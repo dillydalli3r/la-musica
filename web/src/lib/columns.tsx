@@ -2,11 +2,14 @@ import { useState } from "react";
 import { Columns3 } from "lucide-react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 
-/** One table column definition: id for prefs/widths, header label, sort key. */
+/** One table column definition: id for prefs/widths, header label, sort key.
+ *  defHidden columns exist (sortable, toggleable via the columns chooser)
+ *  but are not part of the default visible set. */
 export interface Col {
   id: string;
   label: string;
   sortKey: string;
+  defHidden?: boolean;
 }
 
 /** Column layout shared by every album tracklist — the album page table and
@@ -33,10 +36,10 @@ export const ALBUM_TRACK_COLS: Col[] = [
 ];
 
 export function useColumnPrefs(key: string, defs: Col[]): [string[], (id: string) => void] {
-  // v2: the Gain/DR columns joined the default set — bumping the key lets
-  // the new defaults apply once for everyone (old prefs were saved under
-  // mlo-cols-*).
-  const storageKey = `mlo-cols2-${key}`;
+  // v3: type/INST columns joined the default sets and credit columns became
+  // toggleable opt-ins — bumping the key lets the new defaults apply once
+  // for everyone (older prefs lived under mlo-cols-* / mlo-cols2-*).
+  const storageKey = `mlo-cols3-${key}`;
   const [visible, setVisible] = useState<string[]>(() => {
     try {
       const raw = localStorage.getItem(storageKey);
@@ -49,7 +52,7 @@ export function useColumnPrefs(key: string, defs: Col[]): [string[], (id: string
     } catch {
       /* fall through to defaults */
     }
-    return defs.map((d) => d.id);
+    return defs.filter((d) => !d.defHidden).map((d) => d.id);
   });
   const toggle = (id: string) =>
     setVisible((v) => {

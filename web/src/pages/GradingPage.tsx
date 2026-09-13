@@ -49,6 +49,7 @@ const GROUPS: Group[] = [
       { k: "grade_check_disallowed", label: "Disallowed file types", desc: "Unclassified files (.txt, .pdf, .m3u, …) fail the album unless their category is enabled under File categories." },
       { k: "grade_check_extra_images", label: "Stray images", desc: "Images that are neither cover.* nor per-track sidecars fail the album." },
       { k: "grade_check_raw_video", label: "Raw videos", desc: "Un-remuxed videos (VOB/AVI/WMV/TS) fail — run script 11 to normalize them to MKV." },
+      { k: "grade_check_lossless_source", label: "Lossless sources", desc: "Uncompressed lossless sources (WAV/AIFF/APE/WV/SHN) fail — script 3 converts them to FLAC." },
       { k: "grade_check_disc_naming", label: "Disc folder naming", desc: "Multi-disc albums must follow the disc naming pattern (Disc 1, …)." },
       { k: "grade_check_cd_log", label: "CD — .log present", desc: "Every CD disc needs an exact-match .log file." },
       { k: "grade_check_cd_cue", label: "CD — .cue present", desc: "Every CD disc needs a .cue sheet." },
@@ -108,6 +109,7 @@ const GROUPS: Group[] = [
     desc: "Presence checks for lyrics and the script 15 transforms. The transliteration/translation checks only fire when AI tooling is configured and the lyrics actually need them (cross-script rules).",
     items: [
       { k: "grade_check_lyrics", label: "Lyrics present", desc: "Every non-instrumental track needs lyrics (embedded and/or .lrc sidecar, per the lyrics format)." },
+      { k: "grade_check_lyrics_lang_tags", label: "Transform language tags", desc: "Transform tags must carry their language (TRANSLATION-EN, TRANSLITERATION-JA-LATN — never the bare legacy names)." },
       { k: "grade_check_xlit", label: "Transliteration present", desc: "Lyrics in a script you don't read need romanization (.romaji.lrc or the TRANSLITERATION tag).", needsAi: true },
       { k: "grade_check_trans", label: "Translation present", desc: "Lyrics in another script need a translation (.<lang>.lrc or the TRANSLATION tag).", needsAi: true },
     ],

@@ -4,7 +4,7 @@ import { Link, useNavigate } from "react-router-dom";
 import {
   ArrowDownUp, BarChart3, ChevronDown, ChevronRight, CloudDownload,
   FileVideo, FolderOpen, FolderSync, Info as InfoIcon, Layers, ListChecks,
-  ListFilter, ListPlus, Play, Trash2, Wand2,
+  ListFilter, ListPlus, Play, Tag, Trash2, Wand2,
 } from "lucide-react";
 import { api } from "../api";
 import { SCRIPTS, DEFAULT_RUN_ALL } from "../lib/scripts";
@@ -27,6 +27,7 @@ import FavHeart from "../components/FavHeart";
 import AlbumCard from "../components/AlbumCard";
 import StatsPanel from "../components/StatsPanel";
 import TrackDetails from "../components/TrackDetails";
+import BulkTagsDialog from "../components/BulkTagsDialog";
 import type { Album, Artist, Track } from "../types";
 
 type View = "grid" | "compact" | "albums" | "artists" | "tracks";
@@ -38,7 +39,8 @@ type Preset =
   | "digital"
   | "explicit"
   | "instrumental"
-  | "missingLyrics";
+  | "missingLyrics"
+  | "videos";
 
 const PRESETS: { id: Preset; label: string }[] = [
   { id: "all", label: "All" },
@@ -47,6 +49,7 @@ const PRESETS: { id: Preset; label: string }[] = [
   { id: "digital", label: "Digital" },
   { id: "explicit", label: "Explicit" },
   { id: "instrumental", label: "Instrumental" },
+  { id: "videos", label: "Music videos" },
   { id: "missingLyrics", label: "No lyrics" },
 ];
 
@@ -69,6 +72,10 @@ const ALBUM_SORTS = [
   { key: "track_count", label: "Tracks" },
   { key: "grade_pct", label: "Grade" },
   { key: "audit_summary", label: "Audit" },
+  { key: "video_count", label: "Music videos" },
+  { key: "inst_count", label: "Instrumental tracks" },
+  { key: "meta.LABEL", label: "Label" },
+  { key: "meta.CATALOGNUMBER", label: "Catalog #" },
 ];
 
 /** Column widths for the fixed table layout: percentages compress with
@@ -82,6 +89,8 @@ const ALBUM_COL_W: Record<string, string> = {
   media: "w-[10%]",
   dr: "w-[6%]",
   source: "w-[13%]",
+  videos: "w-[7%]",
+  inst: "w-[7%]",
 };
 
 const ALBUM_COLS: Col[] = [
@@ -93,6 +102,8 @@ const ALBUM_COLS: Col[] = [
   { id: "media", label: "Media", sortKey: "media" },
   { id: "dr", label: "DR", sortKey: "meta.ALBUM DYNAMIC RANGE" },
   { id: "source", label: "Source", sortKey: "source_summary" },
+  { id: "videos", label: "Videos", sortKey: "video_count" },
+  { id: "inst", label: "INST", sortKey: "inst_count" },
 ];
 
 const ARTIST_COL_W: Record<string, string> = {
@@ -122,6 +133,11 @@ const TRACK_COL_W: Record<string, string> = {
   bitrate: "w-[9%]",
   dr: "w-[5%]",
   source: "w-[9%]",
+  type: "w-[6%]",
+  inst: "w-[6%]",
+  composer: "w-[10%]",
+  lyricist: "w-[10%]",
+  remixer: "w-[9%]",
 };
 
 const TRACK_COLS: Col[] = [
@@ -140,10 +156,17 @@ const TRACK_COLS: Col[] = [
   // Range is shown.
   { id: "dr", label: "DR", sortKey: "tags.DYNAMIC RANGE" },
   { id: "source", label: "Source", sortKey: "tags.SOURCE" },
+  { id: "type", label: "Type", sortKey: "is_video" },
+  { id: "inst", label: "INST", sortKey: "tags.INSTRUMENTAL" },
+  { id: "composer", label: "Composer", sortKey: "tags.COMPOSER", defHidden: true },
+  { id: "lyricist", label: "Lyricist", sortKey: "tags.LYRICIST", defHidden: true },
+  { id: "remixer", label: "Remixer", sortKey: "tags.REMIXER", defHidden: true },
 ];
 
 interface FlatAlbum extends Album {
   artist: string;
+  video_count: number;
+  inst_count: number;
 }
 
 interface FlatTrack extends Track {
@@ -159,6 +182,48 @@ export function originalYear(meta?: { ORIGINALDATE?: string | null; DATE?: strin
   const src = meta?.ORIGINALDATE || meta?.DATE || "";
   const m = String(src).match(/^(\d{4})/);
   return m ? m[1] : "";
+}
+
+// ---- search: plain words + tag-scoped terms -------------------------------
+/** Tags matched by the "person:" alias — everyone credited on the song. */
+const PERSON_TAG_KEYS = ["ARTIST", "ALBUMARTIST", "COMPOSER", "LYRICIST", "REMIXER"];
+
+/** Friendly `key:value` aliases for tag-scoped search. "#person" matches any
+ *  credited person tag, "#any" matches every tag. Unknown keys fall back to
+ *  plain-word matching. */
+const TAG_QUERY_ALIASES: Record<string, string> = {
+  title: "TITLE", track: "TITLE", artist: "ARTIST", albumartist: "ALBUMARTIST",
+  album: "ALBUM", genre: "GENRE", year: "DATE", date: "DATE",
+  media: "MEDIA", source: "SOURCE", label: "LABEL",
+  catalog: "CATALOGNUMBER", catalogue: "CATALOGNUMBER",
+  country: "RELEASECOUNTRY", releasetype: "RELEASETYPE", type: "RELEASETYPE",
+  isrc: "ISRC", copyright: "COPYRIGHT",
+  composer: "COMPOSER", lyricist: "LYRICIST", remixer: "REMIXER",
+  person: "#person", people: "#person", involved: "#person",
+  tag: "#any", any: "#any",
+};
+
+interface QueryTerms { words: string[]; tags: { key: string; value: string }[] }
+
+/** Split the search box into plain words and tag-scoped terms. Quoted values
+ *  keep spaces: composer:"Hans Zimmer". */
+function parseQueryTerms(raw: string): QueryTerms {
+  const words: string[] = [];
+  const tags: { key: string; value: string }[] = [];
+  const tokens = raw.match(/\S+:"[^"]*"|"[^"]*"|\S+/g) ?? [];
+  for (const tok0 of tokens) {
+    const tok = tok0.replace(/^"|"$/g, "");
+    if (!tok) continue;
+    const m = /^([^:\s]+):(.+)$/.exec(tok);
+    const alias = m ? TAG_QUERY_ALIASES[m[1].toLowerCase()] : undefined;
+    if (m && alias) {
+      const value = m[2].replace(/^"|"$/g, "").toLowerCase();
+      if (value) tags.push({ key: alias, value });
+    } else {
+      words.push(tok.toLowerCase());
+    }
+  }
+  return { words, tags };
 }
 
 export default function LibraryPage() {
@@ -198,6 +263,7 @@ export default function LibraryPage() {
   });
   const [statsOpen, setStatsOpen] = useState(false);
   const [detailTrack, setDetailTrack] = useState<{ track: Track; albumPath: string } | null>(null);
+  const [bulkTagsOpen, setBulkTagsOpen] = useState(false);
 
   const [fullDates, setFullDates] = useLocalPref("full-dates", false);
   const [albumCols, toggleAlbumCol] = useColumnPrefs("albums", ALBUM_COLS);
@@ -221,7 +287,12 @@ export default function LibraryPage() {
         // Prefer the tag-derived album artist (ALBUMARTIST/ARTIST); the
         // artist folder name is only a fallback (it carries the MBID suffix).
         const artistName = al.album_artist || a.name;
-        albums.push({ ...al, artist: artistName });
+        albums.push({
+          ...al,
+          artist: artistName,
+          video_count: (al.tracks ?? []).filter((t) => t.is_video).length,
+          inst_count: (al.tracks ?? []).filter((t) => t.tags.INSTRUMENTAL === "1").length,
+        });
         for (const t of al.tracks) tracks.push({ ...t, artist: artistName, album: al.meta?.ALBUM ?? al.path.split("/").pop() ?? "", albumCover: al.cover_file ?? null, albumPath: al.path });
       }
     return { albums, tracks };
@@ -237,6 +308,7 @@ export default function LibraryPage() {
       case "digital": return (t.tags.MEDIA ?? "").toUpperCase().includes("DIGITAL");
       case "explicit": return t.tags.ITUNESADVISORY === "1";
       case "instrumental": return t.tags.INSTRUMENTAL === "1";
+      case "videos": return !!t.is_video;
       case "missingLyrics": return !t.lyrics_present;
     }
   };
@@ -248,6 +320,7 @@ export default function LibraryPage() {
       case "digital": return (al.media ?? "").toUpperCase().includes("DIGITAL");
       case "explicit":
       case "instrumental":
+      case "videos":
       case "missingLyrics": return (al.tracks ?? []).some((t) => trackPresetOK(t, preset));
     }
   };
@@ -260,20 +333,41 @@ export default function LibraryPage() {
 
   const filtered = useMemo(() => {
     if (!lib) return { artists: [] as Artist[], albums: [] as FlatAlbum[], tracks: [] as FlatTrack[] };
-    const q = query.toLowerCase();
-    const matches = (hay: string) => !q || hay.toLowerCase().includes(q);
+    const terms = parseQueryTerms(query);
+    const words = terms.words;
+    const wordsMatch = (hay: string) => words.every((w) => hay.toLowerCase().includes(w));
 
-    const trOK = (t: Track) => trackPresetOK(t, preset);
+    // tag-scoped term against any tags record ("#person" = any credited
+    // person, "#any" = every tag, otherwise the exact canonical key)
+    const tagTermOK = (rec: Record<string, unknown> | null | undefined, key: string, value: string) => {
+      if (!rec) return false;
+      if (key === "#any") return Object.values(rec).some((v) => v != null && String(v).toLowerCase().includes(value));
+      if (key === "#person") return PERSON_TAG_KEYS.some((k) => String(rec[k] ?? "").toLowerCase().includes(value));
+      return String(rec[key] ?? "").toLowerCase().includes(value);
+    };
+    const trackTagOK = (t: Track) =>
+      terms.tags.every(({ key, value }) => tagTermOK(t.tags as Record<string, unknown>, key, value));
+
+    // plain words search EVERY tag value plus the flattened names
+    const trackHay = (t: Track & { artist?: string; album?: string }) =>
+      [t.artist, t.album, t.file, ...Object.values(t.tags ?? {}).filter(Boolean).map(String)].join(" ");
+    const trOK = (t: Track) => trackPresetOK(t, preset) && trackTagOK(t) && wordsMatch(trackHay(t));
+
     const alOK = (al: Album) => albumPresetOK(al, preset);
+    const alTagOK = (al: Album) =>
+      terms.tags.every(({ key, value }) =>
+        tagTermOK((al.meta ?? {}) as Record<string, unknown>, key, value) ||
+        (al.tracks ?? []).some((t) => tagTermOK(t.tags as Record<string, unknown>, key, value)));
     const alSearch = (al: Album, artist: string) =>
-      matches([artist, al.meta?.ALBUM, al.meta?.DATE, al.meta?.ARTIST, ...(al.tracks?.map((t) => `${t.tags.TITLE} ${t.file}`) ?? [])].join(" "));
+      wordsMatch([artist, al.meta?.ALBUM, al.meta?.DATE, al.meta?.ARTIST, al.meta?.LABEL, al.meta?.CATALOGNUMBER, ...(al.tracks ?? []).map(trackHay)].join(" ")) &&
+      alTagOK(al);
 
     const artists: Artist[] = lib.artists
       .map((a) => ({ ...a, albums: a.albums.filter((al) => alOK(al) && alSearch(al, a.name)) }))
       .filter((a) => a.albums.length);
 
     const albums = flat.albums.filter((al) => alOK(al) && alSearch(al, al.artist));
-    const tracks = flat.tracks.filter((t) => trOK(t) && matches([t.artist, t.album, t.tags.TITLE, t.file, t.tags.GENRE, t.tags.MEDIA].join(" ")));
+    const tracks = flat.tracks.filter(trOK);
     return { artists, albums, tracks };
   }, [lib, query, preset, flat]);
 
@@ -708,6 +802,14 @@ export default function LibraryPage() {
             </button>
             <button
               className="btn-ghost !py-1 text-xs"
+              onClick={() => setBulkTagsOpen(true)}
+              disabled={!selTracks.size}
+              title="Bulk remove or set tags on the selected tracks"
+            >
+              <Tag className="h-3.5 w-3.5" /> Tags
+            </button>
+            <button
+              className="btn-ghost !py-1 text-xs"
               onClick={organizeSelection}
               disabled={removing === "batch" || !selectionAlbumDirs.length}
               title="Apply the naming script from Settings"
@@ -735,6 +837,16 @@ export default function LibraryPage() {
           albums={selectionCount ? flat.albums.filter((a) => selectionAlbumDirs.includes(a.path)) : flat.albums}
           tracks={selectionCount ? flat.tracks.filter((t) => selTracks.has(t.path)) : flat.tracks}
           onClose={() => setStatsOpen(false)}
+        />
+      )}
+
+      {bulkTagsOpen && (
+        <BulkTagsDialog
+          paths={[...selTracks]}
+          onClose={() => {
+            setBulkTagsOpen(false);
+            qc.invalidateQueries({ queryKey: ["library"] });
+          }}
         />
       )}
 
@@ -1147,6 +1259,23 @@ export default function LibraryPage() {
                         </td>
                       )}
                       {trackCols.includes("source") && <td className="td text-zinc-500 break-words">{tr.tags.SOURCE ?? "—"}</td>}
+                      {trackCols.includes("type") && (
+                        <td className="td text-zinc-500" title={tr.is_video ? "Music video" : "Audio track"}>
+                          {tr.is_video ? (
+                            <span className="inline-flex items-center gap-1"><FileVideo className="h-3.5 w-3.5" /> Video</span>
+                          ) : "Audio"}
+                        </td>
+                      )}
+                      {trackCols.includes("inst") && (
+                        <td className="td">
+                          {tr.tags.INSTRUMENTAL === "1"
+                            ? <span className="chip bg-zinc-800 text-zinc-400 border border-border text-[10px]">INST</span>
+                            : <span className="text-zinc-600">—</span>}
+                        </td>
+                      )}
+                      {trackCols.includes("composer") && <td className="td text-zinc-500 break-words" title="Composer">{tr.tags.COMPOSER ?? "—"}</td>}
+                      {trackCols.includes("lyricist") && <td className="td text-zinc-500 break-words" title="Lyricist">{tr.tags.LYRICIST ?? "—"}</td>}
+                      {trackCols.includes("remixer") && <td className="td text-zinc-500 break-words" title="Remixer">{tr.tags.REMIXER ?? "—"}</td>}
                     </tr>
                   );
                 })}
@@ -1273,6 +1402,16 @@ function AlbumRowGroup({
           </td>
         )}
         {visibleCols.includes("source") && <td className="td text-zinc-500 break-words">{album.source_summary ?? "—"}</td>}
+        {visibleCols.includes("videos") && (
+          <td className="td text-zinc-500 tabular-nums" title="Music videos in this album">
+            {album.video_count || "—"}
+          </td>
+        )}
+        {visibleCols.includes("inst") && (
+          <td className="td text-zinc-500 tabular-nums" title="Instrumental tracks in this album">
+            {album.inst_count || "—"}
+          </td>
+        )}
         <td className="td text-right">
           <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
             <button className="btn-ghost !px-1.5 !py-1" title="Add to playlist" onClick={onPlaylist}>

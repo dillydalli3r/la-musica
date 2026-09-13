@@ -1440,9 +1440,9 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     if lrc_text and not _lyrics_word_timestamps_valid(lrc_text, cfg):
                         fmt_ok = False
                     # Sync-level REQUIREMENT: synced lyrics must carry at
-                    # least the configured granularity (SYLLABLE default —
-                    # glued per-syllable tags; WORD — per-word tags).
-                    _level = cfg.get("lrc_sync_level", "SYLLABLE")
+                    # least the configured granularity (LINE default —
+                    # plain line tags; WORD — per-word tags; SYLLABLE — glued per-syllable tags).
+                    _level = cfg.get("lrc_sync_level", "LINE")
                     if lyr_text and TIMESTAMP_RE_GRADE.search(lyr_text) \
                             and not text_meets_sync_level(lyr_text, _level):
                         fmt_ok = False
@@ -1503,7 +1503,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             elif cfg.get("lrc_enhanced_enabled", True) \
                     and cfg.get("lrc_enhanced_word_sync", True) \
                     and (sync_level_of(xlit_text) < sync_level_of(_xlit_src)
-                         or not text_meets_sync_level(xlit_text, cfg.get("lrc_sync_level", "SYLLABLE"))):
+                         or not text_meets_sync_level(xlit_text, cfg.get("lrc_sync_level", "LINE"))):
                 # the source lyrics are syllable/word-synced — the
                 # romanization must be too, at least as fine-grained, or
                 # karaoke dies at the romanized line
@@ -1533,7 +1533,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             elif cfg.get("lrc_enhanced_enabled", True) \
                     and cfg.get("lrc_enhanced_word_sync", True) \
                     and (sync_level_of(trans_text) < sync_level_of(_xlit_src)
-                         or not text_meets_sync_level(trans_text, cfg.get("lrc_sync_level", "SYLLABLE"))):
+                         or not text_meets_sync_level(trans_text, cfg.get("lrc_sync_level", "LINE"))):
                 failed_checks += 1
                 add_issue(f"{lang} translation not syllable-synced "
                           "(force re-run Lyrics Translate script)", basename)
@@ -2294,7 +2294,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             elif cov_ext == ".jxl":
                 cov_enc_key = "jxl"
             if cov_enc_key and cover_file:
-                cov_enc_cfg = (config.get("encoder_tags") or {}).get(cov_enc_key, {})
+                cov_enc_cfg = (cfg.get("encoder_tags") or {}).get(cov_enc_key, {})
                 for field in ("ENCODER_PROGRAM", "ENCODER_QUALITY", "ENCODER_VERSION"):
                     default_on = False if field == "ENCODER_PROGRAM" else True
                     if not cov_enc_cfg.get(field, default_on):

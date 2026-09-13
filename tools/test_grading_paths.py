@@ -96,6 +96,12 @@ ISO_CFG = {
     "grade_check_unreadable": False,
     "grade_check_disallowed": False,
     "grade_check_sidecar_cover": False,
+    "grade_check_ext_case": False,
+    "grade_check_filename_case": False,
+    "grade_check_excess_tags": False,
+    "grade_check_audit": False,
+    "grade_check_mb_links": False,
+    "grade_check_rym_links": False,
 }
 
 tmp = tempfile.mkdtemp(prefix="mlo_naming_test_")
@@ -107,28 +113,29 @@ print("== _naming_mismatch ==")
 folder = tempfile.mkdtemp(prefix="mlo_naming_pure_")
 os.makedirs(os.path.join(folder, "Artist", "2020 - Album"), exist_ok=True)
 good = os.path.join(folder, "Artist", "2020 - Album", "1-01 Song.flac")
-ok(_naming_mismatch(good, folder, DEFAULT_NAMING_SCRIPT, "", BASE_TAGS) is None, "exact match returns None")
+ok(_naming_mismatch(good, folder, DEFAULT_NAMING_SCRIPT, "", BASE_TAGS) == ("ok", None),
+   "exact match returns ('ok', None)")
 ok(_naming_mismatch(os.path.join(folder, "Wrong", "1-01 Song.flac"), folder,
                     DEFAULT_NAMING_SCRIPT, "", BASE_TAGS)
-   == "Artist/2020 - Album/1-01 Song.flac", "wrong folder returns expected path")
+   == ("path", "Artist/2020 - Album/1-01 Song.flac"), "wrong folder returns expected path")
 
 tags_m = dict(BASE_TAGS, MUSICBRAINZ_ALBUMARTISTID="12345678-1234-1234-1234-123456789abc")
 # the default script folds the MBID into ONE folder segment: "Artist [uuid]"
 full = os.path.join(folder, "Artist [12345678-1234-1234-1234-123456789abc]", "2020 - Album", "1-01 Song.flac")
 short = os.path.join(folder, "Artist [12345678]", "2020 - Album", "1-01 Song.flac")
-ok(_naming_mismatch(full, folder, DEFAULT_NAMING_SCRIPT, "", tags_m) is None,
+ok(_naming_mismatch(full, folder, DEFAULT_NAMING_SCRIPT, "", tags_m) == ("ok", None),
    "full MBID path matches")
-ok(_naming_mismatch(short, folder, DEFAULT_NAMING_SCRIPT, "", tags_m) is None,
+ok(_naming_mismatch(short, folder, DEFAULT_NAMING_SCRIPT, "", tags_m) == ("ok", None),
    "short MBID accepted too (ID length can't cause false fails)")
-ok(_naming_mismatch(full, folder, DEFAULT_NAMING_SCRIPT, "", BASE_TAGS) is not None,
+ok(_naming_mismatch(full, folder, DEFAULT_NAMING_SCRIPT, "", BASE_TAGS)[0] == "path",
    "MBID folder mismatches when the tag is absent")
 # RELEASETYPE feeds the script like the organizer does: "[album] 2020 - Album"
 with_type = os.path.join(folder, "Artist [12345678-1234-1234-1234-123456789abc]", "[album] 2020 - Album", "1-01 Song.flac")
-ok(_naming_mismatch(with_type, folder, DEFAULT_NAMING_SCRIPT, "album", tags_m) is None,
+ok(_naming_mismatch(with_type, folder, DEFAULT_NAMING_SCRIPT, "album", tags_m) == ("ok", None),
    "release type joins the album folder segment")
 ok(_naming_mismatch(good.replace("2020 - Album", "2020 - ALBUM"), folder,
-                    DEFAULT_NAMING_SCRIPT, "", BASE_TAGS) is None,
-   "case-insensitive comparison")
+                    DEFAULT_NAMING_SCRIPT, "", BASE_TAGS)[0] == "case",
+   "case-only difference reports 'case' (PATH_CASE check)")
 shutil.rmtree(folder, ignore_errors=True)
 
 # ----------------------------------------------------------------------
@@ -140,7 +147,7 @@ album = os.path.join(music, "Artist", "2020 - Album")
 os.makedirs(album, exist_ok=True)
 flac = os.path.join(album, "1-01 Song.flac")
 make_flac(flac)
-set_tags(flac, dict(BASE_TAGS, INITIALKEY="8A", BPM="120"))
+set_tags(flac, dict(BASE_TAGS, INITIALKEY="B♭ min", BPM="120"))
 
 cfg = dict(ISO_CFG, music_folder=music)
 res = _grade_album(album, "EMBEDDED", cfg)

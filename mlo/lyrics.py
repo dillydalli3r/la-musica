@@ -276,59 +276,25 @@ def format_lyrics_text(text, precision=2, strip_metadata=True,
             first_line = cleaned[first_idx]
             if lrc_add_zero_timestamp:
                 if lrc_zero_timestamp_blank:
-                    # Blank: ensure a bare zero line exists at first_idx — treat both bare and tight as having zero
+                    # Blank leader: ensure a bare [00:00.00] line exists.
                     if not first_line.strip().startswith(zero_ts):
                         cleaned.insert(first_idx, zero_ts)
-                else:
-                    # Tight: zero timestamp should be on same line as first lyric's text
-                    # Extract text after timestamp of first line, if any
+                elif not first_line.strip().startswith(zero_ts):
+                    # Tight leader: "[00:00.00]" + the first lyric's text.
+                    # A timed first line keeps its own timestamp (the leader
+                    # is prepended); an untimed one is replaced by it.
                     m = TIMESTAMP_RE.match(first_line.strip())
                     body = first_line.strip()[m.end():].strip() if m else first_line.strip()
-                    # Remove any existing zero line that is blank
-                    if first_line.strip() == zero_ts:
-                        # Already blank zero, convert to tight if needed
-                        # Keep it as tight with body from next line if exists
-                        if first_idx + 1 < len(cleaned):
-                            next_line = cleaned[first_idx + 1]
-                            m2 = TIMESTAMP_RE.match(next_line.strip())
-                            next_body = next_line.strip()[m2.end():].strip() if m2 else next_line.strip()
-                            if next_body:
-                                cleaned[first_idx] = f"{zero_ts}{next_body}"
-                                # Remove the next line if it was the same text (to avoid duplicate)
-                                if next_body and next_line.strip().endswith(next_body):
-                                    # Only remove if next line's body matches (to avoid deleting unrelated)
-                                    pass
-                        else:
-                            cleaned[first_idx] = zero_ts
+                    leader = f"{zero_ts}{body}" if body else zero_ts
+                    if m:
+                        cleaned.insert(first_idx, leader)
                     else:
-                        # First line is like "[00:12.34]Hello world" — make it tight zero
-                        # We want first line to be "[00:00.00]Hello world" (replace timestamp, keep body)
-                        # But we should keep original timestamp line as second line? For tight, the zero is the first line's timestamp
-                        # So we replace the first line's timestamp with zero, keeping body
-                        if m and body:
-                            tight_line = f"{zero_ts}{body}"
-                            if tight_line != first_line.strip():
-                                cleaned[first_idx] = tight_line
-                        else:
-                            # No timestamp on first line (should not happen), just insert tight
-                            if first_line.strip() != f"{zero_ts}{body}":
-                                cleaned.insert(first_idx, f"{zero_ts}{body}" if body else zero_ts)
-            else:
-                # Remove: if the first line is exactly a blank zero or tight zero, delete it
-                if first_line.strip() == zero_ts:
-                    cleaned.pop(first_idx)
-                else:
-                    # Check if first line is tight zero (starts with zero_ts)
-                    if first_line.strip().startswith(zero_ts):
-                        # Remove tight zero — replace with original timestamp? Hard to know original.
-                        # For now, just remove the zero prefix and keep body
-                        body = first_line.strip()[len(zero_ts):].strip()
-                        if body:
-                            # Try to reconstruct original timestamp? We don't have it, so just keep body with no timestamp
-                            # To avoid losing lyric, keep body as is with no timestamp (will be re-timestamped on next run if needed)
-                            cleaned[first_idx] = body
-                        else:
-                            cleaned.pop(first_idx)
+                        cleaned[first_idx] = leader
+            elif first_line.strip() == zero_ts:
+                # Leader removal only drops a BARE zero line. A tight zero
+                # ("[00:00.00]text") is a legitimately timed first line —
+                # stripping it would leave untimed text in a synced LRC.
+                cleaned.pop(first_idx)
 
     return "\n".join(cleaned)
 

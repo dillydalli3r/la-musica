@@ -21,7 +21,7 @@ import { fmtDuration } from "../pages/LibraryPage";
 const XLIT_KEY = "mlo.np.xlit";
 const TRANS_KEY = "mlo.np.trans";
 const SIZE_KEY = "mlo.np.size"; // sm | md | lg
-const KARAOKE_KEY = "mlo.np.karaoke"; // "1" = word-level karaoke, "0" = line highlight
+const KARAOKE_KEY = "mlo.np.karaoke"; // "1" = word-level karaoke, "0" = line highlight (default)
 const ORBS_KEY = "mlo.np.orbs"; // "1" = animated background
 const VIS_KEY = "mlo.np.vis"; // "1" = background pulses with the beat
 const VIZ_KEY = "mlo.np.viz"; // "1" = frequency-bar visualizer visible
@@ -102,7 +102,7 @@ export default function NowPlayingView(p: Props) {
   const [lyricZoom, setLyricZoom] = useState<number>(
     () => Number(localStorage.getItem(ZOOM_KEY)) || 1.5
   );
-  const [karaoke, setKaraoke] = useState(() => localStorage.getItem(KARAOKE_KEY) !== "0");
+  const [karaoke, setKaraoke] = useState(() => localStorage.getItem(KARAOKE_KEY) === "1");
   const [orbs, setOrbs] = useState(() => localStorage.getItem(ORBS_KEY) !== "0");
   const [vis, setVis] = useState(() => localStorage.getItem(VIS_KEY) !== "0");
   // Frequency-bar visualizer (fullscreen + sidebar), default on.

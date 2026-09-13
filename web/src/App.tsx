@@ -63,7 +63,9 @@ export function applyAccent(name: string | null) {
 
 /** Soulseek availability dot: green = logged into the Soulseek network,
  * amber = slskd running but not logged in, hidden = not running. Sits on
- * the nav icon's corner so it reads the same with the sidebar collapsed. */
+ * the nav icon's corner so it reads the same with the sidebar collapsed.
+ * When logged in, `name` carries the account name — the tab then shows it
+ * instead of the plain "Soulseek" label. */
 function useSlskDot() {
   const { data: st } = useQuery({
     queryKey: ["soulseek", "status-dot"],
@@ -72,12 +74,19 @@ function useSlskDot() {
     staleTime: 15000,
     retry: false,
   });
-  if (st?.logged_in) return { cls: "bg-emerald-500", tip: "Soulseek — connected" };
-  if (st?.running) return { cls: "bg-amber-400", tip: "Soulseek — running, not logged in" };
+  if (st?.logged_in) {
+    const name = String(st.username ?? "").trim() || null;
+    return {
+      cls: "bg-emerald-500",
+      tip: name ? `Soulseek — logged in as ${name}` : "Soulseek — connected",
+      name,
+    };
+  }
+  if (st?.running) return { cls: "bg-amber-400", tip: "Soulseek — running, not logged in", name: null };
   return null;
 }
 
-function SlskIconDot({ dot }: { dot: { cls: string; tip: string } | null }) {
+function SlskIconDot({ dot }: { dot: { cls: string; tip: string; name?: string | null } | null }) {
   if (!dot) return null;
   return (
     <span
@@ -276,11 +285,12 @@ export default function App() {
               {to === "/soulseek" && <SlskIconDot dot={slskDot} />}
             </span>
             <span
-              className={`overflow-hidden whitespace-nowrap transition-[max-width,opacity] duration-150 ${
+              className={`overflow-hidden whitespace-nowrap text-ellipsis transition-[max-width,opacity] duration-150 ${
                 collapsed ? "max-w-0 opacity-0" : "max-w-[110px] opacity-100"
               }`}
             >
-              {label}
+              {/* the Soulseek tab shows the logged-in account name */}
+              {to === "/soulseek" && slskDot?.name ? slskDot.name : label}
             </span>
           </NavLink>
         ))}
@@ -328,7 +338,7 @@ export default function App() {
                   <Icon className="h-4 w-4 shrink-0" />
                   {to === "/soulseek" && <SlskIconDot dot={slskDot} />}
                 </span>
-                <span className="whitespace-nowrap">{label}</span>
+                <span className="whitespace-nowrap">{to === "/soulseek" && slskDot?.name ? slskDot.name : label}</span>
               </NavLink>
             ))}
           </aside>
@@ -370,6 +380,7 @@ export default function App() {
             <input
               className="input !py-2 !pl-10 text-xs w-full !bg-panel/60 backdrop-blur"
               placeholder="Search for tracks, artists, albums…"
+              title="Tag-scoped search: composer:name · person:name (any credit) · genre:metal · tag:anything — quotes keep spaces"
               value={query}
               onChange={(e) => onSearch(e.target.value)}
               onFocus={() => setSearchOpen(true)}

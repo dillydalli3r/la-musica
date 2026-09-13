@@ -6,6 +6,7 @@ so the frontend can sort/filter by grade, audit, genre, year, advisory,
 instrumental, MBIDs, RYM links, duration, bitrate, sample rate, etc.
 """
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
 
 from mlo.stats import _find_albums, worker_count
@@ -79,6 +80,22 @@ def _nums_from_filename(filename):
     return None, None
 
 
+def _video_title_from_filename(filename):
+    """Display title for a music video with no TITLE tag.
+
+    Strips the leading disc/track numbers and the trailing "[Music Video]" /
+    "(MV)" style markers so "2-01 Yowamushi Mont Blanc [Music Video].mkv"
+    displays as "Yowamushi Mont Blanc" instead of the raw file name. This is
+    a DISPLAY fallback only — the tag itself stays unset until it is edited.
+    """
+    stem = os.path.splitext(os.path.basename(filename))[0]
+    stem = re.sub(r"^\s*\d+\s*-\s*\d+\s+", "", stem)
+    stem = re.sub(r"^\s*\d+\s+", "", stem)
+    stem = re.sub(r"\s*[\[\(](?:music\s*video|mv|pv|video)[\]\)]\s*$", "", stem, flags=re.I)
+    stem = stem.strip(" -_")
+    return stem or os.path.basename(filename)
+
+
 def _enrich_track(tr, album_dir):
     """Add path, tech info, tags and per-track sidecar cover (cached reads)."""
     p = os.path.join(album_dir, tr["file"])
@@ -108,6 +125,12 @@ def _enrich_track(tr, album_dir):
     # Music-video containers ride the same track shape; the UI uses this
     # to offer the video player / remux+tag tooling instead of the audio path.
     tr["is_video"] = p.lower().endswith(LIB_VIDEO_EXTS)
+    # Untagged videos must not display their raw file name: derive a clean
+    # title from the file name so the library, player bar and playlist
+    # viewers show "Yowamushi Mont Blanc" instead of
+    # "2-01 Yowamushi Mont Blanc [Music Video].mkv".
+    if tr["is_video"] and not str((tags_obj.get("TITLE") or "")).strip():
+        tr["tags"]["TITLE"] = _video_title_from_filename(tr["file"])
     # Per-track audit/grade convenience fields for sorting.
     tr["grade_pass"] = not tr.get("issues")
     tr["lyrics_present"] = bool(tr.get("lyrics_embedded") or tr.get("lyrics_lrc"))

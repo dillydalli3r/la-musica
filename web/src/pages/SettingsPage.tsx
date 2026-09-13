@@ -133,7 +133,7 @@ export default function SettingsPage() {
         { k: "lrc_enhanced_word_sync", label: "Enhanced LRC word sync", type: "bool" },
         {
           k: "lrc_sync_level", label: "Required lyrics sync level", type: "select",
-          options: [["SYLLABLE", "Syllable (default)"], ["WORD", "Word"], ["LINE", "Line timestamps only"]],
+          options: [["LINE", "Line timestamps only (default)"], ["WORD", "Word"], ["SYLLABLE", "Syllable"]],
         },
         { k: "lrc_extended_enabled", label: "Extended LRC (E-LRC)", type: "bool" },
         { k: "lrc_add_zero_timestamp", label: "Add [00:00.00] opening line", type: "bool" },
@@ -379,7 +379,11 @@ export default function SettingsPage() {
     { k: "grade_check_xlit", label: "Transliteration (script 15)", type: "bool" },
     { k: "grade_check_trans", label: "Translation (script 15)", type: "bool" },
     { k: "grade_check_naming", label: "Naming script paths", type: "bool" },
+    { k: "grade_check_filename_case", label: "Filename capitalization (exact case)", type: "bool" },
+    { k: "grade_check_ext_case", label: "Lowercase file extensions", type: "bool" },
+    { k: "grade_check_excess_tags", label: "Excess tags (non-canonical)", type: "bool" },
     { k: "grade_check_key_bpm", label: "Key & BPM tags", type: "bool" },
+    { k: "grade_check_lyrics_lang_tags", label: "Transform tags carry language (TRANSLATION-EN)", type: "bool" },
   ];
   const ALL_CFG_KEYS = [...CFG_GROUPS.flatMap((g) => g.fields), ...GRADE_CHECK_KEYS].map((f) => f.k);
   const [scriptCfg, setScriptCfg] = useState<Record<string, unknown>>({});
@@ -959,7 +963,7 @@ export default function SettingsPage() {
                     <span>Karaoke word highlight (vs. whole-line)</span>
                     <input
                       type="checkbox"
-                      defaultChecked={localStorage.getItem("mlo.np.karaoke") !== "0"}
+                      defaultChecked={localStorage.getItem("mlo.np.karaoke") === "1"}
                       onChange={(e) => localStorage.setItem("mlo.np.karaoke", e.target.checked ? "1" : "0")}
                     />
                   </label>

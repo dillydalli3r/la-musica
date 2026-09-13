@@ -303,7 +303,7 @@ def _apply(config, text, mode, lang=""):
     if config.get("lrc_enhanced_word_sync", True) and \
             any(_LINE_TS_RE.match(l) for l in lines):
         new_text = elrc_word_sync(
-            new_text, level=str(config.get("lrc_sync_level") or "SYLLABLE").lower())
+            new_text, level=str(config.get("lrc_sync_level") or "LINE").lower())
     return new_text, new_text != text
 
 

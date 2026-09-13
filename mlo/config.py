@@ -198,8 +198,8 @@ DEFAULT_CONFIG = {
     "lrc_enhanced_enabled": True,
     "lrc_enhanced_word_sync": True,
     # Required (and AI-targeted) sync granularity of synced lyrics.
-    # SYLLABLE is the default: per-syllable glued ELRC tags, real karaoke.
-    "lrc_sync_level": "SYLLABLE",
+    # LINE is the default: plain [mm:ss.xx] line timestamps.
+    "lrc_sync_level": "LINE",
     "lrc_extended_enabled": True,
     "lrc_add_zero_timestamp": False,
     "lrc_zero_timestamp_blank": False,

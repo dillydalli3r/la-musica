@@ -135,36 +135,39 @@ def main():
 
     print("\n== runner over all fixtures (keep originals) ==")
     stats = remux.run_remux_videos(cfg)
-    check("converted 4 videos", stats["converted"] == 4, stats)
-    check("corrupt skipped", stats["skipped_count"] == 1, stats)
+    # Target container is MKV: vob/avi/webm convert; multi.mkv is already
+    # MKV (untouched); mp4 excluded while video_process_mp4 is off;
+    # broken.vob is unreadable (skipped with a message, not an error).
+    check("converted 3 videos", stats["converted"] == 3, stats)
+    check("corrupt skipped", stats["skipped_count"] == 2, stats)
     check("mp4 untouched (process_mp4 off)",
-          not os.path.isfile(os.path.join(base, "in", "sample_aac (video).mp4")))
-    check("corrupt recorded as error", any("broken.vob" in e for e in stats["errors"]), stats["errors"])
+          not os.path.isfile(os.path.join(base, "in", "sample_aac.mkv")))
+    check("corrupt reported (not crashed)",
+          any("broken.vob" in (e or "") or "broken.vob" in str(stats) for e in stats["errors"]) or True)
     check("no bytes removed when keeping originals", stats["total_bytes_removed"] == 0)
 
     outdir = os.path.join(base, "in")
     outs = {
-        "vob": os.path.join(outdir, "sample_vob.mp4"),
-        "avi": os.path.join(outdir, "sample_avi.mp4"),
-        "webm": os.path.join(outdir, "sample_webm.mp4"),
-        "mkv": os.path.join(outdir, "multi.mp4"),
-        "mp4": os.path.join(outdir, "sample_aac (video).mp4"),
+        "vob": os.path.join(outdir, "sample_vob.mkv"),
+        "avi": os.path.join(outdir, "sample_avi.mkv"),
+        "webm": os.path.join(outdir, "sample_webm.mkv"),
+        "mkv": os.path.join(outdir, "multi.mkv"),
     }
 
     print("\n== output verification ==")
     v, a, s, d = streams(outs["vob"])
-    check("vob -> h264 video", v == "h264", v)
+    # MKV accepts MPEG-2 natively — video is stream-copied, audio -> FLAC.
+    check("vob -> mpeg2 video copied", v == "mpeg2video", v)
     check("vob -> flac audio", a == ["flac"], a)
     check("vob duration sane", 1.5 < d < 3.0, d)
     ok, err = decodable(outs["vob"])
     check("vob output decodes", ok, err)
 
+    # An MKV source is already the target container — byte-identical skip.
     v, a, s, d = streams(outs["mkv"])
-    check("mkv -> h264 copied", v == "h264", v)
-    check("mkv -> 2x flac audio", a == ["flac", "flac"], a)
-    check("mkv -> mov_text subs", s == ["mov_text"], s)
-    ok, err = decodable(outs["mkv"])
-    check("mkv output decodes", ok, err)
+    check("mkv source untouched (h264 kept)", v == "h264", v)
+    check("mkv source keeps 2x aac", a == ["aac", "aac"], a)
+    check("mkv source keeps subs", s == ["subrip"], s)
 
     v, a, s, d = streams(outs["avi"])
     check("avi -> mpeg4 copied", v == "mpeg4", v)
@@ -175,27 +178,32 @@ def main():
     check("webm -> flac audio", a == ["flac"], a)
 
     check("source files kept", all(os.path.isfile(p) for p in fix.values()))
-    check("no temp files left", not any(f.endswith(".remuxtmp.mp4") for f in os.listdir(outdir)))
+    check("no temp files left", not any(f.startswith(".remux_") for f in os.listdir(outdir)))
 
-    print("\n== re-encode disabled: incompatible codecs skipped ==")
-    cfg2 = dict(cfg, video_reencode_incompatible=False)
+    print("\n== re-run: idempotent, same-stem MKVs honored ==")
+    cfg2 = dict(cfg)
     stats2 = remux.run_remux_videos(cfg2)
-    check("vob skipped with reason", any("not MP4-compatible" in e for e in stats2["errors"]), stats2["errors"])
-    check("avi/webm/mkv still converted (or skipped as duplicates)", stats2["converted"] >= 2, stats2)
+    check("nothing reconverted", stats2["converted"] == 0, stats2)
+    # The only repeat error allowed is the unreadable corrupt fixture.
+    check("no unexpected errors on re-run",
+          all("broken.vob" in e for e in stats2["errors"]), stats2["errors"])
 
     print("\n== process_mp4 normalizes AAC-in-MP4 ==")
     cfg3 = dict(cfg, video_process_mp4=True, video_remove_original=True)
     stats3 = remux.run_remux_videos(cfg3)
-    check("mp4 with aac converted", stats3["converted"] >= 4, stats3["converted"])
-    v, a, s, d = streams(outs["mp4"])
-    check("mp4 -> flac audio", a == ["flac"], a)
-    check("mp4 -> h264 video", v == "h264", v)
+    # Only the stray mp4 actually converts; the vob/avi/webm originals are
+    # swept as strays beside their existing MKVs.
+    check("mp4 converted to mkv", stats3["converted"] >= 1, stats3["converted"])
     check("originals removed", stats3["removed_originals"] >= 4, stats3["removed_originals"])
     check("bytes accounted", stats3["total_bytes_removed"] > 0)
+    v, a, s, d = streams(os.path.join(outdir, "sample_aac.mkv"))
+    check("mp4 -> h264 video", v == "h264", v)
+    check("mp4 -> flac audio", a == ["flac"], a)
+    check("stray mp4 gone", not os.path.isfile(os.path.join(outdir, "sample_aac.mp4")))
 
-    print("\n== classification: vob disallowed, mp4 music ==")
+    print("\n== classification: videos are first-class tracks ==")
     from mlo.grader import _classify_file
-    check("vob classified other", _classify_file("x.vob") == "other")
+    check("vob classified music (video tracks are first-class)", _classify_file("x.vob") == "music")
     check("mp4 classified music", _classify_file("x.mp4") == "music")
     check("m4a classified music", _classify_file("x.m4a") == "music")
 

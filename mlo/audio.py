@@ -621,6 +621,7 @@ class AudioFile:
         re-encoded and captions are never dropped.
         """
         return self.set_video_tags({name: value})
+    @staticmethod
     def _id3_text(frame):
         value = getattr(frame, "text", None)
         if isinstance(value, list):
