@@ -83,6 +83,7 @@ function useSlskDot() {
       name,
     };
   }
+  if (st?.conflict) return { cls: "bg-red-500", tip: `Soulseek — ${st.conflict}`, name: null };
   if (st?.running) return { cls: "bg-amber-400", tip: "Soulseek — running, not logged in", name: null };
   return null;
 }
