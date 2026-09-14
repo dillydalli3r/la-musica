@@ -11,9 +11,33 @@ from .grader import run_grade_library
 from .images import run_process_images
 from .loudness import run_calc_dr_replaygain
 from .lyrics import run_format_lyrics
-from .accurip import run_generate_accurip
-from .format_all import run_format_all
+try:
+    from .accurip import run_generate_accurip
+except ImportError:
+    from .stats import new_stats as _ns_accurip
+
+    def run_generate_accurip(config):
+        from .ui import log
+        log("AccurateRip unavailable (import failed)")
+        return _ns_accurip()
+try:
+    from .format_all import run_format_all
+except ImportError:
+    from .stats import new_stats as _ns_fmtall
+
+    def run_format_all(config):
+        from .ui import log
+        log("Format All unavailable (import failed)")
+        return _ns_fmtall()
 from .remux import run_remux_videos
+try:
+    from .audiometa import run_analyze_audiometa
+except ImportError:
+    run_analyze_audiometa = None
+try:
+    from .lyrics_fetch import run_fetch_lyrics
+except ImportError:
+    run_fetch_lyrics = None
 from .report import print_results, print_grade_results, print_combined_results
 from .tools import detect_all_tools
 from .ui import (
@@ -425,6 +449,10 @@ def show_custom_menu():
     print("    9. AccurateRip")
     print("   10. Format All")
     print("   11. Video Remux (MP4)")
+    print("   12. Key & BPM")
+    print("   13. Fetch Lyrics")
+    print("   14. Beets Tagging")
+    print("   15. Lyrics Translate/Transliterate")
     print_separator()
 
     print("Enter the order of scripts to run (comma-separated, e.g. '3,1,2,5'):")
@@ -434,7 +462,8 @@ def show_custom_menu():
     order = []
 
     for p in parts:
-        if p in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"):
+        if p in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11",
+                 "12", "13", "14", "15"):
             order.append(int(p))
         else:
             print(c(f"  Ignoring invalid entry: '{p}'", Color.YELLOW))
@@ -460,6 +489,26 @@ def run_scripts_sequence(config, script_ids, title):
         10: ("Format All", run_format_all),
         11: ("Video Remux", run_remux_videos),
     }
+    try:
+        from .audiometa import run_analyze_audiometa
+        runners[12] = ("Key & BPM", run_analyze_audiometa)
+    except ImportError:
+        pass
+    try:
+        from .lyrics_fetch import run_fetch_lyrics
+        runners[13] = ("Fetch Lyrics", run_fetch_lyrics)
+    except ImportError:
+        pass
+    try:
+        from server.beetscfg import run_beets_tagging
+        runners[14] = ("Beets Tagging", run_beets_tagging)
+    except ImportError:
+        pass
+    try:
+        from .lyrics_xlit import run_lyrics_xlit
+        runners[15] = ("Lyrics Translate/Transliterate", run_lyrics_xlit)
+    except ImportError:
+        pass
 
     auto_advance = config.get("auto_advance", True)
 
@@ -479,7 +528,14 @@ def run_scripts_sequence(config, script_ids, title):
     input("Press Enter to start...")
 
     for i, script_id in enumerate(script_ids):
-        name, runner = runners[script_id]
+        try:
+            name, runner = runners[script_id]
+        except KeyError:
+            log(c(f"  Skipping unknown script id: {script_id}", Color.YELLOW))
+            continue
+        if runner is None:
+            log(c(f"  Skipping unavailable script: {name}", Color.YELLOW))
+            continue
 
         if i > 0:
             if auto_advance:
@@ -538,10 +594,14 @@ def show_main_menu(config):
     print("  9. AccurateRip     (CUETools .accurip files)")
     print(" 10. Format All      (canonical trim pass)")
     print(" 11. Video Remux     (any video -> MP4, audio -> FLAC)")
-    print(f" 11. Run All          {config.get('run_all_order', DEFAULT_RUN_ALL_ORDER)}")
-    print(" 12. Run Custom       (select order)")
-    print(" 13. Configuration")
-    print(" 14. Dependencies     (download latest tools)")
+    print(" 12. Key & BPM       (musical key + tempo tags)")
+    print(" 13. Fetch Lyrics    (LRCLIB synced/plain)")
+    print(" 14. Beets Tagging   (MusicBrainz via beets)")
+    print(" 15. Lyrics Xlit     (translate/transliterate)")
+    print(f" 16. Run All          {config.get('run_all_order', DEFAULT_RUN_ALL_ORDER)}")
+    print(" 17. Run Custom       (select order)")
+    print(" 18. Configuration")
+    print(" 19. Dependencies     (download latest tools)")
     print(c("  0. Exit", Color.YELLOW))
 
     print()
@@ -628,9 +688,20 @@ def main():
         if choice == "0":
             break
 
-        elif choice in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"):
+        elif choice in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
+                         "11", "12", "13", "14", "15"):
             script_id = int(choice)
-            name, runner = runners[script_id]
+            try:
+                name, runner = runners[script_id]
+            except KeyError:
+                print(c("\nScript not available in this menu.", Color.YELLOW))
+                pause_for_input()
+                continue
+            if runner is None:
+                print(c("\nScript unavailable (missing optional dependency).",
+                        Color.YELLOW))
+                pause_for_input()
+                continue
 
             clear_screen()
             print(f">>> Starting: {c(name, Color.BOLD)}")
@@ -645,11 +716,11 @@ def main():
 
             pause_for_input()
 
-        elif choice == "11":
+        elif choice == "16":
             order = config.get("run_all_order", DEFAULT_RUN_ALL_ORDER)
             run_scripts_sequence(config, order, title="RUN ALL SCRIPTS")
 
-        elif choice == "12":
+        elif choice == "17":
             order = show_custom_menu()
 
             if not order:
@@ -659,10 +730,10 @@ def main():
 
             run_scripts_sequence(config, order, title="CUSTOM RUN ORDER")
 
-        elif choice == "13":
+        elif choice == "18":
             show_config_menu(config)
 
-        elif choice == "14":
+        elif choice == "19":
             manage_dependencies()
 
         else:

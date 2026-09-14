@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 import {
   ArrowDownUp, BarChart3, ChevronDown, ChevronRight, CloudDownload,
-  FileVideo, FolderOpen, FolderSync, Info as InfoIcon, Layers, ListChecks,
+  FileVideo, FolderOpen, FolderSync, Info as InfoIcon, Layers, Library, ListChecks,
   ListFilter, ListPlus, Play, Tag, Trash2, Wand2,
 } from "lucide-react";
 import { api } from "../api";
@@ -585,7 +585,7 @@ export default function LibraryPage() {
   if (error) return <EmptyState title="Backend unreachable" hint={String(error)} />;
   if (isLoading || !lib)
     return (
-      <div className="p-4 space-y-4">
+      <div className="p-6 space-y-4">
         <div className="flex items-center gap-2 text-xs text-zinc-500">
           <span className="h-3.5 w-3.5 rounded-full border-2 border-zinc-700 border-t-zinc-400 animate-spin inline-block" />
           Scanning library…
@@ -621,7 +621,10 @@ export default function LibraryPage() {
   const allTracksSelected = sortedTracks.length > 0 && sortedTracks.every((t) => selection.tracks.includes(t.path));
 
   return (
-    <div className="p-4 space-y-3">
+    <div className="p-6 space-y-3">
+      <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
+        <Library className="h-6 w-6 text-accent" /> Library
+      </h1>
       {/* toolbar — every control on ONE line (wrapped as a unit when the
           window is narrow): view tabs, sort, grid size, group-by, columns,
           quick filter — then stats/select and the counts on the right. */}

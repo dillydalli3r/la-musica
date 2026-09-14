@@ -118,7 +118,9 @@ def _codec_args(codec, quality):
     Quality presets come from the tables above; a plain number of kbps
     ("213") is accepted as a custom bitrate for the CBR codecs, and a
     plain 0-10 for Vorbis quality — the UI's custom fields rely on it."""
-    spec = CODECS[codec]
+    spec = CODECS.get(codec)
+    if spec is None:
+        raise ValueError(f"unknown codec: {codec}")
     if codec == "flac":
         try:
             level = max(0, min(8, int(quality)))
@@ -254,13 +256,17 @@ def _write_tags(dst_path, src_af):
     dst = AudioFile(dst_path)
     if dst.audio is None:
         return
-    for k, v in (src_af.all_tags() or {}).items():
-        if v is None or str(v).strip() == "":
-            continue
-        try:
-            dst.set_tag(k, str(v))
-        except Exception:
-            pass  # individual exotic tags must not abort the export
+    dst.defer_save(True)
+    try:
+        for k, v in (src_af.all_tags() or {}).items():
+            if v is None or str(v).strip() == "":
+                continue
+            try:
+                dst.set_tag(k, str(v))
+            except Exception:
+                pass  # individual exotic tags must not abort the export
+    finally:
+        dst.defer_save(False)
 
 
 def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",

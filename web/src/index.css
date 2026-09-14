@@ -166,7 +166,7 @@ body {
   /* Smoothed-rectangle controls (Monochrome-style): soft corners, never
      full pills — buttons, chips and inputs share one rect language. */
   .btn {
-    @apply inline-flex items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-sm font-medium transition-all disabled:opacity-40 disabled:pointer-events-none active:scale-[0.97];
+    @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3.5 py-1.5 text-sm font-medium transition-all disabled:opacity-40 disabled:pointer-events-none active:scale-[0.97];
   }
   .btn-primary {
     @apply btn bg-accent on-accent hover:bg-accent-soft shadow-sm;
@@ -364,4 +364,72 @@ table td {
 }
 .no-scrollbar::-webkit-scrollbar {
   display: none;
+}
+
+/* ------------------------------------------------------------------ */
+/* Extra motion: staggered grids, pop-in modals, toasts, skeletons.    */
+/* ------------------------------------------------------------------ */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: none; }
+}
+/* Cards/list rows ease in one after another (cap the delay so long lists
+   don't leave the tail invisible for a second). */
+.stagger > * {
+  animation: fade-up 0.35s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+.stagger > *:nth-child(1) { animation-delay: 0.02s; }
+.stagger > *:nth-child(2) { animation-delay: 0.05s; }
+.stagger > *:nth-child(3) { animation-delay: 0.08s; }
+.stagger > *:nth-child(4) { animation-delay: 0.11s; }
+.stagger > *:nth-child(5) { animation-delay: 0.14s; }
+.stagger > *:nth-child(6) { animation-delay: 0.17s; }
+.stagger > *:nth-child(7) { animation-delay: 0.2s; }
+.stagger > *:nth-child(8) { animation-delay: 0.23s; }
+.stagger > *:nth-child(n + 9) { animation-delay: 0.26s; }
+
+@keyframes pop-in {
+  from { opacity: 0; transform: scale(0.96) translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+.anim-pop {
+  animation: pop-in 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.anim-fade { animation: fade-in 0.2s ease; }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translate(-50%, 12px) scale(0.97); }
+  to   { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+.toast-in { animation: toast-in 0.22s cubic-bezier(0.22, 1, 0.36, 1); }
+
+/* Skeleton shimmer for loading shelves. */
+@keyframes shimmer {
+  from { background-position: -200% 0; }
+  to   { background-position: 200% 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, #18181b 25%, #232329 37%, #18181b 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.3s ease-in-out infinite;
+}
+
+/* Respect users who ask the OS for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  .stagger > *,
+  .anim-pop,
+  .anim-fade,
+  .page-enter,
+  .toast-in,
+  .skeleton,
+  .orb,
+  .orb-field,
+  .artwork-glow {
+    animation: none !important;
+  }
 }

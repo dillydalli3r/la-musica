@@ -27,6 +27,23 @@ def port_open(port):
             return False
 
 
+def _prompt_close():
+    try:
+        input("Press Enter to close...")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
+def _backend_ours():
+    """True when something on PORT answers like our API (not a stray app)."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(URL + "/api/health", timeout=2) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
 def main():
     try:
         import fastapi  # noqa: F401
@@ -34,11 +51,16 @@ def main():
     except ImportError:
         print("Missing Python dependencies.")
         print("Install them with:  python -m pip install -r server/requirements.txt")
-        input("Press Enter to close...")
+        _prompt_close()
         sys.exit(1)
 
-    if port_open(PORT):
+    if port_open(PORT) and _backend_ours():
         print(f"Backend already running — opening {URL}")
+    elif port_open(PORT):
+        print(f"Port {PORT} is busy (not our backend) — "
+              "stop the other app or change port.")
+        _prompt_close()
+        sys.exit(1)
     else:
         print("Starting backend...")
         flags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
@@ -56,7 +78,7 @@ def main():
             )
         except Exception as e:
             print(f"Failed to start backend: {e}")
-            input("Press Enter to close...")
+            _prompt_close()
             sys.exit(1)
         for _ in range(30):
             time.sleep(1)
@@ -66,7 +88,7 @@ def main():
         else:
             print("Backend did not start in time — check for errors with "
                   "`python -m uvicorn server.main:app`")
-            input("Press Enter to close...")
+            _prompt_close()
             sys.exit(1)
 
     webbrowser.open(URL)

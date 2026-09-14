@@ -345,6 +345,7 @@ class AudioFile:
         self.kind = self._kind()
         self.audio = None
         self.error = None
+        self.tech = {}
         self._tag_cache = None
         # Video containers: True once ffprobe supplied tags/tech, and the
         # path actually holding the data after a tag write (tagging a VOB
@@ -352,11 +353,43 @@ class AudioFile:
         self.is_video = self.kind == "video"
         self.tag_output_path = None
         self._video_tags = {}
+        # Tag writers save on every call by default. Bulk callers flip this
+        # on so a 30-tag edit rewrites the container once, not 30 times.
+        self._defer_save = False
+        self._dirty = False
         self._load()
 
     def _invalidate_cache(self):
         """Drop the vorbis tag-read cache after any tag write."""
         self._tag_cache = None
+
+    def defer_save(self, on=True):
+        """Defer container writes until flush() (or defer_save(False))."""
+        self._defer_save = bool(on)
+        if not on:
+            self.flush()
+
+    def flush(self):
+        """Write pending tag changes to disk (no-op when nothing changed)."""
+        if self.audio is None or not self._dirty:
+            return True
+        try:
+            self.audio.save()
+            self._dirty = False
+            return True
+        except Exception as e:
+            self.error = f"flush: {e}"
+            return False
+
+    def _save(self):
+        """Write now, or mark dirty when deferred. Raises on immediate write
+        failure so existing per-tag callers keep reporting it as before."""
+        self._dirty = True
+        if self._defer_save:
+            return True
+        self.audio.save()
+        self._dirty = False
+        return True
 
     def _kind(self):
         if self.ext == ".flac":
@@ -884,7 +917,7 @@ class AudioFile:
                     else:
                         return False
                 self.audio.tags[str(key)] = [value]
-                self.audio.save()
+                self._save()
                 return True
 
             elif self.kind == "mp3":
@@ -910,7 +943,7 @@ class AudioFile:
                     self.audio.tags.add(
                         frame_cls(encoding=Encoding.UTF8, text=[value])
                     )
-                self.audio.save()
+                self._save()
                 return True
 
             elif self.kind == "mp4":
@@ -927,7 +960,7 @@ class AudioFile:
                         ]
                 else:
                     self.audio[str(key)] = [value]
-                self.audio.save()
+                self._save()
                 return True
 
         except Exception as e:
@@ -953,7 +986,7 @@ class AudioFile:
                         del self.audio.tags[k]
                         changed = True
                 if changed:
-                    self.audio.save()
+                    self._save()
                 return True
 
             elif self.kind == "mp3":
@@ -969,7 +1002,7 @@ class AudioFile:
                                 pass
                 else:
                     self.audio.tags.delall(str(key))
-                self.audio.save()
+                self._save()
                 return True
 
             elif self.kind == "mp4":
@@ -980,7 +1013,7 @@ class AudioFile:
                         del self.audio[k]
                         changed = True
                 if changed:
-                    self.audio.save()
+                    self._save()
                 return True
 
         except Exception as e:
@@ -1025,7 +1058,7 @@ class AudioFile:
                     else:
                         return False
                 self.audio.tags[spec["flac"]] = value
-                self.audio.save()
+                self._save()
                 return True
 
             elif kind == "mp3":
@@ -1067,7 +1100,7 @@ class AudioFile:
                         self.audio.tags.add(
                             frame_cls(encoding=Encoding.UTF8, text=[value])
                         )
-                self.audio.save()
+                self._save()
                 return True
 
             elif kind == "mp4":
@@ -1103,7 +1136,7 @@ class AudioFile:
                 else:
                     self.audio[atom] = [value]
 
-                self.audio.save()
+                self._save()
                 return True
 
         except Exception as e:
@@ -1140,7 +1173,7 @@ class AudioFile:
                         changed = True
 
                 if changed:
-                    self.audio.save()
+                    self._save()
 
                 return True
 
@@ -1176,7 +1209,7 @@ class AudioFile:
                         changed = before > 0
 
                 if changed:
-                    self.audio.save()
+                    self._save()
 
                 return True
 
@@ -1188,12 +1221,12 @@ class AudioFile:
                     key = f"----:{mean}:{name2}"
                     if key in self.audio:
                         del self.audio[key]
-                        self.audio.save()
+                        self._save()
                     return True
 
                 if atom in self.audio:
                     del self.audio[atom]
-                    self.audio.save()
+                    self._save()
 
                 return True
 
@@ -1264,7 +1297,7 @@ class AudioFile:
                         del self.audio.tags[k]
 
                 self.audio.tags["LYRICS"] = [text]
-                self.audio.save()
+                self._save()
                 return True
 
             elif self.kind == "mp3":
@@ -1272,12 +1305,12 @@ class AudioFile:
                 self.audio.tags.add(
                     USLT(encoding=Encoding.UTF8, lang="eng", desc="", text=text)
                 )
-                self.audio.save()
+                self._save()
                 return True
 
             elif self.kind == "mp4":
                 self.audio["\xa9lyr"] = [text]
-                self.audio.save()
+                self._save()
                 return True
 
         except Exception as e:
@@ -1295,18 +1328,18 @@ class AudioFile:
                 for k in list(self.audio.tags.keys()):
                     if str(k).lower() in ("lyrics", "unsyncedlyrics"):
                         del self.audio.tags[k]
-                self.audio.save()
+                self._save()
                 return True
 
             elif self.kind == "mp3":
                 self.audio.tags.delall("USLT")
-                self.audio.save()
+                self._save()
                 return True
 
             elif self.kind == "mp4":
                 if "\xa9lyr" in self.audio:
                     del self.audio["\xa9lyr"]
-                    self.audio.save()
+                    self._save()
                 return True
 
         except Exception as e:

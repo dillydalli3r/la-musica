@@ -1,4 +1,5 @@
-import { Check, X, Disc3, CircleAlert } from "lucide-react";
+import { Link } from "react-router-dom";
+import { Check, X, Disc3, CircleAlert, Loader2 } from "lucide-react";
 
 /** The one condensed grade verdict: a small check (pass) or cross (fail)
  * and nothing else — grading stays out of the way; `score` (the old
@@ -171,12 +172,33 @@ export function IssueList({ issues }: { issues: string[] }) {
   );
 }
 
-export function EmptyState({ title, hint }: { title: string; hint?: string }) {
+export function EmptyState({ title, hint, action }: {
+  title: string;
+  hint?: string;
+  /** Dead-end pages get a way back — same affordance the router 404 gives. */
+  action?: { label: string; to: string };
+}) {
   return (
     <div className="flex flex-col items-center justify-center gap-2 py-24 text-zinc-500">
       <Disc3 className="h-9 w-9 opacity-30" />
       <div className="text-sm font-medium text-zinc-400">{title}</div>
       {hint && <div className="text-xs text-zinc-600 max-w-sm text-center">{hint}</div>}
+      {action && (
+        <Link to={action.to} className="btn-ghost !py-1.5 text-xs mt-2">
+          {action.label}
+        </Link>
+      )}
+    </div>
+  );
+}
+
+/** Page-level loading placeholder. Same geometry as EmptyState so a page
+ *  does not jump when the payload arrives. */
+export function PageLoading({ label = "Loading…" }: { label?: string }) {
+  return (
+    <div className="flex items-center justify-center gap-2 py-24 text-sm text-zinc-500">
+      <Loader2 className="h-4 w-4 animate-spin" />
+      {label}
     </div>
   );
 }

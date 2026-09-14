@@ -450,6 +450,7 @@ export default function NowPlayingView(p: Props) {
   // we never fire a request that's destined to fail (and spin forever).
   useEffect(() => {
     if (aiReady === null || !aiReady || staleLyrics) return;
+    let dead = false;
     const modes = [
       ...(showXlit ? ["transliterate"] : []),
       ...(showTrans ? ["translate"] : []),
@@ -461,16 +462,24 @@ export default function NowPlayingView(p: Props) {
       inFlight.current.add(key);
       api
         .lyricsAiLines(mode as "translate" | "transliterate", plainLines)
-        .then((r) => setTransforms((prev) => ({ ...prev, [mode]: r.lines })))
+        .then((r) => {
+          // Track changed while the request was in flight — drop the result
+          // so track A's lines can never land on track B.
+          if (!dead) setTransforms((prev) => ({ ...prev, [mode]: r.lines }));
+        })
         .catch((e) => {
           // AI failed (rate limit, bad key…) — mark done with no output so
           // the "transforming…" indicator never gets stuck on screen, and
           // surface the reason instead of failing silently.
+          if (dead) return;
           setTransforms((prev) => (prev[mode] ? prev : { ...prev, [mode]: [] }));
           toast(`${mode === "translate" ? "Translation" : "Transliteration"} failed: ${e instanceof Error ? e.message : e}`);
         })
         .finally(() => inFlight.current.delete(key));
     }
+    return () => {
+      dead = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [aiReady, showXlit, showTrans, hasLyrics, plainLines, p.current.path]);
 

@@ -5,6 +5,10 @@ import threading
 from .deps import tqdm
 from .paths import LIB_AUDIO_EXTS, SKIP_DIRS, AUDIO_EXTS
 
+# Pre-lowered once: _walk_files visits thousands of directories and used to
+# rebuild this set at every level.
+_SKIP_DIRS_LOWER = {d.lower() for d in SKIP_DIRS}
+
 BAR_OPTS = dict(
     dynamic_ncols=True,
     ascii=False,
@@ -150,7 +154,7 @@ def _walk_files(root_dir, extensions):
     try:
         for entry in os.scandir(root_dir):
             if entry.is_dir(follow_symlinks=False):
-                if entry.name.lower() not in {d.lower() for d in SKIP_DIRS}:
+                if entry.name.lower() not in _SKIP_DIRS_LOWER:
                     yield from _walk_files(entry.path, extensions)
             elif entry.is_file(follow_symlinks=False):
                 if os.path.splitext(entry.name)[1].lower() in extensions:

@@ -141,6 +141,7 @@ def _convert_lossless_source(args):
             out_af = AudioFile(tmp)
             raw_tags = _ffprobe_tags(ffprobe_exe, filepath)
             seen = set()
+            out_af.defer_save(True)
             for k, v in raw_tags.items():
                 name = _FFPROBE_TAG_MAP.get(str(k).lower())
                 if not name or name in seen:
@@ -162,8 +163,12 @@ def _convert_lossless_source(args):
                     continue
                 out_af.set_any_tag(name, str(v).strip())
                 seen.add(name)
+            out_af.defer_save(False)
         except Exception:
-            pass
+            try:
+                out_af.defer_save(False)
+            except Exception:
+                pass
 
         # Strip unwanted blocks + write our encoder identity, matching the
         # FLAC optimizer's output conventions.

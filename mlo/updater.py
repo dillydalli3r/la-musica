@@ -168,7 +168,13 @@ def check_for_updates(silent=False, callback=None):
                         log(f"Update check: already on latest version (v{current})",
                             Color.GREEN)
             if callback:
-                callback(*result)
+                # Keep a throwing callback out of the error path below — it
+                # would otherwise be invoked a second time with a fake error.
+                try:
+                    callback(*result)
+                except Exception as e:
+                    if not silent:
+                        log(f"Update callback failed: {e}", Color.RED)
         except urllib.error.HTTPError as e:
             if callback:
                 callback(False, None, None, "", f"HTTP {e.code}")

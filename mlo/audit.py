@@ -1481,6 +1481,9 @@ def run_audit_library(config):
     if config.get("audit_check_cd_format", True):
         # Build CD file set independently (MEDIA=CD) so it works even when CRC check is off
         _cd_files_for_format = set()
+        # Initialised here, not inside the CD-only branch below: the check
+        # runs after it and must not see an unbound name on non-CD libraries.
+        cd_format_failed = {}
         try:
             from mlo.audio import AudioFile as _AFCF
             for p in files:

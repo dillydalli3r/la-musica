@@ -157,20 +157,26 @@ def get_sidecar_cover_path(album_dir, track_filename):
     base = os.path.splitext(track_filename)[0]
     # Also handle track_filename that may already be a full path
     base = os.path.basename(base)
+    # The case-insensitive fallback needs the directory listing; fetch it at
+    # most once per call instead of once per candidate extension.
+    listing = None
     for ext in SIDECAR_COVER_EXTS:
         cand = os.path.join(album_dir, base + ext)
         # Case-insensitive check on Windows, but be explicit for cross-platform
         if os.path.isfile(cand):
             return cand
-        # Try case-insensitive glob if exact case fails (e.g. .JPG vs .jpg)
-        try:
-            for f in os.listdir(album_dir):
-                if f.lower() == (base + ext).lower():
-                    cand2 = os.path.join(album_dir, f)
-                    if os.path.isfile(cand2):
-                        return cand2
-        except OSError:
-            pass
+        # Try case-insensitive match if exact case fails (e.g. .JPG vs .jpg)
+        if listing is None:
+            try:
+                listing = os.listdir(album_dir)
+            except OSError:
+                listing = []
+        want = (base + ext).lower()
+        for f in listing:
+            if f.lower() == want:
+                cand2 = os.path.join(album_dir, f)
+                if os.path.isfile(cand2):
+                    return cand2
     return None
 
 

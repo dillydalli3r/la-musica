@@ -1,0 +1,292 @@
+"""Home-page payload: album recommendations, recent additions and highlights.
+
+Recommendations are seeded from the library's own taste (most-collected
+artists + most-tagged genres) and resolved against MusicBrainz release
+groups the library doesn't already own. Everything is best-effort and
+TTL-cached — a MusicBrainz hiccup degrades to library-only highlights rather
+than failing the Home page.
+"""
+import os
+import random
+import threading
+import time
+_lock = threading.Lock()
+_cache = {"t": 0.0, "key": None, "data": None}
+_TTL = 900.0
+_MB_BUDGET = 6  # max MusicBrainz searches per build (1 req/s etiquette)
+
+
+def _artist_of(alb, fallback=""):
+    meta = alb.get("meta") or {}
+    return (str(meta.get("ALBUMARTIST") or "").strip()
+            or str(alb.get("album_artist") or "").strip()
+            or str(meta.get("ARTIST") or "").strip() or fallback)
+
+
+def _owned_row(alb, fallback_artist="", reason="", owned=True):
+    meta = alb.get("meta") or {}
+    return {
+        "path": alb.get("path") or "",
+        "album": str(meta.get("ALBUM") or "").strip(),
+        "artist": _artist_of(alb, fallback_artist),
+        "year": str(meta.get("DATE") or "")[:4] or None,
+        "cover": alb.get("cover_file"),
+        "grade_pct": alb.get("grade_pct"),
+        "mbid": (str(meta.get("MUSICBRAINZ_ALBUMID") or "").strip()
+                 or str(meta.get("MUSICBRAINZ_RELEASEGROUPID") or "").strip() or None),
+        "mb_kind": "rg",
+        "reason": reason,
+        "owned": owned,
+    }
+
+
+def _rec_row(row, reason):
+    return {
+        "path": "",
+        "album": str(row.get("title") or "").strip(),
+        "artist": str(row.get("artist") or "").strip(),
+        "year": str(row.get("first_release_date") or "")[:4] or None,
+        "cover": None,
+        "grade_pct": None,
+        "mbid": row.get("id"),
+        "mb_kind": "rg",
+        "reason": reason,
+        "owned": False,
+    }
+
+
+def _collect(lib):
+    """Flatten the library into albums + owned-id sets + genre/artist tallies."""
+    albums, owned_rg, artist_count, genre_count = [], set(), {}, {}
+    for ar in lib.get("artists", []):
+        for alb in ar.get("albums", []):
+            albums.append(alb)
+            meta = alb.get("meta") or {}
+            rg = str(meta.get("MUSICBRAINZ_RELEASEGROUPID") or "").strip().lower()
+            if rg:
+                owned_rg.add(rg)
+            name = ar.get("display_name") or ar.get("name") or _artist_of(alb)
+            if name:
+                artist_count[name] = artist_count.get(name, 0) + 1
+            for tr in alb.get("tracks", []):
+                g = str((tr.get("tags") or {}).get("GENRE") or "").strip()
+                for part in g.replace(";", ",").split(","):
+                    part = part.strip().lower()
+                    if part:
+                        genre_count[part] = genre_count.get(part, 0) + 1
+    return albums, owned_rg, artist_count, genre_count
+
+
+def _mb_recs(albums, owned_rg, artist_count, genre_count, want):
+    """MusicBrainz release-group suggestions the library doesn't own."""
+    from server import integrations as intg
+
+    seeds = []
+    for name, _n in sorted(artist_count.items(), key=lambda kv: -kv[1])[:3]:
+        seeds.append((f'artist:"{name}"', f"More from {name}"))
+    for g, _n in sorted(genre_count.items(), key=lambda kv: -kv[1])[:3]:
+        if g and g not in ("", "unknown"):
+            seeds.append((f'tag:"{g}"', f"Because you like {g.title()}"))
+
+    recs, used = [], 0
+    for query, reason in seeds:
+        if used >= _MB_BUDGET or len(recs) >= want:
+            break
+        used += 1
+        try:
+            data = intg.search_mb("release-group", query, limit=25)
+        except Exception:
+            continue
+        for row in data.get("rows", []):
+            if len(recs) >= want:
+                break
+            rg = str(row.get("id") or "").lower()
+            if not rg or rg in owned_rg:
+                continue
+            rtype = str(row.get("primary_type") or "").lower()
+            if rtype and rtype not in ("album", "ep", "single"):
+                continue
+            rec = _rec_row(row, reason)
+            if not rec["album"] or not rec["artist"]:
+                continue
+            if any(x["mbid"] == rec["mbid"] for x in recs):
+                continue
+            recs.append(rec)
+    return recs
+
+
+def _recent(albums, limit):
+    def mtime(a):
+        try:
+            return os.path.getmtime(a.get("path") or "")
+        except OSError:
+            return 0.0
+    ordered = sorted(albums, key=mtime, reverse=True)
+    return [_owned_row(a, reason="Recently added") for a in ordered[:limit]]
+
+
+def _top_rated(albums, limit):
+    rated = [a for a in albums if a.get("grade_pct") is not None and (a.get("total_checks") or 0) >= 5]
+    rated.sort(key=lambda a: (-(a.get("grade_pct") or 0), not a.get("pass")))
+    return [_owned_row(a, reason="Best graded") for a in rated[:limit]]
+
+
+def _favorites(lib, limit):
+    try:
+        from server import playlists as pl
+        favs = (pl.list_favorites() or {}).get("albums", [])
+    except Exception:
+        favs = []
+    if not favs:
+        return []
+    by_path = {os.path.normcase(os.path.normpath(a.get("path") or "")): a
+               for a in (alb for ar in lib.get("artists", []) for alb in ar.get("albums", []))}
+    out = []
+    for p in favs[:limit]:
+        alb = by_path.get(os.path.normcase(os.path.normpath(str(p))))
+        if alb:
+            out.append(_owned_row(alb, reason="Favorite"))
+        else:
+            name = os.path.basename(str(p).replace("\\", "/"))
+            out.append({"path": str(p).replace("\\", "/"), "album": name, "artist": "",
+                        "year": None, "cover": None, "grade_pct": None,
+                        "mbid": None, "mb_kind": "rg", "reason": "Favorite", "owned": True})
+    return out
+
+
+def _top_artists(artists, limit):
+    """Most-collected artists, with a representative cover for the card."""
+    rows = []
+    for ar in artists:
+        name = str(ar.get("display_name") or ar.get("name") or "").strip()
+        albs = ar.get("albums") or []
+        if not name or not albs:
+            continue
+        agg = ar.get("aggregate") or {}
+        first = sorted(albs, key=lambda a: str(a.get("path") or "").lower())[0]
+        rows.append({
+            "path": str(ar.get("path") or "").replace("\\", "/"),
+            "artist": name,
+            "album_count": len(albs),
+            "track_count": agg.get("track_count") or 0,
+            "grade_pct": agg.get("grade_pct"),
+            "cover_path": first.get("path") or "",
+            "cover": first.get("cover_file"),
+        })
+    rows.sort(key=lambda r: (-r["album_count"], r["artist"].lower()))
+    return rows[:limit]
+
+
+_WISH_REASON = {"wanted": "Wishlist", "searching": "Searching Soulseek",
+                "failed": "Search failed", "available": "Available now"}
+
+
+def _wanted(limit):
+    """Open Soulseek wishes — releases the background worker is hunting."""
+    try:
+        from server import wishes
+        items = wishes.list_wishes() or []
+    except Exception:
+        return []
+    out = []
+    for w in items:
+        if str(w.get("status") or "") == "imported":
+            continue
+        out.append({
+            "path": "",
+            "album": str(w.get("title") or "").strip() or "Untitled release",
+            "artist": str(w.get("artist") or "").strip(),
+            "year": str(w.get("year") or "")[:4] or None,
+            "cover": None,
+            "grade_pct": None,
+            "mbid": str(w.get("release_mbid") or "").strip() or None,
+            "mb_kind": "release",
+            "reason": _WISH_REASON.get(str(w.get("status") or ""), "Wishlist"),
+            "owned": False,
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _needs_attention(albums, limit):
+    """Owned albums that fail at least one check — lowest grade first."""
+    bad = [a for a in albums
+           if (a.get("total_checks") or 0) > 0 and not a.get("pass")]
+    bad.sort(key=lambda a: (a.get("grade_pct") if a.get("grade_pct") is not None else 0.0,
+                            -(a.get("total_checks") or 0)))
+    return [_owned_row(a, reason="Needs attention") for a in bad[:limit]]
+
+
+def build_home(cfg):
+    """Full Home payload for the given config (TTL-cached)."""
+    from server import library as lib_mod
+
+    folder = str(cfg.get("music_folder") or "")
+    rec_count = int(cfg.get("home_rec_count", 18) or 18)
+    recent_count = int(cfg.get("home_recent_count", 12) or 12)
+    cache_key = (folder, rec_count, recent_count,
+                 bool(cfg.get("home_recommendations", True)))
+    now = time.time()
+    with _lock:
+        if _cache["data"] and _cache["key"] == cache_key and now - _cache["t"] < _TTL:
+            return _cache["data"]
+
+    lib = lib_mod.build_library(cfg)
+    artists = lib.get("artists", [])
+    albums, owned_rg, artist_count, genre_count = _collect(lib)
+
+    stats = {
+        "artists": len(artists),
+        "albums": len(albums),
+        "tracks": sum(a.get("track_count") or len(a.get("tracks") or []) for a in albums),
+    }
+    try:
+        from server import playlists as pl
+        stats["playlists"] = len(pl.list_playlists() or [])
+    except Exception:
+        stats["playlists"] = 0
+    passes = sum((a.get("pass_count") or 0) for a in albums)
+    checks = sum((a.get("total_checks") or 0) for a in albums)
+    stats["grade_pct"] = round(100.0 * passes / checks, 1) if checks else None
+
+    recent = _recent(albums, recent_count)
+    top = _top_rated(albums, max(4, recent_count // 2))
+    favorites = _favorites(lib, max(4, recent_count // 2))
+
+    recommended = []
+    if cfg.get("home_recommendations", True):
+        recommended = _mb_recs(albums, owned_rg, artist_count, genre_count, rec_count)
+
+    # Discover: a random slice of the library that isn't already featured.
+    featured = {os.path.normcase(os.path.normpath(r["path"])) for r in recent + top}
+    pool = [a for a in albums
+            if os.path.normcase(os.path.normpath(a.get("path") or "")) not in featured]
+    random.shuffle(pool)
+    discover = [_owned_row(a, reason="Rediscover") for a in pool[:recent_count]]
+
+    if not recommended:
+        # MusicBrainz unavailable / nothing new — fill with library picks so
+        # the shelf is never empty.
+        recommended = discover[:8]
+
+    data = {
+        "stats": stats,
+        "recent": recent,
+        "recommended": recommended,
+        "top_rated": top,
+        "favorites": favorites,
+        "discover": discover,
+        "top_artists": _top_artists(artists, 6),
+        "wanted": _wanted(8),
+        "needs_attention": _needs_attention(albums, max(4, recent_count // 2)),
+    }
+    with _lock:
+        _cache.update({"t": now, "key": cache_key, "data": data})
+    return data
+
+
+def invalidate():
+    with _lock:
+        _cache["t"] = 0.0
+        _cache["data"] = None

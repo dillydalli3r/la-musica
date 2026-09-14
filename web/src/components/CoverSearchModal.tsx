@@ -89,7 +89,7 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
 
   return (
     <div
-      className="fixed inset-0 z-40 bg-black/70 flex items-center justify-center p-4"
+      className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6"
       onClick={(e) => e.target === e.currentTarget && onClose()}
     >
       <div className="bg-card border border-border rounded-xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl">

@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ClipboardCheck, RotateCcw, Save } from "lucide-react";
+import { ClipboardCheck, RotateCcw, Save, ShieldCheck, SunMedium, ToggleRight } from "lucide-react";
 import { api } from "../api";
 import { toast } from "../store";
 import ConfirmButton from "../components/ConfirmButton";
+import Segmented from "../components/Segmented";
+import { PageLoading } from "../components/Badges";
 
 /** In-depth grading configuration: every check that can count for or
  * against grading, grouped the way they apply — track/album checks,
@@ -201,6 +203,50 @@ export default function GradingPage() {
   const val = (k: string) => !!local?.[k];
   const aiReady = !!String(local?.ai_base_url ?? "").trim() && !!String(local?.ai_model ?? "").trim();
 
+  const [q, setQ] = useState("");
+  const needle = q.trim().toLowerCase();
+  const visible = (items: CheckDef[]) =>
+    needle
+      ? items.filter((it) => it.label.toLowerCase().includes(needle)
+          || it.k.toLowerCase().includes(needle) || it.desc.toLowerCase().includes(needle))
+      : items;
+
+  const setBulk = (v: boolean) =>
+    setLocal((c) => {
+      const next = { ...(c ?? {}) };
+      for (const k of GRADING_KEYS) next[k] = v;
+      return next;
+    });
+
+  /** Named presets: a one-click starting point that is still fully editable. */
+  const [preset, setPreset] = useState<"strict" | "balanced" | "relaxed">("balanced");
+  const applyPreset = (name: "strict" | "balanced" | "relaxed") => {
+    const d = defaults as Record<string, unknown> | undefined;
+    if (!d) return;
+    setPreset(name);
+    const relaxedOff = [
+      "grade_check_tag_spaces", "grade_check_lyrics_spaces", "grade_check_cue_spaces",
+      "grade_check_cover_crop", "grade_check_lyrics_zero", "grade_check_tag_blank_lines",
+      "grade_check_lyrics_blank_lines", "grade_check_cue_blank_lines",
+      "grade_check_filename_case", "grade_check_ext_case", "grade_check_excess_tags",
+      "grade_check_mb_links", "grade_check_rym_links", "grade_check_xlit", "grade_check_trans",
+    ];
+    setLocal((c) => {
+      const next = { ...(c ?? {}) };
+      for (const k of GRADING_KEYS) if (d[k] !== undefined) next[k] = d[k];
+      if (name === "strict") for (const k of GRADING_KEYS) next[k] = true;
+      else if (name === "relaxed") for (const k of relaxedOff) next[k] = false;
+      return next;
+    });
+    toast(name === "balanced" ? "Defaults loaded — Save to apply" : `${name[0].toUpperCase() + name.slice(1)} preset loaded — Save to apply`);
+  };
+
+  const PRESETS: { id: "strict" | "balanced" | "relaxed"; label: string; title: string; icon: typeof ShieldCheck }[] = [
+    { id: "strict", label: "Strict", title: "Enable every check", icon: ShieldCheck },
+    { id: "balanced", label: "Balanced", title: "Factory defaults", icon: ToggleRight },
+    { id: "relaxed", label: "Relaxed", title: "Only the essential checks", icon: SunMedium },
+  ];
+
   return (
     <div className="p-6 space-y-5">
       <div className="flex items-start justify-between gap-4 sticky top-0 z-20 bg-bg/95 backdrop-blur py-2 -mt-2">
@@ -232,8 +278,26 @@ export default function GradingPage() {
         </div>
       </div>
 
+      {local && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <input
+            className="input !py-1.5 text-xs max-w-xs"
+            placeholder="Filter checks… (tags, lyrics, cover…)"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
+          <Segmented
+            value={preset}
+            onChange={applyPreset}
+            options={PRESETS}
+          />
+          <button className="btn-ghost !py-1 text-xs" onClick={() => setBulk(true)}>Enable all</button>
+          <button className="btn-ghost !py-1 text-xs" onClick={() => setBulk(false)}>Disable all</button>
+        </div>
+      )}
+
       {!local ? (
-        <div className="text-sm text-zinc-500 py-10 text-center">Loading grading settings…</div>
+        <PageLoading label="Loading grading settings…" />
       ) : (
         GROUPS.map((g) => (
           <section key={g.id} className="space-y-1.5">
@@ -242,7 +306,7 @@ export default function GradingPage() {
               <div className="text-[11px] text-zinc-500">{g.desc}</div>
             </div>
             <div className="divide-y divide-border/40 rounded-lg border border-border/60 bg-panel/40">
-              {g.items.map((it) => {
+              {visible(g.items).map((it) => {
                 const off = it.needsAi && !aiReady;
                 return (
                   <label

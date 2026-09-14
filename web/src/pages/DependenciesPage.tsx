@@ -30,6 +30,17 @@ export default function DependenciesPage() {
   const updates = tools.filter((t) => t.state === "update");
   const ready = tools.filter((t) => t.state === "ok").length;
 
+  /** Path relative to the deps dir when possible — the full prefix repeats on
+   * every row, so show the distinguishing tail ("…/flac v1.5.0/flac.exe"). */
+  const shortPath = (p: string) => {
+    const d = String(deps?.deps_dir ?? "").replace(/[\\/]+$/, "");
+    if (d && p.toLowerCase().startsWith(d.toLowerCase())) {
+      const rel = p.slice(d.length).replace(/^[\\/]+/, "").replace(/\\/g, "/");
+      if (rel) return `.../${rel}`;
+    }
+    return p.replace(/\\/g, "/");
+  };
+
   const install = async (keys?: string[]) => {
     setBusy(true);
     try {
@@ -58,7 +69,7 @@ export default function DependenciesPage() {
   };
 
   return (
-    <div className="p-6 max-w-3xl mx-auto space-y-4">
+    <div className="p-6 max-w-6xl mx-auto space-y-4">
       <div className="flex items-start justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
@@ -101,7 +112,7 @@ export default function DependenciesPage() {
             title="Open the dependencies folder"
           >
             <FolderOpen className="h-3 w-3 shrink-0" />
-            {deps.deps_dir}
+            {String(deps.deps_dir).replace(/\\/g, "/")}
           </button>
         )}
       </div>
@@ -137,8 +148,8 @@ export default function DependenciesPage() {
                     <span className="text-amber-400/80"> → {t.latest_version}</span>
                   )}
                 </td>
-                <td className="td text-[11px] text-zinc-600 font-mono truncate max-w-[16rem]" title={t.path ?? ""}>
-                  {t.path ?? "—"}
+                <td className="td text-[11px] text-zinc-600 font-mono truncate" title={t.path ?? ""}>
+                  {t.path ? shortPath(t.path) : "—"}
                 </td>
               </tr>
             ))}

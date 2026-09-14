@@ -226,3 +226,79 @@ export interface GenreCascade {
   per_track: { position: number; disc: number; title: string; genres: string[]; source: string | null }[];
   levels: { track: boolean; release: boolean; release_group: boolean; artist: boolean };
 }
+
+export interface Wish {
+  id: number;
+  release_mbid: string;
+  title: string;
+  artist: string;
+  year: string;
+  status: "wanted" | "searching" | "imported" | "failed" | "available";
+  note: string;
+  target_dir: string;
+  queries: string[];
+  attempts: number;
+  added_at: number;
+  updated_at: number;
+  last_search: number;
+  last_error: string;
+  album_path: string;
+}
+
+export interface WishesPayload {
+  wishes: Wish[];
+  worker: {
+    running: boolean;
+    enabled: boolean;
+    current: string | null;
+    last_cycle: number;
+    last_result: string;
+    next_run: number;
+    interval_hours: number;
+  };
+  log: { t: number; level: string; msg: string }[];
+}
+
+/** Home page payload: album recommendations + library highlights. */
+export interface HomeData {
+  stats: {
+    artists: number;
+    albums: number;
+    tracks: number;
+    playlists: number;
+    grade_pct: number | null;
+  };
+  recent: HomeAlbum[];
+  recommended: HomeAlbum[];
+  top_rated: HomeAlbum[];
+  favorites: HomeAlbum[];
+  discover: HomeAlbum[];
+  top_artists: HomeArtist[];
+  wanted: HomeAlbum[];
+  needs_attention: HomeAlbum[];
+}
+
+export interface HomeArtist {
+  path: string;
+  artist: string;
+  album_count: number;
+  track_count: number;
+  grade_pct: number | null;
+  cover_path: string;
+  cover: string | null;
+}
+
+export interface HomeAlbum {
+  /** Library path when owned, else "" (recommendation). */
+  path: string;
+  album: string;
+  artist: string;
+  year?: string | null;
+  cover: string | null;
+  reason?: string;
+  mbid?: string | null;
+  /** MusicBrainz entity type behind `mbid` — "rg" (release group) or "release". */
+  mb_kind?: string;
+  grade_pct?: number | null;
+  owned?: boolean;
+}

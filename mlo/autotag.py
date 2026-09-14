@@ -35,19 +35,6 @@ from .ui import print_header, log, c, Color
 # ----------------------------------------------------------------------
 # ALBUMITUNESADVISORY / INSTRUMENTAL (single-pass per album)
 # ----------------------------------------------------------------------
-def _has_lyrics(path):
-    """True when the track has lyrics (embedded LYRICS or an .lrc sidecar)."""
-    try:
-        af = AudioFile(path)
-        lyr = af.get_lyrics()
-        if lyr and str(lyr).strip():
-            return True
-    except Exception:
-        pass
-    lrc = os.path.splitext(path)[0] + ".lrc"
-    return os.path.isfile(lrc) and os.path.getsize(lrc) > 0 if os.path.exists(lrc) else False
-
-
 def _album_files(album_dir):
     return sorted(
         os.path.join(album_dir, f)

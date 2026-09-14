@@ -392,7 +392,7 @@ def _resolve_script_ids(spec):
         return list(cfg.get("run_all_order", DEFAULT_RUN_ALL_ORDER)), "RUN ALL"
     ids = []
     for part in spec.replace(" ", "").split(","):
-        if part.isdigit() and 1 <= int(part) <= len(SCRIPTS):
+        if part.isdigit() and 1 <= int(part) <= 15:
             sid = int(part)
             if sid not in ids:
                 ids.append(sid)
@@ -536,19 +536,17 @@ def cmd_menu(_args):
 
 
 def cmd_gui(_args):
-    """Launch the Tkinter GUI (same folder / install)."""
-    if getattr(sys, "frozen", False):
-        exe = os.path.join(SCRIPT_DIR, "Music Library Optimizer.exe")
-        if os.path.isfile(exe):
-            subprocess.Popen([exe])
-            return 0
-        print(c("GUI executable not found next to the CLI.", Color.RED))
-        return 1
-    script = os.path.join(SCRIPT_DIR, "app.py")
-    if os.path.isfile(script):
-        subprocess.Popen([sys.executable, script], cwd=SCRIPT_DIR)
+    """Open the web app (backend + browser via the tray launcher)."""
+    from pathlib import Path
+    tray = Path(SCRIPT_DIR) / "tray.py"
+    if tray.is_file():
+        subprocess.Popen([sys.executable, str(tray)], cwd=SCRIPT_DIR)
         return 0
-    print(c("app.py not found.", Color.RED))
+    start = Path(SCRIPT_DIR) / "start_app.py"
+    if start.is_file():
+        subprocess.Popen([sys.executable, str(start)], cwd=SCRIPT_DIR)
+        return 0
+    print(c("No launcher found (tray.py / start_app.py).", Color.RED))
     return 1
 
 
@@ -651,3 +649,7 @@ def main(argv=None):
         parser.print_help()
         return 0
     return args.func(args) or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

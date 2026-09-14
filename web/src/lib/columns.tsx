@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Columns3 } from "lucide-react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 
@@ -145,7 +145,7 @@ export function ColumnsMenu({
       <button
         className={
           iconOnly
-            ? `p-1.5 rounded-md border transition-colors ${
+            ? `p-1.5 rounded-lg border transition-colors ${
                 open
                   ? "text-accent border-accent/50 bg-raise"
                   : "border-border bg-panel/60 text-zinc-500 hover:text-white hover:bg-raise"
@@ -221,6 +221,11 @@ export function ColumnResizer({ width, onDrag, onReset }: {
   onDrag: (px: number) => void;
   onReset: () => void;
 }) {
+  const cleanupRef = useRef<(() => void) | null>(null);
+  // A drag that's in progress when this th unmounts (sort/filter change,
+  // navigation) would otherwise leak both window listeners and the
+  // col-resize cursor.
+  useEffect(() => () => cleanupRef.current?.(), []);
   const start = (e: ReactMouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -232,7 +237,9 @@ export function ColumnResizer({ width, onDrag, onReset }: {
       window.removeEventListener("mouseup", up);
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
+      cleanupRef.current = null;
     };
+    cleanupRef.current = up;
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
     window.addEventListener("mousemove", move);

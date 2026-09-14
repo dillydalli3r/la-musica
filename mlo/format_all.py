@@ -277,6 +277,7 @@ def _format_audio_tags(path, cfg, force=False):
         if af.audio is None:
             return (path, False, None)
         changed = False
+        af.defer_save(True)
         for key, val in list(af.all_tags().items()):
             if val is None:
                 continue
@@ -292,6 +293,7 @@ def _format_audio_tags(path, cfg, force=False):
                         if af.set_tag(key, expected):
                             changed = True
                         else:
+                            af.defer_save(False)
                             return (path, False, af.error or "set_tag failed")
                     continue
                 except Exception:
@@ -307,6 +309,7 @@ def _format_audio_tags(path, cfg, force=False):
                 if af.set_tag(key, fixed):
                     changed = True
                 else:
+                    af.defer_save(False)
                     return (path, False, af.error or "set_tag failed")
         # Optimization leaves only tags this app (and its graders) understand:
         # anything outside TAG_MAP plus the encoder identity tags is removed.
@@ -321,6 +324,7 @@ def _format_audio_tags(path, cfg, force=False):
                             changed = True
                     except Exception:
                         pass
+        af.defer_save(False)
         if changed:
             return (path, True, None)
         return (path, False, None)

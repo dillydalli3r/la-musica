@@ -104,7 +104,7 @@ def _file_missing_rgain(path):
     """True when the file lacks any of the standard ReplayGain tags."""
     try:
         af = AudioFile(path)
-        return not any(af.get_tag(t) for t in RGAIN_TAGS)
+        return any(not af.get_tag(t) for t in RGAIN_TAGS)
     except Exception:
         return True
 

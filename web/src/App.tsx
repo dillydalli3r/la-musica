@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  ArrowDownUp, ChevronLeft, ChevronRight, ClipboardCheck, Gauge, HardDriveDownload, Heart, Import,
+  ArrowDownUp, ChevronLeft, ChevronRight, ClipboardCheck, Gauge, HardDriveDownload, Heart, Home, Import,
   Library, ListMusic, Menu, Music4, PanelLeftClose, Search, X,
   Settings as SettingsIcon, Wrench,
 } from "lucide-react";
 import { api } from "./api";
 import { useStore } from "./store";
+import HomePage from "./pages/HomePage";
 import LibraryPage from "./pages/LibraryPage";
 import ArtistPage from "./pages/ArtistPage";
 import AlbumPage from "./pages/AlbumPage";
@@ -30,7 +31,8 @@ import ImportWizard from "./pages/ImportWizard";
 import { ProgressInline } from "./components/ProgressBar";
 
 const NAV = [
-  { to: "/", label: "Library", icon: Library, end: true },
+  { to: "/", label: "Home", icon: Home, end: true },
+  { to: "/library", label: "Library", icon: Library, end: false },
   { to: "/playlists", label: "Playlists", icon: ListMusic, end: false },
   { to: "/favorites", label: "Favorites", icon: Heart, end: false },
   { to: "/import", label: "Import", icon: Import, end: false },
@@ -64,8 +66,7 @@ export function applyAccent(name: string | null) {
 /** Soulseek availability dot: green = logged into the Soulseek network,
  * amber = slskd running but not logged in, hidden = not running. Sits on
  * the nav icon's corner so it reads the same with the sidebar collapsed.
- * When logged in, `name` carries the account name — the tab then shows it
- * instead of the plain "Soulseek" label. */
+ * When logged in, `name` carries the account name — shown in the tooltip. */
 function useSlskDot() {
   const { data: st } = useQuery({
     queryKey: ["soulseek", "status-dot"],
@@ -152,7 +153,7 @@ export default function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const onSearch = (q: string) => {
     setQuery(q);
-    if (location.pathname !== "/") navigate("/");
+    if (location.pathname !== "/library") navigate("/library");
   };
   const goMbSearch = () => {
     setSearchOpen(false);
@@ -289,8 +290,8 @@ export default function App() {
                 collapsed ? "max-w-0 opacity-0" : "max-w-[110px] opacity-100"
               }`}
             >
-              {/* the Soulseek tab shows the logged-in account name */}
-              {to === "/soulseek" && slskDot?.name ? slskDot.name : label}
+              {/* the tab always reads "Soulseek"; the account name is in the dot tooltip */}
+              {label}
             </span>
           </NavLink>
         ))}
@@ -338,7 +339,7 @@ export default function App() {
                   <Icon className="h-4 w-4 shrink-0" />
                   {to === "/soulseek" && <SlskIconDot dot={slskDot} />}
                 </span>
-                <span className="whitespace-nowrap">{to === "/soulseek" && slskDot?.name ? slskDot.name : label}</span>
+                <span className="whitespace-nowrap">{label}</span>
               </NavLink>
             ))}
           </aside>
@@ -436,7 +437,8 @@ export default function App() {
           {/* keyed by pathname so each navigation eases the new page in */}
           <div key={location.pathname} className="page-enter">
             <Routes>
-            <Route path="/" element={<LibraryPage />} />
+            <Route path="/" element={<HomePage />} />
+            <Route path="/library" element={<LibraryPage />} />
             <Route path="/artist/:path" element={<ArtistPage />} />
             <Route path="/album/:path" element={<AlbumPage />} />
             <Route path="/track/:path" element={<TrackPage />} />
@@ -464,7 +466,7 @@ export default function App() {
               element={
                 <div className="p-10 text-center text-sm text-zinc-500">
                   Page not found —{" "}
-                  <NavLink to="/" className="text-accent-soft hover:underline">
+                  <NavLink to="/library" className="text-accent-soft hover:underline">
                     back to the library
                   </NavLink>
                 </div>
@@ -478,7 +480,7 @@ export default function App() {
       </div>
 
       {toastMsg && (
-        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 rounded-lg border border-accent/40 bg-panel px-4 py-2 text-sm shadow-xl">
+        <div className="toast-in fixed bottom-20 left-1/2 -translate-x-1/2 z-50 rounded-lg border border-accent/40 bg-panel px-4 py-2 text-sm shadow-xl">
           {toastMsg}
         </div>
       )}

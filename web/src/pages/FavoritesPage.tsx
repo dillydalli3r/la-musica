@@ -4,7 +4,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { Disc3, FileVideo, Heart, ListMusic, Mic2, Play } from "lucide-react";import { api } from "../api";
 import { useStore } from "../store";
 import { useFavorites, useTrackLikes } from "../lib/favs";
-import { AdvisoryMark, EmptyState } from "../components/Badges";
+import { AdvisoryMark, EmptyState, PageLoading } from "../components/Badges";
 import { TrackCover } from "../components/CoverImg";
 import AlbumCard from "../components/AlbumCard";
 import FavHeart from "../components/FavHeart";
@@ -128,12 +128,16 @@ function LikedTracks() {
     });
   }, [likes, tracks]);
 
+  // `i` indexes the full rows array (missing files included); the queue only
+  // holds playable tracks, so translate it before handing it to playNow.
   const play = (i: number) => {
     const playable = rows.filter((r) => !r.missing).map((r) => r.queue);
-    if (playable.length) playNow(playable, Math.min(i, playable.length - 1));
+    if (!playable.length) return;
+    const idx = rows.slice(0, i).filter((r) => !r.missing).length;
+    playNow(playable, Math.min(idx, playable.length - 1));
   };
 
-  if (isLoading) return <div className="text-sm text-zinc-500">Loading…</div>;
+  if (isLoading) return <PageLoading />;
   if (!rows.length)
     return (
       <EmptyState
@@ -233,7 +237,7 @@ function FavAlbums() {
     [favs, albums]
   );
 
-  if (isLoading) return <div className="text-sm text-zinc-500">Loading…</div>;
+  if (isLoading) return <PageLoading />;
   if (!rows.length)
     return <EmptyState title="No favorite albums yet" hint="Heart an album on its page or in the library grid." />;
 
@@ -268,7 +272,7 @@ function FavArtists() {
     [favs, artists]
   );
 
-  if (isLoading) return <div className="text-sm text-zinc-500">Loading…</div>;
+  if (isLoading) return <PageLoading />;
   if (!rows.length) return <EmptyState title="No favorite artists yet" hint="Heart an artist on their page." />;
 
   // Same table language as the library's artist view (Artist / Albums /
@@ -368,7 +372,7 @@ function FavPlaylists() {
     }
   };
 
-  if (isLoading) return <div className="text-sm text-zinc-500">Loading…</div>;
+  if (isLoading) return <PageLoading />;
   if (!rows.length) return <EmptyState title="No favorite playlists yet" hint="Heart a playlist on the Playlists page." />;
 
   // Same table language as the other favorites tabs / the library tables.

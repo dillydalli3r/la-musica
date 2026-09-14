@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { FolderOpen, Wrench, Check, ArrowRight, ArrowLeft, RotateCcw, Users } from "lucide-react";
+import { FolderOpen, Check, ArrowRight, ArrowLeft, RotateCcw, Users } from "lucide-react";
 import { api } from "../api";
+import FolderPicker from "../components/FolderPicker";
 import { toast } from "../store";
 
 type Step = 1 | 2 | 3 | 4;
@@ -65,32 +66,14 @@ export default function SetupPage() {
     }
   };
 
-  const pickNative = async () => {
-    if (!(window as any).__TAURI_INTERNALS__) {
-      toast("Native picker is only available in the desktop app — type the path or use the web folder picker");
-      return;
-    }
+  const [showFolderPicker, setShowFolderPicker] = useState(false);
+  const pickMusicFolder = async () => {
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const picked = await invoke<string | null>("pick_folder");
-      if (picked) setMusicFolder(picked);
-    } catch (e) {
-      toast(String(e));
-    }
-  };
-
-  const pickBrowser = async () => {
-    const picker = (window as any).showDirectoryPicker;
-    if (!picker) {
-      toast("This browser has no folder picker — type the path instead");
-      return;
-    }
-    try {
-      const dir = await picker({ mode: "read" });
-      setMusicFolder(dir.name);
-      toast("Folder selected — a full path needs a native picker or manual entry");
-    } catch (e) {
-      if ((e as Error).name !== "AbortError") toast(String(e));
+      const r = await api.fsPickFolder(musicFolder.trim());
+      if (!r.supported) setShowFolderPicker(true); // headless/remote → in-app browser
+      else if (r.path) setMusicFolder(r.path);
+    } catch {
+      setShowFolderPicker(true);
     }
   };
 
@@ -187,14 +170,18 @@ export default function SetupPage() {
                   onChange={(e) => setMusicFolder(e.target.value)}
                   placeholder="F:\Music"
                 />
-                <button className="btn-ghost" onClick={pickNative} title="Native folder picker (desktop)">
+                <button className="btn-ghost" onClick={pickMusicFolder} title="Browse for a folder">
                   <FolderOpen className="h-4 w-4" />
-                </button>
-                <button className="btn-ghost" onClick={pickBrowser} title="Browser folder picker">
-                  <Wrench className="h-4 w-4" />
                 </button>
               </div>
             </label>
+            {showFolderPicker && (
+              <FolderPicker
+                initial={musicFolder.trim()}
+                onPick={setMusicFolder}
+                onClose={() => setShowFolderPicker(false)}
+              />
+            )}
             <div className="flex items-center justify-between">
               <button className="btn-ghost" onClick={skip} disabled={busy}>
                 Skip for now — set it later in Settings

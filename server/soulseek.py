@@ -19,6 +19,7 @@ import subprocess
 import threading
 import time
 import uuid
+from urllib.parse import quote
 
 import httpx
 
@@ -357,7 +358,8 @@ def search(query, cfg=None, timeout_ms=None):
     search_id = str(uuid.uuid4())
     body = {"id": search_id, "searchText": query}
     if timeout_ms:
-        body["timeout"] = int(timeout_ms)
+        # slskd's DTO field is SearchTimeout; a "timeout" key is ignored.
+        body["searchTimeout"] = int(timeout_ms)
     try:
         resp = _request("POST", "/searches", json_body=body, timeout=30.0)
     except httpx.HTTPStatusError as e:
@@ -411,9 +413,14 @@ def search_results(search_id, cfg=None):
 
 
 def enqueue_download(username, files, cfg=None):
-    """Queue files for download: files = [{filename, size}]."""
-    body = {"username": username, "files": files}
-    _request("POST", "/downloads", json_body=body, timeout=30.0)
+    """Queue files for download: files = [{filename, size}].
+
+    slskd's enqueue route is per-user (POST /transfers/downloads/{username})
+    with a bare list body — there is no top-level /downloads route."""
+    body = [{"filename": f["filename"], "size": int(f.get("size") or 0)}
+            for f in files]
+    _request("POST", f"/transfers/downloads/{quote(str(username), safe='')}",
+             json_body=body, timeout=30.0)
     return True
 
 
@@ -487,8 +494,8 @@ def shares_state(cfg=None):
 
 
 def rescan_shares(cfg=None):
-    """Ask slskd to rescan its share index (POST /shares/rescan)."""
-    _request("POST", "/shares/rescan", timeout=30.0)
+    """Ask slskd to rescan its share index (PUT /shares)."""
+    _request("PUT", "/shares", timeout=30.0)
     return True
 
 
