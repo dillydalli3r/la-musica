@@ -78,7 +78,7 @@ async def _lifespan(app: FastAPI):
         pass
 
 
-app = FastAPI(title="la musica API", version="2.2.0", lifespan=_lifespan)
+app = FastAPI(title="la musica API", version="2.2.1", lifespan=_lifespan)
 
 # Docker/bootstrap: MLO_MUSIC_FOLDER env seeds music_folder when unset.
 _MLO_ENV_FOLDER = os.environ.get("MLO_MUSIC_FOLDER")
@@ -218,7 +218,7 @@ def shutdown_backend():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "version": "2.2.0"}
+    return {"status": "ok", "version": "2.2.1"}
 
 
 @app.get("/api/config")
