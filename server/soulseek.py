@@ -188,15 +188,67 @@ def is_running():
         return True
 
 
-def web_up(cfg=None):
-    """True when something answers on the slskd web port (any process)."""
+def _web_status(cfg=None):
+    """Response of GET /application on the configured slskd port (None when
+    nothing answers there)."""
     try:
-        with httpx.Client(base_url=_base_url(cfg), timeout=0.6) as client:
-            r = client.get("/application", headers={"Accept": "application/json"})
-            return r.status_code == 200
+        with httpx.Client(base_url=_base_url(cfg), timeout=1.0) as client:
+            return client.get("/application", headers={"Accept": "application/json"})
     except Exception:
-        return False
+        return None
 
+def web_up(cfg=None):
+    """True when an slskd web API answers openly on our port."""
+    r = _web_status(cfg)
+    return r is not None and r.status_code == 200
+
+def _auth_required(cfg=None):
+    """True when that API demands authentication.
+
+    Our config disables web auth on localhost, so an answer of 401/403 comes
+    from ANOTHER app's slskd (they share the default port 5030). Such a
+    listener must never be adopted as ours, and never be killed by Stop.
+    """
+    r = _web_status(cfg)
+    return r is not None and r.status_code in (401, 403)
+
+def instance_owner(cfg=None):
+    """Who is answering on the slskd web port? -> (ours, username, why).
+
+    Adopting a foreign instance made the UI report "running, not logged in"
+    forever: its API either needs authentication or serves another Soulseek
+    account. `why` carries a human explanation whenever it is not ours.
+    """
+    cfg = cfg or load_config()
+    p = int(cfg.get("soulseek_web_port") or 5030)
+    want = str(cfg.get("soulseek_username") or "").strip()
+    r = _web_status(cfg)
+    if r is None:
+        return False, None, ""  # nothing listening on our port
+    if r.status_code in (401, 403):
+        return False, None, (f"another application's slskd is already using "
+                             f"port {p} (it requires authentication)")
+    if r.status_code != 200:
+        return False, None, f"port {p} is used by another program (HTTP {r.status_code})"
+    try:
+        got = str(((r.json() or {}).get("user") or {}).get("username") or "").strip()
+    except Exception:
+        got = ""
+    if want and got and got.lower() != want.lower():
+        return False, got, (f"another application's slskd is already using "
+                            f"port {p} (signed in as {got})")
+    return True, (got or None), ""
+
+
+def _last_log_line(path, limit=220):
+    """Last non-empty line of a log file ("" when unreadable/empty)."""
+    try:
+        with open(path, "rb") as f:
+            lines = [l.strip() for l in
+                     f.read().decode("utf-8", "replace").splitlines() if l.strip()]
+        return lines[-1][-limit:] if lines else ""
+    except OSError:
+        return ""
 
 def start(cfg=None):
     """Spawn slskd; returns (started, message). Idempotent.
@@ -217,26 +269,48 @@ def start(cfg=None):
         except OSError:
             pass
         api_key = write_config(cfg)
-        # Adopt an already-listening slskd (auth is disabled on localhost).
-        try:
-            with httpx.Client(base_url=_base_url(cfg), timeout=0.6) as client:
-                r = client.get("/application", headers={"Accept": "application/json"})
-                if r.status_code == 200:
-                    _proc["api_key"] = None
-                    _proc["started_at"] = time.time()
-                    return True, "adopted already-running slskd"
-        except Exception:
-            pass
+        # Adopt an already-listening slskd, but ONLY our own. A foreign one
+        # (another app's slskd on the same port) must not be adopted: its
+        # API rejects us and Stop would kill a process we do not own.
+        ours, _who, why = instance_owner(cfg)
+        if ours:
+            _proc["api_key"] = None
+            _proc["started_at"] = time.time()
+            return True, "adopted already-running slskd"
+        if why:
+            return False, f"cannot start slskd: {why} — stop the other slskd " \
+                           f"first (only one slskd can run at a time)"
         kwargs = {}
         if os.name == "nt":
             kwargs["creationflags"] = CREATE_NO_WINDOW
+        log = os.path.join(os.path.dirname(config_path()), "slskd.log")
+        try:
+            logf = open(log, "wb")
+        except OSError:
+            logf = subprocess.DEVNULL
         proc = subprocess.Popen(
             [exe, "--config", config_path(), "--no-logo"],
             cwd=os.path.dirname(exe),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=logf,
+            stderr=subprocess.STDOUT,
             **kwargs,
         )
+        if hasattr(logf, "close"):
+            logf.close()  # the child keeps its own handle
+        # slskd allows ONE instance per machine. When another slskd is
+        # already running, this one exits at once and the UI used to look
+        # like a dead "Start" button for ever. Report what it actually said.
+        deadline = time.time() + 2.0
+        while time.time() < deadline and proc.poll() is None:
+            time.sleep(0.1)
+        if proc.poll() is not None:
+            detail = _last_log_line(log)
+            raise_msg = (f"slskd exited immediately ({detail}) — only one slskd "
+                         f"can run at a time, so stop the other app's slskd first"
+                         if detail else
+                         "slskd exited immediately — another slskd is probably "
+                         "already running on this machine")
+            return False, raise_msg
         _proc["proc"] = proc
         _proc["api_key"] = api_key
         _proc["started_at"] = time.time()
@@ -281,8 +355,10 @@ def stop(cfg=None):
         proc = _proc["proc"]
         _proc["proc"] = None
         if proc is None or proc.poll() is not None:
-            # untracked (adopted) slskd — the only way down is via the port
-            if web_up(cfg):
+            # untracked (adopted) slskd — the only way down is via the port.
+            # Never kill a listener that demands authentication: that is
+            # another app's slskd (see instance_owner).
+            if web_up(cfg) and not _auth_required(cfg):
                 return _kill_port_listener(port)
             return False
         try:
@@ -296,7 +372,7 @@ def stop(cfg=None):
             pass
     # a straggler or adopted sibling can still hold the web port
     time.sleep(0.3)
-    if web_up(cfg):
+    if web_up(cfg) and not _auth_required(cfg):
         _kill_port_listener(port)
     return True
 

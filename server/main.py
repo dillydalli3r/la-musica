@@ -2220,7 +2220,8 @@ def soulseek_status():
     """Managed slskd availability, running state, login and download dir."""
     from server import soulseek
     cfg = load_config()
-    running = soulseek.is_running() or soulseek.web_up(cfg)
+    owns, foreign_user, conflict = soulseek.instance_owner(cfg)
+    running = soulseek.is_running() or owns
     logged_in = None
     server = None
     if running:
@@ -2233,6 +2234,11 @@ def soulseek_status():
         "installed": soulseek.slskd_installed(),
         "running": running,
         "logged_in": logged_in,
+        # set when slskd's web port is held by ANOTHER app's slskd (default
+        # port 5030 is shared). The UI must explain that instead of the
+        # misleading "running, not logged in".
+        "conflict": conflict or None,
+        "conflict_username": foreign_user,
         "server": server,
         "download_dir": soulseek.download_dir(cfg),
         "web_port": int(cfg.get("soulseek_web_port") or 5030),
@@ -2915,10 +2921,15 @@ def soulseek_login(req: SoulseekLoginRequest):
     for an existing account)."""
     from server import soulseek
 
+    cfg = load_config()
+    _ours, _who, conflict = soulseek.instance_owner(cfg)
+    if conflict:
+        return {"ok": False, "logged_in": False,
+                "message": f"{conflict} — only one slskd can run at a time, so "
+                           f"stop the other app's slskd first"}
     username = req.username.strip()
     if not username or not req.password:
         raise HTTPException(400, "username and password are required")
-    cfg = load_config()
     same = (username == str(cfg.get("soulseek_username") or "").strip()
             and req.password == str(cfg.get("soulseek_password") or ""))
     if not same:

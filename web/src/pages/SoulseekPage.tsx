@@ -200,6 +200,37 @@ function ReconnectingCard({ username, password, onDone }: {
  * server creates accounts on first login). Shown whenever slskd is running
  * but not logged in. Credentials are SAVED by the server, so the form comes
  * prefilled and future starts reconnect on their own. */
+function PortConflictCard({ message, otherUser }: {
+  message: string;
+  otherUser?: string | null;
+}) {
+  return (
+    <div className="bg-card rounded-lg border border-red-900/50 p-4">
+      <div className="text-xs font-semibold uppercase tracking-wider text-red-300 mb-1.5 flex items-center gap-1.5">
+        <AlertTriangle className="h-3.5 w-3.5" /> Soulseek port already in use
+      </div>
+      <p className="text-[11px] text-zinc-400 mb-2.5">
+        {message}.
+        {otherUser ? (
+          <>
+            {" "}That instance is signed in as <span className="text-zinc-200">{otherUser}</span>,
+            which is a different Soulseek account — this app cannot use it.
+          </>
+        ) : null}
+      </p>
+      <p className="text-[11px] text-zinc-500 mb-3">
+        slskd permits a single running instance per machine, so this app cannot
+        start its own while that one is up. Quit the other application (or stop
+        its slskd) and press Start again. This app never stops the other
+        program's slskd for you.
+      </p>
+      <a className="btn-ghost text-xs" href="/settings">
+        <ExternalLink className="h-3.5 w-3.5" /> Open Settings
+      </a>
+    </div>
+  );
+}
+
 function LoginCard({ onDone, initialUsername, initialPassword }: {
   onDone: () => void;
   initialUsername?: string;
@@ -1331,6 +1362,8 @@ export default function SoulseekPage() {
               <span className="text-amber-300">starting…</span>
             ) : pending === "stop" ? (
               <span className="text-amber-300">stopping…</span>
+            ) : status?.conflict ? (
+              <span className="text-red-400">port {status?.web_port ?? ""} in use by another app</span>
             ) : running ? (
               <span className="text-emerald-400">running{status?.logged_in ? " · logged in" : status?.logged_in === false ? " · not logged in" : ""}</span>
             ) : "stopped"}
@@ -1414,7 +1447,14 @@ export default function SoulseekPage() {
         </>
       )}
 
-      {running && status?.logged_in === false && (
+      {status?.conflict && (
+        <PortConflictCard
+          message={String(status.conflict)}
+          otherUser={status.conflict_username as string | null}
+        />
+      )}
+
+      {!status?.conflict && running && status?.logged_in === false && (
         status?.has_credentials ? (
           <ReconnectingCard
             username={String(status.username ?? "")}
