@@ -455,7 +455,7 @@ export default function LyricsEditorModal({
   // Portal to <body>: page containers stack above z-70 otherwise (the
   // sidebar would draw over the modal).
   return createPortal(
-    <div className="fixed inset-0 z-[70] bg-black/80 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6">
+    <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6">
       <div className="rounded-2xl w-full max-w-6xl h-[92vh] flex flex-col shadow-2xl bg-card border border-border overflow-hidden">
         {/* the editor owns a private decoder so stamping never fights the
             main player; playbackRate follows the speed control */}

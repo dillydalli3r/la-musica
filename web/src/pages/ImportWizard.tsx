@@ -4,7 +4,7 @@ import { useSearchParams, Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   UploadCloud, ExternalLink, Check, ChevronLeft, ChevronRight, ChevronDown, Wand2,
-  ListMusic, Plus, Trash2, Disc3, FolderOpen, X,
+  Plus, Trash2, Disc3, FolderOpen, X,
 } from "lucide-react";
 import { api } from "../api";
 import { toast } from "../store";
@@ -491,7 +491,8 @@ export default function ImportWizard() {
   const pickFolderNative = async () => {
     const inTauri = !!(window as any).__TAURI_INTERNALS__;
     if (!inTauri) {
-      toast("The native picker is only available in the desktop app — use 'Pick folder' instead");
+      // no native dialog in a plain browser — fall back to the folder input
+      document.getElementById("import-folder")?.click();
       return;
     }
     try {
@@ -987,7 +988,7 @@ const finish = async () => {
         : true;
 
   return (
-    <div className="p-6 max-w-4xl mx-auto space-y-5">
+    <div className="p-6 max-w-6xl mx-auto space-y-5">
       <div className="flex items-center gap-3 flex-wrap">
         <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
           <UploadCloud className="h-6 w-6 text-accent" /> Import
@@ -1045,9 +1046,10 @@ const finish = async () => {
             <UploadCloud className="h-10 w-10 text-zinc-600 mx-auto mb-3" />
             <div className="font-medium text-zinc-300">Drop albums or files here</div>
             <div className="text-xs text-zinc-600 mt-1">
-              drop one or more folders (even from different artists) — they are separated into albums below ·
-              multi-disc folders (<b className="text-zinc-500">CD1/</b>, <b className="text-zinc-500">Disc 2/</b>) merge
-              into one album
+              drop one or more folders (even from different artists) — they are separated into albums below
+            </div>
+            <div className="text-xs text-zinc-600">
+              multi-disc folders (<b className="text-zinc-500">CD1/</b>, <b className="text-zinc-500">Disc 2/</b>) merge into one album
             </div>
             <div className="text-[11px] text-zinc-600 mt-1">
               audio (flac, mp3, m4a, ogg, opus, wav, …) · images (jpg, png, webp, tiff, avif, heic, …) · .lrc .cue .log .accurip
@@ -1081,11 +1083,8 @@ const finish = async () => {
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
-            <button className="btn-ghost" onClick={pickFolderBrowser}>
-              <FolderOpen className="h-4 w-4" /> Pick folder…
-            </button>
             <button className="btn-ghost" onClick={pickFolderNative}>
-              <ListMusic className="h-4 w-4" /> Pick folder (native)…
+              <FolderOpen className="h-4 w-4" /> Choose folder
             </button>
             <input
               className="input max-w-xs"

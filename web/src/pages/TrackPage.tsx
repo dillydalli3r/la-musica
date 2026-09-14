@@ -8,7 +8,7 @@ import { uncacheTrack } from "../lib/mediaCache";
 import { LinkEditorButton, MbIcon, RymIcon } from "../components/Links";
 import { SubtitledVideo } from "../components/SubtitledVideo";
 import { useStore, toast } from "../store";
-import { AuditBadge, GradeBadge, IssueList } from "../components/Badges";
+import { AuditBadge, GradeBadge, IssueList, EmptyState, PageLoading } from "../components/Badges";
 import CoverImg from "../components/CoverImg";
 import LyricsViewer from "../components/LyricsViewer";
 import LyricsManagerModal from "../components/LyricsManagerModal";
@@ -60,11 +60,11 @@ export default function TrackPage() {
     setDirty(false);
   }, [data]);
 
-  if (error) return <div className="p-8 text-zinc-500">Track not found: {String(error)}</div>;
-  if (isLoading || !data) return <div className="p-8 text-zinc-500">Loading track…</div>;
+  if (error) return <EmptyState title="Track not found" hint={String(error)} />;
+  if (isLoading || !data) return <PageLoading label="Loading track…" />;
 
-  const fileName = decoded.split("/").pop() ?? decoded;
-  const isVideo = isVideoFile(fileName);
+  const fileName = realPath.split("/").pop() ?? realPath;
+  const isVideo = isVideoFile(realPath);
   const tech = track?.tech ?? data.tech ?? {};
   const issues: string[] = track?.issues ?? [];
   const audit = track?.audit ?? null;
@@ -106,7 +106,7 @@ export default function TrackPage() {
   };
 
   const queueTrack = {
-    path: decoded, file: fileName, albumPath: albumDir,
+    path: realPath, file: fileName, albumPath: albumDir,
     artist: tags.ALBUMARTIST ?? tags.ARTIST, album: tags.ALBUM, title: tags.TITLE || undefined,
   };
   const enqueue = (position: "next" | "end") => {
@@ -419,13 +419,11 @@ function VideoTagCard({
   const [form, setForm] = useState<Record<string, string>>({});
   const [advisory, setAdvisory] = useState("0");
   const [busy, setBusy] = useState(false);
-  const [initFor, setInitFor] = useState(path);
 
-  if (initFor !== path) {
-    setInitFor(path);
+  useEffect(() => {
     setForm(Object.fromEntries(VIDEO_TAG_FIELDS.map((k) => [k, tags[k] ?? ""])));
     setAdvisory(tags.ITUNESADVISORY ?? "0");
-  }
+  }, [path]);
 
   const set = (k: string, v: string) => setForm((m) => ({ ...m, [k]: v }));
 

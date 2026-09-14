@@ -264,7 +264,15 @@ def make_icon():
     return img
 
 
-LOCK_PATH = os.path.join(ROOT, "server", "data", "tray.lock")
+def _lock_path():
+    try:
+        from mlo.paths import app_data_dir
+        return os.path.join(app_data_dir(), "tray.lock")
+    except Exception:
+        pass
+    return os.path.join(ROOT, "server", "data", "tray.lock")
+
+
 _lock_fh = None
 
 
@@ -279,9 +287,10 @@ def _acquire_single_instance():
     running, silently reducing it to "open browser and exit".
     """
     global _lock_fh
+    lock_path = _lock_path()  # resolved per call — music folder may change
     try:
-        os.makedirs(os.path.dirname(LOCK_PATH), exist_ok=True)
-        fh = open(LOCK_PATH, "a+")
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        fh = open(lock_path, "a+")
         try:
             if os.name == "nt":
                 import msvcrt
@@ -312,8 +321,7 @@ def run_tray():
     if status == "failed":
         # no console on pythonw — fall back to a spawned console for errors
         try:
-            subprocess.Popen(["cmd", "/c", "echo Backend failed to start & pause"],
-                             creationflags=0x08000000)
+            subprocess.Popen(["cmd", "/c", "echo Backend failed to start & pause"])
         except Exception:
             pass
         return

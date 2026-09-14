@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ListMusic, Play, Plus, Upload } from "lucide-react";
 import { api } from "../api";
 import { toast, useStore } from "../store";
-import { EmptyState } from "../components/Badges";
+import { EmptyState, PageLoading } from "../components/Badges";
 import { TrackCover } from "../components/CoverImg";
 import FavHeart from "../components/FavHeart";
 import { fmtDuration, GRID_SIZE_MIN } from "./LibraryPage";
@@ -73,7 +73,7 @@ export default function PlaylistsPage() {
       }))
     );
 
-  if (isLoading) return <div className="p-8 text-zinc-500">Loading playlists…</div>;
+  if (isLoading) return <PageLoading label="Loading playlists…" />;
 
   const manual = (playlists ?? []).filter((p) => p.kind === "manual");
   const smart = (playlists ?? []).filter((p) => p.kind === "smart");
@@ -155,7 +155,7 @@ function PlaylistGridCard({ playlist, trackMeta, onPlay }: {
   onPlay: (paths: string[]) => void;
 }) {
   const { data: detail } = useQuery({ queryKey: ["playlist", playlist.id], queryFn: () => api.playlist(playlist.id) });
-  const tracks = detail?.tracks ?? [];
+  const tracks = useMemo(() => detail?.tracks ?? [], [detail]);
   const totalDur = useMemo(() => tracks.reduce((s, t) => s + (trackMeta.get(t)?.dur ?? 0), 0), [tracks, trackMeta]);
 
   return (

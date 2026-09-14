@@ -14,6 +14,16 @@ directory — one folder to back up or carry between machines.
 
 ## Highlights
 
+- **Home** — a sidebar landing page that loads album recommendations from
+  your own taste (most-collected artists + most-tagged genres, resolved
+  against MusicBrainz release groups you don't own yet) alongside recently
+  added, best-graded, rediscover and favourite shelves, with a skeleton
+  loading state.
+- **Wishes** — save any MusicBrainz release to the library *without*
+  downloading it. A background worker re-searches Soulseek for every open
+  wish on a configurable interval and auto-imports a release the moment a
+  verified rip appears; wishes already present in the library (a manual
+  download) resolve themselves. See *Wishes* below.
 - **Library explorer** — artists → albums → tracks with live grade/audit
   badges, search, "fail only" filter, selectable rows with bulk tag tools,
   and sortable/resizable columns (year, title, grade, audit, genre,
@@ -120,7 +130,49 @@ The app now enforces canonical file naming in all three ways:
   sidecars, and leftover files like covers/logs). Case-only renames work on
   case-insensitive filesystems too.
 
+## Home & recommendations (new in 2.2.0)
+
+The sidebar opens on **Home**: library stats plus shelves of albums.
+
+- **Recommended for you** — seeded from the artists you collect most and the
+  genres tagged most across your tracks; each seed is resolved against
+  MusicBrainz release groups you don't already own. Results are TTL-cached
+  and never re-hit the network on repeat views.
+- **Recently added**, **Best graded**, **Rediscover** (random library slice)
+  and **Favorites** — all owned albums, click-through to the album page.
+- Recommendations that aren't in the library link to the MusicBrainz browser,
+  where a click saves them as a wish.
+
+Settings → *Home* controls whether MusicBrainz recommendations are included
+and how many albums each shelf shows.
+
+## Wishes — releases that aren't downloadable *yet* (new in 2.2.0)
+
+Some albums simply aren't on Soulseek right now. A **wish** records a
+MusicBrainz release identity without downloading anything, so it can be
+filled in automatically later:
+
+1. Open a release in the MusicBrainz browser and press **Add to wishes** (or
+   paste a release ID/URL under Soulseek → *Wishes*).
+2. A background worker re-searches Soulseek for every open wish on the
+   configured interval (default every 6 h), running the same
+   find → verify-logs → download → audit → import pipeline as the one-shot
+   auto-importer.
+3. When a verified copy is found the release is imported and organized, and
+   the wish flips to **Imported**. Wishes whose release already exists in the
+   library (e.g. a manual download) are reconciled too — the **Sync library**
+   button does this on demand.
+4. Each wish has **Search now**, per-wish notes and attempt tracking; the
+   whole list shares one searchable activity log.
+
+Settings → *Wishes* controls the master switch, interval, per-wish attempt
+cap and auto-import.
+
 ## Grading — what the checks cover
+
+Every check is toggleable on the Grading page, which also offers
+**Strict / Balanced / Relaxed** presets, a live check filter, and
+enable-all / disable-all bulk actions.
 
 - **Tracks & albums** — unreadable files, required per-track and album-level
   tags, encoder identity tags, naming-script match, path capitalization,
@@ -194,6 +246,8 @@ tools/       test-library generator and test suites
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/library` | tag-rich library tree (grades, audits, tags, tech info; gzipped) |
+| `GET /api/home` | Home page: stats, recommendations, recent/top/favorite shelves |
+| `GET/POST/PATCH/DELETE /api/wishes` | release wishlist CRUD; `POST …/{id}/search`, `…/search-all`, `…/reconcile` |
 | `GET /api/album` `GET /api/artist` | entity details |
 | `GET /api/stream` `GET /api/videos/stream` | audio/video streaming (Range; `?transcode=1` pipes fragmented MP4) |
 | `GET /api/videos/meta` | codec probe deciding direct play vs transcode |

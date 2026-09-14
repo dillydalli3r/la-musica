@@ -174,14 +174,14 @@ export default function LyricsSidebar({
           {album && <div className="text-[10px] text-zinc-500 truncate">{album}</div>}
         </div>
         <button
-          className={`p-1.5 rounded-md transition-colors ${viz ? "text-accent hover:text-accent-soft" : "text-zinc-500 hover:text-white"} hover:bg-raise`}
+          className={`p-1.5 rounded-lg transition-colors ${viz ? "text-accent hover:text-accent-soft" : "text-zinc-500 hover:text-white"} hover:bg-raise`}
           onClick={toggleViz}
           title="Toggle visualizer"
         >
           <AudioLines className="h-4 w-4" />
         </button>
         <button
-          className="p-1.5 rounded-md text-zinc-500 hover:text-white hover:bg-raise transition-colors"
+          className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-raise transition-colors"
           onClick={onClose}
           title="Close lyrics"
         >

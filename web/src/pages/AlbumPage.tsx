@@ -5,7 +5,7 @@ import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync
 import { api } from "../api";
 import { LinkChips, LinkEditorButton } from "../components/Links";
 import { SubtitledVideo } from "../components/SubtitledVideo";
-import { EmptyState, MediaChip, AdvisoryMark, GradeBadge } from "../components/Badges";
+import { EmptyState, MediaChip, AdvisoryMark, GradeBadge, PageLoading } from "../components/Badges";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import CoverSearchModal from "../components/CoverSearchModal";
 import FavHeart from "../components/FavHeart";
@@ -101,8 +101,15 @@ export default function AlbumPage() {
     }
   };
 
-  if (error) return <EmptyState title="Album not found" hint={String(error)} />;
-  if (isLoading || !data) return <div className="p-8 text-zinc-500">Loading album…</div>;
+  if (error)
+    return (
+      <EmptyState
+        title="Album not found"
+        hint="The folder may have been renamed, moved or deleted."
+        action={{ label: "Back to the library", to: "/library" }}
+      />
+    );
+  if (isLoading || !data) return <PageLoading label="Loading album…" />;
 
   const tracks = sortRows(data.tracks, sort);
   // highest disc number across the album (filename fallback included) —
@@ -121,7 +128,7 @@ export default function AlbumPage() {
   // One shared square icon-button style for the header action row — play is
   // the only accent-filled button, everything else stays quiet and boxed.
   const iconBtn =
-    "p-2 rounded-md border border-border bg-panel/60 text-zinc-400 hover:text-white hover:bg-raise transition-colors";
+    "p-2 rounded-lg border border-border bg-panel/60 text-zinc-400 hover:text-white hover:bg-raise transition-colors";
 
   /** The library artist page for this album's artist: by album-artist MBID
    * when tagged, else the artist folder (the album's parent directory). */
@@ -317,7 +324,7 @@ export default function AlbumPage() {
             <CoverImg
               albumPath={data.path}
               coverFile={data.cover_file}
-              wrapperClass="h-56 w-56 rounded-md bg-raise overflow-hidden shadow-2xl"
+              wrapperClass="h-56 w-56 rounded-xl bg-raise overflow-hidden shadow-2xl ring-1 ring-black/40"
             />
             <input
               ref={coverInput}
@@ -629,7 +636,7 @@ export default function AlbumPage() {
               <th className="th relative px-1 w-[4.75rem]">
                 <div className="flex items-center justify-end gap-0.5">
                   <button
-                    className={`p-1.5 rounded-md transition-colors ${
+                    className={`p-1.5 rounded-lg transition-colors ${
                       selectMode ? "text-accent bg-raise" : "text-zinc-500 hover:text-white hover:bg-raise"
                     }`}
                     onClick={() =>
@@ -711,7 +718,7 @@ export default function AlbumPage() {
                     <div className="flex items-center gap-1.5 min-w-0">
                       <Link
                         to={trackRef(tr)}
-                        className="hover:text-accent-soft break-words flex-1 min-w-0"
+                        className="hover:text-accent-soft break-words min-w-0"
                         title="Click to play · Ctrl-click to open track page"
                         onClick={(e) => entityLinkClick(e, () => navigate(trackRef(tr)))}
                       >

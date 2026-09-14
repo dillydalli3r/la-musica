@@ -2546,7 +2546,11 @@ def run_process_images(config):
                     score = 2
                 elif base.startswith(("01", "1", "scan")):
                     score = 1
-                return (score, -os.path.getsize(f), os.path.basename(f).lower())
+                try:
+                    size = -os.path.getsize(f)
+                except OSError:
+                    size = 0  # vanished/locked file: rank it last, don't abort
+                return (score, size, os.path.basename(f).lower())
 
             candidate = max(group, key=_pick)
             cand_ext = os.path.splitext(candidate)[1]

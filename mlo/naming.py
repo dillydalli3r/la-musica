@@ -95,16 +95,16 @@ def _func(name, args, variables):
         return a[0] if (a[0].strip() and a[0].strip() != "0") else a[1]
     if name == "left" and len(a) >= 2:
         try:
-            n = int(float(a[1]))
+            n = max(0, int(float(a[1])))
         except ValueError:
             n = 0
         return a[0][:n]
     if name == "right" and len(a) >= 2:
         try:
-            n = int(float(a[1]))
+            n = max(0, int(float(a[1])))
         except ValueError:
             n = 0
-        return a[0][-n:]
+        return a[0][-n:] if n else ""
     if name == "num" and len(a) >= 2:
         try:
             n = int(float(a[1]))

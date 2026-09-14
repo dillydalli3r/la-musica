@@ -3,10 +3,11 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import {
   keepPreviousData, useInfiniteQuery, useQuery, useQueryClient,
 } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, ArrowUpDown, ArrowUpRight, Loader2, Search, Zap } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, ArrowUpRight, BookmarkPlus, Check, Loader2, Search, Zap } from "lucide-react";
 import { api } from "../api";
 import { EmptyState } from "../components/Badges";
 import { MbIcon } from "../components/Links";
+import Segmented from "../components/Segmented";
 import { toast } from "../store";
 
 /* In-app MusicBrainz browser: search across the four browsable entities and
@@ -439,8 +440,10 @@ export function MBSearchPage() {
   };
 
   return (
-    <div className="p-6 max-w-5xl mx-auto">
-      <h1 className="text-xl font-bold">MusicBrainz</h1>
+    <div className="p-6 max-w-6xl mx-auto">
+      <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
+        <Zap className="h-6 w-6 text-accent" /> MusicBrainz
+      </h1>
       <div className="relative mt-3">
         <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-500" />
         <input
@@ -455,24 +458,12 @@ export function MBSearchPage() {
           autoFocus
         />
       </div>
-      <div className="flex gap-1 mt-3">
-        {TYPES.map((t) => (
-          <button
-            key={t.id}
-            className={`chip px-2.5 py-1 border ${
-              type === t.id
-                ? "bg-accent on-accent border-transparent font-semibold"
-                : "bg-raise border-border text-zinc-400 hover:text-white"
-            }`}
-            onClick={() => {
-              const next = new URLSearchParams(params);
-              next.set("type", t.id);
-              setParams(next, { replace: true });
-            }}
-          >
-            {t.label}
-          </button>
-        ))}
+      <div className="mt-3">
+        <Segmented value={type} onChange={(t) => {
+          const next = new URLSearchParams(params);
+          next.set("type", t);
+          setParams(next, { replace: true });
+        }} options={TYPES} />
       </div>
 
       <div className="mt-4">
@@ -798,6 +789,8 @@ export function MBReleasePage() {
     queryFn: () => api.mbRelease(id),
     enabled: !!id,
   });
+  const [wished, setWished] = useState(false);
+  const [wishBusy, setWishBusy] = useState(false);
   if (isLoading) return <Spinner />;
   if (error) return <div className="p-6"><LoadError e={error} /></div>;
   if (!r) return null;
@@ -828,6 +821,31 @@ export function MBReleasePage() {
         chips={r.genres ?? []}
         mbHref={mbUrl("release", r.id)}
       >
+        <button
+          className="btn-ghost !py-1.5 text-xs"
+          title="Save this release to the wishlist — it is auto-imported from Soulseek when a verified copy appears"
+          disabled={wishBusy || wished}
+          onClick={async () => {
+            setWishBusy(true);
+            try {
+              await api.wishAdd({
+                release_mbid: r.id,
+                title: r.title,
+                artist,
+                year: (r.date || "").slice(0, 4),
+              });
+              setWished(true);
+              toast("Added to wishes");
+            } catch (e) {
+              toast(String(e));
+            } finally {
+              setWishBusy(false);
+            }
+          }}
+        >
+          {wished ? <Check className="h-3.5 w-3.5" /> : <BookmarkPlus className="h-3.5 w-3.5" />}
+          {wished ? "Wished" : "Add to wishes"}
+        </button>
         <button
           className="btn-primary !py-1.5 text-xs"
           title="Find → verify → download → audit → import this exact release from Soulseek"

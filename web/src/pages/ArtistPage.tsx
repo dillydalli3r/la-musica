@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Music2, BarChart3 } from "lucide-react";
 import { api } from "../api";
 import { LinkChips, LinkEditorButton } from "../components/Links";
-import { EmptyState, GradeBadge, GradeBar } from "../components/Badges";
+import { EmptyState, GradeBadge, GradeBar, PageLoading } from "../components/Badges";
 import CoverImg from "../components/CoverImg";
 import FavHeart from "../components/FavHeart";
 import { albumRef, artistMbid } from "../lib/refs";
@@ -22,8 +22,15 @@ export default function ArtistPage() {
   const { playNow } = useStore();
   const [statsOpen, setStatsOpen] = useState(false);
 
-  if (error) return <EmptyState title="Artist not found" hint={String(error)} />;
-  if (isLoading || !data) return <div className="p-8 text-zinc-500">Loading artist…</div>;
+  if (error)
+    return (
+      <EmptyState
+        title="Artist not found"
+        hint="The artist folder may have been renamed, moved or deleted."
+        action={{ label: "Back to the library", to: "/library" }}
+      />
+    );
+  if (isLoading || !data) return <PageLoading label="Loading artist…" />;
 
   const allTracks = data.albums.flatMap((a) =>
     a.tracks.map((t) => ({
@@ -45,7 +52,7 @@ export default function ArtistPage() {
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-start gap-5">
-        <div className="h-24 w-24 rounded-xl bg-gradient-to-br from-accent/40 to-indigo-700/40 border border-border flex items-center justify-center shrink-0">
+        <div className="h-24 w-24 rounded-xl bg-gradient-to-br from-accent/40 to-accent/10 border border-border flex items-center justify-center shrink-0">
           <Music2 className="h-10 w-10 text-zinc-400" />
         </div>
         <div className="flex-1 min-w-0">
@@ -58,7 +65,7 @@ export default function ArtistPage() {
           )}
           <div className="mt-1 flex items-center gap-3 text-sm text-zinc-400">
             <span>
-              {data.aggregate.album_count} albums · {data.aggregate.track_count} tracks
+              {data.aggregate.album_count} album{data.aggregate.album_count === 1 ? "" : "s"} · {data.aggregate.track_count} track{data.aggregate.track_count === 1 ? "" : "s"}
             </span>
             <GradeBadge
               pass={(data.aggregate.grade_pct ?? 0) >= 100 && !auditFails(data.aggregate.audit_summary)}

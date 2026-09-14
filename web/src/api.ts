@@ -36,6 +36,20 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(cfg),
     }),
+  /** Server-side directory browser — lets the web UI pick a custom music
+   * directory without the desktop shell's native folder picker. */
+  fsList: (path?: string) =>
+    json<{ path: string; parent: string | null; dirs: string[] }>(
+      `${API}/fs/list${path ? `?path=${encodeURIComponent(path)}` : ""}`
+    ),
+  /** Opens the OS folder dialog on the backend's machine (Windows dialog in
+   * the browser version). `supported:false` means fall back to fsList. */
+  fsPickFolder: (initial?: string) =>
+    json<{ path: string | null; supported: boolean }>(
+      `${API}/fs/pick${initial ? `?initial=${encodeURIComponent(initial)}` : ""}`,
+      undefined,
+      300000
+    ),
 
   library: () => json<import("./types").Library>(`${API}/library`),
   album: (path: string) => json<import("./types").Album>(`${API}/album?path=${encodeURIComponent(path)}`),
@@ -495,4 +509,26 @@ export const api = {
 
   soulseekUser: (username: string) =>
     json<any>(`${API}/soulseek/user/${encodeURIComponent(username)}`, undefined, 30000),
+
+  // Wishes — MusicBrainz releases saved now, auto-filled from Soulseek later
+  wishes: () => json<import("./types").WishesPayload>(`${API}/wishes`, undefined, 30000),
+  wishAdd: (body: { release_mbid: string; title?: string; artist?: string; year?: string; note?: string; target_dir?: string; queries?: string[] }) =>
+    json<{ ok: boolean; wish: import("./types").Wish }>(`${API}/wishes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, 60000),
+  wishUpdate: (id: number, patch: { note?: string; target_dir?: string; status?: string; queries?: string[] }) =>
+    json<{ ok: boolean; wish: import("./types").Wish }>(`${API}/wishes/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }),
+  wishDelete: (id: number) => json<{ ok: boolean }>(`${API}/wishes/${id}`, { method: "DELETE" }),
+  wishSearch: (id: number) => json<{ ok: boolean; error?: string }>(`${API}/wishes/${id}/search`, { method: "POST" }, 30000),
+  wishesSearchAll: () => json<{ ok: boolean; error?: string }>(`${API}/wishes/search-all`, { method: "POST" }, 30000),
+  wishesReconcile: () => json<{ ok: boolean; resolved: number }>(`${API}/wishes/reconcile`, { method: "POST" }, 120000),
+
+  // Home page (recommendations + highlights)
+  home: () => json<import("./types").HomeData>(`${API}/home`, undefined, 60000),
 };

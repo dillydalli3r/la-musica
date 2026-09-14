@@ -4,10 +4,12 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowDownUp, Download, Eye, EyeOff, FolderOpen, Loader2, Play, Power, RefreshCw, Search,
   User, Zap, Square, FileCheck2, FileVideo, Music2, Save, Tag, Trash2, PackageOpen,
+  Star, Plus, CheckCircle2, CircleDashed, AlertTriangle, ExternalLink, RotateCw, ChevronDown, ChevronRight, Link2,
 } from "lucide-react";
 import { api } from "../api";
 import { toast } from "../store";
 import { EmptyState } from "../components/Badges";
+import type { Wish } from "../types";
 
 interface SlskFile {
   username: string;
@@ -800,6 +802,286 @@ function SharingCard({ running }: { running: boolean }) {
   );
 }
 
+const MBID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+function timeAgo(t: number | null | undefined): string {
+  if (!t) return "never";
+  const s = Math.max(0, Date.now() / 1000 - t);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
+const WISH_STATUS: Record<Wish["status"], { label: string; cls: string; icon: typeof Star }> = {
+  wanted: { label: "Wanted", cls: "bg-amber-900/40 text-amber-300 border-amber-800", icon: CircleDashed },
+  searching: { label: "Searching", cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: RotateCw },
+  imported: { label: "Imported", cls: "bg-emerald-900/40 text-emerald-300 border-emerald-800", icon: CheckCircle2 },
+  failed: { label: "Failed", cls: "bg-red-950/60 text-red-300 border-red-900", icon: AlertTriangle },
+  available: { label: "Available", cls: "bg-violet-900/40 text-violet-300 border-violet-800", icon: Star },
+};
+
+function WishRow({ w, onChanged }: { w: Wish; onChanged: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [note, setNote] = useState(w.note);
+  const [failed, setFailed] = useState(false);
+  const st = WISH_STATUS[w.status] ?? WISH_STATUS.wanted;
+  const Icon = st.icon;
+
+  const search = async () => {
+    setBusy(true);
+    try {
+      const r = await api.wishSearch(w.id);
+      if (!r.ok) toast(r.error || "Already searching");
+      else toast(`Searching for “${w.title}”…`);
+      onChanged();
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const saveNote = async () => {
+    try {
+      await api.wishUpdate(w.id, { note });
+      toast("Wish updated");
+      onChanged();
+    } catch (e) {
+      toast(String(e));
+    }
+  };
+  const remove = async () => {
+    try {
+      await api.wishDelete(w.id);
+      toast("Wish removed");
+      onChanged();
+    } catch (e) {
+      toast(String(e));
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-border bg-card overflow-hidden">
+      <div className="flex items-center gap-3 p-2.5">
+        {!failed && w.release_mbid ? (
+          <img
+            src={`https://coverartarchive.org/release/${w.release_mbid}/front-250`}
+            alt=""
+            loading="lazy"
+            onError={() => setFailed(true)}
+            className="h-12 w-12 rounded-md object-cover ring-1 ring-border shrink-0"
+          />
+        ) : (
+          <div className="h-12 w-12 rounded-md bg-raise ring-1 ring-border shrink-0 flex items-center justify-center text-zinc-700">
+            <Music2 className="h-5 w-5" />
+          </div>
+        )}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className={`chip text-[9px] border ${st.cls}`}>
+              <Icon className={`h-3 w-3 ${w.status === "searching" ? "animate-spin" : ""}`} /> {st.label}
+            </span>
+            {w.attempts > 0 && <span className="text-[10px] text-zinc-600">{w.attempts} attempt(s)</span>}
+            <span className="text-[10px] text-zinc-600">added {timeAgo(w.added_at)}</span>
+          </div>
+          <div className="text-sm text-zinc-100 truncate mt-0.5" title={w.title}>{w.title || "(unknown title)"}</div>
+          <div className="text-[11px] text-zinc-500 truncate">
+            {w.artist}{w.year ? ` · ${w.year}` : ""}
+            {w.last_error ? <span className="text-zinc-600"> — {w.last_error}</span> : null}
+          </div>
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          {w.status !== "imported" && (
+            <button className="btn-ghost !py-1 text-xs" onClick={search} disabled={busy} title="Search Soulseek now">
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
+            </button>
+          )}
+          {w.album_path && (
+            <a className="btn-ghost !py-1 text-xs" href={`/album/${encodeURIComponent(w.album_path)}`} title="Open the imported album">
+              <PackageOpen className="h-3.5 w-3.5" />
+            </a>
+          )}
+          <a
+            className="btn-ghost !py-1 text-xs"
+            href={`https://musicbrainz.org/release/${w.release_mbid}`}
+            target="_blank"
+            rel="noreferrer"
+            title="Open on MusicBrainz"
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+          </a>
+          <button className="btn-ghost !py-1 text-xs" onClick={() => setOpen(!open)} title="Notes">
+            {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+          </button>
+          <button className="btn-ghost !py-1 text-xs text-red-300" onClick={remove} title="Remove wish">
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+      {open && (
+        <div className="border-t border-border/60 p-2.5 flex items-center gap-2 anim-fade">
+          <input
+            className="input !py-1 text-xs flex-1"
+            placeholder="Note — pressings to prefer, source hints…"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+          />
+          <button className="btn-ghost !py-1 text-xs" onClick={saveNote} disabled={note === w.note}>
+            <Save className="h-3.5 w-3.5" /> Save
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WishesPanel() {
+  const qc = useQueryClient();
+  const { data, refetch, isLoading } = useQuery({
+    queryKey: ["wishes"],
+    queryFn: api.wishes,
+    refetchInterval: 5000,
+  });
+  const [mbid, setMbid] = useState("");
+  const [busy, setBusy] = useState(false);
+  const worker = data?.worker;
+  const wishes = data?.wishes ?? [];
+
+  const add = async () => {
+    const id = (mbid.match(MBID_RE)?.[0] ?? "").toLowerCase();
+    if (!id) {
+      toast("Paste a MusicBrainz release ID or URL");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.wishAdd({ release_mbid: id });
+      setMbid("");
+      toast("Added to wishes — it will be found automatically");
+      refetch();
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const searchAll = async () => {
+    setBusy(true);
+    try {
+      const r = await api.wishesSearchAll();
+      if (!r.ok) toast(r.error || "A cycle is already running");
+      else toast("Searching for all due wishes…");
+      refetch();
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const reconcile = async () => {
+    setBusy(true);
+    try {
+      const r = await api.wishesReconcile();
+      toast(r.resolved ? `${r.resolved} wish(es) resolved from the library` : "No new matches in the library");
+      qc.invalidateQueries({ queryKey: ["library"] });
+      refetch();
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="bg-card rounded-lg border border-border p-3 text-xs">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[10px] uppercase tracking-widest text-zinc-500">Wishes</span>
+          <span className="text-zinc-500">
+            Save releases now; the app re-searches Soulseek on an interval and imports them when a verified copy appears.
+          </span>
+          <div className="ml-auto flex items-center gap-2">
+            <button className="btn-ghost !py-1 text-xs" onClick={reconcile} disabled={busy} title="Flip wishes already present in the library">
+              <CheckCircle2 className="h-3.5 w-3.5" /> Sync library
+            </button>
+            <button className="btn-primary !py-1 text-xs" onClick={searchAll} disabled={busy}>
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />} Search all now
+            </button>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 mt-2 flex-wrap text-[10px] text-zinc-600">
+          <span className={worker?.enabled ? "text-emerald-400" : "text-amber-400"}>
+            {worker?.enabled ? "worker on" : "worker off"}
+          </span>
+          <span>· every {worker?.interval_hours ?? 6}h</span>
+          <span>· next {worker?.next_run ? timeAgo(worker.next_run).replace("ago", "from now") : "—"}</span>
+          {worker?.running && worker.current && (
+            <span className="text-sky-300">· searching {worker.current}</span>
+          )}
+          {worker && !worker.running && worker.last_result && <span>· last: {worker.last_result}</span>}
+          <span>· {openWishCount(wishes)} open</span>
+        </div>
+      </div>
+
+      <div className="bg-card rounded-lg border border-border p-3">
+        <div className="flex gap-2">
+          <Link2 className="h-4 w-4 text-zinc-600 self-center shrink-0" />
+          <input
+            className="input flex-1"
+            placeholder="Paste a MusicBrainz release ID or URL to wish for it"
+            value={mbid}
+            onChange={(e) => setMbid(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && !busy && add()}
+          />
+          <button className="btn-primary" onClick={add} disabled={busy || !mbid.trim()}>
+            <Plus className="h-4 w-4" /> Add wish
+          </button>
+        </div>
+        <div className="text-[11px] text-zinc-600 mt-1.5">
+          Tip: open any release in the MusicBrainz browser and press “Add to wishes”, or paste its URL here.
+        </div>
+      </div>
+
+      {isLoading ? (
+        <div className="space-y-2">
+          {[0, 1, 2].map((i) => <div key={i} className="skeleton h-16 rounded-lg" />)}
+        </div>
+      ) : wishes.length === 0 ? (
+        <EmptyState
+          title="No wishes yet"
+          hint="Wish for a release that isn't available on Soulseek right now — it will be imported automatically once a verified copy is found."
+        />
+      ) : (
+        <div className="space-y-2 stagger">
+          {wishes.map((w) => (
+            <WishRow key={w.id} w={w} onChanged={() => refetch()} />
+          ))}
+        </div>
+      )}
+
+      {data?.log && data.log.length > 0 && (
+        <details className="bg-card rounded-lg border border-border p-3">
+          <summary className="text-[10px] uppercase tracking-widest text-zinc-500 cursor-pointer">Wish log</summary>
+          <div className="mt-2 space-y-0.5 max-h-48 overflow-auto font-mono text-[10px]">
+            {data.log.slice(-40).reverse().map((l, i) => (
+              <div key={i} className={l.level === "warn" ? "text-amber-400/80" : l.level === "ok" ? "text-emerald-400/80" : "text-zinc-500"}>
+                {new Date(l.t * 1000).toLocaleTimeString()} — {l.msg}
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function openWishCount(wishes: Wish[]) {
+  return wishes.filter((w) => w.status === "wanted" || w.status === "searching" || w.status === "failed").length;
+}
+
 export default function SoulseekPage() {
   const [params] = useSearchParams();
   const { data: status, refetch: refetchStatus } = useQuery({
@@ -886,10 +1168,11 @@ export default function SoulseekPage() {
 
   // Page tabs — Search is the default; the badge on Downloads counts active
   // transfers so progress is visible from any tab.
-  type TabId = "search" | "auto" | "downloads" | "sharing" | "settings";
+  type TabId = "search" | "auto" | "wishes" | "downloads" | "sharing" | "settings";
   const TAB_LIST: { id: TabId; label: string }[] = [
     { id: "search", label: "Search" },
     { id: "auto", label: "Auto-import" },
+    { id: "wishes", label: "Wishes" },
     { id: "downloads", label: "Downloads" },
     { id: "sharing", label: "Sharing" },
     { id: "settings", label: "Settings" },
@@ -1144,6 +1427,8 @@ export default function SoulseekPage() {
       )}
 
       {tab === "auto" && <AutoPanel initialMbid={releaseParam} />}
+
+      {tab === "wishes" && <WishesPanel />}
 
       {tab === "search" && (
       <div className="bg-card rounded-lg border border-border p-4">

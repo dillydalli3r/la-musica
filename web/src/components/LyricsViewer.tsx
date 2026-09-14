@@ -810,7 +810,7 @@ export default function LyricsViewer({
               ref={(el) => {
                 lineRefs.current[i] = el;
               }}
-              className={`group flex items-center gap-2 rounded-md border px-2 py-1.5 transition-colors ${
+              className={`group flex items-center gap-2 rounded-lg border px-2 py-1.5 transition-colors ${
                 i === activeLine && playing
                   ? "border-accent/60 bg-accent/20"
                   : i === selIdx

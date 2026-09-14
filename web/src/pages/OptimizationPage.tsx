@@ -114,7 +114,7 @@ export default function OptimizationPage() {
   };
 
   return (
-    <div className="p-6 max-w-4xl">
+    <div className="p-6 max-w-6xl mx-auto">
       <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
         <Gauge className="h-6 w-6" /> Optimization
       </h1>

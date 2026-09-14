@@ -165,7 +165,10 @@ export default function ExportPage() {
   const filteredAlbums = useMemo(() => {
     const q = filter.toLowerCase();
     return albums.filter(
-      (a: any) => !q || (a.meta?.ALBUM ?? "").toLowerCase().includes(q) || (a.artist ?? "").toLowerCase().includes(q)
+      (a) =>
+        !q ||
+        (a.meta?.ALBUM ?? "").toLowerCase().includes(q) ||
+        (a.album_artist ?? a.meta?.ALBUMARTIST ?? a.meta?.ARTIST ?? "").toLowerCase().includes(q)
     );
   }, [albums, filter]);
   const filteredArtists = useMemo(() => {
@@ -245,7 +248,7 @@ export default function ExportPage() {
   const codecLabel = codecLabels?.codecs?.[codec] ?? FALLBACK_CODEC_LABELS[codec] ?? codec;
 
   return (
-    <div className="p-6 max-w-6xl">
+    <div className="p-6 max-w-6xl mx-auto">
       <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
         <HardDriveDownload className="h-6 w-6" /> Export
       </h1>
@@ -386,13 +389,13 @@ export default function ExportPage() {
                         <td className="td !py-1 text-zinc-600 tabular-nums">{m?.num ?? i + 1}</td>
                         <td className="td !py-1 pl-0">
                           <TrackCover
-                            albumPath={m?.albumPath ?? p.split("/").slice(0, -1).join("/")}
+                            albumPath={m?.albumPath ?? p.split(/[\\/]/).slice(0, -1).join("/")}
                             trackCover={m?.coverFile}
                             albumCover={m?.albumCover}
                             wrapperClass="h-7 w-7 rounded bg-raise border border-border overflow-hidden shrink-0"
                           />
                         </td>
-                        <td className="td !py-1 break-words min-w-0">{m?.title ?? p.split("/").pop()}</td>
+                        <td className="td !py-1 break-words min-w-0">{m?.title ?? p.split(/[\\/]/).pop()}</td>
                         <td className="td !py-1 text-zinc-500 break-words hidden sm:table-cell">{m?.artist}</td>
                         <td className="td !py-1 text-zinc-500 break-words hidden md:table-cell">{m?.album}</td>
                         <td className="td !py-1 text-zinc-500 tabular-nums text-right">{m?.dur ? fmtDuration(m.dur) : "—"}</td>
@@ -464,9 +467,14 @@ export default function ExportPage() {
                 onChange={(e) => setQuality(e.target.value)}
                 disabled={codec === "copy"}
               >
-                {(QUALITY[codec] ?? []).map((q) => (
-                  <option key={q.v} value={q.v}>{q.label}</option>
-                ))}
+                {/* copy has no knobs — a disabled placeholder keeps the box legible */}
+                {(QUALITY[codec] ?? []).length === 0 ? (
+                  <option value="">—</option>
+                ) : (
+                  (QUALITY[codec] ?? []).map((q) => (
+                    <option key={q.v} value={q.v}>{q.label}</option>
+                  ))
+                )}
               </select>
             </label>
           </div>
@@ -485,15 +493,18 @@ export default function ExportPage() {
               {kbps !== null && <span className="text-zinc-600">~{kbps} kbps effective</span>}
             </label>
           )}
-          <select
-            className="input !py-1 text-xs mt-2 w-full"
-            value={structure}
-            onChange={(e) => setStructure(e.target.value)}
-          >
-            {STRUCTURES.map((s) => (
-              <option key={s.v} value={s.v}>{s.label}</option>
-            ))}
-          </select>
+          <label className="text-[10px] text-zinc-500 flex flex-col gap-1 mt-2">
+            Folder structure
+            <select
+              className="input !py-1 text-xs w-full"
+              value={structure}
+              onChange={(e) => setStructure(e.target.value)}
+            >
+              {STRUCTURES.map((s) => (
+                <option key={s.v} value={s.v}>{s.label}</option>
+              ))}
+            </select>
+          </label>
 
           <button className="btn-primary w-full mt-4 text-xs" disabled={busy || !paths.length} onClick={run}>
             <HardDriveDownload className="h-3.5 w-3.5" />

@@ -64,10 +64,21 @@ async def _lifespan(app: FastAPI):
             except Exception as e:
                 print(f"[mlo] slskd autostart failed: {e}")
         threading.Thread(target=_autostart_slskd, daemon=True).start()
+    # Wishlist worker: periodically re-searches Soulseek for saved releases.
+    try:
+        from server import wishes_worker
+        wishes_worker.start()
+    except Exception as e:
+        print(f"[mlo] wishes worker failed to start: {e}")
     yield
+    try:
+        from server import wishes_worker
+        wishes_worker.stop()
+    except Exception:
+        pass
 
 
-app = FastAPI(title="la musica API", version="2.1.1", lifespan=_lifespan)
+app = FastAPI(title="la musica API", version="2.2.0", lifespan=_lifespan)
 
 # Docker/bootstrap: MLO_MUSIC_FOLDER env seeds music_folder when unset.
 _MLO_ENV_FOLDER = os.environ.get("MLO_MUSIC_FOLDER")
@@ -207,7 +218,7 @@ def shutdown_backend():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "version": "2.1.1"}
+    return {"status": "ok", "version": "2.2.0"}
 
 
 @app.get("/api/config")
@@ -227,6 +238,95 @@ def set_config(cfg: dict):
 def get_config_defaults():
     """Factory defaults — powers the settings UI's reset-to-defaults actions."""
     return DEFAULT_CONFIG
+
+
+def _native_picker_available():
+    """Whether the OS folder dialog can be shown by this process."""
+    if os.name == "nt" or sys.platform == "darwin":
+        pass
+    elif not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return False
+    try:
+        import tkinter  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _pick_folder_native(initial=""):
+    """Open the OS folder picker on the machine running the backend.
+
+    Browsers never return an absolute path from showDirectoryPicker(), so the
+    backend (which runs on the user's own machine) shows the dialog itself and
+    hands back the chosen path. Returns None when cancelled or unavailable."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception:
+        return None
+    root = None
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        kwargs = {}
+        if initial and os.path.isdir(initial):
+            kwargs["initialdir"] = initial
+        path = filedialog.askdirectory(title="Choose your music folder",
+                                       mustexist=True, **kwargs)
+        return path.replace("\\", "/") or None
+    except Exception:
+        return None
+    finally:
+        try:
+            if root is not None:
+                root.destroy()
+        except Exception:
+            pass
+
+
+@app.get("/api/fs/pick")
+def fs_pick(initial: str = Query("")):
+    """Show the native folder dialog; `supported=false` lets the UI fall back
+    to the in-app browser when there is no GUI to attach to (e.g. Docker)."""
+    supported = _native_picker_available()
+    return {"path": _pick_folder_native(initial) if supported else None,
+            "supported": supported}
+
+
+@app.get("/api/fs/list")
+def fs_list(path: str = Query("")):
+    """List sub-directories so the browser UI can pick a music folder.
+
+    The native folder picker only exists in the desktop shell, and browsers
+    never reveal the absolute path chosen with showDirectoryPicker(), so the
+    backend (which runs on the user's own machine) browses instead. Only
+    directory names are returned — never file contents."""
+    import string
+
+    p = str(path or "").strip()
+    if not p:
+        dirs = ([f"{d}:\\" for d in string.ascii_uppercase if os.path.isdir(f"{d}:\\")]
+                if os.name == "nt" else ["/", os.path.expanduser("~")])
+        return {"path": "", "parent": None, "dirs": dirs}
+
+    p = os.path.abspath(os.path.normpath(p))
+    if not os.path.isdir(p):
+        raise HTTPException(404, "not a folder")
+    try:
+        with os.scandir(p) as it:
+            dirs = sorted((e.path for e in it if e.is_dir()
+                           and e.name.lower() not in _skip_names()
+                           and not e.name.startswith(".")),
+                          key=lambda s: os.path.basename(s).lower())
+    except OSError as e:
+        raise HTTPException(400, f"cannot read folder: {e}")
+
+    parent = os.path.dirname(p.rstrip("\\/")) or ""
+    if os.path.normcase(parent) == os.path.normcase(p):
+        parent = ""
+    norm = lambda s: (s or "").replace("\\", "/") or None
+    return {"path": norm(p), "parent": norm(parent), "dirs": [norm(d) for d in dirs]}
 
 
 # --------------------------------------------------------------------------- #
@@ -266,6 +366,17 @@ def library():
     """Tag-rich library tree: artists -> albums -> tracks (grade/audit + tags)."""
     cfg = load_config()
     return lib_mod.build_library(cfg)
+
+
+@app.get("/api/home")
+def home():
+    """Home page: stats, recent additions, top grades and MusicBrainz-backed
+    album recommendations derived from the library's own taste."""
+    from server import recommendations
+    try:
+        return recommendations.build_home(load_config())
+    except Exception as e:
+        raise HTTPException(502, f"home payload failed: {e}")
 
 
 @app.post("/api/naming/preview")
@@ -493,6 +604,7 @@ _CTYPES = {
     ".mpg": "video/mpeg", ".mpeg": "video/mpeg", ".vob": "video/mpeg",
     ".m2v": "video/mpeg", ".ts": "video/mp2t", ".m2ts": "video/mp2t",
     ".mts": "video/mp2t", ".3gp": "video/3gpp", ".ogv": "video/ogg",
+    ".mka": "audio/x-matroska",
 }
 
 
@@ -504,8 +616,8 @@ def stream(path: str = Query(...)):
     if not _in_music_folder(p, _music_folder()):
         raise HTTPException(400, "file outside music folder")
     ctype = _CTYPES.get(os.path.splitext(p)[1].lower(), "application/octet-stream")
-    if ctype == "application/octet-stream" and os.path.splitext(p)[1].lower() in (".mkv", ".mka"):
-        ctype = "video/x-matroska"
+    # ponytail: unknown extensions stream as octet-stream; add explicit
+    # mapping above when a supported player format is missing.
     return FileResponse(p, media_type=ctype, headers={"Accept-Ranges": "bytes"})
 
 
@@ -552,8 +664,10 @@ def videos_stream(path: str = Query(...), transcode: int = Query(0)):
 
         # CREATE_NO_WINDOW: a piped ffmpeg still allocates a console on
         # Windows unless suppressed — one flashed open per video otherwise.
+        # stderr goes to DEVNULL: a PIPE never drained blocks ffmpeg once
+        # full, hanging the stream.
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             creationflags=0x08000000 if os.name == "nt" else 0)
     except Exception as e:
         raise HTTPException(500, f"ffmpeg failed to start: {e}")
@@ -562,6 +676,8 @@ def videos_stream(path: str = Query(...), transcode: int = Query(0)):
 
     def _gen():
         try:
+            if proc.stdout is None:
+                return
             while True:
                 chunk = proc.stdout.read(256 * 1024)
                 if not chunk:
@@ -570,8 +686,11 @@ def videos_stream(path: str = Query(...), transcode: int = Query(0)):
         finally:
             if proc.poll() is None:
                 proc.kill()
-            proc.stdout.close()
-            proc.stderr.close()
+            try:
+                if proc.stdout:
+                    proc.stdout.close()
+            except Exception:
+                pass
 
     return StreamingResponse(_gen(), media_type="video/mp4")
 
@@ -1167,9 +1286,10 @@ def likes_list():
 
 @app.post("/api/likes/toggle")
 def likes_toggle(req: LikeToggleRequest):
-    p = os.path.normpath(req.path).replace("\\", "/")
+    p = os.path.normpath(mbresolve.resolve_track(req.path) or req.path)
     if not os.path.isfile(p):
         raise HTTPException(404, "file not found")
+    p = p.replace("\\", "/")
     try:
         liked = pl_mod.toggle_like(p, mbid=req.mbid)
     except ValueError as e:
@@ -1278,6 +1398,7 @@ def tags_bulk(req: BulkTagsRequest):
             # existence via all_tags(): get_tag only knows the standard
             # TAG_MAP names and would miss custom/unknown keys entirely
             present = {str(k).upper() for k in (af.all_tags() or {})}
+            af.defer_save(True)
             for name in removes:
                 if name in present and af.delete_tag(name):
                     removed += 1
@@ -1288,6 +1409,7 @@ def tags_bulk(req: BulkTagsRequest):
                         removed += 1
                 elif af.set_tag(name, v):
                     added += 1
+            af.defer_save(False)
             tagcache.invalidate_path(p)
         except Exception as e:
             failed += 1
@@ -1477,6 +1599,8 @@ def export_run(req: ExportRequest):
     for p in req.paths:
         if not _in_music_folder(p, _music_folder()):
             raise HTTPException(400, f"file outside music folder: {p}")
+    if req.codec not in exporter.CODECS:
+        raise HTTPException(400, f"unknown codec: {req.codec}")
     cfg = load_config()
     res = exporter.export_tracks(
         cfg, [os.path.normpath(p) for p in req.paths], dest_root,
@@ -1751,16 +1875,8 @@ def _scan_album_tracks(album_dir):
             path = os.path.join(root, f)
             tags, tech = tagcache.read_track(path, None)
             duration = float(tech.get("length") or 0) or None
-            tn = tags.get("TRACKNUMBER")
-            dn = tags.get("DISCNUMBER")
-            try:
-                tn = int(str(tn).split("/")[0])
-            except (TypeError, ValueError):
-                tn = None
-            try:
-                dn = int(str(dn).split("/")[0])
-            except (TypeError, ValueError):
-                dn = None
+            tn = lib_mod._parse_num(tags.get("TRACKNUMBER"))
+            dn = lib_mod._parse_num(tags.get("DISCNUMBER"))
             tracks.append({
                 "path": path.replace("\\", "/"),
                 "file": os.path.relpath(path, album_dir).replace("\\", "/"),
@@ -1781,6 +1897,8 @@ def mb_match(req: MatchRequest):
     album_dir = os.path.normpath(req.album_path)
     if not os.path.isdir(album_dir):
         raise HTTPException(404, "album not found")
+    if not _in_music_folder(album_dir, _music_folder()):
+        raise HTTPException(400, "album outside music folder")
     rid = intg._mbid(req.release_id)
     if not rid:
         raise HTTPException(400, "invalid release ID")
@@ -1830,6 +1948,7 @@ def mb_assign(req: AssignTagsRequest):
             changed += 1
             tagcache.invalidate_path(fp)
             continue
+        af.defer_save(True)
         for k, v in tag_map.items():
             try:
                 if v is None or str(v) == "":
@@ -1839,6 +1958,7 @@ def mb_assign(req: AssignTagsRequest):
                     errors.append(f"{p} {k}: {af.error or 'write failed'}")
             except Exception as e:
                 errors.append(f"{p} {k}: {e}")
+        af.defer_save(False)
         changed += 1
         tagcache.invalidate_path(fp)
     if errors:
@@ -1910,7 +2030,7 @@ def lyrics_write(req: LyricsWriteRequest):
         except Exception:
             pass
         raise HTTPException(500, str(e))
-    tagcache.invalidate_path(lrc_path)
+    tagcache.invalidate_path(p)
     return {"ok": True, "lrc": lrc_path.replace("\\", "/")}
 
 
@@ -1953,7 +2073,7 @@ async def lyrics_publish(req: LyricsPublishRequest):
     if synced is None and plain is None and req.path:
         # Fall back to the text already stored on the track.
         from mlo.audio import AudioFile
-        af = AudioFile(os.path.normpath(req.path))
+        af = AudioFile(p)
         if af.audio is not None:
             stored = af.get_lyrics()
             if stored:
@@ -2344,8 +2464,6 @@ def soulseek_local_file(path: str = Query(...)):
     if not os.path.isfile(p):
         raise HTTPException(404, "file not found")
     ctype = _CTYPES.get(os.path.splitext(p)[1].lower(), "application/octet-stream")
-    if ctype == "application/octet-stream" and os.path.splitext(p)[1].lower() in (".mkv", ".mka"):
-        ctype = "video/x-matroska"
     return FileResponse(p, media_type=ctype, headers={"Accept-Ranges": "bytes"})
 
 
@@ -2393,8 +2511,9 @@ def soulseek_preview_stream(path: str = Query(...), native: int = Query(0)):
     ]
     try:
         # CREATE_NO_WINDOW — same reason as videos_stream above.
+        # stderr DEVNULL: undrained PIPE blocks ffmpeg, hangs stream.
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             creationflags=0x08000000 if os.name == "nt" else 0)
     except Exception as e:
         raise HTTPException(500, f"ffmpeg failed to start: {e}")
@@ -2403,6 +2522,8 @@ def soulseek_preview_stream(path: str = Query(...), native: int = Query(0)):
 
     def _gen():
         try:
+            if proc.stdout is None:
+                return
             while True:
                 chunk = proc.stdout.read(256 * 1024)
                 if not chunk:
@@ -2411,8 +2532,11 @@ def soulseek_preview_stream(path: str = Query(...), native: int = Query(0)):
         finally:
             if proc.poll() is None:
                 proc.kill()
-            proc.stdout.close()
-            proc.stderr.close()
+            try:
+                if proc.stdout:
+                    proc.stdout.close()
+            except Exception:
+                pass
 
     return StreamingResponse(_gen(), media_type="video/mp4")
 
@@ -2582,6 +2706,95 @@ class SoulseekAutoRequest(BaseModel):
     queries: Optional[List[str]] = None
     username: Optional[str] = None
     target_dir: Optional[str] = None
+
+
+# --------------------------------------------------------------------------- #
+# Wishes — save MusicBrainz releases now, auto-fill them from Soulseek later
+# --------------------------------------------------------------------------- #
+class WishAddRequest(BaseModel):
+    release_mbid: str
+    title: Optional[str] = None
+    artist: Optional[str] = None
+    year: Optional[str] = None
+    note: Optional[str] = None
+    target_dir: Optional[str] = None
+    queries: Optional[List[str]] = None
+
+
+class WishUpdateRequest(BaseModel):
+    note: Optional[str] = None
+    target_dir: Optional[str] = None
+    status: Optional[str] = None
+    queries: Optional[List[str]] = None
+
+
+@app.get("/api/wishes")
+def wishes_list():
+    """Saved releases + the background worker's status and recent log."""
+    from server import wishes, wishes_worker
+    return {"wishes": wishes.list_wishes(), "worker": wishes_worker.status(),
+            "log": wishes.read_log(60)}
+
+
+@app.post("/api/wishes")
+def wishes_add(req: WishAddRequest):
+    """Save a MusicBrainz release to the wishlist without downloading it.
+    Missing display fields are filled from MusicBrainz."""
+    from server import wishes
+    title, artist, year = req.title, req.artist, req.year
+    if not title:
+        try:
+            from server import integrations as intg
+            rel = intg.release_lookup(req.release_mbid)
+            title = rel.get("title")
+            artist = artist or ((rel.get("artists") or [{}])[0].get("name"))
+            year = year or str(rel.get("date") or "")[:4]
+        except Exception:
+            pass
+    w = wishes.add_wish(req.release_mbid, title=title or "", artist=artist or "",
+                        year=year or "", note=req.note or "",
+                        target_dir=req.target_dir or "", queries=req.queries)
+    return {"ok": True, "wish": w}
+
+
+@app.patch("/api/wishes/{wid}")
+def wishes_update(wid: int, req: WishUpdateRequest):
+    from server import wishes
+    w = wishes.update_wish(wid, req.model_dump(exclude_unset=True))
+    if w is None:
+        raise HTTPException(404, "wish not found")
+    return {"ok": True, "wish": w}
+
+
+@app.delete("/api/wishes/{wid}")
+def wishes_delete(wid: int):
+    from server import wishes
+    return {"ok": wishes.delete_wish(wid)}
+
+
+@app.post("/api/wishes/{wid}/search")
+def wishes_search(wid: int):
+    """Search Soulseek for one wish right now."""
+    from server import wishes, wishes_worker
+    if wishes.get_wish(wid) is None:
+        raise HTTPException(404, "wish not found")
+    return wishes_worker.trigger(wid)
+
+
+@app.post("/api/wishes/search-all")
+def wishes_search_all():
+    """Run a full wishes cycle now (every due wish, newest attempted first)."""
+    from server import wishes_worker
+    return wishes_worker.trigger()
+
+
+@app.post("/api/wishes/reconcile")
+def wishes_reconcile():
+    """Flip wishes already present in the library (manual download) to
+    imported. Returns how many were resolved."""
+    from server import wishes
+    n = wishes.reconcile_with_library()
+    return {"ok": True, "resolved": n}
 
 
 class SoulseekTestLogRequest(BaseModel):
@@ -2818,8 +3031,12 @@ def track_export(path: str = Query(...), codec: str = Query("flac"),
         if proc.returncode != 0 or not os.path.isfile(out) or os.path.getsize(out) == 0:
             raise HTTPException(500, f"transcode failed: {(proc.stderr or '')[:200]}")
     except HTTPException:
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
         raise
     except Exception as e:
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
         raise HTTPException(500, f"transcode failed: {e}")
 
     from starlette.background import BackgroundTask
@@ -2896,7 +3113,15 @@ def mb_genres_import(req: GenreImportRequest):
             for t in full.get("media") or []:
                 g = _top(t.get("genres"))
                 if g:
-                    track_genres[(int(t.get("disc") or 1), int(t.get("position") or 0))] = g
+                    try:
+                        disc = int(str(t.get("disc") or 1).split("/")[0])
+                    except (TypeError, ValueError):
+                        disc = 1
+                    try:
+                        pos = int(str(t.get("position") or 0).split("/")[0])
+                    except (TypeError, ValueError):
+                        continue
+                    track_genres[(disc, pos)] = g
         except Exception:
             track_genres = {}
 
@@ -2975,8 +3200,12 @@ def organize(req: OrganizeRequest):
         dst_dirs = []  # target dir of every track (moved or in place)
         errors = []
         for t in tracks:
-            vars_ = track_variables(t["tags"], release_type=release_type)
-            rel = eval_script(script, vars_, shorter_ids=shorter)
+            try:
+                vars_ = track_variables(t["tags"], release_type=release_type)
+                rel = eval_script(script, vars_, shorter_ids=shorter)
+            except Exception as e:
+                errors.append(f"{t['file']}: script error: {e}")
+                continue
             if not rel:
                 errors.append(f"{t['file']}: script evaluated to empty path")
                 continue
@@ -3340,6 +3569,10 @@ if WEB_DIST.is_dir():
         if file.is_file():
             # hashed asset filenames change per build; etag revalidation is enough
             return FileResponse(file)
+        if full_path.startswith("assets/"):
+            # a missing hashed bundle must 404 — the fallback would answer with
+            # index.html, i.e. HTML handed to the browser as JavaScript/CSS.
+            raise HTTPException(404)
         # index.html must revalidate so an app update is picked up immediately
         return FileResponse(WEB_DIST / "index.html", headers={"Cache-Control": "no-cache"})
 

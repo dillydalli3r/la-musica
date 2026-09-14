@@ -94,7 +94,7 @@ export default function StatsPanel({
         : null;
 
   return (
-    <div className="fixed inset-0 z-40 bg-black/70 flex items-center justify-center p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6" onClick={onClose}>
       <div
         className="bg-card border border-border rounded-xl w-full max-w-xl max-h-[85vh] overflow-auto shadow-2xl"
         onClick={(e) => e.stopPropagation()}

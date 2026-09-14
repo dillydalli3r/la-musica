@@ -24,7 +24,7 @@ export default function Visualizer({
   const peaks = useRef<Float32Array>(new Float32Array(bars));
   const stale = useRef(0); // consecutive frames with no analyser signal
   const playingRef = useRef(playing);
-  playingRef.current = playing;
+  useEffect(() => { playingRef.current = playing; }, [playing]);
 
   useEffect(() => {
     const canvas = canvasRef.current;

@@ -5,6 +5,7 @@ import os
 import tempfile
 
 from .paths import CONFIG_FILE, DEFAULT_DIGITAL_SOURCE, app_data_dir, read_music_folder_guess
+from .naming import DEFAULT_NAMING_SCRIPT
 from .ui import c, Color
 
 # Run All order — strict pipeline v1.7.0: 1 Lyrics → 2 CUEs → 8 Auto Tagging → 3 FLAC → 5 Images → 9 AccurateRip → 6 Audit → 4 Grade → 7 DR/ReplayGain → 10 Format All.
@@ -234,6 +235,18 @@ DEFAULT_CONFIG = {
     "discs_toc_unique_margin_s": 4.0,
     "cue_fix_filenames": True,
 
+    # Naming script (Picard-style). Organize, the grader's path check and the
+    # beets plugin all read this; it was previously undeclared, so defaults
+    # and validation now cover it. `short_folder_names` truncates the
+    # MusicBrainz IDs in folder names to 8 chars.
+    "naming_script": DEFAULT_NAMING_SCRIPT,
+    "short_folder_names": False,
+
+    # Force flags used by the Run All order / individual runs — re-format even
+    # when a file already looks canonical.
+    "force_lyrics": False,
+    "force_cue": False,
+
     # Music-file tag writes
     "fix_instrumental_from_lyrics": True,
     "write_audit_tag": True,
@@ -394,7 +407,6 @@ DEFAULT_CONFIG = {
     "dr_replaygain_enabled": True,
     "replaygain_skip_existing": True,
     "force_dr_replaygain": False,
-    "force_dr_ui": False,
 
     # Video remux (script 11): every video container -> MKV with the video
     # copied bit-exact and every audio stream re-encoded to FLAC (lossless
@@ -493,10 +505,31 @@ DEFAULT_CONFIG = {
     "soulseek_auto_log_min_score": 100,
     # Fraction of the release track list a candidate folder must contain.
     "soulseek_auto_complete_ratio": 1.0,
+    # How long to let a Soulseek search collect responses before scoring the
+    # candidates (seconds). Longer = more peers + better chance of a match.
+    "soulseek_auto_search_wait": 45,
+    # Explicit shared folders (empty = share the whole music folder).
+    "soulseek_share_dirs": [],
+    # Extra share filters — substrings/paths slskd must NOT share.
+    "soulseek_share_exclude": [],
+
+    # Wishes — MusicBrainz releases saved to the library WITHOUT downloading.
+    # A background worker re-searches Soulseek for each wish on an interval
+    # and auto-imports the release the moment a verified match appears.
+    "wishes_enabled": True,
+    "wishes_interval_hours": 6,
+    "wishes_max_attempts": 0,       # 0 = retry forever
+    "wishes_auto_import": True,
+
     # Genres imported from MusicBrainz per release/track (top voted first).
     "mb_genre_count": 1,
     # Script 3/10 removes tags outside the canonical set while optimizing.
     "strip_unknown_tags": True,
+
+    # Home — album recommendations loaded on the sidebar's Home section.
+    "home_recommendations": True,
+    "home_rec_count": 18,
+    "home_recent_count": 12,
 
     # Misc
     "auto_advance": True,
@@ -546,6 +579,11 @@ _INT_RANGES = {
     "cover_png_target_size": (0, 4000),
     "cover_jxl_target_size": (0, 4000),
     "soulseek_auto_log_min_score": (0, 100),
+    "soulseek_auto_search_wait": (5, 300),
+    "wishes_interval_hours": (1, 168),
+    "wishes_max_attempts": (0, 1000),
+    "home_rec_count": (4, 60),
+    "home_recent_count": (4, 60),
     "mb_genre_count": (1, 10),
 }
 _CHOICES = {
@@ -675,6 +713,22 @@ def normalize_config(user=None) -> dict:
         clean = [str(t).strip()[:120] for t in v if str(t).strip()]
         cfg[k] = clean[:6] or list(DEFAULT_CONFIG[k])
 
+    # Shared-folder lists (Settings → Soulseek, Soulseek → Sharing). Accept a
+    # ";"/newline separated string from hand-edited config files.
+    for k in ("soulseek_share_dirs", "soulseek_share_exclude"):
+        v = cfg.get(k)
+        if isinstance(v, str):
+            v = [t for t in v.replace("\n", ";").split(";") if t.strip()]
+        if not isinstance(v, (list, tuple)):
+            v = []
+        cfg[k] = [str(t).strip() for t in v if str(t).strip()][:64]
+
+    script = cfg.get("naming_script")
+    if not isinstance(script, str) or not script.strip():
+        cfg["naming_script"] = DEFAULT_NAMING_SCRIPT
+    else:
+        cfg["naming_script"] = script.strip()[:2000]
+
     default_tags = DEFAULT_CONFIG["encoder_tags"]
     user_tags = cfg.get("encoder_tags") if isinstance(cfg.get("encoder_tags"), dict) else {}
     merged_tags = {}
@@ -787,21 +841,37 @@ def _migrate_to_data_dir():
     try:
         os.makedirs(d, exist_ok=True)
         legacy_data = os.path.join(os.path.dirname(CONFIG_FILE), "server", "data")
-        if os.path.isdir(legacy_data):
-            for name in os.listdir(legacy_data):
-                if name == "tray.lock":  # runtime lock, not data
-                    continue
-                src = os.path.join(legacy_data, name)
-                dst = os.path.join(d, name)
-                if not os.path.exists(dst):
-                    shutil.move(src, dst)
+        # A music-folder change can leave the state in the *previous* folder's
+        # Data dir (nobody rewrote the stub); migrate that forward too so
+        # nothing is orphaned. Existing files are never clobbered.
+        other_data = None
+        try:
+            with open(CONFIG_FILE, encoding="utf-8") as f:
+                prev_mf = (json.load(f) or {}).get("music_folder")
+            if prev_mf and os.path.abspath(prev_mf) != os.path.abspath(mf):
+                other_data = app_data_dir(prev_mf)
+        except Exception:
+            pass
+        _move_state_dir(legacy_data, d)
+        _move_state_dir(other_data, d)
         new_cfg = os.path.join(d, "config.json")
         if os.path.isfile(CONFIG_FILE) and not os.path.exists(new_cfg):
             shutil.move(CONFIG_FILE, new_cfg)
-            # stub so read_music_folder_guess() keeps resolving after the move
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump({"music_folder": mf}, f, indent=2)
-                f.write("\n")
+        # A carried-over config may still point at its old location (the very
+        # bug this fixes): keep the live value aligned with the new folder.
+        if os.path.isfile(new_cfg):
+            try:
+                with open(new_cfg, "r", encoding="utf-8") as f:
+                    moved = json.load(f)
+                if moved.get("music_folder") != mf:
+                    moved["music_folder"] = mf
+                    with open(new_cfg, "w", encoding="utf-8") as f:
+                        json.dump(moved, f, indent=2, sort_keys=True)
+                        f.write("\n")
+            except Exception:
+                pass
+        # stub so read_music_folder_guess() keeps resolving after the move
+        _write_stub(mf)
     except Exception as e:
         print(f"WARNING: .data migration failed: {e}")
 
@@ -819,11 +889,57 @@ def load_config() -> dict:
     return normalize_config(user)
 
 
+def _move_state_dir(src, dst):
+    """Move app state files from one Data dir to another (never clobber).
+
+    Used both by the legacy .data migration and by a music-folder change, so
+    playlists, the beets DB, wishes and slskd.yaml follow the library.
+    Returns True when a move was attempted.
+    """
+    import shutil
+
+    if not src or os.path.abspath(src) == os.path.abspath(dst):
+        return False
+    if not os.path.isdir(src):
+        return False
+    try:
+        os.makedirs(dst, exist_ok=True)
+        for name in os.listdir(src):
+            if name == "tray.lock":  # runtime lock, not data
+                continue
+            s, d = os.path.join(src, name), os.path.join(dst, name)
+            if not os.path.exists(d):
+                shutil.move(s, d)
+        return True
+    except Exception as e:
+        print(f"WARNING: could not move app state: {e}")
+        return False
+
+
+def _write_stub(music_folder):
+    """Legacy-path config.json: records the folder that owns the .data dir
+    so read_music_folder_guess() keeps resolving on the next run."""
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump({"music_folder": music_folder}, f, indent=2)
+            f.write("\n")
+    except OSError:
+        pass
+
+
 def save_config(cfg: dict) -> bool:
     """Validate and atomically replace the persisted configuration."""
     global _MIGRATED
     try:
         normalized = normalize_config(cfg)
+        prev_mf = read_music_folder_guess() or ""
+        new_mf = str(normalized.get("music_folder") or "").strip()
+        # App state lives in <music folder>/Data: a folder change must carry it
+        # along, or the new folder starts empty and the old one is orphaned.
+        if (new_mf and prev_mf and os.path.isdir(new_mf)
+                and os.path.abspath(new_mf) != os.path.abspath(prev_mf)):
+            _move_state_dir(app_data_dir(prev_mf), app_data_dir(new_mf))
+            _write_stub(new_mf)
         path = active_config_file()
         directory = os.path.dirname(path) or "."
         fd, temp_path = tempfile.mkstemp(

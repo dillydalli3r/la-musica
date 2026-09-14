@@ -26,9 +26,15 @@ createRoot(document.getElementById("root")!).render(
 // Offline playback: the worker serves cached audio/video streams so
 // "Download" (cache in the app) keeps tracks playable without the server.
 // Needs a secure context (localhost qualifies; plain-LAN http does not).
-if ("serviceWorker" in navigator && window.isSecureContext) {
+// Skipped in Tauri (no SW support) and insecure contexts.
+// ponytail: Tauri offline playback needs native-side cache; add when requested.
+if ("serviceWorker" in navigator && window.isSecureContext
+    && !(window as any).__TAURI_INTERNALS__) {
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("sw.js").catch(() => {
+    // absolute path — a relative "sw.js" resolves against the current route
+    // (/album/<path> → /album/sw.js) which the SPA fallback answers with
+    // index.html, so deep links never got offline playback.
+    navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch(() => {
       /* offline cache stays unavailable — streaming still works */
     });
   });

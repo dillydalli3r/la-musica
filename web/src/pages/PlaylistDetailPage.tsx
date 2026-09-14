@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { api } from "../api";
 import { toast, useStore } from "../store";
-import { EmptyState } from "../components/Badges";
+import { EmptyState, PageLoading } from "../components/Badges";
 import { TrackCover } from "../components/CoverImg";
 import FavHeart from "../components/FavHeart";
 import OverflowMenu from "../components/OverflowMenu";
@@ -77,7 +77,7 @@ export default function PlaylistDetailPage() {
     qc.invalidateQueries({ queryKey: ["playlist", pid] });
   };
 
-  const tracks = detail?.tracks ?? [];
+  const tracks = useMemo(() => detail?.tracks ?? [], [detail]);
   const reorderable = playlist?.kind === "manual";
 
   // shared per-track metadata for the table + duration totals
@@ -176,7 +176,7 @@ export default function PlaylistDetailPage() {
   };
 
   if (error) return <EmptyState title="Playlist not found" hint={String(error)} />;
-  if (isLoading || !playlist) return <div className="p-8 text-zinc-500">Loading playlist…</div>;
+  if (isLoading || !playlist) return <PageLoading label="Loading playlist…" />;
 
   // first four covers for the mosaic header art
   const mosaic = tracks.slice(0, 4).map((t) => ({
@@ -186,7 +186,7 @@ export default function PlaylistDetailPage() {
   }));
 
   const iconBtn =
-    "p-2 rounded-md border border-border bg-panel/60 text-zinc-400 hover:text-white hover:bg-raise transition-colors";
+    "p-2 rounded-lg border border-border bg-panel/60 text-zinc-400 hover:text-white hover:bg-raise transition-colors";
 
   const openFilterEditor = () => {
     setConditions(playlist?.filter?.conditions ?? []);
@@ -348,7 +348,7 @@ export default function PlaylistDetailPage() {
                   const isOver = overIdx === i && dragIdx !== null && dragIdx !== i;
                   return (
                     <tr
-                      key={`${i}-${t}`}
+                      key={t}
                       draggable={reorderable}
                       onDragStart={(e) => {
                         if (!reorderable) return;

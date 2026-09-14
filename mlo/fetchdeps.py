@@ -453,6 +453,13 @@ def _extract_archive(archive_path, dest_dir, log):
             "Cannot silently install: temporary path contains spaces and "
             "7-Zip is unavailable. Install 7-Zip and retry."
         )
+    # /D= is passed through cmd.exe unquoted, so shell metacharacters in the
+    # path would either break the command or inject into it.
+    if any(ch in target for ch in '&^|<>"'):
+        raise RuntimeError(
+            "Cannot silently install: temporary path contains shell "
+            "metacharacters and 7-Zip is unavailable."
+        )
     # /D must be the last argument and unquoted.
     result = run_tool(
         f'"{archive_path}" /S /D={target}',
@@ -562,7 +569,8 @@ def _install_pip_package(key, log=print, progress=None):
         "--progress-bar", "off", "--disable-pip-version-check",
         PIP_PACKAGES[key],
     ]
-    proc = run_tool(cmd, capture_output=True, text=True, timeout=1800)
+    proc = run_tool(cmd, capture_output=True, text=True,
+                    encoding="utf-8", errors="replace", timeout=1800)
     if proc.returncode != 0 or not pip_package_path(key):
         shutil.rmtree(dest_dir, ignore_errors=True)
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()
@@ -661,7 +669,7 @@ def install_dependency(key, log=print, progress=None):
     """
     if key == "simpledrmeter":
         version = _install_simple_dr_meter(log=log, progress=progress)
-        _patch_simple_dr_meter(os.path.join(DEPS_DIR, f"simple-dr-meter v{version}"))
+        _patch_simple_dr_meter(os.path.join(DEPS_DIR, "simple-dr-meter"))
         return version
     if key == "php":
         return _install_php(log=log, progress=progress)

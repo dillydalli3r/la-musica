@@ -16,7 +16,7 @@ export default function Segmented<T extends string>({ value, onChange, options, 
   className?: string;
 }) {
   return (
-    <div className={`flex rounded-md border border-border overflow-hidden ${className ?? ""}`} role="tablist">
+    <div className={`flex w-fit rounded-md border border-border overflow-hidden ${className ?? ""}`} role="tablist">
       {options.map((o) => (
         <button
           key={o.id}

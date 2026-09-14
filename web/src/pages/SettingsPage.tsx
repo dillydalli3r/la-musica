@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { FolderOpen, Save, RotateCcw, Settings as SettingsIcon, Check, Eye, EyeOff } from "lucide-react";
 import { api } from "../api";
 import ConfirmButton from "../components/ConfirmButton";
+import FolderPicker from "../components/FolderPicker";
 import { toast } from "../store";
 import { applyAccent } from "../App";
 
@@ -248,6 +249,7 @@ export default function SettingsPage() {
         { k: "grade_check_accuraterip", label: "Check AccurateRip", type: "bool" },
         { k: "grader_cover_size_tolerance_px", label: "Cover size tolerance (px)", type: "number", min: 0, max: 5 },
         { k: "grader_strict_square_threshold", label: "Strict square threshold", type: "number", min: 0, max: 0.05, step: 0.005 },
+        { k: "grade_verbose", label: "Verbose grading diagnostics", type: "bool" },
       ],
     },
     {
@@ -322,6 +324,37 @@ export default function SettingsPage() {
         { k: "soulseek_auto_digital_queries", label: "Digital query templates (; separated)", type: "text" },
         { k: "soulseek_auto_log_min_score", label: "Min .log score (0–100)", type: "number", min: 0, max: 100 },
         { k: "soulseek_auto_complete_ratio", label: "Required track completeness (0.5–1)", type: "number", min: 0.5, max: 1, step: 0.05 },
+        { k: "soulseek_auto_search_wait", label: "Search wait before scoring (seconds)", type: "number", min: 5, max: 300 },
+      ],
+    },
+    {
+      title: "Wishes (auto-fill)",
+      blurb:
+        "Releases saved to the library without downloading them. The background worker re-searches Soulseek for every open wish on the interval below and imports a release the moment a verified match appears.",
+      fields: [
+        { k: "wishes_enabled", label: "Run the wishes worker", type: "bool" },
+        { k: "wishes_interval_hours", label: "Search interval (hours)", type: "number", min: 1, max: 168 },
+        { k: "wishes_max_attempts", label: "Max attempts per wish (0 = forever)", type: "number", min: 0, max: 1000 },
+        { k: "wishes_auto_import", label: "Auto-import when a verified match is found", type: "bool" },
+      ],
+    },
+    {
+      title: "Home (recommendations)",
+      blurb:
+        "The Home section in the sidebar. Recommendations are seeded from your most-collected artists and genres and resolved against MusicBrainz release groups you don't own yet.",
+      fields: [
+        { k: "home_recommendations", label: "Include MusicBrainz recommendations", type: "bool" },
+        { k: "home_rec_count", label: "Recommendations shown", type: "number", min: 4, max: 60 },
+        { k: "home_recent_count", label: "Recently-added albums shown", type: "number", min: 4, max: 60 },
+      ],
+    },
+    {
+      title: "Updates & maintenance",
+      blurb: "Background update checks and diagnostics.",
+      fields: [
+        { k: "update_check_interval_days", label: "Check for updates every (days)", type: "number", min: 1, max: 30 },
+        { k: "soulseek_share_dirs", label: "Extra shared folders (; separated, blank = whole music folder)", type: "text" },
+        { k: "soulseek_share_exclude", label: "Never share these paths (; separated)", type: "text" },
       ],
     },
     {
@@ -449,6 +482,7 @@ export default function SettingsPage() {
   const NAV: { id: string; label: string; section?: string }[] = [
     { id: "general", label: "General" },
     { id: "appearance", label: "Appearance" },
+    { id: "home", label: "Home" },
     { id: "naming", label: "Naming" },
     { id: "tagwrites", label: "Tagging" },
     { id: "grading", label: "Grading" },
@@ -456,6 +490,7 @@ export default function SettingsPage() {
     { id: "beets", label: "Beets", section: "Integrations" },
     { id: "soulseek", label: "Soulseek", section: "Integrations" },
     { id: "autoimport", label: "Auto-import", section: "Integrations" },
+    { id: "wishes", label: "Wishes", section: "Integrations" },
     { id: "deps", label: "Dependencies", section: "Integrations" },
     { id: "flac", label: "FLACs & lossless", section: "Scripts" },
     { id: "embedcovers", label: "Embedded covers", section: "Scripts" },
@@ -469,6 +504,7 @@ export default function SettingsPage() {
     { id: "videos", label: "Videos", section: "Scripts" },
     { id: "audiometa", label: "Key & BPM", section: "Scripts" },
     { id: "importtags", label: "Import & tags", section: "Scripts" },
+    { id: "updates", label: "Updates", section: "System" },
   ];
 
   const runPreview = async () => {
@@ -526,17 +562,14 @@ export default function SettingsPage() {
     localStorage.setItem("mlo.defaultView.v2", v);
   };
 
-  const pickNative = async () => {
-    if (!(window as any).__TAURI_INTERNALS__) {
-      toast("Native picker is only available in the desktop app");
-      return;
-    }
+  const [showFolderPicker, setShowFolderPicker] = useState(false);
+  const pickMusicFolder = async () => {
     try {
-      const { invoke } = await import("@tauri-apps/api/core");
-      const picked = await invoke<string | null>("pick_folder");
-      if (picked) setMusicFolder(picked);
-    } catch (e) {
-      toast(String(e));
+      const r = await api.fsPickFolder(musicFolder.trim());
+      if (!r.supported) setShowFolderPicker(true); // headless/remote → in-app browser
+      else if (r.path) setMusicFolder(r.path);
+    } catch {
+      setShowFolderPicker(true);
     }
   };
 
@@ -628,6 +661,7 @@ export default function SettingsPage() {
       ["grading", "Grading"], ["cdrips", "CD Rips"], ["videos", "Videos"],
       ["ai", "AI-assisted"], ["audiometa", "Key & BPM"], ["beets", "Beets tagging"],
       ["soulseek", "Soulseek (managed slskd)"], ["autoimport", "Auto-import"],
+      ["wishes", "Wishes"], ["home", "Home"], ["updates", "Updates"],
       ["importtags", "Import & tag cleanup"],
     ].map(([tab, prefix]) => [
       tab,
@@ -713,7 +747,11 @@ export default function SettingsPage() {
               <span className="flex-1 min-w-0 truncate">{f.label}</span>
               <input
                 className="input !w-32 !py-0.5 text-[11px] shrink-0"
-                value={String(scriptCfg[f.k] ?? "")}
+                value={
+                  Array.isArray(scriptCfg[f.k])
+                    ? (scriptCfg[f.k] as unknown[]).join("; ")
+                    : String(scriptCfg[f.k] ?? "")
+                }
                 onChange={(e) => setCfg(f.k, e.target.value)}
               />
             </div>
@@ -809,7 +847,7 @@ export default function SettingsPage() {
               <button
                 onClick={() => setTab(n.id)}
                 className={`w-full text-left px-3 py-1.5 rounded-md text-xs transition-colors ${
-                  tab === n.id ? "bg-raise text-white border border-accent/40" : "text-zinc-400 hover:text-white hover:bg-panel border border-transparent"
+                  tab === n.id ? "bg-accent on-accent font-medium" : "text-zinc-400 hover:text-white hover:bg-panel border border-transparent"
                 }`}
               >
                 {n.label}
@@ -826,11 +864,18 @@ export default function SettingsPage() {
                 <span className="text-xs text-zinc-500 uppercase">Music folder</span>
                 <div className="flex gap-2 mt-1">
                   <input className="input" value={musicFolder} onChange={(e) => setMusicFolder(e.target.value)} placeholder="F:\Music" />
-                  <button className="btn-ghost" onClick={pickNative} title="Native folder picker (desktop)">
+                  <button className="btn-ghost" onClick={pickMusicFolder} title="Browse for a folder">
                     <FolderOpen className="h-4 w-4" />
                   </button>
                 </div>
               </label>
+              {showFolderPicker && (
+                <FolderPicker
+                  initial={musicFolder.trim()}
+                  onPick={setMusicFolder}
+                  onClose={() => setShowFolderPicker(false)}
+                />
+              )}
               <label className="block">
                 <span className="text-xs text-zinc-500 uppercase">Lyrics format</span>
                 <select className="input mt-1" value={lyricsFormat} onChange={(e) => setLyricsFormat(e.target.value)}>

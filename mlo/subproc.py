@@ -41,6 +41,12 @@ def run_tool(*args, **kwargs):
     input_data = kwargs.pop("input", None)
     capture_output = kwargs.pop("capture_output", False)
     check = kwargs.pop("check", False)
+    # Tool output (ffmpeg/flac/metadata) is UTF-8; without an explicit
+    # encoding, Windows decodes with the ANSI codepage and can raise
+    # UnicodeDecodeError on any non-ASCII byte.
+    if kwargs.get("text") or kwargs.get("universal_newlines"):
+        kwargs.setdefault("encoding", "utf-8")
+        kwargs.setdefault("errors", "replace")
     if capture_output:
         if "stdout" in kwargs or "stderr" in kwargs:
             raise ValueError("stdout and stderr arguments may not be used with capture_output")
