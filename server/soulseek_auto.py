@@ -135,8 +135,8 @@ _TRACKNO_RE = re.compile(r"^(\d{1,3})(?:\s*[-._]|\s+|\)|$)")
 
 def _album_root(path):
     """Fold per-disc subfolders (…/CD1/01 - x.flac) into one album root."""
-    d = os.path.dirname(path)
-    parts = d.replace("\\", "/").rstrip("/").split("/")
+    d = os.path.dirname(path.replace("\\", "/"))
+    parts = d.rstrip("/").split("/")
     if len(parts) >= 2 and _DISCBASE_RE.search(parts[-1]):
         d = "/".join(parts[:-1])
     return d if d.endswith("/") else d + "/"
@@ -297,9 +297,17 @@ def _search_once(slsk, query, wait_s):
         except Exception:
             continue
         best = res
-        if res.get("state") in ("Completed", "TimedOut", "ResponseLimitReached"):
-            # give late responses 3 more seconds, then stop
-            time.sleep(3.0)
+        if getattr(slsk, "is_search_done", None) and slsk.is_search_done(res):
+            # give late responses 2 more seconds, then stop
+            time.sleep(2.0)
+            try:
+                best = slsk.search_results(sid)
+            except Exception:
+                pass
+            break
+        state_str = str(res.get("state") or "")
+        if any(x in state_str for x in ("Completed", "TimedOut", "ResponseLimitReached", "Cancelled")):
+            time.sleep(2.0)
             try:
                 best = slsk.search_results(sid)
             except Exception:

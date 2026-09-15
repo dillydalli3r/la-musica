@@ -413,7 +413,23 @@ export const api = {
       body: JSON.stringify({ query }),
     }, 60000),
   soulseekSearchResults: (id: string) =>
-    json<{ state: string | null; responseCount?: number; fileCount?: number; responses: { username: string; file: string; size: number; bitrate: number | null; duration: number | null; vbr: boolean | null; slot: boolean; speed: number; queue: number }[] }>(
+    json<{
+      state: string | null;
+      isComplete?: boolean;
+      responseCount?: number;
+      fileCount?: number;
+      responses: {
+        username: string;
+        file: string;
+        size: number;
+        bitrate: number | null;
+        duration: number | null;
+        vbr: boolean | null;
+        slot: boolean;
+        speed: number;
+        queue: number;
+      }[];
+    }>(
       `${API}/soulseek/search/${encodeURIComponent(id)}`,
       undefined,
       30000

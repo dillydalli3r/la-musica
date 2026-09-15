@@ -1189,9 +1189,11 @@ export default function SoulseekPage() {
   const [searchId, setSearchId] = useState<string | null>(null);
   const [results, setResults] = useState<SlskFile[]>([]);
   const [searching, setSearching] = useState(false);
+  const [searchMeta, setSearchMeta] = useState<{ fileCount: number; responseCount: number } | null>(null);
   const [busyUser, setBusyUser] = useState<string | null>(null);
   const [filter, setFilter] = useState<FilterId>("all");
-  const [closedGroups, setClosedGroups] = useState<Set<string>>(new Set()); // groups OPEN by default
+  const [openGroups, setOpenGroups] = useState<Set<string>>(new Set());
+  const [visibleLimit, setVisibleLimit] = useState(60);
   const [logTest, setLogTest] = useState<Record<string, { ok: boolean; text: string } | "busy">>({});
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoRan = useRef(false); // ?q= handoff runs once per page visit
@@ -1263,6 +1265,8 @@ export default function SoulseekPage() {
     if (q) setQuery(q);
     setSearching(true);
     setResults([]);
+    setSearchMeta(null);
+    setVisibleLimit(60);
     try {
       const r = await api.soulseekSearch(text);
       setSearchId(r.id);
@@ -1272,14 +1276,33 @@ export default function SoulseekPage() {
         elapsed += 2;
         try {
           const res = await api.soulseekSearchResults(r.id);
-          setResults(res.responses ?? []);
-          const done = elapsed > 30 || res.state === "Completed" || res.state === "TimedOut";
-          if (done) {
-            if (pollRef.current) clearInterval(pollRef.current);
+          if (res.fileCount || res.responseCount) {
+            setSearchMeta({
+              fileCount: Number(res.fileCount || 0),
+              responseCount: Number(res.responseCount || 0),
+            });
+          }
+          if (res.responses && res.responses.length > 0) {
+            setResults(res.responses);
+          }
+          const isDone =
+            Boolean(res.isComplete) ||
+            (res.state ? res.state !== "InProgress" && (res.state.includes("Completed") || res.state.includes("TimedOut")) : false);
+          if (isDone || elapsed >= 45) {
+            if (pollRef.current) {
+              clearInterval(pollRef.current);
+              pollRef.current = null;
+            }
             setSearching(false);
+            if (res.responses && res.responses.length > 0) {
+              setResults(res.responses);
+            }
           }
         } catch {
-          if (pollRef.current) clearInterval(pollRef.current);
+          if (pollRef.current) {
+            clearInterval(pollRef.current);
+            pollRef.current = null;
+          }
           setSearching(false);
         }
       }, 2000);
@@ -1327,6 +1350,12 @@ export default function SoulseekPage() {
   };
 
   const groups = useMemo(() => groupResults(results), [results]);
+  useEffect(() => {
+    if (groups.length > 0) {
+      // Auto-expand the best-match group on new results
+      setOpenGroups((prev) => (prev.size === 0 ? new Set([groups[0].key]) : prev));
+    }
+  }, [groups]);
   const visible = groups.filter((g) => groupMatches(g, filter));
   const counts: Record<FilterId, number> = {
     all: groups.length,
@@ -1335,12 +1364,14 @@ export default function SoulseekPage() {
     lossy: groups.filter((g) => g.format === "MP3" || g.format === "M4A" || g.format === "AAC").length,
   };
   const toggleGroup = (key: string) =>
-    setClosedGroups((prev) => {
+    setOpenGroups((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
       else next.add(key);
       return next;
     });
+  const expandAll = () => setOpenGroups(new Set(visible.map((g) => g.key)));
+  const collapseAll = () => setOpenGroups(new Set());
 
   if (status && !status.installed) {
     return (
@@ -1491,25 +1522,32 @@ export default function SoulseekPage() {
         {groups.length > 0 && (
           <>
             {/* filter chips with live counts — CD rips with log+cue first */}
-            <div className="flex flex-wrap items-center gap-1.5 mt-3">
-              {FILTERS.map((f) => (
-                <button
-                  key={f.id}
-                  className={`chip px-2.5 py-1 border ${
-                    filter === f.id
-                      ? "bg-accent on-accent border-transparent font-semibold"
-                      : "bg-raise border-border text-zinc-400 hover:text-white"
-                  }`}
-                  onClick={() => setFilter(f.id)}
-                >
-                  {f.label} <span className={filter === f.id ? "opacity-70" : "text-zinc-600"}>{counts[f.id]}</span>
-                </button>
-              ))}
+            <div className="flex flex-wrap items-center justify-between gap-1.5 mt-3">
+              <div className="flex flex-wrap items-center gap-1.5">
+                {FILTERS.map((f) => (
+                  <button
+                    key={f.id}
+                    className={`chip px-2.5 py-1 border ${
+                      filter === f.id
+                        ? "bg-accent on-accent border-transparent font-semibold"
+                        : "bg-raise border-border text-zinc-400 hover:text-white"
+                    }`}
+                    onClick={() => setFilter(f.id)}
+                  >
+                    {f.label} <span className={filter === f.id ? "opacity-70" : "text-zinc-600"}>{counts[f.id]}</span>
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-1.5 text-xs text-zinc-500">
+                <button className="btn-ghost !py-0.5 !px-2 text-[11px]" onClick={expandAll}>Expand all</button>
+                <span>·</span>
+                <button className="btn-ghost !py-0.5 !px-2 text-[11px]" onClick={collapseAll}>Collapse all</button>
+              </div>
             </div>
 
             <div className="mt-3 space-y-2 max-h-[560px] overflow-auto pr-1">
-              {visible.map((g) => {
-                const open = !closedGroups.has(g.key);
+              {visible.slice(0, visibleLimit).map((g) => {
+                const open = openGroups.has(g.key);
                 return (
                   <div key={g.key} className="rounded-lg border border-border overflow-hidden">
                     {/* folder header: what you'd actually download */}
@@ -1592,6 +1630,14 @@ export default function SoulseekPage() {
                   No {FILTERS.find((f) => f.id === filter)?.label.toLowerCase()} groups in this result set.
                 </div>
               )}
+              {visible.length > visibleLimit && (
+                <button
+                  className="btn-secondary w-full py-2 text-xs mt-2"
+                  onClick={() => setVisibleLimit((n) => n + 60)}
+                >
+                  Show more ({visible.length - visibleLimit} remaining)
+                </button>
+              )}
             </div>
           </>
         )}
@@ -1599,9 +1645,15 @@ export default function SoulseekPage() {
           <div className="text-[11px] text-zinc-500 mt-3">No results (yet) — try a different query.</div>
         )}
         {searching && results.length === 0 && (
-          <div className="text-[11px] text-zinc-500 mt-3 flex items-center gap-1.5">
-            <span className="h-3 w-3 rounded-full border border-zinc-600 border-t-transparent animate-spin inline-block" />
-            Searching the network… results stream in below.
+          <div className="text-[11px] text-zinc-400 mt-3 flex items-center gap-2">
+            <span className="h-3.5 w-3.5 rounded-full border-2 border-accent border-t-transparent animate-spin inline-block shrink-0" />
+            {searchMeta && searchMeta.fileCount > 0 ? (
+              <span>
+                Searching Soulseek… found <strong className="text-zinc-200">{searchMeta.fileCount.toLocaleString()}</strong> files from <strong className="text-zinc-200">{searchMeta.responseCount}</strong> peers (aggregating…)
+              </span>
+            ) : (
+              <span>Broadcasting query to Soulseek network…</span>
+            )}
           </div>
         )}
       </div>

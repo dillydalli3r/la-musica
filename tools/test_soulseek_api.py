@@ -37,4 +37,14 @@ method, path, body = calls[-1]
 assert body.get("searchTimeout") == 45000, body
 assert "timeout" not in body, body
 
+# slskd serializes SearchStates as bitwise flags joined with commas;
+# 'Completed, TimedOut' must count as done or every search polls forever.
+for done in ("Completed", "Completed, TimedOut", "TimedOut",
+             "Completed, ResponseLimitReached", "Cancelled"):
+    assert soulseek.is_search_done(done), done
+for pending in ("InProgress", "", None, "None"):
+    assert not soulseek.is_search_done(pending), pending
+assert soulseek.is_search_done({"state": "InProgress", "isComplete": True})
+assert not soulseek.is_search_done({"state": "InProgress", "isComplete": False})
+
 print("ok")

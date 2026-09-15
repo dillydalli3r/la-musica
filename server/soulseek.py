@@ -446,13 +446,36 @@ def search(query, cfg=None, timeout_ms=None):
     return remote or search_id
 
 
+def is_search_done(res_or_state):
+    """True when an slskd search has completed, timed out, or cancelled.
+
+    slskd states are bitwise flags that serialize to comma-separated strings
+    like 'Completed, TimedOut' or 'InProgress'.
+    """
+    if isinstance(res_or_state, dict):
+        if res_or_state.get("isComplete"):
+            return True
+        st = res_or_state.get("state")
+    else:
+        st = res_or_state
+    if not st or st == "InProgress":
+        return False
+    return any(x in str(st) for x in ("Completed", "TimedOut", "ResponseLimitReached", "Cancelled"))
+
+
 def search_results(search_id, cfg=None):
     """Aggregate file responses for a finished/in-progress search."""
     try:
         state = _request("GET", f"/searches/{search_id}")
     except httpx.HTTPStatusError as e:
         if e.response is not None and e.response.status_code == 404:
-            return {"state": "NotFound", "responses": []}
+            return {
+                "state": "NotFound",
+                "isComplete": True,
+                "responseCount": 0,
+                "fileCount": 0,
+                "responses": [],
+            }
         raise
     responses = []
     try:
@@ -479,10 +502,12 @@ def search_results(search_id, cfg=None):
                 "speed": speed,
                 "queue": queue,
             })
+    st_dict = state if isinstance(state, dict) else {}
     return {
-        "state": (state or {}).get("state"),
-        "responseCount": (state or {}).get("responseCount"),
-        "fileCount": (state or {}).get("fileCount"),
+        "state": st_dict.get("state"),
+        "isComplete": bool(st_dict.get("isComplete")),
+        "responseCount": int(st_dict.get("responseCount") or 0),
+        "fileCount": int(st_dict.get("fileCount") or 0),
         "responses": responses,
     }
 
