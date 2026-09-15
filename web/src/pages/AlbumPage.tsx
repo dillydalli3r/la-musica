@@ -20,7 +20,7 @@ import { SortHeader, sortRows, toggleSort, groupByDisc, type SortState } from ".
 import { ColumnsMenu, ColumnResizer, useColumnPrefs, useColumnWidths, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W } from "../lib/columns";
 import { toast, useStore } from "../store";
 import { fmtTech, albumTech } from "../lib/fmt";
-import { fmtDuration } from "./LibraryPage";
+import { fmtDuration } from "../lib/fmt";
 import type { Track } from "../types";
 
 /** Whether a track file is a music video container (playable with <video>). */

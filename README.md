@@ -56,6 +56,11 @@ directory — one folder to back up or carry between machines.
 - **Favorites** — liked tracks / albums / artists / playlists, consistent
   with the library views (ctrl-click a track title anywhere to open its
   track page for editing; the player bar title opens it too).
+- **MusicBrainz browser** — the sidebar's *MusicBrainz* entry (and Enter in
+  the global search box) opens a full MusicBrainz browser: search releases /
+  artists / recordings, drill into release groups and releases, and add any
+  release to *Wishes* — or match it against the library. Pasting a
+  musicbrainz.org link or a bare MBID anywhere jumps straight to that entity.
 - **Import** — drag & drop uploads or a watched import folder: MusicBrainz
   release matching, cascading genre import, LRCLIB lyrics fetch, advisory
   ratings, then automatic organize into the naming-script layout.
@@ -240,7 +245,6 @@ mlo/         core engine: grader, audit, flac, images, lyrics, cue,
 desktop/     Tauri v2 desktop shell
 tools/       test-library generator and test suites
 ```
-
 ## API overview (selected)
 
 | Endpoint | Purpose |
@@ -270,7 +274,21 @@ tools/       test-library generator and test suites
 ```bash
 python tools/make_test_library.py   # synthetic library for end-to-end runs
 python tools/test_remux.py          # video remux suite (VOB/MKV/AVI/WebM fixtures)
+python tools/test_script_menus.py   # every script menu agrees (numbers, labels,
+                                    # Run All order, force switches) — the gate
+                                    # for adding a script anywhere
+python tools/smoke_api.py           # route smoke test against a running backend
+                                    # (python tools/smoke_api.py http://127.0.0.1:8000)
 ```
+
+The browser-side checks (`tools/check_menus.cjs` — every sidebar entry and
+route renders with no page errors; `tools/shot.cjs` — screenshots every route)
+need a running backend and a local Playwright install.
+
+The other `tools/test_*.py` suites cover config migration, CUE disc renaming,
+grading paths, Home shelves, lyrics merge/repair and the Soulseek client.
+Run them all before a release. The frontend gate is `cd web && npx tsc -b &&
+npx oxlint && npm run build`.
 
 ---
 

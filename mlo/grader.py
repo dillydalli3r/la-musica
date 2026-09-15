@@ -2810,7 +2810,6 @@ def run_grade_library(config):
         failed_checks = result["total_checks"] - result["pass_count"]
         passed = failed_checks == 0
         # Binary grading: an album is 100% only when every check passes.
-        pct = 100.0 if passed else 0.0
         grade = "PASS" if passed else "FAIL"
 
         stats["grade_dist"][grade] += 1

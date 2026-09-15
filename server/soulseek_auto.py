@@ -236,7 +236,6 @@ def find_candidates(results, release, cfg):
             if hit is not None:
                 used.add(id(hit))
                 matched += 1
-        ratio = matched / len(expected) if expected else 0.0
         complete = (matched == len(expected)) and not missing_logs and not missing_cues
         acceptable = matched >= min_ratio * len(expected) and not missing_logs and not missing_cues
         if not acceptable:

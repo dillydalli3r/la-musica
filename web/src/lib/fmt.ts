@@ -122,3 +122,38 @@ export function albumTech(
   }
   return parts.join(" · ");
 }
+
+/** Grid cover sizes (small / medium / large) → grid-template min column,
+ * shared by the library and favourites album grids. */
+export const GRID_SIZE_MIN: Record<"s" | "m" | "l", number> = { s: 126, m: 164, l: 214 };
+
+/** The year shown on cards/cells: the ORIGINAL release year when tagged
+ * (a remaster keeps its original year), the release year otherwise. */
+export function originalYear(meta?: { ORIGINALDATE?: string | null; DATE?: string | null } | null): string {
+  const src = meta?.ORIGINALDATE || meta?.DATE || "";
+  const m = String(src).match(/^(\d{4})/);
+  return m ? m[1] : "";
+}
+
+/** Year by default ("2010-12-15" -> "2010"); full value when the user
+ *  enables Show full dates. The raw date is always the tooltip. */
+export function fmtDateCell(value: string | null | undefined, full: boolean): string {
+  if (!value) return "—";
+  if (full) return value;
+  const m = String(value).match(/^(\d{4})/);
+  return m ? m[1] : value;
+}
+
+/** mm:ss (h:mm:ss past an hour). Non-finite (Infinity / NaN) comes from
+ * live-transcoded video streams — callers fall back to the probed duration,
+ * and "—" keeps Infinity:NaN off the screen in the meantime. */
+export function fmtDuration(sec: number | undefined): string {
+  if (sec === undefined || !Number.isFinite(sec) || sec < 0) return "—";
+  const s = Math.floor(sec);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  return h
+    ? `${h}:${String(m).padStart(2, "0")}:${String(ss).padStart(2, "0")}`
+    : `${m}:${String(ss).padStart(2, "0")}`;
+}

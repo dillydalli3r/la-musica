@@ -4,7 +4,7 @@ import { AlertTriangle, HardDriveDownload, Library, Search } from "lucide-react"
 import { api } from "../api";
 import { toast, useStore } from "../store";
 import CoverImg, { TrackCover } from "../components/CoverImg";
-import { fmtDuration } from "./LibraryPage";
+import { fmtDuration } from "../lib/fmt";
 import Segmented from "../components/Segmented";
 
 /** Quality presets per codec — mirrors server/exporter.py CODECS tables.
@@ -216,7 +216,8 @@ export default function ExportPage() {
 
   const toggle = (set: Set<string>, path: string, apply: (s: Set<string>) => void) => {
     const next = new Set(set);
-    next.has(path) ? next.delete(path) : next.add(path);
+    if (next.has(path)) next.delete(path);
+    else next.add(path);
     apply(next);
   };
 

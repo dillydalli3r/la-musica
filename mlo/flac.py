@@ -288,18 +288,7 @@ def _optimize_flac(args):
 
     # Only clean tags when we will re-encode or when file is already ours and
     # needs tag cleanup; otherwise don't mutate a file we will skip.
-    # _clean_flac_tags is now applied to temp output after flac re-encode.
-    # For skip path with seektable removal, clean only if tags actually need removal.
-    cleaned = False
-    if should_reencode:
-        try:
-            from .containers import _clean_flac_tags
-            # Clean temp later; but also clean original UNSYNCEDLYRICS only if not re-encoding?
-            # For re-encode path we clean temp, not original.
-            pass
-        except Exception:
-            pass
-
+    # _clean_flac_tags is applied to the temp output after the flac re-encode.
     if not should_reencode:
         # Even when skipping re-encode, actively remove seektables if
         # required - but only for files this pipeline did not write

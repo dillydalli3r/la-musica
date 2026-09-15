@@ -1120,7 +1120,6 @@ def elrc_word_sync(lrc_text, max_line_spread_s=6.0, min_word_span_s=0.18,
     lines pass through unchanged. CJK text sweeps per character (a kana
     character is one syllable, so CJK output is the same at both levels).
     """
-    line_re = re.compile(r"^(?:\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\])+(.*)$")
     all_times_re = re.compile(r"\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\]")
     word_tag_re = re.compile(r"<(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?>")
     syllables = str(level or "word").lower() == "syllable"

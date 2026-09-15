@@ -64,9 +64,11 @@ Desktop.ini
 # ZCode local session state
 .zcode/
 
-# Dev-only screenshot/smoke helpers
-tools/shots/
+# Dev-only screenshot helper (route walker writing PNGs to tools/shots/)
+tools/shot.cjs
+tools/shot.py
 
 # Local agent/session state and dev-only screenshot harness
 .pi/
-tools/shot.py
+# Dev-only screenshot output
+tools/shots/

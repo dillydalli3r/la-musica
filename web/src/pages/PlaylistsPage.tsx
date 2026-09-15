@@ -7,7 +7,7 @@ import { toast, useStore } from "../store";
 import { EmptyState, PageLoading } from "../components/Badges";
 import { TrackCover } from "../components/CoverImg";
 import FavHeart from "../components/FavHeart";
-import { fmtDuration, GRID_SIZE_MIN } from "./LibraryPage";
+import { fmtDuration, GRID_SIZE_MIN } from "../lib/fmt";
 import type { Playlist } from "../types";
 
 export default function PlaylistsPage() {

@@ -222,7 +222,6 @@ def release_lookup(mbid):
     tracks = []
     for medium in data.get("media", []):
         disc = medium.get("position", 1)
-        medium_format = medium.get("format") or ""
         for trk in medium.get("tracks", []):
             rec = trk.get("recording", {})
             artists = []

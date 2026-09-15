@@ -1663,7 +1663,6 @@ def _process_jxl_back_to_original(args):
         ) = args
         config = None
 
-    filename = os.path.basename(src_path)
     temp_files = []
 
     try:

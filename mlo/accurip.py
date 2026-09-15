@@ -177,7 +177,6 @@ def _run_arcue(arcue_exe, cue_path, cwd, timeout=120):
     )
     # ArCueDotNet returns 0 even when some tracks are No match – it still prints the log.
     # Only treat as error when no log header was emitted.
-    out = (proc.stdout or "") + (proc.stderr or "")
     # ArCueDotNet writes the log to stdout; in some builds it also mirrors to stderr – combine.
     combined = proc.stdout or ""
     if not combined and proc.stderr:
@@ -193,8 +192,6 @@ def _generate_via_cuetools(ffmpeg_exe, arcue_exe, album_dir, disc_num, track_pat
     Uses a temp dir with WAVs + patched cue, invokes ArCueDotNet -v, captures
     the verbose log.  Returns the raw log text (as CUETools emitted it).
     """
-    discs = album_discs(album_dir)
-    # fallback discs mapping is already passed in track_paths; but we need full map for cue discovery if needed
     # If cue_path is None, we create a minimal cue synthesising TRACKs from sorted track_paths
     tmp_dir = tempfile.mkdtemp(prefix="mlo_accurip_")
     try:
@@ -222,7 +219,7 @@ def _generate_via_cuetools(ffmpeg_exe, arcue_exe, album_dir, disc_num, track_pat
                 wav = name_map.get(os.path.basename(tp).lower(), os.path.splitext(os.path.basename(tp))[0] + ".wav")
                 lines.append(f'FILE "{wav}" WAVE')
                 lines.append(f'  TRACK {idx:02d} AUDIO')
-                lines.append(f'    INDEX 01 00:00:00')
+                lines.append('    INDEX 01 00:00:00')
             patched = "\n".join(lines) + "\n"
 
         cue_tmp = os.path.join(tmp_dir, f"CD-{disc_num}.cue")

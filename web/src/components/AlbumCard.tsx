@@ -7,7 +7,7 @@ import { albumTech } from "../lib/fmt";
 import CoverImg from "./CoverImg";
 import FavHeart from "./FavHeart";
 import { albumRef } from "../lib/refs";
-import { originalYear } from "../pages/LibraryPage";
+import { originalYear } from "../lib/fmt";
 import type { Album } from "../types";
 
 /** The library's album grid card, shared by the Library and Favorites pages

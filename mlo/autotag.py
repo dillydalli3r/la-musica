@@ -168,7 +168,6 @@ def run_auto_tagging(config):
 
         # 2) Derive ALBUMITUNESADVISORY from current per-track advisories (respect per-type gate)
         advisory_modified = 0
-        advisory_before = 0
         if do_advisory:
             # Only include advisories for tracks where we can write album advisory, or where advisory is enabled
             advisories_for_derive = [d["advisory"] for d in info]
@@ -188,7 +187,6 @@ def run_auto_tagging(config):
                         d["album_advisory"] = str(advisory_value)
                 if advisory_modified:
                     notes.append(f"advisory={advisory_value}")
-                advisory_before = advisory_modified
 
         # 3) Auto-zero ITUNESADVISORY for instrumental tracks (must run AFTER instrumental fix + advisory derive)
         zero_modified = 0

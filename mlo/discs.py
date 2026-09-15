@@ -33,7 +33,6 @@ from .config import should_write_audio_tag
 from .paths import AUDIO_EXTS
 from .stats import is_audio_file
 from .subproc import run_tool
-from .ui import log, c, Color
 
 # Optional: EAC checksum verifier (pypi eac-logchecker)
 try:
@@ -730,19 +729,6 @@ def rename_accurip_for_discs(album_dir, discs=None, log_fn=None, config=None):
                 remaining.remove(best)
             except ValueError:
                 pass
-    if remaining and len(claimed) < len(discs):
-        toc_tol = float(config.get("discs_toc_tolerance_s", TOC_TOLERANCE_S)) if config else TOC_TOLERANCE_S
-        toc_margin = float(config.get("discs_toc_unique_margin_s", TOC_UNIQUE_MARGIN_S)) if config else TOC_UNIQUE_MARGIN_S
-        durations = {}
-        for d, paths in discs.items():
-            if d in claimed:
-                continue
-            secs = _audio_seconds(paths)
-            if secs:
-                durations[d] = secs
-        for f in remaining:
-            # For .accurip, we don't have TOC, so use file content's track count? Skip TOC matching for accurip
-            continue
     for d, f in sorted(claimed.items()):
         src = os.path.join(album_dir, f)
         dst = os.path.join(album_dir, _disc_expected_name(pattern, d, ".accurip"))
@@ -901,7 +887,6 @@ def fix_cue_filenames(album_dir, log_fn=None, config=None):
 
         if changed:
             try:
-                import tempfile
                 fd, tmp = tempfile.mkstemp(prefix=".cue_fix_", suffix=".cue", dir=os.path.dirname(path) or ".")
                 with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
                     fh.writelines(out_lines)

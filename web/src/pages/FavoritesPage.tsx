@@ -8,7 +8,7 @@ import { AdvisoryMark, EmptyState, PageLoading } from "../components/Badges";
 import { TrackCover } from "../components/CoverImg";
 import AlbumCard from "../components/AlbumCard";
 import FavHeart from "../components/FavHeart";
-import { fmtDuration, GRID_SIZE_MIN } from "./LibraryPage";
+import { fmtDuration, GRID_SIZE_MIN } from "../lib/fmt";
 import Segmented from "../components/Segmented";
 import { artistRef, artistMbid } from "../lib/refs";
 import type { Album, Artist, Playlist, Track } from "../types";

@@ -9,7 +9,6 @@ integrations, and album import.
 import os
 import re
 import sys
-import json
 import asyncio
 import threading
 import time
@@ -26,9 +25,9 @@ from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from mlo import __version__ as APP_VERSION
 from mlo import load_config, save_config
 from mlo.config import DEFAULT_CONFIG
 from mlo import stats as stats_mod
@@ -78,7 +77,7 @@ async def _lifespan(app: FastAPI):
         pass
 
 
-app = FastAPI(title="la musica API", version="2.2.1", lifespan=_lifespan)
+app = FastAPI(title="la musica API", version=APP_VERSION, lifespan=_lifespan)
 
 # Docker/bootstrap: MLO_MUSIC_FOLDER env seeds music_folder when unset.
 _MLO_ENV_FOLDER = os.environ.get("MLO_MUSIC_FOLDER")
@@ -218,7 +217,7 @@ def shutdown_backend():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "version": "2.2.1"}
+    return {"status": "ok", "version": APP_VERSION}
 
 
 @app.get("/api/config")
@@ -1520,17 +1519,23 @@ def run_scripts(req: RunRequest):
     if req.targets:
         cfg["targets"] = [os.path.normpath(t) for t in req.targets]
     # Per-script options default from saved config; the request can override.
+    # A *supplied* force dict is authoritative and complete: the UI's one-shot
+    # Force switch sends every checked key, so an unchecked key must turn the
+    # force off rather than fall back to a saved-on config value. Only a
+    # request that omits `force` entirely falls back to the saved Settings.
     f = req.force or {}
-    cfg["force_reencode_flac"] = bool(f.get("flac", cfg.get("force_reencode_flac")))
-    cfg["force_reencode_images"] = bool(f.get("images", cfg.get("force_reencode_images")))
-    cfg["force_audit"] = bool(f.get("audit", cfg.get("force_audit")))
-    cfg["force_lyrics"] = bool(f.get("lyrics", cfg.get("force_lyrics")))
-    cfg["force_cue"] = bool(f.get("cue", cfg.get("force_cue")))
-    cfg["force_dr_replaygain"] = bool(f.get("dr", cfg.get("force_dr_replaygain")))
-    cfg["force_auto_tag"] = bool(f.get("autotag", cfg.get("force_auto_tag")))
-    cfg["force_accurip"] = bool(f.get("accurip", cfg.get("force_accurip")))
-    cfg["force_audiometa"] = bool(f.get("audiometa", cfg.get("force_audiometa")))
-    cfg["force_xlit"] = bool(f.get("xlit", cfg.get("force_xlit")))
+    oneshot = req.force is not None
+    if oneshot:
+        cfg["force_reencode_flac"] = bool(f.get("flac", False))
+        cfg["force_reencode_images"] = bool(f.get("images", False))
+        cfg["force_audit"] = bool(f.get("audit", False))
+        cfg["force_lyrics"] = bool(f.get("lyrics", False))
+        cfg["force_cue"] = bool(f.get("cue", False))
+        cfg["force_dr_replaygain"] = bool(f.get("dr", False))
+        cfg["force_auto_tag"] = bool(f.get("autotag", False))
+        cfg["force_accurip"] = bool(f.get("accurip", False))
+        cfg["force_audiometa"] = bool(f.get("audiometa", False))
+        cfg["force_xlit"] = bool(f.get("xlit", False))
     # image-option overrides (subset of run_process_images knobs)
     for key in ("rename_to_cover", "reencode_to_jxl", "images_convert_to_jpeg",
                 "images_convert_lossless_to_png", "convert_jxl_back", "remove_alpha",
@@ -2563,7 +2568,6 @@ def soulseek_local_file_delete(req: LocalFileDeleteRequest):
     if os.path.isfile(p):
         os.remove(p)
         try:
-            upath = os.path.dirname(p)
             for root, dirs, files in os.walk(ddir, topdown=False):
                 if os.path.abspath(root).startswith(os.path.abspath(ddir)) and not os.listdir(root) and root != ddir:
                     os.rmdir(root)
@@ -3480,7 +3484,6 @@ def import_ingest(source: str = Query(...), target: str = Query(...)):
     if os.path.normcase(os.path.abspath(dest)) == os.path.normcase(os.path.abspath(src)):
         return {"ok": True, "path": dest.replace("\\", "/")}
     n = 2
-    base = dest
     while os.path.exists(dest):
         dest = os.path.normpath(os.path.join(folder, f"{name} ({n})"))
         n += 1

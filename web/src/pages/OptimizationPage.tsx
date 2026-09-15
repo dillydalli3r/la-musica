@@ -7,7 +7,7 @@ import { api } from "../api";
 import { useStore } from "../store";
 import { ProgressInline } from "../components/ProgressBar";
 import { FORCE_SCRIPTS, forceDict, loadForceSel, saveForceSel } from "../lib/force";
-import { SCRIPTS, DEFAULT_RUN_ALL } from "../lib/scripts";
+import { SCRIPTS, DEFAULT_RUN_ALL, isScriptId } from "../lib/scripts";
 
 // Selected scripts + their custom run order, persisted across reloads.
 const SEL_KEY = "mlo.opt.sel.v1";
@@ -58,7 +58,7 @@ export default function OptimizationPage() {
       : "Running all scripts…");
     try {
       const order = Array.isArray(config?.run_all_order) && (config!.run_all_order as number[]).length
-        ? (config!.run_all_order as number[]).filter((n) => n >= 1 && n <= 15)
+        ? (config!.run_all_order as number[]).filter(isScriptId)
         : DEFAULT_RUN_ALL;
       const force = forceRun ? forceDict(forceSel) : undefined;
       const res = await api.run(order, undefined, force);

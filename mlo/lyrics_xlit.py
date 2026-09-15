@@ -346,7 +346,6 @@ def run_lyrics_xlit(config):
               "(presets available, e.g. Google Gemini).", Color.YELLOW))
         return stats
 
-    fmt = str(config.get("lyrics_format", "EMBEDDED")).upper()
     log("write mode: "
         + ("tags TRANSLITERATION-<lang>/TRANSLATION-<lang>"
            if embed_tags else "tags skipped (LRC lyrics format)")

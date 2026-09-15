@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -8,26 +8,33 @@ import {
 } from "lucide-react";
 import { api } from "./api";
 import { useStore } from "./store";
-import HomePage from "./pages/HomePage";
-import LibraryPage from "./pages/LibraryPage";
-import ArtistPage from "./pages/ArtistPage";
-import AlbumPage from "./pages/AlbumPage";
-import TrackPage from "./pages/TrackPage";
-import PlaylistsPage from "./pages/PlaylistsPage";
-import PlaylistDetailPage from "./pages/PlaylistDetailPage";
-import FavoritesPage from "./pages/FavoritesPage";
-import SettingsPage from "./pages/SettingsPage";
-import SetupPage from "./pages/SetupPage";
-import SoulseekPage from "./pages/SoulseekPage";
-import ExportPage from "./pages/ExportPage";
-import GradingPage from "./pages/GradingPage";
-import OptimizationPage from "./pages/OptimizationPage";
-import DependenciesPage from "./pages/DependenciesPage";
-import {
-  MBSearchPage, MBArtistPage, MBReleaseGroupPage, MBReleasePage, MBRecordingPage,
-} from "./pages/MusicBrainzPage";
+
+// Route-level code splitting: only the landing page ships in the initial
+// bundle, every other page is fetched on first visit. Without this the whole
+// app (library, player, soulseek, import wizard, settings) loads up front.
+const HomePage = lazy(() => import("./pages/HomePage"));
+const LibraryPage = lazy(() => import("./pages/LibraryPage"));
+const ArtistPage = lazy(() => import("./pages/ArtistPage"));
+const AlbumPage = lazy(() => import("./pages/AlbumPage"));
+const TrackPage = lazy(() => import("./pages/TrackPage"));
+const PlaylistsPage = lazy(() => import("./pages/PlaylistsPage"));
+const PlaylistDetailPage = lazy(() => import("./pages/PlaylistDetailPage"));
+const FavoritesPage = lazy(() => import("./pages/FavoritesPage"));
+const SettingsPage = lazy(() => import("./pages/SettingsPage"));
+const SetupPage = lazy(() => import("./pages/SetupPage"));
+const SoulseekPage = lazy(() => import("./pages/SoulseekPage"));
+const ExportPage = lazy(() => import("./pages/ExportPage"));
+const GradingPage = lazy(() => import("./pages/GradingPage"));
+const OptimizationPage = lazy(() => import("./pages/OptimizationPage"));
+const DependenciesPage = lazy(() => import("./pages/DependenciesPage"));
+const ImportWizard = lazy(() => import("./pages/ImportWizard"));
+const MBSearchPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBSearchPage })));
+const MBArtistPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBArtistPage })));
+const MBReleaseGroupPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBReleaseGroupPage })));
+const MBReleasePage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBReleasePage })));
+const MBRecordingPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBRecordingPage })));
+
 import PlayerBar from "./components/PlayerBar";
-import ImportWizard from "./pages/ImportWizard";
 import { ProgressInline } from "./components/ProgressBar";
 
 const NAV = [
@@ -37,6 +44,7 @@ const NAV = [
   { to: "/favorites", label: "Favorites", icon: Heart, end: false },
   { to: "/import", label: "Import", icon: Import, end: false },
   { to: "/soulseek", label: "Soulseek", icon: ArrowDownUp, end: false },
+  { to: "/mb/search", label: "MusicBrainz", icon: Music4, end: false },
   { to: "/export", label: "Export", icon: HardDriveDownload, end: false },
   { to: "/optimize", label: "Optimization", icon: Gauge, end: false },
   { to: "/grading", label: "Grading", icon: ClipboardCheck, end: false },
@@ -88,13 +96,28 @@ function useSlskDot() {
   return null;
 }
 
-function SlskIconDot({ dot }: { dot: { cls: string; tip: string; name?: string | null } | null }) {
-  if (!dot) return null;
+function SlskIconDot({ dot }: { dot: { cls: string; tip: string; name?: string | null } | null }) {  if (!dot) return null;
   return (
     <span
       className={`absolute -top-1 -right-1.5 h-2 w-2 rounded-full ${dot.cls} ring-2 ring-panel`}
       title={dot.tip}
     />
+  );
+}
+
+/** Shown while a lazy route's chunk downloads. Inlined (no spinner
+ * library) so the fallback itself is part of the initial bundle. */
+function PageLoading() {
+  return (
+    <div className="p-6 max-w-6xl mx-auto animate-pulse" aria-busy="true" aria-live="polite">
+      <div className="h-7 w-52 rounded bg-raise" />
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        {Array.from({ length: 6 }).map((_, i) => (
+          <div key={i} className="h-28 rounded-lg border border-border bg-card" />
+        ))}
+      </div>
+      <span className="sr-only">Loading page…</span>
+    </div>
   );
 }
 
@@ -437,6 +460,8 @@ export default function App() {
         <main className="flex-1 overflow-auto min-w-0 pt-12">
           {/* keyed by pathname so each navigation eases the new page in */}
           <div key={location.pathname} className="page-enter">
+            {/* lazy routes: the page chunk is fetched on first visit */}
+            <Suspense fallback={<PageLoading />}>
             <Routes>
             <Route path="/" element={<HomePage />} />
             <Route path="/library" element={<LibraryPage />} />
@@ -474,6 +499,7 @@ export default function App() {
               }
             />
           </Routes>
+            </Suspense>
           </div>
         </main>
 

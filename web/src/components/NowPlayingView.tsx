@@ -16,7 +16,7 @@ import { parsePlayerLrc, activeLineRange, KaraokeWords, type LrcLine } from "./L
 import type { Playlist } from "../types";
 import { createLyricsGlider, type LyricsGlider } from "../lib/lyrScroll";
 import { nextSpeed, fmtSpeed } from "../lib/playback";
-import { fmtDuration } from "../pages/LibraryPage";
+import { fmtDuration } from "../lib/fmt";
 
 const XLIT_KEY = "mlo.np.xlit";
 const TRANS_KEY = "mlo.np.trans";

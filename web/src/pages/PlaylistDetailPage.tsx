@@ -11,7 +11,7 @@ import { TrackCover } from "../components/CoverImg";
 import FavHeart from "../components/FavHeart";
 import OverflowMenu from "../components/OverflowMenu";
 import { trackRef, entityLinkClick } from "../lib/refs";
-import { fmtDuration } from "./LibraryPage";
+import { fmtDuration } from "../lib/fmt";
 import type { FilterCondition, Playlist } from "../types";
 
 const FIELDS = [

@@ -14,7 +14,7 @@ from .ui import c, Color
 # Run All pipeline: remux first, then beets tagging (MusicBrainz), then
 # formatting/tagging scripts, lyric fetching (before grade sees it), and
 # analysis/audit/grade at the end.
-DEFAULT_RUN_ALL_ORDER = [11, 14, 1, 2, 8, 13, 12, 3, 5, 9, 6, 4, 7, 10]
+DEFAULT_RUN_ALL_ORDER = [11, 14, 1, 2, 8, 13, 15, 12, 3, 5, 9, 6, 4, 7, 10]
 
 # Audio tag families that can be toggled per filetype.
 # Each family groups related TAG_MAP keys that are written together.
@@ -785,9 +785,10 @@ def normalize_config(user=None) -> dict:
         clean_order = [1, 2, 8, 3, 5, 9, 6, 4, 7, 10]
 
     # Scripts added later join existing pipelines at sensible positions:
-    #   14 beets tagging  — right after the remux (writes tags, places files)
-    #   13 lyric fetching — after autotag (needs final ARTIST/TITLE), before grade
-    #   12 Key & BPM      — after 13 (grading wants its tags)
+    #   14 beets tagging   — right after the remux (writes tags, places files)
+    #   13 lyric fetching  — after autotag (needs final ARTIST/TITLE), before grade
+    #   15 xlit/translate  — right after the fetch (same lyrics pipeline)
+    #   12 Key & BPM       — after 13 (grading wants its tags)
     def _insert_script(order, sid, anchors):
         if sid in order:
             return
@@ -800,6 +801,7 @@ def normalize_config(user=None) -> dict:
     if clean_order:
         _insert_script(clean_order, 14, [11])
         _insert_script(clean_order, 13, [8, 14, 11])
+        _insert_script(clean_order, 15, [13, 8])
         _insert_script(clean_order, 12, [13, 8])
     cfg["run_all_order"] = clean_order or list(DEFAULT_RUN_ALL_ORDER)
     return cfg

@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Disc3, Heart, ListMusic, ListPlus, Maximize2, Mic2, Play, Pause, SkipBack, SkipForward, Shuffle, Repeat, Timer, Volume2, X } from "lucide-react";
 import { api } from "../api";
 import { toast, useStore } from "../store";
-import { fmtDuration } from "../pages/LibraryPage";
+import { fmtDuration } from "../lib/fmt";
 import { fmtPair, fmtTech, isVideoFile } from "../lib/fmt";
 import { nextSpeed, fmtSpeed } from "../lib/playback";
 import { AdvisoryMark } from "./Badges";
@@ -285,7 +285,12 @@ export default function PlayerBar() {
       // Music videos play through the popout <video> — pause the <audio>
       // pair and drop their sources so exactly one decoder exists.
       for (const a of [aRef.current, bRef.current]) {
-        try { a?.pause(); a && (a.src = ""); } catch { /* ignore */ }
+        try {
+          if (a) {
+            a.pause();
+            a.src = "";
+          }
+        } catch { /* ignore */ }
       }
       pathOnA.current = null;
       pathOnB.current = null;

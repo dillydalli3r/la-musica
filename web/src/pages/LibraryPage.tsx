@@ -7,7 +7,7 @@ import {
   ListFilter, ListPlus, Play, Tag, Trash2, Wand2,
 } from "lucide-react";
 import { api } from "../api";
-import { SCRIPTS, DEFAULT_RUN_ALL } from "../lib/scripts";
+import { SCRIPTS, DEFAULT_RUN_ALL, isScriptId } from "../lib/scripts";
 import { toast, useStore } from "../store";
 import {
   sortRows, SortHeader, groupByDisc, type SortState,
@@ -18,7 +18,7 @@ import {
 } from "../lib/columns";
 import { gradeSliver, statusFor, auditFails } from "../lib/status";
 import { albumRef, trackRef, artistRef, entityLinkClick } from "../lib/refs";
-import { fmtTech } from "../lib/fmt";
+import { fmtTech, fmtDuration, fmtDateCell, originalYear, GRID_SIZE_MIN } from "../lib/fmt";
 import { EmptyState, GradeBadge, MediaChip, AdvisoryMark } from "../components/Badges";
 import { forceDict, loadForceSel } from "../lib/force";
 import Segmented from "../components/Segmented";
@@ -60,10 +60,6 @@ const VIEW_TABS: { id: View; label: string }[] = [
   { id: "artists", label: "Artists" },
   { id: "tracks", label: "Tracks" },
 ];
-
-/** Grid cover sizes (small / medium / large) → grid-template min column.
- * Exported so the Favorites album grid renders with the exact same sizing. */
-export const GRID_SIZE_MIN: Record<"s" | "m" | "l", number> = { s: 126, m: 164, l: 214 };
 
 const ALBUM_SORTS = [
   { key: "meta.ALBUM", label: "Album name" },
@@ -176,14 +172,6 @@ interface FlatTrack extends Track {
   albumPath: string;
 }
 
-/** The year shown on cards/cells: the ORIGINAL release year when tagged
- * (a remaster keeps its original year), the release year otherwise. */
-export function originalYear(meta?: { ORIGINALDATE?: string | null; DATE?: string | null } | null): string {
-  const src = meta?.ORIGINALDATE || meta?.DATE || "";
-  const m = String(src).match(/^(\d{4})/);
-  return m ? m[1] : "";
-}
-
 // ---- search: plain words + tag-scoped terms -------------------------------
 /** Tags matched by the "person:" alias — everyone credited on the song. */
 const PERSON_TAG_KEYS = ["ARTIST", "ALBUMARTIST", "COMPOSER", "LYRICIST", "REMIXER"];
@@ -230,7 +218,7 @@ export default function LibraryPage() {
   const { data: lib, isLoading, error } = useQuery({ queryKey: ["library"], queryFn: api.library });
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   const runAllIds = Array.isArray(config?.run_all_order) && config.run_all_order.length
-    ? config.run_all_order.filter((n: number) => n >= 1 && n <= 15)
+    ? config.run_all_order.filter((n: number) => isScriptId(n))
     : DEFAULT_RUN_ALL;
   const qc = useQueryClient();
   const navigate = useNavigate();
@@ -1592,15 +1580,6 @@ function ScriptsDropdown({ onRun, runAllIds }: { onRun: (ids: number[], force?: 
   );
 }
 
-/** Year by default ("2010-12-15" -> "2010"); full value when the user
- *  enables Show full dates. The raw date is always the tooltip. */
-export function fmtDateCell(value: string | null | undefined, full: boolean): string {
-  if (!value) return "—";
-  if (full) return value;
-  const m = String(value).match(/^(\d{4})/);
-  return m ? m[1] : value;
-}
-
 function useLocalPref(key: string, initial: boolean): [boolean, (v: boolean) => void] {
   const storageKey = `mlo-pref-${key}`;
   const [value, setValue] = useState<boolean>(() => {
@@ -1619,20 +1598,6 @@ function useLocalPref(key: string, initial: boolean): [boolean, (v: boolean) => 
     }
   };
   return [value, set];
-}
-
-export function fmtDuration(sec: number | undefined): string {
-  // Non-finite (Infinity / NaN) comes from live-transcoded video streams —
-  // callers fall back to the probed duration, and this keeps "—" on screen
-  // in the meantime instead of "Infinity:NaN".
-  if (sec === undefined || !Number.isFinite(sec) || sec < 0) return "—";
-  const s = Math.floor(sec);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  const ss = s % 60;
-  return h
-    ? `${h}:${String(m).padStart(2, "0")}:${String(ss).padStart(2, "0")}`
-    : `${m}:${String(ss).padStart(2, "0")}`;
 }
 
 function useLocalSort(key: string): [SortState | null, (key: string) => void] {

@@ -227,9 +227,9 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let open_i = MenuItem::with_id(app, "open", "Open la musica", true, None::<&str>)?;
     let autostart_on = app.autolaunch().is_enabled().unwrap_or(false);
     let autostart_i = CheckMenuItem::with_id(
-        app, "autostart", "Start on Login", true, autostart_on, None::<&str>,
+        app, "autostart", "Auto-start on login", true, autostart_on, None::<&str>,
     )?;
-    let quit_i = MenuItem::with_id(app, "quit", "Quit (stop backend)", true, None::<&str>)?;
+    let quit_i = MenuItem::with_id(app, "quit", "Exit (stop backend)", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
         &[&open_i, &autostart_i, &PredefinedMenuItem::separator(app)?, &quit_i],

@@ -6,6 +6,7 @@ import ConfirmButton from "../components/ConfirmButton";
 import FolderPicker from "../components/FolderPicker";
 import { toast } from "../store";
 import { applyAccent } from "../App";
+import { DEFAULT_RUN_ALL, SCRIPT_LABEL, isScriptId } from "../lib/scripts";
 
 const DEFAULT_NAMING_SCRIPT =
   "%albumartist% [%musicbrainz_albumartistid%]/$if(%releasetype%,[%releasetype%] ,)$if(%originaldate%,%originaldate% - ,)$if(%date%,%date% - ,)%album% {$if(%releasecountry%,%releasecountry% - )%media%$if(%catalognumber%, - %catalognumber%)}/%discnumber%-$num(%tracknumber%,2) %title%";
@@ -426,7 +427,7 @@ export default function SettingsPage() {
   const [previewing, setPreviewing] = useState(false);
   const [rawConfig, setRawConfig] = useState("{}");
   const [tab, setTab] = useState("general");
-  const [runAll, setRunAll] = useState<number[]>([11, 14, 1, 2, 8, 13, 12, 3, 5, 9, 6, 4, 7, 10]);
+  const [runAll, setRunAll] = useState<number[]>(DEFAULT_RUN_ALL);
   const [beetsBusy, setBeetsBusy] = useState(false);
   const { data: beetsStatus, refetch: refetchBeets } = useQuery({
     queryKey: ["beetsStatus"],
@@ -446,22 +447,12 @@ export default function SettingsPage() {
     }
   };
 
-  const RUN_ALL_SCRIPTS: { id: number; label: string }[] = [
-    { id: 11, label: "Video Remux" },
-    { id: 14, label: "Beets Tag" },
-    { id: 1, label: "Lyrics" },
-    { id: 2, label: "CUEs" },
-    { id: 8, label: "AutoTag" },
-    { id: 13, label: "Lyrics Fetch" },
-    { id: 3, label: "FLACs" },
-    { id: 5, label: "Images" },
-    { id: 9, label: "AccurateRip" },
-    { id: 6, label: "Audit" },
-    { id: 4, label: "Grade" },
-    { id: 7, label: "DR / ReplayGain" },
-    { id: 10, label: "Format All" },
-    { id: 12, label: "Key & BPM" },
-  ];
+  // Derived from the shared script list so the Settings grid can never drift
+  // from the Optimization page (labels + which scripts exist).
+  const RUN_ALL_SCRIPTS: { id: number; label: string }[] = DEFAULT_RUN_ALL.map((id) => ({
+    id,
+    label: SCRIPT_LABEL[id] ?? `#${id}`,
+  }));
 
   // Every per-script force switch. They also live in their own script tab;
   // both places bind to the same config keys, and the master toggle below
@@ -547,7 +538,7 @@ export default function SettingsPage() {
       )
     );
     setRawConfig(JSON.stringify(config, null, 2));
-    setRunAll(Array.isArray(config.run_all_order) ? config.run_all_order.map(Number).filter((n) => n >= 1 && n <= 15) : [11, 14, 1, 2, 8, 13, 15, 12, 3, 5, 9, 6, 4, 7, 10]);
+    setRunAll(Array.isArray(config.run_all_order) ? config.run_all_order.map(Number).filter(isScriptId) : DEFAULT_RUN_ALL);
     setLoaded(true);
   }, [config, loaded]);
 
@@ -645,7 +636,7 @@ export default function SettingsPage() {
       setWorkerLimit(Number(parsed.worker_limit ?? workerLimit));
       setNamingScript(String(parsed.naming_script ?? "") || namingScript);
       setShortFolderNames(!!parsed.short_folder_names);
-      setRunAll(Array.isArray(parsed.run_all_order) ? parsed.run_all_order.map(Number).filter((n: number) => n >= 1 && n <= 15) : runAll);
+      setRunAll(Array.isArray(parsed.run_all_order) ? parsed.run_all_order.map(Number).filter(isScriptId) : runAll);
       toast("Raw config applied — click Save all settings to persist");
     } catch (e) {
       toast("Invalid JSON: " + String(e));

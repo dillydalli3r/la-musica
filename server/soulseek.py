@@ -119,7 +119,6 @@ def generate_yaml(cfg=None):
     web_port = int(cfg.get("soulseek_web_port") or 5030)
     up_limit = int(cfg.get("soulseek_up_limit") or 0)
     down_limit = int(cfg.get("soulseek_down_limit") or 0)
-    music = str(cfg.get("music_folder") or "").strip()
     downloads = download_dir(cfg)
     shared = share_dirs(cfg)
     exclude = share_exclude(cfg)
