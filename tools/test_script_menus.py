@@ -2,7 +2,7 @@
 """Menu-consistency gate: every surface that lists the 15 scripts must agree.
 
 Sources checked:
-  * ``mlo/cliapp.py``        SCRIPTS      — canonical name + number + label
+  * ``EXPECTED_SCRIPTS`` below — the frozen expected registry (number + name)
   * ``server/main.py``       RUNNERS      — the numbers /api/run accepts
   * ``web/src/lib/scripts.ts`` SCRIPTS    — the UI's single source of truth
   * ``README.md``            the 15-script table
@@ -17,6 +17,28 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# The registry every surface must agree on: number -> what the script is called.
+# Kept here on purpose — a gate that reads its expectation out of the code under
+# test cannot notice that code losing a script. Adding a script means adding it
+# here as well as to server/main.py, web/src/lib/scripts.ts and README.md.
+EXPECTED_SCRIPTS = {
+    1: "Format Lyrics",
+    2: "Format CUEs",
+    3: "Optimize FLACs",
+    4: "Grade Library",
+    5: "Process Images",
+    6: "Audit Library",
+    7: "DR & ReplayGain",
+    8: "Auto Tagging",
+    9: "AccurateRip",
+    10: "Format All",
+    11: "Video Remux",
+    12: "Key & BPM",
+    13: "Fetch Lyrics",
+    14: "Beets Tagging",
+    15: "Lyrics Translate/Transliterate",
+}
+
 
 def read(rel):
     with open(os.path.join(ROOT, rel), encoding="utf-8") as fh:
@@ -25,19 +47,6 @@ def read(rel):
 
 def strip_accents(s):
     return s.replace("·", "-").replace("&", "and")
-
-
-def cliapp_scripts():
-    """Legacy console registry (mlo/cliapp.py). Returns {} if that module has
-    been removed, so this gate keeps working without it."""
-    path = os.path.join(ROOT, "mlo/cliapp.py")
-    if not os.path.isfile(path):
-        return {}
-    block = re.search(r"^SCRIPTS = \{(.*?)^\}", read("mlo/cliapp.py"), re.S | re.M).group(1)
-    out = {}
-    for m in re.finditer(r'"\w+":\s*\((\d+),\s*"([^"]+)"', block):
-        out[int(m.group(1))] = m.group(2)
-    return out
 
 
 def server_runners():
@@ -123,7 +132,7 @@ def check_run_all_migration(check):
 
 def main():
     fail = 0
-    canon = cliapp_scripts() or {n: web_scripts().get(n, "") for n in sorted(web_scripts())}
+    canon = EXPECTED_SCRIPTS
     runners = server_runners()
     web = web_scripts()
     readme = readme_scripts()

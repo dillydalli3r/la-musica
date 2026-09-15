@@ -8,7 +8,7 @@ Re-run after changing the design:  python tools/make_icon.py
 import os
 import sys
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ASSETS = os.path.join(ROOT, "assets")
@@ -83,9 +83,6 @@ def build_master():
         # draw as rounded rectangle (flat bottom, rounded top)
         # Use rectangle + top ellipse for rounded top
         bd.rounded_rectangle([x0, y0, x1, y1], radius=r, fill=(255, 255, 255, 255))
-    # subtle outer glow for white bars to pop on black
-    glow = bar_layer.filter(ImageFilter.GaussianBlur(big * 0.012))
-    glow = Image.new("RGBA", (big, big), (255, 255, 255, 0))
     # composite bars over black
     img = Image.alpha_composite(img, bar_layer)
 

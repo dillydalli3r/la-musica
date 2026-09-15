@@ -1,7 +1,8 @@
 /** Library scripts — the single source of truth for every menu that lists
  * them (Optimization page, library selection menu, Settings Run-All order).
- * Numbers match the runner registry in server/main.py and mlo/cliapp.py, and
- * the table in README.md. Add a script here once; every surface picks it up. */
+ * Numbers match the runner registry in server/main.py, the table in README.md
+ * and the frozen EXPECTED_SCRIPTS in tools/test_script_menus.py, which gates
+ * that agreement. Add a script here once; every surface picks it up. */
 export const SCRIPTS: { ids: number[]; label: string }[] = [
   { ids: [1], label: "Format lyrics" },
   { ids: [2], label: "Format CUEs" },
