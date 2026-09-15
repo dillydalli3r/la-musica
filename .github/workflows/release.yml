@@ -40,15 +40,15 @@ jobs:
       - name: Package application zip
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          STAGE="MusicLibraryOptimizer-${VERSION}"
+          STAGE="la-musica-${VERSION}"
           mkdir -p "${STAGE}/web"
           cp -r mlo server tools "${STAGE}/"
           cp -r web/dist "${STAGE}/web/dist"
           cp start_app.py tray.py README.md LICENSE THIRD-PARTY-NOTICES.md "${STAGE}/" 2>/dev/null || true
-          [ -f "Start Music Library Optimizer.bat" ] && cp "Start Music Library Optimizer.bat" "${STAGE}/"
+          [ -f "Start la musica.bat" ] && cp "Start la musica.bat" "${STAGE}/"
           python -m pip download -r server/requirements.txt -d /tmp/wheels --only-binary :all: >/dev/null 2>&1 || true
           echo "${VERSION}" > "${STAGE}/.version"
-          zip -qr "MusicLibraryOptimizer-${VERSION}-windows-x64.zip" "${STAGE}"
+          zip -qr "la-musica-${VERSION}-windows-x64.zip" "${STAGE}"
           rm -rf "${STAGE}"
 
       - name: Docker meta
@@ -84,8 +84,8 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          name: Music Library Optimizer ${{ github.ref_name }}
+          name: la musica ${{ github.ref_name }}
           generate_release_notes: true
-          files: MusicLibraryOptimizer-*-windows-x64.zip
+          files: la-musica-*-windows-x64.zip
           draft: false
           prerelease: false

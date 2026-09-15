@@ -1,5 +1,5 @@
 """
-FastAPI backend for MusicLibraryOptimizer v2 — localhost:8000.
+FastAPI backend for la musica v2 — localhost:8000.
 
 Wraps the mlo/* engine as REST + WebSocket for the React frontend:
 library (tag-rich, sortable), grading/auditing, tag editing, playback

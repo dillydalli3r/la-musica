@@ -1,4 +1,4 @@
-# Music Library Optimizer — Desktop shell
+# la musica — Desktop shell
 
 Tauri v2 (Rust) wrapper around the React UI and Python backend.
 

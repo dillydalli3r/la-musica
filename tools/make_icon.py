@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the Music Library Optimizer app icon (app_icon.ico + PNGs).
+"""Generate the la musica app icon (app_icon.ico + PNGs).
 
 Draws a rounded square with an indigo->violet diagonal gradient, a white
 eighth-note glyph and small sparkles, supersampled 4x for crisp edges.

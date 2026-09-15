@@ -7,7 +7,7 @@ Shows a tray icon while the backend runs and provides:
   * Auto-start on login (Windows registry Run key, HKCU — no admin needed)
   * Stop backend + Exit
 
-Launched by "Start Music Library Optimizer.bat". If pystray is missing it
+Launched by "Start la musica.bat". If pystray is missing it
 degrades to the plain launcher (start backend + open browser + exit).
 """
 import os
@@ -154,7 +154,31 @@ def stop_any_backend():
 # --------------------------------------------------------------------------- #
 # Auto-start on login (Windows HKCU Run key — per-user, no admin required)
 # --------------------------------------------------------------------------- #
-AUTOSTART_NAME = "MusicLibraryOptimizer"
+AUTOSTART_NAME = "la musica"
+# This value name used to be "MusicLibraryOptimizer". An install from before the
+# rename still has that entry pointing at this same tray.py: the toggle would
+# read as off while the app kept starting, and switching it on would add a
+# second entry and a second tray fighting for the port. So adopt what the old
+# name holds, then drop it.
+LEGACY_AUTOSTART_NAME = "MusicLibraryOptimizer"
+
+def migrate_legacy_autostart():
+    """Move a pre-rename auto-start entry onto the current value name."""
+    if os.name != "nt":
+        return
+    import winreg
+    path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, path) as k:
+            try:
+                command, kind = winreg.QueryValueEx(k, LEGACY_AUTOSTART_NAME)
+            except OSError:
+                return
+            if not autostart_enabled():
+                winreg.SetValueEx(k, AUTOSTART_NAME, 0, kind, command)
+            winreg.DeleteValue(k, LEGACY_AUTOSTART_NAME)
+    except OSError:
+        pass
 
 
 def _autostart_command():
@@ -313,6 +337,7 @@ def _acquire_single_instance():
 
 
 def run_tray():
+    migrate_legacy_autostart()
     if not _acquire_single_instance():
         # A tray instance already manages the backend — just open the app.
         webbrowser.open(URL)

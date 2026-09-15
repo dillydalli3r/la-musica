@@ -1,4 +1,4 @@
-"""Music Library Optimizer core package.
+"""la musica core package.
 
 Modules:
     paths       filesystem locations and constants

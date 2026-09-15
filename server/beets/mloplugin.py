@@ -1,4 +1,4 @@
-"""Music Library Optimizer beets plugin (``mloplugin``).
+"""la musica beets plugin (``mloplugin``).
 
 Adds Picard-parity behaviors on top of a vanilla beets import:
 
@@ -16,7 +16,7 @@ Adds Picard-parity behaviors on top of a vanilla beets import:
 
 The plugin edits files through MLO's own tag layer (mlo.audio), so every
 container-specific tag mapping (vorbis / ID3 TXXX / MP4 freeform) matches
-what the rest of MusicLibraryOptimizer writes.
+what the rest of la musica writes.
 
 This module runs inside the beets process, which is the same Python
 interpreter with the repo root on sys.path (set up below).

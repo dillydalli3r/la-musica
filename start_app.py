@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Launch MusicLibraryOptimizer.
+"""Launch la musica.
 
 Starts the FastAPI backend (if not already running), waits for it to come
-up, then opens the app in your browser. Double-click "Start Music Library
-Optimizer.bat" (Windows) or run `python start_app.py`.
+up, then opens the app in your browser. Double-click "Start la musica.bat"
+(Windows) or run `python start_app.py`.
 """
 import os
 import socket

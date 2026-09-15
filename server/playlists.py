@@ -1,4 +1,4 @@
-"""Playlists for MusicLibraryOptimizer v2.
+"""Playlists for la musica v2.
 
 Dual storage:
   * SQLite (server/data/playlists.db) — fast UI, smart playlists, ordering.

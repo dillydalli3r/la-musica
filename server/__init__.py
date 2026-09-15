@@ -1,1 +1,1 @@
-"""MusicLibraryOptimizer v2 backend package."""
+"""la musica v2 backend package."""
