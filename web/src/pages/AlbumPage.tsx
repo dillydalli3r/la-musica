@@ -557,8 +557,60 @@ export default function AlbumPage() {
                   data.meta?.["ALBUM DYNAMIC RANGE"] ? `ADR ${data.meta["ALBUM DYNAMIC RANGE"]}` : null,
                   maxDisc > 1 ? `${maxDisc} disc${maxDisc === 1 ? "" : "s"}` : null,
                 ].filter((c): c is string => !!c)}
-                actions={
-                  <>
+              >
+                {/* identity strip: the grade verdict, the advisory mark and the
+                    MB / RYM links — deliberately outside the truncating title */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    className={`h-2 w-2 rounded-full shrink-0 transition-opacity ${verdictPass ? "bg-emerald-500/70" : "bg-red-500/80"}`}
+                    title={verdictPass ? `Pass — ${data.grade_pct ?? "?"}% of checks` : `Fail — ${data.grade_pct ?? "?"}% · ${issueEntries.length} problem type(s)`}
+                    onClick={() => setIssuesOpen(!issuesOpen)}
+                    aria-label="Grading verdict"
+                  />
+                  <AdvisoryMark value={data.meta?.ITUNESADVISORY ?? data.meta?.ALBUMITUNESADVISORY} size="md" />
+                  {/* MusicBrainz / RateYourMusic identity links: exactly one
+                      of each — prefer the release over its group */}
+                  <LinkChips
+                    tags={(data.meta ?? {}) as Record<string, unknown>}
+                    only={[
+                      ...(data.meta?.MUSICBRAINZ_ALBUMID ? [] : ["MUSICBRAINZ_RELEASEGROUPID"]),
+                      "MUSICBRAINZ_ALBUMID",
+                      "RATEYOURMUSIC_ALBUM",
+                    ]}
+                  />
+                </div>
+                {issueEntries.length > 0 && (
+                  <div>
+                    <button
+                      className="inline-flex items-center gap-1.5 text-xs text-red-400/80 hover:text-red-300"
+                      onClick={() => setIssuesOpen(!issuesOpen)}
+                    >
+                      <CircleAlert className="h-3.5 w-3.5" />
+                      {issueEntries.length} problem{issueEntries.length === 1 ? "" : "s"} to fix
+                      {issuesOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                    </button>
+                    {issuesOpen && (
+                      <div className="mt-1.5 max-w-3xl rounded-lg border border-red-900/40 bg-red-950/20 p-1.5 space-y-0.5">
+                        {issueEntries.map(([text, files]) => (
+                          <div key={text} className="rounded-md px-2 py-1.5 hover:bg-red-950/40">
+                            <div className="text-xs text-red-200 flex items-start gap-1.5">
+                              <CircleAlert className="h-3 w-3 mt-0.5 shrink-0 text-red-400" />
+                              <span>{text}</span>
+                              <span className="ml-auto text-[10px] text-zinc-500 shrink-0">{files.length === 1 && files[0] === "album" ? "whole album" : `${files.length} file(s)`}</span>
+                            </div>
+                            {files[0] !== "album" && (
+                              <div className="text-[10px] text-zinc-500 mt-0.5 pl-[18px]">
+                                {files.length > 6 ? `${files.slice(0, 6).join(" · ")} · +${files.length - 6} more` : files.join(" · ")}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {/* the album's actions, directly under the problems line */}
+                <div className="flex items-center gap-2 flex-wrap pt-2">
                     <button
                       className="btn-primary !p-2.5 !rounded-md"
                       onClick={() => playNow(queueTracks)}
@@ -638,60 +690,7 @@ export default function AlbumPage() {
                 },
               ]}
             />
-                  </>
-                }
-              >
-                {/* identity strip: the grade verdict, the advisory mark and the
-                    MB / RYM links — deliberately outside the truncating title */}
-                <div className="flex items-center gap-2 flex-wrap">
-                  <button
-                    className={`h-2 w-2 rounded-full shrink-0 transition-opacity ${verdictPass ? "bg-emerald-500/70" : "bg-red-500/80"}`}
-                    title={verdictPass ? `Pass — ${data.grade_pct ?? "?"}% of checks` : `Fail — ${data.grade_pct ?? "?"}% · ${issueEntries.length} problem type(s)`}
-                    onClick={() => setIssuesOpen(!issuesOpen)}
-                    aria-label="Grading verdict"
-                  />
-                  <AdvisoryMark value={data.meta?.ITUNESADVISORY ?? data.meta?.ALBUMITUNESADVISORY} size="md" />
-                  {/* MusicBrainz / RateYourMusic identity links: exactly one
-                      of each — prefer the release over its group */}
-                  <LinkChips
-                    tags={(data.meta ?? {}) as Record<string, unknown>}
-                    only={[
-                      ...(data.meta?.MUSICBRAINZ_ALBUMID ? [] : ["MUSICBRAINZ_RELEASEGROUPID"]),
-                      "MUSICBRAINZ_ALBUMID",
-                      "RATEYOURMUSIC_ALBUM",
-                    ]}
-                  />
                 </div>
-                {issueEntries.length > 0 && (
-                  <div>
-                    <button
-                      className="inline-flex items-center gap-1.5 text-xs text-red-400/80 hover:text-red-300"
-                      onClick={() => setIssuesOpen(!issuesOpen)}
-                    >
-                      <CircleAlert className="h-3.5 w-3.5" />
-                      {issueEntries.length} problem{issueEntries.length === 1 ? "" : "s"} to fix
-                      {issuesOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                    </button>
-                    {issuesOpen && (
-                      <div className="mt-1.5 max-w-3xl rounded-lg border border-red-900/40 bg-red-950/20 p-1.5 space-y-0.5">
-                        {issueEntries.map(([text, files]) => (
-                          <div key={text} className="rounded-md px-2 py-1.5 hover:bg-red-950/40">
-                            <div className="text-xs text-red-200 flex items-start gap-1.5">
-                              <CircleAlert className="h-3 w-3 mt-0.5 shrink-0 text-red-400" />
-                              <span>{text}</span>
-                              <span className="ml-auto text-[10px] text-zinc-500 shrink-0">{files.length === 1 && files[0] === "album" ? "whole album" : `${files.length} file(s)`}</span>
-                            </div>
-                            {files[0] !== "album" && (
-                              <div className="text-[10px] text-zinc-500 mt-0.5 pl-[18px]">
-                                {files.length > 6 ? `${files.slice(0, 6).join(" · ")} · +${files.length - 6} more` : files.join(" · ")}
-                              </div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
               </PageHeader>
             </div>
           </div>
@@ -967,7 +966,7 @@ export default function AlbumPage() {
         <table className="w-full text-sm">
           {/* top-12 clears the 48px floating top bar — at top-0 the header
               pins underneath it */}
-          <thead className="border-b border-border sticky top-12 z-10 bg-bg/95 backdrop-blur">
+          <thead className="border-b border-border/60">
             <tr>
               {selectMode && <th className="th w-10"></th>}
               {ALBUM_TRACK_COLS.filter((c) => trackCols.includes(c.id)).map((c) =>
