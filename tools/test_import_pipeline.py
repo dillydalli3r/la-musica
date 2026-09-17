@@ -340,6 +340,22 @@ try:
     # the preview route only guards the paths it is given
     assert api_imports.import_scripts_preview(
         api_imports.PreviewRequest(paths=[os.path.join(LIB, "Album One")]))["count"] >= 0
+
+    # A fresh install has NO music folder configured yet, and the wizard asks
+    # for this preview on mount: an empty path list guards nothing and must
+    # answer, not 400 (the CI suite runs without any config on disk).
+    def _no_folder(cfg=None):
+        raise HTTPException(400, "music_folder not set or not found")
+
+    _stub._music_folder = _no_folder
+    fresh = api_imports.import_scripts_preview(api_imports.PreviewRequest())
+    assert fresh["count"] == len(fresh["chain"]) and fresh["count"] > 0, fresh
+    try:
+        api_imports.import_scripts_preview(api_imports.PreviewRequest(paths=[ROOT]))
+    except HTTPException as e:
+        assert e.status_code == 400, e
+    else:
+        raise AssertionError("paths were accepted with no music folder configured")
 finally:
     if _real_main is None:
         sys.modules.pop("server.main", None)

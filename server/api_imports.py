@@ -80,10 +80,19 @@ def _cap(count, limit, what):
 
 
 def _guard(paths):
-    """Refuse any path outside the music folder (400), like every other route."""
+    """Refuse any path outside the music folder (400), like every other route.
+
+    An empty list guards nothing, so it returns before touching the music
+    folder: the wizard asks `/api/import/scripts/preview` with no paths on
+    first run, where no music folder is configured yet and the preview is
+    still perfectly answerable.
+    """
+    wanted = [p for p in (paths or []) if str(p).strip()]
+    if not wanted:
+        return
     from server.main import _in_music_folder, _music_folder
     folder = _music_folder()
-    for p in paths or []:
+    for p in wanted:
         if not _in_music_folder(p, folder):
             raise HTTPException(400, f"path outside music folder: {p}")
 
