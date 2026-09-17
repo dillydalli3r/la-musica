@@ -329,13 +329,21 @@ def recording_isrcs(recording_mbid):
 #
 #   deezer-isrc    api.deezer.com/track/isrc:<ISRC>      (verified working)
 #   spotify-isrc   Spotify search by ISRC                (needs client id+secret)
-#   apple-album    iTunes album search → collection id → lookup?entity=song
-#                                                        (verified working)
+#   apple-album    iTunes artist → its albums → THE EXPLICIT EDITION →
+#                  lookup?entity=song                    (verified working)
 #   itunes-song    iTunes song search, exact title only  (last resort)
 #
 # VERIFIED, on this machine: Apple's own `lookup?isrc=` and `lookup?upc=`
 # endpoints answer resultCount 0 — Apple does not serve identity lookups, so
-# Apple is reached through the album route (or the exact-title song search).
+# Apple is reached through the artist's album list (or the exact-title song
+# search). APPLE'S ALBUM *SEARCH* IS NOT USABLE FOR THIS: `search?entity=album`
+# answers ONE edition — for System Of A Down's "Steal This Album!" the CLEANED
+# one — whose tracks then read `cleaned`/`notExplicit` over the whole album,
+# i.e. an explicitly clean re-release of an explicit master. The artist route
+# (`lookup?id=<artistId>&entity=album`) lists every edition with its own
+# `collectionExplicitness`, so the explicit edition is the one whose tracks are
+# read, and the cleaned edition is only a cross-check.
+#
 # Deezer's ISRC endpoint DOES work and is per-track, so it is asked first: it
 # needs no title guessing at all. Spotify is optional and never load-bearing;
 # it is skipped entirely until `spotify_client_id`/`spotify_client_secret` are
@@ -358,6 +366,15 @@ _SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
 _SPOTIFY_SEARCH = "https://api.spotify.com/v1/search"
 # Album titles are compared with difflib below this ratio = not this release.
 _APPLE_ALBUM_SIMILARITY = 0.6
+# iTunes rate-limits hard: hammering it earns an EMPTY body (not JSON), and a
+# library pass re-reads the same artist and the same album's tracks over and
+# over. Calls are spaced out AND cached — in memory by the transport, on disk
+# below so a restart does not re-ask what Apple already told us.
+_APPLE_MIN_INTERVAL = 3.0
+_APPLE_CACHE_TTL = 30 * 86400.0
+_APPLE_CACHE_NAME = "apple_cache"
+_apple_lock = threading.Lock()
+_apple_last = 0.0
 
 # One answer per (source, identity). A library pass asks each track once;
 # `None` (asked, nobody stated a value) is cached too, so a rerun that found
@@ -495,6 +512,133 @@ def _spotify_advisory(isrc, cfg, timeout=None):
     return None
 
 
+def _data_cache_dir(name):
+    """<music>/.mlo/data/<name> — the app's folder-state dir for *name*."""
+    from mlo.paths import app_data_dir
+    music = ""
+    try:
+        from mlo.config import load_config
+        music = str(load_config().get("music_folder") or "")
+    except Exception:
+        music = ""
+    d = app_data_dir(music or None) or ""
+    return os.path.join(d, name) if d else None
+
+
+def _apple_cache_dir():
+    """Disk cache for the artist→albums and album→tracks payloads."""
+    return _data_cache_dir(_APPLE_CACHE_NAME)
+
+
+def _apple_json(path, params, timeout=None):
+    """One iTunes GET: ~1 per _APPLE_MIN_INTERVAL, disk-cached for a month.
+
+    Apple rate-limits hard — rapid repeats answer an EMPTY body, not JSON —
+    and these payloads (an artist's whole album list, one album's tracks) are
+    what a library pass re-reads for every file. None on any failure; this
+    never raises.
+    """
+    global _apple_last
+    import hashlib
+    from urllib.parse import urlencode
+    key = hashlib.sha1((path + "?" + urlencode(
+        sorted((str(k), str(v)) for k, v in (params or {}).items())
+    )).encode("utf-8")).hexdigest()
+    d = _apple_cache_dir()
+    fp = os.path.join(d, key + ".json") if d else None
+    if fp:
+        try:
+            if (os.path.isfile(fp)
+                    and time.time() - os.path.getmtime(fp) < _APPLE_CACHE_TTL):
+                with open(fp, encoding="utf-8") as fh:
+                    return json.load(fh)
+        except (OSError, ValueError):
+            pass
+    with _apple_lock:
+        wait = _APPLE_MIN_INTERVAL - (time.time() - _apple_last)
+        if wait > 0:
+            time.sleep(wait)
+        _apple_last = time.time()
+        data = _advisory_json(f"{_ITUNES_LOOKUP}{path}", dict(params or {}),
+                              timeout=timeout, host="itunes.apple.com")
+    if data is None or not fp:
+        return data
+    try:
+        os.makedirs(d, exist_ok=True)
+        tmp = fp + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, fp)
+    except OSError:
+        pass
+    return data
+
+
+def _apple_country(cfg=None):
+    """The storefront Apple is asked about — the app's region setting."""
+    return (str((cfg or {}).get("cover_country") or "").strip().lower()
+            or "us")
+
+
+def _apple_artist_id(artist, timeout=None):
+    """Apple's artist id for a name, or None.
+
+    Only the artist route lists EVERY edition of a release, so this is where
+    the advisory route starts.
+    """
+    name = str(artist or "").strip()
+    if not name:
+        return None
+    data = _apple_json("/search", {"term": name, "entity": "musicArtist",
+                                   "limit": 5}, timeout=timeout)
+    want = _norm_compare(name)
+    for row in (data or {}).get("results") or []:
+        if _norm_compare(row.get("artistName")) == want:
+            return _advisory_int(row.get("artistId"))
+    return None
+
+
+def _apple_editions(artist, album, track_count=None, cfg=None, timeout=None):
+    """Apple's editions of one album, the EXPLICIT edition first.
+
+    `lookup?id=<artistId>&entity=album` lists every edition Apple holds, each
+    with its own `collectionExplicitness`. An edition counts as this album
+    when its normalized `collectionName` matches — a `trackCount` match only
+    corroborates (it sorts such an edition up, and lets a near-identical title
+    through). Every failure — no artist, no editions, a rate-limited empty
+    body — returns [].
+    """
+    artist_id = _apple_artist_id(artist, timeout=timeout)
+    if not artist_id:
+        return []
+    data = _apple_json("/lookup",
+                       {"id": artist_id, "entity": "album", "limit": 200,
+                        "country": _apple_country(cfg)}, timeout=timeout)
+    want_artist = _norm_compare(artist)
+    want_album = _norm_compare(album)
+    want_count = _advisory_int(track_count)
+    rows = []
+    for row in (data or {}).get("results") or []:
+        cid = _advisory_int(row.get("collectionId"))
+        if not cid:
+            continue
+        got_artist = _norm_compare(row.get("artistName"))
+        if want_artist and got_artist and want_artist not in got_artist:
+            continue
+        name = _norm_compare(row.get("collectionName"))
+        count_ok = bool(want_count
+                        and _advisory_int(row.get("trackCount")) == want_count)
+        named = bool(want_album and name == want_album)
+        if not (named or (count_ok and _similarity(
+                album, str(row.get("collectionName") or ""))
+                >= _APPLE_ALBUM_SIMILARITY)):
+            continue
+        explicit = str(row.get("collectionExplicitness") or "").strip().lower()
+        rows.append((explicit == "explicit", count_ok, named, row))
+    rows.sort(key=lambda r: (r[0], r[1], r[2]), reverse=True)
+    return [row for *_rank, row in rows]
+
+
 def _apple_value(item):
     """Apple's track payload → 1/0/None.
 
@@ -516,7 +660,7 @@ def _apple_value(item):
 
 
 def _apple_collection_value(cid, title="", disc=None, track=None,
-                            positions_ok=True, timeout=None):
+                            positions_ok=True, timeout=None, cfg=None):
     """The advisory Apple states for the file inside one collection.
 
     The file is mapped to its track by discNumber/trackNumber (the position
@@ -527,11 +671,12 @@ def _apple_collection_value(cid, title="", disc=None, track=None,
     match may be trusted.
 
     Returns None when the matched track is `cleaned` or carries no rating:
-    that collection simply cannot answer.
+    that collection simply cannot answer, and the CALLER may still ask the
+    album's other editions.
     """
-    songs = _advisory_json(f"{_ITUNES_LOOKUP}/lookup",
-                           {"id": cid, "entity": "song", "limit": 200},
-                           timeout=timeout)
+    songs = _apple_json("/lookup",
+                        {"id": cid, "entity": "song", "limit": 200,
+                         "country": _apple_country(cfg)}, timeout=timeout)
     tracks = [item for item in (songs or {}).get("results") or []
               if str(item.get("wrapperType") or "").lower() == "track"]
     want_disc, want_track = _advisory_int(disc), _advisory_int(track)
@@ -553,51 +698,37 @@ def _apple_collection_value(cid, title="", disc=None, track=None,
 
 
 def _apple_album_advisory(artist, album, title="", disc=None, track=None,
-                          track_count=None, timeout=None):
-    """(value, source) from the release's album page on Apple, or None.
+                          track_count=None, timeout=None, cfg=None):
+    """(value, source) from the album's editions on Apple, or None.
 
-    `search?entity=album` resolves the collection (an artist-name match plus a
-    collectionName similarity check; the collection whose trackCount matches
-    the album ranks first), then the file is mapped into it by disc/track (or
-    an exact title) — see `_apple_collection_value`.
+    The long way round, on purpose: artist search → artist id → the artist's
+    album list → the EXPLICIT edition first (`_apple_editions`), then the
+    cleaned / other editions as a cross-check. Apple's album *search* answers
+    one edition only — often the cleaned one, whose tracks then read
+    `cleaned`/`notExplicit` even where the master is explicit.
 
-    The best-scoring collection is tried first, but a collection that cannot
-    answer is not the end of the road: Apple often offers only a CLEANED
-    edition under one album name and the explicit one under another, so the
-    next candidates are tried too (bounded to three lookups) before giving up.
     A `cleaned` match never produces a value — it only proves that THIS
-    collection cannot rate the track. Candidates whose track count differs
-    from the album's are title-matched only, because position alone would then
-    be matching a different song.
+    edition cannot rate the track — so the next candidate is tried (bounded to
+    three track lookups) before giving up. Candidates whose track count is
+    known and differs are title-matched only, because position alone would
+    then be matching a different song.
     """
     artist = str(artist or "").strip()
     album = str(album or "").strip()
     if not artist or not album:
         return None
-    found = _advisory_json(f"{_ITUNES_LOOKUP}/search",
-                           {"term": f"{artist} {album}", "entity": "album",
-                            "limit": 10}, timeout=timeout)
-    want_artist = _norm_compare(artist)
     want_count = _advisory_int(track_count)
-    candidates = []
-    for row in (found or {}).get("results") or []:
-        got_artist = _norm_compare(row.get("artistName"))
-        if want_artist and got_artist and want_artist not in got_artist:
-            continue
-        sim = _similarity(album, str(row.get("collectionName") or ""))
-        if sim < _APPLE_ALBUM_SIMILARITY:
-            continue
-        same_count = bool(want_count and _advisory_int(row.get("trackCount")) == want_count)
-        candidates.append((same_count, sim, row))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
-    for count_ok, _sim, row in candidates[:3]:
+    for row in _apple_editions(artist, album, track_count, cfg,
+                               timeout=timeout)[:3]:
         cid = _advisory_int(row.get("collectionId"))
         if not cid:
             continue
-        value = _apple_collection_value(cid, title, disc, track,
-                                        positions_ok=count_ok, timeout=timeout)
+        count_ok = bool(want_count
+                        and _advisory_int(row.get("trackCount")) == want_count)
+        value = _apple_collection_value(
+            cid, title, disc, track,
+            positions_ok=want_count is None or count_ok,
+            timeout=timeout, cfg=cfg)
         if value is not None:
             return (value, "apple-album")
     return None
@@ -684,7 +815,7 @@ def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
         key = ("apple-album", _norm_compare(artist), _norm_compare(album),
                _advisory_int(disc), _advisory_int(track), _norm_compare(title))
         answer = _advisory_cached(key, lambda: _apple_album_advisory(
-            artist, album, title, disc, track, track_count))
+            artist, album, title, disc, track, track_count, cfg=cfg))
         if answer is not None:
             return {"value": answer[0], "source": answer[1], "checked": checked}
     if title:
@@ -704,8 +835,8 @@ def resolve_advisory(isrc="", recording_mbid="", **context):
 
       1. Deezer by ISRC — per-track identity, no title guessing (primary);
       2. Spotify by ISRC — only when client id + secret are configured;
-      3. Apple's album route — album → collection → track (disc/track, then
-         exact title);
+      3. Apple's artist route — artist → its album list → the explicit
+         edition → track (disc/track, then exact title);
       4. Apple's song search — exact normalized title only.
 
     `context` may carry `title`, `artist`, `album`, `disc`, `track`,
@@ -915,15 +1046,7 @@ def _rym_unreachable(reason):
 
 def _rym_cache_dir():
     """<music>/.mlo/data/rym_cache — the app's folder-state dir."""
-    from mlo.paths import app_data_dir
-    music = ""
-    try:
-        from mlo.config import load_config
-        music = str(load_config().get("music_folder") or "")
-    except Exception:
-        music = ""
-    d = app_data_dir(music or None) or ""
-    return os.path.join(d, "rym_cache") if d else None
+    return _data_cache_dir("rym_cache")
 
 
 def _rym_cache_read(key, ttl):

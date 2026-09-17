@@ -6,9 +6,11 @@ What this pins, with the HTTP layer stubbed (no network at all):
   * Deezer's per-track ISRC lookup is the PRIMARY source and maps
     explicit_content_lyrics / explicit_lyrics to 0/1/2 — and an unclassified
     field is NO answer, not a guess;
-  * Apple's album route resolves the collection (artist match + title
-    similarity + trackCount) and maps the file to a track by disc/track, then
-    by exact title — and a `cleaned` entry is NO ANSWER (never 0, never 2);
+  * Apple's album route resolves the EDITION through the artist
+    (`search?entity=musicArtist` → artist id → `lookup?entity=album`), prefers
+    the `collectionExplicitness: explicit` edition over the cleaned one, and
+    maps the file to a track by disc/track, then by exact title — with a
+    `cleaned` entry as NO ANSWER (never 0, never 2) from that edition only;
   * Apple's song search accepts only an exact normalized title (and artist)
     hit, and a `cleaned` hit is rejected;
   * Spotify is asked ONLY when `spotify_client_id`/`spotify_client_secret`
@@ -38,6 +40,10 @@ ISRC = "USRC17607839"
 CFG = {}
 # The real transport seam, saved before any stub replaces it.
 _REAL_ADVISORY_JSON = intg._advisory_json
+# The iTunes disk cache belongs to a real app run (and would outlive these
+# stubs); no politeness sleep either — the transport is stubbed here.
+intg._apple_cache_dir = lambda: None
+intg._APPLE_MIN_INTERVAL = 0.0
 
 
 def stub_http(routes):
@@ -119,76 +125,157 @@ assert route == {"value": None, "source": None,
                  "checked": ["deezer-isrc", "apple-album", "itunes-song"]}, route
 
 # --------------------------------------------------------------------------- #
-# 2) Apple album route — album → collection → track
+# 2) Apple artist route — artist → editions → the track
 # --------------------------------------------------------------------------- #
-ALBUM_HITS = {"results": [
-    {"collectionId": 9, "collectionName": "Loud", "artistName": "Some Cover Band",
-     "trackCount": 4},
-    {"collectionId": 111, "collectionName": "Loud", "artistName": "Rihanna",
-     "trackCount": 3},
-    {"collectionId": 222, "collectionName": "Loud", "artistName": "Rihanna",
-     "trackCount": 4},
+# Payloads shaped exactly like Apple's (System Of A Down, "Steal This
+# Album!", us storefront): the artist's album list carries BOTH editions — the
+# explicit master (193126473) and the cleaned re-release (193535804) — and the
+# explicit one's real per-track flags mark five tracks explicit. Apple's album
+# *search* is deliberately not used: it answers the cleaned edition alone,
+# whose every track reads `cleaned`/Clean.
+ARTIST = "System Of A Down"
+ALBUM = "Steal This Album!"
+ARTIST_HITS = {"results": [
+    {"wrapperType": "artist", "artistId": 462715, "artistName": ARTIST}]}
+EXPLICIT_ID, CLEANED_ID = 193126473, 193535804
+EDITION = {"wrapperType": "collection", "artistName": ARTIST,
+           "collectionName": ALBUM, "collectionCensoredName": ALBUM,
+           "trackCount": 16, "country": "USA", "primaryGenreName": "Hard Rock"}
+EDITIONS = {"results": [
+    dict(EDITION, collectionId=EXPLICIT_ID, collectionExplicitness="explicit"),
+    dict(EDITION, collectionId=CLEANED_ID, collectionExplicitness="cleaned"),
 ]}
-SONGS = {"results": [
-    {"wrapperType": "collection", "collectionId": 222, "trackCount": 4},
-    {"wrapperType": "track", "collectionId": 222, "discNumber": 1, "trackNumber": 1,
-     "trackName": "S&M", "trackExplicitness": "explicit",
-     "contentAdvisoryRating": "Explicit"},
-    {"wrapperType": "track", "collectionId": 222, "discNumber": 1, "trackNumber": 2,
-     "trackName": "What's My Name?", "trackExplicitness": "cleaned",
-     "contentAdvisoryRating": "Clean"},
-    {"wrapperType": "track", "collectionId": 222, "discNumber": 2, "trackNumber": 1,
-     "trackName": "Love the Way You Lie", "trackExplicitness": "notExplicit"},
-]}
-APPLE = {"api.deezer.com": {"error": {"type": "DataException"}},
-         "itunes.apple.com/search": ALBUM_HITS,
-         "itunes.apple.com/lookup": SONGS}
+TRACK_NAMES = [
+    "Chic 'N' Stu", "Innervision", "Bubbles", "Boom!", "Nüguns",
+    "A.D.D. (American Dream Denial)", "Mr. Jack", "I-E-A-I-A-I-O", "36",
+    "Pictures", "Highway Song", "F**k the System", "Ego Brain", "Thetawaves",
+    "Roulette", "Streamline",
+]
+EXPLICIT_TRACKS = {4, 6, 7, 8, 12}
+
+
+def tracks(cid, explicit=(), explicitness="notExplicit"):
+    rows = []
+    for n, name in enumerate(TRACK_NAMES, 1):
+        exp = "explicit" if n in explicit else explicitness
+        row = {"wrapperType": "track", "collectionId": cid, "discNumber": 1,
+               "trackNumber": n, "trackName": name, "trackExplicitness": exp}
+        if exp == "cleaned":
+            row["contentAdvisoryRating"] = "Clean"   # Apple's own pairing
+        rows.append(row)
+    return {"results": rows}
+
+
+def apple_routes(artist_hits=None, editions=None, songs=None):
+    artist_hits = ARTIST_HITS if artist_hits is None else artist_hits
+    editions = EDITIONS if editions is None else editions
+    songs = songs if songs is not None else {
+        EXPLICIT_ID: tracks(EXPLICIT_ID, EXPLICIT_TRACKS),
+        CLEANED_ID: tracks(CLEANED_ID, explicitness="cleaned"),
+    }
+    return {
+        "api.deezer.com": {"error": {"type": "DataException"}},
+        "itunes.apple.com/search": lambda p: (artist_hits
+                                              if p.get("entity") == "musicArtist"
+                                              else {"results": []}),
+        "itunes.apple.com/lookup": lambda p: (editions
+                                              if p.get("entity") == "album"
+                                              else songs.get(p.get("id"),
+                                                             {"results": []})),
+    }
 
 
 def apple(**ctx):
     clear()
-    calls = stub_http(APPLE)
+    calls = stub_http(apple_routes())
     ctx.setdefault("isrc", "")
+    ctx.setdefault("artist", ARTIST)
+    ctx.setdefault("album", ALBUM)
+    ctx.setdefault("track_count", 16)
     route = intg.resolve_advisory_route(cfg=CFG, **ctx)
     return route, calls
 
 
-# disc/track wins over the title: the file's own position decides, so a
-# mistitled file still gets ITS track's rating, and the collection whose
-# trackCount matches (222, not 111) is the one looked up first.
-route, calls = apple(artist="Rihanna", album="Loud", title="Wrong Title",
-                     disc=2, track=1, track_count=4)
-assert route["value"] == 0 and route["source"] == "apple-album", route
-lookup = gets(calls, "itunes.apple.com/lookup")[0]
-assert lookup[2]["id"] == 222, lookup
+# the five explicit tracks answer 1, the other eleven answer 0 — read off the
+# EXPLICIT edition, by the file's own disc/track position
+for n, name in enumerate(TRACK_NAMES, 1):
+    route, _ = apple(title=name, disc=1, track=n)
+    want = 1 if n in EXPLICIT_TRACKS else 0
+    assert route["value"] == want and route["source"] == "apple-album", (n, route)
+
+# ... and that is the edition that was read: artist search → artist id, then
+# the artist's album list, and the clean edition is never looked up
+route, calls = apple(title="Boom!", disc=1, track=4)
+assert route["value"] == 1, route
+search = gets(calls, "itunes.apple.com/search")
+assert search[0][2] == {"term": ARTIST, "entity": "musicArtist", "limit": 5}, search
+lookups = gets(calls, "itunes.apple.com/lookup")
+assert [c[2]["id"] for c in lookups] == [462715, EXPLICIT_ID], lookups
+assert lookups[0][2]["entity"] == "album" and lookups[0][2]["country"] == "us", lookups
+assert lookups[1][2]["entity"] == "song", lookups
+
+# disc/track wins over the title: a mistitled file still gets ITS track's flag
+route, _ = apple(title="Wrong Title", disc=1, track=4)
+assert route["value"] == 1, route
 
 # exact normalized title fallback when the file states no position
-route, _ = apple(artist="Rihanna", album="Loud", title="S&M")
-assert route["value"] == 1 and route["source"] == "apple-album", route
+route, _ = apple(title="Mr. Jack")
+assert route["value"] == 1, route
 
-# `cleaned` is NO ANSWER: not 0, not 2, and no other track's rating either
-route, _ = apple(artist="Rihanna", album="Loud", title="What's My Name?",
-                 disc=1, track=2)
+# only a CLEANED edition exists → NO value (never 0, never 2), even though
+# that edition reports a rating for every track
+clear()
+calls = stub_http(apple_routes(
+    editions={"results": [dict(EDITION, collectionId=CLEANED_ID,
+                               collectionExplicitness="cleaned")]}))
+route = intg.resolve_advisory_route(artist=ARTIST, album=ALBUM, title="Boom!",
+                                    disc=1, track=4, track_count=16, cfg=CFG)
 assert route["value"] is None and route["source"] is None, route
-route, _ = apple(artist="Rihanna", album="Loud", title="What's My Name?")
+route = intg.resolve_advisory_route(artist=ARTIST, album=ALBUM, title="Boom!",
+                                    cfg=CFG)
 assert route["value"] is None and route["source"] is None, route
 
-# a different artist's collection is not this album
-route, _ = apple(artist="Nobody At All", album="Loud", title="S&M",
-                 disc=1, track=1)
+# an artist Apple does not know, or an album the artist does not have, is NO
+# value — and never an exception
+clear()
+calls = stub_http(apple_routes(artist_hits={"results": []}))
+route = intg.resolve_advisory_route(artist="Nobody At All", album=ALBUM,
+                                    title="Boom!", disc=1, track=4, cfg=CFG)
+assert route["value"] is None and route["source"] is None, route
+assert not gets(calls, "itunes.apple.com/lookup"), calls
+route = intg.resolve_advisory_route(artist=ARTIST, album="", title="Boom!",
+                                    disc=1, track=4, cfg=CFG)
+assert route["value"] is None, route
+route = intg.resolve_advisory_route(artist=ARTIST, album=ALBUM, cfg=CFG)
+assert route["value"] is None and route["source"] is None, route
+
+# a release the artist does not have (every row credits another artist) is not
+# this album: the name match alone never rates a track
+clear()
+stub_http(apple_routes(editions={"results": [
+    dict(EDITION, collectionId=EXPLICIT_ID, collectionExplicitness="explicit",
+         artistName="Some Cover Band")]}))
+route = intg.resolve_advisory_route(artist=ARTIST, album=ALBUM, title="Boom!",
+                                    disc=1, track=4, track_count=16, cfg=CFG)
 assert route["value"] is None and route["source"] is None, route
 
 
-# A collection that can only state `cleaned` is not the end of the road: the
+# An edition that can only state `cleaned` is not the end of the road: the
 # next candidate (same album, same track count, so the position still
 # identifies the track) answers instead.
 FALLBACK = {"api.deezer.com": {"error": {"type": "DataException"}},
             "itunes.apple.com/search": {"results": [
-                {"collectionId": 501, "collectionName": "Loud",
-                 "artistName": "Rihanna", "trackCount": 4},
-                {"collectionId": 502, "collectionName": "Loud",
-                 "artistName": "Rihanna", "trackCount": 4}]},
+                {"wrapperType": "artist", "artistId": 1039,
+                 "artistName": "Rihanna"}]},
             "itunes.apple.com/lookup": lambda params: (
+                {"results": [
+                    {"wrapperType": "collection", "collectionId": 501,
+                     "collectionName": "Loud", "artistName": "Rihanna",
+                     "trackCount": 4},
+                    {"wrapperType": "collection", "collectionId": 502,
+                     "collectionName": "Loud", "artistName": "Rihanna",
+                     "trackCount": 4}]}
+                if params.get("entity") == "album" else
                 {"results": [
                     {"wrapperType": "track", "discNumber": 1, "trackNumber": 2,
                      "trackName": "What's My Name?",
@@ -204,7 +291,7 @@ route = intg.resolve_advisory_route(artist="Rihanna", album="Loud",
                                     title="What's My Name?", disc=1, track=2,
                                     track_count=4, cfg=CFG)
 assert route["value"] == 0 and route["source"] == "apple-album", route
-assert [c[2]["id"] for c in gets(calls, "itunes.apple.com/lookup")] == [501, 502], calls
+assert [c[2]["id"] for c in gets(calls, "itunes.apple.com/lookup")] == [1039, 501, 502], calls
 
 # --------------------------------------------------------------------------- #
 # 3) Spotify — optional, configured only
@@ -496,13 +583,12 @@ finally:
 # --------------------------------------------------------------------------- #
 assert {"deezer-isrc", "apple-album"} <= intg.ADVISORY_SOURCES
 clear()
-stub_http({"api.deezer.com": {"explicit_lyrics": False, "explicit_content_lyrics": 0},
-           "itunes.apple.com/search": ALBUM_HITS,
-           "itunes.apple.com/lookup": SONGS})
+stub_http(dict(apple_routes(), **{
+    "api.deezer.com": {"explicit_lyrics": False, "explicit_content_lyrics": 0}}))
 for kwargs in ({"isrc": ISRC},
-               {"artist": "Rihanna", "album": "Loud", "title": "S&M",
-                "disc": 1, "track": 1},
-               {"title": "S&M", "artist": "Rihanna"}):
+               {"artist": ARTIST, "album": ALBUM, "title": "Boom!",
+                "disc": 1, "track": 4},
+               {"title": "Boom!", "artist": ARTIST}):
     route = intg.resolve_advisory_route(cfg=CFG, **kwargs)
     assert (route["value"] is None) == (route["source"] is None), route
     if route["source"]:
