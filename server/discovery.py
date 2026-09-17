@@ -96,7 +96,29 @@ _HOST_WAIT = {
     "api.listenbrainz.org": 1.05,
     "musicbrainz.org": 1.05,
     "api.deezer.com": 0.15,
+    # The crowdsourced/keyed services ask for 1 req/s as well; Wikidata's
+    # documented policy is the same. A missing entry means "no wait", which is
+    # only right for the CDNs (Apple, TheAudioDB).
+    "ws.audioscrobbler.com": 1.05,
+    "api.discogs.com": 1.05,
+    "www.wikidata.org": 1.05,
 }
+
+
+# One clear line per host per process: a provider going dark must be visible
+# in the import log without every track printing its own traceback.
+_HOST_WARNED: set = set()
+_HOST_WARNED_LOCK = threading.Lock()
+
+
+def _host_unreachable(host, reason):
+    """Print one line the first time *host* fails, then stay quiet."""
+    with _HOST_WARNED_LOCK:
+        if host in _HOST_WARNED:
+            return
+        _HOST_WARNED.add(host)
+    print(f"[mlo] {host}: {reason} — that source is skipped this run")
+
 
 TTL_META = 1800.0        # artist/album metadata, images, descriptions, MBIDs
 TTL_CHART = 900.0        # charts and recommendations (they move)
@@ -198,10 +220,13 @@ def _json(url, params=None, headers=None, timeout=None, ttl=TTL_META, host=None)
     try:
         target = host or (httpx.URL(url).host or "")
         _throttle(target)
-        # MetaBrainz and Wikimedia both require a descriptive, contactable UA;
-        # the storefront APIs (Deezer, Apple, TheAudioDB) serve a browser UA.
+        # MetaBrainz and Wikimedia both require a descriptive, contactable UA
+        # (Wikimedia answers 403 to a bare browser string — Wikidata included:
+        # `www.wikidata.org` is not matched by "wikimedia"); the storefront
+        # APIs (Deezer, Apple, TheAudioDB) serve a browser UA.
         polite = any(tag in target for tag in
-                     ("musicbrainz", "listenbrainz", "wikimedia", "wikipedia"))
+                     ("musicbrainz", "listenbrainz", "wikimedia", "wikipedia",
+                      "wikidata"))
         # A caller's own headers (Spotify's bearer token, for one) win over
         # the defaults — they are required, not cosmetic.
         sent = {"User-Agent": APP_UA if polite else BROWSER_UA,
@@ -216,10 +241,14 @@ def _json(url, params=None, headers=None, timeout=None, ttl=TTL_META, host=None)
         )
         if resp.status_code >= 400:
             data = None
+            # 404 is an identity that does not exist there, not a dead source.
+            if resp.status_code != 404:
+                _host_unreachable(target, f"HTTP {resp.status_code}")
         else:
             data = resp.json()
-    except Exception:
+    except Exception as e:
         data = None
+        _host_unreachable(host or "", f"no answer ({type(e).__name__})")
     finally:
         with _CACHE_LOCK:
             if data is not None:
@@ -534,6 +563,155 @@ def listenbrainz_top_recordings(range_="month", limit=25, timeout=None):
 
 
 # --------------------------------------------------------------------------- #
+# ListenBrainz genre tags
+# --------------------------------------------------------------------------- #
+# `/1/metadata/<entity>/?<entity>_mbids=<uuid>&inc=tag` answers a dict keyed by
+# MBID whose `tag` block has one bucket per entity kind. Each row is
+# `{tag, count, genre_mbid?}`:
+#
+#   * a row WITH `genre_mbid` is a RECOGNISED genre — ListenBrainz matched it
+#     to the MusicBrainz genre taxonomy — and is imported as a genre;
+#   * a row WITHOUT one is a free tag: how people describe the music. That is
+#     as often a mood ("melancholic"), a scene, a language or outright spam
+#     (a live sample carried `vyrzukhisuc-artiest`), so a free tag is kept only
+#     when it is agreed on (count >= 2) and is not a mood word.
+#
+# The artist bucket of a recording lookup is deliberately NOT folded in here:
+# the chain asks for the artist's own tags as its own, lower tier, and
+# attribute-splitting is the caller's decision, not this function's.
+_LB_MOOD_WORDS = frozenset("""
+melancholic melancholy sad happy lonely anxious angry aggressive calm
+chill chillout relaxing relaxed peaceful dreamy atmospheric introspective
+emotional energetic powerful beautiful epic romantic sexy party summer
+driving uplifting dark upbeat instrumental love night
+""".split())
+_LB_MIN_FREE_COUNT = 2
+_LB_ENTITIES = {
+    "recording": ("recording", "recording_mbids"),
+    "release_group": ("release_group", "release_group_mbids"),
+    "release-group": ("release_group", "release_group_mbids"),
+    "artist": ("artist", "artist_mbids"),
+}
+# What the listeners call a genre, and what only describes a mood.
+LB_MOOD_WORDS = _LB_MOOD_WORDS
+
+
+def listenbrainz_genre_tags(mbid, entity="recording", timeout=None):
+    """{"genres": [...], "tags": [...], "source": "listenbrainz"} or None.
+
+    Recognised genres (`genre_mbid` rows) first, then the agreed free tags
+    that are not moods — deduped case-insensitively, trimmed, in row order.
+    `None` means ListenBrainz stated nothing about this MBID (or did not
+    answer): the caller moves to its next tier, never invents a genre.
+    """
+    ident = str(mbid or "").strip().lower()
+    where, param = _LB_ENTITIES.get(str(entity or "").strip().lower(), (None, None))
+    if not ident or not where:
+        return None
+    data = _json(f"{LISTENBRAINZ_BASE}/metadata/{where}/",
+                 {param: ident, "inc": "tag"}, timeout=timeout)
+    if isinstance(data, list):
+        # `/metadata/artist/` answers a LIST of records (the recording and
+        # release-group paths answer a dict keyed by MBID); the record for this
+        # MBID is picked by its own id, never by position.
+        node = next((row for row in data if isinstance(row, dict)
+                     and str(row.get("mbid") or row.get("artist_mbid")
+                             or "").lower() == ident), None)
+        if node is None:
+            node = next((row for row in data if isinstance(row, dict)), {}) or {}
+    else:
+        node = (data or {}).get(ident) or {}
+    rows = (node.get("tag") or {}).get(where) or []
+    if isinstance(rows, dict):
+        rows = [rows]
+    genres, tags = [], []
+
+    def add(bucket, name):
+        key = str(name or "").strip().lower()
+        if not key:
+            return
+        if any(key == seen for seen in bucket):
+            return
+        bucket.append(key)
+
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("tag"):
+            continue
+        count = _int(row.get("count")) or 0
+        name = str(row.get("tag")).strip()
+        if row.get("genre_mbid"):
+            add(genres, name)
+        elif count >= _LB_MIN_FREE_COUNT and name.lower() not in _LB_MOOD_WORDS:
+            add(tags, name)
+    if not genres and not tags:
+        return None
+    return {"genres": genres, "tags": tags, "source": "listenbrainz"}
+
+
+# --------------------------------------------------------------------------- #
+# Wikidata
+# --------------------------------------------------------------------------- #
+WIKIDATA_API = "https://www.wikidata.org/w/api.php"
+
+
+def _wikidata(params, timeout=None):
+    sent = dict(params)
+    sent["format"] = "json"
+    sent["origin"] = "*"
+    return _json(WIKIDATA_API, sent, timeout=timeout, host="www.wikidata.org")
+
+
+def wikidata_entity(term, timeout=None):
+    """The QID Wikidata's own search considers the best match for *term*."""
+    term = str(term or "").strip()
+    if not term:
+        return None
+    data = _wikidata({"action": "wbsearchentities", "search": term,
+                      "language": "en", "uselang": "en", "limit": 5,
+                      "type": "item"}, timeout=timeout)
+    hits = (data or {}).get("search") or []
+    return (hits[0] or {}).get("id") if hits else None
+
+
+def wikidata_genres(qid="", term="", timeout=None):
+    """Genres Wikidata states for one entity (P136), or None.
+
+    `qid` is the entity (a release group's own Wikidata relation when the
+    caller has it); `term` is the fallback search "artist album". P136 values
+    are item ids, resolved to their English labels in one extra request — a
+    claim whose label cannot be read is dropped, never guessed. None when the
+    entity or its genre statements cannot be read.
+    """
+    qid = str(qid or "").strip()
+    if not qid:
+        qid = wikidata_entity(term, timeout=timeout) or ""
+    if not qid:
+        return None
+    claims = _wikidata({"action": "wbgetclaims", "entity": qid,
+                        "property": "P136"}, timeout=timeout)
+    ids = []
+    for claim in ((claims or {}).get("claims") or {}).get("P136") or []:
+        value = ((claim.get("mainsnak") or {}).get("datavalue") or {}).get("value")
+        got = value.get("id") if isinstance(value, dict) else value
+        if isinstance(got, str) and got.startswith("Q") and got not in ids:
+            ids.append(got)
+    if not ids:
+        return None
+    data = _wikidata({"action": "wbgetentities", "ids": "|".join(ids),
+                      "props": "labels", "languages": "en"}, timeout=timeout)
+    entities = (data or {}).get("entities") or {}
+    genres = []
+    for item in ids:
+        labels = ((entities.get(item) or {}).get("labels") or {})
+        label = (labels.get("en") or {}).get("value")
+        if label and label.strip().lower() not in {g.lower() for g in genres}:
+            genres.append(label.strip())
+    if not genres:
+        return None
+    return {"genres": genres, "qid": qid, "qids": ids, "source": "wikidata"}
+
+
+# --------------------------------------------------------------------------- #
 # iTunes
 # --------------------------------------------------------------------------- #
 def itunes_artwork(url, size=3000):
@@ -603,35 +781,83 @@ DISCOGS_BASE = "https://api.discogs.com"
 LASTFM_BASE = "https://ws.audioscrobbler.com/2.0/"
 
 
-def discogs_album_genres(artist, album, cfg=None, timeout=None):
-    """Discogs genres+styles for an album; [] without a configured token.
+def _discogs_release(artist, album, cfg=None, timeout=None):
+    """The Discogs release detail for an album; None without a token or a hit.
 
-    Discogs' search endpoint requires authentication, so the source is skipped
-    (never guessed) until `discogs_token` is set in Settings. The release's
-    `genre` and `style` lists are both genres for tagging purposes.
+    Discogs' search endpoint requires authentication, so the source is
+    skipped (never guessed) until `discogs_token` is set in Settings. The
+    detail object is what both the genre and the (weak) Parental Advisory
+    routes read, so both are answered by ONE cached pair of requests.
     """
     token = str((cfg or {}).get("discogs_token") or "").strip()
     if not token or not (artist or album):
-        return []
+        return None
     data = _json(f"{DISCOGS_BASE}/database/search",
                  {"artist": artist, "release_title": album, "type": "release",
                   "token": token, "per_page": 3}, timeout=timeout)
     results = (data or {}).get("results") or []
     if not results:
-        return []
+        return None
     rid = results[0].get("id")
     if not rid:
-        return []
-    detail = _json(f"{DISCOGS_BASE}/releases/{rid}", {"token": token},
-                   timeout=timeout)
-    out = list((detail or {}).get("genres") or [])
-    out += list((detail or {}).get("styles") or [])
+        return None
+    return _json(f"{DISCOGS_BASE}/releases/{rid}", {"token": token},
+                 timeout=timeout)
+
+
+def discogs_album_genres(artist, album, cfg=None, timeout=None):
+    """Discogs genres+styles for an album; [] without a configured token.
+
+    The release's `genre` and `style` lists are both genres for tagging
+    purposes (`style` is the finer one, and RYM-style tagging wants both).
+    """
+    detail = _discogs_release(artist, album, cfg=cfg, timeout=timeout) or {}
+    out = list(detail.get("genres") or [])
+    out += list(detail.get("styles") or [])
     return [g for g in out if str(g).strip()]
+
+
+def discogs_parental_advisory(artist, album, cfg=None, timeout=None):
+    """True when Discogs lists a "Parental Advisory" release format.
+
+    Album-level and WEAK evidence — a sticker on the edition Discogs matched,
+    not a statement about any one track — so it is only ever used as an extra
+    explicit signal, and its absence states nothing. None without a token.
+    """
+    detail = _discogs_release(artist, album, cfg=cfg, timeout=timeout)
+    if not detail:
+        return None
+    for fmt in detail.get("formats") or []:
+        if not isinstance(fmt, dict):
+            continue
+        text = " ".join([str(fmt.get("name") or "")]
+                        + [str(d) for d in fmt.get("descriptions") or []])
+        if "parental advisory" in text.lower():
+            return True
+    return None
+
+
+def _lastfm_key(cfg):
+    return str((cfg or {}).get("lastfm_api_key") or "").strip()
+
+
+def _lastfm_tags(method, params, cfg=None, timeout=None):
+    """`{method}` top tags for one entity; [] without a key or on any failure."""
+    key = _lastfm_key(cfg)
+    if not key:
+        return []
+    sent = dict(params, method=method, api_key=key, format="json", autocorrect=1)
+    data = _json(LASTFM_BASE, sent, timeout=timeout,
+                 host="ws.audioscrobbler.com")
+    tags = (((data or {}).get("toptags") or {}).get("tag")) or []
+    if isinstance(tags, dict):
+        tags = [tags]
+    return [t.get("name") for t in tags if isinstance(t, dict) and t.get("name")]
 
 
 def lastfm_album_genres(artist, album, cfg=None, timeout=None):
     """Last.fm top tags for an album; [] without a configured API key."""
-    key = str((cfg or {}).get("lastfm_api_key") or "").strip()
+    key = _lastfm_key(cfg)
     if not key or not (artist or album):
         return []
     data = _json(LASTFM_BASE,
@@ -642,6 +868,21 @@ def lastfm_album_genres(artist, album, cfg=None, timeout=None):
     if isinstance(tags, dict):
         tags = [tags]
     return [t.get("name") for t in tags if t.get("name")]
+
+
+def lastfm_track_genres(artist, track, cfg=None, timeout=None):
+    """Last.fm top tags for ONE track (the per-track tier); [] without a key."""
+    if not track:
+        return []
+    return _lastfm_tags("track.getTopTags", {"artist": artist, "track": track},
+                        cfg, timeout)
+
+
+def lastfm_artist_genres(artist, cfg=None, timeout=None):
+    """Last.fm top tags for an artist (the tier below the track); [] w/o key."""
+    if not artist:
+        return []
+    return _lastfm_tags("artist.getTopTags", {"artist": artist}, cfg, timeout)
 
 
 # --------------------------------------------------------------------------- #
@@ -673,6 +914,39 @@ def audiodb_artist(name, timeout=None):
     }
 
 
+def audiodb_track(artist, track, timeout=None):
+    """TheAudioDB's own row for ONE track, or None when it states none.
+
+    `searchtrack.php` is the source's PER-TRACK tier (the row carries
+    `strGenre`/`strStyle`/`strMood`); `audiodb_album` is the caller's fallback
+    tier. TheAudioDB answers the first rows it has for a title whoever
+    recorded it, so a row whose own `strArtist` is not the artist we asked
+    about is NO answer — never another artist's genre for our track.
+    """
+    artist = str(artist or "").strip()
+    track = str(track or "").strip()
+    if not artist or not track:
+        return None
+    data = _json(f"{AUDIODB_BASE}/{AUDIODB_KEY}/searchtrack.php",
+                 {"s": artist, "t": track}, timeout=timeout)
+    want = _norm(artist)
+    for item in (data or {}).get("track") or []:
+        got = _norm(item.get("strArtist"))
+        if not got or not (got == want or want in got or got in want):
+            continue
+        return {
+            "kind": "track",
+            "title": item.get("strTrack") or track,
+            "artist": item.get("strArtist") or artist,
+            "album": item.get("strAlbum") or "",
+            "genre": item.get("strGenre") or "",
+            "style": item.get("strStyle") or "",
+            "mood": item.get("strMood") or "",
+            "source": "audiodb",
+        }
+    return None
+
+
 def audiodb_album(artist, album, timeout=None):
     data = _json(f"{AUDIODB_BASE}/{AUDIODB_KEY}/searchalbum.php",
                  {"s": artist, "a": album}, timeout=timeout)
@@ -696,6 +970,41 @@ def audiodb_album(artist, album, timeout=None):
         "popularity": _int(item.get("intPopularity")),
         "source": "audiodb",
     }
+
+
+# --------------------------------------------------------------------------- #
+# Spotify (artist genres — the chain's last resort)
+# --------------------------------------------------------------------------- #
+SPOTIFY_API = "https://api.spotify.com/v1"
+
+
+def spotify_artist_genres(artist, cfg=None, timeout=None):
+    """Spotify's ARTIST genres, or [] without credentials / on any failure.
+
+    Spotify serves no per-track genre at all (a track object carries none), so
+    this source is artist-level and says so — which is why it sits last in the
+    genre chain, below every album-level source. One request: the artist
+    search hit IS the artist object, genres included. The hit counts only when
+    its own name is the artist we asked about — a search hit is a candidate,
+    not an identity — and an empty `genres` list is no answer, not a guess.
+
+    Empty without `spotify_client_id`/`spotify_client_secret`: the source is
+    skipped entirely, never defaulted.
+    """
+    name = str(artist or "").strip()
+    token = integrations._spotify_token(cfg, timeout=timeout)
+    if not name or not token:
+        return []
+    data = _json(f"{SPOTIFY_API}/search",
+                 {"q": name, "type": "artist", "limit": 1},
+                 headers={"Authorization": f"Bearer {token}"},
+                 timeout=timeout, host="api.spotify.com")
+    want = _norm(name)
+    for item in ((data or {}).get("artists") or {}).get("items") or []:
+        if _norm(item.get("name")) != want:
+            continue
+        return [str(g).strip() for g in item.get("genres") or [] if str(g).strip()]
+    return []
 
 
 # --------------------------------------------------------------------------- #

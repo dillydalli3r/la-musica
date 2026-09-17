@@ -3,21 +3,30 @@
 
 What this pins, with the HTTP layer stubbed (no network at all):
 
-  * Deezer's per-track ISRC lookup is the PRIMARY source and maps
-    explicit_content_lyrics / explicit_lyrics to 0/1/2 — and an unclassified
-    field is NO answer, not a guess;
+  * EVERY applicable source is asked in one pass and none short-circuits:
+    Deezer's per-track ISRC lookup, Spotify's ISRC search (configured only),
+    Apple's album route and Apple's song search — and every ISRC MusicBrainz
+    holds for the recording feeds both ISRC sources (Apple serves no ISRC
+    lookup);
+  * the merge rule lives in ONE place, `integrations.merge_advisory`: explicit
+    anywhere → 1, else clean anywhere → 0, else 0 (an unstated advisory is
+    written as 0, the user's policy) — with the per-source `answers` map as
+    the only signal that a source actually spoke;
+  * Deezer's `explicit_content_lyrics` / `explicit_lyrics` map to 0/1 — and an
+    unclassified field is NO answer, not a guess;
   * Apple's album route resolves the EDITION through the artist
     (`search?entity=musicArtist` → artist id → `lookup?entity=album`), prefers
     the `collectionExplicitness: explicit` edition over the cleaned one, and
-    maps the file to a track by disc/track, then by exact title — with a
-    `cleaned` entry as NO ANSWER (never 0, never 2) from that edition only;
-  * Apple's song search accepts only an exact normalized title (and artist)
-    hit, and a `cleaned` hit is rejected;
-  * Spotify is asked ONLY when `spotify_client_id`/`spotify_client_secret`
-    are configured, and only a hit whose own external_ids.isrc matches;
-  * a value is never returned without the source that stated it, and an
-    unknown track writes NO ITUNESADVISORY (fetch_advisories reports
-    updated=0) — an existing valid value is left alone;
+    maps the file to a track by disc/track, then by title — a `cleaned` entry
+    is NO ANSWER from that edition only (never 0, never 2);
+  * Apple's song search accepts only a hit `title_matches` accepts, and a
+    `cleaned` hit is rejected;
+  * a variant is never the track: an instrumental/karaoke/demo/cover/tribute
+    candidate is refused for an original search, and the original is refused
+    for a file whose own name says it is the variant
+    (`title_variant_kind` / `title_matches`);
+  * a value is only written when a source stated something (fetch_advisories
+    reports updated=0 for an existing valid value, which it never overwrites);
   * RateYourMusic sends browser-like headers plus the configured `rym_cookie`,
     treats a blocked/challenge answer as unreachable, logs ONE line per
     process and returns None so the genre chain falls through.
@@ -97,7 +106,8 @@ DEEZER_CASES = [
     ({"explicit_lyrics": False, "explicit_content_lyrics": 0}, 0),
     # Deezer leaves it unclassified (3) but states the lyrics are not explicit
     ({"explicit_lyrics": False, "explicit_content_lyrics": 3}, 0),
-    # nothing classified either way → no answer
+    # nothing classified either way → no answer from Deezer (the merge below
+    # still writes 0 — the user's policy — but `answers` stays empty)
     ({"explicit_content_lyrics": 3}, None),
     ({"error": {"type": "DataException", "message": "no data"}}, None),
 ]
@@ -105,23 +115,25 @@ for payload, want in DEEZER_CASES:
     clear()
     calls = stub_http({"api.deezer.com": payload})
     route = intg.resolve_advisory_route(isrc=ISRC, cfg=CFG)
-    assert route["value"] == want, (payload, route)
-    assert bool(route["source"]) == (want is not None), route
-    if want is not None:
-        assert route["source"] == "deezer-isrc", route
-    assert intg.resolve_advisory(isrc=ISRC, cfg=CFG) == want, (payload, route)
+    merged = 0 if want is None else want
+    assert route["value"] == merged, (payload, route)
+    assert route["answers"] == ({} if want is None
+                                else {"deezer-isrc": merged}), (payload, route)
+    assert route["source"] == ("deezer-isrc" if want is not None else None), (payload, route)
+    assert intg.resolve_advisory(isrc=ISRC, cfg=CFG) == merged, (payload, route)
     assert f"track/isrc:{ISRC}" in gets(calls, "api.deezer.com")[0][1]
     # the same track is asked once: the memo (not the network) answers again
     assert len(gets(calls, "api.deezer.com")) == 1, calls
 
-# An ISRC Deezer does not hold falls through to the album route rather than
-# inventing a value.
+# An ISRC Deezer does not hold falls through to the album route; nobody states
+# anything here, so the merged value is 0 with an EMPTY answers map — and no
+# source, because nothing stated it.
 clear()
 stub_http({"api.deezer.com": {"error": {"type": "DataException"}},
            "itunes.apple.com/search": {"results": []}})
 route = intg.resolve_advisory_route(isrc=ISRC, artist="Rihanna", album="Loud",
                                     title="S&M", disc=1, track=1, cfg=CFG)
-assert route == {"value": None, "source": None,
+assert route == {"value": 0, "source": None, "answers": {},
                  "checked": ["deezer-isrc", "apple-album", "itunes-song"]}, route
 
 # --------------------------------------------------------------------------- #
@@ -135,6 +147,9 @@ assert route == {"value": None, "source": None,
 # whose every track reads `cleaned`/Clean.
 ARTIST = "System Of A Down"
 ALBUM = "Steal This Album!"
+# Section 6 rebinds the module-level ALBUM to a temp folder; the Apple album
+# title is pinned here so later sections still ask about the real album.
+APPLE_ALBUM = ALBUM
 ARTIST_HITS = {"results": [
     {"wrapperType": "artist", "artistId": 462715, "artistName": ARTIST}]}
 EXPLICIT_ID, CLEANED_ID = 193126473, 193535804
@@ -222,32 +237,33 @@ assert route["value"] == 1, route
 route, _ = apple(title="Mr. Jack")
 assert route["value"] == 1, route
 
-# only a CLEANED edition exists → NO value (never 0, never 2), even though
-# that edition reports a rating for every track
+# only a CLEANED edition exists → the edition states no rating for any track,
+# so no source answered and the merged value is 0 with an EMPTY answers map
+# (never a value attributed to `cleaned`)
 clear()
 calls = stub_http(apple_routes(
     editions={"results": [dict(EDITION, collectionId=CLEANED_ID,
                                collectionExplicitness="cleaned")]}))
 route = intg.resolve_advisory_route(artist=ARTIST, album=ALBUM, title="Boom!",
                                     disc=1, track=4, track_count=16, cfg=CFG)
-assert route["value"] is None and route["source"] is None, route
+assert route["value"] == 0 and route["source"] is None and route["answers"] == {}, route
 route = intg.resolve_advisory_route(artist=ARTIST, album=ALBUM, title="Boom!",
                                     cfg=CFG)
-assert route["value"] is None and route["source"] is None, route
+assert route["value"] == 0 and route["source"] is None and route["answers"] == {}, route
 
-# an artist Apple does not know, or an album the artist does not have, is NO
-# value — and never an exception
+# an artist Apple does not know, or an album the artist does not have, states
+# nothing — and never raises
 clear()
 calls = stub_http(apple_routes(artist_hits={"results": []}))
 route = intg.resolve_advisory_route(artist="Nobody At All", album=ALBUM,
                                     title="Boom!", disc=1, track=4, cfg=CFG)
-assert route["value"] is None and route["source"] is None, route
+assert route["value"] == 0 and route["source"] is None and route["answers"] == {}, route
 assert not gets(calls, "itunes.apple.com/lookup"), calls
 route = intg.resolve_advisory_route(artist=ARTIST, album="", title="Boom!",
                                     disc=1, track=4, cfg=CFG)
-assert route["value"] is None, route
+assert route["value"] == 0 and route["source"] is None, route
 route = intg.resolve_advisory_route(artist=ARTIST, album=ALBUM, cfg=CFG)
-assert route["value"] is None and route["source"] is None, route
+assert route["value"] == 0 and route["source"] is None and route["answers"] == {}, route
 
 # a release the artist does not have (every row credits another artist) is not
 # this album: the name match alone never rates a track
@@ -257,7 +273,7 @@ stub_http(apple_routes(editions={"results": [
          artistName="Some Cover Band")]}))
 route = intg.resolve_advisory_route(artist=ARTIST, album=ALBUM, title="Boom!",
                                     disc=1, track=4, track_count=16, cfg=CFG)
-assert route["value"] is None and route["source"] is None, route
+assert route["value"] == 0 and route["source"] is None and route["answers"] == {}, route
 
 
 # An edition that can only state `cleaned` is not the end of the road: the
@@ -310,25 +326,28 @@ def spotify(items, dz=None):
 
 HIT = {"explicit": True, "external_ids": {"isrc": ISRC}}
 
-# configured: the Deezer miss is answered by Spotify, with the bearer token
+# configured: the Deezer miss is answered by Spotify, with the bearer token —
+# and the provenance map carries exactly who said what
 calls, route = spotify([HIT])
 assert route == {"value": 1, "source": "spotify-isrc",
+                 "answers": {"spotify-isrc": 1},
                  "checked": ["deezer-isrc", "spotify-isrc"]}, route
 assert gets(calls, "api.spotify.com")[0][3].get("Authorization") == "Bearer tok", calls
 assert "isrc:" + ISRC in gets(calls, "api.spotify.com")[0][2]["q"]
 calls, route = spotify([{"explicit": False, "external_ids": {"isrc": ISRC}}])
 assert route["value"] == 0 and route["source"] == "spotify-isrc", route
+assert route["answers"] == {"spotify-isrc": 0}, route
 
-# an explicit track wins over the clean edition's rating only by identity: a
-# hit for a DIFFERENT isrc is not this track
+# a hit for a DIFFERENT isrc is not this track: nothing answered, merged 0
 calls, route = spotify([{"explicit": True, "external_ids": {"isrc": "GBAYE0000001"}}])
-assert route["value"] is None and route["source"] is None, route
+assert route["value"] == 0 and route["source"] is None and route["answers"] == {}, route
 
 # unconfigured: Spotify is never called, and its absence changes nothing
 clear()
 calls = stub_http({"api.deezer.com": {"error": {"type": "DataException"}}})
 route = intg.resolve_advisory_route(isrc=ISRC, cfg=CFG)
-assert route == {"value": None, "source": None, "checked": ["deezer-isrc"]}, route
+assert route == {"value": 0, "source": None, "answers": {},
+                 "checked": ["deezer-isrc"]}, route
 assert not gets(calls, "accounts.spotify.com"), calls
 assert not gets(calls, "api.spotify.com"), calls
 
@@ -404,24 +423,77 @@ def song_search(results, artist="Rihanna", title="S&M"):
 
 # a near-miss title is NOT rated (a search hit is a candidate, not identity)
 calls, route = song_search(SONG_SEARCH["results"])
-assert route["value"] is None and route["source"] is None, route
+assert route["value"] == 0 and route["source"] is None and route["answers"] == {}, route
 
 # exact title + stated explicitness → accepted
 calls, route = song_search(SONG_SEARCH["results"] + [
     {"trackName": "S&M", "artistName": "Rihanna", "trackExplicitness": "notExplicit"}])
 assert route["value"] == 0 and route["source"] == "itunes-song", route
+assert route["answers"] == {"itunes-song": 0}, route
 
-# ... but a CLEANED hit never is (it is an edited master, not a rating)
+# ... but a CLEANED hit never is (it is an edited master, not a rating), so
+# Apple's song search states nothing at all
 calls, route = song_search([{"trackName": "S&M", "artistName": "Rihanna",
                              "trackExplicitness": "cleaned",
                              "contentAdvisoryRating": "Clean"}])
-assert route["value"] is None and route["source"] is None, route
+assert route["value"] == 0 and route["source"] is None and route["answers"] == {}, route
 assert route["checked"] == ["itunes-song"], route
 
 # a same-title hit by another artist is not this track
 calls, route = song_search([{"trackName": "S&M", "artistName": "Some Cover Band",
                              "trackExplicitness": "explicit"}])
-assert route["value"] is None and route["source"] is None, route
+assert route["value"] == 0 and route["source"] is None and route["answers"] == {}, route
+
+# --------------------------------------------------------------------------- #
+# 5b) A variant is never the track: neither an instrumental/karaoke hit for an
+# original-file search, nor the original for a file that IS the variant
+# --------------------------------------------------------------------------- #
+def artist_of(title):
+    return "Rihanna" if title == "S&M" else ARTIST
+
+
+for title, variant in [
+        ("S&M", "S&M (Instrumental)"),
+        ("S&M", "S&M (Karaoke Version)"),
+        ("Boom!", "Boom! (Demo)"),
+        ("Boom!", "Boom! (Cover Version)"),
+        ("Boom!", "Boom! (Made Famous By System Of A Down)")]:
+    clear()
+    calls = stub_http({"itunes.apple.com/search": {"results": [
+        {"trackName": variant, "artistName": artist_of(title),
+         "trackExplicitness": "explicit"}]}})
+    route = intg.resolve_advisory_route(title=title, artist=artist_of(title), cfg=CFG)
+    assert route["value"] == 0 and route["source"] is None, (title, variant, route)
+    assert route["answers"] == {}, (title, variant, route)
+
+# ... and the reverse: a file that IS the variant never takes the original's
+# rating, even though the search hit is the same song by the same artist
+clear()
+stub_http({"itunes.apple.com/search": {"results": [
+    {"trackName": "S&M", "artistName": "Rihanna", "trackExplicitness": "explicit"}]}})
+route = intg.resolve_advisory_route(title="S&M (Instrumental)", artist="Rihanna",
+                                    cfg=CFG)
+assert route["value"] == 0 and route["source"] is None and route["answers"] == {}, route
+# the same-kind variant of the same title IS the same title; a cross-kind
+# pair never is
+assert intg.title_matches("S&M (Instrumental)", "S&M (Instrumental)")
+assert not intg.title_matches("S&M (Karaoke)", "S&M (Instrumental)")
+assert intg.title_variant_kind("Karaoke - S&M") == "karaoke"
+assert intg.title_variant_kind("Instrumental Version") == "instrumental"
+assert intg.title_variant_kind("S&M") is None
+
+# The guard has to be its own check, not just "the names differ": these two
+# normalize to the SAME key, so only the variant kind separates them — and a
+# search hit named the variant (no parentheses) is refused for a file whose
+# own name says "(Instrumental)".
+assert intg._norm_compare("Boom! (Instrumental)") == intg._norm_compare("Boom! Instrumental")
+assert not intg.title_matches("Boom! (Instrumental)", "Boom! Instrumental")
+clear()
+stub_http({"itunes.apple.com/search": {"results": [
+    {"trackName": "Boom! Instrumental", "artistName": ARTIST,
+     "trackExplicitness": "explicit"}]}})
+route = intg.resolve_advisory_route(title="Boom! (Instrumental)", artist=ARTIST, cfg=CFG)
+assert route["value"] == 0 and route["answers"] == {}, route
 
 # --------------------------------------------------------------------------- #
 # 6) fetch_advisories: only a stated value is written
@@ -472,18 +544,24 @@ for i, (title, isrc, current) in enumerate([
 _real_audiofile = mlo_audio.AudioFile
 mlo_audio.AudioFile = FakeAudio
 try:
-    # nobody states a value → no tag at all (an absent advisory is "unrated");
-    # the track that already carries a valid 2 is reported, not rewritten
+    # nobody states anything → the merge rule writes 0 for every track that
+    # had no value, and NO source is reported because none stated it; the
+    # track that already carries a valid 2 is reported, not rewritten
     clear()
     stub_http({})
     out = imports.fetch_advisories([ALBUM], {"advisory_auto_fetch": True})
-    assert out == {"updated": 0, "values": {FILES[1]: 2}, "sources": {}}, out
-    assert all("ITUNESADVISORY" not in (FakeAudio.written.get(p) or {})
-               or (FakeAudio.written[p].get("ITUNESADVISORY") == "2")
-               for p in FILES), FakeAudio.written
+    assert out == {"updated": 2, "values": {FILES[0]: 0, FILES[1]: 2, FILES[2]: 0},
+                   "sources": {}, "answers": {}}, out
+    assert FakeAudio.written[FILES[0]]["ITUNESADVISORY"] == "0", FakeAudio.written
+    assert FakeAudio.written[FILES[1]]["ITUNESADVISORY"] == "2", FakeAudio.written
+    assert FakeAudio.written[FILES[2]]["ITUNESADVISORY"] == "0", FakeAudio.written
 
-    # Deezer answers for the first track only: exactly that one is written,
-    # the user's existing 2 is reported but never overwritten
+    # Deezer answers for the first track only: that one is written with its
+    # source AND its provenance map, the user's existing 2 is reported but
+    # never overwritten, and the track nobody answered for still merges to 0
+    for path in FILES:
+        FakeAudio.written[path].pop("ITUNESADVISORY", None)
+    FakeAudio.written[FILES[1]]["ITUNESADVISORY"] = "2"
     clear()
     calls = stub_http({"api.deezer.com/track/isrc:" + ISRC:
                        {"explicit_lyrics": True, "explicit_content_lyrics": 1},
@@ -491,12 +569,13 @@ try:
                        "itunes.apple.com/search": {"results": []},
                        "itunes.apple.com/lookup": {"results": []}})
     out = imports.fetch_advisories([ALBUM], {"advisory_auto_fetch": True})
-    assert out["updated"] == 1, out
-    assert out["values"] == {FILES[0]: 1, FILES[1]: 2}, out
+    assert out["updated"] == 2, out
+    assert out["values"] == {FILES[0]: 1, FILES[1]: 2, FILES[2]: 0}, out
     assert out["sources"] == {FILES[0]: "deezer-isrc"}, out
+    assert out["answers"] == {FILES[0]: {"deezer-isrc": 1}}, out
     assert FakeAudio.written[FILES[0]]["ITUNESADVISORY"] == "1", FakeAudio.written
     assert FakeAudio.written[FILES[1]]["ITUNESADVISORY"] == "2", FakeAudio.written
-    assert "ITUNESADVISORY" not in FakeAudio.written[FILES[2]], FakeAudio.written
+    assert FakeAudio.written[FILES[2]]["ITUNESADVISORY"] == "0", FakeAudio.written
     # the existing valid value was never looked up or rewritten
     assert len(gets(calls, "api.deezer.com")) == 2, calls
 
@@ -590,8 +669,85 @@ for kwargs in ({"isrc": ISRC},
                 "disc": 1, "track": 4},
                {"title": "Boom!", "artist": ARTIST}):
     route = intg.resolve_advisory_route(cfg=CFG, **kwargs)
-    assert (route["value"] is None) == (route["source"] is None), route
+    assert route["value"] in (0, 1), route
+    # a value only carries a source when a source actually stated something,
+    # and the whole provenance map is empty exactly then
+    assert (route["source"] is None) == (not route["answers"]), route
     if route["source"]:
         assert route["source"] in intg.ADVISORY_SOURCES, route
+        assert route["source"] in route["answers"], route
+
+# --------------------------------------------------------------------------- #
+# 9) Cross-reference: explicit ANYWHERE wins, a clean statement is still heard,
+# and every source is asked even when the first one already answered
+# --------------------------------------------------------------------------- #
+DZ_CLEAN = {"explicit_lyrics": False, "explicit_content_lyrics": 0}
+
+# Deezer says clean, Apple's explicit edition says explicit → 1, and BOTH
+# statements are in the provenance map
+clear()
+calls = stub_http(dict(apple_routes(), **{"api.deezer.com": DZ_CLEAN}))
+route = intg.resolve_advisory_route(isrc=ISRC, artist=ARTIST, album=APPLE_ALBUM,
+                                    title="Boom!", disc=1, track=4,
+                                    track_count=16, cfg=CFG)
+assert route["value"] == 1 and route["source"] == "apple-album", route
+assert route["answers"] == {"deezer-isrc": 0, "apple-album": 1}, route
+assert route["checked"] == ["deezer-isrc", "apple-album", "itunes-song"], route
+# the first source answering did NOT stop the others: Deezer was asked, and
+# Apple's artist route + explicit edition were followed too
+assert gets(calls, "api.deezer.com"), calls
+assert [c[2]["id"] for c in gets(calls, "itunes.apple.com/lookup")] == [462715, EXPLICIT_ID], calls
+
+# ... and with Spotify configured, all four routes are asked, not three
+clear()
+calls = stub_http(dict(apple_routes(), **{
+    "api.deezer.com": DZ_CLEAN,
+    "accounts.spotify.com": TOKEN,
+    "api.spotify.com": {"tracks": {"items": [
+        {"explicit": False, "external_ids": {"isrc": ISRC}}]}}}))
+route = intg.resolve_advisory_route(isrc=ISRC, artist=ARTIST, album=APPLE_ALBUM,
+                                    title="Boom!", disc=1, track=4,
+                                    track_count=16, cfg=SPOTIFY_CFG)
+assert route["value"] == 1, route
+assert route["answers"] == {"deezer-isrc": 0, "spotify-isrc": 0,
+                            "apple-album": 1}, route
+assert route["checked"] == ["deezer-isrc", "spotify-isrc", "apple-album",
+                            "itunes-song"], route
+
+# every source clean, none explicit → 0, attributed to the first one that
+# said so
+clear()
+stub_http(dict(apple_routes(songs={EXPLICIT_ID: tracks(EXPLICIT_ID)}),
+               **{"api.deezer.com": DZ_CLEAN}))
+route = intg.resolve_advisory_route(isrc=ISRC, artist=ARTIST, album=APPLE_ALBUM,
+                                    title="Boom!", disc=1, track=4,
+                                    track_count=16, cfg=CFG)
+assert route["value"] == 0 and route["source"] == "deezer-isrc", route
+assert route["answers"] == {"deezer-isrc": 0, "apple-album": 0}, route
+
+# the merge rule itself, in one place
+assert intg.merge_advisory({}) == 0                    # nobody stated anything
+assert intg.merge_advisory({"a": 0}) == 0              # clean only
+assert intg.merge_advisory({"a": 0, "b": 1}) == 1      # explicit beats clean
+assert intg.merge_advisory({"a": 1, "b": 0}) == 1      # either order
+
+# ISRC completeness: with no ISRC tag, every ISRC MusicBrainz holds for the
+# recording feeds BOTH ISRC sources — Apple has no ISRC lookup at all
+_real_recording_isrcs = intg.recording_isrcs
+intg.recording_isrcs = lambda mbid: ["AAA11111111", "BBB22222222"]
+try:
+    clear()
+    calls = stub_http({"api.deezer.com": {"error": {"type": "DataException"}},
+                       "accounts.spotify.com": TOKEN,
+                       "api.spotify.com": {"tracks": {"items": []}}})
+    route = intg.resolve_advisory_route(recording_mbid="rec-1", cfg=SPOTIFY_CFG)
+    assert route["checked"] == ["deezer-isrc", "spotify-isrc"] * 2, route
+    assert [c[1].rsplit("isrc:", 1)[-1]
+            for c in gets(calls, "api.deezer.com")] == ["AAA11111111",
+                                                        "BBB22222222"], calls
+    assert [c[2]["q"] for c in gets(calls, "api.spotify.com")
+            if "q" in c[2]] == ["isrc:AAA11111111", "isrc:BBB22222222"], calls
+finally:
+    intg.recording_isrcs = _real_recording_isrcs
 
 print("advisory sources: all assertions passed")

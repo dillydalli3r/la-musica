@@ -46,7 +46,7 @@ from server import api_imports
 from server import api_lyrics
 from server import discovery
 from mlo.paths import (SKIP_DIRS, clear_track_covers, downloads_dir,
-                       library_root, load_track_covers, move_path,
+                       is_video_file, library_root, load_track_covers, move_path,
                        save_track_covers, set_track_covers, trash_dir)
 
 # Captured at startup — worker threads use run_coroutine_threadsafe against
@@ -461,6 +461,93 @@ def dependencies():
             "state": state,
         })
     return {"deps_dir": str(DEPS_DIR), "tools": out}
+
+
+def _check_source_kind(kind):
+    """400 on an unknown `kind` filter (both sources routes validate it)."""
+    if not kind:
+        return
+    from server import sources_health as health_mod
+
+    if kind not in health_mod.KINDS:
+        raise HTTPException(400, f"unknown source kind: {kind} "
+                                 f"(one of {', '.join(health_mod.KINDS)})")
+
+
+@app.get("/api/sources/health")
+def sources_health(kind: str = Query(None), probe: int = Query(0)):
+    """Which external sources work right now — the wizard's and Settings' one
+    answer, for all four kinds at once (`lyrics`, `advisory`, `genre`,
+    `metadata`).
+
+    `probe=0` (default) reports the CONFIG only and performs no request at
+    all: unconfigured sources are `skipped` (with the config keys they need)
+    and the rest `ok`. `probe=1` runs one cheap lookup per configured source
+    against the same fixed sample the lyrics providers already probe with —
+    in parallel, a few seconds in total — and says what answered.
+    """
+    from server import sources_health as health_mod
+
+    _check_source_kind(kind)
+    return health_mod.health_payload(load_config(), kind=kind, probe=bool(probe))
+
+
+@app.get("/api/sources/health/{source_id}")
+def sources_health_source(source_id: str, kind: str = Query(None),
+                          probe: int = Query(1)):
+    """One source's row — same shape, for a per-source Test button.
+
+    Probes by default here: asking about ONE source is a deliberate test.
+
+    The row is returned BARE — the same object `/api/sources/health` puts in
+    `sources`, so a per-source Test button reads one shape.
+
+    An id can belong to two kinds (`deezer` and `itunes` are both a genre
+    source and a metadata provider), so the row kinds are searched in the
+    payload's own order — lyrics, advisory, genre, metadata — unless `kind=`
+    picks one. The row always carries its kind, so a caller that sends both
+    ids (`kind=id`) is never guessing.
+    """
+    from server import sources_health as health_mod
+
+    _check_source_kind(kind)
+    if source_id not in health_mod.source_ids():
+        raise HTTPException(404, f"unknown source: {source_id}")
+    payload = health_mod.health_payload(load_config(), kind=kind,
+                                        probe=bool(probe))
+    row = next((r for r in payload["sources"] if r["id"] == source_id), None)
+    if row is None:
+        raise HTTPException(404, f"{source_id} is not a {kind} source")
+    return row
+
+
+@app.get("/api/videos/thumb")
+def videos_thumb(path: str = Query(...), t: float = Query(0.0),
+                 w: int = Query(320)):
+    """One JPEG frame of a library video at *t* seconds (scrub preview).
+
+    Seeking happens before `-i` (keyframe seek) and the frame is cached under
+    `<music>/.mlo/data/thumbs/`, keyed by path+mtime+width+whole second of
+    *t* — so dragging the scrubber re-encodes nothing. *t* is clamped to the
+    file's length when ffprobe knows it, and *w* to a sane range.
+    """
+    from server import thumbs
+
+    p = os.path.normpath(mbresolve.resolve_track(path) or path)
+    if not os.path.isfile(p):
+        raise HTTPException(404, "file not found")
+    if not _in_music_folder(p, _music_folder()):
+        raise HTTPException(400, "file outside music folder")
+    if not is_video_file(p):
+        raise HTTPException(400, "not a video file")
+    try:
+        fp = thumbs.thumb_file(p, t=t, w=w)
+    except thumbs.ThumbError as e:
+        raise HTTPException(e.status, str(e))
+    # Private, long-lived: the key already carries the file's mtime, so a
+    # changed file is a different URL as far as any cache is concerned.
+    return FileResponse(fp, media_type="image/jpeg",
+                        headers={"Cache-Control": "private, max-age=86400"})
 
 
 class DepsInstallRequest(BaseModel):
@@ -1242,24 +1329,31 @@ def _sniff_image_ext(data: bytes, content_type: str) -> str:
 async def cover_search(artist: str = Query(""), album: str = Query(""),
                        limit: int = Query(40, ge=1, le=100),
                        sources: Optional[str] = Query(None),
-                       country: Optional[str] = Query(None)):
+                       country: Optional[str] = Query(None),
+                       release_group_mbid: Optional[str] = Query(None)):
     """Search covers.musichoarders.xyz (aggregates Apple Music, Deezer,
-    Qobuz, Tidal, Discogs, ...) for album covers matching artist/album.
+    Qobuz, Tidal, Discogs, ...) for album covers matching artist/album, and
+    fall back to the Cover Art Archive / Deezer / iTunes when it has nothing.
+
+    `results` rows carry `width`/`height` — the image's real pixel size, probed
+    from the file for the first results and `null` when unknown (never a
+    guess). `provider` names who answered: "cov", a fallback id, or null when
+    nobody had anything, so an empty result is never silent.
 
     `sources` (comma-separated ids) and `country` override the saved defaults
-    for this one search — the finder's source picker and region dropdown."""
+    for this one search — the finder's source picker and region dropdown.
+    """
     if not artist.strip() and not album.strip():
         raise HTTPException(400, "artist or album is required")
     src = [s.strip() for s in (sources or "").split(",") if s.strip()] or None
     try:
-        results = await asyncio.to_thread(
+        return await asyncio.to_thread(
             intg.cover_search, artist.strip(), album.strip(), limit,
-            60.0, src, country)
+            60.0, src, country, None, (release_group_mbid or "").strip())
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(502, f"cover search failed: {e}")
-    return {"results": results}
 
 
 @app.get("/api/cover/sources")
@@ -2305,9 +2399,10 @@ def _lyrics_record(hit, artist="", track="", album=None, duration=None):
     The album/library batch download, the lyrics manager's search list and the
     viewer all read `id` / `plainLyrics` / `syncedLyrics` / `artist` / `track`
     (the LRCLIB record shape). Keeping it means those callers get the whole
-    fallback chain — LRCLIB → NetEase → lyrics.ovh → Kugou — without changing,
-    and `provider` / `provider_label` ride along for anything that wants to
-    show where the lyrics came from.
+    fallback chain — LRCLIB → NetEase → Kugou → QQ Music → Kuwo → YouTube
+    captions, see `mlo.lyrics_providers.SOURCES` — without changing, and
+    `provider` / `provider_label` ride along for anything that wants to show
+    where the lyrics came from.
     """
     if not hit:
         return None
@@ -4529,20 +4624,23 @@ def genres_import(req: GenreChainImportRequest):
     except (TypeError, ValueError):
         raise HTTPException(400, "limit must be a number")
     chain = intg.genre_chain(artist=artist, album=album, release=release,
-                             limit=limit, cfg=cfg)
+                             limit=limit, cfg=cfg, files=files)
     names = chain.get("genres") or []
-    per_track = {}
-    for t in (release or {}).get("media") or []:
-        g = t.get("genres") or []
-        if g:
-            per_track[(int(t.get("disc") or 1), int(t.get("position") or 0))] = g
+    # The chain already merged every track's own genres ahead of the
+    # release-wide ones and capped them per track — `_write_album_genres`, the
+    # ONE writer, is what applies the cap to the file.
+    per_track = chain.get("per_track") or {}
 
     cap = limit or int(cfg.get("mb_genre_count") or 3)
     updated = _write_album_genres(files, names, per_track, limit=cap)
     return {"updated": updated, "genres": names,
             "per_source": chain.get("per_source") or {},
             "notes": chain.get("notes") or {},
-            "per_track": bool(per_track)}
+            "per_track": bool(per_track),
+            # Where each file's genres came from, in the order that
+            # contributed, plus the tier that answered (track/album/artist).
+            "sources": chain.get("sources") or {},
+            "levels": chain.get("levels") or {}}
 
 
 @app.get("/api/genres/facets")
@@ -4587,33 +4685,37 @@ class AdvisoryFetchRequest(BaseModel):
 
 @app.post("/api/mb/advisory/fetch")
 def mb_advisory_fetch(req: AdvisoryFetchRequest):
-    """Resolve ITUNESADVISORY (0/1/2) for an album or a MusicBrainz release.
+    """Resolve ITUNESADVISORY (0/1) for an album or a MusicBrainz release.
 
     Tracks are identified by their ISRC tag — or by the MusicBrainz recording
     ID an import already stamped, whose ISRCs MusicBrainz supplies — and rated
-    by the first provider that actually states a rating: Deezer's ISRC lookup,
-    Spotify (only when configured), Apple's album route, Apple's song search.
-    Only a stated value is written: an unknown track keeps NO advisory, because
-    a missing advisory means "unrated" and 0 would claim the audio is clean, a
-    `cleaned` Apple entry states nothing and is never written, and an existing
-    valid 0/1/2 is never overwritten.
+    by EVERY applicable source in one pass (Deezer and Spotify by ISRC, Apple's
+    explicit-edition album route, Apple's exact-title song search), merged by
+    `integrations.merge_advisory`: 1 when any source states explicit, else 0 —
+    an unstated advisory is written as 0, and `answers` is what shows whether
+    any source actually spoke. A `cleaned` Apple entry states nothing and is
+    never written, an existing valid 0/1/2 is never overwritten, and a value
+    equal to the merged one is not rewritten.
 
-    Returns {updated, values, sources}: `values` maps the file path (paths
-    mode) or "disc:position" (release mode) to the rating that was found, and
-    `sources` maps the same keys to the provider that stated it."""
+    Returns {updated, values, sources, answers}: `values` maps the file path
+    (paths mode) or "disc:position" (release mode) to the merged rating,
+    `sources` maps the same keys to the provider that stated it, and `answers`
+    maps them to what every source said ({source: 0|1})."""
     from server import imports as imports_mod
 
     if not req.paths and not req.release_mbid:
         raise HTTPException(400, "paths or release_mbid required")
     values = {}
     sources = {}
+    answers = {}
     updated = 0
     if req.release_mbid:
         rid = intg._mbid(req.release_mbid)
         if not rid:
             raise HTTPException(400, "invalid MusicBrainz release ID")
         try:
-            values.update(intg.release_advisories(rid, sources=sources))
+            values.update(intg.release_advisories(rid, sources=sources,
+                                                 answers=answers))
         except Exception as e:
             raise HTTPException(502, f"MusicBrainz release lookup failed: {e}")
     if req.paths:
@@ -4622,7 +4724,40 @@ def mb_advisory_fetch(req: AdvisoryFetchRequest):
         updated = int(result.get("updated") or 0)
         values.update(result.get("values") or {})
         sources.update(result.get("sources") or {})
-    return {"updated": updated, "values": values, "sources": sources}
+        answers.update(result.get("answers") or {})
+    return {"updated": updated, "values": values, "sources": sources,
+            "answers": answers}
+
+
+class InstrumentalFetchRequest(BaseModel):
+    paths: Optional[List[str]] = None           # audio files or album folders
+
+
+@app.post("/api/instrumental/fetch")
+def instrumental_fetch(req: InstrumentalFetchRequest):
+    """Resolve and write INSTRUMENTAL (0/1) for these albums / tracks.
+
+    Every source is cross-referenced by `server.instrumental`: LRCLIB's own
+    `instrumental` flag by artist/title/album/duration, Spotify
+    audio-features when credentials are configured, the file's own name
+    ("... (Instrumental)") and lyrics evidence. They are merged by one rule —
+    any source saying instrumental → 1, else any source saying not
+    instrumental → 0, else NO value and no write (absence of evidence is never
+    recorded as a value, and a variant title is never read as the track). A
+    file that already carries 0/1 is left alone: the user's edit wins.
+
+    Returns {updated, values, evidence}: `values` maps the file path to the
+    merged value and `evidence` maps it to what each source said
+    ({source: 0|1}) — that is what the UI shows next to the tag."""
+    from server import imports as imports_mod
+
+    if not req.paths:
+        raise HTTPException(400, "paths required")
+    _tag_paths_guard(req.paths)
+    result = imports_mod.fetch_instrumentals(req.paths, load_config())
+    return {"updated": int(result.get("updated") or 0),
+            "values": result.get("values") or {},
+            "evidence": result.get("evidence") or {}}
 
 
 def _metadata_album_identity(album_dir, artist=""):

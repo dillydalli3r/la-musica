@@ -8,7 +8,8 @@ import Modal from "./Modal";
 
 interface Candidate {
   id: number;
-  /** Which provider supplied this hit (LRCLIB, NetEase, lyrics.ovh, Kugou). */
+  /** Which provider supplied this hit (LRCLIB, NetEase, Kugou, QQ Music,
+   *  Kuwo, YouTube captions). */
   provider?: string;
   artistName: string;
   trackName: string;

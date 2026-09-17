@@ -5,6 +5,7 @@ per their API etiquette. RYM has no public API — links are user-supplied
 URLs stored as tags, but we validate/parse them here.
 """
 import asyncio
+import contextlib
 import html as _html
 import json
 import os
@@ -324,14 +325,26 @@ def recording_isrcs(recording_mbid):
 # --------------------------------------------------------------------------- #
 # Content advisory (ITUNESADVISORY): 0 = not explicit, 1 = explicit, 2 = safe.
 # --------------------------------------------------------------------------- #
-# Sources, asked in this order — the first one that STATES a value wins, and
-# a route that cannot state one contributes nothing:
+# EVERY applicable source is asked for EVERY track — one pass, no short
+# circuit — and the answers are collected per source and MERGED by a single
+# documented rule (`merge_advisory`), so a source that states "not explicit"
+# is heard even after another one already said "explicit", and the caller can
+# show what each source said:
 #
 #   deezer-isrc    api.deezer.com/track/isrc:<ISRC>      (verified working)
 #   spotify-isrc   Spotify search by ISRC                (needs client id+secret)
 #   apple-album    iTunes artist → its albums → THE EXPLICIT EDITION →
 #                  lookup?entity=song                    (verified working)
 #   itunes-song    iTunes song search, exact title only  (last resort)
+#   discogs-parental  Discogs edition format/description (token only, WEAK,
+#                  album level — explicit-only, ranks last)
+#   youtube-age    yt-dlp `age_limit` >= 18 for the track's OWN video id
+#                  (explicit-only, last, never a blind per-track search)
+#
+# ISRC path: the two ISRC sources are asked for every ISRC the track has —
+# the file's own tag, or every ISRC MusicBrainz holds for its recording.
+# APPLE HAS NO ISRC LOOKUP, which is why it is reached by artist → album
+# edition instead; it is still cross-referenced with both ISRC sources.
 #
 # VERIFIED, on this machine: Apple's own `lookup?isrc=` and `lookup?upc=`
 # endpoints answer resultCount 0 — Apple does not serve identity lookups, so
@@ -344,21 +357,26 @@ def recording_isrcs(recording_mbid):
 # `collectionExplicitness`, so the explicit edition is the one whose tracks are
 # read, and the cleaned edition is only a cross-check.
 #
-# Deezer's ISRC endpoint DOES work and is per-track, so it is asked first: it
-# needs no title guessing at all. Spotify is optional and never load-bearing;
-# it is skipped entirely until `spotify_client_id`/`spotify_client_secret` are
-# set in Settings.
+# Deezer's ISRC endpoint is per-track and needs no title guessing at all.
+# Spotify is optional and never load-bearing; it is skipped entirely until
+# `spotify_client_id`/`spotify_client_secret` are set in Settings.
 #
 # Honesty rules, which every route below obeys:
-#   * only 0/1/2 is ever returned — never a default, never a guess;
+#   * a route only ever returns an answer it can attribute to itself, and an
+#     answer it cannot state is NO answer (never a guess, never a default);
 #   * a `cleaned` Apple entry (or a `Clean` contentAdvisoryRating) is a CLEANED
 #     EDITION, states nothing about the original master and is NO ANSWER — it
 #     must never become 0 or 2;
-#   * None means "unrated": the caller leaves the tag absent.
+#   * a name-based match never accepts a variant of the track, and a variant
+#     never accepts the original (`title_matches`);
+#   * the merged value is 0 when nobody stated anything at all: an unstated
+#     advisory is written as "not explicit", the user's policy, and the
+#     `answers` map is what says whether any source actually spoke.
 # Every value a route may report as `source`. A caller may only write a value
 # it can attribute to one of these.
 ADVISORY_SOURCES = frozenset({"deezer-isrc", "spotify-isrc", "apple-album",
-                              "itunes-song"})
+                              "itunes-song", "discogs-parental",
+                              "youtube-age"})
 
 _ITUNES_LOOKUP = "https://itunes.apple.com"
 _DEEZER_TRACK_ISRC = "https://api.deezer.com/track/isrc:"
@@ -626,6 +644,13 @@ def _apple_editions(artist, album, track_count=None, cfg=None, timeout=None):
         if want_artist and got_artist and want_artist not in got_artist:
             continue
         name = _norm_compare(row.get("collectionName"))
+        # An instrumental/karaoke edition of the album is not the album: its
+        # tracks would rate the wrong recording, so a variant mismatch is out
+        # for both the name match and the similarity fallback below.
+        kind = title_variant_kind(album)
+        got_kind = title_variant_kind(row.get("collectionName"))
+        if (kind or got_kind) and kind != got_kind:
+            continue
         count_ok = bool(want_count
                         and _advisory_int(row.get("trackCount")) == want_count)
         named = bool(want_album and name == want_album)
@@ -664,11 +689,13 @@ def _apple_collection_value(cid, title="", disc=None, track=None,
     """The advisory Apple states for the file inside one collection.
 
     The file is mapped to its track by discNumber/trackNumber (the position
-    decides — another track's rating is not this file's), falling back to an
-    exact normalized title match. `positions_ok=False` disables the position
-    mapping entirely: that collection does not hold the album's track count,
-    so the same disc/track number may be a different song and only a title
-    match may be trusted.
+    decides — another track's rating is not this file's), falling back to a
+    title match that refuses variants (`title_matches`): an instrumental or
+    karaoke version of the track sits in the same album and is a different
+    recording. `positions_ok=False` disables the position mapping entirely:
+    that collection does not hold the album's track count, so the same
+    disc/track number may be a different song and only a title match may be
+    trusted.
 
     Returns None when the matched track is `cleaned` or carries no rating:
     that collection simply cannot answer, and the CALLER may still ask the
@@ -685,10 +712,9 @@ def _apple_collection_value(cid, title="", disc=None, track=None,
             if (_advisory_int(item.get("discNumber")) == want_disc
                     and _advisory_int(item.get("trackNumber")) == want_track):
                 return _apple_value(item)
-    want_title = _norm_compare(title)
-    if want_title:
+    if str(title or "").strip():
         for item in tracks:
-            if _norm_compare(item.get("trackName")) != want_title:
+            if not title_matches(title, item.get("trackName")):
                 continue
             value = _apple_value(item)
             if value is not None:
@@ -744,13 +770,97 @@ def _norm_compare(text):
     return discovery.norm(text)
 
 
+# --------------------------------------------------------------------------- #
+# Title variants: an instrumental / karaoke / demo / cover / tribute version
+# is NOT the track itself. A per-track value may never be taken from one of
+# them (`title_variant_kind`), and a file whose own name says it is a variant
+# may never take the original's data. `title_matches` is that guard, and every
+# name-based match in this module goes through it.
+# --------------------------------------------------------------------------- #
+# (kind, pattern) — first hit wins; checked in this order on purpose, so
+# "(Karaoke Instrumental Version)" reads instrumental.
+_VARIANT_MARKERS = (
+    ("instrumental", r"\(\s*instrumental\s*\)"),
+    ("instrumental", r"\binstrumental\s+version\b"),
+    ("instrumental", r"^\s*instrumental\s*[-–—:]"),
+    ("karaoke", r"\bkaraoke\b"),
+    ("karaoke", r"\bbacking\s+track\b"),
+    ("demo", r"\(\s*demo\s*\)"),
+    ("cover", r"\bcover\s+version\b"),
+    ("tribute", r"\btribute\b"),
+    ("tribute", r"\bmade\s+famous\s+by\b"),
+    ("tribute", r"\bin\s+the\s+style\s+of\b"),
+)
+
+
+def title_variant_kind(title):
+    """None, or which kind of variant this title says it is.
+
+    "karaoke", "instrumental", "demo", "cover" or "tribute" — the markers are
+    the ones releases actually carry: `(Instrumental)`, `Instrumental
+    Version`, a leading `Instrumental -`/`Karaoke -`, `Karaoke`, `Backing
+    Track`, `(Demo)`, `Cover Version`, `Tribute`, `Made Famous By`, `In The
+    Style Of`. Anything else (including a plain title) is None.
+    """
+    text = str(title or "")
+    for kind, pattern in _VARIANT_MARKERS:
+        if re.search(pattern, text, re.I):
+            return kind
+    return None
+
+
+def title_matches(query_title, candidate_title, *, allow_variant=False):
+    """True when `candidate_title` is the same title as `query_title`.
+
+    Normalized comparison (discovery's normalizer), with the variant guard on
+    top: a candidate that is an instrumental/karaoke/… version of the query is
+    NOT the query, and a variant query does not accept the original either —
+    unless `allow_variant`, which ignores the guard and compares names only.
+    """
+    query = _norm_compare(query_title)
+    candidate = _norm_compare(candidate_title)
+    if not query or not candidate:
+        return False
+    if not allow_variant:
+        want = title_variant_kind(query_title)
+        got = title_variant_kind(candidate_title)
+        if (want or got) and want != got:
+            return False
+    return query == candidate
+
+
+def merge_advisory(answers):
+    """The ONE merge rule for ITUNESADVISORY — `{source: 0|1}` → 0|1.
+
+    The user's policy, in this order: if ANY source states explicit → 1; else
+    if ANY source states clean → 0; else (nobody said anything) → 0 as well.
+    The last two branches are the same value on purpose: an unstated advisory
+    is written as "not explicit", and only the empty answer map tells a caller
+    that no source actually spoke.
+    """
+    for value in (answers or {}).values():
+        if _advisory_int(value) == 1:
+            return 1
+    return 0
+
+
+def _winning_source(answers, value):
+    """The first source (in ask order) whose answer is the merged `value`."""
+    for source, answer in (answers or {}).items():
+        if _advisory_int(answer) == value:
+            return source
+    return None
+
+
 def _itunes_song_advisory(title, artist="", timeout=None):
     """(value, source) from Apple's song search — the LAST resort.
 
     A search hit is a candidate, not an identity, so a hit is only accepted
-    when its normalized track title equals the file's exactly AND its own
-    artist credit contains the file's artist. A `cleaned` hit is never
-    accepted (see `_apple_value`).
+    when `title_matches` says it is the file's title AND its own artist credit
+    contains the file's artist. `title_matches` is also what refuses an
+    instrumental/karaoke/cover hit (and the reverse): search answers those
+    generously, and a variant's rating is not this track's. A `cleaned` hit is
+    never accepted (see `_apple_value`).
     """
     title = str(title or "").strip()
     if not title:
@@ -758,10 +868,9 @@ def _itunes_song_advisory(title, artist="", timeout=None):
     data = _advisory_json(f"{_ITUNES_LOOKUP}/search",
                           {"term": " ".join(t for t in (artist, title) if t),
                            "entity": "song", "limit": 10}, timeout=timeout)
-    want_title = _norm_compare(title)
     want_artist = _norm_compare(artist)
     for item in (data or {}).get("results") or []:
-        if _norm_compare(item.get("trackName")) != want_title:
+        if not title_matches(title, item.get("trackName")):
             continue
         if want_artist and want_artist not in _norm_compare(item.get("artistName")):
             continue
@@ -777,15 +886,117 @@ def _spotify_configured(cfg):
                 and str(cfg.get("spotify_client_secret") or "").strip())
 
 
+def _discogs_parental_advisory(artist, album, cfg=None):
+    """(1, "discogs-parental") when Discogs lists a Parental Advisory format.
+
+    Album-level and WEAK — a sticker on the edition Discogs matched, not a
+    per-track statement — so it ranks LAST and can only ever add an explicit
+    signal: it never clears a track it did not rate. Requires `discogs_token`,
+    like every Discogs route; without one (or without a hit) it answers None.
+    """
+    from server import discovery
+
+    if not str((cfg or {}).get("discogs_token") or "").strip():
+        return None
+    if not (artist and album):
+        return None
+    try:
+        flagged = discovery.discogs_parental_advisory(artist, album, cfg)
+    except Exception:
+        return None
+    return (1, "discogs-parental") if flagged else None
+
+
+# The tags a track's own video origin is recorded in: the video pipeline
+# writes SOURCE, and YOUTUBEID/VIDEOID are the explicit spellings.
+_YOUTUBE_TAG_KEYS = ("YOUTUBEID", "YOUTUBE_ID", "VIDEOID", "SOURCE")
+_YOUTUBE_ID_RX = re.compile(r"[A-Za-z0-9_-]{11}")
+
+
+def youtube_video_id(tags):
+    """The YouTube id a track's OWN tags record, or "".
+
+    Only a recorded origin counts: an `11`-character id, or a URL carrying
+    `v=`/`/shorts/`/`youtu.be/`. Nothing here searches YouTube — a search's
+    first hit is not this track, and rating the wrong video is precisely the
+    failure this rule exists to prevent.
+    """
+    if not isinstance(tags, dict):
+        return ""
+    for key in _YOUTUBE_TAG_KEYS:
+        value = str(tags.get(key) or "").strip()
+        if not value:
+            continue
+        if "youtube.com" in value or "youtu.be" in value:
+            match = re.search(r"(?:v=|/shorts/|youtu\.be/)([A-Za-z0-9_-]{11})",
+                              value)
+            if match:
+                return match.group(1)
+            continue
+        if _YOUTUBE_ID_RX.fullmatch(value):
+            return value
+    return ""
+
+
+def youtube_age_advisory(video_id, cfg=None):
+    """(1, "youtube-age") when YouTube itself flags the video 18+, else None.
+
+    Only asked about a video the caller already knows belongs to this track
+    (see `youtube_video_id`) or passes itself. `age_limit >= 18` states
+    explicit; anything else — a normal video, an unavailable one, yt-dlp not
+    installed, YouTube disabled — states NOTHING, because "no age gate" is not
+    a statement about the music.
+    """
+    from server import youtube
+
+    ident = str(video_id or "").strip()
+    if not _YOUTUBE_ID_RX.fullmatch(ident):
+        return None
+    if not youtube._enabled(cfg):
+        return None
+    module = youtube._load_ytdlp()
+    if module is None:
+        return None
+    try:
+        with module.YoutubeDL(youtube._ydl_opts(cfg)) as ydl:
+            info = ydl.extract_info(youtube._watch_url(ident), download=False)
+    except Exception:
+        return None
+    if not isinstance(info, dict):
+        return None
+    try:
+        limit = int(info.get("age_limit") or 0)
+    except (TypeError, ValueError):
+        return None
+    return (1, "youtube-age") if limit >= 18 else None
+
+
 def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
                            album="", disc=None, track=None, track_count=None,
-                           cfg=None):
-    """{"value": 0|1|2|None, "source": key|None, "checked": [key, ...]}.
+                           cfg=None, youtube_id="", tags=None):
+    """{"value": 0|1, "source": key|None, "checked": [key, ...],
+        "answers": {key: 0|1}}.
 
-    The whole point of the three-part answer: a caller may only write a value
-    it can attribute, so `value` is never set without a `source` naming the
-    provider that stated it. `checked` lists the routes that were actually
-    asked (in order), which is what the UI shows when nothing answered.
+    EVERY applicable source is asked, in one pass, and none of them
+    short-circuits:
+
+      1. Deezer by ISRC, then 2. Spotify by ISRC — for EVERY ISRC the track
+         has: the file's own tag plus every ISRC MusicBrainz holds for its
+         recording (Apple serves no ISRC lookup, so it is reached by edition
+         instead and is still cross-referenced with both);
+      3. Apple's artist route — artist → its album list → the explicit
+         edition → track (disc/track, then a title match);
+      4. Apple's song search — title match only;
+      5. Discogs' edition (`format`/`description` "Parental Advisory", token
+         only) and 6. YouTube's 18+ gate for a video the track records — two
+         LAST, explicit-only, album/edition-level signals that never clear a
+         track and stay silent when their input is absent.
+
+    `answers` is the per-source map in ask order, `source` the first source
+    that stated the merged value, `checked` every route that was asked. The
+    merge itself is `merge_advisory` — one rule, one place — so `value` is 0
+    or 1 and an empty `answers` is the only signal that nobody stated
+    anything.
     """
     if cfg is None:
         try:
@@ -793,23 +1004,30 @@ def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
             cfg = load_config()
         except Exception:
             cfg = {}
-    codes = [str(isrc).strip()] if str(isrc or "").strip() else []
-    if not codes and recording_mbid:
-        codes = recording_isrcs(recording_mbid)
+    codes = []
+    if str(isrc or "").strip():
+        codes.append(str(isrc).strip())
+    if recording_mbid:
+        # The file's own ISRC is asked first, then every ISRC MusicBrainz
+        # holds for the recording — both ISRC sources see all of them.
+        for code in recording_isrcs(recording_mbid):
+            if code.upper() not in {c.upper() for c in codes}:
+                codes.append(code)
     spotify_on = _spotify_configured(cfg)
     checked = []
+    answers = {}
     for code in codes:
         checked.append("deezer-isrc")
         answer = _advisory_cached(("deezer-isrc", code.upper()),
                                   lambda c=code: _deezer_advisory(c))
         if answer is not None:
-            return {"value": answer[0], "source": answer[1], "checked": checked}
+            answers.setdefault(answer[1], answer[0])
         if spotify_on:
             checked.append("spotify-isrc")
             answer = _advisory_cached(("spotify-isrc", code.upper()),
                                       lambda c=code: _spotify_advisory(c, cfg))
             if answer is not None:
-                return {"value": answer[0], "source": answer[1], "checked": checked}
+                answers.setdefault(answer[1], answer[0])
     if artist and album:
         checked.append("apple-album")
         key = ("apple-album", _norm_compare(artist), _norm_compare(album),
@@ -817,46 +1035,63 @@ def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
         answer = _advisory_cached(key, lambda: _apple_album_advisory(
             artist, album, title, disc, track, track_count, cfg=cfg))
         if answer is not None:
-            return {"value": answer[0], "source": answer[1], "checked": checked}
+            answers.setdefault(answer[1], answer[0])
     if title:
         checked.append("itunes-song")
         key = ("itunes-song", _norm_compare(artist), _norm_compare(title))
         answer = _advisory_cached(key,
                                   lambda: _itunes_song_advisory(title, artist))
         if answer is not None:
-            return {"value": answer[0], "source": answer[1], "checked": checked}
-    return {"value": None, "source": None, "checked": checked}
+            answers.setdefault(answer[1], answer[0])
+    # The last two are extra EXPLICIT-only signals, both album/edition level
+    # and both silent when their input is missing: a Discogs Parental
+    # Advisory sticker (a configured token only), and YouTube's own 18+ gate
+    # for a video the track already records. Neither can clear a track.
+    if artist and album and str((cfg or {}).get("discogs_token") or "").strip():
+        checked.append("discogs-parental")
+        key = ("discogs-parental", _norm_compare(artist), _norm_compare(album))
+        answer = _advisory_cached(
+            key, lambda: _discogs_parental_advisory(artist, album, cfg))
+        if answer is not None:
+            answers.setdefault(answer[1], answer[0])
+    video = str(youtube_id or "").strip() or youtube_video_id(tags)
+    if video:
+        checked.append("youtube-age")
+        answer = _advisory_cached(("youtube-age", video),
+                                  lambda: youtube_age_advisory(video, cfg))
+        if answer is not None:
+            answers.setdefault(answer[1], answer[0])
+    value = merge_advisory(answers)
+    return {"value": value, "source": _winning_source(answers, value),
+            "checked": checked, "answers": answers}
 
 
 def resolve_advisory(isrc="", recording_mbid="", **context):
-    """ITUNESADVISORY (0/1/2) for one track, or None when nobody states one.
+    """ITUNESADVISORY (0/1) for one track — the merged answer of every source.
 
-    Asked in order, first stated answer wins (`resolve_advisory_route`):
-
-      1. Deezer by ISRC — per-track identity, no title guessing (primary);
-      2. Spotify by ISRC — only when client id + secret are configured;
-      3. Apple's artist route — artist → its album list → the explicit
-         edition → track (disc/track, then exact title);
-      4. Apple's song search — exact normalized title only.
+    Deezer by ISRC, Spotify by ISRC when configured, Apple's artist→album
+    route and Apple's song search are all asked (see
+    `resolve_advisory_route`), and the merged value is 1 when ANY of them says
+    explicit, 0 otherwise (`merge_advisory`, the user's policy — an unstated
+    advisory is a 0, not an absent tag).
 
     `context` may carry `title`, `artist`, `album`, `disc`, `track`,
-    `track_count` and `cfg` (routes 3 and 4 need them; routes 1 and 2 do not).
-    MusicBrainz supplies the ISRC when the caller has none.
-
-    None means "unrated" and must never be written as 0 — a clean rating is a
-    claim about the audio, not a default — and no route ever answers from a
-    `cleaned` edition.
+    `track_count` and `cfg` (the Apple routes need them; the ISRC sources do
+    not). MusicBrainz supplies the ISRCs when the caller has only a recording
+    ID. Use `resolve_advisory_route` when the per-source answers matter too.
     """
     return resolve_advisory_route(isrc=isrc, recording_mbid=recording_mbid,
                                   **context)["value"]
 
 
-def release_advisories(mbid, sources=None):
-    """{f'{disc}:{position}': 0|1|2} for every track of a release a provider
-    rates. Empty when nothing is known — callers must not fill the gaps.
+def release_advisories(mbid, sources=None, answers=None):
+    """{f'{disc}:{position}': 0|1} for every track of a release.
 
-    `sources` (optional) is filled with the answering source key per entry, so
-    the caller can report provenance alongside the value.
+    Every track gets the merged value of the sources that were asked (0 when
+    none of them stated anything — the merge rule, not a gap to fill in).
+    `sources` (optional) is filled with the source that stated each value and
+    `answers` (optional) with the whole per-track `{source: 0|1}` map, so a
+    caller can report provenance alongside the value.
     """
     release = release_lookup(mbid)
     fallback_artist = next((a.get("name") for a in release.get("artists") or []
@@ -879,6 +1114,8 @@ def release_advisories(mbid, sources=None):
             out[key] = route["value"]
             if sources is not None and route["source"]:
                 sources[key] = route["source"]
+            if answers is not None and route.get("answers"):
+                answers[key] = route["answers"]
     return out
 
 
@@ -1000,7 +1237,62 @@ _RYM_CHALLENGE_RE = re.compile(
 # order on a release page (primary genres first) — the anchors are the whole
 # scrape, so a markup change degrades to "no genres", never to wrong ones.
 _RYM_GENRE_RE = re.compile(r'href="/genre/([a-z0-9%\-]+)"[^>]*>([^<]{1,60})</a>', re.I)
+# Descriptors ("Concept Album", "Death", "Lo-Fi") are RYM's other album-level
+# classification. They are not genres, but they are the only classification a
+# release page carries when it carries no /genre/ anchor, so they are read as
+# a LAST-RESORT album-level answer and labelled as such in the provenance.
+_RYM_DESCRIPTOR_RE = re.compile(
+    r'href="/descriptor/([a-z0-9%\-]+)"[^>]*>([^<]{1,60})</a>', re.I)
+# The track list: each row is a <tr class="tracklist_row">. A row that carries
+# its own /genre/ anchor (some releases do tag a track) is that track's
+# genre — everything else is album-level and says so.
+_RYM_TRACK_ROW_RE = re.compile(r"<tr[^>]*tracklist_row[^>]*>(.*?)</tr>", re.I | re.S)
+_RYM_TRACK_NUM_RE = re.compile(r"tracklist_track_num[^>]*>\s*(\d+)", re.I)
+_RYM_TRACK_TITLE_RE = re.compile(
+    r"tracklist_track_title[^>]*>(.*?)</t[dh]>", re.I | re.S)
 _RYM_ARTIST_LINK_RE = re.compile(r'href="(/artist/[^"]+)"', re.I)
+
+
+def _rym_labels(pattern, html):
+    """Trimmed, de-duplicated anchor labels for one RYM link pattern."""
+    out = []
+    for _slug, label in pattern.findall(html or ""):
+        name = re.sub(r"\s+", " ", label).strip()
+        if name and name.lower() not in {g.lower() for g in out}:
+            out.append(name)
+    return out
+
+
+def _rym_genres_from(html):
+    """Genres (the /genre/ anchors) from a RYM release or artist page."""
+    return _rym_labels(_RYM_GENRE_RE, html)
+
+
+def _rym_tracks_from(html):
+    """[{position, title, genres}] from a release page's track list.
+
+    RYM states genres per RELEASE, not per track, so `genres` is normally
+    empty and the release's own list is what applies (the caller marks that
+    `level: album`). A row that does carry a /genre/ anchor is used for that
+    row, mapped onto our tracks by position first and by title second — and a
+    title that matches nothing is dropped rather than guessed at.
+    """
+    out = []
+    for row in _RYM_TRACK_ROW_RE.findall(html or ""):
+        match = _RYM_TRACK_TITLE_RE.search(row)
+        if not match:
+            continue
+        title = re.sub(r"\s+", " ",
+                       re.sub(r"<[^>]+>", "", match.group(1))).strip()
+        if not title:
+            continue
+        num = _RYM_TRACK_NUM_RE.search(row)
+        out.append({
+            "position": int(num.group(1)) if num else len(out) + 1,
+            "title": title,
+            "genres": _rym_labels(_RYM_GENRE_RE, row),
+        })
+    return out
 
 
 def _rym_cookie(cfg=None):
@@ -1141,12 +1433,7 @@ def _rym_slug(value):
 
 def _rym_genres_from(html):
     """Genres (the /genre/ anchors) from a RYM release or artist page."""
-    out = []
-    for _slug, label in _RYM_GENRE_RE.findall(html or ""):
-        name = re.sub(r"\s+", " ", label).strip()
-        if name and name.lower() not in {g.lower() for g in out}:
-            out.append(name)
-    return out
+    return _rym_labels(_RYM_GENRE_RE, html)
 
 
 def rym_genres(artist, album):
@@ -1155,20 +1442,42 @@ def rym_genres(artist, album):
     Tries the release URL RYM derives from the artist+album slugs (its
     canonical `/release/album/<artist>/<album>/` shape) first and its search
     page second, so a punctuation-heavy title still resolves. Returns
-    {"genres": [...], "source_url": ...} or None — see RYM_BASE's note on the
-    blocked-by-RYM failure mode. Chart data is NOT scraped: nothing in the app
-    consumes a RYM chart, so only the genre path is implemented.
+    {"genres": [...], "descriptors": [...], "level": "album", "tracks": [...],
+    "source_url": ...} or None — see RYM_BASE's note on the blocked-by-RYM
+    failure mode. Chart data is NOT scraped: nothing in the app consumes a RYM
+    chart, so only the genre path is implemented.
+
+    `level` is always "album" here: RYM classifies releases, and a release's
+    genres are applied to every one of its tracks — the caller records that in
+    the provenance rather than pretending the answer was per-track.
+    `descriptors` are the page's /descriptor/ anchors, used only when the page
+    carries no /genre/ anchor at all, and `tracks` carries the track list so a
+    row that DOES state its own genre can be mapped by position, then title.
     """
     artist = str(artist or "").strip()
     album = str(album or "").strip()
     if not artist or not album:
         return None
+
+    def answer(html, url):
+        # The track list is read first and then REMOVED: a row that states its
+        # own genre must not have that genre promoted to the whole release.
+        rows = _rym_tracks_from(html)
+        head = _RYM_TRACK_ROW_RE.sub("", html or "")
+        genres = _rym_genres_from(head)
+        descriptors = [] if genres else _rym_labels(_RYM_DESCRIPTOR_RE, head)
+        if not genres and not descriptors:
+            return None
+        return {"genres": genres or descriptors, "descriptors": descriptors,
+                "level": "album", "tracks": rows,
+                "source_url": f"{RYM_BASE}{url}", "source": "rym"}
+
     url = f"/release/album/{_rym_slug(artist)}/{_rym_slug(album)}/"
     html = _rym_get(url)
     if html:
-        genres = _rym_genres_from(html)
-        if genres:
-            return {"genres": genres, "source_url": f"{RYM_BASE}{url}"}
+        got = answer(html, url)
+        if got:
+            return got
     html = _rym_get("/search", {"searchterm": f"{artist} {album}", "type": "a"})
     if not html:
         return None
@@ -1178,11 +1487,11 @@ def rym_genres(artist, album):
         return None
     rel_url = m2.group(1)
     page = _rym_get(rel_url)
-    genres = _rym_genres_from(page or "")
-    if not genres:
+    got = answer(page or "", rel_url)
+    if not got:
         return None
-    return {"genres": genres, "source_url": f"{RYM_BASE}{rel_url}",
-            "artist_page": f"{RYM_BASE}{m.group(1)}" if m else ""}
+    got["artist_page"] = f"{RYM_BASE}{m.group(1)}" if m else ""
+    return got
 
 
 def rym_artist_genres(artist):
@@ -1343,80 +1652,774 @@ def rym_links(artist="", album="", cfg=None):
 
 
 # --------------------------------------------------------------------------- #
+# Bandcamp (scraped — no public API)
+# --------------------------------------------------------------------------- #
+# An album page carries the release's crowd-sourced tags as `.tralbum-tags`
+# anchors, and its own JSON blob (`data-tralbum`) holds the album title plus
+# one `trackinfo` entry per track. Bandcamp states NO per-track genre at all
+# — every tag it has is the album's — so this source is an ALBUM-level
+# crowdsourced tier and the chain labels its row `level: album`.
+#
+# VERIFIED here: bandcamp.com's own search/tag pages answer this client with
+# Cloudflare's interstitial, but the per-artist album pages do NOT — and the
+# album URL is derivable from the names
+# (`https://<artist-slug>.bandcamp.com/album/<album-slug>`), so the source
+# costs one request per album. A page is accepted only when it states THIS
+# album: the tralbum's own title matches, and (when the caller knows its own
+# track titles) the page's track titles line up with them — a wrong album's
+# tags are NO answer. Politeness is the same as RYM's: browser headers, 1
+# req/s, one line per process on a hard failure, and the caller's 30-day cache
+# wraps the whole source so a repeat import re-fetches nothing.
+BANDCAMP_BASE = "https://bandcamp.com"
+BANDCAMP_MIN_INTERVAL = 1.0
+_bandcamp_lock = threading.Lock()
+_bandcamp_last = 0.0
+_bandcamp_warned = False
+_BANDCAMP_HEADERS = {
+    "User-Agent": RYM_HEADERS["User-Agent"],
+    "Accept": RYM_HEADERS["Accept"],
+    "Accept-Language": RYM_HEADERS["Accept-Language"],
+    "Referer": BANDCAMP_BASE + "/",
+}
+# The attribute value is HTML-escaped (`&quot;`), so no raw `"` can appear
+# inside it and a plain non-greedy match is safe.
+_BANDCAMP_TRALBUM_RE = re.compile(r'data-tralbum="([^"]*)"', re.S)
+# Tags are `<a class="tag" href=".../discover/<slug>">Label</a>` inside the
+# tag block. Read as labels; the block is found by its own class so no anchor
+# elsewhere on the page can be mistaken for a tag.
+_BANDCAMP_TAG_RE = re.compile(r'<a class="tag"[^>]*>([^<]+)</a>', re.I)
+
+
+def _bandcamp_unreachable(reason):
+    """One concise line per process when Bandcamp cannot answer at all."""
+    global _bandcamp_warned
+    if _bandcamp_warned:
+        return
+    _bandcamp_warned = True
+    print(f"[mlo] bandcamp.com: {reason} — that source is skipped this run")
+
+
+def _bandcamp_get(url, timeout=20.0):
+    """One polite GET of a Bandcamp page (browser UA, 1 req/s), or "".
+
+    "" covers everything that is not that page: a 404 slug, an empty body, a
+    connection failure. A 404 is a miss the caller moves on from, so only a
+    connection failure is logged.
+    """
+    global _bandcamp_last
+    with _bandcamp_lock:
+        wait = BANDCAMP_MIN_INTERVAL - (time.time() - _bandcamp_last)
+        if wait > 0:
+            time.sleep(wait)
+        _bandcamp_last = time.time()
+        try:
+            r = httpx.get(url, headers=_BANDCAMP_HEADERS, timeout=timeout,
+                          follow_redirects=True)
+        except httpx.HTTPError as e:
+            _bandcamp_unreachable(f"no connection ({type(e).__name__})")
+            return ""
+    if r.status_code != 200 or not r.text:
+        return ""
+    return r.text
+
+
+def _bandcamp_slug(value, sep):
+    """`value` as a Bandcamp slug: folded, `&` → `and`, other junk → *sep*."""
+    text = str(value or "").strip().lower().replace("&", " and ")
+    return re.sub(r"[^a-z0-9]+", sep, text).strip(sep)
+
+
+def _bandcamp_subdomain_candidates(artist):
+    """The Bandcamp subdomains *artist* may use, best first.
+
+    Bandcamp subdomains are written without separators ("King Buffalo" →
+    `kingbuffalo`); the hyphenated form is kept as a second candidate because
+    some artists do register that way.
+    """
+    out = [_bandcamp_slug(artist, ""), _bandcamp_slug(artist, "-")]
+    return [s for i, s in enumerate(out) if s and s not in out[:i]]
+
+
+def _bandcamp_tralbum(page):
+    """The page's `data-tralbum` JSON, or None when the page carries none."""
+    match = _BANDCAMP_TRALBUM_RE.search(page or "")
+    if not match:
+        return None
+    try:
+        data = json.loads(_html.unescape(match.group(1)))
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _bandcamp_tracks(tralbum):
+    """[{position, title}] from a tralbum's `trackinfo` (its own track list)."""
+    out = []
+    for row in (tralbum or {}).get("trackinfo") or []:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title") or "").strip()
+        if title:
+            out.append({"position": row.get("track_num"), "title": title})
+    return out
+
+
+def _bandcamp_tags(page):
+    """The album's own tags, junk filtered like ListenBrainz free tags.
+
+    A tag is kept when it is not a mood word (`LB_MOOD_WORDS`) and is not the
+    same word as one already kept once punctuation and spacing are ignored —
+    Bandcamp lists literal duplicates of its own slugs side by side ("doom
+    metal" and "doommetal"), and those are one tag, not two.
+    """
+    from server import discovery
+
+    start = page.find("tralbum-tags tralbum-tags-nu")
+    if start < 0:
+        start = page.find("tralbumData tralbum-tags")
+    if start < 0:
+        return []
+    end = page.find("</div>", start)
+    block = page[start:end if end > start else len(page)]
+    out, seen = [], set()
+    for match in _BANDCAMP_TAG_RE.finditer(block):
+        name = _html.unescape(match.group(1)).strip()
+        key = re.sub(r"[^a-z0-9]+", "", name.lower())
+        if not name or not key or key in seen:
+            continue
+        if name.lower() in discovery.LB_MOOD_WORDS:
+            continue
+        seen.add(key)
+        out.append(name)
+    return out
+
+
+def _bandcamp_is_album(tralbum, album, titles=None):
+    """Whether a tralbum is the album we asked about (never a guess)."""
+    from server import discovery
+
+    if album:
+        stated = discovery.norm((tralbum.get("current") or {}).get("title"))
+        if stated != discovery.norm(album):
+            return False
+    page_titles = {discovery.norm(t["title"]) for t in _bandcamp_tracks(tralbum)}
+    ours = [discovery.norm(t) for t in titles or [] if str(t or "").strip()]
+    if ours and page_titles and not (set(ours) & page_titles):
+        return False
+    return True
+
+
+def bandcamp_album(artist="", album="", titles=None):
+    """Bandcamp's tags for one album: {"genres", "tracks", "url"} or None.
+
+    `titles` (optional) are the caller's own track titles for that album: they
+    are what confirms the page that came back is this release, so a
+    same-named record by another band cannot donate its tags. None means "no
+    such album for this client" (a wrong slug, no Bandcamp presence, the
+    interstitial) — never an empty answer dressed up as one.
+    """
+    name = str(album or "").strip()
+    if not name:
+        return None
+    for sub in _bandcamp_subdomain_candidates(artist):
+        url = f"https://{sub}.bandcamp.com/album/{_bandcamp_slug(name, '-')}"
+        page = _bandcamp_get(url)
+        if not page:
+            continue
+        tralbum = _bandcamp_tralbum(page)
+        if not tralbum or not _bandcamp_is_album(tralbum, name, titles):
+            continue
+        return {"genres": _bandcamp_tags(page),
+                "tracks": _bandcamp_tracks(tralbum), "url": url}
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # Genre chain — one merge point for every genre source
 # --------------------------------------------------------------------------- #
-# Order used when mlo.config genre_sources is empty. Same list as the config
-# default: scraped RYM, then peer/community sources, then streaming providers,
-# with MusicBrainz (the app's identity anchor) last.
-GENRE_SOURCES = ["rateyourmusic", "soulseek", "discogs", "lastfm",
-                 "theaudiodb", "musicbrainz", "deezer", "itunes"]
+# Order used when mlo.config `genre_sources` is empty. It is a PRIORITY LIST:
+# every source is asked for EVERY track (see `_genre_source_answers`), and the
+# merged answer is taken in this order, so the position of a source is what a
+# track's genre picks look like. `mlo.config.DEFAULT_CONFIG["genre_sources"]`
+# is this list and `normalize_config` migrates both previously shipped
+# defaults into it (`tools/test_genres.py` asserts the two are equal).
+#
+#   a. rateyourmusic  release page — per TRACK where the page states one, else
+#                     album. FIRST by the user's own requirement: its curated
+#                     genre + descriptor classification is the one they want
+#                     (needs `rym_cookie`; blocked, it logs one line and is
+#                     skipped — see RYM_BASE).
+#   b. listenbrainz   recording tags → release-group → artist. Crowdsourced
+#                     PER RECORDING, free, no key, MBID-native (no title
+#                     guessing for a release MusicBrainz knows).
+#   c. musicbrainz    recording → release → release group → artist. Curated
+#                     per recording, and the app's identity anchor, but its
+#                     genre coverage is spotty.
+#   d. itunes         per-track `primaryGenreName`. Free, keyless, and its
+#                     per-track genre is reliable for mainstream releases.
+#   e. lastfm         track.getTopTags → artist.getTopTags. Crowdsourced per
+#                     track and broad, but needs a free API key.
+#   f. theaudiodb     searchtrack.php per track → album genre/mood. Per-track
+#                     plus album metadata (biography, art), keyless.
+#   g. wikidata       P136 on the recording entity, then the release group /
+#                     searched entity. Curated but sparse, per recording where
+#                     one is stated.
+#   h. bandcamp       album page tags. Crowdsourced and strong for
+#                     indie/self-released records; ALBUM level (Bandcamp
+#                     states no per-track genre at all), keyless.
+#   i. discogs        release styles + genres. Curated, album level, needs a
+#                     token.
+#   j. deezer         album genres only — album level, keyless.
+#   k. spotify        ARTIST genres — artist level, needs client id+secret,
+#                     the last resort (the chain only ever adds a source's
+#                     answer, so the weakest one goes last).
+#
+# Every per-track source sits ABOVE every album-only one (bandcamp, discogs,
+# deezer, spotify), which is what keeps a track's own answer ahead of an
+# album-wide guess (`tools/test_genres.py` asserts that property of this list).
+#
+# `soulseek` is NOT in the default list: peers advertise folders and file
+# names, not genres, so it can never state one — it stays handled as a
+# documented no-op so a saved config listing it keeps working.
+GENRE_SOURCES = ["rateyourmusic", "listenbrainz", "musicbrainz", "itunes",
+                 "lastfm", "theaudiodb", "wikidata", "bandcamp", "discogs",
+                 "deezer", "spotify"]
 
 
-def _genre_source_names(source, artist, album, release, cfg):
-    """One source's raw genre names (never raises — wrapped by genre_chain)."""
+# The key an ALBUM- or ARTIST-wide answer is filed under: it applies to every
+# track of the release, and the row's `level` is what says so.
+_ALL_TRACKS = ""
+_LEVEL_RANK = {"track": 0, "album": 1, "artist": 2}
+
+
+def _genre_track_key(disc, position):
+    """`"disc:position"` — the key one track's answer is filed under."""
+    return f"{int(disc or 1)}:{int(position or 0)}"
+
+
+def _genre_names(names):
+    """Trimmed, case-insensitively deduped names, original spelling kept."""
+    out = []
+    for name in names or []:
+        text = str(name or "").strip()
+        if text and text.lower() not in {g.lower() for g in out}:
+            out.append(text)
+    return out
+
+
+def _genre_row(level, names, title=""):
+    """{"level", "genres"[, "title"]} for one answer, or None when empty."""
+    clean = _genre_names(names)
+    if not clean:
+        return None
+    row = {"level": level, "genres": clean}
+    if title:
+        row["title"] = str(title)
+    return row
+
+
+# --------------------------------------------------------------------------- #
+# 30-day value cache — genre answers (per album / recording) and, through the
+# same helper, the cover-search image dimension probes (per image URL)
+# --------------------------------------------------------------------------- #
+# Genre data moves slowly, one album pass asks the same album (and the same
+# recording) over and over, and every crowdsourced source here is throttled to
+# ~1 req/s; an image's size likewise never changes for a URL. Answers —
+# including "nothing", which must not be re-asked either — are kept in memory
+# and on disk under <music>/.mlo/data/genre_cache, keyed by kind so the two
+# users never collide.
+_GENRE_CACHE_TTL = 30 * 86400.0
+_GENRE_CACHE: dict = {}
+_GENRE_CACHE_LOCK = threading.Lock()
+_GENRE_CACHE_MAX = 5000
+_GENRE_MISS = object()
+
+
+def _genre_cache_file(ident):
+    import hashlib
+
+    folder = _data_cache_dir("genre_cache")
+    if not folder:
+        return None
+    return os.path.join(folder, hashlib.sha1(ident.encode("utf-8")).hexdigest()
+                        + ".json")
+
+
+def _genre_cached(kind, key, producer):
+    """`producer()` memoized 30 days by (kind, key) — memory, then disk.
+
+    The app's one 30-day disk cache. `kind` is "album" (identity: artist +
+    album, or a release-group/artist MBID), "recording" (identity: a recording
+    MBID or artist + title) or "cover_dim" (identity: an image URL).
+    `producer` must return JSON-serializable data or None and must never
+    raise: a failing source is not allowed to take the chain down, and "no
+    answer" is cached like any other answer so a rerun costs no request.
+    """
+    ident = f"{kind}|{key}"
+    with _GENRE_CACHE_LOCK:
+        hit = _GENRE_CACHE.get(ident)
+    if hit is not None:
+        return None if hit is _GENRE_MISS else hit
+    path = _genre_cache_file(ident)
+    if path:
+        try:
+            if (os.path.isfile(path)
+                    and time.time() - os.path.getmtime(path) < _GENRE_CACHE_TTL):
+                with open(path, encoding="utf-8") as fh:
+                    value = json.load(fh)
+                with _GENRE_CACHE_LOCK:
+                    _GENRE_CACHE[ident] = _GENRE_MISS if value is None else value
+                return value
+        except (OSError, ValueError):
+            pass
+    value = producer()
+    with _GENRE_CACHE_LOCK:
+        if len(_GENRE_CACHE) >= _GENRE_CACHE_MAX:
+            _GENRE_CACHE.clear()
+        _GENRE_CACHE[ident] = _GENRE_MISS if value is None else value
+    if path:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+                json.dump(value, fh)
+            os.replace(tmp, path)
+        except OSError:
+            pass
+    return value
+
+
+# --------------------------------------------------------------------------- #
+# Per-source answers
+# --------------------------------------------------------------------------- #
+def _mb_wikidata_qid(mbid, entity="release-group"):
+    """The Wikidata entity a MusicBrainz entity points at, or None.
+
+    MusicBrainz holds the relation itself (`inc=url-rels`), which is what
+    makes the Wikidata tier an identity lookup instead of a title guess.
+    `entity` is a MusicBrainz endpoint name ("release-group", "recording",
+    "work"): the genre chain asks a RECORDING first, then the WORK it performs
+    (see `_mb_recording_ids`), because a track's own item carries P136 where
+    the release group carries none.
+    """
+    if not mbid:
+        return None
+    try:
+        data = mb_get_cached(f"{entity}/{mbid}",
+                             {"inc": "url-rels", "fmt": "json"})
+    except Exception:
+        return None
+    return _mb_wikidata_qid_in((data or {}).get("relations"))
+
+
+def _mb_wikidata_qid_in(relations):
+    """The Wikidata QID of a MusicBrainz relation list, or ""."""
+    for rel in relations or []:
+        if str(rel.get("type") or "").strip().lower() != "wikidata":
+            continue
+        match = re.search(r"Q\d+",
+                          str((rel.get("url") or {}).get("resource") or ""))
+        if match:
+            return match.group(0)
+    return ""
+
+
+def _mb_recording_ids(recording_mbid):
+    """{"qid", "work"} for one MusicBrainz recording, both "" when none.
+
+    ONE request (`inc=url-rels+work-rels`) answers both questions: whether the
+    recording itself links a Wikidata item (rare — every popular recording
+    probed on this machine had no such link), and which WORK it performs. The
+    work is the practical route and it is still an identity, never a title
+    guess: VERIFIED here, Queen's "Bohemian Rhapsody" recording → work
+    `41c94a08…` → Wikidata Q187745, whose P136 is progressive rock / hard rock
+    / progressive pop, and Pink Floyd's "Time" → work → Q641913 ("popular
+    music"). A multi-word ENTITY SEARCH is not usable for this at all —
+    `wbsearchentities` matches labels by prefix, so "artist title" answers
+    nothing (VERIFIED: no hits for four-word research queries).
+    """
+    if not recording_mbid:
+        return {"qid": "", "work": ""}
+    try:
+        data = mb_get_cached(f"recording/{recording_mbid}",
+                             {"inc": "url-rels+work-rels", "fmt": "json"})
+    except Exception:
+        return {"qid": "", "work": ""}
+    relations = (data or {}).get("relations") or []
+    work = ""
+    for rel in relations:
+        if work:
+            break
+        work = str((rel.get("work") or {}).get("id") or "")
+    return {"qid": _mb_wikidata_qid_in(relations), "work": work}
+
+
+def _itunes_track_genres(artist, album, cfg=None):
+    """{"disc:position": [genre]} from Apple's per-track `primaryGenreName`.
+
+    Free and streaming-tier: the album's edition (explicit edition first — the
+    same resolution the advisory route uses) is looked up with `entity=song`,
+    and every row carries its own genre. Apple serves it per track, which is
+    why this source beats the album-level ones below it. {} when Apple holds
+    no such album.
+    """
+    editions = _apple_editions(artist, album, cfg=cfg)
+    cid = _advisory_int((editions[0] if editions else {}).get("collectionId"))
+    if not cid:
+        return {}
+    data = _apple_json("/lookup", {"id": cid, "entity": "song", "limit": 200,
+                                   "country": _apple_country(cfg)})
+    out = {}
+    for row in (data or {}).get("results") or []:
+        genre = str(row.get("primaryGenreName") or "").strip()
+        position = _advisory_int(row.get("trackNumber"))
+        if not genre or not position:
+            continue
+        key = _genre_track_key(_advisory_int(row.get("discNumber")) or 1, position)
+        out[key] = _genre_names((out.get(key) or []) + [genre])
+    return out
+
+
+def _release_artist_mbids(artist, album, release, cfg):
+    """The release's artist MBIDs, resolved from the name when it has none."""
+    from server import discovery
+
+    ids = [a.get("mbid") for a in (release or {}).get("artists") or []
+           if a.get("mbid")]
+    if not ids and artist:
+        try:
+            resolved = discovery.resolve_artist_mbid(artist)
+        except Exception:
+            resolved = None
+        if resolved:
+            ids.append(resolved)
+    return ids
+
+
+def _genre_source_answers(source, artist, album, release, cfg, tracks):
+    """One source's answers: {key: {"level", "genres"[, "title"]}}.
+
+    `key` is a track key for a per-track answer, `_ALL_TRACKS` for an
+    album/artist-wide one; both may be present and `genre_chain` merges the
+    track's own answer first. Every source is asked at its best available
+    level — a per-track source that cannot answer per track answers nothing
+    rather than promoting an album guess to a track. Never raises: the chain
+    wraps the call, and every network path inside returns "no answer".
+    """
     from server import discovery
 
     if source == "rateyourmusic":
-        return list((rym_genres(artist, album) or {}).get("genres") or [])
-    if source == "soulseek":
-        # Peers advertise folders and file names, not genres. Nothing here can
-        # state a genre, so this source is a no-op by design — it stays in the
-        # order so a saved config listing it keeps working.
-        return []
-    if source == "discogs":
-        return discovery.discogs_album_genres(artist, album, cfg)
-    if source == "lastfm":
-        return discovery.lastfm_album_genres(artist, album, cfg)
-    if source == "theaudiodb":
-        row = discovery.audiodb_album(artist, album) or {}
-        return [g for g in (row.get("genre"), row.get("mood")) if g]
+        data = rym_genres(artist, album) or rym_artist_genres(artist)
+        if not data:
+            return {}
+        wide = _genre_row(data.get("level") or "artist",
+                          (data.get("genres") or []) + (data.get("descriptors") or []))
+        answers = {_ALL_TRACKS: wide} if wide else {}
+        for row in data.get("tracks") or []:
+            # RYM renders one medium per page, so the row number is the
+            # position on disc 1; `genre_chain` re-maps by title when that
+            # does not line up with this release's own numbering.
+            own = _genre_row("track", row.get("genres"), row.get("title"))
+            if own:
+                answers[_genre_track_key(1, row.get("position"))] = own
+        return answers
+
+    if source == "listenbrainz":
+        answers = {}
+        for track in tracks:
+            recording = track.get("recording_mbid")
+            if not recording:
+                continue
+            got = _genre_cached(
+                "recording", f"listenbrainz|{recording}",
+                lambda r=recording: discovery.listenbrainz_genre_tags(r, "recording"))
+            row = _genre_row("track", ((got or {}).get("genres") or [])
+                             + ((got or {}).get("tags") or []))
+            if row:
+                answers[_genre_track_key(track.get("disc"), track.get("position"))] = row
+        rg_names = []
+        rg = (release or {}).get("release_group_id")
+        if rg:
+            got = _genre_cached(
+                "album", f"listenbrainz|release_group|{rg}",
+                lambda: discovery.listenbrainz_genre_tags(rg, "release_group"))
+            rg_names = ((got or {}).get("genres") or []) + ((got or {}).get("tags") or [])
+        artist_names = []
+        for mbid in _release_artist_mbids(artist, album, release, cfg):
+            got = _genre_cached(
+                "album", f"listenbrainz|artist|{mbid}",
+                lambda m=mbid: discovery.listenbrainz_genre_tags(m, "artist"))
+            artist_names += ((got or {}).get("genres") or []) + ((got or {}).get("tags") or [])
+            break
+        wide = _genre_row("album" if rg_names else "artist", rg_names + artist_names)
+        if wide:
+            answers[_ALL_TRACKS] = wide
+        return answers
+
     if source == "musicbrainz":
-        names = []
+        answers = {}
+        for track in tracks:
+            row = _genre_row("track", track.get("genres"))
+            if row:
+                answers[_genre_track_key(track.get("disc"), track.get("position"))] = row
+        wide, level = [], "album"
         if release:
-            names += list(release.get("genres") or [])
+            wide += list(release.get("genres") or [])
             rg = release.get("release_group_id")
             if rg:
-                names += release_group_genres(rg)
-            for a in release.get("artists") or []:
-                if a.get("mbid"):
-                    names += artist_genres(a["mbid"])
-                    break
+                wide += _genre_cached("album", f"musicbrainz|release_group|{rg}",
+                                      lambda r=rg: release_group_genres(r)) or []
+            for mbid in _release_artist_mbids(artist, album, release, cfg):
+                wide += _genre_cached("album", f"musicbrainz|artist|{mbid}",
+                                      lambda m=mbid: artist_genres(m)) or []
+                break
         else:
+            # No release in hand: the release group and the artist are what a
+            # genre cascade normally falls back on, resolved from the names.
             rg = None
             try:
                 rg = discovery.resolve_release_group(artist, album, cfg)
             except Exception:
                 rg = None
             if rg and rg.get("mbid"):
-                names += release_group_genres(rg["mbid"])
-            # the artist's own genres: what a genre cascade usually has to
-            # fall back on when the release itself carries none
-            ar = discovery.resolve_artist_mbid(artist) if artist else None
-            if ar:
-                names += artist_genres(ar)
-        return names
-    if source == "deezer":
-        return discovery.album_genres(artist, album, cfg=cfg)
+                wide += _genre_cached("album", f"musicbrainz|release_group|{rg['mbid']}",
+                                      lambda m=rg["mbid"]: release_group_genres(m)) or []
+            for mbid in _release_artist_mbids(artist, album, release, cfg):
+                wide += _genre_cached("album", f"musicbrainz|artist|{mbid}",
+                                      lambda m=mbid: artist_genres(m)) or []
+                if not (release or {}).get("artists"):
+                    level = "artist"
+                break
+        row = _genre_row(level, wide)
+        if row:
+            answers[_ALL_TRACKS] = row
+        return answers
+
     if source == "itunes":
-        return [r["genre"] for r in discovery.itunes_search_album(artist, album, limit=1)
-                if r.get("genre")]
-    return []
+        def look():
+            per_track = _itunes_track_genres(artist, album, cfg)
+            if per_track:
+                return {"tracks": per_track}
+            # Apple's album search is the fallback when its per-track lookup
+            # has nothing: one primary genre for the album (still better than
+            # no answer, and the caller marks it album level).
+            names = _genre_names([r.get("genre") for r in
+                                  discovery.itunes_search_album(artist, album,
+                                                                limit=1)])
+            return {"album": names} if names else None
+
+        got = _genre_cached(
+            "album", f"itunes|album|{_norm_compare(artist)}|{_norm_compare(album)}",
+            look) or {}
+        answers = {}
+        for key, names in (got.get("tracks") or {}).items():
+            row = _genre_row("track", names)
+            if row:
+                answers[key] = row
+        row = _genre_row("album", got.get("album"))
+        if row:
+            answers[_ALL_TRACKS] = row
+        return answers
+
+    if source == "wikidata":
+        answers = {}
+        # The TRACK's own item first, and by identity: the recording's
+        # Wikidata relation when it has one, else the Wikidata item of the
+        # WORK that recording performs (see `_mb_recording_ids`). Both are
+        # `level: track` answers.
+        for track in tracks:
+            recording = str(track.get("recording_mbid") or "").strip()
+            title = str(track.get("title") or "").strip()
+            if not recording:
+                continue
+            ids = _genre_cached("recording", f"wikidata|recording|{recording}",
+                                lambda r=recording: _mb_recording_ids(r)) or {}
+            qid = str(ids.get("qid") or "")
+            work = str(ids.get("work") or "")
+            if not qid and work:
+                qid = _genre_cached("recording", f"wikidata|work|{work}",
+                                    lambda w=work: _mb_wikidata_qid(w, "work")) or ""
+            if not qid:
+                continue
+            got = _genre_cached("recording", f"wikidata|qid|{qid}",
+                                lambda q=qid: discovery.wikidata_genres(qid=q)) or {}
+            row = _genre_row("track", got.get("genres"), title)
+            if row:
+                answers[_genre_track_key(track.get("disc"),
+                                         track.get("position"))] = row
+        # Then the release group's own entity (or the searched "artist album"
+        # entity) as today — album level, the fallback tier.
+        rg = (release or {}).get("release_group_id") or ""
+        term = " ".join(t for t in (artist, album) if t)
+        got = _genre_cached(
+            "album", f"wikidata|{rg}|{_norm_compare(term)}",
+            lambda: discovery.wikidata_genres(qid=_mb_wikidata_qid(rg), term=term)) or {}
+        row = _genre_row("album", got.get("genres"))
+        if row:
+            answers[_ALL_TRACKS] = row
+        return answers
+
+    if source == "lastfm":
+        answers = {}
+        for track in tracks:
+            title = track.get("title")
+            if not title:
+                continue
+            names = _genre_cached(
+                "recording", f"lastfm|track|{_norm_compare(artist)}|{_norm_compare(title)}",
+                lambda t=title: discovery.lastfm_track_genres(artist, t, cfg)) or []
+            row = _genre_row("track", names)
+            if row:
+                answers[_genre_track_key(track.get("disc"), track.get("position"))] = row
+        names = _genre_cached("album", f"lastfm|artist|{_norm_compare(artist)}",
+                              lambda: discovery.lastfm_artist_genres(artist, cfg)) or []
+        row = _genre_row("artist", names)
+        if row:
+            answers[_ALL_TRACKS] = row
+        return answers
+
+    if source == "discogs":
+        names = _genre_cached("album", f"discogs|{_norm_compare(artist)}|{_norm_compare(album)}",
+                              lambda: discovery.discogs_album_genres(artist, album, cfg)) or []
+        row = _genre_row("album", names)
+        return {_ALL_TRACKS: row} if row else {}
+
+    if source == "theaudiodb":
+        answers = {}
+        # `searchtrack.php` first — TheAudioDB serves a track row (genre,
+        # style, mood) per track, and it is the source's per-track tier.
+        for track in tracks:
+            title = str(track.get("title") or "").strip()
+            if not title:
+                continue
+            names = _genre_cached(
+                "recording",
+                f"theaudiodb|track|{_norm_compare(artist)}|{_norm_compare(title)}",
+                lambda t=title: _audiodb_track_genre_names(artist, t)) or []
+            row = _genre_row("track", names, title)
+            if row:
+                answers[_genre_track_key(track.get("disc"),
+                                         track.get("position"))] = row
+        # The album row stays as the fallback tier for the tracks it did not
+        # answer for (and for a release whose tracks have no names yet).
+        names = _genre_cached("album", f"theaudiodb|{_norm_compare(artist)}|{_norm_compare(album)}",
+                              lambda: _audiodb_genre_names(artist, album)) or []
+        row = _genre_row("album", names)
+        if row:
+            answers[_ALL_TRACKS] = row
+        return answers
+
+    if source == "bandcamp":
+        # Album-level by nature (see the Bandcamp section above): its own
+        # track titles confirm the page is this release, and the tags are the
+        # album's. One request per album, cached 30 days like every source.
+        titles = [t.get("title") for t in tracks if str(t.get("title") or "").strip()]
+        got = _genre_cached(
+            "album", f"bandcamp|{_norm_compare(artist)}|{_norm_compare(album)}",
+            lambda: bandcamp_album(artist, album, titles)) or {}
+        row = _genre_row("album", got.get("genres"))
+        return {_ALL_TRACKS: row} if row else {}
+
+    if source == "deezer":
+        names = _genre_cached("album", f"deezer|{_norm_compare(artist)}|{_norm_compare(album)}",
+                              lambda: discovery.album_genres(artist, album, cfg=cfg)) or []
+        row = _genre_row("album", names)
+        return {_ALL_TRACKS: row} if row else {}
+
+    if source == "spotify":
+        # Artist-level, honest about it: Spotify states no per-track genre at
+        # all. Skipped entirely (no request) until its credentials are set.
+        if not _spotify_configured(cfg):
+            return {}
+        names = _genre_cached(
+            "album", f"spotify|artist|{_norm_compare(artist)}",
+            lambda: discovery.spotify_artist_genres(artist, cfg)) or []
+        row = _genre_row("artist", names)
+        return {_ALL_TRACKS: row} if row else {}
+
+    if source == "soulseek":
+        # Peers advertise folders and file names, not genres. Nothing here can
+        # state a genre, so this source is a no-op by design — it stays in the
+        # order so a saved config listing it keeps working.
+        return {}
+    return {}
+
+
+def _audiodb_genre_names(artist, album):
+    """TheAudioDB's album genre + mood (its two genre-ish fields)."""
+    from server import discovery
+
+    row = discovery.audiodb_album(artist, album) or {}
+    return [g for g in (row.get("genre"), row.get("mood")) if g]
+
+
+def _audiodb_track_genre_names(artist, title):
+    """TheAudioDB's genre + style for ONE track, [] when it states none.
+
+    `strMood` is a mood word ("Sad") and never a genre, so it is left out of
+    the per-track row exactly as ListenBrainz's mood tags are.
+    """
+    from server import discovery
+
+    row = discovery.audiodb_track(artist, title) or {}
+    return [g for g in (row.get("genre"), row.get("style")) if g]
+
+
+def _answer_by_title(answers, title):
+    """The per-track answer whose own title is ours (the fallback mapping).
+
+    RYM's rows carry the release page's titles; when its numbering does not
+    line up with ours the title is what maps them. An unmatched title yields
+    None — never a neighbouring track's genres.
+    """
+    want = _norm_compare(title)
+    if not want:
+        return None
+    for key, row in answers.items():
+        if key == _ALL_TRACKS or not row.get("title"):
+            continue
+        if _norm_compare(row["title"]) == want:
+            return row
+    return None
 
 
 def genre_chain(artist="", album="", release=None, limit=None, sources=None,
-                cfg=None):
-    """Genres for an album, merged from the configured sources in order.
+                cfg=None, files=None):
+    """Per-track genres for a release, merged from the configured sources.
 
-    RateYourMusic → those with only a no-op/needs-a-key → TheAudioDB →
-    MusicBrainz → Deezer → iTunes (mlo.config `genre_sources`). Every source
-    that answers contributes; the merged list is deduped case-insensitively,
-    Title-Cased and capped at `limit` (default `mb_genre_count`, now 3).
-    A source that cannot answer (RYM blocked, no Discogs/Last.fm token, no
-    peer genre signal) contributes nothing and is reported in `notes` — it is
-    never filled in from a guess.
+    Every source is asked for EVERY track; the default order (the priority
+    list documented above `GENRE_SOURCES`) is: RateYourMusic (per track where
+    its page states one, else album) → ListenBrainz (recording → release group
+    → artist) → MusicBrainz (recording → release → release group → artist) →
+    iTunes (`primaryGenreName`, per track) → Last.fm (track → artist) →
+    TheAudioDB (`searchtrack.php` per track → album) → Wikidata (the
+    recording's P136 → release group/entity) → Bandcamp (album tags) →
+    Discogs (release styles) → Deezer (album genres) → Spotify (artist
+    genres). `mlo.config` migrates both previously shipped default lists onto
+    this one, so an install that never chose an order gets it; a customised
+    list is honoured as written.
 
-    Returns {"genres": [...], "per_source": {source: [...]}, "notes": {source:
-    reason}}.
+    Every source that answers contributes; the merged list is deduped
+    case-insensitively, Title-Cased and capped at `limit` (default
+    `mb_genre_count`, now 3) **per track**.
+
+    Each track's own answer is merged first, then the release-wide one, so a
+    track that states its own genre keeps it ahead of the album's fallback.
+    A source that only knows album- or artist-wide answers (Bandcamp, Discogs,
+    Deezer, Spotify, and RYM/TheAudioDB/Wikidata when their per-track tier is
+    silent) is marked `level: "album"`/`"artist"` in the provenance, never
+    `track` — nothing pretends to be per-track.
+
+    `files` (optional) are the album's audio files; they key the provenance
+    maps by path (`sources`, `levels`), which is what the UI shows. A source
+    that cannot answer (RYM blocked, no Discogs/Last.fm key, no Wikidata
+    statement, a timeout) contributes nothing and is reported in `notes` — it
+    is never filled in from a guess.
+
+    Returns {"genres": [...], "per_track": {(disc, position): [...]},
+    "per_track_sources": {...}, "per_track_levels": {...},
+    "sources": {path: [source, ...]}, "levels": {path: "track"|"album"|
+    "artist"}, "per_source": {source: [...]}, "notes": {source: reason}}.
     """
     if cfg is None:
         try:
@@ -1435,31 +2438,104 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
             limit = 3
     artist = str(artist or "").strip()
     album = str(album or "").strip()
+    tracks = list((release or {}).get("media") or [])
 
-    per_source, notes = {}, {}
+    answers_by_source, per_source, notes = {}, {}, {}
     for source in order:
         try:
-            names = _genre_source_names(source, artist, album, release, cfg) or []
+            answers = _genre_source_answers(source, artist, album, release,
+                                            cfg, tracks) or {}
         except Exception as e:
             notes[source] = f"failed: {e}"
             continue
-        clean = []
-        for name in names:
-            text = str(name).strip()
-            if text and text.lower() not in {g.lower() for g in clean}:
-                clean.append(text)
-        if clean:
-            per_source[source] = clean
-        else:
+        if not answers:
             notes[source] = "no data"
+            continue
+        answers_by_source[source] = answers
+        # The release-wide answer first, then the per-track ones: this list is
+        # the album summary the caller may still want for a release whose
+        # tracks carry no identity of their own.
+        every = []
+        for key in sorted(answers, key=lambda k: (k != _ALL_TRACKS, k)):
+            every += answers[key].get("genres") or []
+        per_source[source] = _genre_names(every)
 
-    merged = []
-    for source in order:
-        for name in per_source.get(source, []):
-            text = str(name).strip().title()
-            if text and text.lower() not in {g.lower() for g in merged}:
-                merged.append(text)
-    return {"genres": merged[:limit], "per_source": per_source, "notes": notes}
+    def merge(track):
+        """(genres, sources, level) in ask order.
+
+        `track=None` is the release-wide answer (every row every source has,
+        the release-wide ones first); for a track it is that track's own
+        answer, then the release-wide one.
+        """
+        pairs = []
+        for source in order:
+            answers = answers_by_source.get(source) or {}
+            if track is None:
+                rows = [answers[key] for key in
+                        sorted(answers, key=lambda k: (k != _ALL_TRACKS, k))]
+            else:
+                rows = []
+                key = _genre_track_key(track.get("disc"), track.get("position"))
+                row = answers.get(key) or _answer_by_title(answers, track.get("title"))
+                if row:
+                    rows.append(row)
+                wide = answers.get(_ALL_TRACKS)
+                if wide and wide is not row:
+                    rows.append(wide)
+            for row in rows:
+                for name in row.get("genres") or []:
+                    pairs.append((str(name).strip().title(), source,
+                                  row.get("level") or "album"))
+        kept, seen = [], set()
+        for name, source, level in pairs:
+            low = name.lower()
+            if not name or low in seen:
+                continue
+            seen.add(low)
+            kept.append((name, source, level))
+        kept = kept[:limit]
+        level = None
+        for _name, _source, got in kept:
+            if level is None or _LEVEL_RANK.get(got, 9) < _LEVEL_RANK.get(level, 9):
+                level = got
+        return ([n for n, _s, _l in kept],
+                list(dict.fromkeys(s for _n, s, _l in kept)), level)
+
+    per_track, per_track_sources, per_track_levels = {}, {}, {}
+    for track in tracks:
+        genres, contributors, level = merge(track)
+        if not genres:
+            continue
+        key = (int(track.get("disc") or 1), int(track.get("position") or 0))
+        per_track[key] = genres
+        per_track_sources[key] = contributors
+        per_track_levels[key] = level
+
+    merged, album_contributors, album_level = merge(None)
+    out_sources, out_levels = {}, {}
+    for path in files or []:
+        key = None
+        try:
+            from server import soulseek_auto
+            key = soulseek_auto._parse_trackno(str(path))
+        except Exception:
+            key = None
+        if key in per_track_sources:
+            out_sources[str(path)] = list(per_track_sources[key])
+            out_levels[str(path)] = per_track_levels.get(key)
+        else:
+            # No release identity to key a track on (the Auto-tagging hook has
+            # only the file): the release-wide answer is what that file gets,
+            # and it says so.
+            out_sources[str(path)] = list(album_contributors)
+            out_levels[str(path)] = album_level
+
+    return {"genres": merged[:limit], "per_track": per_track,
+            "per_track_sources": per_track_sources,
+            "per_track_levels": per_track_levels,
+            "sources": out_sources, "levels": out_levels,
+            "per_source": per_source, "notes": notes}
+
 
 
 # Fixed genre buckets for GET /api/genres/facets. Every library genre lands in
@@ -1992,7 +3068,14 @@ def match_tracks(local_tracks, release):
                 match, score = m, 1.0
         if match is None and lt.get("title"):
             best, best_score = None, 0.0
+            kind = title_variant_kind(lt["title"])
             for m in release_media:
+                # A variant of the track (instrumental/karaoke/…) is another
+                # recording: it may never be suggested as this file's track,
+                # whatever the name similarity says.
+                got = title_variant_kind(m.get("title"))
+                if (kind or got) and kind != got:
+                    continue
                 s = _similarity(lt["title"], m.get("title", ""))
                 if s > best_score:
                     best, best_score = m, s
@@ -2262,56 +3345,368 @@ def resolve_cov_search(sources=None, country=None, cfg=None):
     return chosen[:limit], c
 
 
-def cover_search(artist, album, limit=40, timeout=60.0, sources=None,
-                 country=None, cfg=None):
-    """Search COV for album covers. Returns a list of
-    {source, small, big, title, artist, tracks, url} dicts sorted by the
-    site's relevance order, capped at *limit*.
+def _cover_row(source, small, big, title=None, artist=None, tracks=None,
+               url=None, width=None, height=None):
+    """One search result. Every provider (COV and each fallback) answers this
+    exact shape, so the finder never has to know which one answered: the keys
+    it already reads (`source`, `small`, `big`, `title`, `artist`, `tracks`,
+    `url`) plus the REAL pixel size — `None` means unknown, never a guess."""
+    return {"source": source, "small": small or None, "big": big or None,
+            "title": title or None, "artist": artist or None, "tracks": tracks,
+            "url": url or None, "width": width, "height": height}
 
-    `sources` and `country` override the saved defaults for this one search
-    (the finder's source picker and region dropdown)."""
-    if not artist and not album:
-        raise ValueError("artist or album is required")
-    src_ids, ctry = resolve_cov_search(sources, country, cfg)
+
+def _cov_headers():
+    """The exact header set COV's own frontend sends.
+
+    The API gate 401s without it, and it must be these headers ONLY: adding
+    `Accept: application/json` makes the endpoint answer 200 with an EMPTY
+    stream (verified live), which reads as "no covers exist" — the silent
+    nothing this module exists to avoid.
+    """
+    return {"User-Agent": COV_UA, "Referer": f"{COV_BASE}/", "Origin": COV_BASE,
+            "X-Session": uuid.uuid4().hex}
+
+
+@contextlib.contextmanager
+def _cov_stream(body, headers, timeout=60.0):
+    """POST a search and yield COV's streamed JSON lines (the HTTP seam)."""
+    with httpx.Client(timeout=httpx.Timeout(timeout, read=timeout)) as client:
+        with client.stream("POST", f"{COV_BASE}/api/search", json=body,
+                           headers=headers) as r:
+            r.raise_for_status()
+            yield r.iter_lines()
+
+
+def _cov_results(artist, album, limit, timeout, src_ids, ctry):
+    """COV's own covers for one query, in the site's relevance order."""
     body = {"country": ctry, "sources": src_ids}
     if artist:
         body["artist"] = artist
     if album:
         body["album"] = album
-    headers = {
-        "User-Agent": COV_UA,
-        "Referer": f"{COV_BASE}/",
-        "Origin": COV_BASE,
-        "X-Session": uuid.uuid4().hex,
-    }
-    results = []
-    with httpx.Client(timeout=httpx.Timeout(timeout, read=timeout)) as client:
-        with client.stream("POST", f"{COV_BASE}/api/search", json=body,
-                           headers=headers) as r:
-            r.raise_for_status()
-            for line in r.iter_lines():
-                line = (line or "").strip()
-                if not line.startswith("{"):
-                    continue
-                try:
-                    ev = json.loads(line)
-                except ValueError:
-                    continue
-                if ev.get("type") != "cover":
-                    continue
-                rel = ev.get("releaseInfo") or {}
-                results.append({
-                    "source": ev.get("source"),
-                    "small": ev.get("smallCoverUrl"),
-                    "big": ev.get("bigCoverUrl"),
-                    "title": rel.get("title"),
-                    "artist": rel.get("artist"),
-                    "tracks": rel.get("tracks"),
-                    "url": rel.get("url"),
-                })
-                if len(results) >= limit:
-                    break
-    return results
+    rows = []
+    with _cov_stream(body, _cov_headers(), timeout) as lines:
+        for line in lines:
+            line = (line or "").strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if ev.get("type") != "cover":
+                continue
+            rel = ev.get("releaseInfo") or {}
+            rows.append(_cover_row(
+                ev.get("source"), ev.get("smallCoverUrl"), ev.get("bigCoverUrl"),
+                rel.get("title"), rel.get("artist"), rel.get("tracks"),
+                rel.get("url"), ev.get("width"), ev.get("height")))
+            if len(rows) >= limit:
+                break
+    return rows
+
+
+# --------------------------------------------------------------------------- #
+# Real image dimensions
+# --------------------------------------------------------------------------- #
+# COV's streamed lines carry no dimensions at all, and a CDN URL's own
+# "500x0w"/"-250" is a REQUEST hint, not the size the URL answers with — so the
+# size is read from the image's own header bytes. A ranged GET of the first
+# 64 KB is enough for every JPEG SOF marker (they sit near the front), a PNG
+# IHDR and all three WebP headers; anything larger is a download, and a search
+# must not become one.
+COVER_PROBE_BYTES = 65536
+# Only the first results are probed — 40 covers must not become 40 image
+# fetches. The rest keep `width`/`height` None, which the finder reads as
+# "unknown" and shows as such.
+COVER_PROBE_LIMIT = 24
+COVER_PROBE_WORKERS = 8
+
+
+def _image_size(data):
+    """(width, height) read from an image's own header bytes, or None.
+
+    JPEG (SOI + SOFn), PNG (IHDR) and WebP (VP8X / VP8 / VP8L) only — those
+    are what every cover provider here serves; anything else reads unknown
+    rather than being guessed at.
+    """
+    if len(data) < 26:
+        return None
+    if data[:2] == b"\xff\xd8":                              # JPEG
+        i = 2
+        while i + 9 < len(data):
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            marker = data[i + 1]
+            if marker in (0x01, 0xD8) or 0xD0 <= marker <= 0xD7:
+                i += 2
+                continue
+            if marker == 0xDA:                               # scan: no SOF after
+                break
+            seg = int.from_bytes(data[i + 2:i + 4], "big")
+            if seg < 2:
+                break
+            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                return (int.from_bytes(data[i + 7:i + 9], "big"),
+                        int.from_bytes(data[i + 5:i + 7], "big"))
+            i += 2 + seg
+        return None
+    if data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR":
+        return (int.from_bytes(data[16:20], "big"),
+                int.from_bytes(data[20:24], "big"))
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        kind = data[12:16]
+        if kind == b"VP8X":                                  # extended
+            return (int.from_bytes(data[24:27], "little") + 1,
+                    int.from_bytes(data[27:30], "little") + 1)
+        if kind == b"VP8 " and data[23:26] == b"\x9d\x01\x2a":   # lossy
+            return (int.from_bytes(data[26:28], "little") & 0x3FFF,
+                    int.from_bytes(data[28:30], "little") & 0x3FFF)
+        if kind == b"VP8L" and data[20] == 0x2F:             # lossless
+            bits = int.from_bytes(data[21:25], "little")
+            return ((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+    return None
+
+
+def _probe_get(url, nbytes=COVER_PROBE_BYTES, timeout=10.0):
+    """The first *nbytes* of an image URL (a Range request), or b"".
+
+    Range is a request, not a promise: a server may answer 200 with the whole
+    file, so the body is read in chunks and dropped once *nbytes* are in hand.
+    Never raises — a fetch that cannot answer is "unknown", not a failed
+    search.
+    """
+    try:
+        with httpx.Client(timeout=httpx.Timeout(timeout, read=timeout),
+                          follow_redirects=True) as client:
+            with client.stream("GET", url,
+                               headers={"Range": f"bytes=0-{nbytes - 1}",
+                                        "User-Agent": COV_UA}) as r:
+                r.raise_for_status()
+                out = bytearray()
+                for chunk in r.iter_bytes(nbytes):
+                    out += chunk
+                    if len(out) >= nbytes:
+                        break
+                return bytes(out[:nbytes])
+    except Exception:
+        return b""
+
+
+def _probe_dimensions(url, timeout=10.0):
+    """One probe of one URL: header bytes only, public hosts only, no raise.
+
+    Nothing here may raise — `_genre_cached` requires its producer to be total,
+    and an unknown size is a valid answer while a dead search is not.
+    """
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if (parsed.scheme not in ("http", "https")
+                or not _public_host(parsed.hostname)):
+            return None                 # the same trust boundary as the download
+        size = _image_size(_probe_get(url, timeout=timeout))
+        return {"width": size[0], "height": size[1]} if size else None
+    except Exception:
+        return None
+
+
+def image_dimensions(url, timeout=10.0):
+    """`{"width", "height"}` of the image at *url*, or None when unknown.
+
+    Memoized 30 days (memory + <music>/.mlo/data, the app's shared value
+    cache) — a probe that found nothing is cached too, so a rerun never re-asks
+    a host that already said no.
+    """
+    url = str(url or "").strip()
+    if not url:
+        return None
+    got = _genre_cached("cover_dim", url,
+                        lambda: _probe_dimensions(url, timeout))
+    return got if isinstance(got, dict) else None
+
+
+def _attach_dimensions(rows, limit=COVER_PROBE_LIMIT, timeout=10.0):
+    """Fill `width`/`height` on the first *limit* rows from their own image.
+
+    Probed in a small pool: these are 20+ different CDNs, and a search that
+    waits on them one at a time is a search that hangs on one slow host.
+    """
+    todo = [r for r in rows[:limit] if r.get("width") is None]
+    if not todo:
+        return
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=COVER_PROBE_WORKERS) as pool:
+        sizes = list(pool.map(
+            lambda r: image_dimensions(r.get("big") or r.get("small"), timeout),
+            todo))
+    for row, size in zip(todo, sizes):
+        if size:
+            row["width"], row["height"] = size["width"], size["height"]
+
+
+# --------------------------------------------------------------------------- #
+# Fallbacks — asked ONLY when the meta-search returns nothing
+# --------------------------------------------------------------------------- #
+# Each is a single album lookup (not a meta-search) and each answers the same
+# row shape, with its own id as `source` and the dimensions probed the same
+# way. Order: the caller's release-group MBID first (an identity — no name
+# guessing at all), then the two keyless catalogues the app already talks to.
+CAA_BASE = "https://coverartarchive.org"
+DEEZER_API = "https://api.deezer.com"
+COVER_FALLBACKS = ("coverartarchive", "deezer", "itunes")
+
+
+def _artwork_big(url):
+    """`…/100x100bb.jpg` → `…/3000x3000bb.jpg` (Apple's largest artwork).
+
+    `artworkUrl100` is the only artwork URL Apple's search returns, and the
+    same asset is served at any size in that segment.
+    """
+    return re.sub(r"/\d+x\d+bb\.", "/3000x3000bb.", str(url or "")) or None
+
+
+def _name_rank(name, want):
+    """0 when *name* is exactly *want* (folded), else 1 — sorting only."""
+    return 0 if (want and _norm_compare(name) == want) else 1
+
+
+def _caa_covers(rg_mbid, limit, artist="", album="", timeout=30.0):
+    """Cover Art Archive images for a RELEASE GROUP, front cover first.
+
+    Asked about the release-group MBID the caller already has (the import
+    wizard holds one): CAA is browsed BY IDENTITY — its search is per release,
+    and matching it by name is the name-guessing this app does not do. The big
+    URL is the original upload; CAA publishes no dimensions, which is exactly
+    why the probe exists.
+    """
+    rg = str(rg_mbid or "").strip()
+    if not rg:
+        return []
+    data = _advisory_json(f"{CAA_BASE}/release-group/{rg}",
+                          headers={"User-Agent": USER_AGENT},
+                          timeout=timeout, host="coverartarchive.org")
+    images = [i for i in ((data or {}).get("images") or []) if i.get("image")]
+    images.sort(key=lambda i: not i.get("front"))
+    page = f"{CAA_BASE}/release-group/{rg}"
+    rows = []
+    for img in images[:limit]:
+        th = img.get("thumbnails") or {}
+        rows.append(_cover_row("coverartarchive",
+                               th.get("large") or th.get("small") or img["image"],
+                               img["image"], album, artist, None, page))
+    return rows
+
+
+def _deezer_covers(artist, album, limit, timeout=30.0):
+    """Deezer's album cover — `cover_xl` is the biggest Deezer serves
+    (1000×1000), so nothing here is expected to be larger than that.
+
+    Rows are ORDERED, never dropped: a tribute/karaoke album that carries the
+    same title is a bad first hit, not a reason to hide the real covers.
+    """
+    term = " ".join(x for x in (f'artist:"{artist}"' if artist else "",
+                                f'album:"{album}"' if album else "") if x)
+    if not term:
+        return []
+    data = _advisory_json(f"{DEEZER_API}/search/album",
+                          {"q": term, "limit": max(1, min(limit, 25))},
+                          timeout=timeout, host="api.deezer.com")
+    want_artist, want_album = _norm_compare(artist), _norm_compare(album)
+    rows = [a for a in ((data or {}).get("data") or [])
+            if a.get("cover_xl") or a.get("cover_big")]
+    rows.sort(key=lambda a: (_name_rank((a.get("artist") or {}).get("name"),
+                                        want_artist),
+                             _name_rank(a.get("title"), want_album)))
+    return [_cover_row("deezer", a.get("cover_big") or a.get("cover_medium"),
+                       a.get("cover_xl") or a.get("cover_big"),
+                       a.get("title"), (a.get("artist") or {}).get("name"),
+                       a.get("nb_tracks"), a.get("link"))
+            for a in rows[:limit]]
+
+
+def _itunes_covers(artist, album, limit, cfg=None, timeout=30.0):
+    """Apple's album artwork at its 3000×3000 size (see `_artwork_big`).
+
+    Reached through the app's cached, throttled iTunes client — this is the
+    same endpoint the advisory routes already use, and Apple rate-limits.
+    """
+    term = " ".join(x for x in (artist, album) if x)
+    if not term:
+        return []
+    data = _apple_json("/search", {"term": term, "entity": "album",
+                                   "limit": max(1, min(limit, 25)),
+                                   "country": _apple_country(cfg)},
+                       timeout=timeout)
+    want_artist, want_album = _norm_compare(artist), _norm_compare(album)
+    rows = [a for a in ((data or {}).get("results") or [])
+            if a.get("artworkUrl100")]
+    rows.sort(key=lambda a: (_name_rank(a.get("artistName"), want_artist),
+                             _name_rank(a.get("collectionName"), want_album)))
+    return [_cover_row("itunes", a["artworkUrl100"],
+                       _artwork_big(a["artworkUrl100"]),
+                       a.get("collectionName"), a.get("artistName"),
+                       a.get("trackCount"), a.get("collectionViewUrl"))
+            for a in rows[:limit]]
+
+
+def _cover_fallback(artist, album, limit, cfg, rg_mbid, timeout):
+    """(results, provider) from the FIRST fallback that answers, else ([], None).
+
+    Only ever reached when the meta-search came back empty or failed; one
+    lookup per provider in COVER_FALLBACKS order, stopping at the first
+    non-empty list. A provider that errors is skipped, not fatal.
+    """
+    for pid in COVER_FALLBACKS:
+        try:
+            if pid == "coverartarchive":
+                rows = _caa_covers(rg_mbid, limit, artist, album, timeout)
+            elif pid == "deezer":
+                rows = _deezer_covers(artist, album, limit, timeout)
+            else:
+                rows = _itunes_covers(artist, album, limit, cfg, timeout)
+        except Exception:
+            rows = []
+        if rows:
+            return rows, pid
+    return [], None
+
+
+def cover_search(artist, album, limit=40, timeout=60.0, sources=None,
+                 country=None, cfg=None, release_group_mbid=""):
+    """Album covers for artist/album → ``{"results": [...], "provider": id}``.
+
+    Every row is ``{source, small, big, title, artist, tracks, url, width,
+    height}``: the keys the finder already reads, plus the image's REAL pixel
+    size, read from the file itself for the first ``COVER_PROBE_LIMIT`` rows
+    (``None`` means unknown — a dimension probe can never fail the search).
+
+    ``provider`` names who actually answered: ``"cov"`` for the meta-search, a
+    fallback id otherwise, and ``None`` when nobody had anything at all — an
+    empty answer is STATED, never left as a silent zero-result. The fallbacks
+    run only when COV returns nothing (or refuses/errors: a dead meta-search
+    is a fallback case, not an error the user has to understand).
+
+    ``sources``/``country`` override the SAVED defaults (`cover_sources`,
+    `cover_country`) for this one search only — nothing here writes config.
+    ``release_group_mbid``, when the caller has one, is the identity the Cover
+    Art Archive fallback is asked about.
+    """
+    if not artist and not album:
+        raise ValueError("artist or album is required")
+    src_ids, ctry = resolve_cov_search(sources, country, cfg)
+    try:
+        results = _cov_results(artist, album, limit, timeout, src_ids, ctry)
+    except Exception:
+        results = []
+    provider = "cov"
+    if not results:
+        results, provider = _cover_fallback(artist, album, limit, cfg,
+                                            release_group_mbid, timeout)
+    _attach_dimensions(results)
+    return {"results": results, "provider": provider}
 
 
 # Image downloads are the one place a caller supplies a URL the server then
@@ -2391,8 +3786,10 @@ def fetch_image_bytes(url, timeout=60.0):
 
 
 def lyrics_chain(cfg, artist, track, album=None, duration=None):
-    """First provider hit for a track across the lyrics chain (LRCLIB, NetEase,
-    lyrics.ovh, Kugou) — same dict as mlo.lyrics_providers.fetch_lyrics, or
-    None. Imported lazily so the engine module stays out of this header."""
+    """First provider hit for a track across the lyrics chain (the order lives
+    in ``mlo.lyrics_providers.SOURCES``: LRCLIB, NetEase, QQ Music, Kuwo,
+    Kugou, YouTube captions) — same dict as
+    ``mlo.lyrics_providers.fetch_lyrics``, or None. Imported lazily so the
+    engine module stays out of this header."""
     from mlo.lyrics_providers import fetch_lyrics
     return fetch_lyrics(cfg, artist, track, album, duration)

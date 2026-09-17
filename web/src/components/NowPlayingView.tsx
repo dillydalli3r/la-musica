@@ -10,6 +10,7 @@ import { toast, useStore } from "../store";
 import { fmtTech, fmtPair, isVideoFile } from "../lib/fmt";
 import { AdvisoryMark } from "./Badges";
 import CoverImg from "./CoverImg";
+import ScrubSeek from "./ScrubSeek";
 import { activeAnalyser } from "../lib/analyser";
 import Visualizer from "./Visualizer";
 import { parsePlayerLrc, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
@@ -769,15 +770,12 @@ export default function NowPlayingView(p: Props) {
   const seekRow = (
     <div className="flex items-center gap-2 text-xs text-zinc-400 w-[26rem] px-2">
       <span className="w-10 text-right font-mono tabular-nums">{fmtDuration(dispTime)}</span>
-      <input
-        type="range"
-        min={0}
+      <ScrubSeek
+        videoPath={videoPath}
+        value={dispTime}
         max={duration || 0}
-        step={0.05}
-        value={Math.min(dispTime, duration || 0)}
-        onChange={(e) => p.onSeek(Number(e.target.value))}
-        className="flex-1 min-w-0 seek-fat"
-        title="Seek"
+        onChange={p.onSeek}
+        className="flex-1 min-w-0"
       />
       <span className="w-10 font-mono tabular-nums">{fmtDuration(duration)}</span>
       {/* the divider sits dead-center between the duration and volume

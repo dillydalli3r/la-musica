@@ -2265,6 +2265,7 @@ const finish = async () => {
               albumPath={albumPath}
               artist={release?.artists.map((a) => a.name).join(", ") || trackArtist(stepTracks[0]?.path ?? "")}
               album={trackAlbum || currentAlbumName}
+              releaseGroupMbid={release?.release_group_id ?? undefined}
               tracks={coverSel.size ? selectedCoverFiles() : undefined}
               onClose={() => setCoverSearchOpen(false)}
               onApplied={refreshCovers}

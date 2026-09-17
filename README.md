@@ -63,7 +63,11 @@ machines.
   cached) instead of silently playing loud. Music videos play fullscreen
   with auto-hiding chrome, correct aspect ratio (no cropping), and every
   codec the bundled ffmpeg can probe (incompatible ones are transparently
-  transcoded to fragmented MP4). Browser-fullscreen with a two-stage Esc.
+  transcoded to fragmented MP4). Dragging a video's seek bar grows a
+  **scrub preview** above the cursor: the frame at that position
+  (`GET /api/videos/thumb`), debounced, cached per second, and silent — a
+  frame that cannot be cut leaves the time label standing alone. Browser-fullscreen
+  with a two-stage Esc.
 - **Offline cache** — "Download" caches tracks (and video streams) in a
   service-worker media cache; cached tracks keep playing with the backend
   down. "Export" is the real file-saving path.
@@ -95,12 +99,17 @@ machines.
   fingerprint matching** (it tells you which release the audio actually is,
   not just which one the tags claim), cascading genre import, lyrics,
   **ITUNESADVISORY resolved per track by ISRC** (the file's own ISRC, or
-  MusicBrainz's when it has none — asked in order: Deezer, then Spotify when
-  `spotify_client_id`/`spotify_client_secret` are set, then Apple's album
-  route and its exact-title song search. Only a 0/1/2 a source actually
-  states is written: an unknown or ambiguous track stays absent, a `cleaned`
-  Apple edition is never reported as clean, and an existing valid value is
-  never overwritten), organize into the
+  every ISRC MusicBrainz holds for its recording — every applicable source is
+  asked on every track: Deezer by ISRC, Spotify by ISRC when
+  `spotify_client_id`/`spotify_client_secret` are set, Apple's explicit-edition
+  album route and its exact-title song search, Discogs' *Parental Advisory*
+  format when `discogs_token` is set, and yt-dlp's `age_limit` for a track that
+  records a YouTube id. An explicit statement anywhere wins (1), else any clean
+  statement is 0, else 0 — an unstated advisory is written as 0, with the
+  per-source `answers` map as the provenance; the Discogs and YouTube signals
+  are explicit-only and can never clear a track, a `cleaned` Apple edition is
+  never reported as clean, and an existing valid value is never overwritten),
+  organize into the
   naming-script layout — and then the **import script chain** runs
   automatically (CUEs → FLACs → videos → lyrics format → lyrics fetch → auto
   tagging incl. mood/genre → images → audit → DR & ReplayGain → AccurateRip →
@@ -212,12 +221,12 @@ forced to redo work.
 | 5 | Process images | Covers resized/cropped (default 1200×1200 JPEG q90; per-format size targets for JPEG/PNG/JXL, configurable), JPEG/PNG/JXL optimization, optional JPEG XL conversion |
 | 6 | Audit library | AudioAuditor detectors (silence, DR, peaks, LUFS, BPM, MQA, fake stereo…) + CD .log CRC verification → AUDIT tag |
 | 7 | DR & ReplayGain | rsgain + simple-dr-meter (album gain, FLAC and MP4 alike) |
-| 8 | Auto tagging | **ITUNESADVISORY** normalization + auto-fetch by ISRC (Deezer, then Spotify when its credentials are set, then Apple — only a stated 0/1/2 is written, an unknown or ambiguous track stays absent, 0 is *clean*), INSTRUMENTAL-from-lyrics, **MOOD** and **ENERGY** (0-100) from the track's own audio (valence/arousal quadrant, refined by the genre), and a missing **GENRE** filled from the genre chain |
+| 8 | Auto tagging | **ITUNESADVISORY** normalization + cross-referenced auto-fetch (every applicable source asked on every track and merged — Deezer and Spotify by ISRC, Apple's explicit-edition album route and its song search, Discogs' parental-advisory format with a token, yt-dlp's 18+ gate for a track with a YouTube id; explicit anywhere wins, else clean, else 0 — an unstated advisory is written as 0, and 0 is *clean*), **INSTRUMENTAL** cross-referenced from LRCLIB's `instrumental`, Spotify audio-features `instrumentalness` (when its credentials are set), the file's own name and lyrics evidence — an "instrumental" answer anywhere wins (1), "not instrumental" is 0, and nothing is written when no source can state anything — plus **MOOD** and **ENERGY** (0-100) from the track's own audio (valence/arousal quadrant, refined by the genre), and a missing **GENRE** filled from the genre chain |
 | 9 | AccurateRip | .accurip generation via CUETools, checksum verification |
 | 10 | Format All | Final canonical pass: accurip/cue/lrc/tag trim + **embedded cover policy** |
 | 11 | Remux videos | Any video container (VOB/AVI/WMV/TS/MOV/FLV…) → MKV, video copied bit-exact when possible, every audio stream re-encoded to FLAC, subtitles copied, chapters preserved (MP4/M4V are scanned but only remuxed while `video_process_mp4` is on — they already play natively) |
 | 12 | Key & BPM | librosa-backed INITIALKEY + BPM (musical/camelot/openkey notation) |
-| 13 | Fetch lyrics | The configurable lyrics chain (default LRCLIB → NetEase → lyrics.ovh → Kugou) into the configured format (embedded / .lrc / both); a provider's synced lyrics win over plain text |
+| 13 | Fetch lyrics | The configurable synced lyrics chain (default LRCLIB → NetEase → QQ Music → Kuwo → Kugou → YouTube captions) into the configured format (embedded / .lrc / both) |
 | 14 | Beets tagging | Managed beets (Picard parity) with the naming script, genre import, work/movement tags |
 
 ### Embedded covers (new in 2.1.0)
@@ -380,15 +389,35 @@ album page; the rest offer *Wish* and a MusicBrainz link.
   album-level; the page shows the album aggregate next to it so the two are
   never confused.
 
-## Lyrics — four sources, in the order you choose (new in 2.4.0)
+## Lyrics — six synced sources, in the order you choose (new in 2.4.0)
 
-Lyrics are no longer one provider. The chain is **LRCLIB → NetEase →
-lyrics.ovh → Kugou** by default, and it walks the list until a provider has
-the song:
+Lyrics are no longer one provider. The chain is **LRCLIB → NetEase → QQ
+Music → Kuwo → Kugou → YouTube captions** by default, and it walks the list
+until a provider has the song. Every one of them is free, needs no key, and
+answers with timestamps — the order is a ranking, and each step is a reason:
 
-- **Synced lyrics win.** A provider hit that carries timestamps keeps them; a
-  plain-text hit is used only when no provider has a synced version — turn
-  that off with `lyrics_allow_plain` ("synced or nothing").
+- **LRCLIB (#1)** — open, community-maintained synced lyrics; no key, best
+  global coverage of the six, and the only one that is both open data and
+  worldwide.
+- **NetEase (#2)** — a very large catalogue, synced with translations, the
+  strongest for CJK releases. Unofficial API.
+- **QQ Music (#3)** — synced with translations, strong mainstream coverage.
+  Unofficial API, and a loose search: the match score decides what is the track.
+- **Kuwo (#4)** — synced with translations, large catalogue. Unofficial API,
+  loose search (only originals are written).
+- **Kugou (#5)** — synced, large catalogue, weaker match quality than the four
+  above. Unofficial API.
+- **YouTube captions (#6)** — synced captions of a *known* video id,
+  auto-generated ones included (those can mishear). Only for tracks that carry
+  a YouTube id, so nothing is ever searched on YouTube; needs yt-dlp.
+
+`GET /api/lyrics/providers` returns that ranking with each provider's notes,
+the saved order and the plain-lyrics policy.
+
+- **Synced or nothing.** An answer without timestamps is thrown away as if
+  the provider had none. LRCLIB's untimed records can be allowed back with
+  `lyrics_allow_plain` — off by default, and the only opt-in that lets plain
+  text through.
 - **Configurable** in Settings → *Lyrics*: reorder the sources, drop the ones
   you don't want, and see each provider's note (what it is good at) in the
   list. An empty order means the built-in chain.
@@ -422,11 +451,20 @@ requires them:
   leaves its MOOD untouched. Music videos get both tags too — the mood
   writer covers video containers, in one write per file.
 - **GENRE** — filled only when the tags carry none, from the configurable
-  **genre chain** (`genre_sources`), merged in one place: the source order,
-  then each source's names, then a case-insensitive de-duplication, Title
-  Case, and a cap of `mb_genre_count` (default 3). The default order is
-  **RateYourMusic → Soulseek → Discogs → Last.fm → TheAudioDB →
-  MusicBrainz → Deezer → iTunes**:
+  **genre chain** (`genre_sources`), merged per track: the source order, then
+  each source's names, then a case-insensitive de-duplication, Title Case, and
+  a cap of `mb_genre_count` (default 3) **per track**. The default order is
+  **RateYourMusic → ListenBrainz → MusicBrainz → iTunes → Last.fm →
+  TheAudioDB → Wikidata → Bandcamp → Discogs → Deezer → Spotify**:
+  - **Every source is asked on every track**, at the best level that API
+    allows. Per-track sources come first: RateYourMusic's release page (per
+    track where the page states one, else the release's own list), ListenBrainz
+    (recording → release group → artist), MusicBrainz (recording → release →
+    release group → artist), iTunes' `primaryGenreName`, Last.fm's track tags,
+    TheAudioDB's track and Wikidata's recording (then its work). Album- and
+    artist-wide sources — Bandcamp's album tags, Discogs styles, Deezer's album
+    genres, Spotify's *artist* genres — are marked `level: album`/`artist` in
+    the provenance and are never promoted to a track answer.
   - **RateYourMusic** is a real scrape of the release page (with a `/search`
     fallback): browser-like headers (it sits behind Cloudflare), **1 request
     per second under a lock**, and a **30-day on-disk cache**
@@ -435,14 +473,15 @@ requires them:
     it RYM contributes nothing (Cloudflare answers the scrape instead) and the
     chain falls through to the next source (a datacenter IP is blocked
     regardless). Charts are *not* scraped — nothing in the app consumes them.
-  - RateYourMusic behind Cloudflare without a working `rym_cookie`, a missing
-    Discogs token, a missing Last.fm key, or any provider without an answer is
-    simply **no data**: the source is recorded in the import's `notes`, and the
-    chain moves on. No genre is ever invented.
-  - Soulseek has no peer genre signal to read — it stays in the order (a no-op)
-    so older saved source lists keep working.
-  - MusicBrainz is queried through the release + release group + artist
-    cascade, with a per-recording refinement on tracks.
+  - **Provenance, not guesses.** Every ask is throttled per host and cached for
+    30 days, and the response says who answered: per-track `sources` and
+    `levels`, per-source counts, and `notes` naming every source that stayed
+    silent. RateYourMusic behind Cloudflare without a working `rym_cookie`, a
+    missing Discogs token, a missing Last.fm key, or any provider without an
+    answer is simply **no data** — no genre is ever invented.
+  - `soulseek` is not in the default list (peers advertise folders and file
+    names, not genres); a saved source list naming it stays a documented no-op
+    so older configs keep working.
 - **Graded.** *Mood tag present*, *Energy tag present* and *Genre tag
   present* are per-track checks (on by default, `MOOD_MISSING` /
   `ENERGY_MISSING` / `GENRE_MISSING`), so a library that never ran script 8
@@ -469,11 +508,22 @@ The import paths share one pipeline now (`server/imports.py`):
    8 auto tagging (mood/energy/genre/advisory) → 5 images → 6 audit →
    7 DR & ReplayGain → 9 AccurateRip → 12 key & BPM → 14 beets →
    10 format all → 4 grade**. Before the chain runs, the advisory step resolves
-   each track's `ITUNESADVISORY` by ISRC — Deezer, then Spotify when its
-   optional credentials are set, then Apple's album/song route, with
-   MusicBrainz supplying a missing ISRC (`advisory_auto_fetch`) — and the
+   each track's `ITUNESADVISORY` by ISRC — every applicable source asked on
+   every track (Deezer and Spotify by ISRC when its optional credentials are
+   set, Apple's explicit-edition album route and its song search, Discogs'
+   parental-advisory format with a token, yt-dlp's 18+ gate for a track with a
+   YouTube id), merged explicit-anywhere-wins: 1 to explicit, else clean to 0,
+   else 0, with MusicBrainz supplying the missing ISRCs
+   (`advisory_auto_fetch`) — and the instrumental step cross-references
+   `INSTRUMENTAL` the same way (LRCLIB's `instrumental`, Spotify
+   audio-features `instrumentalness`, the file's own name, lyrics evidence;
+   instrumental wins, else not-instrumental is 0, and a track nobody can rate
+   keeps no value; `instrumental_auto_fetch`). Both cross-references report
+   their provenance per track (`answers`/`evidence`) and run every name-based
+   match through one shared variant guard, so an instrumental/karaoke/demo/
+   cover/tribute candidate is never accepted as the track — and the
    metadata step fetches the artist image / artist description / album
-   description (`metadata_auto_fetch`); both never
+   description (`metadata_auto_fetch`); all three never
    overwrite a value you already have. Settings → *Import* replaces that list
    (`import_scripts`), or turns it off entirely (`import_auto_scripts`). A
    script that fails is reported and the chain carries on — one bad script
@@ -644,12 +694,17 @@ renames.
 ## Cover finder
 
 The album/track online cover search is a meta-search over the musichoarders
-providers with selectable sources and a storefront **region**
-(`cover_country`, default `us`). The chosen source list and region can be saved
-as the default (`cover_sources`), so the next search starts from the same
-choices. `GET /api/cover/search` runs the search against the catalogue,
-`GET /api/cover/sources` lists the selectable sources, regions and the saved
-defaults, and `POST /api/cover/fromurl` saves a chosen result to disk.
+providers, and it falls back to **Cover Art Archive → Deezer → iTunes** when
+they have nothing — every result row says which provider answered. Results
+carry the image's **real pixel dimensions** (`width`/`height`, probed from the
+file's own header bytes, `null` when unknown — never a guess) and a storefront
+**region**. The finder's source list and region pickers are **per-search**,
+change nothing in Settings, and only its *Save as default* button writes
+`cover_sources` + `cover_country`; the next search (and the wizard) then starts
+from those choices. `GET /api/cover/search` runs the search against the
+catalogue, `GET /api/cover/sources` lists the selectable sources, the regions
+and the saved defaults, and `POST /api/cover/fromurl` saves a chosen result to
+disk.
 
 ## Downloads viewer
 
@@ -691,6 +746,27 @@ Install the external toolchain from Settings → Dependencies (ffmpeg, flac,
 libjxl, oxipng, rsgain, AudioAuditor, Logchecker, CUETools, librosa, beets,
 slskd, yt-dlp — and optionally chromaprint/`fpcalc` for AcoustID matching).
 The UI walks you through the first-run setup.
+
+### Sources & setup
+
+Every provider the app can ask — the six lyrics sources, the six advisory
+routes, the eleven genre sources and the four metadata providers, 27 rows —
+lives behind `GET /api/sources/health` (with `?probe=1` to run one cheap live
+lookup per configured source, `kind=lyrics|advisory|genre|metadata` to filter,
+and `GET /api/sources/health/{id}` for a single row). Each row says what it
+needs, whether that is configured, and — when probed — what actually answered.
+
+The first-run wizard's step 3 **Sources** and the Settings → *Sources* panel
+are the same panel: every row has a **Test** button, and the keyed providers
+collect their free credentials right there — Spotify client ID/secret,
+Discogs token, Last.fm API key and the RateYourMusic cookie. Nothing blocks
+finishing setup: a provider without its key is skipped like any other
+unavailable source, and `needs` is what says which key is missing.
+
+The keyless sources (LRCLIB, the CJK lyrics APIs, MusicBrainz, ListenBrainz,
+iTunes, TheAudioDB, Wikidata, Bandcamp, Deezer, Cover Art Archive, Apple's
+routes) work as-is; yt-dlp is the only *installed* requirement, for YouTube
+captions and the 18+ advisory gate.
 
 ### Terminal entry point
 
@@ -803,7 +879,8 @@ Where the app stores what it fetches:
 | `GET/POST/PATCH/DELETE /api/wishes` | release wishlist CRUD; `POST …/{id}/search`, `…/search-all`, `…/reconcile` |
 | `GET /api/album` `GET /api/artist` | entity details |
 | `GET /api/stream` `GET /api/videos/stream` | audio/video streaming (Range; `?transcode=1` pipes fragmented MP4) |
-| `GET /api/videos/meta` | codec probe deciding direct play vs transcode |
+| `GET /api/videos/meta` | codec probe deciding direct play vs transcode (carries the video's `duration`) |
+| `GET /api/videos/thumb?path=…&t=…&w=…` | one JPEG frame of a library video at `t` seconds for the scrub preview (keyframe seek before `-i`, cached under `.mlo/data/thumbs/`, uncached frames take ~50–150 ms) |
 | `GET /api/tags` | per-track tag/lyrics/cover read view |
 | `POST /api/tags/bulk` `POST /api/videos/tag` | bulk tag surgery; music-video tag writes |
 | `POST /api/lyrics/embed` `POST /api/lyrics/write` | embedded LYRICS / .lrc sidecar writes |
@@ -814,12 +891,14 @@ Where the app stores what it fetches:
 | `GET /api/mb/release?mbid=…` `GET /api/mb/release-genres?mbid=…` | MusicBrainz release + genre cascade |
 | `POST /api/mb/match` `POST /api/mb/assign` | track/disc matching, MB/RYM/genre/advisory writes (ITUNESADVISORY is accepted only as 0/1/2 or empty) |
 | `POST /api/mb/auto-import` | queue a release / release group / artist for download: `mode=best` (one edition per group) or `all` (every eligible edition); returns `queued`, per-item status and `skipped` reasons |
-| `POST /api/mb/advisory/fetch` | resolve `ITUNESADVISORY` for tracks (or a release) by ISRC — Deezer, then Spotify when configured, then Apple — and return `sources` (which provider answered each path); a rating no source states is left absent |
-| `POST /api/genres/import` `GET /api/genres/facets` | import genres for paths through the genre chain (per-source counts + notes); facet list with category cards for the Genres page |
+| `POST /api/mb/advisory/fetch` | resolve `ITUNESADVISORY` for tracks (or a release): every applicable source is asked on every track (Deezer and Spotify by ISRC, Apple's explicit-edition album route, Apple's song search, Discogs' parental-advisory format when a token is set, yt-dlp's `age_limit` for a track with a YouTube id) and merged — explicit anywhere is 1, else clean is 0, else 0 — returning `sources` (who stated each path's value) and `answers` (what every source said, `{path: {source: 0\|1}}`) |
+| `POST /api/instrumental/fetch` | resolve and write `INSTRUMENTAL` (0/1) cross-referencing LRCLIB's `instrumental`, Spotify audio-features `instrumentalness` (when configured), the file's own name and lyrics evidence: an "instrumental" answer anywhere is 1, else a "not instrumental" answer is 0, else nothing is written; every name-based match passes the shared variant guard (an instrumental/karaoke/cover/tribute hit is never accepted as the track); returns `values` and `evidence` (`{path: {source: 0\|1}}`) |
+| `POST /api/genres/import` `GET /api/genres/facets` | import genres for paths through the genre chain (RYM-first priority list, per-track answers with `level` fallbacks, per-source counts + notes); facet list with category cards for the Genres page |
 | `GET /api/metadata/candidates` `POST /api/metadata/apply` | artist image / artist description / album description candidates (staged when `metadata_review` is on) and the write of the chosen one |
 | `POST /api/videos/download-youtube` `POST /api/videos/match` | download a music video from YouTube for an artist+title (best candidate by duration); assign downloaded video files to tracks |
 | `POST /api/soulseek/download-bulk` `…/download-user` `…/search/cancel` | queue the selected search files, take everything a user shares through a fresh browse (already-queued transfers skipped), or cancel a running search |
 | `GET /api/discovery/sources` | discovery providers + the per-feature source orders (Settings → Discovery) |
+| `GET /api/sources/health` `GET /api/sources/health/{id}` | every external source (lyrics, advisory, genre, metadata) with its `needs`/`configured` state; `probe=1` runs one cheap lookup per configured source against a fixed sample (`kind=` filters, the single-source route returns the bare row) |
 | `GET /api/discovery/search` | catalogue search (albums/artists) through the provider chain; `source=musicbrainz` keeps the old search |
 | `GET /api/discovery/album` | provider album detail (genres, label, track list); `?resolve=1` also resolves the MusicBrainz release group |
 | `GET /api/discovery/similar` | "more like this" albums / tracks / artists, owned rows flagged with their library path |
@@ -834,7 +913,7 @@ Where the app stores what it fetches:
 | `GET /api/lyrics/find` | look lyrics up in the chain without writing anything |
 | `GET /api/lyrics/*` `POST /api/lyrics/write` | lyrics proxy + LRC sidecar write |
 | `POST /api/cover` | album cover upload (`?track=` writes per-track sidecar covers) |
-| `GET /api/cover/search` `GET /api/cover/sources` | cover meta-search (sources + storefront region) and the selectable catalogue / saved defaults |
+| `GET /api/cover/search` `GET /api/cover/sources` | cover meta-search (each row: real `width`/`height`, its provider, and the fallback chain Cover Art Archive → Deezer → iTunes) and the selectable catalogue / saved defaults |
 | `POST /api/cover/fromurl` | save a chosen search result as the cover |
 | `GET /api/downloads` `POST /api/downloads/import` `POST /api/downloads/delete` | staged `.mlo/downloads` entries: list newest-first, import as albums, delete |
 | `POST /api/import/upload` `…/commit` | upload + link assignment |

@@ -15,6 +15,7 @@ const SOURCE_NAMES: Record<string, string> = {
   itunes: "iTunes",
   discogs: "Discogs",
   musicbrainz: "Cover Art Archive",
+  coverartarchive: "Cover Art Archive",
   amazonmusic: "Amazon Music",
   fanarttv: "Fanart.tv",
   lastfm: "Last.fm",
@@ -32,6 +33,21 @@ function urlWidth(url: string | null): number | null {
 /** Fallback when the backend config has no usable `cover_target_size`. */
 const DEFAULT_TARGET = 1200;
 
+/** A result's pixel size — best source first: the backend's own probe of the
+ *  image file, then the image the browser measured, and only then the CDN
+ *  URL's own hint. That hint is a REQUEST width ("…/500x0w.jpg"), not the
+ *  size the URL answers with, so it is marked as an estimate. `null` = no
+ *  size known at all. */
+function resultSize(
+  r: CoverResult,
+  measured?: { w: number; h: number }
+): { w: number; h: number; real: boolean } | null {
+  if (r.width && r.height) return { w: r.width, h: r.height, real: true };
+  if (measured) return { w: measured.w, h: measured.h, real: true };
+  const hint = urlWidth(r.big || r.small);
+  return hint != null ? { w: hint, h: hint, real: false } : null;
+}
+
 interface Props {
   albumPath: string;
   artist: string;
@@ -41,12 +57,21 @@ interface Props {
   /** Audio filenames in the album folder: apply the chosen image to THESE
    *  tracks (one file, many tracks) instead of the album cover. */
   tracks?: string[];
+  /** The album's MusicBrainz release-group MBID, when the page knows it — the
+   *  identity the Cover Art Archive fallback is asked about. Without it that
+   *  fallback can only answer for artist/album. */
+  releaseGroupMbid?: string;
 }
 
-export default function CoverSearchModal({ albumPath, artist, album, onClose, onApplied, tracks }: Props) {
+export default function CoverSearchModal({ albumPath, artist, album, onClose, onApplied, tracks, releaseGroupMbid }: Props) {
   const [qArtist, setQArtist] = useState(artist);
   const [qAlbum, setQAlbum] = useState(album);
   const [results, setResults] = useState<CoverResult[] | null>(null);
+  // Who answered the last search: "cov" for the meta-search, a fallback id
+  // ("deezer", "itunes", "coverartarchive") when it had nothing, null when
+  // nobody did. Shown so a fallback answer is never silently passed off as
+  // the meta-search's.
+  const [provider, setProvider] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<CoverResult | null>(null);
@@ -105,11 +130,14 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
       const r = await api.coverSearch(a.trim(), al.trim(), {
         sources: srcSel.length ? srcSel : undefined,
         country: country || undefined,
+        releaseGroupMbid,
       });
       setResults(r.results ?? []);
+      setProvider(r.provider ?? null);
     } catch (e) {
       setError(String(e));
       setResults(null);
+      setProvider(null);
     } finally {
       setLoading(false);
     }
@@ -191,14 +219,13 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
               <div className="font-medium truncate">{selected.title ?? "—"}</div>
               <div className="text-zinc-400 truncate">{selected.artist ?? "—"}</div>
               {(() => {
-                const hint = urlWidth(selected.big || selected.small);
-                const m = measured?.url === (selected.big || selected.small) ? measured : null;
-                const dim = m ? `${m.w}×${m.h}px` : hint ? `~${hint}px (estimated)` : null;
-                const low = m ? m.w < target : hint != null && hint < target;
-                if (!dim) return null;
+                const m = measured?.url === (selected.big || selected.small) ? measured : undefined;
+                const size = resultSize(selected, m);
+                if (!size) return null;
+                const low = size.w < target;
                 return (
                   <div className={`text-xs mt-0.5 ${low ? "text-amber-400" : "text-zinc-500"}`}>
-                    {dim}
+                    {size.real ? `${size.w}×${size.h}px` : `~${size.w}px (estimated)`}
                     {low && ` · low resolution (target ${target}px)`}
                   </div>
                 );
@@ -366,17 +393,22 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
         {!loading && results && results.length === 0 && !error && (
           <div className="text-zinc-500 text-sm p-3">No covers found for this query.</div>
         )}
+        {results && results.length > 0 && provider && provider !== "cov" && (
+          <div className="text-[11px] text-amber-400/90 pb-2">
+            covers.musichoarders.xyz had nothing for this query — via{" "}
+            {SOURCE_NAMES[provider] ?? provider}
+          </div>
+        )}
         {results && results.length > 0 && (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
             {results.map((r, i) => {
-              // Real measured size wins; the CDN URL's own hint is a
-              // fallback for an image that has not loaded yet (and is absent
-              // entirely on sources like Apple, whose URL carries no size —
-              // which is why those results showed no resolution at all).
+              // The backend's own probe of the image wins; the image the
+              // browser loaded is the fallback for the rows past its probe
+              // limit, and the CDN URL's hint is the last resort (marked as an
+              // estimate — sources like Apple carry no size in the URL at all).
               const big = r.big || r.small;
-              const dim = big ? sizes[big] : undefined;
-              const px = dim?.w ?? urlWidth(big);
-              const low = px != null && px < target;
+              const size = resultSize(r, big ? sizes[big] : undefined);
+              const low = size != null && size.w < target;
               return (
                 <button
                   key={`${r.source}-${i}`}
@@ -406,9 +438,15 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
                       </span>
                       <span
                         className={`text-[10px] tabular-nums ${low ? "text-amber-400" : "text-zinc-500"}`}
-                        title={dim ? "Measured from the full-size image" : "From the image URL — still loading"}
+                        title={
+                          size?.real
+                            ? "Measured from the full-size image"
+                            : size
+                              ? "Estimated from the image URL — the real size is unknown"
+                              : "Size not known yet"
+                        }
                       >
-                        {dim ? `${dim.w}×${dim.h}` : px != null ? `${px}px` : "…"}
+                        {size ? (size.real ? `${size.w}×${size.h}` : `~${size.w}px`) : "…"}
                         {low ? " · low" : ""}
                       </span>
                     </div>

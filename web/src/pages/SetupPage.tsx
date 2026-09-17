@@ -3,9 +3,10 @@ import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ArrowRight, ArrowLeft, RotateCcw, Users } from "lucide-react";
 import { api } from "../api";
+import SourcesPanel from "../components/SourcesPanel";
 import { toast } from "../store";
 
-type Step = 1 | 2 | 3 | 4;
+type Step = 1 | 2 | 3 | 4 | 5;
 
 export default function SetupPage() {
   const navigate = useNavigate();
@@ -57,7 +58,7 @@ export default function SetupPage() {
       } else {
         toast("Soulseek settings saved");
       }
-      setStep(4);
+      setStep(5);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -124,7 +125,7 @@ export default function SetupPage() {
         </div>
 
         <div className="flex items-center gap-2 text-[11px] text-zinc-500 mb-4">
-          {([1, 2, 3, 4] as Step[]).map((s) => (
+          {([1, 2, 3, 4, 5] as Step[]).map((s) => (
             <div key={s} className="flex items-center gap-2">
               <span
                 className={`h-5 w-5 rounded-sm flex items-center justify-center text-[10px] border ${
@@ -134,7 +135,7 @@ export default function SetupPage() {
                 {step > s ? <Check className="h-3 w-3" /> : s}
               </span>
               <span className={step === s ? "text-zinc-200" : "text-zinc-600"}>
-                {s === 1 ? "Music folder" : s === 2 ? "Dependencies" : s === 3 ? "Soulseek" : "Done"}
+                {s === 1 ? "Music folder" : s === 2 ? "Dependencies" : s === 3 ? "Sources" : s === 4 ? "Soulseek" : "Done"}
               </span>
             </div>
           ))}
@@ -231,6 +232,33 @@ export default function SetupPage() {
 
         {step === 3 && (
           <div className="panel p-6 space-y-4">
+            <div>
+              <div className="text-sm font-semibold">Sources</div>
+              <p className="text-xs text-zinc-400 mt-1">
+                What the app asks for lyrics, genres, ratings and artwork. All of them are free; the
+                keyed ones work without keys too — they just get skipped. Nothing here blocks the
+                rest of the setup.
+              </p>
+            </div>
+            <SourcesPanel />
+            <div className="flex justify-between">
+              <button className="btn-ghost" onClick={() => setStep(2)}>
+                <ArrowLeft className="h-3.5 w-3.5" /> Back
+              </button>
+              <div className="flex gap-2">
+                <button className="btn-ghost" onClick={() => setStep(4)}>
+                  Skip for now
+                </button>
+                <button className="btn-primary" onClick={() => setStep(4)}>
+                  Next <ArrowRight className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {step === 4 && (
+          <div className="panel p-6 space-y-4">
             <div className="flex items-center gap-2 text-sm font-semibold">
               <Users className="h-4 w-4 text-accent" /> Share your library on Soulseek
             </div>
@@ -266,11 +294,11 @@ export default function SetupPage() {
               </div>
             </div>
             <div className="flex items-center justify-between">
-              <button className="btn-ghost" onClick={() => setStep(2)} disabled={busy}>
+              <button className="btn-ghost" onClick={() => setStep(3)} disabled={busy}>
                 <ArrowLeft className="h-3.5 w-3.5" /> Back
               </button>
               <div className="flex gap-2">
-                <button className="btn-ghost" onClick={() => setStep(4)} disabled={busy}>
+                <button className="btn-ghost" onClick={() => setStep(5)} disabled={busy}>
                   Skip for now
                 </button>
                 <button className="btn-primary" disabled={busy || !ssShare} onClick={() => saveSoulseek(true)}
@@ -282,7 +310,7 @@ export default function SetupPage() {
           </div>
         )}
 
-        {step === 4 && (
+        {step === 5 && (
           <div className="panel p-6 space-y-4">
             <div className="flex items-center gap-2 text-sm font-semibold">
               <Check className="h-4 w-4 text-emerald-400" /> You're all set
@@ -291,6 +319,7 @@ export default function SetupPage() {
               Library: <code className="font-mono text-zinc-200">{musicFolder || "(none)"}</code>
               <br />
               {deps ? `${deps.tools.filter((t) => t.state === "ok" || t.state === "update").length}/${deps.tools.length} tools ready` : "Dependency check skipped"}.
+              Sources can be tested and keyed anytime in Settings → Sources.
               Scripts that need missing tools will tell you when you run them.
             </p>
             <div className="flex justify-end">

@@ -5,6 +5,7 @@ import type {
   ArtistArtworkImage,
   CoverInfo,
   CoverSourceCatalog,
+  CoverSearch,
   CoverWriteResult,
   DiscoveryAlbumDetail,
   DiscoveryCatalog,
@@ -21,6 +22,9 @@ import type {
   LyricsHit,
   LyricsProviders,
   ScriptRunResult,
+  SourceHealth,
+  SourceKind,
+  SourcesHealth,
   Wish,
   WishesPayload,
 } from "./types";
@@ -275,6 +279,78 @@ export interface MetadataCandidates {
   images: MetadataImageCandidate[];
   artist_description: MetadataText | null;
   album_description: MetadataText | null;
+}
+
+/* ---------------------------------------------------------------------- *
+ * Per-track checks — advisory (/api/mb/advisory/fetch) and instrumental   *
+ * (/api/instrumental/fetch). Both WRITE the tag they check and hand back  *
+ * who said what, which is the only provenance the UI can show.            *
+ * ---------------------------------------------------------------------- */
+
+/** `{path: {source: value}}` — every provider that had something to say about
+ *  that track. Absent entirely on servers predating the provenance fields. */
+export type TrackAnswers = Record<string, Record<string, string | number>>;
+
+/** Advisory fetch reply. `values` is what the rating is (0 clean, 1 explicit,
+ *  2 clean edition) and `sources` the one provider whose answer was written;
+ *  `answers` carries all of them. */
+export interface AdvisoryFetchResult {
+  updated: number;
+  values?: Record<string, string | number>;
+  sources?: Record<string, string>;
+  answers?: TrackAnswers;
+}
+
+/** Instrumental fetch reply: `values` is INSTRUMENTAL (0/1), `evidence` the
+ *  answers behind it. */
+export interface InstrumentalFetchResult {
+  updated: number;
+  values?: Record<string, number | string>;
+  evidence?: TrackAnswers;
+}
+
+/** One track's entry in a check reply's per-path map. Those maps are keyed by
+ *  the path the server normpathed — backslashes on Windows, while the UI
+ *  carries "/" paths — so both spellings are tried. Undefined when the server
+ *  said nothing about this track. */
+export function replyFor<T>(map: Record<string, T> | undefined, path: string): T | undefined {
+  return map?.[path] ?? map?.[path.replace(/\//g, "\\")] ?? map?.[path.replace(/\\/g, "/")];
+}
+
+/** The providers behind a track's value, the deciding one first
+ *  ("deezer-isrc, apple-album"). Reads the entry `replyFor` returned, so a
+ *  server without the maps yields [] — provenance is never inferred locally. */
+export function answerSources(
+  answers: Record<string, unknown> | undefined,
+  winner?: string | null
+): string[] {
+  const out: string[] = [];
+  for (const s of [winner, ...Object.keys(answers ?? {})]) {
+    if (s && !out.includes(s)) out.push(s);
+  }
+  return out;
+}
+
+/** Run both per-track checks on one selection. The legs are independent: an
+ *  endpoint a server does not have must not hide the other leg's values, so a
+ *  failed leg arrives as null with its message in `errors`. */
+export async function checkTrackValues(paths: string[]): Promise<{
+  adv: AdvisoryFetchResult | null;
+  inst: InstrumentalFetchResult | null;
+  errors: string[];
+}> {
+  const [adv, inst] = await Promise.all([
+    api.mbAdvisoryFetch({ paths }).catch((e) => e as Error),
+    api.instrumentalFetch(paths).catch((e) => e as Error),
+  ]);
+  const errors: string[] = [];
+  if (adv instanceof Error) errors.push(`advisory: ${adv.message}`);
+  if (inst instanceof Error) errors.push(`instrumental: ${inst.message}`);
+  return {
+    adv: adv instanceof Error ? null : adv,
+    inst: inst instanceof Error ? null : inst,
+    errors,
+  };
 }
 
 export const api = {
@@ -653,19 +729,19 @@ export const api = {
     );
   },
 
+  /** Album covers for artist/album. `releaseGroupMbid`, when the caller knows
+   *  it, is the identity the Cover Art Archive fallback is asked about; the
+   *  reply's `provider` says who actually answered. */
   coverSearch: (
     artist: string,
     album: string,
-    opts?: { sources?: string[]; country?: string }
+    opts?: { sources?: string[]; country?: string; releaseGroupMbid?: string }
   ) => {
     const q = new URLSearchParams({ artist, album });
     if (opts?.sources?.length) q.set("sources", opts.sources.join(","));
     if (opts?.country) q.set("country", opts.country);
-    return json<{ results: import("./types").CoverResult[] }>(
-      `${API}/cover/search?${q}`,
-      undefined,
-      90000
-    );
+    if (opts?.releaseGroupMbid) q.set("release_group_mbid", opts.releaseGroupMbid);
+    return json<CoverSearch>(`${API}/cover/search?${q}`, undefined, 90000);
   },
   /** Selectable cover sources + regions, plus the saved defaults. */
   coverSources: () => json<CoverSourceCatalog>(`${API}/cover/sources`),
@@ -1019,7 +1095,8 @@ export const api = {
     json<{ ok: boolean }>(`${API}/album/description?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
 
   // ----------------------------------------------------------------- //
-  // Lyrics — provider chain (LRCLIB → NetEase → lyrics.ovh → Kugou)   //
+  // Lyrics — the synced provider chain (LRCLIB → NetEase → Kugou →    //
+  // QQ Music → Kuwo → YouTube captions); see Settings → Lyrics.       //
   // ----------------------------------------------------------------- //
   lyricsProviders: () => json<LyricsProviders>(`${API}/lyrics/providers`),
   /** Auto-import lyrics for one or more tracks through the provider chain.
@@ -1103,12 +1180,23 @@ export const api = {
       180000
     ),
   /** Fetch the advisory rating (ITUNESADVISORY) for one release or a set of
-   *  tracks — the values land in `values` and are written to `paths`. */
+   *  tracks — the values land in `values` and are written to `paths`, and
+   *  `answers` reports every provider that had something to say (the UI's
+   *  provenance). */
   mbAdvisoryFetch: (body: { paths?: string[]; release_mbid?: string }) =>
-    json<{ updated: number; values: Record<string, string> }>(`${API}/mb/advisory/fetch`, {
+    json<AdvisoryFetchResult>(`${API}/mb/advisory/fetch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+    }, 120000),
+
+  /** Check INSTRUMENTAL for a set of tracks: each value the sources can state
+   *  is written, and `evidence` reports who decided it. */
+  instrumentalFetch: (paths: string[]) =>
+    json<InstrumentalFetchResult>(`${API}/instrumental/fetch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths }),
     }, 120000),
 
   soulseekDownloadBulk: (username: string, files: { filename: string; size?: number }[]) =>
@@ -1167,6 +1255,37 @@ export const api = {
       body: JSON.stringify(body),
     }, 120000),
 
+  // ----------------------------------------------------------------- //
+  // Source health — every provider the app can talk to, with the       //
+  // status of its last probe (setup wizard + Settings → Sources).      //
+  // ----------------------------------------------------------------- //
+  /** All sources. `probe` runs a live test per source (slow, one network
+   *  round trip each); without it the rows come back with their cheap
+   *  configured/needs state and the previous status. */
+  sourcesHealth: (probe = false, kind?: SourceKind) => {
+    const q = new URLSearchParams();
+    if (kind) q.set("kind", kind);
+    q.set("probe", probe ? "1" : "0");
+    return json<SourcesHealth>(`${API}/sources/health?${q}`, undefined, 120000);
+  },
+  /** One source's row — the per-row Test button. Always probes live. `kind`
+   *  disambiguates the ids that exist in two families (deezer and itunes are
+   *  both a genre source and a metadata provider); the row carries its own
+   *  `kind` back, which is what the caller matches on. The live route answers
+   *  `{source, checked_at}` and the agreed shape is the bare row — both read. */
+  sourceHealth: (id: string, probe = true, kind?: SourceKind) =>
+    json<SourceHealth | { source: SourceHealth }>(
+      `${API}/sources/health/${encodeURIComponent(id)}?probe=${probe ? "1" : "0"}${kind ? `&kind=${kind}` : ""}`,
+      undefined,
+      60000
+    ).then((r) => ("source" in r ? r.source : r)),
+
+  /** URL of one video frame (`GET /api/videos/thumb`): JPEG bytes for the
+   *  scrub preview. `t` is floored to whole seconds so repeated positions
+   *  reuse one cache entry; 404s for a non-video or a path outside the
+   *  music folder, which the caller swallows. */
+  videoThumbUrl: (path: string, t: number, w = 160) =>
+    `${API}/videos/thumb?path=${encodeURIComponent(path)}&t=${Math.max(0, Math.floor(t))}&w=${Math.round(w)}`,
   /** Download a music video from YouTube for one track (web/digital media). */
   videosDownloadYoutube: (body: { path?: string; artist: string; title: string; duration?: number }) =>
     json<{ ok: boolean; file?: string; candidate?: Record<string, unknown> }>(`${API}/videos/download-youtube`, {

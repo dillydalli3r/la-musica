@@ -1,7 +1,7 @@
 """Script 13 — Fetch Lyrics.
 
 Downloads missing lyrics for every track from the configured provider chain
-(LRCLIB → NetEase → lyrics.ovh → Kugou; see ``lyrics_providers``) and writes
+(``lyrics_sources``, built-in order in ``lyrics_providers``) and writes
 them per the global ``lyrics_format`` (EMBEDDED / LRC / BOTH), canonicalized
 with the same formatting rules as script 1. Tracks tagged INSTRUMENTAL=1
 and tracks that already carry lyrics (embedded or an .lrc sidecar) are
@@ -16,7 +16,7 @@ from .lyrics import (
     _process_lyrics_for_audio,
 )
 from .lyrics_providers import (  # noqa: F401  (lrclib_fetch is a re-export shim)
-    SOURCE_LABELS, fetch_lyrics, lrclib_fetch, provider_order,
+    SOURCE_LABELS, fetch_lyrics, lrclib_fetch, provider_order, youtube_id_from,
 )
 from .paths import AUDIO_EXTS
 from .stats import (
@@ -67,7 +67,14 @@ def fetch_one(path, config, force=False):
             duration = af.audio.info.length
         except Exception:
             pass
-        hit = fetch_lyrics(config, artist, title, af.get_tag("ALBUM"), duration)
+        # A YouTube id is the ONLY thing the captions provider can work with;
+        # it never searches, so nothing is guessed from the tags (the file name
+        # carries "[<id>]" — the template the video download itself writes).
+        youtube_id = youtube_id_from(af.get_tag("YOUTUBEID"),
+                                     af.get_tag("YOUTUBE_URL"),
+                                     os.path.basename(path))
+        hit = fetch_lyrics(config, artist, title, af.get_tag("ALBUM"), duration,
+                           youtube_id=youtube_id)
         # A synced provider hit keeps its timestamps; a plain one does not.
         text = ((hit or {}).get("synced") or (hit or {}).get("plain") or "").strip()
         if not text:

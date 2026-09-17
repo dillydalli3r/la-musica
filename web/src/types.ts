@@ -245,6 +245,20 @@ export interface CoverResult {
   artist: string | null;
   tracks: number | null;
   url: string | null;
+  /** The image's REAL pixel size, read from its own header bytes by the
+   *  backend. `null` means unknown — the first results are probed, the rest
+   *  report null rather than a guess (a CDN URL's "500x0w" is a request hint,
+   *  not the size the URL answers with). */
+  width?: number | null;
+  height?: number | null;
+}
+
+/** `/api/cover/search` — `provider` names who actually answered: `"cov"` for
+ *  the covers.musichoarders.xyz meta-search, the fallback id that filled in
+ *  (`coverartarchive`/`deezer`/`itunes`), or null when nobody had anything. */
+export interface CoverSearch {
+  provider: string | null;
+  results: CoverResult[];
 }
 
 /** Response of the cover write endpoints (`/api/cover`, `/api/cover/fromurl`):
@@ -637,6 +651,15 @@ export interface LyricsProvider {
   id: string;
   label: string;
   notes: string;
+  /** 1-based rank in the built-in chain (mlo/lyrics_providers.available_sources). */
+  rank?: number;
+  /** Every shipped provider is time-synced and free; the flags come from the
+   *  backend (`available_sources`) so a plain-only one could never be
+   *  ticked in the settings picker by accident. */
+  kind?: string;
+  synced?: boolean;
+  free?: boolean;
+  needs?: string[];
 }
 
 export interface LyricsProviders {
@@ -754,6 +777,38 @@ export interface ScriptRunResult {
   skipped?: boolean;
   reason?: string;
   error?: string;
+}
+
+/* ---------------------------------------------------------------------- *
+ * Source health (/api/sources/health) — the setup wizard + Settings panel   *
+ * ---------------------------------------------------------------------- */
+
+/** The four provider families the backend reports on. */
+export type SourceKind = "lyrics" | "advisory" | "genre" | "metadata";
+
+/** One provider row. `needs` are config keys this source reads; `configured`
+ *  says whether they are all set, and `status`/`detail`/`ms` come from the
+ *  last probe (`fail`/`skipped` are states, never errors). */
+export interface SourceHealth {
+  id: string;
+  kind: SourceKind;
+  label: string;
+  free: boolean;
+  synced?: boolean;
+  /** 1-based position in the built-in chain, and the registry's own blurb —
+   *  only lyrics rows carry these today. */
+  rank?: number;
+  notes?: string;
+  needs: string[];
+  configured: boolean;
+  status: "ok" | "skipped" | "fail";
+  detail: string;
+  ms: number;
+}
+
+export interface SourcesHealth {
+  checked_at: string;
+  sources: SourceHealth[];
 }
 
 /** Album detail from `/api/discovery/album`: a discovery row plus the

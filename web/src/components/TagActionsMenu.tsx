@@ -1,6 +1,6 @@
 import { useState } from "react";
 import {
-  BadgeInfo, Disc3, ImagePlus, ListMusic, Music4, RefreshCw, Sparkles, Tags,
+  BadgeInfo, Disc3, ImagePlus, ListMusic, Music2, Music4, RefreshCw, Sparkles, Tags,
 } from "lucide-react";
 import { api } from "../api";
 import OverflowMenu from "./OverflowMenu";
@@ -86,6 +86,16 @@ export default function TagActionsMenu({
                   ),
               },
               {
+                label: "Check instrumental",
+                icon: Music2,
+                disabled: !paths.length,
+                title: "Ask the configured sources whether each track is instrumental, and write INSTRUMENTAL",
+                onClick: () =>
+                  run(() => api.instrumentalFetch(paths), (r) =>
+                    `${r?.updated ?? 0} track(s) checked`
+                  ),
+              },
+              {
                 label: "Fetch / refresh lyrics",
                 icon: ListMusic,
                 disabled: !paths.length,
@@ -129,6 +139,7 @@ export default function TagActionsMenu({
         <MetadataReviewModal
           artist={review === "artist" ? artist : undefined}
           albumPath={review === "album" ? albumPath : undefined}
+          paths={review === "album" ? paths : undefined}
           title={review === "artist" ? "Artist metadata" : "Album description"}
           onClose={() => setReview(null)}
           onSaved={onDone}

@@ -130,6 +130,16 @@ def finish_album(album_dir, cfg=None, progress=None, force=None):
         except Exception:
             traceback.print_exc()
 
+    # Instrumental detection sits next to it for the same reason (the chain's
+    # lyrics step reads INSTRUMENTAL), and is independent of the advisory: a
+    # track can be instrumental and explicit-rated. Gated by
+    # instrumental_auto_fetch; never fatal.
+    if cfg.get("instrumental_auto_fetch", True):
+        try:
+            out["instrumental"] = fetch_instrumentals([path], cfg)
+        except Exception:
+            traceback.print_exc()
+
     # Artist image / descriptions: fetched here (the metadata step) so an
     # import leaves the album graded-ready. metadata_review on stages the
     # candidates instead of writing them. Never fatal.
@@ -189,15 +199,18 @@ def fetch_advisories(paths, cfg=None):
 
     Each track is identified by its ISRC tag (or by the MusicBrainz recording
     ID the import just stamped, whose ISRCs MusicBrainz supplies) and rated by
-    `integrations.resolve_advisory`: Deezer's ISRC lookup first, then Spotify
-    when configured, then Apple's album route and exact-title song search.
-    Only a stated rating (0/1/2) is written: an unknown track keeps NO
-    advisory, because a missing advisory means "unrated" and 0 would claim the
-    audio is clean. An existing valid value is left alone (the user's manual
-    edit wins).
+    `integrations.resolve_advisory_route`, which asks EVERY applicable source
+    in one pass — Deezer and Spotify by ISRC, Apple's explicit-edition album
+    route, Apple's exact-title song search — and merges them with
+    `integrations.merge_advisory`: 1 when any source states explicit, else 0.
+    An unstated advisory is therefore written as 0 (the user's policy): the
+    per-track `answers` map is what shows whether any source actually spoke.
+    A file that already carries a valid 0/1/2 is left alone (the user's manual
+    edit wins) and a value equal to the merged one is not rewritten.
 
-    Returns ``{"updated": n, "values": {path: 0|1|2}, "sources": {path:
-    provider}}`` — `sources` is who stated each value.
+    Returns ``{"updated": n, "values": {path: 0|1}, "sources": {path:
+    provider}, "answers": {path: {source: 0|1}}}`` — `sources` is who stated
+    each value, `answers` is what every source said about the track.
     """
     from mlo.audio import AudioFile
     from mlo.config import should_write_audio_tag
@@ -205,7 +218,7 @@ def fetch_advisories(paths, cfg=None):
 
     cfg = cfg or load_config()
     if not cfg.get("advisory_auto_fetch", True):
-        return {"updated": 0, "values": {}, "sources": {},
+        return {"updated": 0, "values": {}, "sources": {}, "answers": {},
                 "skipped": "advisory_auto_fetch is off"}
     targets = []
     for p in paths or []:
@@ -225,6 +238,7 @@ def fetch_advisories(paths, cfg=None):
     updated = 0
     values = {}
     sources = {}
+    answers = {}
     for path in targets:
         try:
             af = AudioFile(path)
@@ -250,16 +264,78 @@ def fetch_advisories(paths, cfg=None):
             value = route.get("value")
             if value is None:
                 continue
-            if af.set_tag("ITUNESADVISORY", str(value)):
+            if str(value) != current and af.set_tag("ITUNESADVISORY", str(value)):
                 updated += 1
-                values[path] = value
-                if route.get("source"):
-                    sources[path] = route["source"]
+            values[path] = value
+            if route.get("source"):
+                sources[path] = route["source"]
+            if route.get("answers"):
+                answers[path] = route["answers"]
         except Exception:
             continue
     if updated:
         _invalidate_caches()
-    return {"updated": updated, "values": values, "sources": sources}
+    return {"updated": updated, "values": values, "sources": sources,
+            "answers": answers}
+
+
+def fetch_instrumentals(paths, cfg=None):
+    """Resolve and write INSTRUMENTAL (0/1) for these albums / tracks.
+
+    The detection itself is ``server.instrumental.detect_instrumental``, which
+    cross-references every available source (LRCLIB, Spotify audio-features,
+    the file's own title marker, lyrics evidence) and merges them: any source
+    saying instrumental wins, otherwise any source saying not-instrumental,
+    otherwise NO answer and no write. A file that already carries 0/1 is left
+    alone (the user's manual edit wins).
+
+    Returns ``{"updated": n, "values": {path: 0|1}, "evidence": {path:
+    {source: 0|1}}}``.
+    """
+    from mlo.audio import AudioFile
+    from mlo.config import should_write_audio_tag
+    from server import instrumental as inst
+
+    cfg = cfg or load_config()
+    if not cfg.get("instrumental_auto_fetch", True):
+        return {"updated": 0, "values": {}, "evidence": {},
+                "skipped": "instrumental_auto_fetch is off"}
+    targets = []
+    for p in paths or []:
+        p = os.path.normpath(str(p))
+        if os.path.isdir(p):
+            targets.extend(_audio_files(p))
+        elif os.path.isfile(p):
+            targets.append(p)
+
+    found = inst.detect_instrumental(targets, cfg)
+    updated = 0
+    values = {}
+    evidence = {}
+    for path, hit in found.items():
+        try:
+            value = hit.get("value")
+            if hit.get("answers"):
+                evidence[path] = hit["answers"]
+            if value is None:
+                continue
+            af = AudioFile(path)
+            if af.audio is None:
+                continue
+            current = str(af.get_tag("INSTRUMENTAL") or "").strip()
+            if current in ("0", "1"):
+                values[path] = int(current)
+                continue
+            if not should_write_audio_tag(cfg, "INSTRUMENTAL", filepath=path):
+                continue
+            if str(value) != current and af.set_tag("INSTRUMENTAL", str(value)):
+                updated += 1
+            values[path] = value
+        except Exception:
+            continue
+    if updated:
+        _invalidate_caches()
+    return {"updated": updated, "values": values, "evidence": evidence}
 
 
 # --------------------------------------------------------------------------- #
@@ -534,10 +610,13 @@ def _stamp_release(album_dir, release, cfg):
     The MusicBrainz ids (+ per-track recording ids) come from
     ``server.soulseek_auto._stamp_mb_tags`` — the same stamper the Soulseek
     import uses, so a bulk import and an auto-import tag identically. On top:
-    GENRE from the MusicBrainz genre cascade (track → release → release group →
-    artist). ITUNESADVISORY is not written here — ``finish_album`` resolves it
-    from the ISRCs (``fetch_advisories``) before the chain runs, which is the
-    only path that can state a real rating instead of echoing one.
+    GENRE from the full per-track genre chain (RateYourMusic → ListenBrainz →
+    MusicBrainz → iTunes → Wikidata → Last.fm → Discogs → Deezer, see
+    ``integrations.genre_chain``), already merged per track and capped at
+    ``mb_genre_count``. ITUNESADVISORY is not written here —
+    ``finish_album`` resolves it from the ISRCs (``fetch_advisories``) before
+    the chain runs, which is the only path that can state a real rating
+    instead of echoing one.
 
     Returns the number of files written; a tag failure never fails an import.
     """
@@ -551,18 +630,28 @@ def _stamp_release(album_dir, release, cfg):
         soulseek_auto._stamp_mb_tags(album_dir, rel)
     except Exception:
         traceback.print_exc()
+    files = _audio_files(album_dir)
     genres = {}
     if rel.get("release_group_id") or rel.get("id"):
         try:
-            cascade = intg.genre_cascade(rel, limit=cfg.get("mb_genre_count"))
-            for track in cascade.get("per_track") or []:
-                key = (int(track.get("disc") or 1), int(track.get("position") or 0))
-                genres[key] = track.get("genres") or []
+            # The FULL per-track chain (RateYourMusic → ListenBrainz →
+            # MusicBrainz → iTunes → Wikidata → Last.fm → Discogs → Deezer),
+            # merged per track and capped: an import therefore writes the same
+            # genres an Auto-tagging run would, from the release it has just
+            # identified, and a per-track source (recording tags, Apple's
+            # primaryGenreName) lands on the track it belongs to.
+            chain = intg.genre_chain(
+                artist=next((a.get("name") for a in rel.get("artists") or []
+                             if a.get("name")), ""),
+                album=rel.get("title") or "",
+                release=rel, limit=cfg.get("mb_genre_count"), cfg=cfg,
+                files=files)
+            genres = chain.get("per_track") or {}
         except Exception:
             traceback.print_exc()
 
     failed = 0
-    for path in _audio_files(album_dir):
+    for path in files:
         try:
             af = AudioFile(path)
             if af.audio is None:

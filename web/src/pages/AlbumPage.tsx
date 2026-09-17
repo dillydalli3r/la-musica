@@ -377,8 +377,9 @@ export default function AlbumPage() {
 
   /** Auto-import missing lyrics for every track in this album.
    *
-   * One backend call per album runs the whole provider chain (LRCLIB →
-   * NetEase → lyrics.ovh → Kugou, in the order Settings → Lyrics sets),
+   * One backend call per album runs the whole synced provider chain
+   * (LRCLIB → NetEase → Kugou → QQ Music → Kuwo → YouTube captions, in
+   * the order Settings → Lyrics sets),
    * writes per the global lyrics_format and canonicalizes exactly like
    * script 13 — the same code path the track page's button uses. */
   const downloadLyricsAlbum = async () => {
@@ -1188,6 +1189,7 @@ export default function AlbumPage() {
           albumPath={data.path}
           artist={data.meta?.ALBUMARTIST ?? data.meta?.ARTIST ?? ""}
           album={data.meta?.ALBUM ?? ""}
+          releaseGroupMbid={data.meta?.MUSICBRAINZ_RELEASEGROUPID ?? undefined}
           onClose={() => setCoverSearchOpen(false)}
           onApplied={() => {
             qc.invalidateQueries({ queryKey: ["library"] });

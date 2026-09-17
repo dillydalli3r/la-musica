@@ -8,8 +8,8 @@ could still win a "synced or nothing" run. Pinned here:
   * provider_order() honours cfg["lyrics_sources"], preserves its order,
     drops unknown ids (a hand-edited config can never wedge the run) and
     falls back to the built-in order,
-  * fetch_lyrics() skips a plain-only hit when plain lyrics are not allowed
-    and keeps walking the chain,
+  * fetch_lyrics() skips a plain-only hit — the chain is synced-only by
+    default — and keeps walking until a synced source answers,
   * the NetEase and Kugou scoring picks the RIGHT candidate out of the real
     payloads they returned (cover versions with a matching title but another
     artist lose), and the synced LRC really is available as plain text,
@@ -33,15 +33,19 @@ from mlo import lyrics_providers as lp
 # --------------------------------------------------------------------------- #
 # The catalogue and its settings metadata
 # --------------------------------------------------------------------------- #
-assert lp.SOURCES[:3] == ["lrclib", "netease", "lyricsovh"], lp.SOURCES
+assert lp.SOURCES[:3] == ["lrclib", "netease", "qq"], lp.SOURCES
 assert set(lp.SOURCE_LABELS) == set(lp.SOURCES) == set(lp.SOURCE_NOTES), lp.SOURCES
 assert lp.SOURCE_LABELS["lrclib"] == "LRCLIB", lp.SOURCE_LABELS
 assert lp.SOURCE_LABELS["netease"] == "NetEase", lp.SOURCE_LABELS
-assert lp.SOURCE_LABELS["lyricsovh"] == "lyrics.ovh", lp.SOURCE_LABELS
+assert lp.SOURCE_LABELS["kugou"] == "Kugou", lp.SOURCE_LABELS
+assert lp.SOURCE_LABELS["qq"] == "QQ Music", lp.SOURCE_LABELS
 
 listed = lp.available_sources()
 assert [s["id"] for s in listed] == lp.SOURCES, listed
-assert all(set(s) == {"id", "label", "notes"} for s in listed), listed
+assert all(set(s) == {"id", "kind", "label", "synced", "free", "needs",
+                      "rank", "notes"} for s in listed), listed
+assert [s["rank"] for s in listed] == [1, 2, 3, 4, 5, 6], listed
+assert all(s["synced"] and s["free"] and s["needs"] == [] for s in listed), listed
 assert all(s["notes"].strip() for s in listed), listed
 
 
@@ -51,13 +55,13 @@ assert all(s["notes"].strip() for s in listed), listed
 assert lp.provider_order() == lp.SOURCES
 assert lp.provider_order({}) == lp.SOURCES
 assert lp.provider_order({"lyrics_sources": []}) == lp.SOURCES
-assert lp.provider_order({"lyrics_sources": "lyricsovh"}) == ["lyricsovh"]
+assert lp.provider_order({"lyrics_sources": "kuwo"}) == ["kuwo"]
 # order is the user's, not the built-in one
-assert lp.provider_order({"lyrics_sources": ["lyricsovh", "lrclib"]}) == \
-    ["lyricsovh", "lrclib"], lp.provider_order({"lyrics_sources": ["lyricsovh", "lrclib"]})
+assert lp.provider_order({"lyrics_sources": ["kuwo", "lrclib"]}) == \
+    ["kuwo", "lrclib"], lp.provider_order({"lyrics_sources": ["kuwo", "lrclib"]})
 # unknown ids (and a stale/duplicated one) are dropped, not fatal
-assert lp.provider_order({"lyrics_sources": ["nope", "netease", "NETEASE", " genius "]}) == \
-    ["netease"]
+assert lp.provider_order({"lyrics_sources": ["nope", "netease", "NETEASE",
+                                             " megalobiz "]}) == ["netease"]
 # nothing known at all -> the built-in order, never an empty run
 assert lp.provider_order({"lyrics_sources": ["nope"]}) == lp.SOURCES
 assert lp.provider_order({"lyrics_sources": None}) == lp.SOURCES
@@ -150,6 +154,11 @@ def dead_http(*a, **k):
 
 CFG = {}
 
+# Both HTTP entry points stay stubbed for the whole run: no assertion here may
+# depend on — or disturb — a live provider (a section narrows them further, and
+# Patch puts these silent stubs back afterwards).
+Patch(lp, _get_json=lambda *a, **k: None, _http=lambda *a, **k: None).__enter__()
+
 
 # --------------------------------------------------------------------------- #
 # NetEase: scoring on the real payload + synced LRC -> plain text
@@ -228,30 +237,39 @@ assert lp._match_score(["Slowdive"], "Alison (Remastered)", 0, "Slowdive", "Alis
 PLAIN_ONLY = "listen close and dont be stoned\ni'll be here in the morning\n"
 SYNCED = "[00:19.92]listen close and don't be stoned\n"
 
-# lyrics.ovh is the only source with the song, and it has no timestamps
-with Patch(lp, _get_json=fake_api([("api.lyrics.ovh", {"lyrics": PLAIN_ONLY})])):
+# LRCLIB has the song with untimed text only (its /get record carries
+# plainLyrics alone)
+LRCLIB_PLAIN_ONLY = ("lrclib.net/api/get", {"syncedLyrics": None,
+                                            "plainLyrics": PLAIN_ONLY,
+                                            "instrumental": False,
+                                            "duration": 230.0})
+with Patch(lp, _get_json=fake_api([LRCLIB_PLAIN_ONLY])):
+    # synced-only is the default: refused, and never replaced by an invention
     hit = lp.fetch_lyrics(CFG, "Slowdive", "Alison")
-    assert hit["provider"] == "lyricsovh" and hit["synced"] is None, hit
-    assert hit["plain"] == PLAIN_ONLY.strip(), hit["plain"]
-    # "synced or nothing" refuses it — and does not raise or invent a hit
+    assert hit is None, hit
     assert lp.fetch_lyrics(dict(CFG, lyrics_allow_plain=False),
                            "Slowdive", "Alison") is None
-    # the param beats the config, in both directions
-    assert lp.fetch_lyrics(dict(CFG, lyrics_allow_plain=False), "Slowdive", "Alison",
-                           allow_plain=True)["provider"] == "lyricsovh"
+    # the opt-in lets it through, and the param beats the config both ways
+    hit = lp.fetch_lyrics(dict(CFG, lyrics_allow_plain=True), "Slowdive", "Alison")
+    assert hit["provider"] == "lrclib" and hit["synced"] is None, hit
+    assert hit["plain"] == PLAIN_ONLY.strip(), hit["plain"]
+    assert lp.fetch_lyrics(CFG, "Slowdive", "Alison",
+                           allow_plain=True)["provider"] == "lrclib"
     assert lp.fetch_lyrics(dict(CFG, lyrics_allow_plain=True), "Slowdive", "Alison",
                            allow_plain=False) is None
 
 # ...and the chain FALLS THROUGH to the next provider instead of stopping
 with Patch(lp, _get_json=fake_api([
-        ("api.lyrics.ovh", {"lyrics": PLAIN_ONLY}),
-        ("lrclib.net/api/get", {"syncedLyrics": SYNCED, "plainLyrics": None,
-                                "instrumental": False, "duration": 230.0})])):
-    order = {"lyrics_sources": ["lyricsovh", "lrclib"]}
-    assert lp.fetch_lyrics(order, "Slowdive", "Alison")["provider"] == "lyricsovh"
+        LRCLIB_PLAIN_ONLY,
+        ("lrclib.net/api/search", {"syncedLyrics": SYNCED, "plainLyrics": None,
+                                   "instrumental": False, "duration": 230.0}),
+        ("krcs.kugou.com/search", KUGOU_SEARCH),
+        ("lyrics.kugou.com/download", KUGOU_DOWNLOAD)])):
+    order = {"lyrics_sources": ["lrclib", "kugou"], "lyrics_allow_plain": True}
+    assert lp.fetch_lyrics(order, "Slowdive", "Alison")["provider"] == "lrclib"
     fell = lp.fetch_lyrics(dict(order, lyrics_allow_plain=False),
                            "Slowdive", "Alison")
-    assert fell["provider"] == "lrclib" and fell["synced"] == SYNCED.strip(), fell
+    assert fell["provider"] == "kugou" and fell["synced"] == KUGOU_LRC.strip(), fell
 
 
 # --------------------------------------------------------------------------- #
@@ -277,8 +295,9 @@ with Patch(lp, _get_json=fake_api([], asked)):
 # --------------------------------------------------------------------------- #
 # The shared hit shape (every provider returns all of these)
 # --------------------------------------------------------------------------- #
-with Patch(lp, _get_json=fake_api([("api.lyrics.ovh", {"lyrics": PLAIN_ONLY})])):
-    hit = lp.fetch_lyrics(CFG, "Slowdive", "Alison", "Souvlaki", 230.295)
+with Patch(lp, _get_json=fake_api([LRCLIB_PLAIN_ONLY])):
+    hit = lp.fetch_lyrics(dict(CFG, lyrics_allow_plain=True),
+                          "Slowdive", "Alison", "Souvlaki", 230.295)
 assert set(hit) == {"provider", "provider_label", "synced", "plain", "instrumental",
                     "duration", "matched_artist", "matched_title", "matched_album"}, hit
 assert isinstance(hit["instrumental"], bool), hit

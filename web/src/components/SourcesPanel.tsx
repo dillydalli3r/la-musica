@@ -1,0 +1,291 @@
+import { useEffect, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { ExternalLink, RotateCcw } from "lucide-react";
+import { api } from "../api";
+import { toast } from "../store";
+import type { SourceHealth, SourceKind, SourcesHealth } from "../types";
+
+/** The four provider families, in the order the panel lists them. The rows
+ *  themselves come from `/api/sources/health` — nothing here is a source
+ *  list, so a provider added on the backend shows up on its own. */
+const KIND_LABEL: Record<SourceKind, string> = {
+  lyrics: "Lyrics providers — synced, free",
+  advisory: "Advisory sources — release ratings & parental flags",
+  genre: "Genre sources",
+  metadata: "Metadata providers — images & descriptions",
+};
+
+/** What each config key a source may need is called and where it is issued.
+ *  The KEYS come from the endpoint's `needs`; this is only their wording. */
+const KEY_INFO: Record<string, { label: string; hint: string; url?: string; link?: string; secret?: boolean }> = {
+  spotify_client_id: {
+    label: "Spotify client ID",
+    hint: "Create an app, then copy its Client ID from the dashboard.",
+    url: "https://developer.spotify.com/dashboard",
+    link: "Spotify developer dashboard",
+  },
+  spotify_client_secret: {
+    label: "Spotify client secret",
+    hint: "Same app page → Show client secret. Free, no card.",
+    url: "https://developer.spotify.com/dashboard",
+    link: "Spotify developer dashboard",
+    secret: true,
+  },
+  discogs_token: {
+    label: "Discogs personal access token",
+    hint: "Generate a token (free account) and paste it here.",
+    url: "https://www.discogs.com/settings/developers",
+    link: "Discogs developers",
+    secret: true,
+  },
+  lastfm_api_key: {
+    label: "Last.fm API key",
+    hint: "API account → the key is shown immediately.",
+    url: "https://www.last.fm/api/account/create",
+    link: "last.fm API account",
+  },
+  rym_cookie: {
+    label: "RateYourMusic cookie",
+    hint: "Signed in: dev tools → Network → any rym request → Request Headers → Cookie.",
+    url: "https://rateyourmusic.com",
+    link: "rateyourmusic.com",
+    secret: true,
+  },
+};
+
+/** The config keys this panel can prompt for, in a stable order. */
+const KEY_NAMES = Object.keys(KEY_INFO);
+
+/** `needs` mixes config keys with installed tools (yt-dlp): only the keys get
+ *  an input, the tools are a dependency note. */
+const promptKeysOf = (row: SourceHealth) => row.needs.filter((k) => k in KEY_INFO);
+
+/** Deezer and iTunes are a genre source AND a metadata provider — two rows
+ *  share one id, so the row key (and the in-flight marker) carries the kind. */
+const busyId = (row: SourceHealth) => `${row.kind}:${row.id}`;
+
+/** Status chip: `ok` ran, `skipped` cannot run here, `fail` ran and had no
+ *  answer. A failure is a state to look at, never an error to retry. */
+function StatusChip({ row }: { row: SourceHealth }) {
+  const cls =
+    row.status === "ok"
+      ? "bg-emerald-900/50 text-emerald-300 border-emerald-800"
+      : row.status === "skipped"
+        ? "bg-white/5 text-zinc-400 border-white/15"
+        : "bg-red-900/50 text-red-300 border-red-900";
+  return <span className={`chip border ${cls}`}>{row.status}</span>;
+}
+
+/** Every source the app can talk to, grouped by kind, each row testable on
+ *  its own and carrying the key fields it needs. Shared by the setup wizard
+ *  (step 3) and Settings → Sources. */
+export default function SourcesPanel() {
+  const qc = useQueryClient();
+  const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["sourcesHealth"],
+    queryFn: () => api.sourcesHealth(false),
+    staleTime: 30000,
+  });
+  // id of the row being tested, or "all"
+  const [busy, setBusy] = useState<string | null>(null);
+  const [draft, setDraft] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!config) return;
+    setDraft(Object.fromEntries(KEY_NAMES.map((k) => [k, String(config[k] ?? "")])));
+  }, [config]);
+
+  /** Probe one source live and fold its row into the cached list. Matched on
+   *  id AND kind — deezer and itunes exist as both a genre source and a
+   *  metadata provider, so an id alone would overwrite the wrong row. */
+  const probeInto = async (row: SourceHealth) => {
+    const fresh = await api.sourceHealth(row.id, true, row.kind);
+    qc.setQueryData<SourcesHealth | undefined>(["sourcesHealth"], (d) =>
+      d
+        ? { ...d, sources: d.sources.map((s) => (s.id === fresh.id && s.kind === fresh.kind ? fresh : s)) }
+        : d
+    );
+  };
+
+  const testAll = async () => {
+    setBusy("all");
+    try {
+      qc.setQueryData(["sourcesHealth"], await api.sourcesHealth(true));
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const testOne = async (row: SourceHealth) => {
+    setBusy(busyId(row));
+    try {
+      await probeInto(row);
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** Save this row's keys, then re-test just that source — the point of
+   *  entering a key is finding out whether it works. */
+  const saveKeys = async (row: SourceHealth) => {
+    setBusy(busyId(row));
+    try {
+      await api.saveConfig({
+        ...config,
+        ...Object.fromEntries(promptKeysOf(row).map((k) => [k, draft[k] ?? ""])),
+      });
+      qc.invalidateQueries({ queryKey: ["config"] });
+      await probeInto(row);
+      toast.success(`${row.label} re-tested`);
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (isLoading) return <div className="text-xs text-zinc-500">Checking sources…</div>;
+  if (error) return <div className="text-xs text-red-300">{String(error)}</div>;
+  const rows = data?.sources ?? [];
+  const groups = (Object.keys(KIND_LABEL) as SourceKind[])
+    .map((kind) => [kind, rows.filter((r) => r.kind === kind)] as const)
+    .filter(([, list]) => list.length > 0);
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between flex-wrap gap-2">
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+            Sources ({rows.length})
+          </div>
+          <div className="text-[11px] text-zinc-600 mt-0.5">
+            Every provider the app can ask. Testing runs one live lookup per source against a fixed sample;
+            a source that cannot run here is skipped, never fatal.
+          </div>
+        </div>
+        <button className="btn-ghost !py-1 text-xs" onClick={testAll} disabled={busy !== null}>
+          <RotateCcw className={`h-3 w-3 ${busy === "all" ? "animate-spin" : ""}`} />
+          {busy === "all" ? "Testing…" : "Test all"}
+        </button>
+      </div>
+
+      {groups.map(([kind, list]) => (
+        <div key={kind} className="space-y-1">
+          <div className="text-[10px] uppercase tracking-widest text-zinc-500">{KIND_LABEL[kind]}</div>
+          <div className="rounded-md border border-border divide-y divide-border/60">
+            {list.map((row) => {
+              const promptKeys = promptKeysOf(row);
+              return (
+              <div key={busyId(row)} className="px-3 py-2 space-y-1.5">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[13px] text-zinc-200" title={row.notes}>
+                    {row.rank ? `${row.rank}. ` : ""}
+                    {row.label}
+                  </span>
+                  <StatusChip row={row} />
+                  {row.needs.length > 0 && (
+                    <span
+                      className={`chip border ${
+                        row.configured
+                          ? "bg-emerald-900/40 text-emerald-300 border-emerald-800"
+                          : "bg-amber-900/40 text-amber-300 border-amber-900"
+                      }`}
+                    >
+                      {row.configured ? "configured" : "not configured"}
+                    </span>
+                  )}
+                  {row.synced && <span className="chip border border-white/15 bg-white/5 text-zinc-400">synced</span>}
+                  {row.rank !== undefined && (
+                    <span
+                      className="chip border border-accent/25 bg-accent/10 text-accent-soft"
+                      title="Rank in the BUILT-IN chain. A saved order in Settings → Lyrics & CUEs replaces it without changing it."
+                    >
+                      #{row.rank} preferred
+                    </span>
+                  )}
+                  {row.needs
+                    .filter((k) => !(k in KEY_INFO))
+                    .map((k) => (
+                      <span key={k} className="chip border border-white/15 bg-white/5 text-zinc-400">
+                        needs {k}
+                      </span>
+                    ))}
+                  <span className="flex-1" />
+                  <span className="text-[10px] font-mono text-zinc-600">
+                    {row.id}
+                    {row.ms ? ` · ${row.ms} ms` : ""}
+                  </span>
+                  <button
+                    className="btn-ghost !py-0.5 !px-2 text-[11px]"
+                    onClick={() => testOne(row)}
+                    disabled={busy !== null}
+                  >
+                    {busy === busyId(row) ? "Testing…" : "Test"}
+                  </button>
+                </div>
+
+                {row.detail && <div className="text-[11px] text-zinc-500">{row.detail}</div>}
+                {row.notes && <div className="text-[11px] text-zinc-600">{row.notes}</div>}
+
+                {promptKeys.length > 0 && (
+                  <div className="space-y-1.5 pt-0.5">
+                    <div className="flex flex-wrap items-end gap-2">
+                      {promptKeys.map((k) => (
+                        <label key={k} className="flex-1 min-w-[200px]">
+                          <span className="text-[10px] uppercase tracking-wider text-zinc-500">
+                            {KEY_INFO[k].label}
+                          </span>
+                          <input
+                            className="input !py-1 text-[11px] mt-0.5"
+                            type={KEY_INFO[k].secret ? "password" : "text"}
+                            value={draft[k] ?? ""}
+                            placeholder={KEY_INFO[k].label}
+                            onChange={(e) => setDraft((d) => ({ ...d, [k]: e.target.value }))}
+                          />
+                        </label>
+                      ))}
+                      <button
+                        className="btn-primary !py-1 text-xs shrink-0"
+                        disabled={busy !== null || !promptKeys.some((k) => (draft[k] ?? "") !== String(config?.[k] ?? ""))}
+                        onClick={() => saveKeys(row)}
+                        title="Save these keys and test this source again"
+                      >
+                        Save &amp; test
+                      </button>
+                    </div>
+                    {promptKeys.map((k) => {
+                      const info = KEY_INFO[k];
+                      return (
+                        <div key={k} className="text-[10px] text-zinc-600 flex items-center gap-1 flex-wrap">
+                          <span className="text-zinc-500">{info.label}:</span>
+                          <span>{info.hint}</span>
+                          {info.url && (
+                            <a
+                              className="text-accent-soft hover:underline inline-flex items-center gap-0.5"
+                              href={info.url}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              {info.link ?? info.url}
+                              <ExternalLink className="h-2.5 w-2.5" />
+                            </a>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}

@@ -73,6 +73,36 @@ export function AdvisoryBadge({ value }: { value: string | null | undefined }) {
   return null;
 }
 
+/** ITUNESADVISORY in words for the provenance readouts — the same three
+ *  states the badges draw. Anything else is unknown: a missing advisory is
+ *  "unrated", never 0/clean. */
+const ADVISORY_LABELS: Record<string, string> = {
+  "0": "not explicit",
+  "1": "explicit",
+  "2": "clean edition",
+};
+
+export function advisoryLabel(value: string | number | null | undefined): string {
+  return ADVISORY_LABELS[String(value ?? "").trim()] ?? "unknown";
+}
+
+/** "1 (explicit) · deezer-isrc, apple-album" — one line: the value and the
+ *  providers behind it. A value nobody stated reads "unknown", and provenance
+ *  that was never reported reads "source unknown": neither is guessed. */
+export function advisoryLine(value: string | number | null | undefined, sources: string[]): string {
+  const v = String(value ?? "").trim();
+  const list = sources.length ? sources.join(", ") : "source unknown";
+  return `${v ? `${v} (${advisoryLabel(v)})` : "unknown"} · ${list}`;
+}
+
+/** "instrumental · lyrics-present" — INSTRUMENTAL is 0/1 only; anything else
+ *  (including an absent tag) is unknown, not a value. */
+export function instrumentalLine(value: string | number | null | undefined, sources: string[]): string {
+  const v = String(value ?? "").trim();
+  const list = sources.length ? sources.join(", ") : "source unknown";
+  return `${v === "1" ? "instrumental" : v === "0" ? "not instrumental" : "unknown"} · ${list}`;
+}
+
 /** iTunes-style advisory mark: a tiny boxed letter shown beside track and
  * album titles ("square text symbol"). Drawn in CSS so it renders exactly
  * the same everywhere — emoji squared-letter glyphs vary by platform. */

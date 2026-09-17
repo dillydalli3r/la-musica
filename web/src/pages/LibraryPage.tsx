@@ -430,8 +430,9 @@ export default function LibraryPage() {
   /** Auto-import lyrics for the selection through the provider chain.
    *
    * Skips instrumentals, videos and tracks that already have lyrics; the
-   * backend runs the configured chain (LRCLIB → NetEase → lyrics.ovh →
-   * Kugou), writes per the global lyrics_format and canonicalizes like
+   * backend runs the configured synced chain (LRCLIB → NetEase → Kugou →
+   * QQ Music → Kuwo → YouTube captions), writes per the global
+   * lyrics_format and canonicalizes like
    * script 13. Batched (100 tracks per request) so a big selection does not
    * hold one API worker thread for minutes. */
   const downloadLyricsSelection = async () => {

@@ -20,6 +20,25 @@ LEGACY_DEFAULT_NAMING_SCRIPTS = (
     "%discnumber%-$num(%tracknumber%,2) %title%",
 )
 
+# The genre chains previous releases shipped (Settings writes the whole list
+# into the config, so an untouched install holds a copy of one of them). Both
+# are swapped for the current default; a list the user actually edited is
+# theirs and is kept. Kept next to the naming-script legacy default: same
+# migration idea, same file.
+#   [0] the pre-per-track chain (one album-level pass, Soulseek included)
+#   [1] the first per-track chain (before Bandcamp/Spotify, Wikidata before
+#       TheAudioDB/Last.fm's own tier)
+LEGACY_DEFAULT_GENRE_SOURCES = (
+    [
+        "rateyourmusic", "soulseek", "discogs", "lastfm", "theaudiodb",
+        "musicbrainz", "deezer", "itunes",
+    ],
+    [
+        "rateyourmusic", "listenbrainz", "musicbrainz", "itunes", "wikidata",
+        "lastfm", "discogs", "theaudiodb", "deezer",
+    ],
+)
+
 # Run All order — strict pipeline v1.7.0: 1 Lyrics → 2 CUEs → 8 Auto Tagging → 3 FLAC → 5 Images → 9 AccurateRip → 6 Audit → 4 Grade → 7 DR/ReplayGain → 10 Format All.
 # AccurateRip must run before Audit/Grade so the .accurip is present for real-time AUDIT; Grade after Audit so AUDIT tags are fresh; Format All at end does final canonical trims.
 # User's strict config default as of v1.6.0; reorder via Settings → Run All Order.
@@ -190,10 +209,14 @@ DEFAULT_CONFIG = {
     "cover_jpeg_target_size": 0,
     "cover_png_target_size": 0,
     "cover_jxl_target_size": 0,
-    # Cover FINDER (covers.musichoarders.xyz meta-search): which region the
-    # storefront sources are queried against, and which sources to query.
-    # An empty `cover_sources` means "use the providers' own enabled list in
-    # the app's quality order"; the region defaults to the US storefront.
+    # Cover FINDER (covers.musichoarders.xyz meta-search): the SAVED DEFAULTS
+    # for which region (`cover_country`) and which sources (`cover_sources`) a
+    # search uses. Both are DEFAULTS ONLY: the finder may override either for
+    # one search (its region dropdown and source picker), and a search never
+    # writes back here — only "Save as default" in the finder does.
+    # An empty `cover_sources` means "use the provider's own enabled list in
+    # the app's quality order, capped at the provider's active-source limit";
+    # it is never sent downstream empty (the API rejects that).
     "cover_country": "us",
     "cover_sources": [],
     # Album covers re-encode to 90% quality; other images keep max quality.
@@ -512,6 +535,8 @@ DEFAULT_CONFIG = {
     # ITUNESADVISORY=0 is never assumed just because a track is instrumental
     # (or for any other reason). Re-enable to restore the old zero-fill.
     "auto_zero_advisory_for_instrumental": False,
+    # Fetch INSTRUMENTAL (0/1) from the external sources during auto tagging + import.
+    "instrumental_auto_fetch": True,
     "force_auto_tag": False,
 
     # Key & BPM analysis (script 12): librosa-backed BPM + initial key.
@@ -522,13 +547,18 @@ DEFAULT_CONFIG = {
     "force_audiometa": False,
 
     # Lyrics sources, tried in order until one has the song — each provider
-    # falls back to the next, and MusicBrainz-independent providers are the
-    # only ones that can serve lyrics. Empty = the built-in order
-    # (LRCLIB, NetEase, lyrics.ovh); see Settings → Lyrics.
+    # falls back to the next, and every one of them answers with TIMESTAMPS.
+    # Empty = the built-in order (LRCLIB, NetEase, Kugou, QQ Music, Kuwo,
+    # YouTube captions); see Settings → Lyrics.
     "lyrics_sources": [],
     # Accept plain (unsynced) lyrics when no provider has a synced version.
-    # Off means "synced or nothing" — the canonical formatter still runs.
-    "lyrics_allow_plain": True,
+    # Off (the default) means synced or nothing: the chain ships timestamps
+    # only, and a provider answer without them is treated as no answer.
+    "lyrics_allow_plain": False,
+    # YouTube captions through yt-dlp, for tracks that carry a video id (tag or
+    # the "[<id>]" the video download leaves in the file name). Never searches
+    # YouTube on its own. Off = that provider is simply not in the chain.
+    "lyrics_youtube_captions": True,
 
     # Managed beets tagging (Picard parity).
     "beets_locale": "en",
@@ -634,11 +664,17 @@ DEFAULT_CONFIG = {
     "wishes_auto_import": True,
 
     # Genres imported per release/track (top voted first). Sources are tried
-    # in this order and merged; see mlo/genres.py.
+    # in this order and merged, and EVERY source is asked for EVERY track
+    # (server.integrations._genre_source_answers). Keep this list identical to
+    # `server.integrations.GENRE_SOURCES`, which is what an empty saved list
+    # falls back to — the priority list, per-track sources before album-only
+    # ones, with the rationale for each position documented there and in
+    # `server/integrations.py` above GENRE_SOURCES. `soulseek` is deliberately
+    # absent (peers advertise folders, not genres).
     "mb_genre_count": 3,
     "genre_sources": [
-        "rateyourmusic", "soulseek", "discogs", "lastfm", "theaudiodb",
-        "musicbrainz", "deezer", "itunes",
+        "rateyourmusic", "listenbrainz", "musicbrainz", "itunes", "lastfm",
+        "theaudiodb", "wikidata", "bandcamp", "discogs", "deezer", "spotify",
     ],
     # Optional keys for the genre sources that need one. Left empty the source
     # is skipped instead of guessed (Discogs' search endpoint requires a
@@ -653,15 +689,17 @@ DEFAULT_CONFIG = {
     # Auto-resolve RateYourMusic album + artist links during import; off =
     # links are only ever set by hand in the link editor.
     "rym_links_auto": True,
-    # Advisory (ITUNESADVISORY) auto-fetch on import: asks Deezer by ISRC
-    # first, then Spotify (below), then Apple's album/song routes, and
-    # MusicBrainz supplies the ISRC when the file has none. Never writes a
-    # value when the providers do not state one — an absent advisory is
-    # 'unrated', not 'clean'.
+    # Advisory (ITUNESADVISORY) auto-fetch on import: EVERY applicable source
+    # is asked in one pass and cross-referenced — Deezer by ISRC, Spotify by
+    # ISRC when configured below, Apple's explicit-edition album route and
+    # Apple's song search — merged so an explicit statement anywhere wins and
+    # anything else is 0. MusicBrainz supplies the ISRCs when the file has
+    # none. An existing 0/1/2 is never overwritten (the user's edit wins).
     "advisory_auto_fetch": True,
-    # Optional Spotify Web API credentials (client-credentials flow) used as
-    # the second advisory source. Empty = the source is skipped entirely; it
-    # is never required and its absence can never fail an import.
+    # Optional Spotify Web API credentials (client-credentials flow). Used by
+    # the advisory cross-reference (the ISRC search) and by instrumental
+    # detection (audio-features `instrumentalness`). Empty = both are skipped
+    # entirely; it is never required and its absence can never fail an import.
     "spotify_client_id": "",
     "spotify_client_secret": "",
     # Artist image / artist description / album description auto-fetch on
@@ -917,10 +955,13 @@ def normalize_config(user=None) -> dict:
         v = [t for t in v.replace("\n", ";").split(";") if t.strip()]
     if not isinstance(v, (list, tuple)):
         v = []
-    cfg["genre_sources"] = (
-        [str(t).strip().lower() for t in v if str(t).strip()][:16]
-        or list(DEFAULT_CONFIG["genre_sources"])
-    )
+    saved = [str(t).strip().lower() for t in v if str(t).strip()][:16]
+    # An untouched install holds a copy of one of the OLD shipped defaults,
+    # which is not a choice: swap it for the current one (a customised list is
+    # kept as written).
+    if saved in LEGACY_DEFAULT_GENRE_SOURCES:
+        saved = []
+    cfg["genre_sources"] = saved or list(DEFAULT_CONFIG["genre_sources"])
 
     # Shared-folder lists (Settings → Soulseek, Soulseek → Sharing). Accept a
     # ";"/newline separated string from hand-edited config files.

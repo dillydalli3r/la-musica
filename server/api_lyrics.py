@@ -23,7 +23,7 @@ class LyricsAutoRequest(BaseModel):
     force: bool = False
 
 
-# Each path runs the whole provider chain (up to four providers, each with
+# Each path runs the whole provider chain (up to six providers, each with
 # retries), and the handler is synchronous, so it occupies an API worker
 # thread. Cap the batch: a whole-album or whole-library fetch belongs to
 # script 13 (`POST /api/run`), which reports progress and can be cancelled.
@@ -39,18 +39,34 @@ def lyrics_providers():
         "default_order": list(SOURCES),
         "order": provider_order(cfg),
         "saved": cfg.get("lyrics_sources") or [],
-        "allow_plain": bool(cfg.get("lyrics_allow_plain", True)),
+        "allow_plain": bool(cfg.get("lyrics_allow_plain", False)),
         "labels": dict(SOURCE_LABELS),
         "notes": dict(SOURCE_NOTES),
     }
+
+
+@router.get("/api/lyrics/providers/probe")
+def lyrics_provider_probe(source: str = Query(...)):
+    """Test ONE provider against the fixed sample track (Settings / wizard).
+
+    One cheap lookup, no writes: `{id, kind, status: ok|skipped|fail, detail,
+    ms}`. `skipped` means this machine cannot run the provider (yt-dlp missing,
+    nothing to probe, the host refusing us), `fail` that it ran and had no
+    lyrics for the sample. The sample is the same for every provider, so two
+    runs are comparable."""
+    from mlo.lyrics_providers import probe_source
+    if source not in SOURCES:
+        raise HTTPException(404, f"unknown lyrics source: {source}")
+    return probe_source(source, load_config())
 
 
 @router.post("/api/lyrics/auto")
 def lyrics_auto(req: LyricsAutoRequest):
     """Auto-import lyrics for one or more tracks through the provider chain.
 
-    Falls back provider by provider (LRCLIB → NetEase → lyrics.ovh → Kugou by
-    default), then writes per `lyrics_format` exactly like script 13. A track
+    Falls back provider by provider (LRCLIB → NetEase → Kugou → QQ Music →
+    Kuwo → YouTube captions by default, all of them synced), then writes
+    per `lyrics_format` exactly like script 13. A track
     that already has lyrics is left alone unless *force* is set, and an
     INSTRUMENTAL track is never touched.
     """

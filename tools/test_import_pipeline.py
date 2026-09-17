@@ -400,13 +400,15 @@ class _FakeAudio:
         return True
 
 
-_real_audiofile, _real_cascade = _audio.AudioFile, _intg.genre_cascade
+_real_audiofile, _real_chain = _audio.AudioFile, _intg.genre_chain
 _real_resolve_advisory = _intg.resolve_advisory_route
 _audio.AudioFile = _FakeAudio
-_intg.genre_cascade = lambda release, limit=None: {
-    "per_track": [{"disc": 1, "position": 1, "title": "One", "genres": ["Shoegaze", "Noise Pop"]},
-                  {"disc": 1, "position": 2, "title": "Two", "genres": ["Shoegaze"]}],
-    "levels": {}}
+# `_stamp_release` asks the full per-track chain; here it answers with the
+# per-track map that chain returns (keyed by disc:position), so the stamping
+# test stays offline.
+_intg.genre_chain = lambda **kwargs: {
+    "per_track": {(1, 1): ["Shoegaze", "Noise Pop"], (1, 2): ["Shoegaze"]},
+    "sources": {}, "levels": {}}
 try:
     stamped = imports.bulk_import([{
         "path": _stamp_album,
@@ -454,7 +456,7 @@ try:
         assert "ITUNESADVISORY" not in tags, tags
 finally:
     _audio.AudioFile = _real_audiofile
-    _intg.genre_cascade = _real_cascade
+    _intg.genre_chain = _real_chain
     _intg.resolve_advisory_route = _real_resolve_advisory
 
 # --------------------------------------------------------------------------- #

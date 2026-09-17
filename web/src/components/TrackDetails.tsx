@@ -1,13 +1,14 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ShieldCheck, CircleAlert, Info, ExternalLink } from "lucide-react";
+import { ShieldCheck, CircleAlert, Info, ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import { Link } from "react-router-dom";
-import { api } from "../api";
+import { api, answerSources, checkTrackValues, replyFor } from "../api";
 import { toast } from "../store";
+import type { AdvisoryFetchResult, InstrumentalFetchResult } from "../api";
 import type { Track } from "../types";
 import { fmtDuration, fmtTech } from "../lib/fmt";
 import { trackRef } from "../lib/refs";
-import { AuditBadge, GradeBadge } from "./Badges";
+import { AuditBadge, GradeBadge, advisoryLine, instrumentalLine } from "./Badges";
 import TrackDownloadExport from "./TrackDownloadExport";
 import Modal from "./Modal";
 
@@ -54,6 +55,35 @@ export default function TrackDetails({
   const infoRows = INFO_ROWS.filter(({ key }) => tags[key as keyof typeof tags]);
   const tech = [fmtTech(track.tech), track.tech.length ? fmtDuration(track.tech.length) : ""].filter(Boolean).join(" · ");
   const lyricsState = track.lyrics_embedded ? "embedded" : track.lyrics_lrc ? ".lrc sidecar" : "missing";
+  const trackPath = track.path ?? "";
+
+  // Provenance exists only in the check endpoints' reply (they report which
+  // provider stated each value); it is not readable off the file afterwards,
+  // so until a check runs in this session it reads "source unknown".
+  const [checked, setChecked] = useState<null | { adv?: AdvisoryFetchResult; inst?: InstrumentalFetchResult }>(null);
+  const [checking, setChecking] = useState(false);
+  const qc = useQueryClient();
+  const checkPerTrack = async () => {
+    setChecking(true);
+    try {
+      const { adv, inst, errors } = await checkTrackValues([trackPath]);
+      setChecked({ adv: adv ?? undefined, inst: inst ?? undefined });
+      if (errors.length) toast.error(errors.join(" · "));
+      else toast(`Checked — ${adv?.updated ?? 0} advisory, ${inst?.updated ?? 0} instrumental value(s) written`);
+      qc.invalidateQueries({ queryKey: ["album", albumPath] });
+      qc.invalidateQueries({ queryKey: ["track-tags", trackPath] });
+    } finally {
+      setChecking(false);
+    }
+  };
+  const advisory = advisoryLine(
+    replyFor(checked?.adv?.values, trackPath) ?? tags.ITUNESADVISORY,
+    answerSources(replyFor(checked?.adv?.answers, trackPath), replyFor(checked?.adv?.sources, trackPath))
+  );
+  const instrumental = instrumentalLine(
+    replyFor(checked?.inst?.values, trackPath) ?? tags.INSTRUMENTAL,
+    answerSources(replyFor(checked?.inst?.evidence, trackPath))
+  );
 
   return (
     <Modal
@@ -67,6 +97,15 @@ export default function TrackDetails({
       <div>
         <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">
           <Info className="h-3.5 w-3.5" /> Song info
+          <button
+            className="btn-ghost !py-0.5 !px-1.5 ml-auto normal-case tracking-normal text-[10px] font-normal"
+            onClick={checkPerTrack}
+            disabled={checking}
+            title="Ask the configured sources for this track's advisory + INSTRUMENTAL and write what they state"
+          >
+            {checking ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+            Check advisory + instrumental
+          </button>
         </div>
         {tech && <div className="text-[11px] font-mono text-zinc-500 mb-1.5">{tech}</div>}
         <div className="rounded-md border border-border overflow-hidden">
@@ -85,6 +124,14 @@ export default function TrackDetails({
               <tr>
                 <td className="px-2 py-1 text-zinc-500">Lyrics</td>
                 <td className="px-2 py-1 text-zinc-200">{lyricsState}</td>
+              </tr>
+              <tr>
+                <td className="px-2 py-1 text-zinc-500 align-top">Advisory</td>
+                <td className="px-2 py-1 text-zinc-200">{advisory}</td>
+              </tr>
+              <tr>
+                <td className="px-2 py-1 text-zinc-500 align-top">Instrumental</td>
+                <td className="px-2 py-1 text-zinc-200">{instrumental}</td>
               </tr>
               <tr>
                 <td className="px-2 py-1 text-zinc-500 align-top">AudioAuditor</td>

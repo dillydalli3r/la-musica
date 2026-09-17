@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Save, RotateCcw, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, X } from "lucide-react";
 import { api } from "../api";
 import ConfirmButton from "../components/ConfirmButton";
+import SourcesPanel from "../components/SourcesPanel";
 import PageHeader from "../components/PageHeader";
 import { toast } from "../store";
 import { applyAccent } from "../App";
@@ -33,7 +34,7 @@ const TAG_FAMILIES = ["AUDIT", "LOG_GRADE", "REPLAYGAIN", "DYNAMIC_RANGE", "MEDI
  *  the same values when it loads the file) instead of an empty field. */
 const CFG_DEFAULTS: Record<string, unknown> = {
   mb_genre_count: 3,
-  genre_sources: ["rateyourmusic", "soulseek", "discogs", "lastfm", "theaudiodb", "musicbrainz", "deezer", "itunes"],
+  genre_sources: ["rateyourmusic", "listenbrainz", "musicbrainz", "itunes", "wikidata", "lastfm", "discogs", "theaudiodb", "deezer"],
   advisory_auto_fetch: true,
   metadata_auto_fetch: true,
   metadata_review: false,
@@ -48,7 +49,20 @@ const CFG_DEFAULTS: Record<string, unknown> = {
   auto_import_medium_order: ["CD", "Digital Media", "Vinyl", "Cassette", "Other"],
 };
 
-type ProviderOption = { id: string; label: string; notes?: string };
+type ProviderOption = { id: string; label: string; notes?: string; rank?: number };
+
+/** Genre sources that never answer for a single track — the chain files their
+ *  answer under every track and marks it `level: "album"`/`"artist"`
+ *  (server/integrations._genre_source_answers). Everything absent here is
+ *  asked per track first, with its own album/artist answer as the fallback
+ *  tier, so "per track" is what the picker says for them. */
+const GENRE_LEVEL: Record<string, string> = {
+  rateyourmusic: "album, per track when its release page states one",
+  discogs: "album only",
+  bandcamp: "album only",
+  deezer: "album only",
+  spotify: "artist only",
+};
 
 /** Ordered provider picker for a `list` config key: the listed providers are
  *  tried in order (first one with an answer wins). An empty list means the
@@ -82,8 +96,18 @@ function ProviderOrder({
               <div key={id} className="flex items-start gap-2 px-2 py-1">
                 <span className="w-4 pt-0.5 text-[10px] text-zinc-600">{i + 1}</span>
                 <div className="flex-1 min-w-0">
-                  <div className="text-[12px] text-zinc-200 truncate">{opt?.label ?? id}</div>
-                  {opt?.notes && <div className="text-[10px] text-zinc-600 truncate">{opt.notes}</div>}
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[12px] text-zinc-200 truncate">{opt?.label ?? id}</span>
+                    {opt?.rank !== undefined && (
+                      <span
+                        className="chip border border-accent/25 bg-accent/10 text-accent-soft shrink-0"
+                        title="Rank in the BUILT-IN chain — this list replaces the order, it does not change the rank"
+                      >
+                        #{opt.rank} preferred
+                      </span>
+                    )}
+                  </div>
+                  {opt?.notes && <div className="text-[10px] text-zinc-600">{opt.notes}</div>}
                 </div>
                 <button
                   type="button"
@@ -145,6 +169,127 @@ function ProviderOrder({
   );
 }
 
+/** Cover-art defaults (Settings → Images): the region and source list a cover
+ *  search starts from. These are the SAVED values (`cover_country`,
+ *  `cover_sources`) that a search with no overrides uses — the cover finder's
+ *  own region/source pickers are per-search and change nothing here until its
+ *  "Save as default" is pressed. */
+function CoverDefaults() {
+  const qc = useQueryClient();
+  const { data: cat } = useQuery({ queryKey: ["coverSources"], queryFn: api.coverSources });
+  const [srcSel, setSrcSel] = useState<string[] | null>(null);
+  const [country, setCountry] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  // Seeded from the EFFECTIVE values (`default_sources`/`default_country` are
+  // what a search with no overrides uses — the saved list, or the built-in one
+  // while nothing is saved), and re-seeded whenever they change so a save made
+  // in the finder shows up here instead of leaving a stale draft behind.
+  const savedKey = `${cat?.default_country ?? ""}|${(cat?.default_sources ?? []).join(",")}`;
+  useEffect(() => {
+    if (!cat) return;
+    setSrcSel(cat.default_sources);
+    setCountry(cat.default_country);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedKey]);
+
+  if (!cat || srcSel === null || country === null) {
+    return <div className="text-[11px] text-zinc-600">Loading the cover source catalogue…</div>;
+  }
+  const cap = cat.active_source_limit;
+  const dirty = srcSel.join(",") !== cat.default_sources.join(",") || country !== cat.default_country;
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      await api.saveConfig({ cover_sources: srcSel, cover_country: country });
+      qc.invalidateQueries({ queryKey: ["coverSources"] });
+      qc.invalidateQueries({ queryKey: ["config"] });
+      toast.success(`Saved the default cover search: ${srcSel.length} source(s), ${country.toUpperCase()}`);
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Cover art</div>
+      <div className="text-[11px] text-zinc-600">
+        The defaults a cover search starts from. The finder's own region and source pickers are
+        <span className="text-zinc-400"> per search</span> — they change nothing here until you press
+        its "Save as default", which writes exactly these two values.
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[11px] font-semibold text-zinc-400">Region</span>
+        <select
+          className="input !w-auto !py-1 text-xs"
+          value={country}
+          onChange={(e) => setCountry(e.target.value)}
+        >
+          {cat.countries.map((c) => (
+            <option key={c} value={c}>{c.toUpperCase()}</option>
+          ))}
+        </select>
+        <span className="text-[10px] text-zinc-600">
+          The storefront the sources are asked about — it decides which releases and artwork exist for a region.
+        </span>
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[11px] font-semibold text-zinc-400">Sources</span>
+        <span className="text-[10px] text-zinc-500">
+          {srcSel.length}/{cap} — at most {cap} are used per search
+        </span>
+      </div>
+      <div className="flex flex-wrap gap-x-3 gap-y-1">
+        {cat.sources.map((s) => {
+          const on = srcSel.includes(s.id);
+          const full = !on && srcSel.length >= cap;
+          return (
+            <label
+              key={s.id}
+              className={`flex items-center gap-1.5 text-[11px] select-none ${
+                full ? "text-zinc-600" : "text-zinc-300 cursor-pointer"
+              }`}
+              title={full ? `Already at the ${cap}-source limit` : s.name}
+            >
+              <input
+                type="checkbox"
+                checked={on}
+                disabled={full}
+                onChange={() =>
+                  setSrcSel(srcSel.includes(s.id) ? srcSel.filter((x) => x !== s.id) : [...srcSel, s.id])
+                }
+              />
+              {s.color && <span className="h-2 w-2 rounded-full shrink-0" style={{ background: s.color }} />}
+              {s.name}
+              {!s.enabled && <span className="text-[9px] text-amber-400/80">off</span>}
+            </label>
+          );
+        })}
+      </div>
+      <div className="flex items-center gap-2 flex-wrap">
+        <button className="btn-primary !py-1 text-xs" onClick={save} disabled={busy || !dirty}>
+          <Check className="h-3 w-3" /> Save as default
+        </button>
+        {dirty && (
+          <button
+            className="btn-ghost !py-1 text-xs"
+            disabled={busy}
+            onClick={() => {
+              setSrcSel(cat.default_sources);
+              setCountry(cat.default_country);
+            }}
+          >
+            <RotateCcw className="h-3 w-3" /> Discard changes
+          </button>
+        )}
+        {!dirty && <span className="text-[10px] text-zinc-600">Saved — a search with no overrides uses this.</span>}
+      </div>
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   // open-source credits (vendored tools + packages), rendered at the bottom
@@ -176,6 +321,19 @@ export default function SettingsPage() {
   // Provider catalogues behind the order editors (Discovery / Lyrics lists).
   const { data: discoveryCat } = useQuery({ queryKey: ["discoverySources"], queryFn: api.discoverySources });
   const { data: lyricsCat } = useQuery({ queryKey: ["lyricsProviders"], queryFn: api.lyricsProviders });
+
+  // The genre picker offers EXACTLY the chain's own genre sources (the genre
+  // rows of /api/sources/health are integrations.GENRE_SOURCES), so a chain
+  // change shows up here on its own and no stale id can be ticked. Same cache
+  // entry the Sources panel reads, so this costs no extra request.
+  const { data: health } = useQuery({
+    queryKey: ["sourcesHealth"],
+    queryFn: () => api.sourcesHealth(false),
+    staleTime: 30000,
+  });
+  const genreOptions: [string, string][] = (health?.sources ?? [])
+    .filter((s) => s.kind === "genre")
+    .map((s): [string, string] => [s.id, `${s.label} — ${GENRE_LEVEL[s.id] ?? "per track"}`]);
 
   // ---- script options (persisted to config; /api/run uses them as defaults) ----
   type CfgField =
@@ -249,18 +407,9 @@ export default function SettingsPage() {
         { k: "cover_jpeg_target_size", label: "JPEG cover size override (0 = global)", type: "number", min: 0, max: 4000 },
         { k: "cover_png_target_size", label: "PNG cover size override (0 = global)", type: "number", min: 0, max: 4000 },
         { k: "cover_jxl_target_size", label: "JXL cover size override (0 = global)", type: "number", min: 0, max: 4000 },
-        // Cover FINDER defaults (covers.musichoarders.xyz). The storefront
-        // region decides which releases/artwork the sources know about; the
-        // source list itself is picked in the finder and saved there.
-        {
-          k: "cover_country", label: "Cover finder region (storefront)", type: "select",
-          options: [
-            ["us", "United States (default)"], ["gb", "United Kingdom"], ["ca", "Canada"],
-            ["au", "Australia"], ["de", "Germany"], ["fr", "France"], ["it", "Italy"],
-            ["es", "Spain"], ["br", "Brazil"], ["in", "India"], ["jp", "Japan"],
-            ["kr", "South Korea"], ["cn", "China"], ["tw", "Taiwan"], ["xw", "Worldwide"],
-          ],
-        },
+        // The cover FINDER defaults (region + source list) live in the
+        // "Cover art" panel below, which reads the real region list and the
+        // per-search source cap from /api/cover/sources.
         { k: "force_reencode_images", label: "Force re-process", type: "bool" },
       ],
     },
@@ -273,7 +422,14 @@ export default function SettingsPage() {
           k: "lyrics_sources", label: "Lyrics providers (order)", type: "list", catalog: "lyrics",
           help: "Providers are tried top to bottom when lyrics are fetched from an album, artist or track page. Providers left out of the list are never used.",
         },
-        { k: "lyrics_allow_plain", label: "Accept plain (unsynced) lyrics", type: "bool" },
+        {
+          k: "lyrics_allow_plain", label: "Accept plain (unsynced) lyrics", type: "bool",
+          help: "Off by default: every provider in the chain answers with timestamps, and an answer without them is thrown away as if it had none. Turn this on only to let untimed text (LRCLIB's plain records) through when nothing synced exists.",
+        },
+        {
+          k: "lyrics_youtube_captions", label: "Use YouTube captions (yt-dlp)", type: "bool",
+          help: "Time-synced captions, but only for tracks that carry a YouTube id — the id the video download records — so this never searches YouTube for a track. Automatic captions are used when a video has no typed subtitles and can mishear; needs yt-dlp under Dependencies, otherwise the provider is skipped.",
+        },
         { k: "lrc_timestamp_precision", label: "Timestamp precision (decimals)", type: "number", min: 2, max: 3 },
         { k: "lrc_strip_metadata", label: "Strip metadata tags ([ti:], [ar:])", type: "bool" },
         { k: "lrc_collapse_blank_lines", label: "Collapse blank lines", type: "bool" },
@@ -595,11 +751,11 @@ export default function SettingsPage() {
         { k: "mb_genre_count", label: "Genres imported per release (MusicBrainz)", type: "number", min: 1, max: 10 },
         {
           k: "genre_sources", label: "Genre sources — every ticked source is asked; unticked ones are never used", type: "multi",
-          options: [
-            ["rateyourmusic", "RateYourMusic"], ["soulseek", "Soulseek"], ["discogs", "Discogs"], ["lastfm", "Last.fm"],
-            ["theaudiodb", "TheAudioDB"], ["musicbrainz", "MusicBrainz"], ["deezer", "Deezer"], ["itunes", "iTunes"],
-          ],
-          help: "The genres the sources answer with are merged, deduped and capped at the count above; MusicBrainz is the app's own identity anchor, so leave it on in most setups.",
+          // The list IS the backend chain (the genre rows of
+          // /api/sources/health = server/integrations.GENRE_SOURCES), and each
+          // row says whether it can answer per track or only for the release.
+          options: genreOptions,
+          help: "The genres the sources answer with are merged, deduped and capped at the count above, per track. MusicBrainz is the app's own identity anchor, so leave it on in most setups.",
         },
         { k: "strip_unknown_tags", label: "Remove non-canonical tags on optimize (script 10)", type: "bool" },
       ],
@@ -745,6 +901,7 @@ export default function SettingsPage() {
     { id: "wishes", label: "Wishes", section: "Integrations" },
     { id: "deps", label: "Dependencies", section: "Integrations" },
     { id: "discovery", label: "Discovery", section: "Providers" },
+    { id: "sources", label: "Sources", section: "Providers" },
     { id: "artistimages", label: "Artist images", section: "Providers" },
     { id: "import", label: "Import", section: "Providers" },
     { id: "flac", label: "FLACs & lossless", section: "Scripts" },
@@ -982,7 +1139,12 @@ export default function SettingsPage() {
   // order, shown as the placeholder while a list is empty.
   const listCatalogs: Record<"discovery" | "lyrics", { options: ProviderOption[]; builtin: (k: string) => string[] }> = {
     discovery: { options: discoveryCat?.sources ?? [], builtin: (k) => discoveryCat?.defaults?.[k] ?? [] },
-    lyrics: { options: lyricsCat?.sources ?? [], builtin: () => lyricsCat?.default_order ?? [] },
+    // Only time-synced providers are pickable: a plain-lyrics-only entry has
+    // no place in the chain (the `synced` flag comes from the endpoint).
+    lyrics: {
+      options: (lyricsCat?.sources ?? []).filter((s) => s.synced !== false),
+      builtin: () => lyricsCat?.default_order ?? [],
+    },
   };
 
   const renderFields = (fields: CfgField[]) => (
@@ -1010,11 +1172,18 @@ export default function SettingsPage() {
         }
         if (f.type === "multi") {
           const on = Array.isArray(scriptCfg[f.k]) ? (scriptCfg[f.k] as unknown[]).map(String) : [];
+          // An id the catalogue does not list (a source the chain dropped, or
+          // the health payload not arrived yet) still has to be visible, or a
+          // saved value would silently disappear from the picker.
+          const opts: [string, string][] = [
+            ...f.options,
+            ...on.filter((v) => !f.options.some(([o]) => o === v)).map((v): [string, string] => [v, v]),
+          ];
           return (
             <div key={f.k} className="md:col-span-2 xl:col-span-3">
               <div className="text-[11px] text-zinc-400 mb-1">{f.label}</div>
               <div className="flex flex-wrap gap-x-4 gap-y-1">
-                {f.options.map(([v, l]) => (
+                {opts.map(([v, l]) => (
                   <label key={v} className="flex items-center gap-2 text-[13px] text-zinc-300 cursor-pointer select-none">
                     <input
                       type="checkbox"
@@ -1398,6 +1567,12 @@ export default function SettingsPage() {
             </div>
           )}
 
+          {tab === "sources" && (
+            <div className="panel space-y-3">
+              <SourcesPanel />
+            </div>
+          )}
+
           {tab === "deps" && (
             <div className="panel space-y-3">
               <div className="flex items-center justify-between flex-wrap gap-2">
@@ -1462,6 +1637,11 @@ export default function SettingsPage() {
               <div className="text-xs font-bold text-zinc-300">{GROUP_BY_TAB[tab].title}</div>
               {GROUP_BY_TAB[tab].blurb && <div className="text-[10px] text-zinc-600">{GROUP_BY_TAB[tab].blurb}</div>}
               {renderFields(GROUP_BY_TAB[tab].fields)}
+              {tab === "images" && (
+                <div className="pt-2 border-t border-border">
+                  <CoverDefaults />
+                </div>
+              )}
               {tab === "beets" && (
                 <div className="pt-2 border-t border-border space-y-2">
                   <div className="flex items-center gap-2 flex-wrap">

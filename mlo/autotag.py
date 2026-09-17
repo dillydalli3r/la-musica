@@ -10,11 +10,14 @@ filled in by hand:
        else any edited/safe track (2) -> 2
        else                        -> 0
 
-2) INSTRUMENTAL from lyrics presence per track:
-       has lyrics (embedded LYRICS or an .lrc sidecar) -> 0 (not instrumental)
-       no lyrics -> LEFT UNTOUCHED. A track without downloaded lyric files
-       may still be non-instrumental, so it is never auto-marked as
-       instrumental.
+2) INSTRUMENTAL, cross-referenced from every available source
+   (`server.instrumental`: LRCLIB's own `instrumental` flag, Spotify
+   audio-features when configured, the track's own name, lyrics evidence):
+       any source says instrumental -> 1
+       else any source says not instrumental (lyrics count as that) -> 0
+       else -> LEFT UNTOUCHED. A track no source can state anything about
+       keeps its tag as it is; absence of evidence is never read as
+       "instrumental".
 
 3) MOOD from the track's own audio (``mlo.moods``: tempo, energy, brightness,
    dynamics → valence/arousal quadrant), refined by the track's GENRE in
@@ -64,6 +67,24 @@ def _derive_advisory(advisories):
     return 0
 
 
+# INSTRUMENTAL cross-reference (server.instrumental), reached from script 8
+# through this one hook. The engine ships no HTTP client of its own and never
+# imports the server at module level; when the server is not importable the
+# stage simply keeps its lyrics-only behaviour.
+def _instrumental_fetch(paths, config):
+    """{path: {"value", "answers", "evidence"}} — {} on any failure."""
+    if not paths:
+        return {}
+    try:
+        from server.instrumental import detect_instrumental
+    except Exception:
+        return {}
+    try:
+        return detect_instrumental(paths, config)
+    except Exception:
+        return {}
+
+
 # Genre autofill provider, registered by whoever HAS a provider chain (the
 # server's discovery layer, the import pipeline). The engine never imports the
 # server, so an unset hook simply means "step 4 does not run".
@@ -95,8 +116,10 @@ def run_auto_tagging(config):
     if config.get("auto_zero_advisory_for_instrumental", False):
         log("  ITUNESADVISORY: zeroed on instrumentals (auto_zero_advisory_for_instrumental)")
     if config.get("auto_instrumental", True):
-        log("  INSTRUMENTAL: 0 when lyrics present (no-lyrics tracks left "
-            "untouched)")
+        log("  INSTRUMENTAL: " + (
+            "cross-referenced (LRCLIB, Spotify, the file's own name, lyrics)"
+            if config.get("instrumental_auto_fetch", True) else
+            "0 when lyrics present (no-lyrics tracks left untouched)"))
     if config.get("mood_enabled", True):
         log("  MOOD: from the track's audio" + (
             " (refined by GENRE)" if config.get("mood_source", "hybrid") == "hybrid"
@@ -193,18 +216,31 @@ def run_auto_tagging(config):
             except Exception:
                 pass
 
-        # 1) Fix INSTRUMENTAL from lyrics presence first (correct order)
+        # 1) Fix INSTRUMENTAL first (correct order): the external
+        # cross-reference (LRCLIB, Spotify when configured, the track's own
+        # name — lyrics evidence is one of its sources too), then the lyrics
+        # evidence alone for anything it could not state.
         instrumental_modified = 0
         if do_instrumental:
+            detected = {}
+            if config.get("instrumental_auto_fetch", True):
+                detected = _instrumental_fetch(
+                    [d["af"].path for d in info
+                     if d["instrumental"] not in ("0", "1")], config)
             for d in info:
-                if d["has_lyrics"] and d["instrumental"] != "0":
-                    if not should_write_audio_tag(config, "INSTRUMENTAL", filepath=d["af"].path):
-                        continue
-                    if d["af"].set_tag("INSTRUMENTAL", "0"):
-                        modified += 1
-                        instrumental_modified += 1
-                        d["instrumental"] = "0"
-                        d["af"] = AudioFile(d["af"].path)  # refresh
+                hit = detected.get(os.path.normpath(d["af"].path))
+                target = hit.get("value") if hit is not None else None
+                if target is None and d["has_lyrics"]:
+                    target = 0          # lyrics are evidence of vocals
+                if target is None or d["instrumental"] == str(target):
+                    continue
+                if not should_write_audio_tag(config, "INSTRUMENTAL", filepath=d["af"].path):
+                    continue
+                if d["af"].set_tag("INSTRUMENTAL", str(target)):
+                    modified += 1
+                    instrumental_modified += 1
+                    d["instrumental"] = str(target)
+                    d["af"] = AudioFile(d["af"].path)  # refresh
             if instrumental_modified:
                 notes.append("instrumental")
 
