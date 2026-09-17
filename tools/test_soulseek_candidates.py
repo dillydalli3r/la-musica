@@ -21,7 +21,10 @@ a candidate for the full timeout. Pinned here:
     download progress payload each tick, and drops a transfer that has moved
     no bytes for the stall window,
   * _verify_album() fails a CD rip it could not check a single CRC of,
-  * confirm_lossy()/cancel() only answer a prompt that is actually pending.
+  * confirm()/cancel() only answer a prompt that is actually pending, and
+  * a job whose search found NO usable folder parks and offers the wishes list
+    (interactive path only) instead of failing, handing the wish the very
+    queries the job searched with.
 
 Run:  python tools/test_soulseek_candidates.py
 """
@@ -591,7 +594,7 @@ for _state in ("InProgress", "Queued", "Requested", "Initializing", "", None):
 
 
 # --------------------------------------------------------------------------- #
-# confirm_lossy / cancel / job_active state machine
+# confirm / cancel / job_active state machine
 # --------------------------------------------------------------------------- #
 def _snapshot_job():
     return {k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
@@ -602,7 +605,7 @@ def call_locked(fn, *args):
     """Drive a _job accessor on a worker thread.
 
     cancel() once called _log() while holding the module's non-reentrant
-    _lock, so it never returned and left every later job_state()/confirm_lossy()
+    _lock, so it never returned and left every later job_state()/confirm()
     call blocked. A deadlock must fail an assert with a message, not hang the
     suite (or the app) forever."""
     box = {}
@@ -622,7 +625,7 @@ try:
     assert call_locked(soulseek_auto.job_active) is True, soulseek_auto._job["state"]
 
     # 6a. Accepting a pending prompt: True, resumed, payload and event cleared.
-    assert call_locked(soulseek_auto.confirm_lossy, True) is True, soulseek_auto._job["state"]
+    assert call_locked(soulseek_auto.confirm, True) is True, soulseek_auto._job["state"]
     assert soulseek_auto._job["state"] == "running", soulseek_auto._job["state"]
     assert soulseek_auto._job["confirm"] is None, soulseek_auto._job["confirm"]
     assert soulseek_auto._confirm_event.is_set() is True, "event not set for the waiter"
@@ -631,7 +634,7 @@ try:
     # 6b. Nothing pending (job moved on) -> False, never a silent accept.
     soulseek_auto._confirm_event.clear()
     soulseek_auto._job["state"] = "running"
-    assert call_locked(soulseek_auto.confirm_lossy, False) is False, "answered a prompt that was not pending"
+    assert call_locked(soulseek_auto.confirm, False) is False, "answered a prompt that was not pending"
     assert soulseek_auto._job["state"] == "running", soulseek_auto._job["state"]
     assert soulseek_auto._confirm_event.is_set() is False, "spurious wakeup"
 
@@ -921,17 +924,26 @@ class JobRun:
         self.tree = tree          # album root -> the files that were in it
         self.cancelled = cancelled
         self.progress_snapshots = progress_snapshots
+        self.prompt = None        # the confirm payload a parked job published
 
     def submitted(self):
         return [f for batch in self.enqueued for f in batch]
 
 
-def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSlsk):
+def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSlsk,
+            confirm_lossy=False, answer=None):
     """Drive one whole _run() against a scripted slskd and planted downloads.
 
     Files are planted as finished downloads only where the job is supposed to
     find them mid-run, so the real _wait_for_files/_local_download_candidates
-    path is what produces the verdicts."""
+    path is what produces the verdicts.
+
+    `answer` (None = never parks) answers a job that parks on a prompt: the
+    interactive job BLOCKS waiting for the user, so it is driven on a worker
+    thread and answered the way the HTTP route does — poll job_state(), then
+    confirm(). True/False accept or decline; the string "cancel" calls
+    cancel() on the parked job instead. The payload the job published is left
+    on JobRun.prompt."""
     saved = _snapshot_job()
     saved_time = soulseek_auto.time
     ddir = tempfile.mkdtemp(prefix="mlo-run-")
@@ -940,11 +952,14 @@ def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSls
             put_file(ddir, *f["file"].split("/"))
         stub = stub_cls(ddir, rows)
         verified, imported = [], []
+        prompt = None
         soulseek_auto.time = FakeClock()
         soulseek_auto._job.clear()
         soulseek_auto._job.update({"state": "running", "stage": "", "release": None,
                                    "log": [], "attempts": [], "result": None,
                                    "confirm": None, "search": None, "cancel": False})
+        soulseek_auto._confirm_event.clear()
+        soulseek_auto._confirm_answer["accept"] = False
         with Patch(soulseek, is_running=stub.is_running, web_up=stub.web_up,
                    server_state=stub.server_state, download_dir=stub.download_dir,
                    search=stub.search, search_results=stub.search_results,
@@ -959,14 +974,40 @@ def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSls
                    _import=lambda root, r, c, media: (imported.append(root)
                                                       or {"album_path": root, "imported": True}),
                    traceback=SimpleNamespace(print_exc=lambda *a, **k: None)):
-            soulseek_auto._run(release=release, queries=queries or ["job album"])
+            def drv():
+                soulseek_auto._run(release=release, queries=queries or ["job album"],
+                                   confirm_lossy=confirm_lossy)
+            if answer is None:
+                drv()
+            else:
+                worker = threading.Thread(target=drv, daemon=True)
+                worker.start()
+                deadline = real_time.time() + 10
+                while real_time.time() < deadline:
+                    st = soulseek_auto.job_state()
+                    if st["state"] == "confirm":
+                        prompt = dict(st["confirm"] or {})
+                        break
+                    if not worker.is_alive():
+                        break
+                    real_time.sleep(0.01)
+                assert prompt is not None, "the job never parked on its prompt"
+                if answer == "cancel":
+                    assert soulseek_auto.cancel() is True, "the parked job took no cancel"
+                else:
+                    assert soulseek_auto.confirm(answer) is True, "the prompt was not answerable"
+                worker.join(10)
+                assert not worker.is_alive(), "the job stayed parked after its answer"
         tree = {}       # the download dir is gone once this returns
         for root in set(verified + imported):
             tree[root] = {f for _dp, _dn, files in os.walk(root) for f in files}
-        return JobRun(stub.enqueued, verified, imported, dict(soulseek_auto._job),
-                      tree, list(stub.cancelled), list(stub.progress_snapshots))
+        run = JobRun(stub.enqueued, verified, imported, dict(soulseek_auto._job),
+                     tree, list(stub.cancelled), list(stub.progress_snapshots))
+        run.prompt = prompt
+        return run
     finally:
         soulseek_auto.time = saved_time
+        soulseek_auto._confirm_event.clear()
         soulseek_auto._job.clear()
         soulseek_auto._job.update(saved)
         shutil.rmtree(ddir, ignore_errors=True)
@@ -1174,5 +1215,78 @@ _line = next(e["msg"] for e in job.job["log"] if e["msg"].startswith("Searching 
 assert "2 query template(s) in parallel" in _line and " · " in _line, _line
 assert any("Errored" in e["msg"] and "CAT-1" in e["msg"] for e in job.job["log"]), \
     [e["msg"] for e in job.job["log"][:4]]
+
+# 19. A search that came back empty-ish (no folder held the whole album) used
+#     to end the job on "No candidate folder contained every track" — the user
+#     waited out a search window and lost the release. On the INTERACTIVE path
+#     the job now parks on the same prompt the lossy branch uses and offers the
+#     wishes list; accepting creates a wish carrying the very queries the job
+#     searched with, so the background worker can fill it later with no second
+#     decision, and the job ends "done" with REAL keys plus wished/wish_id.
+from server import wishes as wishes_store   # noqa: E402
+
+_wish_dir = tempfile.mkdtemp(prefix="mlo-wish-")
+_saved_wish_init = wishes_store._initialized
+NO_RESULT_MSG = ("No candidate folder contained every track (and cue/log per "
+                 "disc for CD). Try the manual entry or different search terms.")
+try:
+    with Patch(wishes_store, db_path=lambda: os.path.join(_wish_dir, "wishes.db")):
+        run = run_job(JOB_RELEASE, [], confirm_lossy=True, answer=True)
+        assert run.prompt, "the interactive job never offered the wishes list"
+        assert run.prompt["reason"] == "no_results", run.prompt
+        # the job's OWN query strings ride along ("job album" is resolved to
+        # the release's title, exactly what the search was issued with)
+        assert run.prompt["queries"] == ["Job Album"], run.prompt
+        assert run.prompt["formats"] == [] and run.prompt["candidates"] == [], run.prompt
+        # one timer only: the prompt reports the same cap the search advertised
+        # (the 5s window this config asks for + the 45s grace tail), never a
+        # second, competing countdown
+        assert run.prompt["waited"] == 50, run.prompt
+        assert run.job["state"] == "done", run.job["state"]
+        result = run.job["result"]
+        assert result["wished"] is True and isinstance(result["wish_id"], int), result
+        assert result["album_path"] is None and result["imported"] == 0, result
+        assert result["organized"] == 0, result
+        assert not run.imported and not run.submitted(), (run.imported, run.submitted())
+        assert "Added to wishes" in [e["msg"] for e in run.job["log"]][-1], run.job["log"][-1]
+        wish = wishes_store.get_wish(result["wish_id"])
+        assert wish and wish["release_mbid"] == JOB_RELEASE["id"], wish
+        assert wish["queries"] == run.prompt["queries"], wish
+        assert wish["status"] == "wanted", wish
+        assert (wish["title"], wish["artist"], wish["year"]) == \
+            ("Job Album", "Job Artist", "1996"), wish
+
+        # Declining keeps the old behaviour: the job fails with the same
+        # message and nothing is wished.
+        run = run_job(JOB_RELEASE, [], confirm_lossy=True, answer=False)
+        assert run.prompt["reason"] == "no_results", run.prompt
+        assert run.job["state"] == "error", run.job["state"]
+        assert run.job["result"]["error"] == NO_RESULT_MSG, run.job["result"]
+
+        # The background wishes worker runs with confirm_lossy=False: a wish
+        # must NEVER park to ask whether it should become another wish.
+        run = run_job(JOB_RELEASE, [])
+        assert run.prompt is None, run.prompt
+        assert run.job["state"] == "error", run.job["state"]
+        assert run.job["result"]["error"] == NO_RESULT_MSG, run.job["result"]
+
+        # ...and the knob (and the missing MusicBrainz id) turn the offer off
+        # on the interactive path too. Both cases end on the old error.
+        run = run_job(JOB_RELEASE, [], confirm_lossy=True,
+                      cfg=dict(JOB_CFG, soulseek_auto_wish_prompt=False))
+        assert run.prompt is None and run.job["state"] == "error", run.job
+        run = run_job(dict(JOB_RELEASE, id=None), [], confirm_lossy=True)
+        assert run.prompt is None and run.job["state"] == "error", run.job
+
+        # Cancelling the parked prompt (the user walked away) must not leave a
+        # wish behind either: the job ends "cancelled" with nothing added.
+        _before = len(wishes_store.list_wishes())
+        run = run_job(JOB_RELEASE, [], confirm_lossy=True, answer="cancel")
+        assert run.prompt["reason"] == "no_results", run.prompt
+        assert run.job["state"] == "cancelled", run.job["state"]
+        assert len(wishes_store.list_wishes()) == _before, "cancel added a wish"
+finally:
+    wishes_store._initialized = _saved_wish_init
+    shutil.rmtree(_wish_dir, ignore_errors=True)
 
 print("ok")

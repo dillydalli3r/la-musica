@@ -205,6 +205,85 @@ ok("PATH" not in res["tracks"][0]["issues"],
    "album outside music folder skips the naming check")
 
 # ----------------------------------------------------------------------
+# Case-only differences end-to-end (PATH_CASE)
+# ----------------------------------------------------------------------
+print("== case-only naming (PATH_CASE) ==")
+# Every scenario gets its OWN music root: on a case-insensitive filesystem
+# (Windows) "2020 - ALBUM" and "2020 - Album" are THE SAME directory, so a
+# shared tree would silently reuse the correctly-cased folder (makedirs on an
+# existing path is a no-op, and writing "1-01 song.flac" next to
+# "1-01 Song.flac" reuses the existing file) — the check under test would
+# never see a case difference at all.
+EXPECTED_REL = "Artist/2020 - Album/1-01 Song.flac"
+
+
+def case_scenario(tag, album_name, file_name):
+    """Grade a fresh album whose folder/file names are spelled as given."""
+    root = os.path.join(tmp, f"Case_{tag}", "Music")
+    d = os.path.join(root, "Artists", "Artist", album_name)
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, file_name)
+    make_flac(p)
+    set_tags(p, dict(BASE_TAGS, INITIALKEY="B♭ min", BPM="120"))
+    return root, d, dict(ISO_CFG, music_folder=root, grade_check_filename_case=True)
+
+
+good_root, good_dir, good_cfg = case_scenario("exact", "2020 - Album", "1-01 Song.flac")
+good = _grade_album(good_dir, "EMBEDDED", good_cfg)
+ok("PATH" not in good["tracks"][0]["issues"] and "PATH_CASE" not in good["tracks"][0]["issues"],
+   "exact-case album passes both naming checks")
+ok(good["total_checks"] - good["pass_count"] == 0,
+   f"exact-case album fails no check ({good['pass_count']}/{good['total_checks']})")
+
+# album DIRECTORY differs only in case
+_bad_root, bad_dir, bad_cfg = case_scenario("dir", "2020 - ALBUM", "1-01 Song.flac")
+res = _grade_album(bad_dir, "EMBEDDED", bad_cfg)
+ok("PATH_CASE" in res["tracks"][0]["issues"],
+   "wrong-case album folder fails the track (PATH_CASE)")
+ok(any(i.startswith(f"PATH CASE: expected '{EXPECTED_REL}'") for i in res["issues"]),
+   f"PATH CASE names the script's path (got {res['issues']})")
+ok(res["total_checks"] == good["total_checks"] + 1
+   and res["pass_count"] == good["pass_count"],
+   f"wrong-case folder costs exactly one grade point ({res['pass_count']}/{res['total_checks']})")
+
+# file NAME differs only in case
+_fdir_root, fdir, fcfg = case_scenario("file", "2020 - Album", "1-01 song.flac")
+res = _grade_album(fdir, "EMBEDDED", fcfg)
+ok("PATH_CASE" in res["tracks"][0]["issues"],
+   "wrong-case file name fails the track (PATH_CASE)")
+ok(any(i.startswith(f"PATH CASE: expected '{EXPECTED_REL}'") for i in res["issues"]),
+   f"PATH CASE names the script's path (got {res['issues']})")
+ok(res["total_checks"] == good["total_checks"] + 1
+   and res["pass_count"] == good["pass_count"],
+   f"wrong-case file name costs exactly one grade point ({res['pass_count']}/{res['total_checks']})")
+
+# The grade follows the case the DISK stores, never the caller's spelling:
+# Windows resolves "2020 - Album" to a folder stored as "2020 - ALBUM", so a
+# caller-supplied path used to decide the case verdict on its own.
+res = _grade_album(os.path.join(_bad_root, "Artists", "Artist", "2020 - Album"),
+                   "EMBEDDED", bad_cfg)
+ok("PATH_CASE" in res["tracks"][0]["issues"],
+   "canonically-spelled caller path still reports the folder's real case")
+res = _grade_album(os.path.join(good_root, "Artists", "Artist", "2020 - album"),
+                   "EMBEDDED", good_cfg)
+ok("PATH_CASE" not in res["tracks"][0]["issues"]
+   and res["pass_count"] == res["total_checks"],
+   "loosely-spelled caller path is not graded against its own spelling")
+
+# switches: PATH_CASE has its own, PATH keeps its own
+res = _grade_album(bad_dir, "EMBEDDED", dict(bad_cfg, grade_check_filename_case=False))
+ok("PATH_CASE" not in res["tracks"][0]["issues"]
+   and res["pass_count"] == res["total_checks"],
+   "grade_check_filename_case=False suppresses PATH_CASE (check not counted)")
+res = _grade_album(bad_dir, "EMBEDDED",
+                   dict(bad_cfg, grade_check_naming=False, grade_check_filename_case=True))
+ok("PATH" not in res["tracks"][0]["issues"]
+   and "PATH_CASE" not in res["tracks"][0]["issues"]
+   and res["pass_count"] == res["total_checks"],
+   "grade_check_naming=False disables the whole naming block: no PATH, no "
+   "PATH_CASE, check not counted")
+
+# ----------------------------------------------------------------------
 # beets config: directory: is the library root, not the music folder
 # ----------------------------------------------------------------------
 print("== beets config ==")

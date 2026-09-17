@@ -509,12 +509,18 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
     }
   };
 
-  /** Answer the lossy-only prompt: true downloads the lossy copy anyway. */
+  /** Answer the confirm prompt. Both variants share this endpoint: for a lossy
+   *  downgrade accept downloads the lossy copy, for an empty search accept
+   *  parks the release in the wish list (the background worker keeps looking,
+   *  so declining is the only way to actually stop). */
   const answer = async (accept: boolean) => {
     setAnswering(true);
+    const noResults = job?.confirm?.reason === "no_results";
     try {
       await api.soulseekAutoConfirm(accept);
-      toast(accept ? "Downloading the lossy copy" : "Stopped — waiting for a lossless copy");
+      toast(noResults
+        ? (accept ? "Moving it to wishes — the search keeps running" : "Stopping — nothing was downloaded")
+        : (accept ? "Downloading the lossy copy" : "Stopped — waiting for a lossless copy"));
       refetch();
     } catch (e) {
       toast(String(e));
@@ -522,6 +528,43 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
       setAnswering(false);
     }
   };
+
+  // Announce the outcome once, on the poll that first sees a terminal state —
+  // a job that fails after ten minutes is otherwise invisible unless the panel
+  // happens to be open. The previous state lives in a ref so a re-render or a
+  // late poll cannot repeat the toast, and a freshly started job re-arms it by
+  // passing through "running" again; a page loaded while a job has already
+  // ended therefore stays quiet instead of replaying an old finish.
+  const prevState = useRef<string | null>(null);
+  useEffect(() => {
+    const st = job?.state;
+    if (!st) return;
+    const prev = prevState.current;
+    prevState.current = st;
+    if (prev !== "running" && prev !== "confirm") return;
+    if (st === "running" || st === "confirm") return;
+    if (st === "done") {
+      if (job?.result?.wished) {
+        toast("Added to wishes — the background search keeps looking for it");
+        return;
+      }
+      const album = fileName(job?.result?.album_path ?? job?.result?.staging_path ?? "");
+      toast(album ? `Imported ${album}` : "Auto-import finished");
+      return;
+    }
+    if (st === "cancelled") {
+      toast("Auto-import stopped");
+      return;
+    }
+    // A declined prompt ends the job as an error too, so a stop the user asked
+    // for is not announced as a failure.
+    const err = String(job?.result?.error || job?.stage || "see the log");
+    toast(/declined|nothing was downloaded/i.test(err) ? `Stopped — ${err}` : `Auto-import failed — ${err}`);
+  }, [job]);
+
+  // Only the no_results prompt carries `waited`; the lossy card has no timing.
+  const waited = job?.confirm?.waited ?? 0;
+  const waitedTxt = waited >= 90 ? `${Math.round(waited / 60)} min` : waited >= 1 ? `${Math.round(waited)}s` : "";
 
   const r = job?.release;
   // The wizard needs the folder it should tag; staging_path is the fallback an
@@ -614,17 +657,48 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
               </button>
             </div>
           )}
-          {job?.state === "confirm" && job?.confirm && (
+          {job?.state === "confirm" && job?.confirm && (job.confirm.reason === "no_results" ? (
+            // A search that came back empty: the release is not on the network
+            // right now, so the useful answer is "keep looking". Accept parks it
+            // in the wish list, where the same search runs on the worker's own
+            // schedule with no further input. Decline is the only way to stop.
             <div className="mt-2 rounded-lg border border-amber-700/60 bg-amber-950/30 p-2.5">
               <div className="text-xs font-semibold text-amber-300 mb-1">
-                Only lossy copies found ({job.confirm.formats.filter(Boolean).join(", ") || "lossy"})
+                Nothing usable found{waitedTxt ? ` in ${waitedTxt}` : ""}
+              </div>
+              <div className="text-[11px] text-zinc-400 mb-2">
+                Every candidate this search turned up was rejected or incomplete. Moving the
+                release to wishes keeps the same search running in the background — nothing else
+                to answer, and it is imported automatically once a verified copy shows up.
+                Stopping instead abandons this release until you ask for it again.
+              </div>
+              {(job.confirm.queries ?? []).length > 0 && (
+                <div className="space-y-1 mb-2">
+                  {(job.confirm.queries ?? []).map((q, i) => (
+                    <div key={i} className="text-[11px] text-zinc-500 truncate" title={q}>searched “{q}”</div>
+                  ))}
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                <button className="btn-primary !py-1 text-xs" onClick={() => answer(true)} disabled={answering}>
+                  <Star className="h-3.5 w-3.5" /> Move to wishes
+                </button>
+                <button className="btn-ghost !py-1 text-xs" onClick={() => answer(false)} disabled={answering}>
+                  No, stop
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="mt-2 rounded-lg border border-amber-700/60 bg-amber-950/30 p-2.5">
+              <div className="text-xs font-semibold text-amber-300 mb-1">
+                Only lossy copies found ({(job.confirm.formats ?? []).filter(Boolean).join(", ") || "lossy"})
               </div>
               <div className="text-[11px] text-zinc-400 mb-2">
                 No lossless folder passed the search for this release. Download the best
                 lossy copy anyway, or stop and wait for a lossless one?
               </div>
               <div className="space-y-1 mb-2">
-                {job.confirm.candidates.map((c) => (
+                {(job.confirm.candidates ?? []).map((c) => (
                   <div key={`${c.username}\u0000${c.dir}`} className="text-[11px] text-zinc-500 truncate" title={c.dir}>
                     {c.format || "?"} · {c.matched}/{c.expected} tracks · {fmtSize(c.size)} · {c.username} · …{c.dir.slice(-40)}
                   </div>
@@ -639,7 +713,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
                 </button>
               </div>
             </div>
-          )}
+          ))}
           <div className="mt-1.5 max-h-44 overflow-auto font-mono text-[10px] leading-relaxed text-zinc-500 space-y-0.5">
             {(job?.log ?? []).map((l: any, i: number) => (
               <div key={i} className={l.msg.startsWith("ERROR") ? "text-red-400" : l.msg.startsWith("  ✕") ? "text-red-300" : undefined}>
@@ -657,7 +731,13 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
               </div>
             </details>
           )}
-          {job?.state === "done" && (
+          {job?.state === "done" && (job.result?.wished ? (
+            // A wish handoff ends the job done but with no album on disk — the
+            // import row would otherwise show an empty name and a dead button.
+            <div className="mt-2 text-[11px] text-amber-300">
+              Moved to wishes — the background search keeps looking for it.
+            </div>
+          ) : (
             <div className="mt-2 flex items-center gap-2 flex-wrap">
               <button
                 className="btn-primary !py-1 text-xs"
@@ -677,7 +757,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
                 {!job.result?.organized ? " (organize failed — run it from the album page)" : ""}
               </span>
             </div>
-          )}
+          ))}
         </div>
       )}
     </div>
@@ -1557,6 +1637,28 @@ function WishesPanel() {
   const [busy, setBusy] = useState(false);
   const worker = data?.worker;
   const wishes = data?.wishes ?? [];
+
+  // Announce a wish that gets filled (or fails) while the app is open — the
+  // worker runs on its own schedule, so nothing else would tell the user. The
+  // map is seeded from the first snapshot and unseen ids are skipped, so a page
+  // load neither replays history as a toast burst nor announces a wish that
+  // arrived already failed.
+  const prevWishStatus = useRef<Map<number, string> | null>(null);
+  useEffect(() => {
+    if (!data) return;
+    const prev = prevWishStatus.current;
+    prevWishStatus.current = new Map(data.wishes.map((w) => [w.id, w.status] as const));
+    if (!prev) return;
+    for (const w of data.wishes) {
+      const was = prev.get(w.id);
+      if (!was || was === w.status) continue;
+      if (w.status === "imported") {
+        toast(`Wish filled — ${w.artist ? `${w.artist} — ` : ""}${w.title || "release"}`);
+      } else if (w.status === "failed") {
+        toast(`Wish search failed — ${w.title || "release"}${w.last_error ? `: ${w.last_error}` : ""}`);
+      }
+    }
+  }, [data]);
 
   const add = async () => {
     const id = (mbid.match(MBID_RE)?.[0] ?? "").toLowerCase();

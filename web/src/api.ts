@@ -139,11 +139,24 @@ export interface SlskAutoJob {
   result: {
     album_path?: string; staging_path?: string; imported?: boolean; organized?: boolean;
     organize_error?: string | null; error?: string;
+    /** Set when the job gave up on the search and parked the release in the
+     *  wish list instead — there is no album_path in that case. */
+    wished?: boolean; wish_id?: number;
   } | null;
+  /** The prompt while state == "confirm". `reason` picks the card: "lossy_only"
+   *  asks whether a lossy copy may be downloaded, "no_results" reports a search
+   *  that came back empty and offers the wish handoff. Both are answered through
+   *  soulseekAutoConfirm(). Only the fields of the variant at hand are
+   *  published, so every field past `reason` is optional and the panel renders
+   *  whatever subset arrives. */
   confirm: {
-    reason: string;
-    formats: string[];
-    candidates: {
+    reason?: "lossy_only" | "no_results";
+    /** How long the search ran, in seconds (no_results). */
+    waited?: number;
+    /** The queries that came back empty (no_results). */
+    queries?: string[];
+    formats?: string[];
+    candidates?: {
       username: string; dir: string; format: string;
       matched: number; expected: number; size: number; score: number;
     }[];

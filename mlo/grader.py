@@ -16,7 +16,8 @@ from .lyrics_xlit import (
 )
 from .cue import canonical_cue_text
 from .naming import DEFAULT_NAMING_SCRIPT
-from .paths import AUDIO_EXTS, IMAGE_EXTS, LIB_AUDIO_EXTS, LIB_VIDEO_EXTS, get_track_cover, load_track_covers
+from .paths import (AUDIO_EXTS, IMAGE_EXTS, LIB_AUDIO_EXTS, LIB_VIDEO_EXTS,
+                    get_track_cover, library_root, load_track_covers)
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, is_audio_file,
     _find_albums, _clean_set, _summarize_values, _collect_targets,
@@ -905,6 +906,49 @@ def _norm_path_case(p):
     return os.path.normcase(str(p or "").replace("/", os.sep).replace("\\", os.sep))
 
 
+def _fs_cased_dir(path, base):
+    """Re-spell *path* with the letter case the filesystem actually stores.
+
+    Only needed because the PATH_CASE grade compares a path against the
+    naming script, and on a case-insensitive filesystem (Windows) that
+    comparison is only as good as the casing of the string the caller handed
+    us: grading `.../Artists/Artist/2020 - Album` for a folder the disk
+    stores as `2020 - ALBUM` returned an exact match, so the wrong case the
+    user has to fix (organize rewrites it) vanished into the caller's own
+    spelling — a path served from the library payload, healed from a stale
+    cache, or typed into an API call. File names never had that hole (they
+    come from os.listdir); directory segments are walked here for the same
+    reason: the listing is the only source of the stored case.
+
+    Segments below *base* are matched case-insensitively against the listing
+    one level at a time (one listdir per level, once per album, and only when
+    the naming check is enabled). A segment with no counterpart — an 8.3
+    short name (`DILLYD~1`), a junction/symlink target, an unreadable parent
+    — keeps the caller's spelling rather than resolving to a path that may
+    not address the same folder, and so does a path that is not below *base*.
+    """
+    if not base:
+        return path
+    try:
+        rel = os.path.relpath(path, base)
+    except ValueError:  # different drives (Windows): no shared base
+        return path
+    if os.path.isabs(rel) or rel.startswith(os.pardir):
+        return path
+    cur = base
+    for seg in rel.split(os.sep):
+        try:
+            names = os.listdir(cur)
+        except OSError:
+            return path
+        match = next((n for n in names
+                      if os.path.normcase(n) == os.path.normcase(seg)), None)
+        if match is None:
+            return path
+        cur = os.path.join(cur, match)
+    return cur
+
+
 def _mb_release_type(mbid):
     """Release type MusicBrainz reports for *mbid*, or None.
 
@@ -943,7 +987,6 @@ def _naming_mismatch(ap, folder, script, release_type, tags):
     produce false failures.
     """
     from mlo.naming import eval_script, track_variables
-    from mlo.paths import library_root
 
     base = library_root(folder) if folder else folder
     actual = os.path.relpath(ap, base)
@@ -1024,6 +1067,13 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
     except ValueError:
         naming_check = False
     album_release_type = None
+
+    # Grade the case the DISK stores, not the case this caller spelled: on a
+    # case-insensitive filesystem a canonically-spelled path for a folder
+    # stored as "2020 - ALBUM" used to pass the PATH_CASE check (see
+    # _fs_cased_dir). Only the directory segments need it — the file name
+    # already comes from os.listdir.
+    naming_dir = _fs_cased_dir(album_dir, library_root(music_folder)) if naming_check else album_dir
 
     lyrics_present_count = 0
     lyrics_expected_count = 0
@@ -1242,7 +1292,8 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     album_release_type = _mb_release_type(
                         tags_map["MUSICBRAINZ_ALBUMID"]) or ""
             kind, expected = _naming_mismatch(
-                ap, music_folder, naming_script,
+                os.path.join(naming_dir, basename),
+                music_folder, naming_script,
                 str(tags_map.get("RELEASETYPE") or "").strip()
                 or album_release_type or None,
                 tags_map,

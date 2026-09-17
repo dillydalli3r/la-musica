@@ -50,12 +50,15 @@ _job = {
     "log": [],             # [{t, msg}] progress lines (newest last)
     "attempts": [],        # [{username, dir, reason}] rejected candidates
     "result": None,        # {album_path, imported, organized}
-    "confirm": None,       # {formats, candidates} while state == "confirm"
+    # {reason, formats, candidates} (lossy_only) or
+    # {reason, waited, queries, formats, candidates} (no_results)
+    "confirm": None,
     "search": None,        # live per-query progress while searching
     "progress": None,      # live download metrics while a transfer runs
     "cancel": False,
 }
-# Lossy-only downloads wait here for the user's answer (confirm_lossy()).
+# A job parked on a prompt waits here for the user's answer (confirm()):
+# "only lossy copies found" and "no usable results — add to wishes?".
 _confirm_event = threading.Event()
 _confirm_answer = {"accept": False}
 
@@ -100,11 +103,15 @@ def job_state():
                 for k, v in _job.items() if k != "cancel"}
 
 
-def confirm_lossy(accept):
-    """Answer the pending "only lossy copies found" prompt.
+def confirm(accept):
+    """Answer the job's pending prompt.
 
-    Returns False when no prompt is pending (the job moved on, or was
-    cancelled) — the caller must not read that as an accepted download."""
+    Both prompts a job can park on end here — "only lossy copies found" and
+    "no usable results — add to wishes?" — because the waiter is one event
+    either way; which question was asked is in job_state()["confirm"]["reason"]
+    and the answer is only ever yes/no. Returns False when no prompt is pending
+    (the job moved on, or was cancelled) — the caller must not read that as an
+    accepted download."""
     with _lock:
         if _job["state"] != "confirm" or _job["cancel"]:
             return False
@@ -124,7 +131,7 @@ def cancel():
         else:
             released = False
     if released:
-        _confirm_event.set()  # a job parked on the lossy prompt must wake up
+        _confirm_event.set()  # a job parked on a prompt must wake up
         return True
     return False
 
@@ -1198,10 +1205,12 @@ def start_job(release_mbid=None, release=None, queries=None, username=None,
     only release_mbid is given it is fetched here. queries overrides the
     configured search templates for this run. username+target_dir downloads
     that exact user/folder without searching (manual entry).
-    confirm_lossy — when no lossless folder matched but lossy ones did, park
-    the job and wait for confirm_lossy() instead of downloading (the
-    interactive path); False means lossy copies are never taken silently
-    (background wishes).
+    confirm_lossy — the interactive path (server.main's HTTP start route).
+    When no lossless folder matched but lossy ones did, park the job and wait
+    for confirm() instead of downloading, and likewise park when the search
+    found no usable folder at all and the release could be wished instead.
+    False (the background wishes worker) means lossy copies are never taken
+    silently — and a wish is never asked to become a wish.
     """
     with _lock:
         if _job["state"] in ("running", "confirm"):
@@ -1397,6 +1406,68 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
             if not candidates and search_failed:
                 raise RuntimeError("; ".join(search_failed[:3]))
             if not candidates:
+                # slskd answered, but no folder held the whole album. That used
+                # to be a hard stop ("No candidate folder contained every
+                # track"), which threw away a search the user just waited out
+                # for a release that is merely rare right now. On the
+                # interactive path the job instead parks on the SAME prompt the
+                # lossy branch uses and offers to add the release to the wishes
+                # list: the background worker then keeps searching for it with
+                # the very queries this job used, so nothing is lost by parking
+                # the job — the user only decides whether it is worth watching
+                # for. A release with no MusicBrainz id has nothing to wish for
+                # (the browsed-folder grab), and the background wishes path
+                # (confirm_lossy=False) fails quietly as before.
+                #
+                # How long a search runs is decided in ONE place —
+                # soulseek_auto_search_wait (the requested window) plus
+                # _SEARCH_GRACE_S (the tail slskd needs to hand back responses
+                # once a search ended) — and this prompt fires exactly when that
+                # window has just ended with nothing usable. `waited` reports
+                # that same cap to the UI instead of a second, competing timer.
+                if (confirm_lossy and release.get("id")
+                        and cfg.get("soulseek_auto_wish_prompt", True)):
+                    from server import wishes
+                    _log("No usable result — asking whether to add this release "
+                         "to the wishes list.")
+                    with _lock:
+                        _job["state"] = "confirm"
+                        _job["stage"] = "No usable results — add to wishes?"
+                        _job["confirm"] = {
+                            "reason": "no_results",
+                            "waited": int(search_wait + _SEARCH_GRACE_S),
+                            "queries": list(queries_built),
+                            "formats": [],
+                            "candidates": [],
+                        }
+                    _confirm_event.wait()  # released by confirm() or cancel()
+                    _confirm_event.clear()
+                    with _lock:
+                        _job["confirm"] = None
+                        _job["state"] = "running"
+                        accepted = _confirm_answer["accept"]
+                    if _cancelled():
+                        return _finish("cancelled")
+                    if accepted:
+                        wish = wishes.add_wish(
+                            release.get("id"), title=release.get("title") or "",
+                            artist=((release.get("artists") or [{}])[0]
+                                    .get("name", "")),
+                            year=str(release.get("date") or "")[:4],
+                            queries=list(queries_built))
+                        _log(f"Added to wishes (#{wish['id']}) — the worker keeps "
+                             f"searching for this release in the background with "
+                             f"the same queries, so nothing is lost by parking "
+                             f"this job.")
+                        # Nothing landed in the library: report the wish, never a
+                        # download. The import path's result keys are kept (as
+                        # None/0) so a caller reading result["album_path"] sees
+                        # one shape for every finished job.
+                        return _finish("done", {
+                            "wished": True, "wish_id": wish["id"],
+                            "album_path": None, "staging_path": None,
+                            "imported": 0, "organized": 0,
+                            "organize_error": None})
                 raise RuntimeError("No candidate folder contained every track "
                                    "(and cue/log per disc for CD). Try the "
                                    "manual entry or different search terms.")
@@ -1431,7 +1502,7 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                             "score": c["score"],
                         } for c in candidates[:5]],
                     }
-                _confirm_event.wait()  # released by confirm_lossy() or cancel()
+                _confirm_event.wait()  # released by confirm() or cancel()
                 _confirm_event.clear()
                 with _lock:
                     _job["confirm"] = None

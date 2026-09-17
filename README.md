@@ -25,7 +25,9 @@ machines.
   downloading it. A background worker re-searches Soulseek for every open
   wish on a configurable interval and auto-imports a release the moment a
   verified rip appears; wishes already present in the library (a manual
-  download) resolve themselves. See *Wishes* below.
+  download) resolve themselves. An auto-import search that ends with nothing
+  usable can be handed to that same worker instead of failing. See *Wishes*
+  below.
 - **Library explorer** — artists → albums → tracks with live grade/audit
   badges, search, "fail only" filter, selectable rows with bulk tag tools,
   and sortable/resizable columns (year, title, grade, audit, genre,
@@ -98,9 +100,15 @@ machines.
   (up to 180 s). Imports convert any lossless source (WAV, AIFF, APE, WV,
   SHN, TTA; ALAC in MP4) into the codec set by `lossless_target_codec`
   *before* the files are named and graded — the same conversion script 3
-  applies library-wide. The *Downloads* tab buckets transfers into active,
-  queued, completed and failed, with per-transfer **Cancel**, **Retry** on
-  the failed ones and **Clear finished** to empty the history.
+  applies library-wide. When the search window closes without a usable
+  candidate, the job parks and offers to move it to *Wishes* rather than
+  reporting the old "no candidate folder contained every track" failure
+  (`soulseek_auto_wish_prompt`, default on); see *Wishes* below. The page
+  toasts every terminal auto-import state, including "added to wishes", and
+  every wish that flips to **Imported** or **Failed**. The *Downloads* tab
+  buckets transfers into active, queued, completed and failed, with
+  per-transfer **Cancel**, **Retry** on the failed ones and **Clear finished**
+  to empty the history.
   The sidebar dot is green when logged into the
   Soulseek network (tooltip names the account), amber when slskd runs but
   isn't logged in (tooltip carries the daemon's own error, e.g.
@@ -126,7 +134,7 @@ forced to redo work.
 | 2 | Format CUEs | Canonical CUE text, FILE-line fixes, CD-N sheet renaming |
 | 3 | Optimize FLACs | Re-encode at target level, strip padding/CUESHEET/APPLICATION, remove tags outside the canonical set, convert every other lossless source (WAV, AIFF, APE, WV, SHN, TTA; ALAC in MP4) to the codec set by `lossless_target_codec` losslessly (default FLAC, alternative ALAC — Settings → *FLACs & lossless sources*); `lossless_remove_original` decides whether the pre-conversion file survives a verified conversion |
 | 4 | Grade | The full grading battery below |
-| 5 | Process images | Covers resized/cropped (default 1200×1200 JPEG q90, configurable), JPEG/PNG/JXL optimization, optional JPEG XL conversion |
+| 5 | Process images | Covers resized/cropped (default 1200×1200 JPEG q90; per-format size targets for JPEG/PNG/JXL, configurable), JPEG/PNG/JXL optimization, optional JPEG XL conversion |
 | 6 | Audit library | AudioAuditor detectors (silence, DR, peaks, LUFS, BPM, MQA, fake stereo…) + CD .log CRC verification → AUDIT tag |
 | 7 | DR & ReplayGain | rsgain + simple-dr-meter (album gain, FLAC and MP4 alike) |
 | 8 | Auto tagging | ITUNESADVISORY normalization, INSTRUMENTAL-from-lyrics |
@@ -155,6 +163,20 @@ which every player can read. Settings → *Embedded covers* flips the policy:
 
 The pass is idempotent — it only rewrites files whose embedded art actually
 changes.
+
+### Cover compression
+
+Covers are normalized by script 5 (Settings → *Images*):
+
+- **Resize** to `cover_target_size` px (default 1200) when
+  `cover_resize_enabled` is on, and **crop to square** when
+  `cover_crop_enabled` is on. `cover_force_exact_size` crops regardless of
+  aspect deviation, so the output is exactly *target*×*target*.
+- **Re-encode** as JPEG at `cover_jpeg_quality` (default 90 %). Other images
+  keep their own quality setting; covers are the only ones re-encoded at 90.
+- **Per-format size targets** — `cover_jpeg_target_size`,
+  `cover_png_target_size` and `cover_jxl_target_size` override the global
+  target for that one format; 0 means "use the global target".
 
 ### Filenames, capitalization and extensions (new in 2.1.0)
 
@@ -214,6 +236,21 @@ filled in automatically later:
 Settings → *Wishes* controls the master switch, interval, per-wish attempt
 cap and auto-import.
 
+New in 2.3.0, the end of a fruitless search: an auto-import job whose search
+window closes with **no usable candidate** parks instead of failing and asks
+whether to move the job to wishes. Accepting creates a wish carrying the same
+search queries, so the background worker keeps looking with no further input;
+declining keeps the old *no candidate folder contained every track* failure.
+The prompt appears after the configured time — the search window
+(`soulseek_auto_search_wait`, default 15 s) plus the 45 s grace tail, about a
+minute by default — and there is deliberately no second timer.
+`soulseek_auto_wish_prompt` (default on) switches the prompt off; searches the
+wishes worker itself started never prompt.
+
+Completion is notified by toast: an auto-import job reaching a terminal state
+(including *added to wishes*), and a wish flipping to **Imported** or
+**Failed**.
+
 ## Grading — what the checks cover
 
 Every check is toggleable on the Grading page, which also offers
@@ -239,6 +276,52 @@ enable-all / disable-all bulk actions.
   configured and the script needs it).
 - **File categories** — which file types participate in grading at all
   (music, covers, CUE, log, LRC, accurip, videos, other).
+
+### AudioAuditor override
+
+A track's audit verdict can be forced from the track page: **REAL** / **FAKE**
+writes the `AUDIOAUDITOR_OVERRIDE` tag, while *Auto* clears it and hands the
+track back to AudioAuditor. The override wins over every derived verdict — it
+is applied last, so the album-level all-real gate agrees with it, and a forced
+re-audit reproduces the user's call instead of erasing it.
+
+## Library layout — a read-only report
+
+`GET /api/library/layout`, surfaced on the **Optimization** page, walks the
+whole music folder — root, `Artists/`, every artist folder, every album
+folder — and reports where the canonical
+`<music>/Artists/<Artist>/<Album>/<files>` shape is not met: misplaced audio,
+unexpected folders and subfolders, empty album folders, stray files (including
+a file sitting directly in `Artists/`), hidden folders, and leftovers from the
+old `.mlo_data` layout.
+
+The scan never moves, renames or deletes anything; acting on the report is
+what **Organize** and the scripts are for.
+
+New in 2.3.0 it also reports **`wrong_case`** — an artist folder, album folder
+or file name whose stored capitalization differs from the naming script's
+expectation. The comparison is case-sensitive, which works because
+`os.listdir` returns the stored casing even on Windows' case-insensitive
+filesystem. Each row hints at running Organize; the scanner itself never
+renames.
+
+## Cover finder
+
+The album/track online cover search is a meta-search over the musichoarders
+providers with selectable sources and a storefront **region**
+(`cover_country`, default `us`). The chosen source list and region can be saved
+as the default (`cover_sources`), so the next search starts from the same
+choices. `GET /api/cover/search` runs the search against the catalogue,
+`GET /api/cover/sources` lists the selectable sources, regions and the saved
+defaults, and `POST /api/cover/fromurl` saves a chosen result to disk.
+
+## Downloads viewer
+
+Releases downloaded to the staging folder `<music>/.mlo/downloads` are listed
+by `GET /api/downloads` (newest first); `POST /api/downloads/import` moves
+entries into the library as albums and `POST /api/downloads/delete` removes
+them. The Soulseek page's *Downloads* tab shows the same entries as transfers
+bucketed into active, queued, completed and failed.
 
 ## Getting started
 
@@ -293,6 +376,7 @@ tools/       test-library generator and test suites
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/library` | tag-rich library tree (grades, audits, tags, tech info; gzipped) |
+| `GET /api/library/layout` | read-only layout scan: misplaced audio, unexpected folders, empty albums, stray files, hidden folders, `wrong_case` |
 | `GET /api/home` | Home page: stats, recommendations, recent/top/favorite shelves |
 | `GET/POST/PATCH/DELETE /api/wishes` | release wishlist CRUD; `POST …/{id}/search`, `…/search-all`, `…/reconcile` |
 | `GET /api/album` `GET /api/artist` | entity details |
@@ -309,6 +393,9 @@ tools/       test-library generator and test suites
 | `POST /api/mb/match` `POST /api/mb/assign` | track/disc matching, MB/RYM/genre/advisory writes |
 | `GET /api/lyrics/*` `POST /api/lyrics/write` | LRCLIB proxy + LRC sidecar write |
 | `POST /api/cover` | album cover upload (`?track=` writes per-track sidecar covers) |
+| `GET /api/cover/search` `GET /api/cover/sources` | cover meta-search (sources + storefront region) and the selectable catalogue / saved defaults |
+| `POST /api/cover/fromurl` | save a chosen search result as the cover |
+| `GET /api/downloads` `POST /api/downloads/import` `POST /api/downloads/delete` | staged `.mlo/downloads` entries: list newest-first, import as albums, delete |
 | `POST /api/import/upload` `…/commit` | upload + link assignment |
 | `POST /api/lyrics/ai` `POST /api/lyrics/ai/lines` | AI lyric transforms (cleanup, repair, translate, transliterate; line-aligned for the player) |
 | `WS /ws/progress` | live progress |
@@ -330,7 +417,8 @@ route renders with no page errors) needs a running backend and Playwright
 (`npm i -D playwright`).
 
 The other `tools/test_*.py` suites cover config migration, CUE disc renaming,
-grading paths, Home shelves, lyrics merge/repair and the Soulseek client.
+grading paths, Home shelves, lyrics merge/repair, the Soulseek client and the
+layout scanner's capitalization reporting (`test_layout_case.py`).
 Run them all before a release. The frontend gate is `cd web && npx tsc -b &&
 npx oxlint && npm run build`. CI (`.github/workflows/ci.yml`) runs the Python
 suites and that frontend gate on every push and pull request; the suites that

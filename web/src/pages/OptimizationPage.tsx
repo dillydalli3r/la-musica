@@ -314,6 +314,7 @@ const LAYOUT_KINDS: { kind: string; label: string; bad: boolean }[] = [
   { kind: "unexpected_folder", label: "Unexpected folder in the music folder root", bad: true },
   { kind: "unexpected_subfolder", label: "Unexpected folder inside an album", bad: true },
   { kind: "empty_album", label: "Album folder with no audio", bad: true },
+  { kind: "wrong_case", label: "Name capitalization differs from the naming script", bad: true },
   { kind: "legacy_state_file", label: "Leftover from the old .mlo_data layout", bad: false },
   { kind: "stray_in_artists", label: "Stray file directly in Artists/", bad: false },
   { kind: "hidden_folder", label: "Hidden folder inside Artists/", bad: false },

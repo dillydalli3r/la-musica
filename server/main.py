@@ -3777,15 +3777,19 @@ class SoulseekAutoConfirmRequest(BaseModel):
 
 @app.post("/api/soulseek/auto/confirm")
 def soulseek_auto_confirm(req: SoulseekAutoConfirmRequest):
-    """Answer the "only lossy copies found" prompt of a running auto-import.
+    """Answer the running auto-import's pending prompt.
 
-    The job parks in state `confirm` instead of downloading lossy audio on
-    its own; this releases it (accept=true downloads the lossy copy,
-    accept=false ends the job without downloading)."""
+    A job parks in state `confirm` rather than deciding for the user: it found
+    only lossy copies, or it found no usable folder at all and the release
+    could be handed to the wishes list instead. Both questions are answered
+    here because the job waits on one event either way — which question was
+    asked is `job_state()["confirm"]["reason"]`. This releases the job:
+    accept=true takes the lossy copy (or adds the wish),
+    accept=false ends the job without doing either."""
     from server import soulseek_auto
-    ok = soulseek_auto.confirm_lossy(req.accept)
+    ok = soulseek_auto.confirm(req.accept)
     if not ok:
-        raise HTTPException(409, "no lossy confirmation is pending")
+        raise HTTPException(409, "no confirmation is pending")
     return {"ok": True, "accepted": bool(req.accept)}
 
 
@@ -4888,15 +4892,123 @@ def _layout_has_audio(d):
     return False
 
 
+def _layout_case_only(expected, actual):
+    """Whether two names are the SAME name in different letter case.
+
+    Case-only is the only kind of name mismatch the layout scanner reports.
+    Anything else — a different album, a different title — is a naming
+    problem and belongs to the grader's PATH check; repeating it here would
+    only give the user two rows for one thing, and a guess about paths is
+    what the scanner must never make.
+    """
+    return (bool(expected) and expected != actual
+            and expected.casefold() == actual.casefold())
+
+
+def _layout_case_issues(artist, album, album_dir, folder, script, seen):
+    """`wrong_case` rows for one album folder, or [] when there is nothing
+    trustworthy to compare against.
+
+    The expected names come from the naming script the ORGANIZER applies —
+    the same `naming_script` the grader evaluates — run over the album's own
+    tags. That is the whole reason this is reportable at all: Windows is
+    case-insensitive, so "abbey road" and "Abbey Road" open the same folder
+    and nothing in the normal file API will ever admit the difference. What
+    it does NOT do is lie about the spelling: `os.listdir` returns the name
+    exactly as it is STORED on disk, and that stored spelling is what every
+    comparison below reads. So a case-only mismatch shows up here precisely
+    because the scanner looks at the raw directory entries instead of asking
+    the OS whether two paths are "the same file" — it would always say yes.
+
+    Tags are read from ONE audio file per album (the first one, through the
+    tag cache), because the artist and album segments are album properties
+    and the script's last segment is only compared against the file those
+    tags came from. Any other file in the album is left alone: its expected
+    name needs its own tags, and without them a comparison would be a guess.
+    Unreadable tags, an empty tag dict or a script that evaluates to nothing
+    all end in silence — a false "wrong case" here would push the user into
+    renaming music to a name that is not actually correct.
+
+    Cost ceiling: this reads tags for one file per album on every full scan.
+    If scanning a large library ever gets slow, the cheap win is a prefilter
+    — only read tags for albums whose folder or file names do not already
+    contain the tag spelling — or a cached layout snapshot; both are more
+    machinery than a read-only report currently earns.
+
+    `seen` holds the absolute paths this scan already reported, so an artist
+    folder shared by ten albums produces one row, not ten.
+    """
+    from mlo.naming import eval_script, track_variables
+
+    src = None
+    for f in _layout_list(album_dir):
+        if _layout_is_audio(f):
+            src = f
+            break
+    if src is None:
+        return []
+    try:
+        tags = tagcache.read_track(os.path.join(album_dir, src))[0] or {}
+    except Exception:
+        return []
+    release_type = str(tags.get("RELEASETYPE") or "").strip() or None
+    expected = eval_script(script, track_variables(tags, release_type=release_type))
+    if not expected:
+        return []
+    segs = [s for s in expected.replace("\\", "/").split("/") if s]
+    if not segs:
+        return []
+
+    rows = []
+
+    def add(path, expected_name, actual_name, what):
+        key = os.path.normcase(os.path.abspath(path))
+        if key in seen:
+            return
+        seen.add(key)
+        rows.append(_layout_issue(
+            "wrong_case", path, folder,
+            "%s \u201c%s\u201d differs from the naming script\u2019s \u201c%s\u201d "
+            "in letter case only" % (what, actual_name, expected_name),
+            "run Organize \u2014 it rewrites this to the script\u2019s exact "
+            "casing (nothing is renamed by this scan)"))
+
+    # The script's leading segments are directories — segment 0 is the artist
+    # folder, segment 1 the album folder — and the last one is the file name
+    # WITHOUT its extension (beets-style: the extension belongs to the file,
+    # so it is appended from the file on disk, exactly as the grader does).
+    # A shorter script simply names fewer things, and zip then compares only
+    # what it does name.
+    for seg, actual_name, path, what in zip(
+            segs[:-1],
+            (artist, album),
+            (os.path.dirname(album_dir), album_dir),
+            ("artist folder", "album folder")):
+        if _layout_case_only(seg, actual_name):
+            add(path, seg, actual_name, what)
+    expected_file = segs[-1] + os.path.splitext(src)[1]
+    if _layout_case_only(expected_file, src):
+        add(os.path.join(album_dir, src), expected_file, src, "file")
+    return rows
+
+
 @app.get("/api/library/layout")
 def library_layout():
-    """Scan the whole music folder for misplaced files and unexpected folders.
+    """Scan the whole music folder for misplaced files, unexpected folders and
+    names spelled in the wrong letter case.
 
     Read-only. Checks the music-folder root, <music>/Artists, each artist
     folder, each album folder and the tree's depth — reporting every place the
     canonical `<music>/Artists/<Artist>/<Album>/<files>` shape is not met."""
+    from mlo.naming import DEFAULT_NAMING_SCRIPT
     from mlo.paths import IMAGE_EXTS
-    folder = load_config().get("music_folder") or ""
+    cfg = load_config()
+    folder = cfg.get("music_folder") or ""
+    # The canonical spellings the `wrong_case` check compares against: the
+    # same script (same fallback) the organizer renames with and the grader
+    # grades against.
+    naming_script = (str(cfg.get("naming_script") or "").strip()
+                     or DEFAULT_NAMING_SCRIPT)
     out = {"folder": folder.replace("\\", "/"), "artists_dir": "",
            "exists": False, "issues": [], "counts": {}, "total": 0,
            "albums": 0, "artists": 0, "audio_files": 0}
@@ -4906,6 +5018,9 @@ def library_layout():
     out["exists"] = True
     out["artists_dir"] = (lib or "").replace("\\", "/")
     issues = []
+    # Paths already reported as wrong_case — one artist folder serves all of
+    # its albums, and the user does not need that row ten times.
+    case_seen = set()
 
     # ---- 1. the music-folder root -----------------------------------------
     # Only Artists/ and the app's own .mlo state dirs belong here. A loose
@@ -4977,7 +5092,14 @@ def library_layout():
                 issues.append(_layout_issue(
                     "empty_album", ap, folder,
                     "album folder \u201c%s / %s\u201d holds no audio" % (name, an),
-                    "remove it, or fill it — an empty album grades as an error"))
+                    "remove it, or fill it \u2014 an empty album grades as an error"))
+            # Letter-case drift: the folder or file is in the right PLACE but
+            # spells its name the way the filesystem let somebody type it,
+            # not the way the naming script spells it. Reported next to the
+            # shape problems because from here it is the same kind of answer:
+            # "this is not the canonical library yet".
+            issues.extend(_layout_case_issues(
+                name, an, ap, folder, naming_script, case_seen))
 
             # ---- 4. inside an album: strays and unexpected subfolders ------
             for f in _layout_list(ap):

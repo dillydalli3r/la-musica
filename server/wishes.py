@@ -17,7 +17,13 @@ import sqlite3
 import threading
 import time
 
-_lock = threading.Lock()
+# Reentrant: add_wish()/delete_wish() hold the lock while calling _conn(), and
+# on FIRST use _conn() creates the schema, which takes this same lock. With a
+# plain Lock that was a self-deadlock — the first wish ever added in a process
+# (a fresh install, or an auto-import job whose user accepted the "add to
+# wishes?" offer) parked its thread forever, holding the lock every later
+# wishes call needed. Same trap server.soulseek_auto documents for its RLock.
+_lock = threading.RLock()
 
 STATUSES = ("wanted", "searching", "imported", "failed", "available")
 

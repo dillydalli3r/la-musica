@@ -522,7 +522,15 @@ DEFAULT_CONFIG = {
     "soulseek_auto_max_attempts": 3,
     # How long to let a Soulseek search collect responses before scoring the
     # candidates (seconds). Longer = more peers + better chance of a match.
+    # The real cap is this plus the search's grace tail; the no-results prompt
+    # (below) fires exactly when that window ends with nothing usable.
     "soulseek_auto_search_wait": 15,
+    # Park an interactive job that found no usable folder and ask the user
+    # whether to add the release to the wishes list, instead of failing the job
+    # outright: a rare album is worth watching for, and the background wishes
+    # worker keeps searching with the queries the job already used. The
+    # background path itself never asks (a wish must not be turned into a wish).
+    "soulseek_auto_wish_prompt": True,
     # Explicit shared folders (empty = share the whole music folder).
     "soulseek_share_dirs": [],
     # Extra share filters — substrings/paths slskd must NOT share.

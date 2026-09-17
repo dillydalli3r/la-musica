@@ -176,7 +176,7 @@ export interface DownloadsPayload {
 export interface LayoutIssue {
   /** What is wrong: audio_at_root, audio_in_artists, audio_in_artist,
    *  unexpected_folder, unexpected_subfolder, empty_album, stray_file,
-   *  stray_in_artists, hidden_folder, legacy_state_file. */
+   *  stray_in_artists, hidden_folder, legacy_state_file, wrong_case. */
   kind: string;
   /** Music-folder-relative path, for display. */
   path: string;
