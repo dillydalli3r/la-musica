@@ -61,7 +61,7 @@ export default function PlaylistDetailPage() {
     queryFn: api.playlists,
     select: (rows: Playlist[]) => rows.find((p) => p.id === pid),
   });
-  const { data: detail } = useQuery({ queryKey: ["playlist", pid], queryFn: () => api.playlist(pid) });
+  const { data: detail, error: detailError } = useQuery({ queryKey: ["playlist", pid], queryFn: () => api.playlist(pid) });
   const { data: lib } = useQuery({ queryKey: ["library"], queryFn: api.library });
 
   const [renaming, setRenaming] = useState(false);
@@ -157,8 +157,12 @@ export default function PlaylistDetailPage() {
     if (j < 0 || j >= tracks.length) return;
     const next = [...tracks];
     [next[i], next[j]] = [next[j], next[i]];
-    await api.playlistOrder(pid, next);
-    invalidate();
+    try {
+      await api.playlistOrder(pid, next);
+      invalidate();
+    } catch (e) {
+      toast(String(e));
+    }
   };
 
   const moveTo = async (from: number, to: number) => {
@@ -166,16 +170,31 @@ export default function PlaylistDetailPage() {
     const next = [...tracks];
     const [moved] = next.splice(from, 1);
     next.splice(to, 0, moved);
-    await api.playlistOrder(pid, next);
-    invalidate();
+    try {
+      await api.playlistOrder(pid, next);
+      invalidate();
+    } catch (e) {
+      toast(String(e));
+    }
   };
 
   const removeTrack = async (path: string) => {
-    await api.playlistRemove(pid, [path]);
-    invalidate();
+    try {
+      await api.playlistRemove(pid, [path]);
+      invalidate();
+    } catch (e) {
+      toast(String(e));
+    }
   };
 
-  if (error) return <EmptyState title="Playlist not found" hint={String(error)} />;
+  if (error || detailError || (!isLoading && !playlist))
+    return (
+      <EmptyState
+        title="Playlist not found"
+        hint="It may have been deleted."
+        action={{ label: "Back to playlists", to: "/playlists" }}
+      />
+    );
   if (isLoading || !playlist) return <PageLoading label="Loading playlist…" />;
 
   // first four covers for the mosaic header art
@@ -195,12 +214,16 @@ export default function PlaylistDetailPage() {
   };
 
   const saveSmart = async () => {
-    await api.playlistFilter(pid, { conditions, match: matchAll ? "all" : "any" });
-    const ev = await api.playlistEvaluate(pid);
-    await api.playlistOrder(pid, ev.paths);
-    setFilterOpen(false);
-    invalidate();
-    toast("Smart playlist updated");
+    try {
+      await api.playlistFilter(pid, { conditions, match: matchAll ? "all" : "any" });
+      const ev = await api.playlistEvaluate(pid);
+      await api.playlistOrder(pid, ev.paths);
+      setFilterOpen(false);
+      invalidate();
+      toast("Smart playlist updated");
+    } catch (e) {
+      toast(String(e));
+    }
   };
 
   const rename = async () => {

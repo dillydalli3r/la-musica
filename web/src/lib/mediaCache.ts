@@ -10,14 +10,36 @@ import { isVideoFile } from "./fmt";
  * The cache key is the exact URL the player element requests, so the
  * service worker's cache.match hits on ordinary playback.
  */
-const CACHE_NAME = "mlo-media-v1";
+const CACHE_NAME = "mlo-media-v2";
 
-/** The URL this track's player element would request. */
-export function playableUrl(path: string): string {
-  const base = isVideoFile(path) ? api.videoStreamUrl(path) : api.streamUrl(path);
+function absolute(base: string): string {
   // api.ts prefixes an absolute origin inside Tauri; resolve to absolute
   // here too so cache keys match SW-intercepted request URLs.
   return new URL(base, window.location.href).toString();
+}
+
+/** The URL this track's player element will request. A video whose probe
+ * says the browser cannot decode it natively is played through the live
+ * transcode (`?transcode=1`), so it must be cached under that same URL —
+ * the direct-stream URL is never requested for exactly those videos. */
+export async function playableUrl(path: string): Promise<string> {
+  if (!isVideoFile(path)) return absolute(api.streamUrl(path));
+  let transcode = false;
+  try {
+    transcode = (await api.videoMeta(path)).native === false;
+  } catch {
+    /* probe unavailable (server down) — fall back to the direct stream */
+  }
+  return absolute(api.videoStreamUrl(path, transcode));
+}
+
+/** Every URL a track's stream may have been cached under: the direct one,
+ * plus the live transcode for videos (the player retries a failed direct
+ * stream through it). Lets lookups and removals work without a probe, so
+ * "Downloaded" survives a server that is down. */
+function cacheUrls(path: string): string[] {
+  if (!isVideoFile(path)) return [absolute(api.streamUrl(path))];
+  return [absolute(api.videoStreamUrl(path)), absolute(api.videoStreamUrl(path, true))];
 }
 
 async function cache(): Promise<Cache> {
@@ -25,7 +47,7 @@ async function cache(): Promise<Cache> {
 }
 
 export async function cacheTrack(path: string): Promise<void> {
-  const url = playableUrl(path);
+  const url = await playableUrl(path);
   const c = await cache();
   // The response is explicitly moved into the cache; the stream endpoint
   // has no custom headers we need to preserve beyond the defaults.
@@ -36,13 +58,14 @@ export async function cacheTrack(path: string): Promise<void> {
 
 export async function uncacheTrack(path: string): Promise<void> {
   const c = await cache();
-  await c.delete(playableUrl(path));
+  await Promise.all(cacheUrls(path).map((u) => c.delete(u)));
 }
 
 export async function isTrackCached(path: string): Promise<boolean> {
   try {
     const c = await cache();
-    return !!(await c.match(playableUrl(path)));
+    const hits = await Promise.all(cacheUrls(path).map((u) => c.match(u)));
+    return hits.some(Boolean);
   } catch {
     return false; // Cache Storage unavailable (insecure context)
   }

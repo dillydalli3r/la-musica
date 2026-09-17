@@ -70,9 +70,10 @@ export default function SettingsPage() {
   const CFG_GROUPS: CfgGroup[] = [
     {
       title: "FLACs & lossless sources (script 3)",
-      blurb: "Re-encodes FLACs at the target level and converts uncompressed sources (WAV/AIFF/APE/WV/SHN) to FLAC losslessly.",
+      blurb: "Re-encodes FLACs at the target level and converts every other lossless source (WAV/AIFF/APE/WV/SHN/TTA, ALAC in MP4) to the target codec below, losslessly — the same conversion runs on Soulseek imports. FLAC is what the rest of the pipeline assumes; choosing ALAC re-containers FLACs into .m4a as well.",
       fields: [
-        { k: "optimize_convert_lossless", label: "Convert WAV/AIFF/APE/WV to FLAC", type: "bool" },
+        { k: "optimize_convert_lossless", label: "Convert lossless sources to the target codec", type: "bool" },
+        { k: "lossless_target_codec", label: "Target lossless codec", type: "select", options: [["flac", "FLAC (.flac)"], ["alac", "ALAC (.m4a)"]] },
         { k: "lossless_remove_original", label: "Remove original after verified conversion", type: "bool" },
         { k: "flac_level", label: "Compression level", type: "number", min: 0, max: 8 },
         { k: "add_seektables", label: "Add seektables", type: "bool" },
@@ -120,6 +121,18 @@ export default function SettingsPage() {
         { k: "cover_jpeg_target_size", label: "JPEG cover size override (0 = global)", type: "number", min: 0, max: 4000 },
         { k: "cover_png_target_size", label: "PNG cover size override (0 = global)", type: "number", min: 0, max: 4000 },
         { k: "cover_jxl_target_size", label: "JXL cover size override (0 = global)", type: "number", min: 0, max: 4000 },
+        // Cover FINDER defaults (covers.musichoarders.xyz). The storefront
+        // region decides which releases/artwork the sources know about; the
+        // source list itself is picked in the finder and saved there.
+        {
+          k: "cover_country", label: "Cover finder region (storefront)", type: "select",
+          options: [
+            ["us", "United States (default)"], ["gb", "United Kingdom"], ["ca", "Canada"],
+            ["au", "Australia"], ["de", "Germany"], ["fr", "France"], ["it", "Italy"],
+            ["es", "Spain"], ["br", "Brazil"], ["in", "India"], ["jp", "Japan"],
+            ["kr", "South Korea"], ["cn", "China"], ["tw", "Taiwan"], ["xw", "Worldwide"],
+          ],
+        },
         { k: "force_reencode_images", label: "Force re-process", type: "bool" },
       ],
     },
@@ -166,7 +179,7 @@ export default function SettingsPage() {
         { k: "audit_cutoff_allow", label: "Frequency cutoff allowance (Hz, 0 = default)", type: "number", min: 0, max: 24000 },
         { k: "audit_verify_cd_checksums", label: "Verify CD .log CRC checksums", type: "bool" },
         { k: "audit_cd_require_both", label: "Require log CRC AND auditor for REAL", type: "bool" },
-        { k: "audit_integrity", label: "Write integrity tags (AUDIO_MD5)", type: "bool" },
+        { k: "audit_integrity", label: "Verify file integrity (flac -t / decode)", type: "bool" },
         { k: "audit_fail_on_unscorable_log", label: "Fail on unscorable .log", type: "bool" },
         { k: "audit_verify_log_checksum", label: "Verify .log checksum", type: "bool" },
         { k: "audit_require_accuraterip", label: "Require AccurateRip data", type: "bool" },
@@ -312,9 +325,11 @@ export default function SettingsPage() {
         { k: "soulseek_web_port", label: "Web/API port", type: "number", min: 1024, max: 65535 },
         { k: "soulseek_up_limit", label: "Upload speed limit (kB/s, 0 = unlimited)", type: "number", min: 0, max: 100000 },
         { k: "soulseek_down_limit", label: "Download speed limit (kB/s, 0 = unlimited)", type: "number", min: 0, max: 100000 },
-        { k: "soulseek_download_dir", label: "Download dir (blank = <music folder>/.mlo_downloads)", type: "text" },
+        { k: "soulseek_download_dir", label: "Download dir (blank = <music folder>/.mlo/downloads)", type: "text" },
         { k: "soulseek_autostart", label: "Start slskd with the app backend", type: "bool" },
         { k: "soulseek_share_library", label: "Share the music folder on the network", type: "bool" },
+        { k: "soulseek_share_dirs", label: "Extra shared folders (; separated, blank = whole music folder)", type: "text" },
+        { k: "soulseek_share_exclude", label: "Never share these paths (; separated)", type: "text" },
       ],
     },
     {
@@ -325,7 +340,7 @@ export default function SettingsPage() {
         { k: "soulseek_auto_digital_queries", label: "Digital query templates (; separated)", type: "text" },
         { k: "soulseek_auto_log_min_score", label: "Min .log score (0–100)", type: "number", min: 0, max: 100 },
         { k: "soulseek_auto_complete_ratio", label: "Required track completeness (0.5–1)", type: "number", min: 0.5, max: 1, step: 0.05 },
-        { k: "soulseek_auto_search_wait", label: "Search wait before scoring (seconds)", type: "number", min: 5, max: 300 },
+        { k: "soulseek_auto_search_wait", label: "Search window (seconds of quiet before slskd ends a query)", type: "number", min: 5, max: 300 },
       ],
     },
     {
@@ -347,15 +362,6 @@ export default function SettingsPage() {
         { k: "home_recommendations", label: "Include MusicBrainz recommendations", type: "bool" },
         { k: "home_rec_count", label: "Recommendations shown", type: "number", min: 4, max: 60 },
         { k: "home_recent_count", label: "Recently-added albums shown", type: "number", min: 4, max: 60 },
-      ],
-    },
-    {
-      title: "Updates & maintenance",
-      blurb: "Background update checks and diagnostics.",
-      fields: [
-        { k: "update_check_interval_days", label: "Check for updates every (days)", type: "number", min: 1, max: 30 },
-        { k: "soulseek_share_dirs", label: "Extra shared folders (; separated, blank = whole music folder)", type: "text" },
-        { k: "soulseek_share_exclude", label: "Never share these paths (; separated)", type: "text" },
       ],
     },
     {
@@ -419,7 +425,17 @@ export default function SettingsPage() {
     { k: "grade_check_key_bpm", label: "Key & BPM tags", type: "bool" },
     { k: "grade_check_lyrics_lang_tags", label: "Transform tags carry language (TRANSLATION-EN)", type: "bool" },
   ];
-  const ALL_CFG_KEYS = [...CFG_GROUPS.flatMap((g) => g.fields), ...GRADE_CHECK_KEYS].map((f) => f.k);
+  // Toggles the General tab renders by hand (they belong to no group tab) —
+  // listed here so they load, save and search like every other setting.
+  const GENERAL_TOGGLES: CfgField[] = [
+    { k: "auto_advance", label: "Auto-advance between Run All scripts", type: "bool" },
+    { k: "show_sidecar_files", label: "Show sidecar files (cue/log/lrc/accurip) in library", type: "bool" },
+  ];
+  const ALL_CFG_KEYS = [
+    ...CFG_GROUPS.flatMap((g) => g.fields),
+    ...GRADE_CHECK_KEYS,
+    ...GENERAL_TOGGLES,
+  ].map((f) => f.k);
   const [scriptCfg, setScriptCfg] = useState<Record<string, unknown>>({});
   const setCfg = (k: string, v: unknown) => setScriptCfg((c) => ({ ...c, [k]: v }));
   const [previewPath, setPreviewPath] = useState<string | null>(null);
@@ -447,12 +463,22 @@ export default function SettingsPage() {
     }
   };
 
-  // Derived from the shared script list so the Settings grid can never drift
-  // from the Optimization page (labels + which scripts exist).
-  const RUN_ALL_SCRIPTS: { id: number; label: string }[] = DEFAULT_RUN_ALL.map((id) => ({
-    id,
-    label: SCRIPT_LABEL[id] ?? `#${id}`,
-  }));
+  // The grid follows the live order (Run All executes exactly this list), so
+  // a tick can never move a script in the pipeline without saying so. Scripts
+  // that are switched off stay listed after the enabled ones, in factory order.
+  const runAllScripts: { id: number; label: string }[] = [
+    ...runAll,
+    ...DEFAULT_RUN_ALL.filter((id) => !runAll.includes(id)),
+  ].map((id) => ({ id, label: SCRIPT_LABEL[id] ?? `#${id}` }));
+
+  /** Tick / untick a script; a re-ticked script goes back to its default
+   * pipeline position instead of jumping to the end. */
+  const toggleRunAllScript = (id: number, on: boolean) =>
+    setRunAll((ids) => {
+      if (!on) return ids.filter((i) => i !== id);
+      const at = ids.filter((i) => DEFAULT_RUN_ALL.indexOf(i) < DEFAULT_RUN_ALL.indexOf(id)).length;
+      return [...ids.slice(0, at), id, ...ids.slice(at)];
+    });
 
   // Every per-script force switch. They also live in their own script tab;
   // both places bind to the same config keys, and the master toggle below
@@ -495,7 +521,6 @@ export default function SettingsPage() {
     { id: "videos", label: "Videos", section: "Scripts" },
     { id: "audiometa", label: "Key & BPM", section: "Scripts" },
     { id: "importtags", label: "Import & tags", section: "Scripts" },
-    { id: "updates", label: "Updates", section: "System" },
   ];
 
   const runPreview = async () => {
@@ -652,7 +677,7 @@ export default function SettingsPage() {
       ["grading", "Grading"], ["cdrips", "CD Rips"], ["videos", "Videos"],
       ["ai", "AI-assisted"], ["audiometa", "Key & BPM"], ["beets", "Beets tagging"],
       ["soulseek", "Soulseek (managed slskd)"], ["autoimport", "Auto-import"],
-      ["wishes", "Wishes"], ["home", "Home"], ["updates", "Updates"],
+      ["wishes", "Wishes"], ["home", "Home"],
       ["importtags", "Import & tag cleanup"],
     ].map(([tab, prefix]) => [
       tab,
@@ -677,6 +702,11 @@ export default function SettingsPage() {
     for (const c of GRADE_CHECK_KEYS) {
       if (c.label.toLowerCase().includes(needle) || c.k.toLowerCase().includes(needle)) {
         hits.push({ tab: "grading", group: "Grading checks", field: c.label });
+      }
+    }
+    for (const f of GENERAL_TOGGLES) {
+      if (f.label.toLowerCase().includes(needle) || f.k.toLowerCase().includes(needle)) {
+        hits.push({ tab: "general", group: "General", field: f.label });
       }
     }
     return hits.slice(0, 24);
@@ -880,28 +910,24 @@ export default function SettingsPage() {
                 <input className="input mt-1" type="number" min={0} value={workerLimit} onChange={(e) => setWorkerLimit(Number(e.target.value))} />
               </label>
               <div className="flex flex-wrap gap-x-6 gap-y-1.5">
-                <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
-                  <input type="checkbox" checked={!!scriptCfg.auto_advance} onChange={(e) => setCfg("auto_advance", e.target.checked)} />
-                  Auto-advance between Run All scripts
-                </label>
-                <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
-                  <input type="checkbox" checked={!!scriptCfg.show_sidecar_files} onChange={(e) => setCfg("show_sidecar_files", e.target.checked)} />
-                  Show sidecar files (cue/log/lrc/accurip) in library
-                </label>
+                {GENERAL_TOGGLES.map((f) => (
+                  <label key={f.k} className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
+                    <input type="checkbox" checked={!!scriptCfg[f.k]} onChange={(e) => setCfg(f.k, e.target.checked)} />
+                    {f.label}
+                  </label>
+                ))}
               </div>
               <details className="bg-zinc-950/40 rounded-lg border border-border px-3 py-2">
                 <summary className="text-xs font-medium cursor-pointer text-zinc-400 select-none">
                   Run All — scripts in order ({runAll.length} enabled)
                 </summary>
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-1.5 mt-2">
-                  {RUN_ALL_SCRIPTS.map((s) => (
+                  {runAllScripts.map((s) => (
                     <label key={s.id} className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
                       <input
                         type="checkbox"
                         checked={runAll.includes(s.id)}
-                        onChange={(e) =>
-                          setRunAll((ids) => (e.target.checked ? [...ids, s.id] : ids.filter((i) => i !== s.id)))
-                        }
+                        onChange={(e) => toggleRunAllScript(s.id, e.target.checked)}
                       />
                       <span className="text-zinc-600 w-4">{s.id}</span>
                       {s.label}
@@ -1162,7 +1188,7 @@ export default function SettingsPage() {
                   </div>
                   {beetsStatus?.installed && (
                     <details className="text-[11px]">
-                      <summary className="cursor-pointer text-zinc-500">generated beets config (server/data/beets-config.yaml)</summary>
+                      <summary className="cursor-pointer text-zinc-500">generated beets config ({"<music folder>/.mlo/data/beets-config.yaml"})</summary>
                       <pre className="mt-1 p-2 bg-zinc-950 border border-border rounded overflow-auto max-h-64 text-[10px] font-mono text-zinc-400">{beetsStatus.config}</pre>
                     </details>
                   )}

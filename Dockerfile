@@ -15,8 +15,10 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     MLO_MUSIC_FOLDER=/music
 
-# Core audio/image tools for the optimization pipeline. oxipng is not in
-# every Debian release, so it is installed best-effort.
+# Core audio/image tools for the optimization pipeline. oxipng is best-effort:
+# the app fetches it from Settings → Dependencies at runtime when the distro
+# package is missing, so the image must not fail to build over it (README says
+# the same).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         flac \

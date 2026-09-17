@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Image, Loader2, RefreshCw, ExternalLink, Check, X } from "lucide-react";
 import { api } from "../api";
 import { toast } from "../store";
-import type { CoverResult } from "../types";
+import type { CoverResult, CoverSourceCatalog } from "../types";
 
 const SOURCE_NAMES: Record<string, string> = {
   qobuz: "Qobuz",
@@ -20,12 +20,16 @@ const SOURCE_NAMES: Record<string, string> = {
   soundcloud: "SoundCloud",
 };
 
-/** Try to read a pixel width out of a CDN cover URL (best effort). */
+/** Pixel width parsed out of a CDN cover URL — a cheap HINT only; the result
+ *  actually chosen is measured from the loaded image (`naturalWidth`). */
 function urlWidth(url: string | null): number | null {
   if (!url) return null;
   const m = url.match(/(\d{2,5})x/);
   return m ? parseInt(m[1], 10) : null;
 }
+
+/** Fallback when the backend config has no usable `cover_target_size`. */
+const DEFAULT_TARGET = 1200;
 
 interface Props {
   albumPath: string;
@@ -33,9 +37,12 @@ interface Props {
   album: string;
   onClose: () => void;
   onApplied?: () => void;
+  /** Audio filenames in the album folder: apply the chosen image to THESE
+   *  tracks (one file, many tracks) instead of the album cover. */
+  tracks?: string[];
 }
 
-export default function CoverSearchModal({ albumPath, artist, album, onClose, onApplied }: Props) {
+export default function CoverSearchModal({ albumPath, artist, album, onClose, onApplied, tracks }: Props) {
   const [qArtist, setQArtist] = useState(artist);
   const [qAlbum, setQAlbum] = useState(album);
   const [results, setResults] = useState<CoverResult[] | null>(null);
@@ -43,13 +50,61 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<CoverResult | null>(null);
   const [applying, setApplying] = useState(false);
+  // The app's cover target (as graded by the backend) — read once.
+  const [target, setTarget] = useState(DEFAULT_TARGET);
+  // Real dimensions of the selected result's image, measured on load and keyed
+  // by URL so a stale measurement can never describe a different pick.
+  const [measured, setMeasured] = useState<{ url: string; w: number; h: number } | null>(null);
+  // Per-result real dimensions, keyed by the image URL. COV's event carries no
+  // size, so each result's BIG image is measured by loading it once — the
+  // browser caches it, and the same image is what "apply" then downloads.
+  const [sizes, setSizes] = useState<Record<string, { w: number; h: number }>>({});
+  // Source/region overrides for THIS search; seeded from the saved defaults.
+  const [cat, setCat] = useState<CoverSourceCatalog | null>(null);
+  const [srcSel, setSrcSel] = useState<string[]>([]);
+  const [country, setCountry] = useState("");
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  useEffect(() => {
+    api
+      .coverSources()
+      .then((c) => {
+        setCat(c);
+        setSrcSel((cur) => (cur.length ? cur : c.default_sources));
+        setCountry((cur) => cur || c.default_country);
+      })
+      .catch(() => {});
+  }, []);
+
+  /** Measure each result's big image (the one "apply" would download). */
+  useEffect(() => {
+    if (!results?.length) return;
+    let dead = false;
+    for (const r of results) {
+      const url = r.big || r.small;
+      if (!url || sizes[url]) continue;
+      const img = new window.Image();
+      img.onload = () => {
+        if (dead) return;
+        setSizes((s) => (s[url] ? s : { ...s, [url]: { w: img.naturalWidth, h: img.naturalHeight } }));
+      };
+      img.src = url;
+    }
+    return () => {
+      dead = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [results]);
 
   const search = async (a = qArtist, al = qAlbum) => {
     setLoading(true);
     setError(null);
     setSelected(null);
     try {
-      const r = await api.coverSearch(a.trim(), al.trim());
+      const r = await api.coverSearch(a.trim(), al.trim(), {
+        sources: srcSel.length ? srcSel : undefined,
+        country: country || undefined,
+      });
       setResults(r.results ?? []);
     } catch (e) {
       setError(String(e));
@@ -65,6 +120,16 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
   }, []);
 
   useEffect(() => {
+    api
+      .config()
+      .then((cfg) => {
+        const n = Number(cfg.cover_target_size);
+        if (Number.isFinite(n) && n > 0) setTarget(n);
+      })
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
@@ -75,13 +140,16 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
   const apply = async (r: CoverResult) => {
     if (!r.big && !r.small) return;
     setApplying(true);
+    setError(null);
     try {
-      const res = await api.coverFromUrl(albumPath, r.big || r.small!);
-      toast(`Cover saved as ${res.path.split("/").pop()}`);
+      const perTrack = tracks?.length ? tracks : undefined;
+      const res = await api.coverFromUrl(albumPath, r.big || r.small!, undefined, perTrack);
+      const name = res.path.split("/").pop();
+      toast(res.warning ? `Cover saved as ${name} — ${res.warning}` : `Cover saved as ${name}`);
       onApplied?.();
       onClose();
     } catch (e) {
-      toast(String(e));
+      setError(String(e));
     } finally {
       setApplying(false);
     }
@@ -96,11 +164,23 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
         <div className="flex items-center justify-between gap-3 p-4 border-b border-border">
           <h2 className="font-semibold flex items-center gap-2">
             <Image className="h-4 w-4 text-accent" /> Find cover
-            <span className="text-xs text-zinc-500 font-normal">covers.musichoarders.xyz</span>
+            <a
+              href="https://covers.musichoarders.xyz"
+              target="_blank"
+              rel="noreferrer"
+              className="text-xs text-zinc-500 font-normal hover:text-accent-soft hover:underline inline-flex items-center gap-1"
+            >
+              covers.musichoarders.xyz <ExternalLink className="h-3 w-3" />
+            </a>
           </h2>
           <button className="btn-ghost !p-1.5" onClick={onClose} title="Close">
             <X className="h-4 w-4" />
           </button>
+        </div>
+
+        <div className="px-4 py-2 border-b border-border text-[11px] text-zinc-500">
+          The MusicBrainz cover shown on the album may be wrong — open covers.musichoarders.xyz
+          above and pick the correct one there. Covers below {target}px are flagged.
         </div>
 
         <div className="p-4 flex flex-wrap gap-2 items-center border-b border-border">
@@ -122,7 +202,109 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
             Search
           </button>
+          {cat && (
+            <button
+              className={`btn-ghost !py-1.5 text-xs ml-auto ${pickerOpen ? "!text-accent" : ""}`}
+              onClick={() => setPickerOpen((v) => !v)}
+              title="Choose which cover sources and which region to search"
+            >
+              {srcSel.length}/{cat.active_source_limit} sources · {country.toUpperCase()}
+            </button>
+          )}
         </div>
+
+        {/* Per-search overrides. The saved defaults come from Settings; this
+            picker changes ONE search without touching them. */}
+        {pickerOpen && cat && (
+          <div className="px-4 py-3 border-b border-border bg-panel/50 space-y-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[11px] font-semibold text-zinc-400">Region</span>
+              <select
+                className="input !w-auto !py-1 text-xs"
+                value={country}
+                onChange={(e) => setCountry(e.target.value)}
+              >
+                {cat.countries.map((c) => (
+                  <option key={c} value={c}>{c.toUpperCase()}</option>
+                ))}
+              </select>
+              <span className="text-[10px] text-zinc-600">
+                The storefront the sources are asked about — it decides which
+                releases and artwork exist for a region.
+              </span>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[11px] font-semibold text-zinc-400">Sources</span>
+              <button
+                className="btn-ghost !py-0.5 !px-1.5 text-[10px]"
+                onClick={() => setSrcSel(cat.default_sources)}
+              >
+                Defaults
+              </button>
+              <button
+                className="btn-ghost !py-0.5 !px-1.5 text-[10px]"
+                onClick={() => setSrcSel(cat.sources.filter((s) => s.enabled).map((s) => s.id))}
+              >
+                All
+              </button>
+              <button className="btn-ghost !py-0.5 !px-1.5 text-[10px]" onClick={() => setSrcSel([])}>
+                None
+              </button>
+              <span className="text-[10px] text-zinc-500">
+                at most {cat.active_source_limit} per search
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-x-3 gap-y-1">
+              {cat.sources.map((s) => {
+                const on = srcSel.includes(s.id);
+                const full = !on && srcSel.length >= cat.active_source_limit;
+                return (
+                  <label
+                    key={s.id}
+                    className={`flex items-center gap-1.5 text-[11px] select-none ${
+                      full ? "text-zinc-600" : "text-zinc-300 cursor-pointer"
+                    }`}
+                    title={full ? `Already at the ${cat.active_source_limit}-source limit` : s.name}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      disabled={full}
+                      onChange={() =>
+                        setSrcSel((cur) =>
+                          cur.includes(s.id) ? cur.filter((x) => x !== s.id) : [...cur, s.id]
+                        )
+                      }
+                    />
+                    {s.color && (
+                      <span className="h-2 w-2 rounded-full shrink-0" style={{ background: s.color }} />
+                    )}
+                    {SOURCE_NAMES[s.id] ?? s.name}
+                    {!s.enabled && <span className="text-[9px] text-amber-400/80">off</span>}
+                  </label>
+                );
+              })}
+            </div>
+            <div className="flex items-center gap-2 text-[10px] text-zinc-600 flex-wrap">
+              <span>Changing these applies to the next search.</span>
+              <button
+                className="btn-ghost !py-0.5 !px-1.5 text-[10px]"
+                onClick={async () => {
+                  try {
+                    await api.saveConfig({ cover_sources: srcSel, cover_country: country });
+                    toast(`Saved as the default cover search: ${srcSel.length} source(s), ${country.toUpperCase()}`);
+                    setCat((c) => (c ? { ...c, saved_sources: srcSel, saved_country: country } : c));
+                  } catch (e) {
+                    toast(String(e));
+                  }
+                }}
+                title="Make this source list + region the default for every future cover search"
+              >
+                <Check className="h-3 w-3" /> Save as default
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="flex-1 overflow-y-auto p-4">
           {error && <div className="text-red-400 text-sm p-3 bg-red-950/40 rounded-lg border border-red-900">{error}</div>}
@@ -137,7 +319,14 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
           {results && results.length > 0 && (
             <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
               {results.map((r, i) => {
-                const px = urlWidth(r.big || r.small);
+                // Real measured size wins; the CDN URL's own hint is a
+                // fallback for an image that has not loaded yet (and is absent
+                // entirely on sources like Apple, whose URL carries no size —
+                // which is why those results showed no resolution at all).
+                const big = r.big || r.small;
+                const dim = big ? sizes[big] : undefined;
+                const px = dim?.w ?? urlWidth(big);
+                const low = px != null && px < target;
                 return (
                   <button
                     key={`${r.source}-${i}`}
@@ -165,7 +354,13 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
                         <span className="text-[10px] font-semibold uppercase tracking-wider text-accent-soft bg-accent/10 border border-accent/25 rounded px-1 py-px">
                           {SOURCE_NAMES[r.source] ?? r.source}
                         </span>
-                        {px != null && <span className="text-[10px] text-zinc-500">{px}px</span>}
+                        <span
+                          className={`text-[10px] tabular-nums ${low ? "text-amber-400" : "text-zinc-500"}`}
+                          title={dim ? "Measured from the full-size image" : "From the image URL — still loading"}
+                        >
+                          {dim ? `${dim.w}×${dim.h}` : px != null ? `${px}px` : "…"}
+                          {low ? " · low" : ""}
+                        </span>
                       </div>
                       <div className="text-xs font-medium truncate">{r.title ?? "—"}</div>
                       <div className="text-[11px] text-zinc-500 truncate">
@@ -183,14 +378,43 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
         {selected && (
           <div className="border-t border-border p-4 flex items-center gap-4 bg-zinc-950/50">
             <img
+              key={selected.big || selected.small || ""}
               src={selected.big || selected.small || ""}
               alt="preview"
               className="h-24 w-24 rounded-lg border border-border object-cover"
               referrerPolicy="no-referrer"
+              onLoad={(e) => {
+                const el = e.currentTarget;
+                if (el.naturalWidth > 0 && el.naturalHeight > 0) {
+                  setMeasured({
+                    url: selected.big || selected.small || "",
+                    w: el.naturalWidth,
+                    h: el.naturalHeight,
+                  });
+                }
+              }}
             />
             <div className="flex-1 min-w-0 text-sm">
               <div className="font-medium truncate">{selected.title ?? "—"}</div>
               <div className="text-zinc-400 truncate">{selected.artist ?? "—"}</div>
+              {(() => {
+                const hint = urlWidth(selected.big || selected.small);
+                const m = measured?.url === (selected.big || selected.small) ? measured : null;
+                const dim = m ? `${m.w}×${m.h}px` : hint ? `~${hint}px (estimated)` : null;
+                const low = m ? m.w < target : hint != null && hint < target;
+                if (!dim) return null;
+                return (
+                  <div className={`text-xs mt-0.5 ${low ? "text-amber-400" : "text-zinc-500"}`}>
+                    {dim}
+                    {low && ` · low resolution (target ${target}px)`}
+                  </div>
+                );
+              })()}
+              {tracks && tracks.length > 0 && (
+                <div className="text-xs text-zinc-500 mt-0.5">
+                  Applies to {tracks.length} selected track{tracks.length === 1 ? "" : "s"} — one image, no copies
+                </div>
+              )}
               {selected.url && (
                 <a
                   href={selected.url}

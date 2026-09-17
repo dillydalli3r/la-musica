@@ -137,13 +137,13 @@ def main():
     stats = remux.run_remux_videos(cfg)
     # Target container is MKV: vob/avi/webm convert; multi.mkv is already
     # MKV (untouched); mp4 excluded while video_process_mp4 is off;
-    # broken.vob is unreadable (skipped with a message, not an error).
+    # broken.vob is unreadable — counted as the failure it is, not as a skip.
     check("converted 3 videos", stats["converted"] == 3, stats)
-    check("corrupt skipped", stats["skipped_count"] == 2, stats)
+    check("only the already-MKV source skipped", stats["skipped_count"] == 1, stats)
     check("mp4 untouched (process_mp4 off)",
           not os.path.isfile(os.path.join(base, "in", "sample_aac.mkv")))
     check("corrupt reported (not crashed)",
-          any("broken.vob" in (e or "") or "broken.vob" in str(stats) for e in stats["errors"]) or True)
+          any("broken.vob" in (e or "") or "broken.vob" in str(stats) for e in stats["errors"]))
     check("no bytes removed when keeping originals", stats["total_bytes_removed"] == 0)
 
     outdir = os.path.join(base, "in")
@@ -201,10 +201,14 @@ def main():
     check("mp4 -> flac audio", a == ["flac"], a)
     check("stray mp4 gone", not os.path.isfile(os.path.join(outdir, "sample_aac.mp4")))
 
-    print("\n== classification: videos are first-class tracks ==")
+    print("\n== classification: videos are their own category ==")
     from mlo.grader import _classify_file
-    check("vob classified music (video tracks are first-class)", _classify_file("x.vob") == "music")
-    check("mp4 classified music", _classify_file("x.mp4") == "music")
+    # Music-video containers are first-class tracks but their own file
+    # category: grading gates them with grade_include_video, so folding them
+    # into "music" made that gate a no-op (and let a raw VOB fail the generic
+    # disallowed-files check instead of the dedicated video check).
+    check("vob classified video", _classify_file("x.vob") == "video")
+    check("mp4 classified video", _classify_file("x.mp4") == "video")
     check("m4a classified music", _classify_file("x.m4a") == "music")
 
     shutil.rmtree(base, ignore_errors=True)

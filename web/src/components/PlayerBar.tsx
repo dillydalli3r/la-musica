@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type SyntheticEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type SyntheticEvent } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -62,7 +62,7 @@ function ScrollingText({ text, className }: {
     <span ref={wrapRef} className={`block overflow-hidden min-w-0 ${className ?? ""}`}>
       <span
         ref={textRef}
-        className={`block whitespace-nowrap ${shift > 0 ? "will-change-transform" : ""}`}
+        className={`block whitespace-nowrap ${shift > 0 ? "title-marquee will-change-transform" : ""}`}
         style={
           shift > 0
             ? ({
@@ -146,10 +146,16 @@ export default function PlayerBar() {
   const idle = !current;
   const isVideo = !!current && (isVideoFile(current.file) || isVideoFile(current.path));
   const videoRef = useRef<HTMLVideoElement>(null);
-  // The popout card that owns the video element between fullscreen visits —
-  // the fullscreen player moves the element back here when it closes.
-  const videoHomeRef = useRef<HTMLDivElement>(null);
   const media = () => (isVideo ? videoRef.current : audio()) as HTMLMediaElement | null;
+  // The rAF lyric clock (fullscreen + sidebar) keys its effect on this
+  // callback's identity; a fresh closure per render (PlayerBar re-renders
+  // several times a second) tore down and rebuilt the 60 fps loop, so the
+  // function reads the live element through a ref instead.
+  const mediaRef = useRef(media);
+  useEffect(() => {
+    mediaRef.current = media;
+  });
+  const getAudioTime = useCallback(() => mediaRef.current()?.currentTime ?? 0, []);
   // Codec probe for the current video: `native === false` means the browser
   // cannot decode this file (container or codecs) and the player must start
   // on the live transcode instead of waiting for a playback error — this is
@@ -328,8 +334,18 @@ export default function PlayerBar() {
     preloadedPath.current = null;
     const el = audio();
     if (!el) return;
+    // Exactly one decoder: the element we are NOT loading into stops here.
+    // Usually it is just the idle preload slot — but when the skip lands on a
+    // preloaded track (the last 10s of a song), the OLD element is the one
+    // still making sound, and leaving it running played both tracks at once.
+    (el === aRef.current ? bRef.current : aRef.current)?.pause();
     el.src = api.streamUrl(track.path);
     setElPath(el, track.path);
+    // The active element is whichever one the current track was just loaded
+    // into — derived here (the single load point) instead of the old boolean
+    // that only flipped on a gapless handover. That flag drifting is what let
+    // the near-end preload overwrite the audio that was playing.
+    activeIsA.current = el === aRef.current;
     el.playbackRate = speed; // fresh <src> resets the rate
     el.play().catch(() => {});
     try { videoRef.current?.pause(); } catch { /* ignore */ }
@@ -432,8 +448,10 @@ export default function PlayerBar() {
           setPlaying(current.path);
         }
       } else if (code === "BracketLeft") {
+        if (document.querySelector("[data-lrc-editor]")) return; // the lyrics editor owns its own speed bindings
         setSpeed((s) => Math.max(0.5, Math.round((s - 0.25) * 100) / 100));
       } else if (code === "BracketRight") {
+        if (document.querySelector("[data-lrc-editor]")) return;
         setSpeed((s) => Math.min(2, Math.round((s + 0.25) * 100) / 100));
       } else if (code === "Digit0") {
         setSpeed(1);
@@ -570,10 +588,26 @@ export default function PlayerBar() {
       return;
     }
     const next = index + 1;
+    // End of the queue, no shuffle, no repeat: the queue popover promises
+    // "it ends after this track", so it ends — pausing instead of silently
+    // wrapping to track 1. The explicit Next button still wraps (step()).
+    if (!shuffle && next >= queue.length) {
+      media()?.pause();
+      setPlaying(null);
+      return;
+    }
     if (!shuffle && next < queue.length && preloaded.current === next) {
       swapped.current = true;
-      activeIsA.current = !activeIsA.current;
-      const el = audio(); // now the preloaded element
+      // The handover element is the one that is NOT holding the track that
+      // just finished — the preload wrote the incoming track there. Resolving
+      // through audio() here was wrong: it resolves against queue[index] and
+      // this tick still has the OLD index, so it returned the DEAD element
+      // and play() restarted the finished song from 0 while the bar showed the
+      // next row (and the load effect then consumed `swapped` without loading
+      // the real next track — silence, frozen clock, sticky).
+      const el = pathOnA.current === queue[index]?.path ? bRef.current : aRef.current;
+      // Keep the flag consistent with whichever element actually plays.
+      activeIsA.current = el === aRef.current;
       setIndex(next);
       setPlaying(queue[next]?.path ?? null);
       setTime(0);
@@ -1128,35 +1162,40 @@ export default function PlayerBar() {
         </div>
 
         {/* music-video popout: the REAL decoder (with sound) behind every
-            video — visible during default playback. The fullscreen player
-            ADOPTS this same element (a plain DOM move, no remount), so there
-            is exactly one decoder, one network stream and no drift; on exit
-            it returns right here. */}
-        {isVideo && current && (
+            video. It is portaled to <body> and never moves in the DOM — the
+            fullscreen player only restyles it to fill the viewport (z-40,
+            just under the z-50 overlay), so there is exactly one decoder, one
+            network stream, no drift and no re-parenting React could trip
+            over when the track changes while the overlay is open. */}
+        {isVideo && current && createPortal(
           <div
-            ref={videoHomeRef}
-            className={fullscreen ? "hidden" : "absolute right-3 bottom-[5.25rem] z-30 w-80 max-w-[80vw] rounded-xl overflow-hidden border border-border bg-black shadow-2xl"}
+            className={fullscreen
+              ? "fixed inset-0 z-40 bg-black"
+              : "fixed right-3 bottom-[5.25rem] z-[15] w-80 max-w-[80vw] rounded-xl overflow-hidden border border-border bg-black shadow-2xl"}
           >
-            <div className="flex items-center gap-2 px-2.5 py-1.5 bg-zinc-950/90">
-              <span className="text-[11px] text-zinc-300 break-words flex-1 min-w-0">{displayTitle}</span>
-              <button
-                className="p-1 rounded hover:bg-white/10 text-zinc-400 hover:text-white shrink-0"
-                onClick={() => openFullscreen()}
-                title="Open fullscreen player"
-              >
-                <Maximize2 className="h-3.5 w-3.5" />
-              </button>
-              <button
-                className="p-1 rounded hover:bg-white/10 text-zinc-400 hover:text-white shrink-0"
-                onClick={() => step(1)}
-                title="Skip video"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </div>
+            {!fullscreen && (
+              <div className="flex items-center gap-2 px-2.5 py-1.5 bg-zinc-950/90">
+                <span className="text-[11px] text-zinc-300 break-words flex-1 min-w-0">{displayTitle}</span>
+                <button
+                  className="p-1 rounded hover:bg-white/10 text-zinc-400 hover:text-white shrink-0"
+                  onClick={() => openFullscreen()}
+                  title="Open fullscreen player"
+                >
+                  <Maximize2 className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  className="p-1 rounded hover:bg-white/10 text-zinc-400 hover:text-white shrink-0"
+                  onClick={() => step(1)}
+                  title="Skip video"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
             <VideoPopout
               path={current.path}
               videoRef={videoRef}
+              fill={fullscreen}
               preferTranscode={preferTranscode}
               onTime={onVideoTime}
               onMeta={(e) => {
@@ -1168,7 +1207,8 @@ export default function PlayerBar() {
               }}
               onEnded={handleEnded}
             />
-          </div>
+          </div>,
+          document.body
         )}
 
         {/* portal to <body>: the fullscreen player must escape the right
@@ -1183,8 +1223,6 @@ export default function PlayerBar() {
               playing={!!playing}
               time={time}
               duration={effDuration}
-              videoEl={videoRef}
-              videoHome={videoHomeRef}
               shuffle={shuffle}
               loop={loop}
               liked={liked}
@@ -1200,7 +1238,7 @@ export default function PlayerBar() {
               onToggleLoop={() => setLoop(!loop)}
               onToggleLike={toggleLike}
               onClose={closeFullscreen}
-              getAudioTime={() => media()?.currentTime ?? 0}
+              getAudioTime={getAudioTime}
               speed={speed}
               onSpeedChange={setSpeed}
             />,
@@ -1218,7 +1256,7 @@ export default function PlayerBar() {
               a.currentTime = t;
               setTime(t);
             }}
-            getAudioTime={() => media()?.currentTime ?? 0}
+            getAudioTime={getAudioTime}
             onClose={() => setLyricsOpen(false)}
           />
         )}
@@ -1233,6 +1271,7 @@ export default function PlayerBar() {
 function VideoPopout({
   path,
   videoRef,
+  fill = false,
   preferTranscode = false,
   onTime,
   onMeta,
@@ -1240,6 +1279,10 @@ function VideoPopout({
 }: {
   path: string;
   videoRef: React.RefObject<HTMLVideoElement | null>;
+  /** Draw filling the viewport (fullscreen) instead of the popout card's
+   * aspect-ratio box — and drop the native controls, since the viewer draws
+   * its own transport over the picture. */
+  fill?: boolean;
   preferTranscode?: boolean;
   onTime: (e: SyntheticEvent<HTMLVideoElement>) => void;
   onMeta: (e: SyntheticEvent<HTMLVideoElement>) => void;
@@ -1257,7 +1300,7 @@ function VideoPopout({
   const live = errorFallback || preferTranscode;
   if (failed) {
     return (
-      <div className="p-3 text-[11px] text-zinc-400">
+      <div className="flex items-center justify-center p-6 text-center text-[11px] text-zinc-400">
         This video can't play in the browser. Remux it (album page → Remux videos) or open the file externally.
       </div>
     );
@@ -1267,7 +1310,7 @@ function VideoPopout({
       key={`${path}|${live ? "x" : "direct"}`}
       ref={videoRef}
       src={api.videoStreamUrl(path, live)}
-      controls
+      controls={!fill}
       autoPlay
       playsInline
       preload="auto"
@@ -1279,7 +1322,7 @@ function VideoPopout({
         if (!live) setErrorFallback(true);
         else setFailed(true);
       }}
-      className="w-full aspect-video bg-black"
+      className={fill ? "h-full w-full object-contain bg-black" : "w-full aspect-video bg-black"}
     >
       {tracks.map((t) => (
         <track key={t.key} kind="subtitles" src={t.src} label={t.label} default={t.default} />

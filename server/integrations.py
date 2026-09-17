@@ -102,7 +102,9 @@ def mb_get_cached(endpoint, params=None, timeout=30.0, retries=5):
                 pass  # keep the stale copy on refresh failure
             finally:
                 with _BROWSE_LOCK:
-                    _INFLIGHT.pop(key, None)
+                    ev = _INFLIGHT.pop(key, None)
+                if ev is not None:
+                    ev.set()  # wake waiters — they read the cache we just wrote
 
         with _BROWSE_LOCK:
             if _INFLIGHT.get(key) is None:
@@ -126,16 +128,18 @@ def mb_get_cached(endpoint, params=None, timeout=30.0, retries=5):
             flight = _INFLIGHT[key] = threading.Event()
     try:
         data = mb_get(endpoint, params, timeout=timeout, retries=retries)
+        with _BROWSE_LOCK:
+            # Write the cache BEFORE waking waiters: a woken reader that
+            # found an empty cache would 500 a fetch that actually worked.
+            _BROWSE_CACHE[key] = (time.time(), data)
+            # keep the cache from growing without bound
+            if len(_BROWSE_CACHE) > 600:
+                for k in list(_BROWSE_CACHE)[:200]:
+                    _BROWSE_CACHE.pop(k, None)
     finally:
         with _BROWSE_LOCK:
             _INFLIGHT.pop(key, None)
         flight.set()
-    with _BROWSE_LOCK:
-        _BROWSE_CACHE[key] = (time.time(), data)
-        # keep the cache from growing without bound
-        if len(_BROWSE_CACHE) > 600:
-            for k in list(_BROWSE_CACHE)[:200]:
-                _BROWSE_CACHE.pop(k, None)
     return data
 
 
@@ -278,7 +282,14 @@ def release_lookup(mbid):
         "catalog_number": catalog_number,
         "label": label_name,
         "release_group_id": (data.get("release-group") or {}).get("id"),
+        # `release_type` keeps its historical lowercase "+"-joined spelling —
+        # it is written into the RELEASETYPE tag and drives the naming script
+        # and grading. The structured pair below is for display: MusicBrainz
+        # splits release types into primary (Album/EP/Single/Broadcast/Other)
+        # and secondary (Soundtrack/Live/Compilation/Remix/Demo/...).
         "release_type": release_type,
+        "primary_type": rg_obj.get("primary-type") or "",
+        "secondary_types": [s for s in (rg_obj.get("secondary-types") or [])],
         "artists": release_artists,
         "genres": _title_genres(data),
         "media": tracks,
@@ -423,6 +434,28 @@ def _credit(node):
     )
 
 
+def _rg_types(node):
+    """(primary_type, secondary_types) of a node's release group.
+
+    MusicBrainz embeds the release group as an OBJECT for release SEARCH
+    results but as a bare id STRING for browse results (inc=release-groups);
+    an id, or anything else unexpected, must read as "type unknown" instead
+    of raising AttributeError and failing the whole page."""
+    rg = node.get("release-group") if isinstance(node, dict) else None
+    if not isinstance(rg, dict):
+        return "", []
+    return ((rg.get("primary-type") or ""),
+            [s for s in (rg.get("secondary-types") or []) if s])
+
+
+def _isrc(node):
+    """The ISRC string of an isrcs entry (an entity wraps it, a recording
+    lookup returns it bare)."""
+    if isinstance(node, dict):
+        return str(node.get("isrc") or "")
+    return str(node or "")
+
+
 def _media_summary(node):
     """'2×CD + DVD' style summary of an entity's media list."""
     parts = []
@@ -447,14 +480,18 @@ def _release_counts(node):
     return total, breakdown
 
 
-def search_mb(entity, query, limit=100, mode="free", offset=0):
+def search_mb(entity, query, limit=100, mode="free", offset=0,
+              primary_type="", secondary_type=""):
     """Normalized MB search rows for the four browsable entities.
 
     mode="free" is the plain full-text search; for releases, mode="catno" /
     "barcode" search by catalog number / barcode (catalog numbers like
-    'SRCS 8757' are how pressings are identified). Returns {rows, total} —
-    total is MusicBrainz's match count so the UI can offer deeper paging
-    (searches cap at 100 rows per request)."""
+    'SRCS 8757' are how pressings are identified). primary_type /
+    secondary_type narrow releases and release groups with MusicBrainz's own
+    type qualifiers — the only way to ask the index for "albums that are
+    soundtracks" instead of filtering the rows afterwards. Returns
+    {rows, total} — total is MusicBrainz's match count so the UI can offer
+    deeper paging (searches cap at 100 rows per request)."""
     if entity not in MB_ENTITIES:
         raise ValueError("entity must be artist, release-group, release or recording")
     q = query
@@ -462,6 +499,13 @@ def search_mb(entity, query, limit=100, mode="free", offset=0):
         q = f'catno:"{query}"'
     elif entity == "release" and mode == "barcode":
         q = f"barcode:{query}"
+    if entity in ("release", "release-group"):
+        # quoted: several secondary types are multi-word ("Audio drama",
+        # "DJ-mix", "Field recording")
+        if primary_type:
+            q = f'{q} AND primarytype:"{primary_type}"'
+        if secondary_type:
+            q = f'{q} AND secondarytype:"{secondary_type}"'
     data = mb_get_cached(entity, {"query": q, "limit": limit, "offset": offset, "fmt": "json"})
     # MB search responses use plural collection keys
     key = {"artist": "artists", "release-group": "release-groups",
@@ -498,6 +542,11 @@ def search_mb(entity, query, limit=100, mode="free", offset=0):
                 if li.get("catalog-number"):
                     catalog_number = li["catalog-number"]
                     break
+            # MB's release search embeds the release group with its PRIMARY
+            # type only (the search index carries no secondary types) — that
+            # is still what separates an album pressing from a single/EP.
+            # `_rg_types` keeps a bare-id embed from crashing the request.
+            rg_primary, rg_secondary = _rg_types(item)
             row.update({
                 "artist": _credit(item),
                 "date": item.get("date") or "",
@@ -506,6 +555,8 @@ def search_mb(entity, query, limit=100, mode="free", offset=0):
                 "formats": _media_summary(item),
                 "track_count": sum((m.get("track-count") or 0) for m in item.get("media") or []),
                 "catalog_number": catalog_number,
+                "primary_type": rg_primary,
+                "secondary_types": rg_secondary,
             })
         else:  # recording
             row.update({
@@ -629,6 +680,7 @@ def recording_browse(mbid, limit=300, offset=0):
         key=lambda r: r.get("date") or "9999",
     ):
         track_count, track_breakdown = _release_counts(r)
+        rg_primary, rg_secondary = _rg_types(r)
         releases.append({
             "id": r.get("id"),
             "title": r.get("title"),
@@ -639,7 +691,11 @@ def recording_browse(mbid, limit=300, offset=0):
             "disc_count": len(r.get("media") or []),
             "track_count": track_count,
             "track_breakdown": track_breakdown,
-            "release_group": (r.get("release-group") or {}).get("primary-type") or "",
+            # the release group's full type: primary (Album/EP/Single/...) plus
+            # secondary (Soundtrack/Live/Compilation/...), so a score album
+            # reads "Album + Soundtrack" instead of a bare "Album".
+            "primary_type": rg_primary,
+            "secondary_types": rg_secondary,
         })
     return {
         "id": data.get("id"),
@@ -651,7 +707,10 @@ def recording_browse(mbid, limit=300, offset=0):
         ),
         "length": data.get("length"),
         "genres": _title_genres(data),
-        "isrcs": [i.get("isrc") for i in data.get("isrcs") or [] if i.get("isrc")],
+        # a recording lookup returns bare ISRC strings ("USRC17607839") while
+        # some other entities wrap them in {"isrc": ...} — .get() on a string
+        # raised AttributeError and 502'd the whole recording page.
+        "isrcs": [v for v in (_isrc(i) for i in data.get("isrcs") or []) if v],
         "total": total,
         "offset": offset,
         "releases": releases,
@@ -851,38 +910,118 @@ COV_FALLBACK_SOURCES = [
     "itunes", "discogs", "musicbrainz",
 ]
 
+_cov_info_cache = {"at": 0.0, "info": {}}
 _cov_sources_cache = {"at": 0.0, "ids": []}
+# COV's own default when a request omits `country`.
+COV_DEFAULT_COUNTRY = "us"
+
+
+def cov_catalog(timeout=15.0):
+    """Everything the UI needs to configure a cover search: the selectable
+    sources, the regions, and COV's own active-source cap.
+
+    Cached for an hour — it is static metadata, and the UI asks for it every
+    time the finder opens. A failure falls back to the built-in source list so
+    the finder still works offline (with the region list reduced to the one
+    default, since the real list comes from the server)."""
+    import time as _time
+    now = _time.time()
+    if _cov_info_cache["info"] and now - _cov_info_cache["at"] < 3600:
+        return _cov_info_cache["info"]
+    try:
+        raw = httpx.get(f"{COV_BASE}/api/info",
+                        headers={"User-Agent": COV_UA},
+                        timeout=timeout).json()
+    except Exception:
+        raw = {}
+    sources = []
+    for s in raw.get("sources") or []:
+        if not isinstance(s, dict) or not s.get("id"):
+            continue
+        sources.append({
+            "id": s["id"],
+            "name": s.get("name") or s["id"],
+            "enabled": bool(s.get("enabled", True)),
+            "color": s.get("color"),
+            "countries": [str(c).lower() for c in (s.get("countries") or [])],
+        })
+    if not sources:
+        sources = [{"id": i, "name": i, "enabled": True, "color": None,
+                    "countries": []} for i in COV_FALLBACK_SOURCES]
+    countries = [str(c).lower() for c in (raw.get("countries") or [])]
+    info = {
+        "sources": sources,
+        "countries": countries or [COV_DEFAULT_COUNTRY],
+        "active_source_limit": int(raw.get("activeSourceLimit") or COV_MAX_SOURCES),
+    }
+    _cov_info_cache.update(at=now, info=info)
+    return info
+
+
+def _cov_enabled_ids(timeout=15.0):
+    """Source ids COV reports as enabled, in priority order."""
+    enabled = [s["id"] for s in cov_catalog(timeout)["sources"] if s.get("enabled", True)]
+    ordered = [s for s in COV_SOURCE_PRIORITY if s in enabled]
+    ordered += [s for s in enabled if s not in ordered]
+    return ordered or list(COV_FALLBACK_SOURCES)
 
 
 def _cov_sources(timeout=15.0):
-    """Enabled source ids from /api/info, cached for an hour."""
-    import time as _time
-    now = _time.time()
-    if _cov_sources_cache["ids"] and now - _cov_sources_cache["at"] < 3600:
-        return _cov_sources_cache["ids"]
-    try:
-        info = httpx.get(f"{COV_BASE}/api/info",
-                         headers={"User-Agent": COV_UA},
-                         timeout=timeout).json()
-        enabled = [s["id"] for s in info.get("sources", []) if s.get("enabled", True)]
-    except Exception:
-        enabled = list(COV_FALLBACK_SOURCES)
-    ordered = [s for s in COV_SOURCE_PRIORITY if s in enabled]
-    ordered += [s for s in enabled if s not in ordered]
-    ids = ordered[:COV_MAX_SOURCES]
-    if not ids:
-        ids = list(COV_FALLBACK_SOURCES)
-    _cov_sources_cache.update(at=now, ids=ids)
-    return ids
+    """Default source ids for a search, capped at COV's active limit."""
+    ids = _cov_enabled_ids(timeout)[:cov_catalog(timeout)["active_source_limit"]]
+    return ids or list(COV_FALLBACK_SOURCES)
 
 
-def cover_search(artist, album, limit=40, timeout=60.0):
+def resolve_cov_search(sources=None, country=None, cfg=None):
+    """(source_ids, country) for a search, honouring the caller, then the
+    saved defaults, then COV's own defaults.
+
+    `sources`/`country` come from the finder UI (a per-search override);
+    `cfg` holds the SAVED defaults (`cover_sources`, `cover_country`) used
+    when the caller passes nothing. Every id is validated against the catalog
+    so a stale saved setting cannot silently search nothing, and the list is
+    trimmed to COV's cap — it rejects a longer one outright."""
+    cat = cov_catalog()
+    known = {s["id"] for s in cat["sources"]}
+    limit = cat["active_source_limit"]
+
+    chosen = [str(s).strip() for s in (sources or []) if str(s).strip()]
+    if not chosen:
+        try:
+            from mlo.config import load_config
+            chosen = [str(s).strip() for s in
+                      ((cfg or load_config()).get("cover_sources") or [])
+                      if str(s).strip()]
+        except Exception:
+            chosen = []
+    chosen = [s for s in chosen if s in known]
+    if not chosen:
+        chosen = _cov_enabled_ids()
+
+    c = str(country or "").strip().lower()
+    if not c:
+        try:
+            from mlo.config import load_config
+            c = str((cfg or load_config()).get("cover_country") or "").strip().lower()
+        except Exception:
+            c = ""
+    if c not in cat["countries"]:
+        c = COV_DEFAULT_COUNTRY
+    return chosen[:limit], c
+
+
+def cover_search(artist, album, limit=40, timeout=60.0, sources=None,
+                 country=None, cfg=None):
     """Search COV for album covers. Returns a list of
     {source, small, big, title, artist, tracks, url} dicts sorted by the
-    site's relevance order, capped at *limit*."""
+    site's relevance order, capped at *limit*.
+
+    `sources` and `country` override the saved defaults for this one search
+    (the finder's source picker and region dropdown)."""
     if not artist and not album:
         raise ValueError("artist or album is required")
-    body = {"country": "us", "sources": _cov_sources()}
+    src_ids, ctry = resolve_cov_search(sources, country, cfg)
+    body = {"country": ctry, "sources": src_ids}
     if artist:
         body["artist"] = artist
     if album:

@@ -79,7 +79,7 @@ def lrclib_fetch(artist, track, album=None, duration=None):
         return rec
     # The exact lookup is strict — retry as a search, without the album
     # filter first (it can hurt matches).
-    for album_filter in (None, album):
+    for album_filter in dict.fromkeys((None, album)):
         search = {"track_name": track, "artist_name": artist}
         if album_filter:
             search["album_name"] = album_filter

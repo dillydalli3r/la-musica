@@ -308,7 +308,9 @@ def _apply(config, text, mode, lang=""):
 
 
 def _has_translation(tr_val, path, lang, sidecars):
-    """Already processed? Embedded tag OR any accepted sidecar counts."""
+    """Already processed? Embedded tag OR any accepted sidecar counts.
+    *tr_val* comes from an exact per-language tag read — another language's
+    translation must not mark this one as done."""
     if str(tr_val or "").strip():
         return True
     if sidecars:
@@ -431,7 +433,7 @@ def run_lyrics_xlit(config):
                 if do_trans:
                     for lang in langs:
                         if not force and _has_translation(
-                                af.get_lyrics_transform("TRANSLATION", lang),
+                                af.get_lyrics_transform("TRANSLATION", lang, exact=True),
                                 path, lang, sidecars):
                             continue
                         trans, ok = _apply(config, text, "translate", lang)

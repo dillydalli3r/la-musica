@@ -10,12 +10,43 @@ nothing is lost.
 """
 
 import os
+import signal
 import subprocess
 import threading
 
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 _ACTIVE = {}
 _ACTIVE_LOCK = threading.Lock()
+
+
+def _kill_tree(proc):
+    """Kill a tool and every process it spawned.
+
+    On timeout the direct child is often a shell (``shell=True`` -> cmd.exe)
+    or an encoder wrapper whose real work keeps running and keeps its output
+    file and temp dir locked. Windows has no job object here, so taskkill /T
+    walks the tree; POSIX children get their own session (see run_tool) and
+    are killed as a group.
+    """
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                creationflags=CREATE_NO_WINDOW,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:
+            pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
 
 
 def active_process_count():
@@ -56,6 +87,10 @@ def run_tool(*args, **kwargs):
     # When input is provided, Popen needs stdin=PIPE to actually feed it
     if input_data is not None and "stdin" not in kwargs:
         kwargs["stdin"] = subprocess.PIPE
+    # Own process group on POSIX so a timeout can kill the whole tree
+    # (Windows uses taskkill /T instead; the flag is POSIX-only).
+    if os.name != "nt":
+        kwargs.setdefault("start_new_session", True)
 
     proc = subprocess.Popen(*args, **kwargs)
     with _ACTIVE_LOCK:
@@ -63,10 +98,7 @@ def run_tool(*args, **kwargs):
     try:
         stdout, stderr = proc.communicate(input=input_data, timeout=timeout)
     except subprocess.TimeoutExpired:
-        try:
-            proc.kill()
-        except Exception:
-            pass
+        _kill_tree(proc)
         try:
             stdout, stderr = proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:

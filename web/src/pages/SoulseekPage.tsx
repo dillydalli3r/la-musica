@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowDownUp, Download, Eye, EyeOff, FolderOpen, Loader2, Play, Power, RefreshCw, Search,
   User, Zap, Square, FileCheck2, FileVideo, Music2, Save, Tag, Trash2, PackageOpen,
   Star, Plus, CheckCircle2, CircleDashed, AlertTriangle, ExternalLink, RotateCw, ChevronDown, ChevronRight, Link2,
+  MessageSquare,
 } from "lucide-react";
 import { api } from "../api";
+import type { SlskAutoFile, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskSearchProgress, SlskTransfer } from "../api";
 import { toast } from "../store";
 import { EmptyState } from "../components/Badges";
 import type { Wish } from "../types";
@@ -21,6 +23,10 @@ interface SlskFile {
   slot: boolean;
   speed: number;
   queue: number;
+  /** codec hint from the peer (slskd reports the extension + sample facts) */
+  ext?: string;
+  bit_depth?: number | null;
+  sample_rate?: number | null;
 }
 
 const fmtRate = (n: number | null | undefined) => {
@@ -60,8 +66,26 @@ interface SlskGroup {
   isCdRip: boolean; // log + cue present → a verifiable CD rip
 }
 
-const AUDIO_EXTS = new Set(["FLAC", "MP3", "M4A", "AAC", "OGG", "OPUS", "WAV", "WMA", "APE", "WV", "AIFF", "ALAC"]);
-const LOSSLESS = new Set(["FLAC", "WAV", "APE", "WV", "AIFF", "ALAC"]);
+/** Every audio container the network offers. Lossy and lossless both count —
+ *  the search shows what is there and marks which is which. */
+const AUDIO_EXTS: Record<string, true> = {
+  FLAC: true, WAV: true, AIFF: true, AIF: true, ALAC: true, APE: true, WV: true,
+  SHN: true, TTA: true, DSF: true, DFF: true,
+  M4A: true, MP4: true, AAC: true, MP3: true, OGG: true, OGA: true, OPUS: true,
+  WMA: true, MPC: true, MP2: true, MKA: true,
+};
+/** Lossless by extension. M4A/MP4 are the ambiguous pair: the container holds
+ *  ALAC (lossless) or AAC (lossy), so they only count as lossless when the
+ *  peer reports a bit depth — AAC does not carry one. */
+const LOSSLESS_EXTS: Record<string, true> = {
+  FLAC: true, WAV: true, AIFF: true, AIF: true, ALAC: true, APE: true, WV: true,
+  SHN: true, TTA: true, DSF: true, DFF: true,
+};
+const isLossless = (f: SlskFile) => {
+  const e = (f.ext || extOf(f.file)).toUpperCase();
+  if (e === "M4A" || e === "MP4") return Number(f.bit_depth ?? 0) > 0 && !f.bitrate;
+  return LOSSLESS_EXTS[e] === true;
+};
 
 function groupResults(results: SlskFile[]): SlskGroup[] {
   const map = new Map<string, SlskGroup>();
@@ -78,24 +102,25 @@ function groupResults(results: SlskFile[]): SlskGroup[] {
       map.set(key, g);
     }
     g.files.push(f);
-    const ext = extOf(f.file);
+    const ext = (f.ext || extOf(f.file)).toUpperCase();
     if (ext === "LOG") g.hasLog = true;
     if (ext === "CUE") g.hasCue = true;
-    if (AUDIO_EXTS.has(ext)) g.audio.push(f);
+    if (AUDIO_EXTS[ext]) g.audio.push(f);
     g.totalSize += f.size || 0;
     g.slotFree ||= f.slot;
     g.minQueue = Math.min(g.minQueue, f.queue || 0);
   }
   const groups = [...map.values()];
   for (const g of groups) {
-    // dominant audio format by file count; lossless if that format is
+    // dominant audio format by file count; lossless if that format is (a
+    // folder is lossy only when nothing in it decodes losslessly)
     const counts = new Map<string, number>();
     for (const f of g.audio) {
-      const e = extOf(f.file);
+      const e = (f.ext || extOf(f.file)).toUpperCase();
       counts.set(e, (counts.get(e) ?? 0) + 1);
     }
     g.format = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
-    g.lossless = LOSSLESS.has(g.format);
+    g.lossless = g.audio.some(isLossless);
     g.isCdRip = g.hasLog && g.hasCue;
     g.minQueue = g.minQueue === Number.MAX_SAFE_INTEGER ? 0 : g.minQueue;
   }
@@ -111,17 +136,19 @@ function groupResults(results: SlskFile[]): SlskGroup[] {
   return groups;
 }
 
-type FilterId = "all" | "cdrip" | "lossless" | "lossy";const FILTERS: { id: FilterId; label: string }[] = [
+type FilterId = "all" | "cdrip" | "lossless" | "lossy";
+const FILTERS: { id: FilterId; label: string }[] = [
   { id: "all", label: "All" },
   { id: "cdrip", label: "CD rips (log + cue)" },
   { id: "lossless", label: "Lossless" },
-  { id: "lossy", label: "MP3 / AAC" },
+  { id: "lossy", label: "Lossy" },
 ];
 
-function groupMatches(g: SlskGroup, f: FilterId): boolean {
+function groupMatches(g: SlskGroup, f: FilterId, codec?: string): boolean {
+  if (codec && g.audio.every((x) => (x.ext || extOf(x.file)).toUpperCase() !== codec)) return false;
   if (f === "cdrip") return g.isCdRip;
   if (f === "lossless") return g.lossless;
-  if (f === "lossy") return g.format === "MP3" || g.format === "M4A" || g.format === "AAC";
+  if (f === "lossy") return !g.lossless;
   return true;
 }
 
@@ -149,6 +176,30 @@ function GroupBadges({ g }: { g: SlskGroup }) {
 /** Strip a MusicBrainz URL down to the bare release MBID. */
 const releaseMbid = (s: string) =>
   /(?:release\/)?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(s.trim())?.[1] ?? "";
+
+/** Last few manual searches, newest first — click to re-run. */
+const RECENT_KEY = "mlso.recentSearches";
+const RECENT_MAX = 10;
+
+function loadRecentSearches(): string[] {
+  try {
+    const raw: unknown = JSON.parse(localStorage.getItem(RECENT_KEY) ?? "[]");
+    return Array.isArray(raw) ? raw.filter((x): x is string => typeof x === "string").slice(0, RECENT_MAX) : [];
+  } catch {
+    return []; // unset or tampered value — an empty history is not an error
+  }
+}
+
+/** Dedupe by exact query text, newest first, capped at RECENT_MAX. */
+function saveRecentSearch(list: string[], q: string): string[] {
+  const next = [q, ...list.filter((x) => x !== q)].slice(0, RECENT_MAX);
+  try {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(next));
+  } catch {
+    /* storage full or disabled (private mode) — history is best-effort */
+  }
+  return next;
+}
 
 /** Saved credentials exist and slskd isn't logged in (yet) — usually the
  * few seconds a reconnect takes, sometimes a Soulseek-server cooldown after
@@ -213,8 +264,8 @@ function PortConflictCard({ message, otherUser }: {
         {message}.
         {otherUser ? (
           <>
-            {" "}That instance is signed in as <span className="text-zinc-200">{otherUser}</span>,
-            which is a different Soulseek account — this app cannot use it.
+            {" "}That instance is configured for the Soulseek account <span className="text-zinc-200">{otherUser}</span>,
+            which is a different account from this app's — it cannot be reused.
           </>
         ) : null}
       </p>
@@ -231,16 +282,18 @@ function PortConflictCard({ message, otherUser }: {
   );
 }
 
-function LoginCard({ onDone, initialUsername, initialPassword }: {
+function LoginCard({ onDone, initialUsername, initialPassword, initialError }: {
   onDone: () => void;
   initialUsername?: string;
   initialPassword?: string;
+  initialError?: string | null;
 }) {
   const [username, setUsername] = useState(initialUsername ?? "");
   const [password, setPassword] = useState(initialPassword ?? "");
   const [showPw, setShowPw] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<string | null>(null);
+  const [result, setResult] = useState<string | null>(initialError ?? null);
+  const [failed, setFailed] = useState(!!initialError);
 
   const login = async () => {
     if (!username.trim() || !password) {
@@ -252,12 +305,14 @@ function LoginCard({ onDone, initialUsername, initialPassword }: {
     try {
       const r = await api.soulseekLogin(username.trim(), password);
       setResult(r.message);
+      setFailed(!r.logged_in);
       if (r.logged_in) {
         toast(r.message);
         onDone();
       }
     } catch (e) {
       setResult(String(e));
+      setFailed(true);
     } finally {
       setBusy(false);
     }
@@ -304,7 +359,109 @@ function LoginCard({ onDone, initialUsername, initialPassword }: {
           {busy ? "Connecting…" : "Log in / create account"}
         </button>
       </div>
-      {result && <div className="text-[11px] text-zinc-400 mt-2">{result}</div>}
+      {result && (
+        <div className={`text-[11px] mt-2 ${failed ? "text-red-300" : "text-zinc-400"}`}>{result}</div>
+      )}
+    </div>
+  );
+}
+
+/** Live progress for the auto-import search stage: how far into the current
+ *  query's response window it is, and how much the network has answered. */
+function SearchProgress({ s }: { s: SlskSearchProgress }) {
+  const wait = Math.max(0, s.wait || 0);
+  // The readout never runs past the window: the server clamps `elapsed` and
+  // sends `remaining`, and when an older server sends neither the elapsed
+  // being printed is clamped here — that is what produced "16s / 15s".
+  const elapsed = Math.min(Math.max(0, s.elapsed || 0), wait);
+  const left = typeof s.remaining === "number" ? Math.max(0, s.remaining) : Math.max(0, wait - elapsed);
+  const pct = wait > 0 ? Math.min(100, Math.round((elapsed / wait) * 100)) : 0;
+  return (
+    <div className="mt-2">
+      <div className="flex items-center gap-2 text-[11px] text-zinc-500">
+        <span className="truncate" title={s.query}>
+          query “{s.query}” ·{" "}
+          {typeof s.remaining === "number" ? `${left}s left` : `${elapsed}s / ${wait}s`}
+        </span>
+        <span className="ml-auto shrink-0 text-zinc-400">
+          {s.responses} responses · {s.files} files
+        </span>
+      </div>
+      <div className="mt-1 h-1.5 rounded-sm bg-border/70 overflow-hidden">
+        <div
+          className="h-full bg-accent transition-[width] duration-500 ease-linear"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+/** One file of the running download — the same row markup the Downloads tab
+ *  uses, so both views of a transfer read alike. */
+function ProgressFileRow({ f }: { f: SlskAutoFile }) {
+  const p = Math.max(0, Math.min(100, Math.round(f.percent ?? 0)));
+  const ok = f.done === true || /succeed|complet/i.test(f.state ?? "");
+  return (
+    <div className="flex items-center gap-3 px-2 py-1.5 rounded hover:bg-white/[0.04] text-xs">
+      <div className="flex-1 min-w-0 truncate text-zinc-200" title={f.name}>{fileName(f.name ?? "")}</div>
+      <div className="w-28 shrink-0 h-1.5 rounded-sm bg-border/70 overflow-hidden">
+        <div className={`h-full ${ok ? "bg-emerald-500" : "bg-accent"}`} style={{ width: `${p}%` }} />
+      </div>
+      <span className="text-zinc-500 w-24 text-right shrink-0">
+        {fmtSize(f.bytes ?? 0)} / {fmtSize(f.size ?? 0)}
+      </span>
+      <span className="w-16 text-right shrink-0">
+        {ok ? (
+          <span className="chip text-[9px] bg-emerald-900/40 text-emerald-300 border border-emerald-800">done</span>
+        ) : /inprogress/i.test(f.state ?? "") ? (
+          <span className="chip text-[9px] bg-sky-900/40 text-sky-300 border border-sky-800">{p}%</span>
+        ) : (
+          <span className="chip text-[9px] bg-raise border border-border text-zinc-400">
+            {(f.state ?? "").toLowerCase() || "queued"}
+          </span>
+        )}
+      </span>
+    </div>
+  );
+}
+
+/** What the download stage is actually doing: files/bytes done, live speed,
+ *  ETA, the peer it is pulling from, and a collapsible per-file list. */
+function AutoProgress({ p }: { p: SlskAutoProgress }) {
+  const done = p.files_done ?? 0;
+  const total = p.files_total ?? 0;
+  // Server percentage when present, derived from bytes otherwise — clamped either way.
+  const raw = p.percent ?? (p.size ? (100 * (p.bytes ?? 0)) / p.size : 0);
+  const pct = Math.max(0, Math.min(100, Math.round(raw)));
+  const files = p.files ?? [];
+  const shown = files.slice(0, 8);
+  return (
+    <div className="mt-2 rounded-lg border border-border bg-panel/60 p-2.5">
+      <div className="flex items-center gap-2 text-[11px]">
+        <span className="font-medium text-zinc-300">{p.phase || "download"}</span>
+        {p.username && <span className="text-zinc-500 truncate" title={p.dir}>· {p.username}</span>}
+        <span className="ml-auto shrink-0 text-zinc-400">{done} / {total} files · {pct}%</span>
+      </div>
+      <div className="mt-1 h-1.5 rounded-sm bg-border/70 overflow-hidden">
+        <div className="h-full bg-accent transition-[width] duration-500 ease-linear" style={{ width: `${pct}%` }} />
+      </div>
+      <div className="mt-1 flex items-center gap-3 text-[10px] text-zinc-500">
+        <span>{fmtSize(p.bytes ?? 0)} / {fmtSize(p.size ?? 0)}</span>
+        <span>{fmtRate(p.speed)}</span>
+        <span>ETA {fmtDur(p.eta_s ?? null)}</span>
+      </div>
+      {files.length > 0 && (
+        <details className="mt-1.5">
+          <summary className="cursor-pointer text-[11px] text-zinc-500">{files.length} file(s)</summary>
+          <div className="mt-1 max-h-52 overflow-auto">
+            {shown.map((f, i) => <ProgressFileRow key={`${f.name ?? ""}\u0000${i}`} f={f} />)}
+            {files.length > shown.length && (
+              <div className="px-2 py-1 text-[11px] text-zinc-600">+{files.length - shown.length} more</div>
+            )}
+          </div>
+        </details>
+      )}
     </div>
   );
 }
@@ -314,11 +471,15 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
   const { data: job, refetch } = useQuery({
     queryKey: ["soulseekAuto"],
     queryFn: api.soulseekAutoStatus,
-    refetchInterval: (q) => ((q.state.data as any)?.state === "running" ? 2000 : 15000),
+    // "confirm" is an active state too — the job is parked waiting for the
+    // lossy-only go-ahead, so the card must appear promptly.
+    refetchInterval: (q) => (q.state.data?.state === "running" || q.state.data?.state === "confirm" ? 2000 : 15000),
   });
-  const running = job?.state === "running";
+  const running = job?.state === "running" || job?.state === "confirm";
+  const navigate = useNavigate();
   const [mbid, setMbid] = useState(initialMbid ?? "");
   const [queries, setQueries] = useState("");
+  const [answering, setAnswering] = useState(false);
 
   const start = async () => {
     const id = releaseMbid(mbid);
@@ -348,7 +509,24 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
     }
   };
 
+  /** Answer the lossy-only prompt: true downloads the lossy copy anyway. */
+  const answer = async (accept: boolean) => {
+    setAnswering(true);
+    try {
+      await api.soulseekAutoConfirm(accept);
+      toast(accept ? "Downloading the lossy copy" : "Stopped — waiting for a lossless copy");
+      refetch();
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setAnswering(false);
+    }
+  };
+
   const r = job?.release;
+  // The wizard needs the folder it should tag; staging_path is the fallback an
+  // unorganized job leaves in the result.
+  const tagPath = job?.result?.album_path ?? job?.result?.staging_path ?? "";
   return (
     <div className="bg-card rounded-lg border border-border p-4">
       <div className="flex items-center justify-between mb-2">
@@ -365,6 +543,8 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
         Finds the release on the network by its identifiable traits (catalog number for CDs,
         title + year for digital media — customizable in Settings), tests the rip logs before
         committing, downloads, audits against the logs, and imports it fully tagged.
+        Lossless folders are preferred — if only lossy copies exist you are asked before
+        anything is downloaded.
       </div>
       {!running && (
         <div className="flex gap-2 flex-wrap">
@@ -396,6 +576,70 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
             </div>
           )}
           <div className="text-xs font-medium text-zinc-200">{job?.stage || job?.state}</div>
+          {job?.search && <SearchProgress s={job.search} />}
+          {/* Only set while a download is in flight, and absent on older
+              servers — the panel renders fine without it. */}
+          {job?.progress && <AutoProgress p={job.progress} />}
+          {job?.state === "error" && (
+            <div className="mt-2 rounded-lg border border-red-800 bg-red-950/40 p-2.5">
+              <div className="text-xs font-semibold text-red-300">
+                Failed{job.stage ? ` — ${job.stage}` : ""}
+              </div>
+              <div className="text-[11px] text-red-200/80 mt-1 break-words">
+                {job.result?.error || "The job stopped before it finished — see the log below."}
+              </div>
+              <button
+                className="btn-ghost !py-1 text-xs mt-2 text-red-300"
+                disabled={!releaseMbid(mbid)}
+                onClick={start}
+                title="Run the same release again with the values in the form above"
+              >
+                <RotateCw className="h-3.5 w-3.5" /> Retry
+              </button>
+            </div>
+          )}
+          {job?.state === "cancelled" && (
+            <div className="mt-2 rounded-lg border border-border bg-panel/60 p-2.5">
+              <div className="text-xs font-semibold text-zinc-300">Cancelled</div>
+              <div className="text-[11px] text-zinc-500 mt-1">
+                Stopped during {job.stage || "the current step"} — nothing else was downloaded.
+              </div>
+              <button
+                className="btn-ghost !py-1 text-xs mt-2"
+                disabled={!releaseMbid(mbid)}
+                onClick={start}
+                title="Run the same release again with the values in the form above"
+              >
+                <RotateCw className="h-3.5 w-3.5" /> Start again
+              </button>
+            </div>
+          )}
+          {job?.state === "confirm" && job?.confirm && (
+            <div className="mt-2 rounded-lg border border-amber-700/60 bg-amber-950/30 p-2.5">
+              <div className="text-xs font-semibold text-amber-300 mb-1">
+                Only lossy copies found ({job.confirm.formats.filter(Boolean).join(", ") || "lossy"})
+              </div>
+              <div className="text-[11px] text-zinc-400 mb-2">
+                No lossless folder passed the search for this release. Download the best
+                lossy copy anyway, or stop and wait for a lossless one?
+              </div>
+              <div className="space-y-1 mb-2">
+                {job.confirm.candidates.map((c) => (
+                  <div key={`${c.username}\u0000${c.dir}`} className="text-[11px] text-zinc-500 truncate" title={c.dir}>
+                    {c.format || "?"} · {c.matched}/{c.expected} tracks · {fmtSize(c.size)} · {c.username} · …{c.dir.slice(-40)}
+                  </div>
+                ))}
+              </div>
+              <div className="flex items-center gap-2">
+                <button className="btn-primary !py-1 text-xs" onClick={() => answer(true)} disabled={answering}>
+                  <Download className="h-3.5 w-3.5" /> Download lossy anyway
+                </button>
+                <button className="btn-ghost !py-1 text-xs" onClick={() => answer(false)} disabled={answering}>
+                  No, wait for lossless
+                </button>
+              </div>
+            </div>
+          )}
           <div className="mt-1.5 max-h-44 overflow-auto font-mono text-[10px] leading-relaxed text-zinc-500 space-y-0.5">
             {(job?.log ?? []).map((l: any, i: number) => (
               <div key={i} className={l.msg.startsWith("ERROR") ? "text-red-400" : l.msg.startsWith("  ✕") ? "text-red-300" : undefined}>
@@ -405,22 +649,206 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
           </div>
           {(job?.attempts ?? []).length > 0 && (
             <details className="mt-1.5 text-[11px] text-zinc-500">
-              <summary className="cursor-pointer">{job.attempts.length} rejected candidate(s)</summary>
+              <summary className="cursor-pointer">{job?.attempts?.length} rejected candidate(s)</summary>
               <div className="mt-1 space-y-0.5">
-                {job.attempts.map((a: any, i: number) => (
+                {(job?.attempts ?? []).map((a, i) => (
                   <div key={i} title={a.dir}>…{String(a.dir).slice(-40)} — {a.reason}</div>
                 ))}
               </div>
             </details>
           )}
           {job?.state === "done" && (
-            <div className="mt-1.5 text-[11px] text-emerald-400">
-              Imported {(job.result?.album_path ?? "").split(/[\\/]/).pop()}
-              {!job.result?.organized ? " (organize failed — run it from the album page)" : ""}
+            <div className="mt-2 flex items-center gap-2 flex-wrap">
+              <button
+                className="btn-primary !py-1 text-xs"
+                disabled={!tagPath}
+                onClick={() => {
+                  stopPreviews();
+                  navigate(`/import?album=${encodeURIComponent(tagPath)}`);
+                }}
+                title={tagPath
+                  ? `Open the import wizard for ${tagPath} — covers, lyrics and advisory`
+                  : "The job result carried no album folder — see the log below"}
+              >
+                <Tag className="h-3.5 w-3.5" /> Tag album
+              </button>
+              <span className="text-[11px] text-emerald-400">
+                Imported {(job.result?.album_path ?? "").split(/[\\/]/).pop()}
+                {!job.result?.organized ? " (organize failed — run it from the album page)" : ""}
+              </span>
             </div>
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/** One folder in a browsed share. */
+type SlskBrowseDir = { directory: string; files: { filename: string; size: number }[] };
+
+/** A peer's shared tree (slskd browse) — pick a folder to queue as-is, or hand
+ *  it to auto-import. Big shares take a moment to enumerate, so the answer is
+ *  cached per user and the folder list is filterable and paged. */
+function BrowseModal({ username, onAuto, onClose }: {
+  username: string;
+  onAuto: () => void;
+  onClose: () => void;
+}) {
+  const qc = useQueryClient();
+  const { data, isLoading, error, isFetching, refetch } = useQuery({
+    queryKey: ["soulseekBrowse", username],
+    queryFn: () => api.soulseekBrowse(username),
+    staleTime: 60000,
+  });
+  const [text, setText] = useState("");
+  const [open, setOpen] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState<string | null>(null);
+  const [limit, setLimit] = useState(200);
+
+  const dirs = data?.directories ?? [];
+  const needle = text.trim().toLowerCase();
+  const shown = needle ? dirs.filter((d) => d.directory.toLowerCase().includes(needle)) : dirs;
+  const totalBytes = dirs.reduce((n, d) => n + d.files.reduce((m, f) => m + (f.size || 0), 0), 0);
+
+  const toggle = (dir: string) =>
+    setOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(dir)) next.delete(dir);
+      else next.add(dir);
+      return next;
+    });
+
+  const queue = async (d: SlskBrowseDir) => {
+    setBusy(d.directory);
+    try {
+      const r = await api.soulseekDownload(username, d.files.map((f) => ({ filename: f.filename, size: f.size })));
+      toast(`Queued ${r.queued} file(s) from ${username}`);
+      qc.invalidateQueries({ queryKey: ["soulseekDownloads"] });
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const auto = async (d: SlskBrowseDir) => {
+    setBusy(d.directory);
+    try {
+      await api.soulseekAutoStart({ username, target_dir: d.directory });
+      toast(`Auto-importing from ${username} · ${d.directory.split(/[\\/]/).filter(Boolean).pop() ?? ""}`);
+      qc.invalidateQueries({ queryKey: ["soulseekAuto"] });
+      onAuto();
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
+      <div
+        className="bg-card rounded-lg border border-border w-full max-w-3xl max-h-[85vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
+          <FolderOpen className="h-4 w-4 text-accent shrink-0" />
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-zinc-100 truncate">Shared folders — {username}</div>
+            <div className="text-[11px] text-zinc-500">
+              {isLoading ? "Reading their share list…" : `${dirs.length} folder(s) · ${fmtSize(totalBytes)}`}
+            </div>
+          </div>
+          <button
+            className="btn-ghost !py-1 text-xs ml-auto shrink-0"
+            disabled={isFetching}
+            onClick={() => refetch()}
+            title="Re-read the share list from slskd"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} />
+          </button>
+          <button className="btn-ghost !py-1 text-xs shrink-0" onClick={onClose}>Close</button>
+        </div>
+        <div className="px-4 py-2 border-b border-border/60">
+          <input
+            className="input w-full !py-1.5 text-xs"
+            placeholder="Filter folders (artist, album, path…)"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+          />
+        </div>
+        <div className="p-3 overflow-auto space-y-2">
+          {isLoading ? (
+            <div className="text-xs text-zinc-500 flex items-center justify-center gap-2 py-8">
+              <Loader2 className="h-4 w-4 animate-spin" /> Browsing {username}'s shares…
+            </div>
+          ) : error ? (
+            <div className="text-xs text-red-300 py-8 text-center">{String(error)}</div>
+          ) : shown.length === 0 ? (
+            <div className="text-xs text-zinc-500 py-8 text-center">
+              {dirs.length === 0 ? `${username} shares no folders.` : `No folder matches “${text.trim()}”.`}
+            </div>
+          ) : (
+            <>
+              {shown.slice(0, limit).map((d) => {
+                const isOpen = open.has(d.directory);
+                const total = d.files.reduce((n, f) => n + (f.size || 0), 0);
+                return (
+                  <div key={d.directory} className="rounded-lg border border-border overflow-hidden">
+                    <div className="flex items-center gap-2 px-3 py-2 bg-panel/60">
+                      <button className="flex-1 min-w-0 flex items-center gap-2 text-left" onClick={() => toggle(d.directory)} title={d.directory}>
+                        {isOpen
+                          ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                          : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-500" />}
+                        <span className="min-w-0">
+                          <span className="block text-xs text-zinc-100 truncate">
+                            {d.directory.split(/[\\/]/).filter(Boolean).slice(-2).join(" / ") || d.directory}
+                          </span>
+                          <span className="block text-[10px] text-zinc-500">
+                            {d.files.length} file(s) · {fmtSize(total)}
+                          </span>
+                        </span>
+                      </button>
+                      <button
+                        className="btn-ghost !py-1 text-xs shrink-0"
+                        disabled={busy !== null || d.files.length === 0}
+                        onClick={() => queue(d)}
+                        title="Queue every file in this folder"
+                      >
+                        <Download className="h-3.5 w-3.5" /> Download
+                      </button>
+                      <button
+                        className="btn-ghost !py-1 text-xs shrink-0"
+                        disabled={busy !== null}
+                        onClick={() => auto(d)}
+                        title="Search the release this folder holds and import it fully tagged"
+                      >
+                        <Zap className="h-3.5 w-3.5" /> Auto-import
+                      </button>
+                    </div>
+                    {isOpen && (
+                      <div className="border-t border-border/60 max-h-64 overflow-auto">
+                        {d.files.map((f, i) => (
+                          <div key={i} className="flex items-center gap-3 px-3 py-1 border-t border-border/40 first:border-t-0 text-xs">
+                            <span className="flex-1 min-w-0 truncate text-zinc-300" title={f.filename}>{fileName(f.filename)}</span>
+                            <span className="text-zinc-500 w-16 text-right shrink-0">{fmtSize(f.size)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {shown.length > limit && (
+                <button className="btn-secondary w-full py-2 text-xs" onClick={() => setLimit((n) => n + 200)}>
+                  Show more ({shown.length - limit} folders remaining)
+                </button>
+              )}
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -467,14 +895,34 @@ const TAG_FIELDS: { key: string; label: string; placeholder?: string }[] = [
   { key: "GENRE", label: "Genre" },
 ];
 
+/** Every mounted preview player on this page. Windows keeps the streamed file
+ *  open while a player holds it, so anything that moves or reads those files
+ *  (the import, the tagging wizard) must release them first. */
+const previews = new Set<HTMLMediaElement>();
+const stopPreviews = () => {
+  for (const m of previews) {
+    m.pause();
+    m.removeAttribute("src");
+    m.load();
+  }
+  // Already released — forgetting them keeps a dead element from being
+  // paused over and over on every import.
+  previews.clear();
+};
+
 /** One completed download on disk: preview it (audio/video player), tag it
- * (VOB and friends are remuxed to MKV by the tag write — stream copy, no
- * quality or caption loss), or discard it. */
+ *  (VOB and friends are remuxed to MKV by the tag write — stream copy, no
+ *  quality or caption loss), or discard it. */
 function ReviewRow({ f, onChanged }: { f: ReviewFile; onChanged: () => void }) {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [tagOpen, setTagOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [armDelete, setArmDelete] = useState(false);
+  const media = useRef<HTMLMediaElement | null>(null);
+  useEffect(() => {
+    const el = media.current;
+    return () => { if (el) previews.delete(el); };
+  }, [previewOpen]);
   const parsed = useMemo(() => parseDownloadName(f.file), [f.file]);
   const [form, setForm] = useState<Record<string, string>>({
     TITLE: f.tags.TITLE ?? parsed.title ?? "",
@@ -493,10 +941,17 @@ function ReviewRow({ f, onChanged }: { f: ReviewFile; onChanged: () => void }) {
     try {
       const clean: Record<string, string> = {};
       for (const [k, v] of Object.entries(form)) if (v.trim()) clean[k] = v.trim();
-      const r = await api.videoTag(f.path, clean);
-      toast(r.renamed
-        ? `Tagged & remuxed to MKV: ${String(r.path).split(/[\\/]/).pop()}`
-        : "Tags written");
+      if (f.is_video) {
+        const r = await api.videoTag(f.path, clean);
+        toast(r.renamed
+          ? `Tagged & remuxed to MKV: ${String(r.path).split(/[\\/]/).pop()}`
+          : "Tags written");
+      } else {
+        // audio downloads belong to the audio tag writer — /api/videos/tag
+        // rejects anything that isn't a video container
+        await api.mbAssign({ [f.path]: clean });
+        toast("Tags written");
+      }
       onChanged();
     } catch (e) {
       toast(String(e));
@@ -577,13 +1032,21 @@ function ReviewRow({ f, onChanged }: { f: ReviewFile; onChanged: () => void }) {
           {f.is_video ? (
             <video
               key={f.path}
+              ref={(el) => { media.current = el; if (el) previews.add(el); }}
               controls
               autoPlay
               className="w-full max-h-72 rounded-lg bg-black"
               src={src}
             />
           ) : (
-            <audio key={f.path} controls autoPlay className="w-full" src={src} />
+            <audio
+              key={f.path}
+              ref={(el) => { media.current = el; if (el) previews.add(el); }}
+              controls
+              autoPlay
+              className="w-full"
+              src={src}
+            />
           )}
         </div>
       )}
@@ -630,30 +1093,85 @@ function ReviewRow({ f, onChanged }: { f: ReviewFile; onChanged: () => void }) {
   );
 }
 
+/** Album folder a review file belongs to: the shallowest folder below the
+ * download dir that directly holds review files. slskd mirrors a completed
+ * download as <download dir>/<remote folder>/file (older runs kept a <user>
+ * level in front of it), so that is the album root for both layouts, and a
+ * nested disc subfolder with files of its own belongs to the album instead of
+ * becoming one — the same grouping import_completed uses. A file sitting
+ * higher up than that keeps the folder it is in. */
+function reviewAlbumDir(downloadDir: string, filePath: string, foldersWithFiles: Set<string>): string {
+  const sep = filePath.includes("\\") ? "\\" : "/";
+  const parts = filePath.split(/[\\/]/);
+  const rootDepth = downloadDir.replace(/[\\/]+$/, "").split(/[\\/]/).filter(Boolean).length;
+  for (let d = rootDepth + 1; d < parts.length - 1; d++) {
+    const dir = parts.slice(0, d).join(sep);
+    if (foldersWithFiles.has(dir)) return dir;
+  }
+  return parts.slice(0, -1).join(sep);
+}
+
+/** How many albums the import skipped because their transfers were still
+ * running (contract F). Older servers omit the key, so it is read defensively
+ * rather than off a declared shape. */
+function skippedAlbumCount(result: object): number {
+  const raw: unknown = Reflect.get(result, "skipped");
+  if (Array.isArray(raw)) return raw.length;
+  return typeof raw === "number" ? raw : 0;
+}
+
 /** Review completed downloads: preview, tag (and remux VOB→MKV), discard,
- * then import the keepers into the library. */
+ * then import the keepers into the library. Each completed album can also be
+ * handed to the import wizard for the guided cover/lyrics/advisory flow. */
 function ReviewPanel() {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const { data, refetch } = useQuery({
     queryKey: ["soulseekReview"],
     queryFn: api.soulseekReview,
     refetchInterval: 8000,
   });
   const files = data?.files ?? [];
+  const albums = useMemo(() => {
+    const folders = new Set(files.map((f) => f.path.split(/[\\/]/).slice(0, -1).join(f.path.includes("\\") ? "\\" : "/")));
+    const byDir = new Map<string, number>();
+    for (const f of files) {
+      const dir = reviewAlbumDir(data?.dir ?? "", f.path, folders);
+      byDir.set(dir, (byDir.get(dir) ?? 0) + 1);
+    }
+    return [...byDir.entries()];
+  }, [files, data?.dir]);
   const refresh = () => {
     refetch();
     qc.invalidateQueries({ queryKey: ["library"] });
   };
+  const [justImported, setJustImported] = useState<{
+    moved: string[];
+    failed: { album: string; reason: string }[];
+  } | null>(null);
   const importAll = async () => {
+    // The preview player streams the file straight off disk; Windows won't let
+    // the import move a file that is still open, so release every player first.
+    stopPreviews();
     try {
       const r = await api.soulseekImport();
+      // The moved folders are gone from the download dir by the time this panel
+      // refreshes, so remember them (and what failed) until the next import.
+      setJustImported({ moved: r.moved ?? [], failed: r.failed ?? [] });
+      // Albums whose transfers are still running are reported separately and
+      // left in the download folder; an older server omits the key entirely.
+      const skipped = skippedAlbumCount(r);
       if (r.moved.length) {
+        const conv = r.converted ? ` · ${r.converted} lossless file(s) converted` : "";
         toast(r.organized === false
           ? `Imported ${r.moved.length} album folder(s) — organize failed: ${r.organize_error ?? "see console"}`
-          : `Imported and organized ${r.moved.length} album folder(s) into the library`);
+          : `Imported and organized ${r.moved.length} album folder(s) into the library${conv}`);
         refresh();
-      } else {
+      } else if (!skipped && !(r.failed ?? []).length) {
         toast("Nothing to import — no completed downloads found");
+      }
+      if (skipped) {
+        toast(`${skipped} album(s) are still downloading — skipped for now, and they stay in the download folder until finished`);
       }
     } catch (e) {
       toast(String(e));
@@ -680,9 +1198,66 @@ function ReviewPanel() {
       </div>
       <div className="text-[11px] text-zinc-500 mb-2.5">
         Preview each download, fix its tags (untagged DVD/Blu-ray rips included — saving remuxes them to MKV without
-        re-encoding), discard the misses, then import the keepers. Files land in{" "}
-        <span className="font-mono text-zinc-400">{data?.dir ?? "…"}</span>
+        re-encoding), discard the misses, then import the keepers. Files stay in{" "}
+        <span className="font-mono text-zinc-400">{data?.dir ?? "…"}</span> until an import finishes — nothing is moved
+        out of it before that.
       </div>
+      {albums.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-2.5">
+          {albums.map(([dir, count]) => (
+            <button
+              key={dir}
+              className="btn-ghost !py-1 text-xs"
+              onClick={() => {
+                stopPreviews();
+                navigate(`/import?album=${encodeURIComponent(dir)}`);
+              }}
+              title={`Open the import wizard for ${dir} — covers, lyrics and advisory`}
+            >
+              <Tag className="h-3.5 w-3.5" /> Tag album ·{" "}
+              {dir.split(/[\\/]/).filter(Boolean).pop() ?? dir}
+              <span className="text-[10px] font-mono text-zinc-500 ml-1">{count}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {justImported && justImported.moved.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mb-2.5">
+          {justImported.moved.map((dir) => (
+            <button
+              key={dir}
+              className="btn-ghost !py-1 text-xs"
+              onClick={() => {
+                stopPreviews();
+                navigate(`/import?album=${encodeURIComponent(dir)}`);
+              }}
+              title={`Open the import wizard for ${dir} — covers, lyrics and advisory`}
+            >
+              <Tag className="h-3.5 w-3.5" /> Tag album ·{" "}
+              {dir.split(/[\\/]/).filter(Boolean).pop() ?? dir}
+            </button>
+          ))}
+        </div>
+      )}
+      {justImported && justImported.failed.length > 0 && (
+        <div className="mb-2.5 rounded-lg border border-red-800 bg-red-950/40 p-2.5">
+          <div className="text-xs font-semibold text-red-300 mb-1">
+            {justImported.failed.length} album(s) could not be imported
+          </div>
+          <div className="space-y-0.5 text-[11px] text-red-200/80">
+            {justImported.failed.map((x) => (
+              <div key={x.album} title={x.album}>
+                <span className="text-red-300">
+                  {x.album.split(/[\\/]/).filter(Boolean).pop() ?? x.album}
+                </span> — {x.reason}
+                {/winerror\s*32|being used by another process|in use/i.test(x.reason)
+                  ? " · a file is still in use — stop the preview player and retry"
+                  : ""}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {files.length === 0 ? (
         <div className="text-xs text-zinc-600 py-3 text-center">
           Nothing waiting for review — finished downloads appear here automatically.
@@ -700,8 +1275,8 @@ function ReviewPanel() {
 
 /** Share configuration (la musica settings are the source of truth — the
  * slskd yaml is regenerated from them at start) with live rescan and the
- * autostart preference. Reserved folders (Data / .mlo_downloads /
- * .mlo_trash) are filtered server-side and never shared. */
+ * autostart preference. Reserved folders (.mlo/data / .mlo/downloads /
+ * .mlo/trash) are filtered server-side and never shared. */
 function SharingCard({ running }: { running: boolean }) {
   const qc = useQueryClient();
   const { data } = useQuery({ queryKey: ["soulseekShares"], queryFn: api.soulseekShares });
@@ -827,13 +1402,17 @@ function SharingCard({ running }: { running: boolean }) {
         </div>
       )}
       <div className="text-[10px] text-zinc-600">
-        Reserved folders are never shared: Data (app state), .mlo_downloads, .mlo_trash.
+        Reserved folders are never shared: the hidden .mlo folder holds everything — app state in .mlo/data, downloads in .mlo/downloads and the remove-from-library bin in .mlo/trash.
       </div>
     </div>
   );
 }
 
 const MBID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+/** Hard stop for the search poll loop, in seconds. slskd ends a search 15s
+ *  after the last peer response by default, which lands well inside this. */
+const SEARCH_POLL_LIMIT_S = 180;
 
 function timeAgo(t: number | null | undefined): string {
   if (!t) return "never";
@@ -1126,6 +1705,16 @@ export default function SoulseekPage() {
     enabled: !!status?.running,
     refetchInterval: 3000,
   });
+  // Private messages — the list lives at page level (the panel reads the same
+  // query) so the Messages tab badge stays current from any tab.
+  const { data: messages } = useQuery({
+    queryKey: ["soulseekMessages"],
+    queryFn: api.soulseekMessages,
+    enabled: !!status?.running,
+    refetchInterval: 5000,
+  });
+  const msgUnread = messages?.unread
+    ?? (messages?.conversations ?? []).reduce((n, c) => n + (c?.unread ?? 0), 0);
 
   const running = !!status?.running;
 
@@ -1186,12 +1775,15 @@ export default function SoulseekPage() {
   };
 
   const [query, setQuery] = useState("");
+  const [recent, setRecent] = useState<string[]>(loadRecentSearches);
+  const [browseUser, setBrowseUser] = useState<string | null>(null);
   const [searchId, setSearchId] = useState<string | null>(null);
   const [results, setResults] = useState<SlskFile[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchMeta, setSearchMeta] = useState<{ fileCount: number; responseCount: number } | null>(null);
   const [busyUser, setBusyUser] = useState<string | null>(null);
   const [filter, setFilter] = useState<FilterId>("all");
+  const [codec, setCodec] = useState("");
   const [openGroups, setOpenGroups] = useState<Set<string>>(new Set());
   const [visibleLimit, setVisibleLimit] = useState(60);
   const [logTest, setLogTest] = useState<Record<string, { ok: boolean; text: string } | "busy">>({});
@@ -1201,12 +1793,13 @@ export default function SoulseekPage() {
 
   // Page tabs — Search is the default; the badge on Downloads counts active
   // transfers so progress is visible from any tab.
-  type TabId = "search" | "auto" | "wishes" | "downloads" | "sharing" | "settings";
+  type TabId = "search" | "auto" | "wishes" | "downloads" | "messages" | "sharing" | "settings";
   const TAB_LIST: { id: TabId; label: string }[] = [
     { id: "search", label: "Search" },
     { id: "auto", label: "Auto-import" },
     { id: "wishes", label: "Wishes" },
     { id: "downloads", label: "Downloads" },
+    { id: "messages", label: "Messages" },
     { id: "sharing", label: "Sharing" },
     { id: "settings", label: "Settings" },
   ];
@@ -1263,6 +1856,7 @@ export default function SoulseekPage() {
     const text = (q ?? query).trim();
     if (!text) return;
     if (q) setQuery(q);
+    setRecent((r) => saveRecentSearch(r, text));
     setSearching(true);
     setResults([]);
     setSearchMeta(null);
@@ -1285,10 +1879,14 @@ export default function SoulseekPage() {
           if (res.responses && res.responses.length > 0) {
             setResults(res.responses);
           }
+          // slskd hands the responses over only once the search has ENDED
+          // (it reports counts while running), so the poll rides out the
+          // whole window — a fixed 45s cutoff dropped results from searches
+          // that were still collecting.
           const isDone =
             Boolean(res.isComplete) ||
             (res.state ? res.state !== "InProgress" && (res.state.includes("Completed") || res.state.includes("TimedOut")) : false);
-          if (isDone || elapsed >= 45) {
+          if (isDone || elapsed >= SEARCH_POLL_LIMIT_S) {
             if (pollRef.current) {
               clearInterval(pollRef.current);
               pollRef.current = null;
@@ -1296,6 +1894,8 @@ export default function SoulseekPage() {
             setSearching(false);
             if (res.responses && res.responses.length > 0) {
               setResults(res.responses);
+            } else if (!isDone) {
+              toast("The search did not finish — try again or narrow the query");
             }
           }
         } catch {
@@ -1329,6 +1929,18 @@ export default function SoulseekPage() {
   }, [handoff, status?.running]);
 
   const downloadFile = async (f: SlskFile, group: boolean) => {
+    // Lossless is the expectation; a lossy-only folder is a deliberate
+    // downgrade, so it is confirmed rather than silently queued.
+    const folder = groups.find(
+      (g) => g.username === f.username && g.files.some((x) => x.file === f.file)
+    );
+    if (folder && !folder.lossless) {
+      const what = folder.format || "lossy audio";
+      if (!window.confirm(
+        `This folder has no lossless audio (${what}).\n\n` +
+        `Download it anyway? Lossless copies are preferred.`
+      )) return;
+    }
     setBusyUser(f.username);
     try {
       let files = [{ filename: f.file, size: f.size }];
@@ -1356,13 +1968,23 @@ export default function SoulseekPage() {
       setOpenGroups((prev) => (prev.size === 0 ? new Set([groups[0].key]) : prev));
     }
   }, [groups]);
-  const visible = groups.filter((g) => groupMatches(g, filter));
+  const visible = groups.filter((g) => groupMatches(g, filter, codec));
   const counts: Record<FilterId, number> = {
     all: groups.length,
     cdrip: groups.filter((g) => g.isCdRip).length,
     lossless: groups.filter((g) => g.lossless).length,
-    lossy: groups.filter((g) => g.format === "MP3" || g.format === "M4A" || g.format === "AAC").length,
+    lossy: groups.filter((g) => !g.lossless).length,
   };
+  // Every audio codec the current results actually contain, so the codec
+  // filter never offers an empty choice.
+  const codecs = useMemo(
+    () =>
+      [...new Set(results.flatMap((f) => {
+        const e = (f.ext || extOf(f.file)).toUpperCase();
+        return AUDIO_EXTS[e] ? [e] : [];
+      }))].sort(),
+    [results]
+  );
   const toggleGroup = (key: string) =>
     setOpenGroups((prev) => {
       const next = new Set(prev);
@@ -1434,6 +2056,7 @@ export default function SoulseekPage() {
           >
             {t.label}
             {t.id === "downloads" && dlActive > 0 ? ` · ${dlActive}` : ""}
+            {t.id === "messages" && msgUnread > 0 ? ` · ${msgUnread}` : ""}
             {t.id === "search" && results.length > 0 ? ` · ${results.length}` : ""}
           </button>
         ))}
@@ -1486,14 +2109,22 @@ export default function SoulseekPage() {
       )}
 
       {!status?.conflict && running && status?.logged_in === false && (
-        status?.has_credentials ? (
+        status?.has_credentials && !status?.error ? (
           <ReconnectingCard
             username={String(status.username ?? "")}
             password={String(status.password ?? "")}
             onDone={refetchStatus}
           />
         ) : (
-          <LoginCard onDone={refetchStatus} />
+          // the daemon named its own failure (rejected password, empty
+          // credentials…): stop guessing "cooldown" and show the form with
+          // that reason instead
+          <LoginCard
+            onDone={refetchStatus}
+            initialUsername={String(status?.username ?? "")}
+            initialPassword={String(status?.password ?? "")}
+            initialError={(status?.error as string | null) ?? null}
+          />
         )
       )}
 
@@ -1515,6 +2146,36 @@ export default function SoulseekPage() {
             <Search className="h-4 w-4" /> {searching ? "Searching…" : "Search"}
           </button>
         </div>
+        {!query.trim() && recent.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5 mt-2">
+            <span className="text-[10px] uppercase tracking-widest text-zinc-600">Recent</span>
+            {recent.map((q) => (
+              <button
+                key={q}
+                className="chip px-2 py-0.5 border bg-raise border-border text-zinc-400 hover:text-white max-w-[280px] truncate"
+                disabled={searching || !running}
+                onClick={() => runSearch(q)}
+                title={q}
+              >
+                {q}
+              </button>
+            ))}
+            <button
+              className="btn-ghost !px-1.5 !py-0 text-[11px] text-zinc-500"
+              onClick={() => {
+                setRecent([]);
+                try {
+                  localStorage.removeItem(RECENT_KEY);
+                } catch {
+                  /* storage disabled — the in-memory list is cleared regardless */
+                }
+              }}
+              title="Clear recent searches"
+            >
+              ×
+            </button>
+          </div>
+        )}
         {!running && (
           <div className="text-[11px] text-zinc-500 mt-2">Start slskd to search and download. Credentials, ports, shares and profile description live in Settings → Soulseek.</div>
         )}
@@ -1537,6 +2198,18 @@ export default function SoulseekPage() {
                     {f.label} <span className={filter === f.id ? "opacity-70" : "text-zinc-600"}>{counts[f.id]}</span>
                   </button>
                 ))}
+                {/* codec filter, built from what the peers actually offer */}
+                {codecs.length > 1 && (
+                  <select
+                    className="input !py-1 !w-auto text-[11px]"
+                    value={codec}
+                    onChange={(e) => setCodec(e.target.value)}
+                    title="Show only folders holding this codec"
+                  >
+                    <option value="">Any codec</option>
+                    {codecs.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                )}
               </div>
               <div className="flex items-center gap-1.5 text-xs text-zinc-500">
                 <button className="btn-ghost !py-0.5 !px-2 text-[11px]" onClick={expandAll}>Expand all</button>
@@ -1589,6 +2262,13 @@ export default function SoulseekPage() {
                           <FileCheck2 className="h-3.5 w-3.5" /> Test logs
                         </button>
                       )}
+                      <button
+                        className="btn-ghost !py-1 text-xs shrink-0"
+                        onClick={() => setBrowseUser(g.username)}
+                        title={`Browse everything ${g.username} shares`}
+                      >
+                        <FolderOpen className="h-3.5 w-3.5" /> Browse
+                      </button>
                       <button
                         className="btn-ghost !py-1 text-xs shrink-0"
                         disabled={busyUser === g.username || !g.files.length}
@@ -1665,49 +2345,373 @@ export default function SoulseekPage() {
           <DownloadsPanel downloads={downloads} />
         </>
       )}
+
+      {tab === "messages" && <MessagesPanel running={running} />}
+
+      {browseUser && (
+        <BrowseModal
+          username={browseUser}
+          onAuto={() => setTab("auto")}
+          onClose={() => setBrowseUser(null)}
+        />
+      )}
     </div>
   );
 }
 
+/** slskd timestamps are UTC but may arrive without a zone marker — assume Z
+ *  then, otherwise "now" and the peer's clock disagree by the local offset. */
+const msgTime = (ts?: string) => {
+  if (!ts) return "";
+  const d = new Date(/[zZ]$|[+-]\d\d:?\d\d$/.test(ts) ? ts : `${ts}Z`);
+  if (isNaN(d.getTime())) return "";
+  const now = new Date();
+  return d.toDateString() === now.toDateString()
+    ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
+    : d.toLocaleDateString([], { month: "short", day: "numeric" });
+};
+
+/** Soulseek private messages: the peer list on the left (unread first, then
+ *  alphabetical), the open thread and its composer on the right. The
+ *  conversation query is the page-level one, so the tab badge tracks it from
+ *  every tab; slskd carries no list preview, so a row is just peer + unread. */
+function MessagesPanel({ running }: { running: boolean }) {
+  const qc = useQueryClient();
+  const { data: list, isError, refetch } = useQuery({
+    queryKey: ["soulseekMessages"],
+    queryFn: api.soulseekMessages,
+    enabled: running,
+    refetchInterval: 5000,
+  });
+  const [open, setOpen] = useState<string | null>(null);
+  const [newUser, setNewUser] = useState("");
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [closing, setClosing] = useState<string | null>(null);
+
+  const thread = useQuery({
+    queryKey: ["soulseekMessages", open],
+    queryFn: () => api.soulseekConversation(open as string),
+    enabled: running && !!open,
+    refetchInterval: 3000,
+  });
+  const messages: SlskMessage[] = thread.data?.messages ?? [];
+  const unreadInbound = messages.filter((m) => m.direction === "In" && !m.acknowledged).length;
+
+  // Mark the thread read once it loads, and again after every poll that brings
+  // new inbound messages while it is open.
+  useEffect(() => {
+    if (!open || unreadInbound === 0) return;
+    api.soulseekMarkRead(open)
+      .then(() => qc.invalidateQueries({ queryKey: ["soulseekMessages"] }))
+      .catch(() => { /* the next poll retries */ });
+  }, [open, unreadInbound, qc]);
+
+  // Newest message is what you came for — keep it in view as the thread grows.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [open, messages.length]);
+
+  // The just-typed peer may not exist server-side yet — show it anyway so the
+  // empty thread has a heading and a composer.
+  const peers: SlskConversation[] = (list?.conversations ?? []).filter((c) => c?.username);
+  if (open && !peers.some((c) => c.username === open)) peers.push({ username: open });
+  // Unread first, then alphabetical — slskd hands the list over unordered.
+  peers.sort((a, b) => Number((b.unread ?? 0) > 0) - Number((a.unread ?? 0) > 0)
+    || (a.username ?? "").localeCompare(b.username ?? ""));
+
+  const openThread = (username: string) => {
+    setOpen(username);
+    setDraft("");
+  };
+
+  const send = async () => {
+    const text = draft.trim();
+    if (!open || !text || sending) return;
+    setSending(true);
+    try {
+      const r = await api.soulseekSendMessage(open, text);
+      setDraft(""); // draft cleared only once slskd took it
+      if (r && r.sent === false) toast("Message dropped — the peer ignores or blocks you");
+      await thread.refetch();
+      qc.invalidateQueries({ queryKey: ["soulseekMessages"] });
+    } catch (e) {
+      toast(String(e)); // draft kept so it can be retried
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const closeConversation = async (username: string) => {
+    if (!window.confirm(`Close the conversation with ${username}?\n\nslskd drops its message history.`)) return;
+    setClosing(username);
+    try {
+      await api.soulseekCloseConversation(username);
+      if (open === username) setOpen(null);
+      await refetch();
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setClosing(null);
+    }
+  };
+
+  return (
+    <div className="bg-card rounded-lg border border-border p-4">
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500 flex items-center gap-1.5">
+          <MessageSquare className="h-3.5 w-3.5" /> Messages
+        </div>
+        <div className="flex-1" />
+        <input
+          className="input !py-1 !px-2 text-xs w-56"
+          placeholder="New message — peer username"
+          value={newUser}
+          onChange={(e) => setNewUser(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && newUser.trim()) {
+              openThread(newUser.trim());
+              setNewUser("");
+            }
+          }}
+          title="Open (or start) a thread with this Soulseek user — sending creates it"
+        />
+        <button
+          className="btn-ghost !py-1 text-xs"
+          onClick={() => { refetch(); if (open) thread.refetch(); }}
+          title="Reload the conversation list and the open thread"
+        >
+          <RefreshCw className="h-3.5 w-3.5" /> Refresh
+        </button>
+      </div>
+
+      {!running ? (
+        <div className="text-xs text-zinc-600 py-3">slskd is not running — private messages need it.</div>
+      ) : isError ? (
+        <div className="text-xs text-red-400 py-3">
+          Could not load conversations — slskd is unreachable. Retrying automatically.
+        </div>
+      ) : (
+        <div className="flex gap-3 mt-3">
+          <div className="w-56 shrink-0 rounded-lg border border-border bg-panel/60 p-1 space-y-0.5 max-h-[420px] overflow-auto">
+            {peers.length === 0 ? (
+              <div className="text-xs text-zinc-600 p-2">No conversations yet.</div>
+            ) : (
+              peers.map((c) => (
+                <div
+                  key={c.username}
+                  className={`flex items-center gap-1 rounded-md pr-1 ${
+                    open === c.username ? "bg-raise" : "hover:bg-raise/60"
+                  }`}
+                >
+                  <button
+                    className="flex-1 text-left px-2 py-1.5 text-xs truncate"
+                    onClick={() => openThread(c.username)}
+                    title={c.username}
+                  >
+                    {c.username}
+                  </button>
+                  {(c.unread ?? 0) > 0 && (
+                    <span className="chip bg-accent/15 border border-accent/30 text-accent-soft" title="Unread messages">
+                      {c.unread}
+                    </span>
+                  )}
+                  <button
+                    className="btn-ghost !px-1.5 !py-0.5 text-[10px]"
+                    onClick={() => closeConversation(c.username)}
+                    disabled={closing === c.username}
+                    title="Close this conversation (drops it from slskd)"
+                  >
+                    Close
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+
+          <div className="flex-1 min-w-0 flex flex-col">
+            {!open ? (
+              <div className="text-xs text-zinc-600 py-6 text-center">Select a conversation.</div>
+            ) : (
+              <>
+                <div className="text-xs font-semibold text-zinc-300 truncate mb-1.5" title={open}>
+                  {open}
+                </div>
+                <div ref={scrollRef} className="rounded-lg border border-border bg-panel/40 p-2 space-y-1.5 h-[320px] overflow-auto">
+                  {messages.length === 0 ? (
+                    <div className="text-xs text-zinc-600 py-3 text-center">
+                      No messages yet — say hello.
+                    </div>
+                  ) : (
+                    messages.map((m, i) => {
+                      const inbound = m.direction !== "Out";
+                      return (
+                        <div key={m.id ?? i} className={`flex ${inbound ? "justify-start" : "justify-end"}`}>
+                          <div
+                            className={`max-w-[75%] rounded-lg border px-2.5 py-1.5 text-xs whitespace-pre-wrap break-words ${
+                              inbound
+                                ? "bg-raise border-border text-zinc-200"
+                                : "bg-accent/15 border-accent/25 text-zinc-100"
+                            }`}
+                          >
+                            {m.message ?? ""}
+                            <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-zinc-500">
+                              <span className="font-mono">{msgTime(m.timestamp)}</span>
+                              {inbound && !m.acknowledged && (
+                                <span className="chip bg-amber-900/40 border border-amber-800 text-amber-300" title="Not acknowledged yet">
+                                  unread
+                                </span>
+                              )}
+                              {m.replayed && <span className="chip bg-raise border border-border text-zinc-500">replayed</span>}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+                <div className="mt-2 flex gap-2">
+                  <textarea
+                    className="input text-xs min-h-[64px] flex-1"
+                    placeholder="Message — Enter sends, Shift+Enter for a new line"
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        send();
+                      }
+                    }}
+                    disabled={sending}
+                  />
+                  <button
+                    className="btn-primary !py-1 text-xs self-end"
+                    onClick={send}
+                    disabled={sending || !draft.trim()}
+                  >
+                    {sending ? "Sending…" : "Send"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** States slskd never moves again — only these can be cancelled or cleared.
+ *  anything else is still queued or running. */
+const DONE_STATES: Record<string, true> = {
+  Completed: true, Succeeded: true, Errored: true, Cancelled: true, Rejected: true,
+  FileNotFound: true, Aborted: true, TimedOut: true, Failed: true,
+};
+
+/** One transfer row, flattened out of slskd's per-user directory tree. */
+type TransferRow = SlskTransfer & { username: string; dir: string };
+
 /** Transfer statuses for the Downloads tab: active transfers with progress
  * bars, plus queued / completed / failed buckets so the history is
- * browsable instead of one flat list. */
-function DownloadsPanel({ downloads }: { downloads: any }) {
+ * browsable instead of one flat list. Cancel drops a queued/running transfer,
+ * Retry re-queues a failed one, and "Clear finished" empties the history. */
+function DownloadsPanel({ downloads }: { downloads: SlskDownloads | undefined }) {
+  const qc = useQueryClient();
   const [view, setView] = useState<"active" | "completed">("active");
-  const files = ((downloads?.downloads ?? []) as any[]).flatMap((u: any) =>
-    (u.directories ?? []).flatMap((d: any) =>
-      (d.files ?? []).map((f: any) => ({ ...f, username: u.username, dir: d.directory }))));
-  const pct = (f: any) => {
+  const [busy, setBusy] = useState<string | null>(null);
+  const files: TransferRow[] = (downloads?.downloads ?? []).flatMap((u) =>
+    u.directories.flatMap((d) => d.files.map((f) => ({ ...f, username: u.username, dir: d.directory }))));
+  const pct = (f: SlskTransfer) => {
     if (typeof f.percentComplete === "number") return Math.round(f.percentComplete);
     if (f.size) return Math.min(100, Math.round(((f.bytesTransferred ?? 0) / f.size) * 100));
     return 0;
   };
-  const active = files.filter((f) => f.state === "InProgress");
-  const queued = files.filter((f) => f.state === "Queued");
-  const completed = files.filter((f) => f.state === "Completed");
-  const failed = files.filter((f) => !["InProgress", "Queued", "Completed"].includes(f.state));
+  // slskd reports transfer states as compound strings — "Completed,
+  // Succeeded", "InProgress, Errored" — so every bucket matches on the
+  // CONTAINED token, never on equality (an exact "Completed" match found
+  // nothing and the history always read 0).
+  const has = (f: SlskTransfer, token: string) => f.state.includes(token);
+  const done = (s: string) => Object.keys(DONE_STATES).some((k) => s.includes(k));
+  const active = files.filter((f) => has(f, "InProgress"));
+  const queued = files.filter((f) => has(f, "Queued") || has(f, "Requested") || has(f, "Initializing"));
+  const completed = files.filter((f) => has(f, "Succeeded"));
+  const failed = files.filter(
+    (f) => !completed.includes(f) && !active.includes(f) && !queued.includes(f) && done(f.state));
+  const finished = completed.length + failed.length;
   const shown = view === "active" ? [...active, ...queued] : [...completed, ...failed];
-  const bucket = (f: any) =>
-    f.state === "Completed" ? (
+  const bucket = (f: TransferRow) =>
+    has(f, "Succeeded") ? (
       <span className="chip text-[9px] bg-emerald-900/40 text-emerald-300 border border-emerald-800">done</span>
-    ) : f.state === "InProgress" ? (
+    ) : has(f, "InProgress") ? (
       <span className="chip text-[9px] bg-sky-900/40 text-sky-300 border border-sky-800">{pct(f)}%</span>
-    ) : f.state === "Queued" ? (
+    ) : has(f, "Queued") ? (
       <span className="chip text-[9px] bg-raise border border-border text-zinc-400">queued</span>
     ) : (
-      <span className="chip text-[9px] bg-red-950/60 text-red-300 border border-red-900">{f.state?.toLowerCase() ?? "failed"}</span>
+      <span className="chip text-[9px] bg-red-950/60 text-red-300 border border-red-900">{f.state.toLowerCase() || "failed"}</span>
     );
+
+  const cancel = async (f: TransferRow) => {
+    setBusy(f.id);
+    try {
+      const r = await api.soulseekDownloadsCancel(f.username, [f.id]);
+      toast(r.cancelled ? `Cancelled ${fileName(f.filename)}` : "Could not cancel that transfer");
+      qc.invalidateQueries({ queryKey: ["soulseekDownloads"] });
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** Same call as a fresh queue — slskd starts the file again from scratch. */
+  const retry = async (f: TransferRow) => {
+    setBusy(f.id);
+    try {
+      await api.soulseekDownload(f.username, [{ filename: f.filename, size: f.size }]);
+      toast(`Retrying ${fileName(f.filename)}`);
+      qc.invalidateQueries({ queryKey: ["soulseekDownloads"] });
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const clearFinished = async () => {
+    setBusy("*");
+    try {
+      const r = await api.soulseekDownloadsClear();
+      toast(r.cleared ? `Cleared ${r.cleared} finished transfer(s)` : "Nothing to clear");
+      qc.invalidateQueries({ queryKey: ["soulseekDownloads"] });
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   return (
     <div className="bg-card rounded-lg border border-border p-4">
       <div className="flex items-center justify-between gap-2 flex-wrap mb-2">
         <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Downloads</div>
-        <div className="flex gap-1 text-[10px]">
+        <div className="flex items-center gap-1 text-[10px]">
           {([["active", active.length], ["queued", queued.length], ["completed", completed.length], ["failed", failed.length]] as [string, number][]).map(([label, count]) => (
             <span key={label} className={`chip text-[9px] border ${count > 0 ? "bg-raise border-border text-zinc-300" : "bg-panel border-border/60 text-zinc-600"}`}>
               {label} {count}
             </span>
           ))}
+          {finished > 0 && (
+            <button
+              className="btn-ghost !py-0.5 !px-2 text-[11px] ml-1"
+              disabled={busy !== null}
+              onClick={clearFinished}
+              title="Remove finished / failed transfers from this list (in-progress and queued transfers are kept)"
+            >
+              <Trash2 className="h-3 w-3" /> Clear finished
+            </button>
+          )}
         </div>
       </div>
       {files.length === 0 ? (
@@ -1728,8 +2732,8 @@ function DownloadsPanel({ downloads }: { downloads: any }) {
             ))}
           </div>
           <div className="space-y-1 max-h-[360px] overflow-auto">
-            {shown.map((f: any, i: number) => (
-              <div key={`${f.username}-${i}`} className="flex items-center gap-3 px-2 py-1.5 rounded hover:bg-white/[0.04] text-xs">
+            {shown.map((f, i) => (
+              <div key={f.id || `${f.username}-${i}`} className="flex items-center gap-3 px-2 py-1.5 rounded hover:bg-white/[0.04] text-xs">
                 <div className="flex-1 min-w-0">
                   <div className="truncate text-zinc-200" title={f.filename}>{fileName(f.filename ?? "")}</div>
                   <div className="text-[10px] text-zinc-600 truncate" title={f.dir}>{f.username} · {f.dir}</div>
@@ -1741,6 +2745,27 @@ function DownloadsPanel({ downloads }: { downloads: any }) {
                 )}
                 <span className="text-zinc-500 w-16 text-right shrink-0">{fmtSize(f.size ?? 0)}</span>
                 <span className="w-16 text-right shrink-0">{bucket(f)}</span>
+                {view === "active" ? (
+                  <button
+                    className="btn-ghost !px-1.5 !py-0.5 text-[11px] shrink-0 w-16 justify-center"
+                    disabled={busy !== null}
+                    onClick={() => cancel(f)}
+                    title="Drop this transfer from slskd's queue"
+                  >
+                    <Square className="h-3 w-3" /> Cancel
+                  </button>
+                ) : failed.includes(f) ? (
+                  <button
+                    className="btn-ghost !px-1.5 !py-0.5 text-[11px] shrink-0 w-16 justify-center"
+                    disabled={busy !== null}
+                    onClick={() => retry(f)}
+                    title="Queue this file again"
+                  >
+                    <RotateCw className="h-3 w-3" /> Retry
+                  </button>
+                ) : (
+                  <span className="w-16 shrink-0" />
+                )}
               </div>
             ))}
             {shown.length === 0 && (

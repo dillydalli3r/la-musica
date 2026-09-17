@@ -1,37 +1,14 @@
+import { useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { X, ShieldCheck, CircleAlert, Info, ExternalLink } from "lucide-react";
 import { Link } from "react-router-dom";
+import { api } from "../api";
+import { toast } from "../store";
 import type { Track } from "../types";
-import { isVideoTech } from "../lib/fmt";
+import { fmtDuration, fmtTech } from "../lib/fmt";
 import { trackRef } from "../lib/refs";
 import { AuditBadge, GradeBadge } from "./Badges";
 import TrackDownloadExport from "./TrackDownloadExport";
-
-function fmtTech(tech: Track["tech"]): string {
-  const video = isVideoTech(tech);
-  const parts: string[] = [];
-  // Video files: resolution only, plus the audio stream's shape — video
-  // codecs and container bitrates are never shown.
-  if (tech.width && tech.height) parts.push(`${tech.width}×${tech.height}`);
-  else if (tech.width) parts.push(`${tech.width}p`);
-  if (!video && tech.codec) parts.push(`${tech.codec}`);
-  const pair =
-    tech.bits_per_sample && tech.sample_rate
-      ? `${Math.round(tech.bits_per_sample)}/${(tech.sample_rate / 1000).toFixed(1).replace(/\.0$/, "")}`
-      : tech.bits_per_sample
-        ? `${Math.round(tech.bits_per_sample)} bit`
-        : tech.sample_rate
-          ? `${(tech.sample_rate / 1000).toFixed(1).replace(/\.0$/, "")} kHz`
-          : "";
-  if (pair) parts.push(pair);
-  if (tech.length) {
-    const m = Math.floor(tech.length / 60);
-    const s = Math.round(tech.length % 60);
-    parts.push(`${m}:${String(s).padStart(2, "0")}`);
-  }
-  if (!video && tech.bitrate) parts.push(`${Math.round(tech.bitrate / 1000)} kbps`);
-  if (tech.channels) parts.push(tech.channels === 1 ? "mono" : tech.channels === 2 ? "stereo" : `${tech.channels} ch`);
-  return parts.join(" · ");
-}
 
 const INFO_ROWS: { key: string; label: string }[] = [
   { key: "ARTIST", label: "Artist" },
@@ -71,10 +48,10 @@ export default function TrackDetails({
   const issues: string[] = track.issues ?? [];
   const values = track.values ?? {};
   const tags = track.tags ?? {};
-  const checkRows = Object.entries(values).filter(([k]) => !["GENRE", "ITUNESADVISORY", "INSTRUMENTAL", "MEDIA", "SOURCE"].includes(k));
+  const checkRows = Object.entries(values).filter(([k]) => !["GENRE", "ITUNESADVISORY", "INSTRUMENTAL", "MEDIA", "SOURCE", "AUDIOAUDITOR_OVERRIDE"].includes(k));
   const failKeys = new Set(issues.map((i) => i.toUpperCase()));
   const infoRows = INFO_ROWS.filter(({ key }) => tags[key as keyof typeof tags]);
-  const tech = fmtTech(track.tech ?? {});
+  const tech = [fmtTech(track.tech), track.tech.length ? fmtDuration(track.tech.length) : ""].filter(Boolean).join(" · ");
   const lyricsState = track.lyrics_embedded ? "embedded" : track.lyrics_lrc ? ".lrc sidecar" : "missing";
 
   return (
@@ -114,6 +91,12 @@ export default function TrackDetails({
                   <tr>
                     <td className="px-2 py-1 text-zinc-500">Lyrics</td>
                     <td className="px-2 py-1 text-zinc-200">{lyricsState}</td>
+                  </tr>
+                  <tr>
+                    <td className="px-2 py-1 text-zinc-500 align-top">AudioAuditor</td>
+                    <td className="px-2 py-1">
+                      <AuditOverride path={track.path} current={track.audit} />
+                    </td>
                   </tr>
                   <tr>
                     <td className="px-2 py-1 text-zinc-500 align-top">Path</td>
@@ -193,6 +176,73 @@ export default function TrackDetails({
             <div>Unreadable <span className="text-zinc-200">{track.unreadable ? "yes" : "no"}</span></div>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** Manually set the AudioAuditor verdict for one track.
+ *
+ *  REAL / FAKE is stored in the file's AUDIOAUDITOR_OVERRIDE tag, and the
+ *  grader applies it AFTER every derived verdict — so a forced re-audit
+ *  reproduces the user's call instead of erasing it. "Auto" clears the tag and
+ *  hands the track back to AudioAuditor. */
+function AuditOverride({ path, current }: { path: string; current: string | null }) {
+  const qc = useQueryClient();
+  const [busy, setBusy] = useState(false);
+  const { data } = useQuery({ queryKey: ["tags", path], queryFn: () => api.tags(path) });
+  const stored = String((data?.tags as Record<string, string> | undefined)?.AUDIOAUDITOR_OVERRIDE ?? "")
+    .trim()
+    .toUpperCase();
+  const set = async (v: "REAL" | "FAKE" | null) => {
+    setBusy(true);
+    try {
+      await api.mbAssign({ [path]: { AUDIOAUDITOR_OVERRIDE: v } });
+      toast(v ? `AudioAuditor forced to ${v} — it will survive forced re-audits` : "Override cleared — AudioAuditor decides again");
+      qc.invalidateQueries({ queryKey: ["tags", path] });
+      qc.invalidateQueries({ queryKey: ["library"] });
+      qc.invalidateQueries({ queryKey: ["album"] });
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center gap-1">
+        {(["REAL", "FAKE"] as const).map((v) => (
+          <button
+            key={v}
+            className={`px-2 py-0.5 rounded text-[10px] border ${
+              stored === v
+                ? v === "REAL"
+                  ? "bg-emerald-900/60 text-emerald-300 border-emerald-800"
+                  : "bg-red-900/60 text-red-300 border-red-800"
+                : "bg-panel text-zinc-400 border-border hover:border-accent/50"
+            }`}
+            disabled={busy}
+            onClick={() => set(stored === v ? null : v)}
+            title={stored === v ? "Click to clear the override" : `Force AudioAuditor to report ${v}`}
+          >
+            {v}
+          </button>
+        ))}
+        <button
+          className={`px-2 py-0.5 rounded text-[10px] border ${
+            !stored ? "bg-accent on-accent border-accent" : "bg-panel text-zinc-400 border-border hover:border-accent/50"
+          }`}
+          disabled={busy}
+          onClick={() => set(null)}
+          title="Let AudioAuditor decide"
+        >
+          Auto
+        </button>
+      </div>
+      <div className="text-[10px] text-zinc-500">
+        {stored
+          ? `Forced ${stored} — overrides AudioAuditor${current ? ` (it reports ${current})` : ""}`
+          : "AudioAuditor decides. Force it if you have verified this rip yourself."}
       </div>
     </div>
   );

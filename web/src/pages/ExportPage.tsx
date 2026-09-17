@@ -43,7 +43,9 @@ const QUALITY: Record<string, { v: string; label: string }[]> = {
     { v: "192", label: "192 kbps" },
     { v: "160", label: "160 kbps" },
     { v: "128", label: "128 kbps" },
+    { v: "112", label: "112 kbps" },
     { v: "96", label: "96 kbps" },
+    { v: "80", label: "80 kbps" },
     { v: "64", label: "64 kbps" },
     { v: "custom", label: "Custom bitrate…" },
   ],
@@ -57,6 +59,8 @@ const QUALITY: Record<string, { v: string; label: string }[]> = {
     { v: "q4", label: "q4 (~128 kbps)" },
     { v: "q3", label: "q3 (~112 kbps)" },
     { v: "q2", label: "q2 (~96 kbps)" },
+    { v: "q1", label: "q1 (~80 kbps)" },
+    { v: "q0", label: "q0 (~64 kbps, smallest)" },
     { v: "custom", label: "Custom q…" },
   ],
   wav: [

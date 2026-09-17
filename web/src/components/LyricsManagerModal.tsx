@@ -57,6 +57,7 @@ export default function LyricsManagerModal({
   duration,
   currentText,
   onApplied,
+  onSaved,
   onClose,
 }: {
   path: string;
@@ -67,6 +68,9 @@ export default function LyricsManagerModal({
   currentText?: string;
   /** Receives the chosen LRC/plain text plus a short source label. */
   onApplied: (lrc: string, source: string) => void;
+  /** Fired after the embedded editor saves — invalidate the host page's
+   * track/library/album queries here or they keep serving the old lyrics. */
+  onSaved?: () => void;
   onClose: () => void;
 }) {
   const [loading, setLoading] = useState(true);
@@ -294,6 +298,7 @@ export default function LyricsManagerModal({
           duration={duration}
           initialLyrics={currentText ?? ""}
           onClose={() => setEditorOpen(false)}
+          onSaved={onSaved}
         />
       )}
     </div>

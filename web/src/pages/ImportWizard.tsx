@@ -9,9 +9,12 @@ import {
 import { api } from "../api";
 import { toast } from "../store";
 import LyricsViewer, { parseLrc } from "../components/LyricsViewer";
+import CoverSearchModal from "../components/CoverSearchModal";
+import CoverImg, { TrackCover } from "../components/CoverImg";
 import type { MBRelease, MatchSuggestion, Track } from "../types";
+import { SCRIPTS } from "../lib/scripts";
 
-const STEPS = ["Select & separate", "Links", "Match", "Genres", "Lyrics", "Advisory", "Finish"];
+const STEPS = ["Select & separate", "Links", "Match", "Covers", "Genres", "Lyrics", "Advisory", "Finish"];
 
 // Everything the importer accepts: audio, all common image formats, and the
 // sidecars the optimizer understands (.lrc, .cue, .log, .accurip).
@@ -168,6 +171,10 @@ export default function ImportWizard() {
   const [uploaded, setUploaded] = useState<{ name: string; path: string }[]>([]);
   const [albumIndex, setAlbumIndex] = useState(0);
   const [uploading, setUploading] = useState(false);
+  // relPaths the user unticked: PARTIAL import. Excluded files are never
+  // uploaded or moved, and the release tracklist recorded at match time lets
+  // the album page grey out exactly those tracks.
+  const [excluded, setExcluded] = useState<Set<string>>(new Set());
 
   const [mbLink, setMbLink] = useState("");
   const [rymLink, setRymLink] = useState("");
@@ -187,11 +194,29 @@ export default function ImportWizard() {
   const [advisory, setAdvisory] = useState<Record<string, string>>({});
   const [instrumental, setInstrumental] = useState<Record<string, string>>({});
   const [lyricsDrafts, setLyricsDrafts] = useState<Record<string, string>>({});
+  // Covers step: album/per-track cover feedback + the per-track selection.
+  const [coverNotice, setCoverNotice] = useState<string | null>(null);
+  const [lyricsNotice, setLyricsNotice] = useState<string | null>(null);
+  // Live progress for the LRCLIB bulk import (null = not running).
+  const [lyrProgress, setLyrProgress] = useState<{ done: number; total: number; label: string } | null>(null);
+  const [coverSel, setCoverSel] = useState<Set<string>>(new Set());
+  const [coverUrl, setCoverUrl] = useState("");
+  const [trackCoverUrl, setTrackCoverUrl] = useState("");
+  const [coverSearchOpen, setCoverSearchOpen] = useState(false);
+  const albumCoverInput = useRef<HTMLInputElement>(null);
+  const trackCoverInput = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [fetchStatus, setFetchStatus] = useState<string | null>(null);
   const qc = useQueryClient();
 
   const { data: lib } = useQuery({ queryKey: ["library"], queryFn: api.library });
+
+  // Real dimensions of the album cover, re-read whenever a cover changes.
+  const { data: coverInfo } = useQuery({
+    queryKey: ["coverInfo", albumPath],
+    queryFn: () => api.coverInfo(albumPath!),
+    enabled: !!albumPath && step >= 3,
+  });
 
   const trackList = useMemo(() => {
     if (!albumPath || !lib) return [];
@@ -408,6 +433,10 @@ export default function ImportWizard() {
   const adoptImports = (list: ImportFile[], fallback: string) => {
     if (list.length && fallback && !albumName) setAlbumName(fallback);
     setAlbums(detectAlbums(list, fallback || albumName || "New Album"));
+    // A fresh selection starts with nothing excluded: the tick state is keyed
+    // by relPath, so a second drop of a same-named folder would otherwise
+    // silently carry the previous album's exclusions into it.
+    setExcluded(new Set());
   };
 
   const handleFiles = (list: FileList | File[]) => {
@@ -541,7 +570,13 @@ export default function ImportWizard() {
   };
 
   const doImport = async () => {
-    const groups = albums.filter((g) => g.name.trim() && g.files.length);
+    // Excluded files are dropped here, before anything is uploaded or moved:
+    // that is what makes a PARTIAL album import (one track of twelve) work.
+    // The native/folder import MOVES the source directory, so there is no
+    // subset to move — exclusion only exists on the upload path.
+    const skip = source === "web" ? excluded : new Set<string>();
+    const included = (g: AlbumGroup) => g.files.filter((f) => !skip.has(f.relPath));
+    const groups = albums.filter((g) => g.name.trim() && included(g).length);
     if (!groups.length) {
       toast("Nothing to import — add files first");
       return;
@@ -549,22 +584,32 @@ export default function ImportWizard() {
     setUploading(true);
     try {
       const results: { name: string; path: string }[] = [];
+      const failed: { name: string; error: unknown }[] = [];
       for (const g of groups) {
         const name = g.name.trim();
+        const keep = included(g);
         if (source === "web") {
-          const filesToSend = g.files.filter((f) => f.file) as { file: File; relPath: string }[];
+          const filesToSend = keep.filter((f) => f.file) as { file: File; relPath: string }[];
           if (!filesToSend.length) continue;
-          const res = await api.importUpload(name, filesToSend);
-          results.push({ name, path: res.album_path });
+          try {
+            const res = await api.importUpload(name, filesToSend);
+            results.push({ name, path: res.album_path });
+          } catch (e) {
+            failed.push({ name, error: e });
+          }
         } else {
           const src = nativeRoot ? (g.root ? `${nativeRoot}/${g.root}` : nativeRoot) : "";
           if (!src) continue;
-          const res = await api.importIngest(src, name);
-          results.push({ name, path: res.path });
+          try {
+            const res = await api.importIngest(src, name);
+            results.push({ name, path: res.path });
+          } catch (e) {
+            failed.push({ name, error: e });
+          }
         }
       }
       if (!results.length) {
-        toast("Nothing to import");
+        toast(failed.length ? String(failed[0].error) : "Nothing to import");
         return;
       }
       setUploaded(results);
@@ -572,7 +617,11 @@ export default function ImportWizard() {
       setAlbumPath(results[0].path);
       setStep(1);
       qc.invalidateQueries({ queryKey: ["library"] });
-      toast(`Imported ${results.length} album${results.length > 1 ? "s" : ""}`);
+      toast(
+        failed.length
+          ? `Imported ${results.length} album${results.length > 1 ? "s" : ""} — failed: ${failed.map((f) => f.name).join(", ")}`
+          : `Imported ${results.length} album${results.length > 1 ? "s" : ""}`
+      );
     } catch (e) {
       toast(String(e));
     } finally {
@@ -721,7 +770,12 @@ export default function ImportWizard() {
           ALBUM: release?.title ?? null,
           ALBUMARTIST: albumArtist,
           DATE: release?.date || null,
-          TRACKNUMBER: t ? String(t.position).padStart(2, "0") : null,
+          // UNPADDED: a file tag stores "1", never "01". Zero-padding is a
+          // FILENAME/display convention (the naming script's pattern), not a
+          // metadata one — MusicBrainz, Picard, beets and every player write
+          // the bare integer, and a padded tag sorts and diffs wrong against
+          // them.
+          TRACKNUMBER: t ? String(t.position) : null,
           TRACKTOTAL: release?.media?.length ? String(release.media.length) : null,
           DISCNUMBER: t ? String(t.disc) : null,
           DISCTOTAL: release?.medium_count ? String(release.medium_count) : null,
@@ -733,6 +787,27 @@ export default function ImportWizard() {
         };
       }
       await api.mbAssign(writes);
+      // Record the RELEASE's own tracklist on the folder. A partial import
+      // (some of these tracks never brought in) leaves no other trace of what
+      // is absent, so the album page diffs against this list and greys out
+      // the missing rows. A failure here must not lose the tag writes that
+      // just succeeded, so it is reported and the wizard moves on.
+      if (albumPath && release) {
+        try {
+          await api.importExpected(
+            albumPath,
+            release.id ?? releaseId ?? null,
+            (release.media ?? []).map((m) => ({
+              disc: m.disc,
+              position: m.position,
+              title: m.title,
+              recording_mbid: m.recording_mbid ?? null,
+            }))
+          );
+        } catch (e) {
+          toast(`Metadata saved, but the release tracklist could not be recorded: ${e}`);
+        }
+      }
       toast("MusicBrainz metadata written to files (titles, artists, album, dates, MBIDs)");
       setStep(3);
     } catch (e) {
@@ -743,11 +818,134 @@ export default function ImportWizard() {
     }
   };
 
-  // ---------------- Step 3: genres ----------------
+  // ---------------- Step 3: covers ----------------
+  /** How many tracks point at the same image (manifest art or sidecar). */
+  const coverShares = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const t of stepTracks) if (t.cover_file) m.set(t.cover_file, (m.get(t.cover_file) ?? 0) + 1);
+    return m;
+  }, [stepTracks]);
+
+  /** The release picked in the Links step, via the Cover Art Archive. */
+  const mbCoverUrl = releaseId ? `https://coverartarchive.org/release/${releaseId}/front-500` : null;
+
+  const refreshCovers = () => {
+    qc.invalidateQueries({ queryKey: ["library"] });
+    qc.invalidateQueries({ queryKey: ["coverInfo", albumPath] });
+  };
+
+  /** Cover results: amber banner when the image is under the minimum size
+   *  (the backend writes it anyway and says so), toast for the outcome.
+   *  The backend compresses on write, so the toast reports the RESULTING
+   *  size and what it was shrunk from. */
+  const reportCover = (
+    res: {
+      warning?: string | null;
+      width?: number; height?: number;
+      below_target?: boolean;
+      compressed?: boolean;
+      original_width?: number | null;
+      original_height?: number | null;
+    },
+    what: string
+  ) => {
+    setCoverNotice(res.warning ?? null);
+    const dims = res.width && res.height ? ` (${res.width}×${res.height})` : "";
+    const shrunk =
+      res.compressed && res.original_width && res.width && res.original_width > res.width
+        ? ` — compressed from ${res.original_width}×${res.original_height}`
+        : res.compressed
+          ? " — compressed"
+          : "";
+    toast(
+      res.warning
+        ? `${what} applied${dims}${shrunk} — ${res.warning}`
+        : `${what} applied${dims}${shrunk}`
+    );
+  };
+
+  const uploadCover = async (file: File, tracks?: string[]) => {
+    if (!albumPath) return;
+    if (!file.type.startsWith("image/")) {
+      toast(`${file.name} is not an image — use a jpg, png or webp`);
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = tracks?.length
+        ? await api.cover(albumPath, file, undefined, tracks)
+        : await api.cover(albumPath, file);
+      reportCover(res, tracks?.length ? `Cover assigned to ${tracks.length} track(s)` : "Album cover");
+      refreshCovers();
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const applyCoverUrl = async (url: string, tracks?: string[]) => {
+    const u = url.trim();
+    if (!albumPath || !u) return;
+    setBusy(true);
+    try {
+      const res = tracks?.length
+        ? await api.coverFromUrl(albumPath, u, undefined, tracks)
+        : await api.coverFromUrl(albumPath, u);
+      reportCover(res, tracks?.length ? `Cover assigned to ${tracks.length} track(s)` : "Album cover");
+      refreshCovers();
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clearTrackCovers = async () => {
+    if (!albumPath || !coverSel.size) return;
+    setBusy(true);
+    try {
+      await api.coverClear(albumPath, [...coverSel]);
+      toast(`Per-track cover cleared for ${coverSel.size} track(s)`);
+      refreshCovers();
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggleCoverSel = (path: string) =>
+    setCoverSel((s) => {
+      const next = new Set(s);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+
+  const setCoverSelFor = (paths: string[], on: boolean) =>
+    setCoverSel((s) => {
+      const next = new Set(s);
+      for (const p of paths) {
+        if (on) next.add(p);
+        else next.delete(p);
+      }
+      return next;
+    });
+
+  /** The cover endpoints take audio FILENAMES, the selection holds paths. */
+  const selectedCoverFiles = () => [...coverSel].map((p) => p.split("/").pop()!);
+
+  const saveCovers = () => {
+    setCoverNotice(null);
+    setStep(4); // Genres
+  };
+
+  // ---------------- Step 4: genres ----------------
   // When the Genres step opens, prefill untouched tracks with their existing
   // GENRE tags so they are visible and editable right away.
   useEffect(() => {
-    if (step !== 3) return;
+    if (step !== 4) return;
     setGenres((g) => {
       let changed = false;
       const next = { ...g };
@@ -764,6 +962,17 @@ export default function ImportWizard() {
 
   const genreList = (path: string): string[] =>
     (genres[path] ?? "").split(";").map((g) => g.trim()).filter(Boolean);
+
+  /** Every genre currently on ANY track, with how many tracks carry it, most
+   *  common first — the album-wide cleanup control renders one chip per entry. */
+  const allGenres = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const t of stepTracks) {
+      for (const gen of new Set(genreList(t.path))) m.set(gen, (m.get(gen) ?? 0) + 1);
+    }
+    return [...m.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stepTracks, genres]);
 
   const setGenreList = (path: string, list: string[]) =>
     setGenres((g) => ({ ...g, [path]: list.join("; ") }));
@@ -789,6 +998,25 @@ export default function ImportWizard() {
     setDiscGenres((m) => ({ ...m, [disc]: "" }));
   };
 
+  /** Drop one genre from EVERY track — album-wide cleanup of a bad genre. */
+  const removeGenreEverywhere = (genre: string) =>
+    setGenres((g) => {
+      const next = { ...g };
+      for (const t of stepTracks) {
+        const list = (next[t.path] ?? "").split(";").map((x) => x.trim()).filter(Boolean);
+        if (list.includes(genre)) next[t.path] = list.filter((x) => x !== genre).join("; ");
+      }
+      return next;
+    });
+
+  /** Drop ALL genres from every track, leaving the step empty to re-import. */
+  const removeAllGenres = () =>
+    setGenres((g) => {
+      const next = { ...g };
+      for (const t of stepTracks) next[t.path] = "";
+      return next;
+    });
+
   const saveGenres = async () => {
     setBusy(true);
     try {
@@ -796,7 +1024,7 @@ export default function ImportWizard() {
       for (const [p, g] of Object.entries(genres)) writes[p] = { GENRE: g || null };
       await api.mbAssign(writes);
       toast("Genres saved");
-      setStep(4);
+      setStep(5);
     } catch (e) {
       toast(String(e));
     } finally {
@@ -804,7 +1032,7 @@ export default function ImportWizard() {
     }
   };
 
-  // ---------------- Step 4: lyrics ----------------
+  // ---------------- Step 5: lyrics ----------------
   // Display name for a track ANYWHERE in the wizard: MusicBrainz release
   // title > existing tag > filename-derived fallback.
   const displayTitle = (p: string) => {
@@ -832,36 +1060,98 @@ export default function ImportWizard() {
   };
   const trackAlbum = release?.title || stepTracks[0]?.tags.ALBUM || undefined;
 
+  /** The richest row for a path: the library payload first, the step's own
+   *  rows (suggestions / folder scan) second. */
+  const findTrack = (p: string): Track | undefined =>
+    trackList.find((x) => x.path === p) ?? stepTracks.find((x) => x.path === p);
+
+  /** (disc, track) digits from a leading "D-TT" / "TT" file name — the same
+   *  fallback the library payload derives for untagged files. */
+  const numsFromName = (file: string): { disc: number | null; track: number | null } => {
+    const stem = (file.split("/").pop() ?? "").replace(/\.[^.]+$/, "");
+    const dd = stem.match(/^\s*(\d+)\s*-\s*(\d+)/);
+    if (dd) return { disc: Number(dd[1]), track: Number(dd[2]) };
+    const tt = stem.match(/^\s*(\d+)/);
+    return { disc: null, track: tt ? Number(tt[1]) : null };
+  };
+
+  /** Track number shown on EVERY step: the matched MusicBrainz position when
+   *  there is one (that is the number written to the file), else the local tag,
+   *  else the number derived from the file name. */
+  const trackNoOf = (p: string): number | null => {
+    const m = suggByPath.get(p)?.release_track;
+    if (m) return m.position;
+    const t = findTrack(p);
+    if (!t) return null;
+    return parseDisc(t.tags?.TRACKNUMBER) ?? t.tracknumber ?? numsFromName(t.file || p).track;
+  };
+
+  /** Disc number shown on EVERY step, same precedence as {@link trackNoOf}. */
+  const discNoOf = (p: string): number | null => {
+    const m = suggByPath.get(p)?.release_track;
+    if (m) return m.disc;
+    const t = findTrack(p);
+    if (!t) return null;
+    return parseDisc(t.tags?.DISCNUMBER) ?? t.discnumber ?? numsFromName(t.file || p).disc;
+  };
+
+  /** Whether this track will actually carry lyrics once the step is saved.
+   *  A checkmark used to appear for any track whose .lrc sidecar merely
+   *  EXISTED, so empty sidecars from an aborted run claimed lyrics they did
+   *  not have. Instrumentals never count. */
+  const hasLyrics = (t: Track): boolean => {
+    if ((instrumental[t.path] ?? t.tags.INSTRUMENTAL) === "1") return false;
+    const draft = lyricsDrafts[t.path];
+    if (draft && draft.trim()) return true;   // what this step is about to write
+    return !!(t.lyrics_embedded || t.lyrics_lrc); // what is already on disk
+  };
+
   const importLyricsForAll = async () => {
     setBusy(true);
-    let done = 0;
+    const total = stepTracks.length;
+    let fetched = 0;
     let skipped = 0;
     let missing = 0;
+    let seen = 0;
     try {
+      setLyrProgress({ done: 0, total, label: "Starting…" });
       for (const t of stepTracks) {
-        if (instrumental[t.path] === "1") continue;
-        const artist = trackArtist(t.path);
-        const title = trackTitle(t.path);
-        if (!artist || !title) {
-          skipped++;
-          continue;
-        }
-        try {
-          const res = await api.lyricsGet(artist, title, trackAlbum, trackDuration(t.path));
-          const lrc = res?.syncedLyrics ?? res?.plainLyrics;
-          if (lrc) {
-            setLyricsDrafts((d) => ({ ...d, [t.path]: lrc }));
-            done++;
-          } else {
+        const inst = instrumental[t.path] === "1";
+        const artist = inst ? "" : trackArtist(t.path);
+        const title = inst ? "" : trackTitle(t.path);
+        const skipReason = inst
+          ? "Skipped — instrumental"
+          : !artist || !title
+            ? "Skipped — no artist/title"
+            : null;
+        setLyrProgress({
+          done: seen,
+          total,
+          label: skipReason ?? `Fetching ${artist} — ${title}`,
+        });
+        if (skipReason) {
+          if (!inst) skipped++;
+        } else {
+          try {
+            const res = await api.lyricsGet(artist, title, trackAlbum, trackDuration(t.path));
+            const lrc = res?.syncedLyrics ?? res?.plainLyrics;
+            if (lrc) {
+              setLyricsDrafts((d) => ({ ...d, [t.path]: lrc }));
+              fetched++;
+            } else {
+              missing++;
+            }
+          } catch {
             missing++;
           }
-        } catch {
-          missing++;
+          // Gentle pacing for LRCLIB — only when another request follows.
+          if (seen + 1 < total) await new Promise((r) => setTimeout(r, 350));
         }
-        await new Promise((r) => setTimeout(r, 350)); // gentle pacing for LRCLIB
+        seen++;
       }
-      if (done) {
-        toast(`Imported lyrics for ${done} track(s)${missing ? ` — ${missing} not found on LRCLIB` : ""}`);
+      setLyrProgress({ done: total, total, label: "Done" });
+      if (fetched) {
+        toast(`Imported lyrics for ${fetched} track(s)${missing ? ` — ${missing} not found on LRCLIB` : ""}`);
       } else if (skipped) {
         toast("No artist/title available for some tracks — matching the MusicBrainz release first improves lyrics results");
       } else {
@@ -869,25 +1159,46 @@ export default function ImportWizard() {
       }
     } finally {
       setBusy(false);
+      // Hold the finished bar for a beat so 100% is actually visible.
+      setTimeout(() => setLyrProgress(null), 1500);
     }
   };
 
   const saveLyricsStep = async () => {
     setBusy(true);
     try {
+      // Write what the config asks for — the wizard used to always write .lrc.
+      const cfg = await api.config();
+      const fmt = String(cfg.lyrics_format ?? "EMBEDDED").toUpperCase(); // EMBEDDED | LRC | BOTH
       const writes: Record<string, Record<string, string | null>> = {};
+      let embedded = 0;
+      let sidecars = 0;
+      let untimed = 0;
       for (const t of stepTracks) {
         const inst = instrumental[t.path] ?? (t.tags.INSTRUMENTAL === "1" ? "1" : "0");
         writes[t.path] = { INSTRUMENTAL: inst };
-        if (inst === "1") continue;
+        if (inst === "1") continue; // instrumentals never carry lyrics
         const lrc = lyricsDrafts[t.path];
-        if (lrc && parseLrc(lrc).length) {
+        if (!lrc || !lrc.trim()) continue;
+        if (!parseLrc(lrc).length) {
+          untimed++; // plain text: nothing to timestamp, nothing written
+          continue;
+        }
+        if (fmt === "LRC" || fmt === "BOTH") {
           await api.lyricsWrite(t.path, lrc);
+          sidecars++;
+        }
+        if (fmt === "EMBEDDED" || fmt === "BOTH") {
+          await api.lyricsEmbed(t.path, lrc);
+          embedded++;
         }
       }
       await api.mbAssign(writes);
-      toast("Lyrics + INSTRUMENTAL saved");
-      setStep(5);
+      setLyricsNotice(
+        untimed ? `${untimed} track(s) have lyrics without timestamps — not saved as .lrc` : null
+      );
+      toast(`lyrics_format=${fmt}: ${embedded} embedded, ${sidecars} .lrc — INSTRUMENTAL saved`);
+      setStep(6);
     } catch (e) {
       toast(String(e));
     } finally {
@@ -895,7 +1206,7 @@ export default function ImportWizard() {
     }
   };
 
-  // ---------------- Step 5: advisory ----------------
+  // ---------------- Step 6: advisory ----------------
   const applyAdvisoryToAll = (v: string) => {
     setAdvisory((a) => {
       const next = { ...a };
@@ -918,12 +1229,12 @@ export default function ImportWizard() {
       }
       if (!Object.keys(writes).length) {
         toast("No advisory changes — pick values or use Apply to all");
-        setStep(6);
+        setStep(7);
         return;
       }
       await api.mbAssign(writes);
       toast("Advisory ratings saved");
-      setStep(6);
+      setStep(7);
     } catch (e) {
       toast(String(e));
     } finally {
@@ -931,19 +1242,45 @@ export default function ImportWizard() {
     }
   };
 
-  const POST_IMPORT_SCRIPTS = [
-  { id: 1, label: "Lyrics", defaultOn: true },
-  { id: 2, label: "CUEs", defaultOn: true },
-  { id: 3, label: "FLACs (re-encode)", defaultOn: false },
-  { id: 5, label: "Images", defaultOn: true },
-  { id: 7, label: "DR / ReplayGain", defaultOn: true },
-  { id: 6, label: "Audit", defaultOn: false },
-  { id: 8, label: "AutoTag", defaultOn: false },
-  { id: 4, label: "Grade", defaultOn: true },
-];
+  // The post-import chain comes from lib/scripts.ts — the single source of
+  // truth every other script menu in the app already uses. This was an
+  // 8-entry list hardcoded here, and it silently drifted: AccurateRip, Format
+  // all, Remux videos, Key & BPM, Fetch lyrics, Beets and Lyrics xlit were all
+  // missing, so "Run all scripts" ran 8 of the 15 that exist.
+  const POST_IMPORT_DEFAULT_ON = new Set([1, 2, 5, 7, 4]);
+  const POST_IMPORT_SCRIPTS = SCRIPTS.map((s) => ({
+    id: s.ids[0],
+    label: s.label,
+    defaultOn: POST_IMPORT_DEFAULT_ON.has(s.ids[0]),
+  }));
 const [runAfterImport, setRunAfterImport] = useState<number[]>(
   POST_IMPORT_SCRIPTS.filter((s) => s.defaultOn).map((s) => s.id)
 );
+const [scriptsRunning, setScriptsRunning] = useState(false);
+
+/** Run EVERY post-import script on the new album(s) right now, without
+ *  leaving the wizard. The checkboxes stay the "on Done" shortcut; this is
+ *  the one-click "do the whole chain" path the Finish step was missing. */
+const runAllScripts = async () => {
+  if (!uploaded.length) {
+    toast("Nothing imported yet");
+    return;
+  }
+  setScriptsRunning(true);
+  try {
+    await api.run(POST_IMPORT_SCRIPTS.map((s) => s.id), uploaded.map((a) => a.path));
+    toast(
+      `Running all ${POST_IMPORT_SCRIPTS.length} scripts on ${uploaded.length} album${
+        uploaded.length > 1 ? "s" : ""
+      } — progress shows at the top of the window`
+    );
+    qc.invalidateQueries({ queryKey: ["library"] });
+  } catch (e) {
+    toast(String(e));
+  } finally {
+    setScriptsRunning(false);
+  }
+};
 
 const finish = async () => {
   try {
@@ -976,6 +1313,13 @@ const finish = async () => {
     setLyricsDrafts({});
     setInstrumental({});
     setAdvisory({});
+    setCoverNotice(null);
+    setLyricsNotice(null);
+    setLyrProgress(null);
+    setCoverSel(new Set());
+    setCoverUrl("");
+    setTrackCoverUrl("");
+    setCoverSearchOpen(false);
   };
 
   const totalFiles = albums.reduce((n, g) => n + g.files.length, 0);
@@ -986,6 +1330,19 @@ const finish = async () => {
       : step === 1
         ? !!(releaseId || extractMbid(mbLink))
         : true;
+  // Why Continue is disabled — shown next to the button instead of leaving
+  // the user with a dead button.
+  const nextBlock = (() => {
+    if (canNext) return null;
+    if (step === 0)
+      return totalFiles === 0
+        ? "Add files or pick a folder first"
+        : !albums.length
+          ? "Nothing to import"
+          : "Every album needs a name";
+    if (step === 1) return "Enter a MusicBrainz release URL or ID first";
+    return null;
+  })();
 
   return (
     <div className="p-6 max-w-6xl mx-auto space-y-5">
@@ -1135,7 +1492,12 @@ const finish = async () => {
                       placeholder="Album name"
                       onChange={(e) => renameGroup(gi, e.target.value)}
                     />
-                    <span className="text-xs text-zinc-500">{g.files.length} file(s)</span>
+                    <span className="text-xs text-zinc-500">
+                      {g.files.length - g.files.filter((f) => excluded.has(f.relPath)).length} of {g.files.length} file(s)
+                      {g.files.some((f) => excluded.has(f.relPath)) && (
+                        <span className="text-amber-300/90"> — partial album</span>
+                      )}
+                    </span>
                     <button className="btn-danger !px-2 !py-1 ml-auto" onClick={() => removeAlbum(gi)} disabled={albums.length <= 1} title="Remove (files move to first album)">
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
@@ -1149,6 +1511,16 @@ const finish = async () => {
                         gi={gi}
                         albums={albums}
                         groupFiles={g.files}
+                        selectable={source === "web"}
+                        excluded={excluded.has(f.relPath)}
+                        onToggleExcluded={() =>
+                          setExcluded((s) => {
+                            const next = new Set(s);
+                            if (next.has(f.relPath)) next.delete(f.relPath);
+                            else next.add(f.relPath);
+                            return next;
+                          })
+                        }
                         onMove={(to) => moveFile(gi, to, f)}
                       />
                     ))}
@@ -1331,10 +1703,9 @@ const finish = async () => {
               onToggle={() => toggleDisc(g.disc ?? null)}
             >
               {g.rows.map((s) => {
-                const local = trackList.find((t) => t.path === s.local);
                 return (
                   <div key={s.local} className="flex items-center gap-3 bg-card rounded-lg border border-border px-3 py-2">
-                    <span className="text-xs text-zinc-600 w-8">{local?.tags.TRACKNUMBER ?? s.file.split("/").pop()?.slice(0, 2)}</span>
+                    <TrackNoBadge disc={discNoOf(s.local)} track={trackNoOf(s.local)} />
                     <span className="flex-1 truncate text-sm">{displayTitle(s.local)}</span>
                     <span className="text-xs text-zinc-500">
                       {s.matched ? `${s.release_track!.disc}.${s.release_track!.position} ${s.release_track!.title}` : "no match"}
@@ -1367,8 +1738,261 @@ const finish = async () => {
         </div>
       )}
 
-      {/* ---------------- Step 3: genres ---------------- */}
-      {step === 3 && (
+      {/* ---------------- Step 3: covers ---------------- */}
+      {step === 3 && albumPath && (
+        <div className="space-y-4">
+          {coverNotice && (
+            <div className="rounded-lg border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+              {coverNotice}
+            </div>
+          )}
+
+          <div className="grid md:grid-cols-2 gap-3">
+            <div className="bg-card rounded-lg border border-border p-4 space-y-2">
+              <div className="text-sm font-semibold text-zinc-300">Current album cover</div>
+              <CoverImg
+                albumPath={albumPath}
+                coverFile={coverInfo?.file}
+                wrapperClass="h-40 w-40 rounded-lg bg-raise border border-border overflow-hidden"
+              />
+              <div className="text-xs text-zinc-500">
+                {coverInfo?.file
+                  ? `${coverInfo.file} — ${coverInfo.width ?? "?"}×${coverInfo.height ?? "?"} px · ${Math.max(1, Math.round(coverInfo.bytes / 1024))} KB`
+                  : "No album cover on disk yet."}
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <button className="btn-ghost !py-1 text-xs" onClick={() => albumCoverInput.current?.click()} disabled={busy}>
+                  <UploadCloud className="h-3.5 w-3.5" /> Upload image
+                </button>
+                <button className="btn-ghost !py-1 text-xs" onClick={() => setCoverSearchOpen(true)} disabled={busy}>
+                  Search covers
+                </button>
+              </div>
+            </div>
+
+            <div className="bg-card rounded-lg border border-border p-4 space-y-2">
+              <div className="text-sm font-semibold text-zinc-300">MusicBrainz release cover</div>
+              <div className="text-xs text-zinc-500">
+                The release's own cover — compare it with musichoarders before you accept it.
+              </div>
+              {mbCoverUrl ? (
+                <img
+                  src={mbCoverUrl}
+                  alt="MusicBrainz release cover"
+                  referrerPolicy="no-referrer"
+                  className="h-40 w-40 rounded-lg bg-raise border border-border object-cover"
+                />
+              ) : (
+                <div className="h-40 w-40 rounded-lg bg-raise border border-border flex items-center justify-center text-center px-3 text-xs text-zinc-600">
+                  No release picked yet — fetch it in the Links step.
+                </div>
+              )}
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  className="btn-ghost !py-1 text-xs"
+                  onClick={() => mbCoverUrl && applyCoverUrl(mbCoverUrl)}
+                  disabled={busy || !mbCoverUrl}
+                >
+                  <CloudDownloadIcon /> Use the MusicBrainz cover
+                </button>
+                {mbCoverUrl && (
+                  <a
+                    href={mbCoverUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs text-accent-soft underline underline-offset-2"
+                  >
+                    open on coverartarchive.org
+                  </a>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-card rounded-lg border border-border p-3 space-y-2">
+            <div className="text-xs text-zinc-400">
+              MusicBrainz cover wrong? Find the correct one on{" "}
+              <a
+                href="https://covers.musichoarders.xyz"
+                target="_blank"
+                rel="noreferrer"
+                className="text-accent-soft underline underline-offset-2"
+              >
+                covers.musichoarders.xyz <ExternalLink className="inline h-3 w-3" />
+              </a>
+              , then apply it here with Search covers or an image URL.
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-xs font-semibold text-zinc-400">Album cover from URL</span>
+              <input
+                className="input flex-1 min-w-[240px] !py-1 text-xs"
+                placeholder="https://…/cover.jpg"
+                value={coverUrl}
+                onChange={(e) => setCoverUrl(e.target.value)}
+              />
+              <button
+                className="btn-ghost !py-1 text-xs"
+                onClick={() => applyCoverUrl(coverUrl)}
+                disabled={busy || !coverUrl.trim()}
+              >
+                <ExternalLink className="h-3.5 w-3.5" /> Apply to album
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-card rounded-lg border border-border p-3 space-y-2">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm font-semibold text-zinc-300">Per-track covers</span>
+              <span className="text-xs text-zinc-500">
+                {coverSel.size} selected — one image applied to several tracks is stored once and shared between them (that is how
+                tracks 7 and 8 get the same art).
+              </span>
+              <button
+                className="btn-ghost !py-1 text-xs ml-auto"
+                onClick={() =>
+                  setCoverSel(
+                    coverSel.size && coverSel.size === stepTracks.length
+                      ? new Set()
+                      : new Set(stepTracks.map((t) => t.path))
+                  )
+                }
+              >
+                {coverSel.size && coverSel.size === stepTracks.length ? "Select none" : "Select all"}
+              </button>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                className="btn-ghost !py-1 text-xs"
+                onClick={() => trackCoverInput.current?.click()}
+                disabled={busy || !coverSel.size}
+              >
+                <UploadCloud className="h-3.5 w-3.5" /> Upload to selected
+              </button>
+              <input
+                className="input !w-64 !py-1 text-xs"
+                placeholder="Cover image URL for the selection…"
+                value={trackCoverUrl}
+                onChange={(e) => setTrackCoverUrl(e.target.value)}
+              />
+              <button
+                className="btn-ghost !py-1 text-xs"
+                onClick={() => applyCoverUrl(trackCoverUrl, selectedCoverFiles())}
+                disabled={busy || !coverSel.size || !trackCoverUrl.trim()}
+              >
+                <ExternalLink className="h-3.5 w-3.5" /> Use URL
+              </button>
+              <button
+                className="btn-ghost !py-1 text-xs"
+                onClick={() => mbCoverUrl && applyCoverUrl(mbCoverUrl, selectedCoverFiles())}
+                disabled={busy || !coverSel.size || !mbCoverUrl}
+              >
+                <CloudDownloadIcon /> MusicBrainz cover
+              </button>
+              <button className="btn-danger !py-1 text-xs" onClick={clearTrackCovers} disabled={busy || !coverSel.size}>
+                <Trash2 className="h-3.5 w-3.5" /> Clear per-track cover
+              </button>
+            </div>
+            {stepTracks.length === 0 && (
+              <div className="text-xs text-zinc-500">No tracks — go back and fetch the release.</div>
+            )}
+            {groupByDisc(stepTracks, discOfTrack).map((g) => (
+              <DiscSection
+                key={g.disc ?? "unmatched"}
+                disc={g.disc}
+                count={g.rows.length}
+                collapsed={collapsedDiscs.has(g.disc ?? null)}
+                onToggle={() => toggleDisc(g.disc ?? null)}
+                extra={
+                  <>
+                    <button
+                      className="btn-ghost !py-0.5 !px-1.5 text-[11px]"
+                      onClick={() => setCoverSelFor(g.rows.map((t) => t.path), true)}
+                    >
+                      All
+                    </button>
+                    <button
+                      className="btn-ghost !py-0.5 !px-1.5 text-[11px]"
+                      onClick={() => setCoverSelFor(g.rows.map((t) => t.path), false)}
+                    >
+                      None
+                    </button>
+                  </>
+                }
+              >
+                {g.rows.map((t) => {
+                  const shared = t.cover_file ? (coverShares.get(t.cover_file) ?? 0) - 1 : 0;
+                  return (
+                    <label
+                      key={t.path}
+                      className={`flex items-center gap-3 bg-card rounded-lg border px-3 py-2 cursor-pointer ${
+                        coverSel.has(t.path) ? "border-accent/60" : "border-border"
+                      }`}
+                    >
+                      <input type="checkbox" checked={coverSel.has(t.path)} onChange={() => toggleCoverSel(t.path)} />
+                      <TrackCover albumPath={albumPath} trackCover={t.cover_file} albumCover={coverInfo?.file} />
+                      <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
+                      <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
+                      {t.cover_file ? (
+                        <span
+                          className="chip bg-accent/10 text-accent-soft border border-accent/25 shrink-0"
+                          title={t.cover_file}
+                        >
+                          own art{shared > 0 ? ` · shared with ${shared}` : ""}
+                        </span>
+                      ) : (
+                        <span className="chip bg-raise border border-border text-zinc-500 shrink-0">album cover</span>
+                      )}
+                    </label>
+                  );
+                })}
+              </DiscSection>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-2 justify-end">
+            <span className="text-xs text-zinc-500">Covers are written as you apply them — Continue just moves on.</span>
+            <button className="btn-primary" onClick={saveCovers}>Continue to genres</button>
+          </div>
+
+          <input
+            ref={albumCoverInput}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = "";
+              if (f) uploadCover(f);
+            }}
+          />
+          <input
+            ref={trackCoverInput}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              const files = selectedCoverFiles();
+              e.target.value = "";
+              if (f && files.length) uploadCover(f, files);
+            }}
+          />
+
+          {coverSearchOpen && (
+            <CoverSearchModal
+              albumPath={albumPath}
+              artist={release?.artists.map((a) => a.name).join(", ") || trackArtist(stepTracks[0]?.path ?? "")}
+              album={trackAlbum || currentAlbumName}
+              tracks={coverSel.size ? selectedCoverFiles() : undefined}
+              onClose={() => setCoverSearchOpen(false)}
+              onApplied={refreshCovers}
+            />
+          )}
+        </div>
+      )}
+
+      {/* ---------------- Step 4: genres ---------------- */}
+      {step === 4 && (
         <div className="space-y-3">
           <div className="flex items-center gap-2 flex-wrap">
             <button className="btn-ghost" onClick={importGenres} disabled={busy || !(releaseId || extractMbid(mbLink))}>
@@ -1400,6 +2024,35 @@ const finish = async () => {
               : "Genres are not fetched automatically — set the per-track limit, then click to import."}
           </span>
           {stepTracks.length === 0 && <div className="text-xs text-zinc-500">No tracks — go back and fetch the release.</div>}
+          {/* Album-wide cleanup: every genre currently on any track, one click
+              to strip it from ALL of them, plus a clear-everything button.
+              A wrong genre lands on a whole album at once, so removing it
+              everywhere is the common correction — and until now it could only
+              be done one track at a time. */}
+          {allGenres.length > 0 && (
+            <div className="bg-card rounded-lg border border-border px-3 py-2 flex items-center gap-1.5 flex-wrap">
+              <span className="text-xs font-semibold text-zinc-400 shrink-0">Remove a genre everywhere:</span>
+              {allGenres.map(([gen, n]) => (
+                <button
+                  key={gen}
+                  className="chip bg-raise border border-border text-zinc-300 hover:border-red-800 hover:text-red-200"
+                  onClick={() => removeGenreEverywhere(gen)}
+                  title={`Remove “${gen}” from all ${n} track(s)`}
+                >
+                  {gen}
+                  <span className="text-[10px] text-zinc-500 tabular-nums">{n}</span>
+                  <X className="h-3 w-3" />
+                </button>
+              ))}
+              <button
+                className="btn-danger !py-1 text-xs ml-auto"
+                onClick={removeAllGenres}
+                title="Clear the genre field on every track in this step"
+              >
+                <Trash2 className="h-3.5 w-3.5" /> Remove all genres
+              </button>
+            </div>
+          )}
           {groupByDisc(stepTracks, discOfTrack).map((g) => (
             <DiscSection
               key={g.disc ?? "unmatched"}
@@ -1431,7 +2084,7 @@ const finish = async () => {
             >
               {g.rows.map((t) => (
                 <div key={t.path} className="flex items-center gap-3 bg-card rounded-lg border border-border px-3 py-2">
-                  <span className="text-xs text-zinc-600 w-8">{t.tags.TRACKNUMBER ?? "—"}</span>
+                  <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
                   <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
                   <div className="flex items-center gap-1.5 flex-wrap justify-end">
                     {genreList(t.path).map((gen) => (
@@ -1469,26 +2122,50 @@ const finish = async () => {
         </div>
       )}
 
-      {/* ---------------- Step 4: lyrics ---------------- */}
-      {step === 4 && (
+      {/* ---------------- Step 5: lyrics ---------------- */}
+      {step === 5 && (
         <div className="space-y-4">
+          {lyricsNotice && (
+            <div className="rounded-lg border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+              {lyricsNotice}
+            </div>
+          )}
           <div className="flex items-center gap-2">
             <button className="btn-primary text-xs" onClick={importLyricsForAll} disabled={busy}>
               <CloudDownloadIcon /> Auto-import from LRCLIB
             </button>
             <span className="text-xs text-zinc-500">Review below — Space stamps time while previewing; INSTRUMENTAL=1 skips lyrics.</span>
           </div>
+          {lyrProgress && (
+            <div className="bg-card rounded-lg border border-border px-3 py-2 space-y-1.5">
+              <div className="flex items-center gap-2 text-xs">
+                <span className="h-3 w-3 rounded-full border-2 border-zinc-700 border-t-accent-soft animate-spin shrink-0" />
+                <span className="flex-1 truncate text-zinc-300" title={lyrProgress.label}>{lyrProgress.label}</span>
+                <span className="text-zinc-500 font-mono tabular-nums shrink-0">
+                  {lyrProgress.done}/{lyrProgress.total}
+                </span>
+              </div>
+              <div className="h-1.5 rounded-sm bg-raise overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-accent to-indigo-500 transition-all duration-300"
+                  style={{
+                    width: `${lyrProgress.total ? Math.min(100, (lyrProgress.done / lyrProgress.total) * 100) : 0}%`,
+                  }}
+                />
+              </div>
+            </div>
+          )}
           {stepTracks.map((t) => {
             const inst = instrumental[t.path] ?? t.tags.INSTRUMENTAL;
-            const hasDraft = !!(lyricsDrafts[t.path] && parseLrc(lyricsDrafts[t.path]).length) || !!t.lyrics_present;
+            const hasDraft = hasLyrics(t);
             return (
               <details key={t.path} className="bg-card rounded-lg border border-border open:pb-3">
                 <summary className="px-3 py-2 text-sm font-medium cursor-pointer flex items-center gap-2">
-                  <span className="text-xs text-zinc-600 w-8">{t.tags.TRACKNUMBER ?? "—"}</span>
+                  <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
                   <span className="flex-1 truncate">{displayTitle(t.path)}</span>
                   {hasDraft && (
                     <span className="chip bg-emerald-900/60 text-emerald-300 border border-emerald-800">
-                      <Check className="h-3 w-3" /> lyrics
+                      <Check className="h-3 w-3" /> Lyrics
                     </span>
                   )}
                   <label className="flex items-center gap-1.5 text-xs text-zinc-400 select-none" onClick={(e) => e.stopPropagation()}>
@@ -1525,8 +2202,8 @@ const finish = async () => {
         </div>
       )}
 
-      {/* ---------------- Step 5: advisory ---------------- */}
-      {step === 5 && (
+      {/* ---------------- Step 6: advisory ---------------- */}
+      {step === 6 && (
         <div className="space-y-3">
           <div className="text-sm text-zinc-400">Set iTunes advisory per track: <b className="text-zinc-200">0</b> unrated/clean, <b className="text-zinc-200">1</b> explicit, <b className="text-zinc-200">2</b> safe edited version.</div>
           <div className="flex items-center gap-2 bg-card rounded-lg border border-border px-3 py-2 flex-wrap">
@@ -1544,7 +2221,16 @@ const finish = async () => {
           </div>
           {stepTracks.map((t) => (
             <div key={t.path} className="flex items-center gap-3 bg-card rounded-lg border border-border px-3 py-2">
+              <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
               <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
+              {!!t.tags.ITUNESADVISORY && !["0", "1", "2"].includes(t.tags.ITUNESADVISORY.trim()) && (
+                <span
+                  className="chip bg-amber-950/40 text-amber-300 border border-amber-900 shrink-0"
+                  title="ITUNESADVISORY must be 0, 1 or 2 — pick a value below to fix it"
+                >
+                  invalid existing value “{t.tags.ITUNESADVISORY}”
+                </span>
+              )}
               <div className="flex gap-1">
                 {["0", "1", "2"].map((v) => (
                   <button
@@ -1568,8 +2254,8 @@ const finish = async () => {
         </div>
       )}
 
-      {/* ---------------- Step 6: finish ---------------- */}
-      {step === 6 && (
+      {/* ---------------- Step 7: finish ---------------- */}
+      {step === 7 && (
         <div className="bg-card rounded-lg border border-border p-6">
           <div className="text-center">
             <Check className="h-10 w-10 text-emerald-400 mx-auto mb-3" />
@@ -1601,6 +2287,20 @@ const finish = async () => {
             <div className="text-[10px] text-zinc-600 mt-2">
               Progress shows at the top of the window. Scripts can also be run individually anytime from the album page.
             </div>
+            <div className="flex items-center gap-2 mt-3 flex-wrap">
+              <button
+                className="btn-primary !py-1.5 text-xs"
+                onClick={runAllScripts}
+                disabled={scriptsRunning || !uploaded.length}
+                title={`Run every script (${POST_IMPORT_SCRIPTS.map((s) => s.label).join(", ")}) on the new album(s)`}
+              >
+                <Wand2 className={`h-3.5 w-3.5 ${scriptsRunning ? "animate-spin" : ""}`} />
+                {scriptsRunning ? "Starting…" : "Run all scripts"}
+              </button>
+              <span className="text-[10px] text-zinc-500">
+                Runs every script below — no need to tick them all first.
+              </span>
+            </div>
           </div>
           <div className="flex justify-center gap-2 mt-5">
             {albumPath && (
@@ -1614,18 +2314,33 @@ const finish = async () => {
       )}
 
       {/* nav buttons */}
-      {step > 0 && step < 6 && (
+      {step > 0 && step < 7 && (
         <div className="flex justify-between pt-2">
           <button className="btn-ghost" onClick={() => setStep(step - 1)}>
             <ChevronLeft className="h-4 w-4" /> Back
           </button>
-          <button
-            className="btn-primary"
-            disabled={!canNext || busy}
-            onClick={() => (step === 1 ? nextFromLinks() : step === 2 ? confirmMatch() : step === 3 ? saveGenres() : step === 4 ? saveLyricsStep() : saveAdvisory())}
-          >
-            {step === 5 ? "Save & finish" : "Continue"} <ChevronRight className="h-4 w-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            {nextBlock && <span className="text-xs text-amber-300/90">{nextBlock}</span>}
+            <button
+              className="btn-primary"
+              disabled={!canNext || busy}
+              onClick={() =>
+                step === 1
+                  ? nextFromLinks()
+                  : step === 2
+                    ? confirmMatch()
+                    : step === 3
+                      ? saveCovers()
+                      : step === 4
+                        ? saveGenres()
+                        : step === 5
+                          ? saveLyricsStep()
+                          : saveAdvisory()
+              }
+            >
+              {step === 6 ? "Save & finish" : "Continue"} <ChevronRight className="h-4 w-4" />
+            </button>
+          </div>
         </div>
       )}
     </div>
@@ -1634,6 +2349,27 @@ const finish = async () => {
 
 function CloudDownloadIcon() {
   return <ExternalLink className="h-3.5 w-3.5" />;
+}
+
+/** Disc/track number badge shown on EVERY import step: "2.07" when the disc is
+ *  known, "07" when it is not. The width is fixed so the column lines up, and
+ *  the title spells the pair out for hover text. */
+function TrackNoBadge({ disc, track }: { disc: number | null; track: number | null }) {
+  const tt = track != null ? String(track).padStart(2, "0") : "—";
+  const label =
+    disc != null && track != null
+      ? `Disc ${disc}, track ${track}`
+      : disc != null
+        ? `Disc ${disc}, track unknown`
+        : track != null
+          ? `Track ${track} (disc unknown)`
+          : "No track number";
+  return (
+    <span className="text-xs text-zinc-600 w-12 shrink-0 tabular-nums" title={label}>
+      {disc != null ? `${disc}.` : ""}
+      {tt}
+    </span>
+  );
 }
 
 /** Collapsible per-disc section header + body, shared by Match and Genres. */
@@ -1680,11 +2416,14 @@ function DiscSection({
 /** One row in the import file list: image thumbnails for artwork, and a
  * "track cover" hint when an image shares its stem with an audio file in
  * the same album group (that is how per-track covers are added). */
-function ImportFileRow({ f, gi, albums, groupFiles, onMove }: {
+function ImportFileRow({ f, gi, albums, groupFiles, selectable, excluded, onToggleExcluded, onMove }: {
   f: ImportFile;
   gi: number;
   albums: AlbumGroup[];
   groupFiles: ImportFile[];
+  selectable: boolean;
+  excluded: boolean;
+  onToggleExcluded: () => void;
   onMove: (to: number) => void;
 }) {
   const isImage = /\.(jpg|jpeg|png|webp|bmp|gif|tiff|tif|avif|heic|heif|jxl|svg)$/i.test(f.relPath);
@@ -1703,15 +2442,25 @@ function ImportFileRow({ f, gi, albums, groupFiles, onMove }: {
     return hit ? `track cover for ${hit.relPath.split("/").pop()}` : null;
   })();
   return (
-    <div className="flex items-center gap-2 text-xs px-2 py-1">
+    <div className={`flex items-center gap-2 text-xs px-2 py-1 ${excluded ? "opacity-45" : ""}`}>
+      {selectable && (
+        <input
+          type="checkbox"
+          checked={!excluded}
+          onChange={onToggleExcluded}
+          title={excluded ? "Excluded — click to include this file again" : "Untick to leave this file out (partial album import)"}
+          aria-label={`Include ${f.relPath}`}
+        />
+      )}
       {isImage && thumb ? (
         <img src={thumb} alt="" className="h-8 w-8 rounded bg-raise border border-border object-cover shrink-0" />
       ) : isImage ? (
         <span className="h-8 w-8 rounded bg-raise border border-border shrink-0 flex items-center justify-center text-zinc-600 text-[9px]">IMG</span>
       ) : null}
       <span className="flex-1 min-w-0" title={f.relPath}>
-        <span className="block break-words text-zinc-400">{f.relPath}</span>
-        {coverFor && <span className="block text-[10px] text-accent-soft">→ {coverFor}</span>}
+        <span className={`block break-words ${excluded ? "text-zinc-500 line-through" : "text-zinc-400"}`}>{f.relPath}</span>
+        {excluded && <span className="block text-[10px] text-amber-300/80">left out — will show greyed out on the album page</span>}
+        {!excluded && coverFor && <span className="block text-[10px] text-accent-soft">→ {coverFor}</span>}
       </span>
       <select
         className="input !w-auto !py-0.5 text-[11px] shrink-0"

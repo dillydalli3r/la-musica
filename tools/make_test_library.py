@@ -4,8 +4,14 @@
 Builds <temp>/TestLib/<Artist>/<Album>/ with real FLAC files (encoded
 with the bundled flac.exe from generated WAVs), tags via mutagen, one
 malformed-lyrics track, covers, CUE + LOG files, plus one .mp3.
+
+Run:  python tools/make_test_library.py [--clean]
+      --clean first removes `mlo_testlib_*` trees left under the OS temp dir
+      by earlier runs; the library this run builds is never removed (pass
+      its path to the suite you want to run against it).
 """
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -25,7 +31,6 @@ try:
 except FileNotFoundError:
     pass
 if FLAC_EXE is None:
-    import shutil
     FLAC_EXE = shutil.which("flac") or None
 
 # Pure-Python fallback: when no flac.exe toolchain is present, encode
@@ -179,9 +184,6 @@ def build(base):
             fpath = os.path.join(adir, fname)
             if was_flac:
                 flac_encode(wav, fpath)
-                if i == 0:
-                    # vary frequency a little per track
-                    pass
                 base_tags = {
                     "ARTIST": artist, "ALBUMARTIST": artist,
                     "ALBUM": album.split(" - ", 1)[1],
@@ -227,11 +229,8 @@ def build(base):
 
 
 def make_mp3(path, artist, album, fname):
-    """Encode a tiny mp3 via lame if present, else write a valid
+    """Write a tiny tagged MP3: no bundled mp3 encoder, so craft a valid
     MPEG-1 Layer III silence frame stream."""
-    import shutil
-    if FLAC_EXE is None and not PURE_PYTHON:
-        raise SystemExit("flac.exe not found in .dependencies")
     # No bundled mp3 encoder: craft minimal valid MP3 (MPEG1 Layer3
     # 32kbps mono silence frames).
     write_mp3(path, seconds=1)
@@ -252,5 +251,30 @@ def make_mp3(path, artist, album, fname):
         print("mp3 tag skip:", e)
 
 
+def clean_stale():
+    """Remove `mlo_testlib_*` trees left in the OS temp dir by earlier runs.
+
+    Opt-in via `--clean`. Only other runs' trees are touched — whatever this
+    run builds is created afterwards and always left in place for the caller.
+    Returns the number of trees removed.
+    """
+    tmp = tempfile.gettempdir()
+    try:
+        names = os.listdir(tmp)
+    except OSError:
+        return 0
+    removed = 0
+    for name in names:
+        if not name.startswith("mlo_testlib_"):
+            continue
+        path = os.path.join(tmp, name)
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+            removed += 1
+    return removed
+
+
 if __name__ == "__main__":
+    if "--clean" in sys.argv[1:]:
+        print(f"[make_test_library] removed {clean_stale()} stale temp tree(s)")
     build("TestLib")

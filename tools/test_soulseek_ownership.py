@@ -113,8 +113,34 @@ soulseek._proc["proc"] = None  # untracked/adopted path
 assert soulseek.stop(cfg(port_foreign)) is False, "stop() claimed to stop a foreign slskd"
 assert killed == [], f"stop() killed another app's process on port {port_foreign}"
 
-# an openly-answering slskd on our port is ours to stop, even if it is signed
-# in as another account (e.g. the account was changed after it was started)
+# the same, but with web auth DISABLED and a genuinely different Soulseek
+# account: web_up() (and therefore the old kill check) says "ours" here, so
+# the ownership verdict — and the reason it carries — is all that separates
+# Stop from someone else's process.
+port_foreign_user, close_foreign_user = serve(200, b'{"user":{"username":"dillydallier07"}}')
+ours, who, why = soulseek.instance_owner(cfg(port_foreign_user))
+assert ours is False and who == "dillydallier07", (ours, who, why)
+assert "signed in as dillydallier07" in why, why
+assert soulseek.web_up(cfg(port_foreign_user)) is True, "web_up must still see the port as taken"
+
+# record the verdict stop() itself consults, so the refusal is pinned to
+# that foreign-account reason and not just to a hard-coded False
+verdicts = []
+_real_owner = soulseek.instance_owner
+
+def _spy_owner(c=None):
+    v = _real_owner(c)
+    verdicts.append(v)
+    return v
+
+soulseek.instance_owner = _spy_owner
+assert soulseek.stop(cfg(port_foreign_user)) is False, \
+    "stop() claimed to stop another app's slskd signed in as nobody's account"
+soulseek.instance_owner = _real_owner
+assert killed == [], f"stop() killed another app's process on port {port_foreign_user}"
+assert any("signed in as dillydallier07" in (w or "") for _o, _u, w in verdicts), verdicts
+
+# an openly-answering slskd on OUR port, signed in as OUR account, is ours
 assert soulseek.stop(cfg(port)) is True
 assert killed == [port], killed
 
@@ -159,5 +185,6 @@ close_sym()
 close()
 close2()
 close3()
+close_foreign_user()
 
 print("soulseek ownership: all assertions passed")

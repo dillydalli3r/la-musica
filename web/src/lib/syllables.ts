@@ -9,15 +9,49 @@ const VOWELS = new Set("aeiouyàáâãäåæèéêëìíîïòóôõöøùúûü
 const DIGRAPHS = new Set(["ch", "sh", "th", "ph", "wh", "ck", "ng", "gh", "qu"]);
 const WORD_CHAR = /[\p{L}\p{N}_]/u;
 
+/** The backend's word tokenizer (mlo.lyrics._elrc_split_words): whitespace
+ * words for Latin text, but a CJK-bearing piece sweeps per character while
+ * any Latin/digit run inside it stays glued — "カラオケKEIKO" tokenizes to
+ * カ ラ オ ケ KEIKO rather than one piece per codepoint. */
+export function splitElrcWords(line: string): string[] {
+  const out: string[] = [];
+  for (const piece of line.trim().split(/\s+/)) {
+    if (!piece) continue;
+    if (!CJK_RE.test(piece)) {
+      out.push(piece);
+      continue;
+    }
+    let buf = "";
+    for (const ch of piece) {
+      if (CJK_RE.test(ch)) {
+        if (buf) {
+          out.push(buf);
+          buf = "";
+        }
+        out.push(ch);
+      } else {
+        buf += ch;
+      }
+    }
+    if (buf) out.push(buf);
+  }
+  return out.length ? out : [line];
+}
+
 /** Split one word token into syllables. CJK: one character (kana = one
- * mora) per syllable. Latin: maximal vowel runs are nuclei; the cluster
- * between two nuclei splits before a single consonant, between a pair,
- * before a digraph, or after the first consonant of a longer cluster;
- * "y" is a vowel except word-initially (see the Python twin for the
- * exact rules). Returns [word] when no split is found. */
+ * mora) per syllable, with glued Latin/digit runs then split by the Latin
+ * rules (the backend runs _syllabify_token over each _elrc_split_words
+ * token, so "カラオケKEIKO" → カ ラ オ ケ KEI KO). Latin: maximal vowel runs
+ * are nuclei; the cluster between two nuclei splits before a single
+ * consonant, between a pair, before a digraph, or after the first
+ * consonant of a longer cluster; "y" is a vowel except word-initially (see
+ * the Python twin for the exact rules). Returns [word] when no split is
+ * found. */
 export function syllabifyToken(word: string): string[] {
   if (!word) return [word];
-  if (CJK_RE.test(word)) return Array.from(word);
+  if (CJK_RE.test(word)) {
+    return splitElrcWords(word).flatMap((w) => (CJK_RE.test(w) ? [w] : syllabifyToken(w)));
+  }
   const first = word.search(WORD_CHAR);
   if (first === -1) return [word];
   let last = word.length - 1;
@@ -101,17 +135,18 @@ export interface SylPiece {
   wordEnd: boolean;
 }
 
-/** Split a whole lyric line into syllable pieces (tokens separated by
- * single spaces, matching the canonical builder). */
+/** Split a whole lyric line into syllable pieces (matching the canonical
+ * builder: the line is first tokenized like _elrc_split_words — CJK
+ * characters are their own word — then each word is syllabified). */
 export function syllabifyLine(line: string): SylPiece[] {
   const trimmed = (line ?? "").trim();
   if (!trimmed) return [];
-  const tokens = trimmed.split(/\s+/);
+  const words = splitElrcWords(trimmed);
   const out: SylPiece[] = [];
-  tokens.forEach((tok, ti) => {
+  words.forEach((tok, ti) => {
     const syls = syllabifyToken(tok);
     syls.forEach((s, si) => {
-      out.push({ text: s, wordEnd: si === syls.length - 1 && ti < tokens.length - 1 });
+      out.push({ text: s, wordEnd: si === syls.length - 1 && ti < words.length - 1 });
     });
   });
   return out;

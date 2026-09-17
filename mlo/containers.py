@@ -218,6 +218,21 @@ def _identity_missing(enabled, q, v, p=None):
     return False
 
 
+def _quality_meets(enabled, q, threshold):
+    """Whether stored *q* meets *threshold*, gated by ENCODER_QUALITY being enabled.
+
+    A disabled identity tag is never written, so its stored value is None on
+    every file. Comparing that numerically would re-encode forever, so a
+    disabled tag means "skip the quality comparison", not "fail" it.
+    """
+    if not _enabled(enabled, "ENCODER_QUALITY"):
+        return True
+    try:
+        return int(q) >= int(threshold)
+    except (TypeError, ValueError):
+        return False
+
+
 JXL_SIG = b"\x00\x00\x00\x0cJXL \r\n\x87\n"
 
 

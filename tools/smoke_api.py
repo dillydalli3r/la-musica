@@ -2,7 +2,10 @@
 """Route smoke test: hits every FastAPI route with real library values.
 
 Usage:  python tools/smoke_api.py [base_url]
-Exits non-zero when any GET route answers >=400.
+Exits non-zero when any GET route answers >=400, when a real script id does
+not come back from POST /api/run, or when an unknown script id is not
+rejected. Transient upstream failures (429/502/503/504) on the MusicBrainz
+and RateYourMusic proxies are tolerated — those services are not ours.
 """
 import json
 import os
@@ -12,6 +15,16 @@ import urllib.parse
 import urllib.request
 
 BASE = (sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8000").rstrip("/")
+
+# Routes that proxy a third-party service (MusicBrainz, RateYourMusic): a
+# transient upstream failure — rate limit, timeout, firewall — is not a
+# broken route. Our own 5xx still fails: only these statuses, only here.
+UPSTREAM_PREFIXES = ("/api/mb/", "/api/rym/")
+TRANSIENT_UPSTREAM = {429, 502, 503, 504}
+
+
+def transient_upstream(path, status):
+    return status in TRANSIENT_UPSTREAM and path.startswith(UPSTREAM_PREFIXES)
 
 
 def req(path, method="GET", body=None, timeout=60):
@@ -89,20 +102,47 @@ def main():
         ("/api/track/export?path=" + q(tpath), "GET", None),
         ("/api/naming/preview", "POST", {"path": tpath}),
         ("/api/organize", "POST", {"paths": [apath], "dry_run": True}),
-        ("/api/run", "POST", {"ids": [], "targets": []}),
+        # Unknown script ids must be rejected, not silently ignored.
+        ("/api/run", "POST", {"ids": [99], "targets": [apath]}, 400),
         ("/api/playlists", "POST", {"name": "smoke-tmp", "kind": "manual"}),
     ]
     bad = 0
-    for path, method, body in cases:
+    for case in cases:
+        path, method, body = case[0], case[1], case[2]
+        expect = case[3] if len(case) > 3 else None
         st, raw = req(path, method, body)
         # /api/lyrics/* proxies LRCLIB: a 404 for a synthetic test track just
         # means the service has no such lyrics, not that the route is broken.
-        allowed = st == 404 and path.startswith("/api/lyrics")
-        ok = (200 <= st < 400) or allowed
+        if expect is not None:
+            ok = st == expect
+        else:
+            ok = (200 <= st < 400) or (st == 404 and path.startswith("/api/lyrics")) \
+                or transient_upstream(path, st)
         if not ok:
             bad += 1
         show = "" if ok else "  <<< " + raw[:160].decode("utf-8", "replace").replace("\n", " ")
         print(f"{st:>4} {method:<5} {path[:88]}{show}")
+
+    # /api/run must actually execute a runner: `ids: []` short-circuits
+    # server-side, so an empty list would pass even with every runner gone.
+    # 4 = grade, which only reads the library.
+    total = len(cases) + 1
+    st, raw = req("/api/run", "POST", {"ids": [4], "targets": [apath]})
+    run_ok = False
+    detail = raw[:200].decode("utf-8", "replace").replace("\n", " ")
+    if 200 <= st < 400:
+        try:
+            results = json.loads(raw).get("results") or []
+            run_ok = (len(results) == 1 and results[0].get("id") == 4
+                      and not results[0].get("error") and results[0].get("stats") is not None)
+            detail = json.dumps(results[:1])[:200]
+        except Exception as e:  # noqa: BLE001 - smoke test reports
+            detail = f"unparsable body: {e}"
+    if not run_ok:
+        bad += 1
+        print(f"{st:>4} POST  /api/run  ids=[4]  <<< did not run script 4: {detail}")
+    else:
+        print(f"{st:>4} POST  /api/run  ids=[4]  (ran grade on the synthetic album)")
     # Clean up after ourselves (and exercise the DELETE route).
     st, raw = req("/api/playlists")
     if st == 200:
@@ -113,7 +153,7 @@ def main():
                 if not 200 <= dst < 400:
                     bad += 1
 
-    print(f"\n{len(cases) - bad}/{len(cases)} ok, {bad} failed")
+    print(f"\n{total - bad}/{total} ok, {bad} failed")
     return 1 if bad else 0
 
 

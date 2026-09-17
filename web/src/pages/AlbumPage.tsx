@@ -10,6 +10,7 @@ import CoverImg, { TrackCover } from "../components/CoverImg";
 import CoverSearchModal from "../components/CoverSearchModal";
 import FavHeart from "../components/FavHeart";
 import { trackRef, entityLinkClick } from "../lib/refs";
+import { invalidateLibrary } from "../lib/invalidate";
 import { auditFails } from "../lib/status";
 import { isVideoFile } from "../lib/fmt";
 import BulkTagsDialog from "../components/BulkTagsDialog";
@@ -21,7 +22,7 @@ import { ColumnsMenu, ColumnResizer, useColumnPrefs, useColumnWidths, ALBUM_TRAC
 import { toast, useStore } from "../store";
 import { fmtTech, albumTech } from "../lib/fmt";
 import { fmtDuration } from "../lib/fmt";
-import type { Track } from "../types";
+import type { ExpectedTrack, Track } from "../types";
 
 /** Whether a track file is a music video container (playable with <video>). */
 export { isVideoFile };
@@ -38,7 +39,13 @@ export default function AlbumPage() {
     queryFn: () => api.coverColor(decoded),
     retry: false,
   });
-  const { playNow, queue, queueAdd, selection, setSelection, toggleTrack, clearSelection } = useStore();
+  const playNow = useStore((s) => s.playNow);
+  const queue = useStore((s) => s.queue);
+  const queueAdd = useStore((s) => s.queueAdd);
+  const selection = useStore((s) => s.selection);
+  const setSelection = useStore((s) => s.setSelection);
+  const toggleTrack = useStore((s) => s.toggleTrack);
+  const clearSelection = useStore((s) => s.clearSelection);
   const navigate = useNavigate();
   const [sort, setSort] = useState<SortState | null>(null);
   const [statsOpen, setStatsOpen] = useState(false);
@@ -122,7 +129,9 @@ export default function AlbumPage() {
 
   const runScripts = async (ids: number[]) => {
     await api.run(ids, [data.path]);
-    qc.invalidateQueries({ queryKey: ["library"] });
+    // scripts rewrite tags in place — the album payload (tags, grading,
+    // covers) is stale until the shared invalidation runs
+    invalidateLibrary(qc);
   };
 
   // One shared square icon-button style for the header action row — play is
@@ -198,8 +207,7 @@ export default function AlbumPage() {
       toast(r.updated
         ? `Imported ${r.genres.join(", ") || "genres"} on ${r.updated} track(s)${r.per_track ? " (per-track where available)" : ""}`
         : "No genres found on the linked MusicBrainz release");
-      qc.invalidateQueries({ queryKey: ["album", decoded] });
-      qc.invalidateQueries({ queryKey: ["library"] });
+      invalidateLibrary(qc);
     } catch (e) {
       toast(String(e));
     }
@@ -209,7 +217,7 @@ export default function AlbumPage() {
    * tracks — handled per-track from the track page & details panel. */
 
   const removeAlbum = async () => {
-    if (!window.confirm(`Remove "${data.meta?.ALBUM ?? data.path.split("/").pop()}" from the library?\nIt moves to .mlo_trash in your music folder (recoverable).`)) return;
+    if (!window.confirm(`Remove "${data.meta?.ALBUM ?? data.path.split("/").pop()}" from the library?\nIt moves to .mlo/trash in your music folder (recoverable).`)) return;
     try {
       await api.removeAlbum(data.path);
       toast("Album moved to trash");
@@ -243,8 +251,7 @@ export default function AlbumPage() {
     try {
       const r = await api.beetsImport([data.path]);
       toast(`Beets import done${r.organized ? " (re-organized)" : ""}`);
-      qc.invalidateQueries({ queryKey: ["library"] });
-      qc.invalidateQueries({ queryKey: ["album", decoded] });
+      invalidateLibrary(qc);
       qc.invalidateQueries({ queryKey: ["coverColor", decoded] });
     } catch (e) {
       toast(String(e));
@@ -290,8 +297,7 @@ export default function AlbumPage() {
         await new Promise((r) => setTimeout(r, 350)); // LRCLIB rate-limit pacing
       }
       toast(`Lyrics: ${fetched} downloaded · ${skipped} skipped · ${missing} not found`);
-      qc.invalidateQueries({ queryKey: ["library"] });
-      qc.invalidateQueries({ queryKey: ["album", decoded] });
+      invalidateLibrary(qc);
     } catch (e) {
       toast(String(e));
     } finally {
@@ -667,7 +673,27 @@ export default function AlbumPage() {
             {(() => {
               const groups = groupByDisc(tracks);
               const multiDisc = groups.length > 1;
-              return groups.map((g) => (
+              // Tracks the RELEASE has but this folder does not — a PARTIAL
+              // import. They render in release order, greyed out and inert
+              // (there is no file to play, select or grade), so the tracklist
+              // reads as the album rather than as the files that happen to be
+              // present. Empty entirely for a full import.
+              const missingByDisc = new Map<number, ExpectedTrack[]>();
+              for (const e of data.expected_tracks ?? []) {
+                if (!e.missing) continue;
+                const d = e.disc || 1;
+                const list = missingByDisc.get(d);
+                if (list) list.push(e);
+                else missingByDisc.set(d, [e]);
+              }
+              // A disc every one of whose tracks is absent has no group of its
+              // own, so it gets one made from the missing rows alone.
+              const emptyDiscs = [...missingByDisc.keys()]
+                .filter((d) => !groups.some((g) => (g.disc ?? 1) === d))
+                .sort((a, b) => a - b);
+              return (
+                <>
+                  {groups.map((g) => (
                 <Fragment key={g.disc ?? 0}>
                   {g.tracks.map((tr) => (
               <tr
@@ -676,13 +702,13 @@ export default function AlbumPage() {
                 title={selectMode ? "Click to select" : "Click to play"}
                 onClick={selectMode ? () => toggleTrack(tr.path) : () =>
                   playNow(
-                    data.tracks.map((t) => ({
+                    tracks.map((t) => ({
                       path: t.path, file: t.file, albumPath: data.path,
                       artist: data.meta?.ALBUMARTIST ?? data.meta?.ARTIST ?? undefined,
                       album: data.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined,
                       coverFile: t.cover_file ?? null, albumCover: data.cover_file ?? null,
                     })),
-                    data.tracks.findIndex((t) => t.path === tr.path)
+                    tracks.findIndex((t) => t.path === tr.path)
                   )
                 }
               >
@@ -708,7 +734,7 @@ export default function AlbumPage() {
                     <TrackCover
                       albumPath={data.path}
                       trackCover={tr.cover_file}
-                      albumFallback={false}
+                      albumCover={data.cover_file}
                       wrapperClass="h-8 w-8 rounded bg-raise border border-border overflow-hidden shrink-0"
                     />
                   </td>
@@ -770,8 +796,20 @@ export default function AlbumPage() {
                 )}
               </tr>
                   ))}
+                  {missingByDisc.get(g.disc ?? 1)?.map((e) => (
+                    <MissingTrackRow key={`missing-${e.disc}-${e.position}`} e={e} />
+                  ))}
                 </Fragment>
-              ));
+                  ))}
+                  {emptyDiscs.map((d) => (
+                    <Fragment key={`missing-disc-${d}`}>
+                      {missingByDisc.get(d)!.map((e) => (
+                        <MissingTrackRow key={`missing-${e.disc}-${e.position}`} e={e} />
+                      ))}
+                    </Fragment>
+                  ))}
+                </>
+              );
             })()}
           </tbody>
         </table>
@@ -795,6 +833,29 @@ export default function AlbumPage() {
     </>
   );
 }
+/** One release track that this folder does not contain — a PARTIAL import.
+ *  Deliberately inert: there is no file behind it, so it cannot be played,
+ *  selected, graded or linked. Greyed out so the album still reads as a whole
+ *  tracklist with visible holes rather than silently hiding what is absent. */
+function MissingTrackRow({ e }: { e: ExpectedTrack }) {
+  return (
+    <tr
+      className="opacity-40 select-none"
+      title="On the MusicBrainz release but not in this folder — import the missing track to fill this in"
+    >
+      <td className="td cell-nowrap text-zinc-600 tabular-nums" colSpan={16}>
+        <span className="inline-flex items-center gap-2">
+          <span className="w-10 shrink-0 font-mono">
+            {e.disc ? `${e.disc}.${String(e.position).padStart(2, "0")}` : String(e.position)}
+          </span>
+          <span className="italic">{e.title || "Untitled"}</span>
+          <span className="chip text-[9px] bg-raise border border-border text-zinc-500">not imported</span>
+        </span>
+      </td>
+    </tr>
+  );
+}
+
 /** Cover info dialog: resolution, aspect ratio, format and byte size of the
  * album's cover art (the "Cover info" item in the cover's … menu). */
 function CoverInfoModal({ albumPath, coverFile, onClose }: {

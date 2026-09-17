@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams, Link } from "react-router-dom";
 import { Save, Play, Disc3, ListPlus, ListStart, ListMusic, ShieldCheck, ImageUp, Clapperboard, Search, FolderOpen } from "lucide-react";
 import { api } from "../api";
-import { fmtTech, isVideoFile } from "../lib/fmt";
+import { fmtTech, fmtDuration, isVideoFile } from "../lib/fmt";
 import { uncacheTrack } from "../lib/mediaCache";
 import { LinkEditorButton, MbIcon, RymIcon } from "../components/Links";
 import { SubtitledVideo } from "../components/SubtitledVideo";
@@ -19,7 +19,9 @@ export default function TrackPage() {
   const { path = "" } = useParams();
   const decoded = decodeURIComponent(path);
   const qc = useQueryClient();
-  const { playNow, queue, queueAdd } = useStore();
+  const playNow = useStore((s) => s.playNow);
+  const queue = useStore((s) => s.queue);
+  const queueAdd = useStore((s) => s.queueAdd);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["track-tags", decoded],
@@ -32,7 +34,7 @@ export default function TrackPage() {
   const albumDir = decoded.startsWith("mb:")
     ? (data?.path ?? "").split("/").slice(0, -1).join("/")
     : decoded.split("/").slice(0, -1).join("/");
-  const { data: album } = useQuery({
+  const { data: album, error: albumError } = useQuery({
     queryKey: ["album", albumDir],
     queryFn: () => api.album(albumDir),
     retry: false,
@@ -60,7 +62,14 @@ export default function TrackPage() {
     setDirty(false);
   }, [data]);
 
-  if (error) return <EmptyState title="Track not found" hint={String(error)} />;
+  if (error)
+    return (
+      <EmptyState
+        title="Track not found"
+        hint={String(error)}
+        action={{ label: "Back to the library", to: "/library" }}
+      />
+    );
   if (isLoading || !data) return <PageLoading label="Loading track…" />;
 
   const fileName = realPath.split("/").pop() ?? realPath;
@@ -71,6 +80,17 @@ export default function TrackPage() {
   const logGrade = track?.log_grade ?? null;
   const arStatus = track?.accuraterip_status ?? null;
   const csStatus = track?.checksum_status ?? null;
+
+  // The album payload carries this track's grading (issues, audit, log);
+  // until that query resolves AND lists the track the verdict is unknown —
+  // an empty issue list there means "not graded", not "clean".
+  const graded = !!track;
+  const gradeText = !graded
+    ? (albumError ? "unavailable" : "—")
+    : issues.length
+      ? `FAILED (${issues.length} check${issues.length === 1 ? "" : "s"})`
+      : "PASS";
+  const gradeTone = !graded ? "text-zinc-600" : issues.length ? "text-red-300" : "text-emerald-300";
 
   const saveLyrics = async () => {
     // Save target chosen in the lyrics editor toolbar (embedded tag / .lrc
@@ -192,9 +212,20 @@ export default function TrackPage() {
           </div>
           <h1 className="text-2xl font-bold tracking-tight truncate">{tags.TITLE ?? fileName}</h1>
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            <GradeBadge pass={!issues.length} score={issues.length ? 0 : 100} />
-            <AuditBadge audit={audit} />
-            <IssueList issues={issues} />
+            {graded ? (
+              <>
+                <GradeBadge pass={!issues.length} score={issues.length ? 0 : 100} />
+                <AuditBadge audit={audit} />
+                <IssueList issues={issues} />
+              </>
+            ) : (
+              <span
+                className="text-xs text-zinc-600"
+                title={albumError ? String(albumError) : "This track's album payload has not loaded yet"}
+              >
+                {albumError ? "Grading data unavailable" : "Grading —"}
+              </span>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -280,7 +311,7 @@ export default function TrackPage() {
           <div className="bg-card rounded-lg border border-border p-4">
             <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-2">Audio</div>
             <div className="grid grid-cols-2 gap-2 text-sm text-zinc-400">
-              <div>Duration <span className="text-zinc-200">{tech.length ? `${Math.floor(tech.length / 60)}:${String(Math.floor(tech.length % 60)).padStart(2, "0")}` : "—"}</span></div>
+              <div>Duration <span className="text-zinc-200">{fmtDuration(tech.length)}</span></div>
               <div>Bitrate <span className="text-zinc-200">{fmtTech(tech) || "—"}</span></div>
               <div>Bit depth <span className="text-zinc-200">{tech.bits_per_sample ?? "—"}</span></div>
               <div>Sample rate <span className="text-zinc-200">{tech.sample_rate ? `${(tech.sample_rate / 1000).toFixed(1).replace(/\.0$/, "")} kHz` : "—"}</span></div>
@@ -308,7 +339,7 @@ export default function TrackPage() {
               <ShieldCheck className="h-3.5 w-3.5" /> Grading & AUDIT details
             </div>
             <div className="grid grid-cols-2 gap-2 text-sm text-zinc-400">
-              <div>Grade <span className={issues.length ? "text-red-300" : "text-emerald-300"}>{issues.length ? `FAILED (${issues.length} check${issues.length === 1 ? "" : "s"})` : "PASS"}</span></div>
+              <div>Grade <span className={gradeTone}>{gradeText}</span></div>
               <div>AUDIT <span className="text-zinc-200">{audit ?? "not audited"}</span></div>
               <div>Log score <span className="text-zinc-200">{logGrade != null ? `${logGrade}/100` : "—"}</span></div>
               <div>AccurateRip <span className="text-zinc-200">{arStatus ?? "—"}</span></div>
@@ -381,6 +412,7 @@ export default function TrackPage() {
           duration={tech.length ? Math.round(tech.length) : undefined}
           currentText={lyrics}
           onApplied={applyFoundLyrics}
+          onSaved={refreshAfterEditor}
           onClose={() => setManagerOpen(false)}
         />
       )}

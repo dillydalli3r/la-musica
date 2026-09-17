@@ -1,7 +1,7 @@
 [package]
 name = "mlo-desktop"
 version = "2.2.1"
-description = "Music Library Optimizer desktop shell (Tauri v2)"
+description = "la musica desktop shell (Tauri v2)"
 authors = ["dillydalli3r"]
 edition = "2021"
 

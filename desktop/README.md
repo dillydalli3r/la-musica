@@ -7,10 +7,13 @@ Tauri v2 (Rust) wrapper around the React UI and Python backend.
 - **Window** shows the built React app (`../web/dist`, built by
   `beforeBuildCommand`).
 - **Backend**: on startup the shell spawns the FastAPI backend on
-  `127.0.0.1:8000` and kills it when the window closes. Resolution order:
+  `127.0.0.1:8000` and stops it when the app is quit. Resolution order:
   1. Bundled `mlo-server.exe` next to the app binary (PyInstaller one-file
      build — optional, for fully standalone installers)
-  2. `python -m uvicorn server.main:app` from the repo checkout
+  2. `python -m uvicorn server.main:app` from the repo checkout, when that
+     checkout actually contains `server/main.py`
+  Without either, the shell shows a "backend not found" dialog instead of
+  spawning a `python` that has nothing to run.
 - **Native folder picker**: `pick_folder` Tauri command, exposed to the
   Settings page via `invoke`.
 

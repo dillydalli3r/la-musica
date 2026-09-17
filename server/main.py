@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import asyncio
+import json
 import threading
 import time
 import pathlib
@@ -38,7 +39,9 @@ from server import playlists as pl_mod
 from server import integrations as intg
 from server import tagcache
 from server import exporter
-from mlo.paths import SKIP_DIRS
+from mlo.paths import (SKIP_DIRS, clear_track_covers, downloads_dir,
+                       library_root, load_track_covers, move_path,
+                       save_track_covers, set_track_covers, trash_dir)
 
 # Captured at startup — worker threads use run_coroutine_threadsafe against
 # this loop to relay script progress over the WebSocket (get_event_loop()
@@ -111,6 +114,11 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 # Progress relay (WebSocket + original hook)
 # --------------------------------------------------------------------------- #
 progress_clients: set[WebSocket] = set()
+# Guards progress_clients: the engine's progress hook runs on worker threads
+# while the event loop adds/discards sockets, so every read or write of the
+# set happens under this lock (an unguarded list() can raise RuntimeError:
+# "Set changed size during iteration" straight into the engine).
+_progress_lock = threading.Lock()
 
 orig_hook = stats_mod.progress_hook
 
@@ -124,7 +132,9 @@ def _relay(done, total, desc):
     loop = _MAIN_LOOP
     if loop is None or loop.is_closed():
         return
-    for ws in list(progress_clients):
+    with _progress_lock:
+        clients = list(progress_clients)
+    for ws in clients:
         try:
             asyncio.run_coroutine_threadsafe(
                 ws.send_json({"done": done, "total": total, "desc": desc}), loop
@@ -189,8 +199,42 @@ class ImportCommit(BaseModel):
     rym_link: Optional[str] = None
 
 
+class ImportExpected(BaseModel):
+    """Record the MusicBrainz release's full tracklist on an imported album.
+
+    An album imported PARTIALLY carries no trace of the tracks that were
+    never brought in, so the album page has nothing to grey out. Writing the
+    release's own running order at match time is what makes the missing
+    tracks visible. `tracks` is [{disc, position, title, recording_mbid}]."""
+    target_dir: str
+    release_id: Optional[str] = None
+    tracks: List[dict] = []
+
+
+class DownloadsDelete(BaseModel):
+    """Basenames of <music>/.mlo/downloads entries to delete permanently."""
+    names: List[str] = []
+
+
+class DownloadsImport(BaseModel):
+    """Basenames of <music>/.mlo/downloads entries to move into the library."""
+    names: List[str] = []
+
+
 class AlbumRemove(BaseModel):
     path: str
+
+
+class TrashDelete(BaseModel):
+    """Basenames of trash-bin entries to delete permanently."""
+    names: List[str] = []
+
+
+class TrashRestore(BaseModel):
+    """Basenames to move back out of the bin. `dest` is the fallback folder
+    for entries whose original location was never recorded."""
+    names: List[str] = []
+    dest: Optional[str] = None
 
 
 # --------------------------------------------------------------------------- #
@@ -352,7 +396,15 @@ def _in_music_folder(p, folder):
         return False
     if ap == af:
         return True
-    common = os.path.commonpath([ap, af])
+    # Paths on different drives (C: vs F:, or two UNC shares) have no common
+    # ancestor at all; commonpath raises ValueError there, which means
+    # "outside" — not a 500 out of every path-taking endpoint.
+    if os.path.normcase(os.path.splitdrive(ap)[0]) != os.path.normcase(os.path.splitdrive(af)[0]):
+        return False
+    try:
+        common = os.path.commonpath([ap, af])
+    except (OSError, ValueError, TypeError):
+        return False
     return os.path.normcase(common) == os.path.normcase(af)
 
 
@@ -901,10 +953,16 @@ def get_cover(request: Request, album: str = Query(...), file: Optional[str] = Q
 
 @app.post("/api/cover")
 async def upload_cover(album: str = Query(...), file: UploadFile = File(...),
-                       track: Optional[str] = Query(None)):
-    """Upload cover art. Without `track` this replaces the album's cover.*;
-    with `track=<audio filename>` it writes a per-track sidecar cover named
-    after the track stem (e.g. '01 - Song.jpg')."""
+                       track: Optional[str] = Query(None),
+                       tracks: Optional[str] = Query(None)):
+    """Upload cover art.
+
+    No `track`/`tracks` replaces the album's cover.*; `track=<audio filename>`
+    writes a per-track sidecar named after the track stem (e.g.
+    '01 - Song.jpg'); `tracks=a.flac,b.flac` writes ONE image — the sidecar of
+    the first selected track — and maps every selected track to it, so tracks
+    can share art without the file being duplicated.
+    """
     alb = os.path.normpath(album)
     if not os.path.isdir(alb):
         raise HTTPException(404, "album not found")
@@ -913,18 +971,194 @@ async def upload_cover(album: str = Query(...), file: UploadFile = File(...),
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in (".jpg", ".jpeg", ".png", ".jxl", ".webp", ".bmp"):
         ext = ".jpg"
-    stem = "cover"
-    if track:
-        tstem = os.path.splitext(os.path.basename(track))[0].strip()
-        tstem = re_safe_filename(tstem).strip().rstrip(".") or "cover"
-        stem = tstem
+    stem, selected = _cover_write_target(alb, track, tracks)
     data = await file.read()
-    return _write_cover_bytes(alb, stem, ext, data)
+    if not _is_image_bytes(data):
+        raise HTTPException(400, "uploaded file is not a readable image")
+    res = _write_cover_bytes(alb, stem, ext, data)
+    if selected:
+        set_track_covers(alb, selected, os.path.basename(res["path"]))
+    return res
+
+
+def _cover_stem(track):
+    """Sidecar stem for a track filename: '01 - Song.flac' -> '01 - Song'."""
+    tstem = os.path.splitext(os.path.basename(track or ""))[0].strip()
+    return re_safe_filename(tstem).strip().rstrip(".") or "cover"
+
+
+def _resolve_selected_tracks(alb, tracks):
+    """(resolved, unknown) album filenames for a comma-separated selection.
+
+    Names are matched case-insensitively against the album folder so the
+    caller can reject an unknown one instead of recording a map entry that
+    names a file which is not there.
+    """
+    names = [os.path.basename(t.strip()) for t in str(tracks or "").split(",") if t.strip()]
+    try:
+        listing = {f.lower(): f for f in os.listdir(alb)}
+    except OSError:
+        listing = {}
+    resolved, unknown = [], []
+    for n in names:
+        real = listing.get(n.lower())
+        if real and os.path.isfile(os.path.join(alb, real)):
+            resolved.append(real)
+        else:
+            unknown.append(n)
+    return resolved, unknown
+
+
+def _cover_write_target(alb, track, tracks):
+    """(stem, selected tracks) for a cover write: a multi-track selection
+    wins, then a single `track`, then the album cover."""
+    if str(tracks or "").strip():
+        selected, unknown = _resolve_selected_tracks(alb, tracks)
+        if unknown:
+            raise HTTPException(400, f"unknown track(s) in album: {', '.join(unknown)}")
+        if not selected:
+            raise HTTPException(400, "no tracks selected")
+        return _cover_stem(selected[0]), selected
+    if track:
+        return _cover_stem(track), []
+    return "cover", []
+
+
+def _image_magic_ext(data):
+    """Image extension from magic numbers, or None when the bytes carry no
+    recognised image container signature."""
+    if data[:3] == b"\xff\xd8\xff":
+        return ".jpg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return ".png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return ".webp"
+    if data[:2] == b"\xff\x0a" or data[:12] == b"\x00\x00\x00\x0cJXL ":
+        return ".jxl"
+    if data[:2] == b"BM":
+        return ".bmp"
+    return None
+
+
+def _is_image_bytes(data):
+    """Whether upload bytes are an image.
+
+    Pillow reading it counts, and so does a recognised image container magic:
+    JXL/HEIC/AVIF need plugins Pillow may not carry, and such a file is still
+    the cover the user meant to upload.
+    """
+    if not data:
+        return False
+    if _image_magic_ext(data):
+        return True
+    try:
+        from PIL import Image
+    except Exception:
+        return True
+    import io
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            im.size
+        return True
+    except Exception:
+        return False
+
+
+def _compress_cover_bytes(data: bytes, ext: str):
+    """Downscale / crop / re-encode freshly added cover art.
+
+    Returns (bytes, ext, info). A cover from the finder arrives at full CDN
+    resolution (3000px+ and several MB) and an upload at whatever the user
+    happened to have, while the library's own convention is
+    `cover_target_size`, cropped square, JPEG at `cover_jpeg_quality`. Doing
+    that the moment the image lands means a downloaded or uploaded cover is
+    already library-conformant instead of sitting oversized until script 5
+    happens to run.
+
+    Best effort by design: anything PIL cannot read (or any encode failure)
+    returns the original bytes untouched, so a stored cover is never lost or
+    corrupted by this.
+    """
+    info = {"compressed": False, "original_bytes": len(data),
+            "original_width": None, "original_height": None}
+    try:
+        cfg = load_config()
+    except Exception:
+        cfg = {}
+    try:
+        target = int(cfg.get("cover_target_size", 1200) or 0)
+    except (TypeError, ValueError):
+        target = 1200
+    resize = bool(cfg.get("cover_resize_enabled", True))
+    crop = bool(cfg.get("cover_crop_enabled", True))
+    try:
+        quality = max(70, min(100, int(cfg.get("cover_jpeg_quality", 90) or 90)))
+    except (TypeError, ValueError):
+        quality = 90
+    # JXL is left alone: Pillow cannot write it without the plugin, and the
+    # image script re-encodes it later.
+    if ext not in (".jpg", ".jpeg", ".png", ".webp", ".bmp"):
+        return data, ext, info
+    try:
+        import io as _io
+        from PIL import Image
+
+        with Image.open(_io.BytesIO(data)) as img:
+            img.load()
+            ow, oh = img.size
+            info["original_width"], info["original_height"] = ow, oh
+            has_alpha = (img.mode in ("RGBA", "LA")
+                         or (img.mode == "P" and "transparency" in img.info))
+            out = img
+            # Crop BEFORE resizing: the crop decides which pixels survive, so
+            # scaling first would throw away resolution the crop should keep.
+            if crop and ow != oh:
+                side = min(ow, oh)
+                left, top = (ow - side) // 2, (oh - side) // 2
+                out = out.crop((left, top, left + side, top + side))
+            w, h = out.size
+            if resize and target > 0 and max(w, h) > target:
+                scale = target / max(w, h)
+                out = out.resize((max(1, round(w * scale)), max(1, round(h * scale))),
+                                 Image.LANCZOS)
+            nw, nh = out.size
+            buf = _io.BytesIO()
+            if has_alpha:
+                out.convert("RGBA").save(buf, format="PNG", optimize=True)
+                new_ext = ".png"
+            else:
+                out.convert("RGB").save(buf, format="JPEG", quality=quality,
+                                        optimize=True, progressive=True)
+                new_ext = ".jpg"
+            new_data = buf.getvalue()
+            info["width"], info["height"] = nw, nh
+            # Keep the re-encode only when it helps: it must not grow a file
+            # (a small already-optimised PNG can) and must not be a no-op.
+            if (nw, nh) != (ow, oh) or len(new_data) < len(data):
+                info["compressed"] = True
+                info["bytes"] = len(new_data)
+                return new_data, new_ext, info
+            info.pop("width", None)
+            info.pop("height", None)
+    except Exception:
+        info.pop("width", None)
+        info.pop("height", None)
+    return data, ext, info
 
 
 def _write_cover_bytes(alb: str, stem: str, ext: str, data: bytes):
-    """Atomically write cover bytes as <stem><ext> into the album folder
-    and bust the cover cache. Shared by upload and download-from-URL."""
+    """Atomically write cover bytes as <stem><ext> into the album folder,
+    bust the cover cache, and report the written image's dimensions.
+
+    The image is compressed first (see _compress_cover_bytes), so a cover that
+    was just downloaded or uploaded is stored at the library's own size and
+    encoding rather than at whatever the source served."""
+    orig_ext = ext
+    info = {}
+    try:
+        data, ext, info = _compress_cover_bytes(data, ext)
+    except Exception:
+        info = {}
     dest = os.path.join(alb, f"{stem}{ext}")
     fd, tmp = tempfile.mkstemp(prefix=".cover_tmp_", suffix=ext, dir=alb)
     try:
@@ -943,24 +1177,79 @@ def _write_cover_bytes(alb: str, stem: str, ext: str, data: bytes):
         except Exception:
             pass
         raise HTTPException(500, str(e))
+    # A re-encode can change the extension (PNG -> JPG). Remove exactly the
+    # file this write superseded, so the album does not keep a stale duplicate
+    # of the same stem in the old format.
+    if ext != orig_ext:
+        _drop_stale_cover(alb, f"{stem}{orig_ext}")
     tagcache.invalidate_all()
     mbresolve.invalidate()
-    return {"ok": True, "path": dest.replace("\\", "/")}
+    out = {"ok": True, "path": dest.replace("\\", "/")}
+    out.update(_cover_metrics(dest))
+    for k, v in info.items():
+        out.setdefault(k, v)
+    return out
+
+
+_COVER_EXTS = (".jpg", ".jpeg", ".png", ".jxl", ".webp", ".bmp")
+
+
+def _drop_stale_cover(alb: str, stale: str):
+    """Remove one cover file that a re-encode has just superseded.
+
+    Deliberately narrow: it removes exactly `stale` and nothing else. Only the
+    file whose extension THIS write changed is superseded — an album may
+    legitimately hold cover.png next to cover.jxl, and sweeping "other cover
+    formats" would delete art the user still has.
+    """
+    try:
+        path = os.path.join(alb, stale)
+        if os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def _cover_metrics(path):
+    """Dimensions (+ a below-target warning) for a just-written cover file.
+
+    The same PIL read /api/cover/info does, but from the file: the write has
+    already invalidated the byte cache this early in the request.
+    """
+    out = {"width": None, "height": None, "megapixels": None, "warning": None}
+    try:
+        from PIL import Image
+        with Image.open(path) as img:
+            w, h = img.size
+    except Exception:
+        return out
+    if not (w and h):
+        return out
+    out["width"], out["height"] = w, h
+    out["megapixels"] = round(w * h / 1_000_000, 2)
+    try:
+        target = int(load_config().get("cover_target_size", 1200) or 1200)
+    except Exception:
+        target = 1200
+    out["target"] = target
+    if 0 < target and min(w, h) < target:
+        # The minimum IS the cover target the grader checks, so this is the
+        # same number that will fail the album later — say that, rather than
+        # only describing the image.
+        out["below_target"] = True
+        out["warning"] = (f"{w}×{h} is below the minimum {target}×{target} "
+                          f"— grading will flag this cover")
+    else:
+        out["below_target"] = False
+    return out
 
 
 def _sniff_image_ext(data: bytes, content_type: str) -> str:
     """File-extension for image bytes, from magic numbers, then the
     Content-Type, defaulting to .jpg (the common cover-art case)."""
-    if data[:3] == b"\xff\xd8\xff":
-        return ".jpg"
-    if data[:8] == b"\x89PNG\r\n\x1a\n":
-        return ".png"
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return ".webp"
-    if data[:2] == b"\xff\x0a" or data[:12] == b"\x00\x00\x00\x0cJXL ":
-        return ".jxl"
-    if data[:2] == b"BM":
-        return ".bmp"
+    magic = _image_magic_ext(data)
+    if magic:
+        return magic
     ct = (content_type or "").split("/")[1].strip().lower()
     if ct in ("jpeg", "jpg"):
         return ".jpg"
@@ -971,14 +1260,21 @@ def _sniff_image_ext(data: bytes, content_type: str) -> str:
 
 @app.get("/api/cover/search")
 async def cover_search(artist: str = Query(""), album: str = Query(""),
-                       limit: int = Query(40, ge=1, le=100)):
+                       limit: int = Query(40, ge=1, le=100),
+                       sources: Optional[str] = Query(None),
+                       country: Optional[str] = Query(None)):
     """Search covers.musichoarders.xyz (aggregates Apple Music, Deezer,
-    Qobuz, Tidal, Discogs, ...) for album covers matching artist/album."""
+    Qobuz, Tidal, Discogs, ...) for album covers matching artist/album.
+
+    `sources` (comma-separated ids) and `country` override the saved defaults
+    for this one search — the finder's source picker and region dropdown."""
     if not artist.strip() and not album.strip():
         raise HTTPException(400, "artist or album is required")
+    src = [s.strip() for s in (sources or "").split(",") if s.strip()] or None
     try:
         results = await asyncio.to_thread(
-            intg.cover_search, artist.strip(), album.strip(), limit)
+            intg.cover_search, artist.strip(), album.strip(), limit,
+            60.0, src, country)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
@@ -986,16 +1282,39 @@ async def cover_search(artist: str = Query(""), album: str = Query(""),
     return {"results": results}
 
 
+@app.get("/api/cover/sources")
+def cover_sources():
+    """Selectable cover sources + regions, and the saved defaults.
+
+    `default_sources` / `default_country` are what Settings holds, so the
+    finder opens on exactly the values a run without overrides would use."""
+    cat = intg.cov_catalog()
+    cfg = load_config()
+    chosen, ctry = intg.resolve_cov_search(None, None, cfg)
+    return {
+        "sources": cat["sources"],
+        "countries": cat["countries"],
+        "active_source_limit": cat["active_source_limit"],
+        "default_sources": chosen,
+        "default_country": ctry,
+        "saved_sources": [str(s) for s in (cfg.get("cover_sources") or [])],
+        "saved_country": str(cfg.get("cover_country") or intg.COV_DEFAULT_COUNTRY),
+    }
+
+
 @app.post("/api/cover/fromurl")
 async def cover_from_url(album: str = Query(...), url: str = Query(...),
-                         track: Optional[str] = Query(None)):
+                         track: Optional[str] = Query(None),
+                         tracks: Optional[str] = Query(None)):
     """Download a cover image from a URL (e.g. a COV search result) and
-    store it like an uploaded cover (album cover.* or per-track sidecar)."""
+    store it like an uploaded cover (album cover.*, one per-track sidecar, or
+    one image mapped to a whole `tracks=` selection)."""
     alb = os.path.normpath(album)
     if not os.path.isdir(alb):
         raise HTTPException(404, "album not found")
     if not _in_music_folder(alb, _music_folder()):
         raise HTTPException(400, "album outside music folder")
+    stem, selected = _cover_write_target(alb, track, tracks)
     try:
         data, ctype = await asyncio.to_thread(intg.fetch_image_bytes, url)
     except ValueError as e:
@@ -1004,12 +1323,30 @@ async def cover_from_url(album: str = Query(...), url: str = Query(...),
         raise HTTPException(502, f"cover download failed: {e}")
     if not data:
         raise HTTPException(502, "empty image response")
-    stem = "cover"
-    if track:
-        tstem = os.path.splitext(os.path.basename(track))[0].strip()
-        tstem = re_safe_filename(tstem).strip().rstrip(".") or "cover"
-        stem = tstem
-    return _write_cover_bytes(alb, stem, _sniff_image_ext(data, ctype), data)
+    res = _write_cover_bytes(alb, stem, _sniff_image_ext(data, ctype), data)
+    if selected:
+        set_track_covers(alb, selected, os.path.basename(res["path"]))
+    return res
+
+
+class CoverClearRequest(BaseModel):
+    album: str
+    tracks: Optional[List[str]] = None  # None/empty = every per-track entry
+
+
+@app.post("/api/cover/clear")
+def cover_clear(req: CoverClearRequest):
+    """Drop per-track cover mappings for an album (no `tracks` = all of them).
+    The image files stay on disk — clearing a mapping is not deleting art."""
+    alb = os.path.normpath(mbresolve.resolve_album(req.album) or req.album)
+    if not os.path.isdir(alb):
+        raise HTTPException(404, "album not found")
+    if not _in_music_folder(alb, _music_folder()):
+        raise HTTPException(400, "album outside music folder")
+    names = [os.path.basename(str(t)) for t in (req.tracks or []) if str(t).strip()]
+    clear_track_covers(alb, names or None)
+    tagcache.invalidate_all()
+    return {"ok": True}
 
 
 @app.get("/api/videos/scan")
@@ -1288,6 +1625,9 @@ def likes_toggle(req: LikeToggleRequest):
     p = os.path.normpath(mbresolve.resolve_track(req.path) or req.path)
     if not os.path.isfile(p):
         raise HTTPException(404, "file not found")
+    # A like row for a path outside the library can never match a track again.
+    if not _in_music_folder(p, _music_folder()):
+        raise HTTPException(400, "file outside music folder")
     p = p.replace("\\", "/")
     try:
         liked = pl_mod.toggle_like(p, mbid=req.mbid)
@@ -1312,6 +1652,11 @@ def favorites_list():
 
 @app.post("/api/favorites/toggle")
 def favorites_toggle(req: FavoriteToggleRequest):
+    # album/artist keys are library folders; "playlist" keys are playlist ids,
+    # not paths, so only the path-valued kinds get the containment guard.
+    if str(req.kind or "").strip().lower() in ("album", "artist"):
+        if not _in_music_folder(req.key, _music_folder()):
+            raise HTTPException(400, "folder outside music folder")
     try:
         fav = pl_mod.toggle_favorite(req.kind, req.key, mbid=req.mbid)
     except ValueError as e:
@@ -1472,8 +1817,23 @@ def lyrics_xlit_store(req: TrackPathRequest):
 # --------------------------------------------------------------------------- #
 # Run scripts
 # --------------------------------------------------------------------------- #
+# Scripts mutate the library in place, so two overlapping runs (double-clicked
+# Run, or an import-triggered organize landing on a UI run) would fight over
+# the same files. Non-blocking: the second caller gets 409 instead of queueing.
+_run_lock = threading.Lock()
+
+
 @app.post("/api/run")
 def run_scripts(req: RunRequest):
+    if not _run_lock.acquire(blocking=False):
+        raise HTTPException(409, "a script run is already in progress")
+    try:
+        return _run_scripts(req)
+    finally:
+        _run_lock.release()
+
+
+def _run_scripts(req: RunRequest):
     from mlo import (
         run_format_lyrics, run_format_cues, run_optimize_flacs, run_grade_library,
         run_process_images, run_audit_library, run_auto_tagging,
@@ -1659,7 +2019,11 @@ def playlists_delete(pid: int):
 def playlists_add(pid: int, req: PlaylistTracks):
     if pl_mod.get_playlist(pid) is None:
         raise HTTPException(404, "playlist not found")
-    n = pl_mod.add_tracks(pid, [os.path.normpath(p) for p in req.paths], req.position)
+    paths = [os.path.normpath(p) for p in req.paths]
+    for p in paths:
+        if not _in_music_folder(p, _music_folder()):
+            raise HTTPException(400, f"file outside music folder: {p}")
+    n = pl_mod.add_tracks(pid, paths, req.position)
     return {"added": n}
 
 
@@ -1668,7 +2032,11 @@ def playlists_order(pid: int, req: PlaylistTracks):
     """Full reorder: body paths replace the playlist order entirely."""
     if pl_mod.get_playlist(pid) is None:
         raise HTTPException(404, "playlist not found")
-    pl_mod.set_order(pid, [os.path.normpath(p) for p in req.paths])
+    paths = [os.path.normpath(p) for p in req.paths]
+    for p in paths:
+        if not _in_music_folder(p, _music_folder()):
+            raise HTTPException(400, f"file outside music folder: {p}")
+    pl_mod.set_order(pid, paths)
     return {"ok": True}
 
 
@@ -1758,44 +2126,26 @@ def mb_release_genres_query(mbid: str = Query(...), limit: Optional[int] = Query
         raise HTTPException(502, f"MusicBrainz genre lookup failed: {e}")
 
 
-@app.get("/api/mb/release/{mbid}")
-def mb_release(mbid: str):
-    rid = intg._mbid(mbid)
-    if not rid:
-        raise HTTPException(400, "invalid MusicBrainz ID or URL")
-    try:
-        return intg.release_lookup(rid)
-    except Exception as e:
-        raise HTTPException(502, f"MusicBrainz lookup failed: {e}")
-
-
-@app.get("/api/mb/release/{mbid}/genres")
-def mb_release_genres(mbid: str):
-    rid = intg._mbid(mbid)
-    if not rid:
-        raise HTTPException(400, "invalid MusicBrainz ID or URL")
-    try:
-        release = intg.release_lookup(rid)
-        return intg.genre_cascade(release)
-    except Exception as e:
-        raise HTTPException(502, f"MusicBrainz genre lookup failed: {e}")
-
-
 # ---- generic MusicBrainz browser (search + entity pages) -------------------
 @app.get("/api/mb/search")
 def mb_search(q: str = Query(..., min_length=1), type: str = Query("release"),
               limit: int = Query(100), offset: int = Query(0),
-              mode: str = Query("free")):
+              mode: str = Query("free"), primary_type: str = Query(""),
+              secondary_type: str = Query("")):
     """Search MusicBrainz for the in-app browser: type = artist |
     release-group | release | recording; mode = free | catno | barcode
-    (catno/barcode only apply to releases). Returns {rows, total} — searches
-    page 100 rows at a time via offset."""
+    (catno/barcode only apply to releases); primary_type/secondary_type narrow
+    releases and release groups to MusicBrainz release types (Album, EP,
+    Single, Soundtrack, Live, ...). Returns {rows, total} — searches page 100
+    rows at a time via offset."""
     if type not in intg.MB_ENTITIES:
         raise HTTPException(400, "type must be one of " + ", ".join(intg.MB_ENTITIES))
     if mode not in ("free", "catno", "barcode"):
         raise HTTPException(400, "mode must be free, catno or barcode")
     try:
-        return intg.search_mb(type, q, limit, mode, max(0, offset))
+        return intg.search_mb(type, q, limit, mode, max(0, offset),
+                              primary_type=primary_type.strip(),
+                              secondary_type=secondary_type.strip())
     except Exception as e:
         raise HTTPException(502, f"MusicBrainz search failed: {e}")
 
@@ -2106,8 +2456,7 @@ def is_audio_file(name):
 @app.post("/api/album/remove")
 def album_remove(req: AlbumRemove):
     """Remove an album from the library by moving it into
-    <music_folder>/.mlo_trash/ (recoverable, nothing is deleted)."""
-    import shutil
+    <music_folder>/.mlo/trash/ (recoverable, nothing is deleted)."""
     cfg = load_config()
     folder = cfg.get("music_folder") or ""
     if not folder or not os.path.isdir(folder):
@@ -2117,7 +2466,7 @@ def album_remove(req: AlbumRemove):
         raise HTTPException(404, "album not found")
     if not _in_music_folder(p, folder):
         raise HTTPException(400, "album outside music folder")
-    trash = os.path.normpath(os.path.join(folder, ".mlo_trash"))
+    trash = os.path.normpath(trash_dir(folder))
     os.makedirs(trash, exist_ok=True)
     name = os.path.basename(p) or "album"
     dest = os.path.normpath(os.path.join(trash, name))
@@ -2125,11 +2474,357 @@ def album_remove(req: AlbumRemove):
     while os.path.exists(dest):
         dest = os.path.normpath(os.path.join(trash, f"{name} ({n})"))
         n += 1
-    shutil.move(p, dest)
+    if not move_path(p, dest):
+        # move_path already retried the sharing violation away; a player or
+        # an importer still holds a file in the album open.
+        raise HTTPException(
+            500,
+            f"could not move {name} to the trash — a file inside it is still "
+            f"in use (stop playback and retry)")
+    entries = _manifest_read(trash)
+    entries[os.path.basename(dest)] = {
+        "origin": p.replace("\\", "/"),
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    _manifest_write(trash, entries)
     tagcache.invalidate_all()
     mbresolve.invalidate()
     _refresh_slskd_shares_soon()
     return {"ok": True, "trash": dest.replace("\\", "/")}
+
+
+# --------------------------------------------------------------------------- #
+# Trash bin (the other end of POST /api/album/remove)
+# --------------------------------------------------------------------------- #
+# "[Album] 2010-12-15 - 2010-12-15 - Aimai Elegy {JP - CD - XECJ-1011}" -> the
+# title is whatever sits between the date prefix and the brace suffix. Only
+# structural decoration is dropped; nothing is ever synthesised.
+_ALBUM_NAME_RE = re.compile(
+    r"^\[Album\]\s*\d{4}-\d{2}-\d{2}\s*-\s*(?:\d{4}-\d{2}-\d{2}\s*-\s*)?(.+?)\s*\{[^{}]*\}\s*$")
+
+
+def _trash_dir(folder):
+    return os.path.normpath(trash_dir(folder))
+
+
+# Origin manifest: lives INSIDE the bin (it is part of the data and must
+# travel with it), so it is never listed, deleted or restored — see
+# _trash_name_error.
+_TRASH_MANIFEST = ".mlo_manifest.json"
+
+
+def _manifest_path(trash):
+    return os.path.join(trash, _TRASH_MANIFEST)
+
+
+def _manifest_read(trash):
+    """{entry name: {"origin": ..., "at": ...}}; a missing or corrupt
+    manifest reads as empty — entries trashed before this file existed are a
+    normal state, not an error."""
+    try:
+        with open(_manifest_path(trash), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    entries = data.get("entries") if isinstance(data, dict) else None
+    return entries if isinstance(entries, dict) else {}
+
+
+def _manifest_write(trash, entries):
+    """Whole-file rewrite via temp + os.replace: a crash mid-write can never
+    leave a half-written manifest behind."""
+    tmp = _manifest_path(trash) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"version": 1, "entries": entries}, f)
+    os.replace(tmp, _manifest_path(trash))
+
+
+def _manifest_forget(trash, names):
+    """Drop `names` from the manifest, atomically. Records for entries that no
+    longer exist are not just dead weight: a later entry that never went
+    through the move endpoint (dropped in by hand, or created by the dedupe
+    suffix) would inherit the stale origin and 'restore' somewhere it never
+    came from. With nothing left to remember, the file goes away entirely —
+    the bin carries no bookkeeping it cannot back up."""
+    entries = _manifest_read(trash)
+    for n in names:
+        entries.pop(n, None)
+    if entries:
+        _manifest_write(trash, entries)
+        return
+    try:
+        os.remove(_manifest_path(trash))
+    except OSError:
+        pass
+
+
+def _trash_label(name):
+    """Display name for a trashed entry: the album title when the folder
+    follows the app naming convention, otherwise the raw basename."""
+    m = _ALBUM_NAME_RE.match(name)
+    return (m.group(1).strip() if m and m.group(1).strip() else name)
+
+
+# How many files of a trashed entry the listing spells out. The UI says
+# "showing 200 of N"; file_count always reports the true total.
+_TRASH_FILES_CAP = 200
+
+
+def _is_link(path):
+    """True for symlinks AND the Windows junctions a non-admin account has to
+    use instead — os.path.islink misses the latter, yet their realpath
+    resolves just as far away, which is the whole point of skipping them."""
+    try:
+        return os.path.islink(path) or bool(getattr(os.lstat(path), "st_reparse_tag", 0))
+    except OSError:
+        return False
+
+
+def _dir_stats(path, collect=None):
+    """(audio track count, recursive bytes) for a folder. Unreadable parts
+    count as 0/0 rather than raising — a listing must never 500.
+
+    `collect`, when a list, is filled with (rel, size) for every file — the
+    same walk, so the file listing never pays for a second one. rel is
+    forward-slashed and relative to `path`; unreadable files are still listed,
+    with size 0, exactly like the size accounting above ignores them."""
+    tracks = 0
+    total = 0
+    for root, dirs, files in os.walk(path, onerror=lambda e: None):
+        dirs[:] = [d for d in dirs if not _is_link(os.path.join(root, d))]
+        for f in files:
+            full = os.path.join(root, f)
+            try:
+                size = os.path.getsize(full)
+            except OSError:
+                if collect is not None:
+                    collect.append((os.path.relpath(full, path).replace("\\", "/"), 0))
+                continue
+            if collect is not None:
+                collect.append((os.path.relpath(full, path).replace("\\", "/"), size))
+            total += size
+            if is_audio_file(f):
+                tracks += 1
+    return tracks, total
+
+
+def _trash_entry(trash, name, root):
+    """One listing row, or None when the child is not a plain folder/file
+    inside the bin — symlinks, junctions and devices resolve elsewhere (or
+    nowhere), and listing them would both lie about the path and let the walk
+    escape the trash dir."""
+    if name == _TRASH_MANIFEST:
+        return None
+    p = os.path.join(trash, name)
+    if os.path.islink(p) or not _in_music_folder(os.path.realpath(p), root):
+        return None
+    try:
+        mtime = os.path.getmtime(p)
+    except OSError:
+        mtime = 0
+    if os.path.isdir(p):
+        found = []
+        tracks, size = _dir_stats(p, found)
+        # cover_bytes() is the same search GET /api/cover uses, so the bin
+        # agrees with the album view about what counts as a cover.
+        cover = tagcache.cover_bytes(p)[0] is not None
+        kind = "album"
+    elif os.path.isfile(p):
+        kind, cover, tracks = "file", False, 1 if is_audio_file(name) else 0
+        try:
+            size = os.path.getsize(p)
+        except OSError:
+            size = 0
+        found = [(name, size)]
+    else:
+        return None
+    found.sort()
+    return {
+        "name": name,
+        "path": p.replace("\\", "/"),
+        "kind": kind,
+        "label": _trash_label(name),
+        "tracks": tracks,
+        "bytes": size,
+        "trashed_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(mtime)),
+        "cover": cover,
+        # sorted by rel; file_count is the true total, files may be capped
+        "file_count": len(found),
+        "files": [{"name": rel.rsplit("/", 1)[-1], "rel": rel, "bytes": n}
+                  for rel, n in found[:_TRASH_FILES_CAP]],
+        # sort key only; stripped before the response leaves
+        "_mtime": mtime,
+    }
+
+
+@app.get("/api/trash")
+def trash_list():
+    """Contents of <music_folder>/.mlo/trash, newest entry first."""
+    folder = load_config().get("music_folder") or ""
+    trash = _trash_dir(folder) if folder else ""
+    out = {"folder": trash.replace("\\", "/"), "exists": False,
+           "count": 0, "bytes": 0, "entries": [],
+           "music_folder": folder.replace("\\", "/")}
+    if not trash or not os.path.isdir(trash):
+        return out
+    try:
+        names = os.listdir(trash)
+    except OSError:
+        return out
+    origins = {}
+    for n, rec in _manifest_read(trash).items():
+        origin = rec.get("origin") if isinstance(rec, dict) else None
+        if isinstance(origin, str) and origin:
+            origins[n] = origin
+    entries = [e for e in (_trash_entry(trash, n, os.path.realpath(trash))
+                           for n in names) if e]
+    for e in entries:
+        e["origin"] = origins.get(e["name"])
+    entries.sort(key=lambda e: e["_mtime"], reverse=True)
+    for e in entries:
+        del e["_mtime"]
+    out.update(exists=True, count=len(entries), entries=entries,
+               bytes=sum(e["bytes"] for e in entries))
+    return out
+
+
+def _trash_name_error(name, root):
+    """Why `name` may not be deleted from or restored out of the trash dir,
+    or None when fine.
+
+    Names travel as basenames over the API, so anything that is not a single
+    plain path segment — or that resolves (symlinks included) outside the
+    trash dir — is refused before a single byte is touched.
+    """
+    if not name or name in (".", "..") or "/" in name or "\\" in name:
+        return "not a valid trash entry name"
+    if name == _TRASH_MANIFEST:
+        return "reserved trash file"
+    try:
+        real = os.path.realpath(os.path.join(root, name))
+    except (OSError, ValueError):
+        return "unresolvable path"
+    if os.path.dirname(real) != root:
+        return "outside the trash folder"
+    return None
+
+
+@app.post("/api/trash/delete")
+def trash_delete(req: TrashDelete = TrashDelete()):
+    """Permanently delete trash entries by basename. Unknown names and
+    refused names land in `failed`; nothing else is an error."""
+    import shutil
+    cfg = load_config()
+    folder = cfg.get("music_folder") or ""
+    if not folder or not os.path.isdir(folder):
+        raise HTTPException(400, "music_folder not set or not found")
+    trash = _trash_dir(folder)
+    if not os.path.isdir(trash):
+        raise HTTPException(404, "trash folder not found")
+    root = os.path.realpath(trash)
+    deleted, failed, freed = [], [], 0
+    for name in req.names:
+        err = _trash_name_error(name, root)
+        p = os.path.join(trash, name) if err is None else ""
+        if err is None and not os.path.lexists(p):
+            err = "not found in trash"
+        if err is None:
+            try:
+                # Size first: once rmtree has run the bytes are unrecoverable.
+                if os.path.islink(p):
+                    # realpath() already proved the target is inside the bin;
+                    # unlink the link itself, never what it points at.
+                    size = 0
+                    os.remove(p)
+                elif os.path.isdir(p):
+                    size = _dir_stats(p)[1]
+                    shutil.rmtree(p)
+                else:
+                    size = os.path.getsize(p)
+                    os.remove(p)
+                freed += size
+            except OSError as e:
+                err = str(e) or "delete failed"
+        if err:
+            failed.append({"name": name, "error": err})
+        else:
+            deleted.append(name)
+    if deleted:
+        # The entries are gone for good, so their origin records go too.
+        _manifest_forget(trash, deleted)
+        # Same invalidation the move endpoint does: the library, MB cache and
+        # slskd shares all still describe the deleted files.
+        tagcache.invalidate_all()
+        mbresolve.invalidate()
+        _refresh_slskd_shares_soon()
+    return {"deleted": deleted, "failed": failed, "freed": freed}
+
+
+@app.post("/api/trash/restore")
+def trash_restore(req: TrashRestore = TrashRestore()):
+    """Move trash entries back into the library: each returns to the location
+    it was trashed from, or — when it has no manifest record — into `dest`.
+    Per-entry problems land in `failed`; an unusable `dest` is a 400 for the
+    whole request, so a bad request never moves half a batch."""
+    cfg = load_config()
+    folder = cfg.get("music_folder") or ""
+    if not folder or not os.path.isdir(folder):
+        raise HTTPException(400, "music_folder not set or not found")
+    trash = _trash_dir(folder)
+    if not os.path.isdir(trash):
+        raise HTTPException(404, "trash folder not found")
+    dest = ""
+    if req.dest is not None:
+        dest = os.path.normpath(req.dest)
+        if not os.path.isdir(dest) or not _in_music_folder(dest, folder):
+            raise HTTPException(400, "dest must be an existing folder inside the music folder")
+    root = os.path.realpath(trash)
+    origins = _manifest_read(trash)
+    restored, failed = [], []
+    for name in req.names:
+        err = _trash_name_error(name, root)
+        src = os.path.join(trash, name)
+        if err is None and not os.path.lexists(src):
+            err = "not found in trash"
+        target = ""
+        if err is None:
+            rec = origins.get(name)
+            origin = rec.get("origin") if isinstance(rec, dict) else None
+            if isinstance(origin, str) and origin.strip():
+                if not _in_music_folder(origin, folder):
+                    err = "original location is outside the music folder"
+                else:
+                    target = os.path.normpath(origin)
+            elif dest:
+                target = os.path.join(dest, name)
+            else:
+                err = "original location unknown — pass dest"
+        if err is None and os.path.lexists(target):
+            # Never overwrite: the occupant there is somebody's data too.
+            err = f"already exists: {target.replace(chr(92), '/')}"
+        if err is None:
+            try:
+                # The artist folder is often gone by now; recreate it.
+                parent = os.path.dirname(target)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                if not move_path(src, target):
+                    err = "move failed — a file inside is still in use"
+            except OSError as e:
+                err = str(e) or "restore failed"
+        if err:
+            failed.append({"name": name, "error": err})
+        else:
+            origins.pop(name, None)
+            restored.append({"name": name, "to": target.replace("\\", "/")})
+    if restored:
+        # Same invalidation the move endpoint does — the library just gained
+        # albums back, and the manifest just lost rows.
+        _manifest_write(trash, origins)
+        tagcache.invalidate_all()
+        mbresolve.invalidate()
+        _refresh_slskd_shares_soon()
+    return {"restored": restored, "failed": failed}
 
 
 @app.get("/api/album/scan-tracks")
@@ -2239,6 +2934,10 @@ def soulseek_status():
         "installed": soulseek.slskd_installed(),
         "running": running,
         "logged_in": logged_in,
+        # the daemon's own words for a failed login (INVALIDPASS, empty
+        # credentials, a port it could not bind). Without it the UI can only
+        # guess "not logged in" and show a generic cooldown hint.
+        "error": soulseek.login_error(cfg) if running and logged_in is False else None,
         # set when slskd's web port is held by ANOTHER app's slskd (default
         # port 5030 is shared). The UI must explain that instead of the
         # misleading "running, not logged in".
@@ -2398,6 +3097,81 @@ def soulseek_downloads():
     return {"downloads": soulseek.downloads_state()}
 
 
+class SoulseekCancelRequest(BaseModel):
+    username: str
+    transfer_ids: List[str]
+
+
+@app.post("/api/soulseek/downloads/cancel")
+def soulseek_downloads_cancel(req: SoulseekCancelRequest):
+    """Drop transfers from slskd's list (per-file or whole-queue cancel).
+    The underlying DELETE carries ?remove=true because a cancelled transfer
+    otherwise stays queued and slskd keeps re-requesting the very files the
+    review step just deleted."""
+    from server import soulseek
+    if not (soulseek.is_running() or soulseek.web_up(load_config())):
+        raise HTTPException(400, "slskd is not running")
+    ids = [str(t) for t in req.transfer_ids if str(t).strip()]
+    try:
+        # best effort per transfer: ids already gone must not fail the call
+        soulseek.cancel_downloads(req.username, ids)
+    except Exception as e:
+        raise HTTPException(502, f"cancel failed: {e}")
+    return {"ok": True, "cancelled": len(ids)}
+
+
+class SoulseekClearRequest(BaseModel):
+    username: Optional[str] = None
+    states: Optional[List[str]] = None
+
+
+@app.post("/api/soulseek/downloads/clear")
+def soulseek_downloads_clear(req: SoulseekClearRequest):
+    """Clear FINISHED transfers from the history — optionally for one user,
+    optionally narrowed to some of the finished states. In-progress and
+    queued transfers are never touched: the queue is the only record of what
+    is still coming, and clearing it mid-download throws away bytes already
+    on disk. The response counts the finished transfers handed to slskd's
+    per-transfer DELETE (best effort: one already gone still counts)."""
+    from server import soulseek
+    if not (soulseek.is_running() or soulseek.web_up(load_config())):
+        raise HTTPException(400, "slskd is not running")
+    wanted = [str(s).strip().lower() for s in (req.states or []) if str(s).strip()]
+    try:
+        tree = soulseek.downloads_state()
+    except Exception as e:
+        raise HTTPException(502, f"downloads lookup failed: {e}")
+
+    targets = {}
+    for user in tree or []:
+        who = str(user.get("username") or "")
+        if req.username and who != req.username:
+            continue
+        for d in (user.get("directories") or []):
+            for f in (d.get("files") or []):
+                st = str(f.get("state") or "")
+                # `states` only narrows WITHIN the finished ones, so a client
+                # asking for "InProgress" clears nothing instead of killing a
+                # live download
+                if not soulseek.finished_transfer(st):
+                    continue
+                if wanted and not any(w in st.lower() for w in wanted):
+                    continue
+                if f.get("id"):
+                    targets.setdefault(who, []).append(str(f["id"]))
+
+    cleared = 0
+    for who, tids in targets.items():
+        # one user's failure must not abort the rest (cancel_downloads is a
+        # best-effort loop over one DELETE per transfer)
+        try:
+            soulseek.cancel_downloads(who, tids)
+        except Exception:
+            continue
+        cleared += len(tids)
+    return {"ok": True, "cleared": cleared}
+
+
 @app.get("/api/soulseek/uploads")
 def soulseek_uploads():
     """Upload transfer tree — the shared-history view (per user / file)."""
@@ -2530,6 +3304,7 @@ def soulseek_preview_stream(path: str = Query(...), native: int = Query(0)):
         raise HTTPException(500, f"ffmpeg failed to start: {e}")
 
     from starlette.responses import StreamingResponse
+    from mlo.subproc import _kill_tree
 
     def _gen():
         try:
@@ -2541,13 +3316,23 @@ def soulseek_preview_stream(path: str = Query(...), native: int = Query(0)):
                     break
                 yield chunk
         finally:
-            if proc.poll() is None:
-                proc.kill()
+            # Runs on client disconnect, read error and normal end alike.
+            # ffmpeg holds the previewed file open for as long as it lives,
+            # and a killed-but-unreaped child keeps that handle — so the
+            # import move that follows a preview hits a sharing violation.
+            # Kill the tree, then WAIT for it to actually die.
             try:
-                if proc.stdout:
+                if proc.poll() is None:
+                    _kill_tree(proc)
+                if proc.stdout is not None:
                     proc.stdout.close()
             except Exception:
                 pass
+            finally:
+                try:
+                    proc.wait()
+                except Exception:
+                    pass
 
     return StreamingResponse(_gen(), media_type="video/mp4")
 
@@ -2662,14 +3447,37 @@ def soulseek_import():
     """Move completed downloads from the download dir into the library,
     one album folder per shared folder, then immediately organize each
     imported album with the naming script — one click takes a download
-    from slskd to a graded-library-ready album folder."""
+    from slskd to a graded-library-ready album folder.
+
+    Albums whose transfers are still running stay in the download dir and
+    are reported in `skipped`, so the UI can say "still downloading".
+
+    A folder a player (or slskd) still holds open is not fatal: the albums
+    that did move are kept and organized, and the one that could not is
+    reported in `failed` as {"path", "reason"} so the UI can name it and
+    tell the user to stop playback.
+    """
     from server import soulseek
     try:
         moved = soulseek.import_completed()
     except ValueError as e:
         raise HTTPException(400, str(e))
+    skipped = soulseek.last_import_skipped()
+    failed = soulseek.last_import_failed()
     media_tagged = 0
+    converted = 0
     if moved:
+        # Lossless sources (WAV/APE/ALAC...) become the configured lossless
+        # codec before anything is tagged or named, so the naming script and
+        # the grader both see the final files.
+        try:
+            from mlo.flac import convert_album_lossless
+            for album in moved:
+                converted += int((convert_album_lossless(album, load_config())
+                                  or {}).get("modified_count") or 0)
+        except Exception:
+            import traceback
+            traceback.print_exc()
         # Classify each rip (CD / DVD-Video / Blu-ray / Digital Media) and
         # write the tags BEFORE organizing, so they travel with the files.
         try:
@@ -2686,15 +3494,20 @@ def soulseek_import():
             traceback.print_exc()
             tagcache.invalidate_all()
             mbresolve.invalidate()
-            return {"ok": True, "moved": moved, "organized": False,
+            return {"ok": True, "moved": moved, "skipped": skipped,
+                    "failed": failed,
+                    "organized": False,
                     "organize_error": str(e), "media_tagged": media_tagged,
-                    "tagging_started": False}
+                    "converted": converted, "tagging_started": False}
         # Fire-and-forget: advisory + lyrics tagging, then a fresh grade.
         _run_background_tagging()
     tagcache.invalidate_all()
     mbresolve.invalidate()
-    return {"ok": True, "moved": moved, "organized": bool(moved),
-            "media_tagged": media_tagged, "tagging_started": bool(moved)}
+    return {"ok": True, "moved": moved, "skipped": skipped,
+            "failed": failed,
+            "organized": bool(moved),
+            "media_tagged": media_tagged, "converted": converted,
+            "tagging_started": bool(moved)}
 
 
 @app.get("/api/soulseek/user/{username}")
@@ -2707,6 +3520,139 @@ def soulseek_user(username: str):
         return soulseek.user_info(username)
     except Exception as e:
         raise HTTPException(502, f"user info failed: {e}")
+
+
+@app.get("/api/soulseek/browse/{username}")
+def soulseek_browse(username: str):
+    """Every shared folder of a remote user — the manual-pick view: what else
+    does this uploader have before queueing individual files?
+
+    We only normalize slskd's payload to {username, directories:[…]}; slskd
+    does the browsing over the peer network, so an offline user (slskd 404)
+    or our OWN username (slskd cannot connect to itself) answers 5xx. That is
+    an upstream failure carrying slskd's own explanation, hence 502."""
+    from server import soulseek
+    if not (soulseek.is_running() or soulseek.web_up(load_config())):
+        raise HTTPException(404, "slskd is not running")
+    try:
+        dirs = soulseek.browse(username) or []
+    except Exception as e:
+        raise HTTPException(502, f"browse failed: {e}")
+    return {"username": username,
+            "directories": [{"directory": str(d.get("directory") or ""),
+                             "files": [{"filename": str(f.get("filename") or ""),
+                                        "size": int(f.get("size") or 0)}
+                                       for f in (d.get("files") or [])]}
+                            for d in dirs]}
+
+
+class SoulseekMessageRequest(BaseModel):
+    message: str
+
+
+@app.get("/api/soulseek/messages")
+def soulseek_messages():
+    """Conversations with their unread counts, unread first then alphabetical.
+
+    slskd hands the list back unordered and carries no last-message preview,
+    so this sort is the only ordering the UI gets (a preview line would cost
+    one request per conversation)."""
+    from server import soulseek
+    if not (soulseek.is_running() or soulseek.web_up(load_config())):
+        raise HTTPException(400, "slskd is not running")
+    try:
+        convs = soulseek.conversations() or []
+    except Exception as e:
+        raise HTTPException(502, f"conversation list failed: {e}")
+    out = [{"username": str(c.get("username") or ""),
+            "is_active": bool(c.get("isActive", True)),
+            "unread": int(c.get("unAcknowledgedMessageCount") or 0)}
+           for c in convs]
+    out.sort(key=lambda c: (not c["unread"], c["username"].lower()))
+    return {"ok": True, "unread": sum(c["unread"] for c in out),
+            "conversations": out}
+
+
+@app.get("/api/soulseek/messages/{username}")
+def soulseek_conversation(username: str):
+    """One conversation's messages, oldest first (slskd's own order).
+
+    FastAPI decodes {username} on the way in (Soulseek usernames contain
+    spaces) and the wrapper re-encodes it for slskd. slskd answers 404 for a
+    conversation it does not know — the wrapper maps that to None, which is
+    NOT an upstream failure: an existing conversation with no messages comes
+    back as an empty list."""
+    from server import soulseek
+    if not (soulseek.is_running() or soulseek.web_up(load_config())):
+        raise HTTPException(400, "slskd is not running")
+    try:
+        msgs = soulseek.messages(username)
+    except Exception as e:
+        raise HTTPException(502, f"conversation lookup failed: {e}")
+    if msgs is None:
+        raise HTTPException(404, f"no conversation with {username}")
+    return {"ok": True, "username": username,
+            "messages": [{"id": int(m.get("id") or 0),
+                          "direction": str(m.get("direction") or ""),
+                          "message": str(m.get("message") or ""),
+                          "timestamp": str(m.get("timestamp") or ""),
+                          "acknowledged": bool(m.get("isAcknowledged")),
+                          "replayed": bool(m.get("wasReplayed"))}
+                         for m in msgs]}
+
+
+@app.post("/api/soulseek/messages/{username}")
+def soulseek_send_message(username: str, req: SoulseekMessageRequest):
+    """Send a private message; sending to an unknown user creates the
+    conversation server-side.
+
+    slskd answers 201 when the message went out and 200 when the peer
+    blacklisted/ignored us — both are HTTP successes, so the status is what
+    separates "sent" from "silently dropped" for the UI."""
+    from server import soulseek
+    if not (soulseek.is_running() or soulseek.web_up(load_config())):
+        raise HTTPException(400, "slskd is not running")
+    message = str(req.message or "").strip()
+    if not message:
+        raise HTTPException(400, "empty message")
+    try:
+        status = soulseek.send_message(username, message)
+    except Exception as e:
+        raise HTTPException(502, f"send failed: {e}")
+    return {"ok": True, "sent": int(status) == 201}
+
+
+@app.post("/api/soulseek/messages/{username}/read")
+def soulseek_messages_read(username: str):
+    """Acknowledge every message of a conversation (clears its unread count).
+
+    slskd answers 404 for a conversation it does not know; the wrapper maps
+    that to False and the route reports it as an ordinary `acknowledged:
+    false` — a thread that vanished between two polls is not an upstream
+    failure worth an error toast in the UI."""
+    from server import soulseek
+    if not (soulseek.is_running() or soulseek.web_up(load_config())):
+        raise HTTPException(400, "slskd is not running")
+    try:
+        acked = soulseek.acknowledge_conversation(username)
+    except Exception as e:
+        raise HTTPException(502, f"acknowledge failed: {e}")
+    return {"ok": True, "acknowledged": bool(acked)}
+
+
+@app.delete("/api/soulseek/messages/{username}")
+def soulseek_messages_close(username: str):
+    """Close (hide) a conversation — slskd answers 204, which the wrapper
+    turns into True. An unknown (or already closed) conversation comes back
+    as False and is reported as `closed: false`, not as an error."""
+    from server import soulseek
+    if not (soulseek.is_running() or soulseek.web_up(load_config())):
+        raise HTTPException(400, "slskd is not running")
+    try:
+        closed = soulseek.close_conversation(username)
+    except Exception as e:
+        raise HTTPException(502, f"close failed: {e}")
+    return {"ok": True, "closed": bool(closed)}
 
 
 class SoulseekAutoRequest(BaseModel):
@@ -2825,6 +3771,40 @@ def soulseek_auto_cancel():
     return {"ok": soulseek_auto.cancel()}
 
 
+class SoulseekAutoConfirmRequest(BaseModel):
+    accept: bool
+
+
+@app.post("/api/soulseek/auto/confirm")
+def soulseek_auto_confirm(req: SoulseekAutoConfirmRequest):
+    """Answer the "only lossy copies found" prompt of a running auto-import.
+
+    The job parks in state `confirm` instead of downloading lossy audio on
+    its own; this releases it (accept=true downloads the lossy copy,
+    accept=false ends the job without downloading)."""
+    from server import soulseek_auto
+    ok = soulseek_auto.confirm_lossy(req.accept)
+    if not ok:
+        raise HTTPException(409, "no lossy confirmation is pending")
+    return {"ok": True, "accepted": bool(req.accept)}
+
+
+def _release_from_group(mbid):
+    """The earliest release id of a MusicBrainz release GROUP, or None.
+
+    Auto-import needs a *release* (a concrete pressing with a track list),
+    but MusicBrainz hands out release-group links just as often — a pasted
+    group link previously failed with a raw 404 from the release endpoint."""
+    try:
+        rg = intg.release_group_browse(mbid, limit=100, offset=0)
+    except Exception:
+        return None
+    if not rg.get("id"):
+        return None
+    releases = rg.get("releases") or []
+    return releases[0].get("id") if releases else None
+
+
 @app.post("/api/soulseek/auto")
 def soulseek_auto_start(req: SoulseekAutoRequest):
     """Find → verify → download → audit → import a specific MusicBrainz
@@ -2833,14 +3813,26 @@ def soulseek_auto_start(req: SoulseekAutoRequest):
     if not req.release_mbid and not (req.username and req.target_dir):
         raise HTTPException(400, "release_mbid or username+target_dir required")
     release = None
-    if req.release_mbid:
+    release_mbid = req.release_mbid
+    if release_mbid:
         try:
-            release = intg.release_lookup(req.release_mbid)
+            release = intg.release_lookup(release_mbid)
         except Exception as e:
-            raise HTTPException(502, f"MusicBrainz release lookup failed: {e}")
-    r = soulseek_auto.start_job(release_mbid=req.release_mbid, release=release,
+            # a release-group id (or link) is not a release id — import its
+            # earliest release instead of failing the request
+            release_mbid = _release_from_group(release_mbid) or release_mbid
+            if release_mbid == req.release_mbid:
+                raise HTTPException(502, f"MusicBrainz release lookup failed: {e}")
+            try:
+                release = intg.release_lookup(release_mbid)
+            except Exception as e2:
+                raise HTTPException(502, f"MusicBrainz release lookup failed: {e2}")
+    r = soulseek_auto.start_job(release_mbid=release_mbid, release=release,
                                 queries=req.queries, username=req.username,
-                                target_dir=req.target_dir)
+                                target_dir=req.target_dir,
+                                # the user asked for this release by hand: a
+                                # lossy-only match is offered, never silent
+                                confirm_lossy=True)
     if not r.get("ok"):
         raise HTTPException(409, r.get("error", "job refused"))
     return r
@@ -2865,6 +3857,16 @@ def soulseek_test_log(req: SoulseekTestLogRequest):
 
     cfg = load_config()
     ddir = soulseek.download_dir(cfg)
+    # req.username is unvalidated client input used as a path segment; without
+    # this check a username of "../.." aims the empty-folder cleanup below at
+    # directories anywhere up the tree.
+    user = str(req.username or "").strip()
+    if (not user or user != req.username or user != os.path.basename(user)
+            or user in (".", "..")):
+        raise HTTPException(400, "invalid username")
+    upath = os.path.join(ddir, user)
+    if not _in_music_folder(upath, ddir):
+        raise HTTPException(400, "username escapes the download dir")
     soulseek.enqueue_download(req.username,
                               [{"filename": f["filename"], "size": f.get("size") or 0}
                                for f in logs])
@@ -2890,7 +3892,6 @@ def soulseek_test_log(req: SoulseekTestLogRequest):
             pass
     # drop now-empty user folders left by the log test
     try:
-        upath = os.path.join(ddir, req.username)
         for root, dirs, files in os.walk(upath, topdown=False):
             if not os.listdir(root):
                 os.rmdir(root)
@@ -2962,11 +3963,14 @@ def soulseek_login(req: SoulseekLoginRequest):
         _refresh_slskd_shares_soon()
         return {"ok": True, "logged_in": True,
                 "message": f"Logged in to Soulseek as {username}"}
+    # the daemon's verdict beats any guess this endpoint could make
+    detail = soulseek.login_error()
     return {"ok": False, "logged_in": False,
-            "message": ("The Soulseek server did not accept these credentials "
-                        "— if this username already exists, the password may "
-                        "be wrong; otherwise try again in a minute (new "
-                        "accounts can take a moment to register)")}
+            "message": detail or (
+                "The Soulseek server did not accept these credentials "
+                "— if this username already exists, the password may "
+                "be wrong; otherwise try again in a minute (new "
+                "accounts can take a moment to register)")}
 
 
 def _refresh_slskd_shares_soon():
@@ -2988,8 +3992,7 @@ def _refresh_slskd_shares_soon():
 def track_download(path: str = Query(...)):
     """Serve the original, untouched audio file as a browser download."""
     p = os.path.normpath(path)
-    cfg = load_config()
-    if not _in_music_folder(p, cfg.get("music_folder") or ""):
+    if not _in_music_folder(p, _music_folder()):
         raise HTTPException(400, "path is outside the music folder")
     if not os.path.isfile(p):
         raise HTTPException(404, "file not found")
@@ -3019,8 +4022,7 @@ def track_export(path: str = Query(...), codec: str = Query("flac"),
         raise HTTPException(400, f"unsupported codec: {codec}")
     ext, _lossless, args_tpl = _EXPORT_CODECS[codec]
     p = os.path.normpath(path)
-    cfg = load_config()
-    if not _in_music_folder(p, cfg.get("music_folder") or ""):
+    if not _in_music_folder(p, _music_folder()):
         raise HTTPException(400, "path is outside the music folder")
     if not os.path.isfile(p):
         raise HTTPException(404, "file not found")
@@ -3086,6 +4088,13 @@ def mb_genres_import(req: GenreImportRequest):
 
     cfg = load_config()
     n = max(1, min(10, int(req.count or cfg.get("mb_genre_count", 1) or 1)))
+
+    # Same containment guard as /api/tags/bulk and /api/mb/assign: this route
+    # writes GENRE tags, so paths outside the music folder are refused.
+    folder = _music_folder()
+    for p in req.paths:
+        if not _in_music_folder(p, folder):
+            raise HTTPException(400, f"path outside music folder: {p}")
 
     # collect audio files (allow passing one album folder)
     files = []
@@ -3168,6 +4177,31 @@ def mb_genres_import(req: GenreImportRequest):
             "per_track": bool(track_genres)}
 
 
+def _rewrite_track_covers(old_root, new_root, renames):
+    """Follow the per-track cover map through a move.
+
+    Both keys (tracks) and values (images) are album filenames: they are
+    rewritten through *renames* (old basename -> new basename) and an entry
+    whose track or image is not in the new album root is dropped, rather than
+    left pointing at a file that no longer exists."""
+    mapping = load_track_covers(new_root) or load_track_covers(old_root)
+    if not mapping:
+        return
+    try:
+        present = {f.lower() for f in os.listdir(new_root)
+                   if os.path.isfile(os.path.join(new_root, f))}
+    except OSError:
+        return
+    lowered = {k.lower(): v for k, v in renames.items()}
+    out = {}
+    for track, image in mapping.items():
+        track = lowered.get(track.lower(), track)
+        image = lowered.get(image.lower(), image)
+        if track.lower() in present and image.lower() in present:
+            out[track] = image
+    save_track_covers(new_root, out)
+
+
 @app.post("/api/organize")
 def organize(req: OrganizeRequest):
     """Rename/move albums according to the configured naming script.
@@ -3177,7 +4211,6 @@ def organize(req: OrganizeRequest):
     leftover album files (cover art etc.) to the new album root, and prune
     emptied folders. Nothing leaves the music folder.
     """
-    import shutil
     from server.naming import DEFAULT_NAMING_SCRIPT, eval_script, track_variables
 
     cfg = load_config()
@@ -3228,7 +4261,10 @@ def organize(req: OrganizeRequest):
             # source extension is re-appended LOWERCASE (beets keeps the
             # source ext; this app additionally normalizes its case).
             rel += os.path.splitext(t["path"])[1].lower()
-            dst = os.path.normpath(os.path.join(folder, rel))
+            # The library itself is <music folder>/Artists (contract A): the
+            # script only names the path INSIDE it, so every album lands under
+            # Artists/ and the music-folder root stays the Soulseek share root.
+            dst = os.path.normpath(os.path.join(library_root(folder), rel))
             if not _in_music_folder(dst, folder):
                 errors.append(f"{t['file']}: destination outside music folder")
                 continue
@@ -3300,12 +4336,13 @@ def organize(req: OrganizeRequest):
         for src, dst in moves + sidecar_moves:
             try:
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
-                if os.path.normcase(src) == os.path.normcase(dst):
-                    # case-only rename (capitalization / extension case) —
-                    # shutil.move would refuse a "existing" destination
-                    os.rename(src, dst)
-                else:
-                    shutil.move(src, dst)
+                # Case-only renames (capitalization / extension case) go
+                # through move_path too: it uses os.replace, which renames a
+                # file onto its own name modulo case.
+                if not move_path(src, dst):
+                    errors.append(f"{os.path.basename(src)}: a file inside is "
+                                  f"still in use — stop playback and retry")
+                    continue
                 moved += 1
             except Exception as e:
                 errors.append(f"{os.path.basename(src)}: {e}")
@@ -3335,13 +4372,24 @@ def organize(req: OrganizeRequest):
                     n += 1
                 try:
                     os.makedirs(new_root, exist_ok=True)
-                    if os.path.normcase(fpath) == os.path.normcase(dst):
-                        os.rename(fpath, dst)
-                    else:
-                        shutil.move(fpath, dst)
+                    if not move_path(fpath, dst):
+                        errors.append(f"{f}: a file inside is still in use — "
+                                      f"stop playback and retry")
+                        continue
                     leftovers += 1
                 except Exception as e:
                     errors.append(f"{f}: {e}")
+
+        # Per-track cover manifest: its keys and values are filenames in the
+        # album folder, so a sidecar renamed with its track (or a track that
+        # moved) has to be followed here too. The manifest file itself was
+        # swept to the new album root by the leftovers pass above.
+        try:
+            cover_renames = {os.path.basename(s): os.path.basename(d)
+                             for s, d in moves + sidecar_moves}
+            _rewrite_track_covers(p, new_root, cover_renames)
+        except Exception as e:
+            errors.append(f"cover manifest: {e}")
 
         # prune emptied folders: first any empty subfolders left inside the
         # old album (deepest first — a swept "scans/" folder must not keep
@@ -3402,17 +4450,23 @@ async def import_upload(
     target_dir: str = Query(...),
     files: List[UploadFile] = File(...),
 ):
-    """Upload files into a new album directory under the music folder.
+    """Upload files into a new album directory under the library (Artists).
 
     Filenames may contain relative subpaths (e.g. "CD1/01 - Intro.flac")
     so whole album folders keep their internal structure. Path traversal
     and absolute paths are rejected.
+
+    `target_dir` is free text from the wizard's album-name field, so only its
+    BASENAME is used: `_in_music_folder` alone would accept a name like
+    "../Escape" (it resolves to <music>/Escape — inside the music folder, but
+    outside Artists/ where the library actually lives).
     """
     cfg = load_config()
     folder = cfg.get("music_folder") or ""
     if not folder or not os.path.isdir(folder):
         raise HTTPException(400, "music_folder not set or not found")
-    target = os.path.normpath(os.path.join(folder, target_dir))
+    safe = re_safe_filename(os.path.basename(target_dir)) or "Imported"
+    target = os.path.normpath(os.path.join(library_root(folder), safe))
     if not _in_music_folder(target, folder):
         raise HTTPException(400, "target outside music folder")
     os.makedirs(target, exist_ok=True)
@@ -3466,8 +4520,9 @@ def import_scan(path: str = Query(...)):
 
 @app.post("/api/import/ingest")
 def import_ingest(source: str = Query(...), target: str = Query(...)):
-    """Move (or copy across devices) an album folder into the library."""
-    import shutil
+    """Move an album folder into the library. Same volume it is one rename;
+    across devices it is a verified copy followed by the source's removal —
+    never a blind copytree + rmtree."""
     cfg = load_config()
     folder = cfg.get("music_folder") or ""
     if not folder or not os.path.isdir(folder):
@@ -3478,21 +4533,22 @@ def import_ingest(source: str = Query(...), target: str = Query(...)):
     name = re_safe_filename(os.path.basename(target or os.path.basename(src)))
     if not name:
         raise HTTPException(400, "invalid target name")
-    dest = os.path.normpath(os.path.join(folder, name))
+    dest = os.path.normpath(os.path.join(library_root(folder), name))
     if not _in_music_folder(dest, folder):
         raise HTTPException(400, "target outside music folder")
     if os.path.normcase(os.path.abspath(dest)) == os.path.normcase(os.path.abspath(src)):
         return {"ok": True, "path": dest.replace("\\", "/")}
     n = 2
     while os.path.exists(dest):
-        dest = os.path.normpath(os.path.join(folder, f"{name} ({n})"))
+        dest = os.path.normpath(os.path.join(library_root(folder), f"{name} ({n})"))
         n += 1
-    try:
-        shutil.move(src, dest)
-    except OSError:
-        # cross-device: copy then remove the source so the import is a move
-        shutil.copytree(src, dest)
-        shutil.rmtree(src, ignore_errors=True)
+    if not move_path(src, dest):
+        # move_path retried every lock/sharing violation and refuses to copy
+        # blindly: whatever failed, the source is still complete.
+        raise HTTPException(
+            500,
+            f"could not import {name} — a file inside it is still in use "
+            f"(stop playback and retry)")
     tagcache.invalidate_all()
     mbresolve.invalidate()
     return {"ok": True, "path": dest.replace("\\", "/")}
@@ -3502,7 +4558,7 @@ def import_ingest(source: str = Query(...), target: str = Query(...)):
 def import_commit(req: ImportCommit):
     """Store MB/RYM links on every track of a freshly imported album.
 
-    target_dir: album folder name under music_folder.
+    target_dir: album folder name under the library (Artists).
     """
     cfg = load_config()
     folder = cfg.get("music_folder") or ""
@@ -3510,7 +4566,7 @@ def import_commit(req: ImportCommit):
         raise HTTPException(400, "music_folder not set or not found")
     target = os.path.normpath(req.target_dir)
     if not os.path.isabs(target):
-        target = os.path.normpath(os.path.join(folder, req.target_dir))
+        target = os.path.normpath(os.path.join(library_root(folder), req.target_dir))
     if not _in_music_folder(target, folder):
         raise HTTPException(400, "target outside music folder")
     if not os.path.isdir(target):
@@ -3547,13 +4603,425 @@ def import_commit(req: ImportCommit):
     return {"ok": True, "changed": len(changes)}
 
 
+@app.post("/api/import/expected")
+def import_expected(req: ImportExpected):
+    """Record the release's full tracklist on the album folder.
+
+    This is what makes a PARTIAL import legible: the album page diffs the
+    files on disk against this list and greys out the ones that never came
+    in. Sending an empty `tracks` clears the manifest again (a full import
+    leaves nothing behind)."""
+    from mlo.paths import save_expected_tracks
+    cfg = load_config()
+    folder = cfg.get("music_folder") or ""
+    if not folder or not os.path.isdir(folder):
+        raise HTTPException(400, "music_folder not set or not found")
+    target = os.path.normpath(req.target_dir)
+    if not os.path.isabs(target):
+        target = os.path.normpath(os.path.join(library_root(folder), req.target_dir))
+    if not _in_music_folder(target, folder):
+        raise HTTPException(400, "target outside music folder")
+    if not os.path.isdir(target):
+        raise HTTPException(404, "album not found")
+    if not save_expected_tracks(target, req.release_id, req.tracks):
+        raise HTTPException(500, "could not write the release tracklist")
+    tagcache.invalidate_all()
+    return {"ok": True, "tracks": len(req.tracks or [])}
+
+
+# --------------------------------------------------------------------------- #
+# .mlo/downloads — slskd's staging area
+# --------------------------------------------------------------------------- #
+def _downloads_dir(folder):
+    """<music>/.mlo/downloads, or None when no music folder is set."""
+    if not folder:
+        return None
+    try:
+        return downloads_dir(folder)
+    except Exception:
+        return None
+
+
+def _downloads_name_error(name, root):
+    """Why `name` may not be acted on inside the downloads dir, or None.
+
+    Names travel as basenames over the API, so anything that is not a single
+    plain path segment — or that resolves (symlinks included) outside the
+    directory — is refused before a byte is touched."""
+    if not name or name in (".", "..") or "/" in name or "\\" in name:
+        return "not a valid entry name"
+    try:
+        real = os.path.realpath(os.path.join(root, name))
+    except (OSError, ValueError):
+        return "unresolvable path"
+    if os.path.dirname(real) != root:
+        return "outside the downloads folder"
+    return None
+
+
+def _downloads_scan(path):
+    """(files, bytes, audio, images) under *path*, skipping hidden app dirs."""
+    from mlo.paths import LIB_AUDIO_EXTS, LIB_VIDEO_EXTS, IMAGE_EXTS
+    files = size = audio = images = 0
+    for root, dirs, names in os.walk(path):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for f in names:
+            files += 1
+            try:
+                size += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+            ext = os.path.splitext(f)[1].lower()
+            if ext in LIB_AUDIO_EXTS or ext in LIB_VIDEO_EXTS:
+                audio += 1
+            elif ext in IMAGE_EXTS:
+                images += 1
+    return files, size, audio, images
+
+
+def _downloads_entry(root, name):
+    """One downloads entry: size, file counts and whether it is an album.
+
+    `album` is what the page keys the Import button off — a folder holding
+    audio. `partial` marks slskd's own in-flight leftovers, which must never
+    look like something safe to import or delete by accident."""
+    from mlo.paths import LIB_AUDIO_EXTS, LIB_VIDEO_EXTS, IMAGE_EXTS
+    p = os.path.join(root, name)
+    try:
+        mtime = os.path.getmtime(p)
+    except OSError:
+        return None
+    # In-flight transfers and scratch files are dot/underscore-prefixed or
+    # carry a partial suffix; they are not results to act on.
+    partial = name.startswith((".", "_")) or \
+        name.lower().endswith((".part", ".tmp", ".!ut", ".downloading"))
+    if os.path.isdir(p) and not os.path.islink(p):
+        files, size, audio, images = _downloads_scan(p)
+        return {"name": name, "dir": True, "bytes": size, "files": files,
+                "audio": audio, "images": images, "album": audio > 0,
+                "partial": partial, "_mtime": mtime}
+    try:
+        size = os.path.getsize(p)
+    except OSError:
+        size = 0
+    ext = os.path.splitext(name)[1].lower()
+    return {"name": name, "dir": False, "bytes": size, "files": 1,
+            "audio": 1 if (ext in LIB_AUDIO_EXTS or ext in LIB_VIDEO_EXTS) else 0,
+            "images": 1 if ext in IMAGE_EXTS else 0,
+            "album": False, "partial": partial, "_mtime": mtime}
+
+
+@app.get("/api/downloads")
+def downloads_list():
+    """Contents of <music_folder>/.mlo/downloads, newest first.
+
+    This is slskd's staging area: everything it pulls down lands here and
+    stays until it is imported into the library or deleted. Enough is reported
+    per entry (size, file counts, whether it holds audio) for the page to
+    offer Import only where it is meaningful."""
+    folder = load_config().get("music_folder") or ""
+    ddir = _downloads_dir(folder)
+    out = {"folder": (ddir or "").replace("\\", "/"), "exists": False,
+           "count": 0, "bytes": 0, "entries": [],
+           "music_folder": folder.replace("\\", "/")}
+    if not ddir or not os.path.isdir(ddir):
+        return out
+    root = os.path.realpath(ddir)
+    try:
+        names = os.listdir(ddir)
+    except OSError:
+        return out
+    entries = [e for e in (_downloads_entry(root, n) for n in names) if e]
+    entries.sort(key=lambda e: e["_mtime"], reverse=True)
+    for e in entries:
+        del e["_mtime"]
+    out.update(exists=True, count=len(entries), entries=entries,
+               bytes=sum(e["bytes"] for e in entries))
+    return out
+
+
+@app.post("/api/downloads/delete")
+def downloads_delete(req: DownloadsDelete = DownloadsDelete()):
+    """Permanently delete downloads entries by basename. Unknown and refused
+    names land in `failed`; nothing else is an error."""
+    import shutil
+    folder = load_config().get("music_folder") or ""
+    ddir = _downloads_dir(folder)
+    if not ddir or not os.path.isdir(ddir):
+        raise HTTPException(404, "downloads folder not found")
+    root = os.path.realpath(ddir)
+    deleted, failed, freed = [], [], 0
+    for name in req.names:
+        err = _downloads_name_error(name, root)
+        p = os.path.join(ddir, name) if err is None else ""
+        if err is None and not os.path.lexists(p):
+            err = "not found in downloads"
+        if err is None:
+            try:
+                # Size first: once rmtree has run the bytes are unrecoverable.
+                if os.path.islink(p):
+                    size = 0
+                    os.remove(p)
+                elif os.path.isdir(p):
+                    size = _dir_stats(p)[1]
+                    shutil.rmtree(p)
+                else:
+                    size = os.path.getsize(p)
+                    os.remove(p)
+                freed += size
+            except OSError as e:
+                err = str(e) or "delete failed"
+        if err:
+            failed.append({"name": name, "error": err})
+        else:
+            deleted.append(name)
+    if deleted:
+        tagcache.invalidate_all()
+        _refresh_slskd_shares_soon()
+    return {"deleted": deleted, "failed": failed, "freed": freed}
+
+
+@app.post("/api/downloads/import")
+def downloads_import(req: DownloadsImport = DownloadsImport()):
+    """Move downloads entries into the library as albums, clearing them from
+    the staging area.
+
+    Each entry keeps its name (deduplicated with " (2)" etc.) and is verified
+    to sit inside the downloads dir first. A per-entry failure lands in
+    `failed`; the rest of the batch still moves."""
+    folder = load_config().get("music_folder") or ""
+    ddir = _downloads_dir(folder)
+    if not ddir or not os.path.isdir(ddir):
+        raise HTTPException(404, "downloads folder not found")
+    if not folder or not os.path.isdir(folder):
+        raise HTTPException(400, "music_folder not set or not found")
+    root = os.path.realpath(ddir)
+    lib = library_root(folder)
+    moved, failed = [], []
+    for name in req.names:
+        err = _downloads_name_error(name, root)
+        src = os.path.join(ddir, name) if err is None else ""
+        if err is None and not os.path.lexists(src):
+            err = "not found in downloads"
+        if err is None:
+            safe = re_safe_filename(os.path.basename(name)) or "Download"
+            dest = os.path.normpath(os.path.join(lib, safe))
+            if not _in_music_folder(dest, folder):
+                err = "target outside music folder"
+            else:
+                n = 2
+                while err is None and os.path.exists(dest):
+                    dest = os.path.normpath(os.path.join(lib, f"{safe} ({n})"))
+                    n += 1
+                if err is None and not move_path(src, dest):
+                    # move_path retried every lock/sharing violation and
+                    # refuses to copy blindly: the source stays complete.
+                    err = ("could not import — a file inside it is still in "
+                           "use (stop playback and retry)")
+                elif err is None:
+                    moved.append({"name": name, "path": dest.replace("\\", "/")})
+        if err:
+            failed.append({"name": name, "error": str(err)})
+    if moved:
+        tagcache.invalidate_all()
+        mbresolve.invalidate()
+        _refresh_slskd_shares_soon()
+    return {"moved": moved, "failed": failed}
+
+
+# --------------------------------------------------------------------------- #
+# Library layout — is the music folder shaped the way the app expects?
+# --------------------------------------------------------------------------- #
+# The canonical library is <music>/Artists/<Artist>/<Album>/<files>. Everything
+# else that holds audio, or that sits where no audio belongs, is reported here.
+# This is a READ-ONLY report: it says what is wrong and where, and never moves
+# anything on its own.
+_LAYOUT_ALBUM_SIDECARS = {".lrc", ".cue", ".log", ".accurip"}
+# Folders allowed directly in the music folder. `.mlo*` covers the app's own
+# state dirs; everything else is reported.
+_LAYOUT_ROOT_ALLOWED = {".mlo"}
+# Disc folders are the one nesting the app creates and understands.
+_LAYOUT_DISC_RE = re.compile(r"^(cd|disc|disk)\s*\d+$", re.I)
+
+
+def _layout_is_audio(name):
+    from mlo.paths import LIB_AUDIO_EXTS, LIB_VIDEO_EXTS
+    ext = os.path.splitext(name)[1].lower()
+    return ext in LIB_AUDIO_EXTS or ext in LIB_VIDEO_EXTS
+
+
+def _layout_list(d):
+    try:
+        return os.listdir(d)
+    except OSError:
+        return []
+
+
+def _layout_issue(kind, path, folder, detail, hint):
+    """One report row. `path` is always music-folder-relative for display, so
+    the UI never has to know the machine's absolute layout."""
+    try:
+        rel = os.path.relpath(path, folder)
+    except ValueError:
+        rel = path
+    return {"kind": kind, "path": rel.replace("\\", "/"),
+            "abs": path.replace("\\", "/"), "detail": detail, "hint": hint}
+
+
+def _layout_counts(issues):
+    counts = {}
+    for i in issues:
+        counts[i["kind"]] = counts.get(i["kind"], 0) + 1
+    return counts
+
+
+def _layout_has_audio(d):
+    """Whether any audio sits directly in *d* or one/two levels down (the only
+    nesting the layout uses: disc folders inside an album)."""
+    for root, dirs, names in os.walk(d):
+        dirs[:] = [x for x in dirs if x not in SKIP_DIRS]
+        if root.count(os.sep) - d.count(os.sep) > 2:
+            dirs[:] = []
+            continue
+        if any(_layout_is_audio(f) for f in names):
+            return True
+    return False
+
+
+@app.get("/api/library/layout")
+def library_layout():
+    """Scan the whole music folder for misplaced files and unexpected folders.
+
+    Read-only. Checks the music-folder root, <music>/Artists, each artist
+    folder, each album folder and the tree's depth — reporting every place the
+    canonical `<music>/Artists/<Artist>/<Album>/<files>` shape is not met."""
+    from mlo.paths import IMAGE_EXTS
+    folder = load_config().get("music_folder") or ""
+    out = {"folder": folder.replace("\\", "/"), "artists_dir": "",
+           "exists": False, "issues": [], "counts": {}, "total": 0,
+           "albums": 0, "artists": 0, "audio_files": 0}
+    if not folder or not os.path.isdir(folder):
+        return out
+    lib = library_root(folder)
+    out["exists"] = True
+    out["artists_dir"] = (lib or "").replace("\\", "/")
+    issues = []
+
+    # ---- 1. the music-folder root -----------------------------------------
+    # Only Artists/ and the app's own .mlo state dirs belong here. A loose
+    # audio file at the root is the classic "dropped it in the wrong place",
+    # and a foreign folder is either a manual rip dump or a stray copy.
+    for name in _layout_list(folder):
+        p = os.path.join(folder, name)
+        if os.path.isdir(p):
+            if name in _LAYOUT_ROOT_ALLOWED or name.startswith(".mlo"):
+                continue
+            if lib and os.path.normcase(os.path.abspath(p)) == os.path.normcase(os.path.abspath(lib)):
+                continue
+            holds = _layout_has_audio(p)
+            issues.append(_layout_issue(
+                "unexpected_folder", p, folder,
+                "folder in the music folder root%s" % (" holding audio" if holds else ""),
+                "the library lives in Artists/ — move anything real into "
+                "Artists/<Artist>/<Album>/"))
+        elif _layout_is_audio(name):
+            issues.append(_layout_issue(
+                "audio_at_root", p, folder, "audio file in the music folder root",
+                "move it into Artists/<Artist>/<Album>/ (or import it) so "
+                "grading and the organizer can see it"))
+        elif name.startswith(".mlo_"):
+            issues.append(_layout_issue(
+                "legacy_state_file", p, folder,
+                "leftover from the old .mlo_data layout",
+                "safe to delete once the migration has been confirmed"))
+
+    if not lib or not os.path.isdir(lib):
+        out.update(issues=issues, counts=_layout_counts(issues), total=len(issues))
+        return out
+
+    # ---- 2. <music>/Artists ------------------------------------------------
+    artist_names = _layout_list(lib)
+    for name in artist_names:
+        p = os.path.join(lib, name)
+        if not os.path.isdir(p):
+            if _layout_is_audio(name):
+                issues.append(_layout_issue(
+                    "audio_in_artists", p, folder,
+                    "audio file directly in Artists/ (no artist or album folder)",
+                    "move it into Artists/<Artist>/<Album>/"))
+            else:
+                issues.append(_layout_issue(
+                    "stray_in_artists", p, folder,
+                    "non-audio file directly in Artists/",
+                    "delete it, or move it into the album it belongs to"))
+            continue
+        if name.startswith("."):
+            issues.append(_layout_issue(
+                "hidden_folder", p, folder, "hidden folder inside Artists/",
+                "hidden folders are not library content — move or delete it"))
+            continue
+
+        # ---- 3. <music>/Artists/<Artist> ----------------------------------
+        for an in _layout_list(p):
+            ap = os.path.join(p, an)
+            if not os.path.isdir(ap):
+                if _layout_is_audio(an):
+                    issues.append(_layout_issue(
+                        "audio_in_artist", ap, folder,
+                        "audio file directly in the artist folder \u201c%s\u201d "
+                        "(no album folder)" % name,
+                        "give it an album folder: Artists/<Artist>/<Album>/"))
+                continue
+            out["albums"] += 1
+            if not _layout_has_audio(ap):
+                issues.append(_layout_issue(
+                    "empty_album", ap, folder,
+                    "album folder \u201c%s / %s\u201d holds no audio" % (name, an),
+                    "remove it, or fill it — an empty album grades as an error"))
+
+            # ---- 4. inside an album: strays and unexpected subfolders ------
+            for f in _layout_list(ap):
+                fp = os.path.join(ap, f)
+                if os.path.isdir(fp):
+                    if not _LAYOUT_DISC_RE.match(f):
+                        issues.append(_layout_issue(
+                            "unexpected_subfolder", fp, folder,
+                            "folder \u201c%s\u201d inside album \u201c%s / %s\u201d"
+                            % (f, name, an),
+                            "only disc folders (CD1, Disc 2, \u2026) belong "
+                            "inside an album"))
+                    continue
+                ext = os.path.splitext(f)[1].lower()
+                if _layout_is_audio(f):
+                    out["audio_files"] += 1
+                elif ext and ext in _LAYOUT_ALBUM_SIDECARS:
+                    pass                      # .lrc/.cue/.log/.accurip: expected
+                elif ext in IMAGE_EXTS:
+                    pass                      # cover art: expected
+                elif f.startswith("."):
+                    pass                      # the app's own manifests
+                else:
+                    issues.append(_layout_issue(
+                        "stray_file", fp, folder,
+                        "file \u201c%s\u201d is not audio, artwork or a known "
+                        "sidecar" % f,
+                        "delete it if it is junk (nfo/db/txt) — it is dead "
+                        "weight in the library"))
+
+    out["artists"] = sum(1 for n in artist_names
+                         if os.path.isdir(os.path.join(lib, n)) and not n.startswith("."))
+    out.update(issues=issues, counts=_layout_counts(issues), total=len(issues))
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # WebSocket + static
 # --------------------------------------------------------------------------- #
 @app.websocket("/ws/progress")
 async def ws_progress(ws: WebSocket):
     await ws.accept()
-    progress_clients.add(ws)
+    with _progress_lock:
+        progress_clients.add(ws)
     try:
         while True:
             try:
@@ -3568,7 +5036,8 @@ async def ws_progress(ws: WebSocket):
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
-        progress_clients.discard(ws)
+        with _progress_lock:
+            progress_clients.discard(ws)
 
 
 WEB_DIST = ROOT / "web" / "dist"
@@ -3579,10 +5048,22 @@ if WEB_DIST.is_dir():
         to index.html so client-side routes (/settings, /album/...) work."""
         if full_path.startswith(("api/", "ws")):
             raise HTTPException(404)
+        # full_path is attacker-controlled: a ".." segment would otherwise read
+        # any file on disk (e.g. /../../server/tagcache.py, or the config file
+        # holding the Soulseek/AI credentials).
+        if ".." in full_path.replace("\\", "/").split("/"):
+            raise HTTPException(404)
         file = WEB_DIST / full_path
-        if file.is_file():
+        # Belt and braces: even without a ".." segment (absolute/UNC input on
+        # Windows) the resolved target must still sit inside the built SPA.
+        try:
+            resolved = file.resolve()
+        except (OSError, ValueError):
+            resolved = None
+        if (resolved is not None and resolved.is_file()
+                and _in_music_folder(resolved, WEB_DIST.resolve())):
             # hashed asset filenames change per build; etag revalidation is enough
-            return FileResponse(file)
+            return FileResponse(resolved)
         if full_path.startswith("assets/"):
             # a missing hashed bundle must 404 — the fallback would answer with
             # index.html, i.e. HTML handed to the browser as JavaScript/CSS.

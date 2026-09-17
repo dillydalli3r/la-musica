@@ -9,13 +9,14 @@
 
 import type { MouseEvent } from "react";
 
-/** Shared click behavior for entity-title links on play rows: a plain click
- * falls through to the row's play handler (preventDefault stops the router),
- * while Ctrl/Shift/cmd-click opens the target page IN-APP — the browser's
- * new-tab default is deliberately suppressed so the viewer stays inside the
- * app. Middle-click keeps the native new-tab behavior. */
+/** Shared click behavior for entity-title links on play rows: a plain mouse
+ * click falls through to the row's play handler (preventDefault stops the
+ * router), while Ctrl/Shift/cmd-click — and a keyboard activation, which
+ * arrives as a click with detail 0 — opens the target page IN-APP: the
+ * browser's new-tab default is deliberately suppressed so the viewer stays
+ * inside the app. Middle-click keeps the native new-tab behavior. */
 export function entityLinkClick(e: MouseEvent, open: () => void) {
-  if (e.ctrlKey || e.metaKey || e.shiftKey) {
+  if (e.ctrlKey || e.metaKey || e.shiftKey || e.detail === 0) {
     e.preventDefault();
     e.stopPropagation();
     open();

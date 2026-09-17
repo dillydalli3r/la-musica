@@ -33,9 +33,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Track row: "DR12      -0.15 dB   -11.21 dB      3:30 05-Spiders"
 # Columns: DR, Peak (val unit), RMS (val unit), Duration, Track label.
-# simple-dr-meter labels each row with the TRACK NUMBER and TITLE from the
-# file's tags (e.g. "05-Spiders"), NOT the filename - so we key by track
-# number and match files via their TRACKNUMBER tag.
+# The leading number is NOT the track's tag number: simple-dr-meter numbers
+# rows by the file's ORDINAL POSITION in the folder listing (see its
+# audio_io._audio_sources_from_folder — natural-sorted filenames, audio
+# extensions only). The label after the dash is the file's own TITLE tag.
+# Match on the title; the position is only a fallback (multi-disc folders
+# restart TRACKNUMBER per disc, so tag numbers and positions disagree).
 TRACK_ROW_RE = re.compile(
     r"^\s*DR(\d{1,2})\s+(?:\S+\s+){5}(\d+)\s*-\s*(.*?)\s*$"
 )
@@ -43,6 +46,13 @@ TRACK_ROW_RE = re.compile(
 OFFICIAL_DR_RE = re.compile(
     r"Official DR value:\s*DR(\d{1,2})", re.IGNORECASE
 )
+
+
+def _natural_key(name):
+    """Filename order simple-dr-meter walks a folder in."""
+    return [int(t) if t.isdigit() else str(t).lower()
+            for t in re.split(r"(\d+)", str(name))]
+
 
 RGAIN_TAGS = (
     "REPLAYGAIN_TRACK_GAIN",
@@ -145,8 +155,8 @@ def _run_dr_meter(script_path, ffmpeg_dir, album, workdir):
 
 
 def _parse_dr_file(dr_path):
-    """Parse dr.txt -> ({track_number: dr}, {title_lower: dr}, album_dr)."""
-    per_track = {}
+    """Parse dr.txt -> ({row_position: dr}, {title_lower: dr}, album_dr)."""
+    per_position = {}
     per_title = {}
     album_dr = None
     try:
@@ -167,7 +177,7 @@ def _parse_dr_file(dr_path):
                 if m:
                     dr = int(m.group(1))
                     try:
-                        per_track[int(m.group(2))] = dr
+                        per_position[int(m.group(2))] = dr
                     except ValueError:
                         pass
                     title = m.group(3).strip().lower()
@@ -179,7 +189,7 @@ def _parse_dr_file(dr_path):
                     album_dr = int(m2.group(1))
     except OSError:
         pass
-    return per_track, per_title, album_dr
+    return per_position, per_title, album_dr
 
 
 def _raw_tag(af, name):
@@ -193,27 +203,34 @@ def _raw_tag(af, name):
     return ""
 
 
-def _write_dr_tags(album, per_track, per_title, album_dr, write_tags=True, config=None):
+def _write_dr_tags(album, per_position, per_title, album_dr, write_tags=True, config=None):
     """Write DYNAMIC RANGE + ALBUM DYNAMIC RANGE to the album's files.
 
-    Rows in dr.txt are keyed by TRACK NUMBER + TITLE; files are matched by
-    their TRACKNUMBER tag first, falling back to the TITLE tag.
+    dr.txt keys rows by the file's TITLE tag and by its ordinal position in
+    the folder listing; files are matched on the title first, position only
+    as a fallback.
     """
     modified = 0
-    for f in sorted(os.listdir(album)):
+    names = os.listdir(album)
+    # Ordinal position of each file in the listing simple-dr-meter walks
+    # (natural-sorted, audio extensions only) — that is what dr.txt numbers.
+    positions = {}
+    for i, f in enumerate(sorted(
+            (n for n in names if os.path.splitext(n)[1].lower() in AUDIO_EXTS),
+            key=_natural_key), 1):
+        positions[f] = i
+    for f in sorted(names):
         if not is_audio_file(f):
             continue
         path = os.path.join(album, f)
         try:
             af = AudioFile(path)
-            raw_tn = _raw_tag(af, "TRACKNUMBER")
-            num = int(raw_tn) if raw_tn.isdigit() else None
             raw_title = _raw_tag(af, "TITLE").lower()
         except Exception:
             continue
-        dr = per_track.get(num) if num is not None else None
-        if dr is None and raw_title:
-            dr = per_title.get(raw_title)
+        dr = per_title.get(raw_title) if raw_title else None
+        if dr is None:
+            dr = per_position.get(positions.get(f))
         if dr is None:
             continue
         try:
@@ -221,17 +238,27 @@ def _write_dr_tags(album, per_track, per_title, album_dr, write_tags=True, confi
                 continue
             if config is not None and not should_write_audio_tag(config, "DYNAMIC RANGE", filepath=path):
                 continue
-            changed = False
+            pending = {}
             if str(af.get_tag("DYNAMIC RANGE") or "").strip() != str(dr):
-                if af.set_tag("DYNAMIC RANGE", str(dr)):
-                    changed = True
+                pending["DYNAMIC RANGE"] = str(dr)
             if (album_dr is not None
                     and str(af.get_tag("ALBUM DYNAMIC RANGE") or "").strip()
                     != str(album_dr)):
-                if af.set_tag("ALBUM DYNAMIC RANGE", str(album_dr)):
-                    changed = True
-            if changed:
-                modified += 1
+                pending["ALBUM DYNAMIC RANGE"] = str(album_dr)
+            if not pending:
+                continue
+            if getattr(af, "is_video", False):
+                # A video container is rewritten whole on every write — both
+                # tags in one ffmpeg pass instead of two remuxes.
+                if af.set_video_tags(pending):
+                    modified += 1
+            else:
+                changed = False
+                for tag_name, tag_value in pending.items():
+                    if af.set_tag(tag_name, tag_value):
+                        changed = True
+                if changed:
+                    modified += 1
         except Exception:
             continue
     return modified
@@ -364,9 +391,9 @@ def run_calc_dr_replaygain(config):
                             dr_script, os.path.dirname(ffmpeg["ffmpeg_exe"]),
                             album, workdir)
                         if dr_path:
-                            per_track, per_title, album_dr = _parse_dr_file(dr_path)
+                            per_position, per_title, album_dr = _parse_dr_file(dr_path)
                             album_modified += _write_dr_tags(
-                                album, per_track, per_title, album_dr,
+                                album, per_position, per_title, album_dr,
                                 write_tags=config.get("write_dynamic_range_tags", True),
                                 config=config,
                             )
@@ -420,8 +447,8 @@ def run_calc_dr_replaygain(config):
                 if audio_files and (force or any(_file_missing_dr(os.path.join(album_path, f)) for f in audio_files)):
                     dr_path = _run_dr_meter(dr_script, os.path.dirname(ffmpeg["ffmpeg_exe"]), album_path, workdir)
                     if dr_path:
-                        per_track, per_title, album_dr = _parse_dr_file(dr_path)
-                        amod += _write_dr_tags(album_path, per_track, per_title, album_dr, write_tags=config.get("write_dynamic_range_tags", True), config=config)
+                        per_position, per_title, album_dr = _parse_dr_file(dr_path)
+                        amod += _write_dr_tags(album_path, per_position, per_title, album_dr, write_tags=config.get("write_dynamic_range_tags", True), config=config)
                         try:
                             os.remove(dr_path)
                         except OSError:

@@ -1,7 +1,8 @@
 """Playlists for la musica v2.
 
 Dual storage:
-  * SQLite (server/data/playlists.db) — fast UI, smart playlists, ordering.
+  * SQLite (<music folder>/.mlo/data/playlists.db) — fast UI, smart
+    playlists, ordering.
   * .m3u8 export/import — portable standard format for other players.
 
 Playlist kinds:
@@ -20,15 +21,32 @@ _lock = threading.Lock()
 
 
 def db_path():
-    """Playlists + likes live in <music folder>/.data/playlists.db."""
+    """Playlists + likes live in <music folder>/.mlo/data/playlists.db."""
     from mlo.paths import app_data_dir
     return os.path.join(app_data_dir(), "playlists.db")
 
 
+_init_lock = threading.Lock()
+_initialized = False
+
+
 def _conn():
+    global _initialized
     os.makedirs(os.path.dirname(db_path()), exist_ok=True)
     conn = sqlite3.connect(db_path(), timeout=30)
     conn.row_factory = sqlite3.Row
+    # Schema on FIRST USE, not on import: creating the file at import time
+    # planted an empty playlists.db in the state dir before the migration
+    # could move the user's real one in (see mlo.config._move_state_dir).
+    if not _initialized:
+        with _init_lock:
+            if not _initialized:
+                _initialized = True  # set first — _init() re-enters _conn()
+                try:
+                    _init()
+                except Exception:
+                    _initialized = False
+                    raise
     return conn
 
 
@@ -87,9 +105,6 @@ def _init():
                     pass  # column already exists
 
 
-_init()
-
-
 # --------------------------------------------------------------------------- #
 # CRUD
 # --------------------------------------------------------------------------- #
@@ -123,7 +138,8 @@ def get_playlist(pid):
         path = x["path"]
         mbid = x["mbid"] or ""
         cur = mbresolve.heal_row("track", path, mbid)
-        if mbid and cur and os.path.normpath(cur) != os.path.normpath(path):
+        if mbid and cur and _pathkey(cur) != _pathkey(path):
+            cur = os.path.normpath(cur)  # store the same form the API writes
             updates.append((cur, path))
             path = cur
         tracks.append(path.replace("\\", "/"))
@@ -190,6 +206,15 @@ def delete_playlist(pid):
 # --------------------------------------------------------------------------- #
 # Manual playlist tracks
 # --------------------------------------------------------------------------- #
+def _pathkey(path):
+    """Comparison key for stored track paths.
+
+    Rows written by the API hold ``os.path.normpath`` (backslash on
+    Windows), while paths healed from the library payload are forward
+    slashed — every match/delete compares under one normalization."""
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
 def _mbid_for(path):
     """Recording MBID for a library track path ("" when untagged)."""
     try:
@@ -205,9 +230,15 @@ def add_tracks(pid, paths, position=None):
     entry survives later reorganizations."""
     with _lock:
         with _conn() as c:
-            existing = {r["path"] for r in c.execute(
+            existing = {_pathkey(r["path"]) for r in c.execute(
                 "SELECT path FROM playlist_tracks WHERE playlist_id=?", (pid,))}
-            new = [p for p in paths if p not in existing]
+            new = []
+            for p in dict.fromkeys(paths):  # dedupe within the request too
+                k = _pathkey(p)
+                if k in existing:
+                    continue
+                existing.add(k)
+                new.append(p)
             if not new:
                 return 0
             if position is None:
@@ -231,11 +262,12 @@ def set_order(pid, paths):
     """Replace the entire ordering with `paths` (reorder / full replace)."""
     with _lock:
         with _conn() as c:
-            known = {r["path"]: (r["mbid"] or "") for r in c.execute(
-                "SELECT path, mbid FROM playlist_tracks WHERE playlist_id=?", (pid,))}
+            known = {}
+            for r in c.execute("SELECT path, mbid FROM playlist_tracks WHERE playlist_id=?", (pid,)):
+                known.setdefault(_pathkey(r["path"]), r["mbid"] or "")
             c.execute("DELETE FROM playlist_tracks WHERE playlist_id=?", (pid,))
             for i, p in enumerate(paths):
-                mbid = known.get(p) or _mbid_for(p)
+                mbid = known.get(_pathkey(p)) or _mbid_for(p)
                 c.execute("INSERT INTO playlist_tracks (playlist_id, path, position, mbid) VALUES (?,?,?,?)",
                           (pid, p, i, mbid))
             c.execute("UPDATE playlists SET updated=? WHERE id=?", (time.time(), pid))
@@ -244,21 +276,56 @@ def set_order(pid, paths):
 def remove_tracks(pid, paths):
     with _lock:
         with _conn() as c:
+            stored = [r["path"] for r in c.execute(
+                "SELECT path FROM playlist_tracks WHERE playlist_id=?", (pid,))]
             for p in paths:
-                c.execute("DELETE FROM playlist_tracks WHERE playlist_id=? AND path=?", (pid, p))
+                k = _pathkey(p)
+                for s in stored:
+                    if _pathkey(s) == k:
+                        # DELETE with the value as stored, not as requested
+                        c.execute("DELETE FROM playlist_tracks WHERE playlist_id=? AND path=?",
+                                  (pid, s))
             c.execute("UPDATE playlists SET updated=? WHERE id=?", (time.time(), pid))
 
 
 # --------------------------------------------------------------------------- #
 # Smart playlists
 # --------------------------------------------------------------------------- #
+def _as_num(v):
+    """The value as a float, or None when it is not number-like."""
+    try:
+        return float(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _pair(a, b):
+    """Both operands as numbers when both are numeric, else as text.
+
+    The filter editor sends `value` as a string while tag/tech values can be
+    numeric, so comparing the raw operands raises TypeError (`2020 < "1"`)."""
+    na, nb = _as_num(a), _as_num(b)
+    if na is not None and nb is not None:
+        return na, nb
+    return ("" if a is None else str(a)), ("" if b is None else str(b))
+
+
+def _ord_cmp(op):
+    def run(a, b):
+        if a is None or b is None:
+            return False
+        x, y = _pair(a, b)
+        return op(x, y)
+    return run
+
+
 _OPS = {
-    "eq": lambda a, b: a == b,
-    "ne": lambda a, b: a != b,
-    "lt": lambda a, b: a is not None and b is not None and a < b,
-    "gt": lambda a, b: a is not None and b is not None and a > b,
-    "lte": lambda a, b: a is not None and b is not None and a <= b,
-    "gte": lambda a, b: a is not None and b is not None and a >= b,
+    "eq": lambda a, b: a is not None and _pair(a, b)[0] == _pair(a, b)[1],
+    "ne": lambda a, b: _pair(a, b)[0] != _pair(a, b)[1],
+    "lt": _ord_cmp(lambda x, y: x < y),
+    "gt": _ord_cmp(lambda x, y: x > y),
+    "lte": _ord_cmp(lambda x, y: x <= y),
+    "gte": _ord_cmp(lambda x, y: x >= y),
     "contains": lambda a, b: a is not None and str(b).lower() in str(a).lower(),
     "missing": lambda a, b: a is None or str(a).strip() == "",
     "present": lambda a, b: a is not None and str(a).strip() != "",
@@ -266,7 +333,16 @@ _OPS = {
 
 
 def _track_value(track, field):
-    """Extract a sortable value from an enriched track payload."""
+    """Extract a sortable value from an enriched track payload.
+
+    The UI sends dotted keys ("tags.GENRE", "tech.length"); bare fields
+    ("grade_pass", "audit", "lyrics_present", top-level keys) still resolve
+    against the track itself."""
+    scope, _, key = str(field or "").partition(".")
+    if scope == "tags":
+        return (track.get("tags") or {}).get(key)
+    if scope == "tech":
+        return (track.get("tech") or {}).get(key)
     tags = track.get("tags") or {}
     if field in tags:
         return tags[field]
@@ -320,9 +396,9 @@ def evaluate_smart(pid, library, base_paths=None):
 def set_smart_filter(pid, filter_spec):
     with _lock:
         with _conn() as c:
-            c.execute("UPDATE playlists SET filter_json=?, updated=? WHERE id=?",
-                      (json.dumps(filter_spec), time.time(), pid))
-            return c.rowcount > 0
+            cur = c.execute("UPDATE playlists SET filter_json=?, updated=? WHERE id=?",
+                            (json.dumps(filter_spec), time.time(), pid))
+            return cur.rowcount > 0  # rowcount lives on the cursor
 
 
 # --------------------------------------------------------------------------- #
@@ -339,7 +415,9 @@ def export_m3u8(pid):
     if pl is None:
         return None
     with _conn() as c:
-        rows = {r["path"]: (r["mbid"] or "") for r in c.execute(
+        # Stored rows use os.path.normpath (backslash on Windows) while
+        # pl["tracks"] is forward-slashed — match under one normalization.
+        rows = {_pathkey(r["path"]): (r["mbid"] or "") for r in c.execute(
             "SELECT path, mbid FROM playlist_tracks WHERE playlist_id=?", (pid,))}
     lines = ["#EXTM3U"]
     for path in pl["tracks"]:
@@ -358,7 +436,7 @@ def export_m3u8(pid):
         title = title or os.path.splitext(os.path.basename(path))[0]
         lines.append(f"#EXTINF:{dur:.0f},{title}")
         norm = path.replace("\\", "/")
-        mbid = rows.get(path) or rows.get(norm) or ""
+        mbid = rows.get(_pathkey(path)) or ""
         if mbid:
             lines.append(f"#MLO-MBID:{mbid}")
         lines.append(norm)
@@ -407,6 +485,7 @@ def import_m3u8(name, content, base_dir=None):
             for mbid in missing_by_mbid:
                 healed = mbresolve.heal_row("track", "", mbid)
                 if healed and os.path.isfile(healed):
+                    healed = os.path.normpath(healed)  # same form as other writers
                     maxpos = c.execute(
                         "SELECT COALESCE(MAX(position),-1)+1 FROM playlist_tracks WHERE playlist_id=?",
                         (pid,)).fetchone()[0]

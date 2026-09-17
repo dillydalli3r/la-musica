@@ -136,7 +136,8 @@ def get_library(key, builder):
             return hit[1]
     payload = builder()
     with _lock:
-        _lib_cache[key] = (now, payload)
+        # Stamp AFTER the build: a slow scan must not be born already stale.
+        _lib_cache[key] = (time.time(), payload)
     return payload
 
 

@@ -125,7 +125,7 @@ def installed_path(key):
                 return full
     except OSError:
         pass
-    return os.path.join(DEPS_DIR, prefix)
+    return None
 
 # Exe files that must be present after installation.
 MARKER_EXES = {

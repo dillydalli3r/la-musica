@@ -4,6 +4,7 @@ Builds a synthetic album (real FLACs via .dependencies/flac), runs the
 organize endpoint logic with a sandboxed music folder, then the grader.
 
 Run:  python tools/smoke_organize_grade.py
+Exits 2 when no flac encoder is available.
 """
 import os
 import shutil
@@ -15,7 +16,24 @@ import wave
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-FLAC = os.path.join(ROOT, ".dependencies", "flac v1.5.0", "flac.exe")
+
+def find_flac():
+    """The bundled flac encoder, wherever .dependencies keeps it.
+
+    The dependency folder is version-stamped ("flac v1.5.0"), so look it up
+    by prefix instead of pinning a version that a Dependencies update bumps.
+    """
+    dep = os.path.join(ROOT, ".dependencies")
+    if os.path.isdir(dep):
+        for entry in sorted(os.listdir(dep)):
+            if entry.lower().startswith("flac"):
+                cand = os.path.join(dep, entry, "flac.exe")
+                if os.path.isfile(cand):
+                    return cand
+    return shutil.which("flac")
+
+
+FLAC = find_flac()
 
 
 def make_flac(path, title, track, artist="Smoke Artist", album="Smoke Album"):
@@ -47,6 +65,9 @@ def make_flac(path, title, track, artist="Smoke Artist", album="Smoke Album"):
 
 
 def main():
+    if FLAC is None:
+        print("SKIP: no flac.exe found in .dependencies or PATH")
+        return 2
     from server import main as srv
 
     tmp = tempfile.mkdtemp(prefix="mlo_smoke_")
@@ -150,4 +171,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

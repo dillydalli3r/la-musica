@@ -108,7 +108,8 @@ def _patched_cue_for_temp(original_text, discs_wav_map):
 # WAV conversion via ffmpeg (lossless transport only – not a CRC tool)
 # ----------------------------------------------------------------------
 def _convert_to_wavs(ffmpeg_exe, track_paths, tmp_dir, config):
-    """Decode each FLAC (or other) track to WAV in tmp_dir.
+    """Decode each track to WAV in tmp_dir, keeping its own channel layout
+    and sample rate (no upmix/resample — the WAV must be the source audio).
 
     Returns {original basename lower -> wav basename} on success.
     Parallelised; on any failure raises.
@@ -116,20 +117,17 @@ def _convert_to_wavs(ffmpeg_exe, track_paths, tmp_dir, config):
     # Build tasks: (src, dst)
     tasks = []
     name_map = {}
+    used = set()
     for src in track_paths:
         base = os.path.basename(src)
-        wav_base = os.path.splitext(base)[0] + ".wav"
-        # avoid collisions (two tracks with same stem? improbable but guard)
-        dst = os.path.join(tmp_dir, wav_base)
-        # if collision, disambiguate
-        if os.path.exists(dst) or wav_base.lower() in name_map:
-            stem, ext = os.path.splitext(wav_base)
-            i = 2
-            while os.path.join(tmp_dir, f"{stem}_{i}{ext}") in [os.path.join(tmp_dir, v) for v in name_map.values()] or os.path.exists(os.path.join(tmp_dir, f"{stem}_{i}{ext}")):
-                i += 1
-            wav_base = f"{stem}_{i}{ext}"
-            dst = os.path.join(tmp_dir, wav_base)
-        tasks.append((src, dst))
+        stem = os.path.splitext(base)[0]
+        wav_base = stem + ".wav"
+        i = 2
+        while wav_base.lower() in used:
+            wav_base = f"{stem}_{i}.wav"
+            i += 1
+        used.add(wav_base.lower())
+        tasks.append((src, os.path.join(tmp_dir, wav_base)))
         name_map[base.lower()] = wav_base
 
     workers = worker_count(config, default=4, maximum=8, items=len(tasks))
@@ -138,7 +136,7 @@ def _convert_to_wavs(ffmpeg_exe, track_paths, tmp_dir, config):
     def _one(pair):
         src, dst = pair
         proc = run_tool(
-            [ffmpeg_exe, "-v", "error", "-i", src, "-f", "wav", "-acodec", "pcm_s16le", "-ac", "2", "-ar", "44100", dst],
+            [ffmpeg_exe, "-v", "error", "-i", src, "-f", "wav", "-acodec", "pcm_s16le", dst],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
             timeout=120,
         )

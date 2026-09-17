@@ -5,9 +5,13 @@ crashing on real (tiny) FLACs. 13 (network lyrics fetch) and 14 (full beets
 import) are environment-dependent and only config-checked.
 
 Run:  python tools/smoke_runners.py
+Exits 1 when a runner raises OR reports in-run errors, 2 when no flac
+encoder is available (nothing to encode fixtures with).
 """
 import os
+import random
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -16,17 +20,43 @@ import wave
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-FLAC = os.path.join(ROOT, ".dependencies", "flac v1.5.0", "flac.exe")
+
+def find_flac():
+    """The bundled flac encoder, wherever .dependencies keeps it.
+
+    The dependency folder is version-stamped ("flac v1.5.0"), so look it up
+    by prefix instead of pinning a version that a Dependencies update bumps.
+    """
+    dep = os.path.join(ROOT, ".dependencies")
+    if os.path.isdir(dep):
+        for entry in sorted(os.listdir(dep)):
+            if entry.lower().startswith("flac"):
+                cand = os.path.join(dep, entry, "flac.exe")
+                if os.path.isfile(cand):
+                    return cand
+    return shutil.which("flac")
+
+
+FLAC = find_flac()
 
 
 def make_flac(path, title, track):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     wav = path + ".tmp.wav"
+    # Broadband (white) noise, not silence, and with decorrelated channels:
+    # AudioAuditor correctly flags digital silence as "fake lossless" and
+    # identical channels as "fake stereo", which would make the audit runner
+    # report errors for a fixture that is fine.
+    rnd = random.Random(1234)  # deterministic fixtures
+    frames = b"".join(
+        struct.pack("<hh", rnd.randint(-8192, 8192), rnd.randint(-8192, 8192))
+        for _ in range(44100)
+    )
     with wave.open(wav, "w") as w:
         w.setnchannels(2)
         w.setsampwidth(2)
         w.setframerate(44100)
-        w.writeframes(b"\x00\x00\x00\x00" * 44100)
+        w.writeframes(frames)
     subprocess.run([FLAC, "-f", "-s", "--totally-silent", "-o", path, wav], check=True)
     os.remove(wav)
     from mutagen.flac import FLAC as MFLAC
@@ -45,6 +75,9 @@ def make_flac(path, title, track):
 
 
 def main():
+    if FLAC is None:
+        print("SKIP: no flac.exe found in .dependencies or PATH")
+        return 2
     tmp = tempfile.mkdtemp(prefix="mlo_runners_")
     music = os.path.join(tmp, "music")
     album = os.path.join(music, "Smoke Artist", "Smoke Album")
@@ -94,10 +127,14 @@ def main():
         cfg["stats"] = {"is_grader": name == "grade"}
         try:
             stats = fn(cfg)
-            err = sum(1 for e in stats.get("errors", []) if e)
-            print(f"script {sid:>2} {name:<10} OK   (errors in-run: {err})")
+            errs = [e for e in stats.get("errors", []) if e]
+            print(f"script {sid:>2} {name:<10} OK   (errors in-run: {len(errs)})")
             for e in list(stats.get("errors", []))[:3]:
                 print("      ", e)
+            # A runner that reported errors did not do its job: a broken or
+            # missing toolchain must fail the suite instead of printing OK.
+            if errs:
+                failures.append((sid, name, errs[:3]))
         except Exception as e:
             print(f"script {sid:>2} {name:<10} FAIL {type(e).__name__}: {e}")
             failures.append((sid, name, e))
@@ -109,8 +146,13 @@ def main():
     cfg["force_accurip"] = True
     cfg["force_auto_tag"] = True
     try:
-        run_format_all(cfg)
-        print("formatall force OK")
+        force_stats = run_format_all(cfg)
+        errs = [e for e in force_stats.get("errors", []) if e]
+        if errs:
+            print(f"formatall force FAIL (errors in-run: {len(errs)}): {errs[:3]}")
+            failures.append((10, "formatall-force", errs[:3]))
+        else:
+            print("formatall force OK")
     except Exception as e:
         print(f"formatall force FAIL {e}")
         failures.append((10, "formatall-force", e))
@@ -133,4 +175,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -220,9 +220,14 @@ def _copy_artwork(src_af, dst_path):
             for f in src_af.audio.tags.getall("APIC") or []:
                 pics.append((f.mime, f.data))
         elif kind == "mp4":
-            for f in src_af.audio.tags.getall("covr") or []:
-                for v in getattr(f, "value", []) or []:
-                    pics.append(("image/jpeg", bytes(v)))
+            from mutagen.mp4 import MP4Cover
+            # MP4Tags is dict-like (no getall); covr holds MP4Cover objects
+            # (a bytes subclass) — the MIME lives in .imageformat.
+            covr = (getattr(src_af.audio, "tags", None) or {}).get("covr") or []
+            for f in covr:
+                mime = "image/png" if getattr(f, "imageformat", None) == MP4Cover.FORMAT_PNG \
+                    else "image/jpeg"
+                pics.append((mime, bytes(f)))
         if not pics:
             return
         mime, data = pics[0]
@@ -244,7 +249,8 @@ def _copy_artwork(src_af, dst_path):
         elif dst_ext == ".m4a":
             from mutagen.mp4 import MP4, MP4Cover
             f = MP4(dst_path)
-            f["covr"] = [MP4Cover(data, imageformat=MP4Cover.FORMAT_JPEG)]
+            fmt = MP4Cover.FORMAT_PNG if mime == "image/png" else MP4Cover.FORMAT_JPEG
+            f["covr"] = [MP4Cover(data, imageformat=fmt)]
             f.save()
     except Exception:
         pass  # artwork is cosmetic — never fail the export for it
@@ -287,6 +293,7 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
     ext = CODECS.get(codec, {}).get("ext")
     ffmpeg = _ffmpeg_for_codec(codec)
     args = _codec_args(codec, quality)
+    written = {}  # dst -> source path, catches collisions within one run
 
     for i, path in enumerate(paths):
         if callable(progress_hook):
@@ -314,11 +321,23 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
             dst = os.path.join(root, rel)
             os.makedirs(os.path.dirname(dst), exist_ok=True)
 
+            if dst in written:
+                # two tracks mapped onto the same target name — one of them
+                # would be silently lost, so fail loudly instead
+                raise RuntimeError(
+                    f"target name collision with {os.path.basename(written[dst])!r}")
             if os.path.exists(dst):
-                if os.path.getsize(dst) > 0:
-                    out["skipped"] += 1  # already exported (idempotent re-run)
+                size = os.path.getsize(dst)
+                if size <= 0:
+                    os.remove(dst)
+                elif not ffmpeg_use and size == os.path.getsize(path):
+                    out["skipped"] += 1  # byte-for-byte copy of this source
                     continue
-                os.remove(dst)
+                else:
+                    # pre-existing file we cannot prove came from this source
+                    # (stale preset output, or another track's file)
+                    raise RuntimeError(
+                        "destination already exists and was not produced from this source")
 
             if ffmpeg_use:
                 fd, tmp = tempfile.mkstemp(suffix=target_ext,
@@ -327,7 +346,12 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                 try:
                     cmd = [ffmpeg, "-y", "-v", "error", "-nostdin", "-i", path]
                     cmd += args + [tmp]
-                    proc = subprocess.run(cmd, capture_output=True, text=True)
+                    # CREATE_NO_WINDOW: the app runs windowed and owns no
+                    # console, so every console child (ffmpeg here) would
+                    # otherwise allocate one and flash a window per file.
+                    proc = subprocess.run(
+                        cmd, capture_output=True, text=True,
+                        creationflags=0x08000000 if os.name == "nt" else 0)
                     if proc.returncode != 0 or os.path.getsize(tmp) == 0:
                         raise RuntimeError(f"ffmpeg: {(proc.stderr or '').strip()[-200:]}")
                     shutil.move(tmp, dst)
@@ -341,6 +365,7 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                 _copy_artwork(af, dst)
             else:
                 shutil.copy2(path, dst)
+            written[dst] = path
             out["exported"] += 1
             out["bytes"] += os.path.getsize(dst)
         except Exception as e:

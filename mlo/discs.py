@@ -49,7 +49,8 @@ DISC_PREFIX_RE = re.compile(r"^(\d{1,2})\s*-\s*\d{2}(?:\s|\.|$)")
 # "2 - Album.log", "(2).log" ...
 LOG_NAME_DISC_RE = re.compile(
     r"(?:^|[\s_(-])(?:cd|disc)[\s_-]?(\d{1,2})(?=$|[\s._)\]-])"
-    r"|^(\d{1,2})\s*[-._\s]",
+    r"|^(\d{1,2})\s*[-._\s]"
+    r"|(?:^|\s)\((\d{1,2})\)(?=$|[\s._)\]-])",
     re.IGNORECASE,
 )
 
@@ -76,6 +77,11 @@ COPY_CRC_RE = re.compile(r"^Copy CRC\s+([0-9A-Fa-f]{8})")
 TEST_CRC_RE = re.compile(r"^Test CRC\s+([0-9A-Fa-f]{8})")
 XLD_CRC_RE = re.compile(r"^CRC32 hash(?:\s+\(test run\))?\s*:\s*([0-9A-Fa-f]{8})")
 ACCURATE_CRC_RE = re.compile(r"\[([0-9A-Fa-f]{8})\]")
+
+# Containers whose decoded PCM can be the WAV an EAC/XLD log's CRC was taken
+# from. Anything else (mp3/m4a/ogg/opus/aac) is lossy: it can never decode to
+# those samples, so the .log CRC must not be compared for those files.
+LOSSLESS_CRC_EXTS = (".flac", ".wav", ".alac", ".aiff", ".aif")
 
 
 # Duration-match window in seconds and the uniqueness margin required
@@ -197,22 +203,55 @@ def _file_track_number(path):
     return None
 
 
+# PCM is fed to zlib.crc32 in chunks this size, so verifying a track never
+# buffers more than one chunk of decoded audio. 64 KiB is also the read size
+# a pipe serves fastest on Windows (a byte-mode read only completes once the
+# full request is buffered, so asking for megabytes costs throughput).
+_CRC_CHUNK = 1 << 16
+
+
 def _audio_crc32(ffmpeg_exe, path):
     """CRC-32 of the file's decoded 16-bit PCM (the value EAC/XLD print in
-    their logs), as 8 uppercase hex digits, or None on failure."""
+    their logs), as 8 uppercase hex digits, or None on failure.
+
+    The decoder's PCM is fed to zlib.crc32 in _CRC_CHUNK-sized pieces as it
+    arrives, so a track's samples are never held in memory — a 60-minute disc
+    used to cost hundreds of MB of RSS for its single largest track."""
+    import threading
+    import zlib
+
+    crc = 0
+    size = 0
+    rd, wd = os.pipe()
+
+    def pump():
+        nonlocal crc, size
+        with os.fdopen(rd, "rb", 0) as fh:
+            while True:
+                buf = fh.read(_CRC_CHUNK)
+                if not buf:
+                    break
+                crc = zlib.crc32(buf, crc)
+                size += len(buf)
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
     try:
         proc = run_tool(
             [ffmpeg_exe, "-v", "error", "-i", path,
              "-f", "s16le", "-acodec", "pcm_s16le", "-"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=600,
+            stdout=wd, stderr=subprocess.PIPE, timeout=600,
         )
-        if proc.returncode != 0 or not proc.stdout:
-            return None
-        import zlib
-        return format(zlib.crc32(proc.stdout) & 0xFFFFFFFF, "08X")
     except Exception:
+        proc = None
+    finally:
+        # Drop our own write end so the reader sees EOF once the child's
+        # handle goes away (a timeout has already killed the child).
+        os.close(wd)
+    reader.join()
+    if proc is None or proc.returncode != 0 or not size:
         return None
+    return format(crc & 0xFFFFFFFF, "08X")
 
 
 def verify_album_checksums(ffmpeg_exe, album_dir, paths, config=None):
@@ -223,11 +262,12 @@ def verify_album_checksums(ffmpeg_exe, album_dir, paths, config=None):
     matches its actual decoded-PCM CRC is REAL, a mismatch is FAKE, and
     files whose log carries no usable checksum are reported as unverified
     (they get no AUDIT value, so grading fails the album instead of
-    guessing).
+    guessing). Lossy containers are always unverified: the log CRC covers
+    the uncompressed WAV, which a lossy encode can never reproduce.
 
     Returns ({path: 'REAL'|'FAKE'}, {path: reason}) — verified verdicts
     first, then unverified files with the reason (no log / no checksum /
-    undecodable).
+    lossy format / undecodable).
     """
     unverified = {}
     if not config or not config.get("audit_verify_cd_checksums", True):
@@ -261,32 +301,53 @@ def verify_album_checksums(ffmpeg_exe, album_dir, paths, config=None):
 
     verdicts = {}
     pattern = _disc_pattern_for(config)
+    # Per path: the log CRC to compare against, or the unverified reason
+    # resolved right here. Decoding happens afterwards, in parallel.
+    entries = []
     for p in paths:
+        if os.path.splitext(p)[1].lower() not in LOSSLESS_CRC_EXTS:
+            entries.append((p, "lossy format: .log CRC not comparable", None))
+            continue
         d = disc_of_filename(os.path.basename(p))
         if d is None or d < 1:
             d = 1
         if multi:
             log_path = os.path.join(album_dir, _disc_expected_name(pattern, d, ".log"))
             if not os.path.isfile(log_path):
-                unverified[p] = f"missing {_disc_expected_name(pattern, d, '.log')}"
+                entries.append((p, f"missing {_disc_expected_name(pattern, d, '.log')}", None))
                 continue
             per_track = parse_log_checksums(read_log_text(log_path))
             if not per_track:
-                unverified[p] = f"{_disc_expected_name(pattern, d, '.log')} has no per-track CRCs"
+                entries.append((p, f"{_disc_expected_name(pattern, d, '.log')} has no per-track CRCs", None))
                 continue
         else:
             per_track = {}
             for log_path in logs:
                 per_track.update(parse_log_checksums(read_log_text(log_path)))
             if not per_track:
-                unverified[p] = "log has no per-track CRCs"
+                entries.append((p, "log has no per-track CRCs", None))
                 continue
         tn = _file_track_number(p)
         crc = per_track.get(tn)
         if not crc:
-            unverified[p] = f"log has no CRC for track {tn if tn else '?'}"
+            entries.append((p, f"log has no CRC for track {tn if tn else '?'}", None))
             continue
-        actual = _audio_crc32(ffmpeg_exe, p)
+        entries.append((p, None, crc))
+
+    to_decode = [(p, crc) for p, reason, crc in entries if reason is None]
+    actuals = {}
+    if to_decode:
+        from concurrent.futures import ThreadPoolExecutor
+        workers = min(4, len(to_decode))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for (p, _), actual in zip(to_decode, ex.map(lambda pc: _audio_crc32(ffmpeg_exe, pc[0]), to_decode)):
+                actuals[p] = actual
+
+    for p, reason, crc in entries:
+        if reason is not None:
+            unverified[p] = reason
+            continue
+        actual = actuals.get(p)
         if actual is None:
             unverified[p] = "could not decode audio for CRC"
             continue
@@ -585,7 +646,10 @@ def _log_name_disc(name):
     m = LOG_NAME_DISC_RE.search(base)
     if not m:
         return None
-    d = int(m.group(1) or m.group(2))
+    raw = next((g for g in m.groups() if g), None)
+    if raw is None:
+        return None
+    d = int(raw)
     return d if 1 <= d <= 99 else None
 
 
@@ -834,10 +898,18 @@ def fix_cue_filenames(album_dir, log_fn=None, config=None):
     for cue in cues:
         path = os.path.join(album_dir, cue)
         try:
-            with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
-                lines = fh.readlines()
+            with open(path, "rb") as fh:
+                raw = fh.read()
         except OSError:
             continue
+        try:
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            # EAC writes cue sheets in the ANSI codepage (cp1252/latin-1);
+            # errors="replace" would turn every such byte into U+FFFD and
+            # corrupt the sheet on the write-back below.
+            text = raw.decode("latin-1")
+        lines = text.splitlines(keepends=True)
 
         changed = False
         out_lines = []
@@ -1076,96 +1148,6 @@ def check_log_checksum(log_path):
         return (None, str(e)[:160])
 
 
-def check_accuraterip(log_path):
-    """Verify that every track in the log is 'Accurately ripped'.
-
-    Parses the log text per-track section and checks for the characteristic
-    AccurateRip success line: 'Accurately ripped (confidence N)  [CRC]  (AR v1/v2)'.
-
-    Returns (ok: bool | None, reason: str | None, per_track: dict[int,bool]|None).
-    None means the log could not be inspected (unreadable / unsupported).
-    ok==True  -> all tracks accurately ripped
-    ok==False -> at least one track not accurately ripped (reason lists tracks)
-    Missing AccurateRip info for a track is treated as NOT ok when the toggle
-    is on (strict per request: 'if even one track doesn't match, it should fail').
-    """
-    try:
-        if not log_path or not os.path.isfile(log_path):
-            return (None, "not found", None)
-        txt = read_log_text(log_path)
-        if not txt.strip():
-            return (None, "empty log", None)
-        # Quick unsupported: no Track sections at all — can't verify AR (e.g. stray .log not a rip log)
-        if not re.search(r"(?m)^Track\s+\d+\b", txt):
-            return (None, "no Track sections in log", None)
-        # Split into per-track blocks preserving the Track number
-        # re.split with capturing group keeps the number
-        parts = re.split(r"(?m)^Track\s+(\d+)\b", txt)
-        # parts[0]=preamble, then repeating (num, block)
-        per_track = {}
-        failed = []
-        track_count = 0
-        idx = 1
-        while idx < len(parts):
-            num_s = parts[idx]
-            block = parts[idx + 1] if idx + 1 < len(parts) else ""
-            idx += 2
-            try:
-                n = int(num_s)
-            except ValueError:
-                continue
-            track_count += 1
-            low = block.lower()
-            # Determine if this track is accurately ripped
-            # Presence of 'accurately ripped' without negation phrases
-            # Log lines like: 'Accurately ripped (confidence 13)  [hash]  (AR v2)'
-            has_accurate = "accurately ripped" in low
-            has_negation = ("not accurately" in low or "cannot be verified" in low
-                            or "track not present" in low or "rip may not be accurate" in low
-                            or "not present in accuraterip" in low or "no accurate" in low)
-            # Also check explicit fail phrases regardless of accurate phrase
-            fail_phrase = None
-            if "track not present" in low:
-                fail_phrase = "Track not present in AccurateRip DB"
-            elif "cannot be verified" in low:
-                fail_phrase = "Cannot be verified as accurate"
-            elif "not present in accuraterip" in low:
-                fail_phrase = "Not present in AccurateRip"
-            elif "rip may not be accurate" in low:
-                fail_phrase = "Rip may not be accurate"
-            # Decide
-            if has_accurate and not has_negation and not fail_phrase:
-                # Ensure confidence bracket present (avoids false positive from header 'All tracks accurately ripped')
-                # The block should have 'confidence' and a bracket [XXXXXXXX]
-                if "confidence" in low and re.search(r"\[[0-9a-fA-F]{8}\]", block):
-                    per_track[n] = True
-                else:
-                    # Still treat generic 'accurately ripped' as ok (XLD may omit confidence)
-                    per_track[n] = True
-            elif fail_phrase:
-                per_track[n] = False
-                failed.append(f"track {n}: {fail_phrase}")
-            elif has_accurate and has_negation:
-                per_track[n] = False
-                failed.append(f"track {n}: not accurately ripped")
-            else:
-                # No AR info for this track -> strict fail
-                per_track[n] = False
-                # Check if block mentions AR at all
-                if "accuraterip" in low or "accurately" in low:
-                    failed.append(f"track {n}: AccurateRip mismatch")
-                else:
-                    failed.append(f"track {n}: missing AccurateRip verification")
-        if track_count == 0:
-            return (False, "no tracks parsed", None)
-        if failed:
-            return (False, "; ".join(failed[:5]) + (f" (+{len(failed)-5} more)" if len(failed) > 5 else ""), per_track)
-        # All tracks ok
-        return (True, None, per_track)
-    except Exception as e:
-        return (None, str(e)[:160], None)
-
-
 def grade_album_logs(cli_exe, album_dir, force=False, log_fn=None,
                      write_tags=True, config=None):
     """Rename logs/cues to CD-N (config-gated), fix CUE FILE names and
@@ -1218,8 +1200,11 @@ def grade_album_logs(cli_exe, album_dir, force=False, log_fn=None,
 
     scores = {}
     pattern = _disc_pattern_for(config)
+    handled_logs = set()
     for d, paths in sorted(discs.items()):
-        log_path = os.path.join(album_dir, _disc_expected_name(pattern, d, ".log"))
+        log_name = _disc_expected_name(pattern, d, ".log")
+        handled_logs.add(log_name.lower())
+        log_path = os.path.join(album_dir, log_name)
         if not os.path.isfile(log_path):
             notes.append(f"disc {d}: no {_disc_expected_name(pattern, d, '.log')}")
             continue
@@ -1250,45 +1235,20 @@ def grade_album_logs(cli_exe, album_dir, force=False, log_fn=None,
                 else:
                     notes.append(f"disc {d}: failed writing LOG_GRADE to "
                                  f"{os.path.basename(p)}")
-    # Ensure every .log file gets a grade (fallback for orphan logs not at CD-N pattern)
+    # Logs that do not map to a real disc are reported, never graded: their
+    # score would be written to every audio file in the album (clobbering the
+    # real per-disc grade) under an invented disc number that does not exist.
     try:
-        all_logs = [f for f in os.listdir(album_dir) if f.lower().endswith(".log")]
-        for logf in all_logs:
-            log_full = os.path.join(album_dir, logf)
-            already_scored = False
-            for d in discs:
-                if logf.lower() == _disc_expected_name(pattern, d, ".log").lower() and d in scores:
-                    already_scored = True
-                    break
-            if already_scored:
+        for logf in sorted(os.listdir(album_dir)):
+            if not logf.lower().endswith(".log"):
                 continue
-            # Skip if already attempted as expected disc but failed and fallback already tried
-            # For orphan logs, try scoring with all audio files
-            all_audio = [os.path.join(album_dir, f) for f in os.listdir(album_dir) if is_audio_file(f)]
-            if not all_audio:
+            if logf.lower() in handled_logs:
                 continue
-            # Avoid duplicate attempt if this log was the expected one and already has note
-            score2 = score_disc_log(log_full)
-            if score2 is None:
-                notes.append(f"{logf}: could not score (orphan, Logchecker failed)")
+            dname = _log_name_disc(logf)
+            if dname is not None and dname in discs:
+                # Belongs to a real disc; the per-disc loop already noted it.
                 continue
-            dnum = _log_name_disc(logf)
-            if dnum is None or dnum in scores:
-                dnum = max(scores.keys(), default=0) + 1
-            # Don't overwrite existing disc score
-            if dnum in scores:
-                continue
-            scores[dnum] = score2
-            for p in all_audio:
-                if not write_tags:
-                    continue
-                if config is not None and not should_write_audio_tag(config, "LOG_GRADE", filepath=p):
-                    continue
-                t = AudioFile(p)
-                if str(t.get_tag("LOG_GRADE") or "").strip() != str(score2):
-                    if t.set_tag("LOG_GRADE", str(score2)):
-                        if log_fn:
-                            log_fn(f"{logf}: LOG_GRADE={score2} -> {os.path.basename(p)}")
-    except Exception:
+            notes.append(f"{logf}: not mapped to a disc - not graded")
+    except OSError:
         pass
     return scores, notes

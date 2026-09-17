@@ -256,8 +256,9 @@ table td {
 /* ------------------------------------------------------------------ */
 /* Now-playing ambience: animated color orbs behind the fullscreen     */
 /* player, tinted with the cover's dominant color (Apple Music /       */
-/* Monochrome style). Purely CSS — playback is never routed through    */
-/* WebAudio, so cross-origin stream tainting can't mute anything.      */
+/* Monochrome style). The drift is pure CSS; the beat pulse is driven  */
+/* from JS off the shared analyser graph (crossOrigin keeps the        */
+/* streams readable there).                                            */
 /* ------------------------------------------------------------------ */
 .orb {
   position: absolute;
@@ -429,7 +430,8 @@ table td {
   .skeleton,
   .orb,
   .orb-field,
-  .artwork-glow {
+  .artwork-glow,
+  .title-marquee {
     animation: none !important;
   }
 }

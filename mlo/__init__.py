@@ -3,6 +3,8 @@
 Modules:
     paths       filesystem locations and constants
     deps        optional third-party feature detection (mutagen / Pillow / tqdm)
+    subproc     subprocess wrapper (no console flashes, timeouts)
+    fetchdeps   external-tool installer (.dependencies GitHub builds)
     config      config.json load/save and defaults
     ui          console output helpers
     stats       run statistics, byte accounting, progress shims, walkers
@@ -10,10 +12,20 @@ Modules:
     tools       .dependencies encoder auto-detection
     containers  FLAC/JXL/JPEG/PNG metadata tag readers and writers
     audio       unified multi-format tag abstraction (AudioFile)
+    naming      Picard-style naming-script evaluator
     lyrics      lyrics formatting + MEDIA/SOURCE normalization
+    lyrics_fetch LRCLIB lyrics download (script 13)
+    lyrics_xlit transliteration / translation tags (script 15)
     cue         CUE sheet formatter
+    discs       multi-CD mapping, CD-N naming and per-disc log scoring
     flac        lossless FLAC re-encoding
     images      image optimization (JXL / lossless / reverse)
+    remux       video remux to MKV — audio to FLAC, subtitles copied (script 11)
+    loudness    Dynamic Range + ReplayGain tags (script 7)
+    audiometa   key + BPM analysis via librosa (script 12)
+    autotag     advisory / instrumental tagging (script 8)
+    accurip     AccurateRip .accurip generation + verification (script 9)
+    format_all  final canonical pass, embedded cover policy (script 10)
     grader      per-album compliance grading
     audit       audio integrity auditing via the AudioAuditor CLI
     cli         interactive console menu

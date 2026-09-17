@@ -159,7 +159,7 @@ def wordsync_lrc(lrc_text, level="word"):
 import hashlib
 
 def _cache_dir():
-    """The lyrics-AI cache lives in <music folder>/.data too."""
+    """The lyrics-AI cache lives in <music folder>/.mlo/data too."""
     from mlo.paths import app_data_dir
     return os.path.join(app_data_dir(), "lyrics_ai_cache")
 
@@ -193,7 +193,7 @@ def _cache_path(mode, lang, lines):
 def transform_lines(config, lines, mode, lang=""):
     """Translate ('translate') or transliterate ('transliterate') lyric
     lines, preserving line count. Disk-cached; raises ValueError when AI
-    is not configured."""
+    is not configured or the answer came back with no lines at all."""
     lines = [str(line) for line in lines]
     if not lines:
         return []
@@ -211,7 +211,10 @@ def transform_lines(config, lines, mode, lang=""):
             import json
             with open(cache, "r", encoding="utf-8") as fh:
                 cached = json.load(fh)
-            if isinstance(cached, list) and len(cached) == len(lines):
+            # an all-empty cached entry is a failed transform that must
+            # never be re-served — ignore it and re-ask the model
+            if (isinstance(cached, list) and len(cached) == len(lines)
+                    and any(str(v).strip() for v in cached)):
                 return cached
         except (OSError, ValueError):
             pass
@@ -234,16 +237,22 @@ def transform_lines(config, lines, mode, lang=""):
             got.append("")
         if len(got) > len(chunk):
             got = got[:len(chunk)]
+        if not any(got) and any(line.strip() for line in chunk):
+            # refusal / truncated / timeout answer: an all-blank transform
+            # would blank every lyric line, so fail instead of storing it
+            raise ValueError("AI returned no lines")
         out.extend(got)
 
-    with _CACHE_LOCK:
-        try:
-            os.makedirs(_cache_dir(), exist_ok=True)
-            import json
-            with open(_cache_path(mode, lang, lines), "w", encoding="utf-8") as fh:
-                json.dump(out, fh, ensure_ascii=False)
-        except OSError:
-            pass
+    # Never persist an all-blank result: it would be re-served forever.
+    if any(str(v).strip() for v in out):
+        with _CACHE_LOCK:
+            try:
+                os.makedirs(_cache_dir(), exist_ok=True)
+                import json
+                with open(_cache_path(mode, lang, lines), "w", encoding="utf-8") as fh:
+                    json.dump(out, fh, ensure_ascii=False)
+            except OSError:
+                pass
     return out
 
 

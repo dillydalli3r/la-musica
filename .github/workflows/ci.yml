@@ -1,0 +1,93 @@
+name: CI
+
+# Runs on every push and pull request. Two jobs, no third-party actions:
+#   python — installs server/requirements.txt and runs the non-networked
+#            tools/test_*.py suites (each exits non-zero on failure, 2 to
+#            skip). The browser suites (check_menus.cjs, shot.cjs) and
+#            smoke_api.py need a live backend and are not run here.
+#   web    — type-checks, lints and builds the React app.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: server/requirements.txt
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r server/requirements.txt
+
+      - name: Install external toolchain for the suites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flac ffmpeg
+
+      - name: Expose the bundled-toolchain layout the suites resolve
+        # Several suites look for the bundled encoder at
+        # .dependencies/flac*/flac.exe — that folder is version-stamped and
+        # gitignored, so on a runner it never exists. Point it at the distro
+        # flac instead of letting those suites fail for a missing binary.
+        run: |
+          mkdir -p ".dependencies/flac v1.5.0"
+          ln -s "$(command -v flac)" ".dependencies/flac v1.5.0/flac.exe"
+
+      - name: Run the test suites
+        run: |
+          fail=0
+          for suite in tools/test_*.py; do
+            echo "::group::$suite"
+            code=0
+            python "$suite" || code=$?
+            echo "::endgroup::"
+            if [ "$code" -eq 2 ]; then
+              echo "SKIP: $suite (local toolchain not available)"
+            elif [ "$code" -ne 0 ]; then
+              echo "::error file=$suite::$suite exited $code"
+              fail=1
+            fi
+          done
+          exit "$fail"
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: npm ci
+        working-directory: web
+        run: npm ci
+
+      - name: Type-check
+        working-directory: web
+        run: npx tsc -b
+
+      - name: Lint
+        working-directory: web
+        run: npx oxlint
+
+      - name: Build
+        working-directory: web
+        run: npm run build
+
+      - name: Lyrics-pane auto-scroll checks
+        # web/src/lib/lyrScroll.ts against a fake scroller — the retarget that
+        # used to freeze the pane mid-track, and the frame loop that used to
+        # outlive an unmounted pane.
+        run: node tools/check_lyrscroll.cjs

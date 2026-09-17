@@ -15,7 +15,20 @@ from mlo.tools import detect_all_tools
 from mlo.remux import _ffprobe_json, _stream_info
 
 _lock = threading.Lock()
-_cache = {}  # path -> listing (streams don't change while the file sits still)
+_cache = {}  # _stat_key(video) -> muxed stream list
+
+
+def _stat_key(path):
+    """Cache key that changes when the video itself is replaced.
+
+    Sidecars are deliberately NOT cached: they appear and disappear beside
+    the file without touching its stat, and a stale listing would both hide
+    a new .srt and resurrect a deleted one."""
+    try:
+        st = os.stat(path)
+        return (os.path.normcase(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (os.path.normcase(path), 0, 0)
 
 
 def _ffprobe_exe():
@@ -53,23 +66,24 @@ def _sidecars(path):
 
 def list_subtitles(path):
     """Muxed subtitle streams + external sidecars for a video file."""
+    key = _stat_key(path)
     with _lock:
-        hit = _cache.get(path)
-    if hit:
-        return hit
-    muxed = []
-    ffprobe = _ffprobe_exe()
-    if ffprobe:
-        info = _stream_info(path, ffprobe)
-        if info:
-            subs = info[2] or []
-            # re-probe for titles/languages only when there are subs to name
-            for n, codec in enumerate(subs):
-                muxed.append({"n": n, "codec": codec, "title": f"Track {n + 1} ({codec})"})
-    listing = {"muxed": muxed, "sidecars": _sidecars(path)}
-    with _lock:
-        _cache[path] = listing
-    return listing
+        muxed = _cache.get(key)
+    if muxed is None:
+        muxed = []
+        ffprobe = _ffprobe_exe()
+        if ffprobe:
+            info = _stream_info(path, ffprobe)
+            if info:
+                subs = info[2] or []
+                # re-probe for titles/languages only when there are subs to name
+                for n, codec in enumerate(subs):
+                    muxed.append({"n": n, "codec": codec, "title": f"Track {n + 1} ({codec})"})
+        with _lock:
+            _cache[key] = muxed
+            if len(_cache) > 256:  # ponytail: crude bound, entries are tiny
+                _cache.clear()
+    return {"muxed": list(muxed), "sidecars": _sidecars(path)}
 
 
 _SRT_TIME = re.compile(r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})")

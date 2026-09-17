@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mlo.grader import _grade_album, _naming_mismatch
 from mlo.naming import DEFAULT_NAMING_SCRIPT
+from server.beetscfg import generate_config
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FLAC_EXE = None
@@ -111,18 +112,23 @@ tmp = tempfile.mkdtemp(prefix="mlo_naming_test_")
 # ----------------------------------------------------------------------
 print("== _naming_mismatch ==")
 folder = tempfile.mkdtemp(prefix="mlo_naming_pure_")
-os.makedirs(os.path.join(folder, "Artist", "2020 - Album"), exist_ok=True)
-good = os.path.join(folder, "Artist", "2020 - Album", "1-01 Song.flac")
+lib = os.path.join(folder, "Artists")
+os.makedirs(os.path.join(lib, "Artist", "2020 - Album"), exist_ok=True)
+good = os.path.join(lib, "Artist", "2020 - Album", "1-01 Song.flac")
 ok(_naming_mismatch(good, folder, DEFAULT_NAMING_SCRIPT, "", BASE_TAGS) == ("ok", None),
-   "exact match returns ('ok', None)")
-ok(_naming_mismatch(os.path.join(folder, "Wrong", "1-01 Song.flac"), folder,
+   "exact match below <music>/Artists returns ('ok', None)")
+ok(_naming_mismatch(os.path.join(lib, "Wrong", "1-01 Song.flac"), folder,
                     DEFAULT_NAMING_SCRIPT, "", BASE_TAGS)
    == ("path", "Artist/2020 - Album/1-01 Song.flac"), "wrong folder returns expected path")
+# the SAME relative layout one level up (music folder root) is not a match
+ok(_naming_mismatch(os.path.join(folder, "Artist", "2020 - Album", "1-01 Song.flac"),
+                    folder, DEFAULT_NAMING_SCRIPT, "", BASE_TAGS)[0] == "path",
+   "library layout in the music folder root fails (base is Artists/)")
 
 tags_m = dict(BASE_TAGS, MUSICBRAINZ_ALBUMARTISTID="12345678-1234-1234-1234-123456789abc")
 # the default script folds the MBID into ONE folder segment: "Artist [uuid]"
-full = os.path.join(folder, "Artist [12345678-1234-1234-1234-123456789abc]", "2020 - Album", "1-01 Song.flac")
-short = os.path.join(folder, "Artist [12345678]", "2020 - Album", "1-01 Song.flac")
+full = os.path.join(lib, "Artist [12345678-1234-1234-1234-123456789abc]", "2020 - Album", "1-01 Song.flac")
+short = os.path.join(lib, "Artist [12345678]", "2020 - Album", "1-01 Song.flac")
 ok(_naming_mismatch(full, folder, DEFAULT_NAMING_SCRIPT, "", tags_m) == ("ok", None),
    "full MBID path matches")
 ok(_naming_mismatch(short, folder, DEFAULT_NAMING_SCRIPT, "", tags_m) == ("ok", None),
@@ -130,7 +136,7 @@ ok(_naming_mismatch(short, folder, DEFAULT_NAMING_SCRIPT, "", tags_m) == ("ok", 
 ok(_naming_mismatch(full, folder, DEFAULT_NAMING_SCRIPT, "", BASE_TAGS)[0] == "path",
    "MBID folder mismatches when the tag is absent")
 # RELEASETYPE feeds the script like the organizer does: "[album] 2020 - Album"
-with_type = os.path.join(folder, "Artist [12345678-1234-1234-1234-123456789abc]", "[album] 2020 - Album", "1-01 Song.flac")
+with_type = os.path.join(lib, "Artist [12345678-1234-1234-1234-123456789abc]", "[album] 2020 - Album", "1-01 Song.flac")
 ok(_naming_mismatch(with_type, folder, DEFAULT_NAMING_SCRIPT, "album", tags_m) == ("ok", None),
    "release type joins the album folder segment")
 ok(_naming_mismatch(good.replace("2020 - Album", "2020 - ALBUM"), folder,
@@ -143,7 +149,7 @@ shutil.rmtree(folder, ignore_errors=True)
 # ----------------------------------------------------------------------
 print("== _grade_album naming + key/bpm ==")
 music = os.path.join(tmp, "Music")
-album = os.path.join(music, "Artist", "2020 - Album")
+album = os.path.join(music, "Artists", "Artist", "2020 - Album")
 os.makedirs(album, exist_ok=True)
 flac = os.path.join(album, "1-01 Song.flac")
 make_flac(flac)
@@ -180,6 +186,15 @@ res = _grade_album(wrong_dir, "EMBEDDED", cfg_off)
 ok("PATH" not in res["tracks"][0]["issues"],
    "grade_check_naming=False disables the check")
 
+# the naming-script layout one level up (music folder ROOT) must fail: the
+# library root is <music>/Artists, the same base organize() moves into
+root_dir = os.path.join(music, "Artist", "2020 - Album")
+os.makedirs(root_dir, exist_ok=True)
+shutil.copy(flac, os.path.join(root_dir, "1-01 Song.flac"))
+res = _grade_album(root_dir, "EMBEDDED", cfg)
+ok("PATH" in res["tracks"][0]["issues"],
+   "unorganized album in the music folder root fails the naming check")
+
 # album outside music_folder -> check skipped entirely
 outside = tempfile.mkdtemp(prefix="mlo_outside_")
 oalb = os.path.join(outside, "Someone", "Album")
@@ -188,6 +203,17 @@ shutil.copy(flac, os.path.join(oalb, "1-01 Song.flac"))
 res = _grade_album(oalb, "EMBEDDED", cfg)
 ok("PATH" not in res["tracks"][0]["issues"],
    "album outside music folder skips the naming check")
+
+# ----------------------------------------------------------------------
+# beets config: directory: is the library root, not the music folder
+# ----------------------------------------------------------------------
+print("== beets config ==")
+slashes = music.replace("\\", "/")
+beets_txt = generate_config(dict(ISO_CFG, music_folder=music))
+ok(f'directory: "{slashes}/Artists"' in beets_txt,
+   "beets directory: points at <music>/Artists")
+ok(f'directory: "{slashes}"\n' not in beets_txt,
+   "beets directory: is not the music folder itself")
 
 print(f"\nAll {passed} checks passed.")
 shutil.rmtree(tmp, ignore_errors=True)

@@ -15,7 +15,7 @@ import time
 from . import library as lib_mod
 
 _LOCK = threading.Lock()
-_CACHE = {"index": None, "built": 0.0}
+_CACHE = {"index": None, "built": 0.0, "forced_at": 0.0}
 _TTL_S = 120.0
 
 
@@ -104,14 +104,6 @@ def track_mbid_for(path):
     return get_index()["tracks_bypath"].get(_norm(path)) or ""
 
 
-def album_mbid_for(path):
-    return get_index()["albums_bypath"].get(_norm(path)) or ""
-
-
-def artist_mbid_for(path):
-    return get_index()["artists_bypath"].get(_norm(path)) or ""
-
-
 def heal_row(kind, key, mbid):
     """Return the CURRENT path for a stored (key, mbid) pair.
 
@@ -130,13 +122,22 @@ def heal_row(kind, key, mbid):
         cur = idx.get(table, {}).get(str(mbid).lower())
         if cur and os.path.exists(cur):
             return cur
-        # The move is newer than the cached index — rescan once.
-        try:
-            from server import tagcache
-            tagcache.invalidate_all()
-        except Exception:
-            pass
-        idx = get_index(force=True)
+        # The move is newer than the cached index — rescan, but only once
+        # per TTL window: a whole playlist of moved files must not trigger
+        # K full library scans back to back.
+        with _LOCK:
+            rebuild = (time.time() - _CACHE["forced_at"]) > _TTL_S
+            if rebuild:
+                _CACHE["forced_at"] = time.time()
+        if rebuild:
+            try:
+                from server import tagcache
+                tagcache.invalidate_all()
+            except Exception:
+                pass
+            idx = get_index(force=True)
+        else:
+            idx = get_index()
         cur = idx.get(table, {}).get(str(mbid).lower())
         if cur and os.path.exists(cur):
             return cur

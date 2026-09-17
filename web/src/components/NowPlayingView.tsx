@@ -14,7 +14,7 @@ import { activeAnalyser } from "../lib/analyser";
 import Visualizer from "./Visualizer";
 import { parsePlayerLrc, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
 import type { Playlist } from "../types";
-import { createLyricsGlider, type LyricsGlider } from "../lib/lyrScroll";
+import { useLyricsFollow, LYRICS_PAD_BOTTOM, LYRICS_PAD_TOP } from "../lib/lyrScroll";
 import { nextSpeed, fmtSpeed } from "../lib/playback";
 import { fmtDuration } from "../lib/fmt";
 
@@ -33,11 +33,6 @@ interface Props {
   playing: boolean;
   time: number;
   duration: number;
-  /** The popout's live <video> element (music videos) — adopted into the
-   * fullscreen picture via a DOM move so playback never reloads. */
-  videoEl?: React.RefObject<HTMLVideoElement | null>;
-  /** Where that element returns to when the fullscreen view closes. */
-  videoHome?: React.RefObject<HTMLDivElement | null>;
   shuffle: boolean;
   loop: boolean;
   liked: boolean;
@@ -123,7 +118,6 @@ export default function NowPlayingView(p: Props) {
   const [tagsFor, setTagsFor] = useState<string | null>(null);
   const [transforms, setTransforms] = useState<Record<string, string[]>>({});
   const inFlight = useRef<Set<string>>(new Set());
-  const lineRefs = useRef<Record<number, HTMLDivElement | null>>({});
   // The PRIMARY text line of each block — with translations/romanization the
   // outer block also carries sub-lines, and centering the block would push
   // the sung line off the middle. The scroller centers this element.
@@ -150,7 +144,7 @@ export default function NowPlayingView(p: Props) {
   }, []);
 
   const { time, duration } = p;
-  const { queue, index, setIndex, setQueue, queueRemoveAt, queueMove } = useStore();
+  const { queue, index, setIndex, setQueue, queueRemoveAt, queueMove, setPlaying } = useStore();
   const queueListRef = useRef<HTMLDivElement>(null);
   // drag-reorder state for the queue drawer (absolute queue indexes)
   const [dragIdx, setDragIdx] = useState<number | null>(null);
@@ -172,13 +166,18 @@ export default function NowPlayingView(p: Props) {
   // even while the pane is throttled.
   const [smoothTime, setSmoothTime] = useState(0);
   const smoothTickRef = useRef(0);
+  // True while a word / syllable sweep is on screen — the only consumer that
+  // needs 60 fps. Line changes just have to flip on the beat, so everything
+  // else ticks at 20 Hz and skips ~2/3 of the full-view re-renders the pane
+  // has to compete with.
+  const sweepRef = useRef(false);
   useEffect(() => {
     if (!p.playing) return;
     let raf = 0;
     const tick = () => {
       const t = p.getAudioTime?.();
       if (typeof t === "number" && isFinite(t) && t >= 0) {
-        setSmoothTime(t);
+        setSmoothTime(sweepRef.current ? t : Math.round(t * 20) / 20);
         smoothTickRef.current = performance.now();
       }
       raf = requestAnimationFrame(tick);
@@ -292,48 +291,14 @@ export default function NowPlayingView(p: Props) {
   // Persisted-toggle helper shared by the options menu and inline buttons.
   const persist = (key: string, v: string) => localStorage.setItem(key, v);
 
-  // ---- video adoption (music videos in the queue) --------------------------
-  // The player bar's popout <video> owns the sound and IS the only decoder;
-  // the fullscreen view doesn't mirror it with a second muted element
-  // (double decode, double network stream, drift-sync that stalls on live
-  // transcodes) — it ADOPTS the element itself via a plain DOM move, so
-  // playback continues seamlessly across the transition. On close the
-  // element returns to its popout home.
+  // ---- video presentation (music videos in the queue) ----------------------
+  // The player bar owns the popout <video> (the only decoder) and portals it
+  // to <body>, restyling it to fill the viewport while this overlay is open.
+  // Nothing is moved or mirrored here: a second element would double-decode,
+  // and a DOM move would put React's own node under a parent its fiber tree
+  // doesn't know about (NotFoundError on the next track change). All this
+  // overlay adds is the click surface and the control bar painted above it.
   const videoPath = isVideoFile(p.current.file || p.current.path) ? p.current.path : null;
-  const videoSlotRef = useRef<HTMLDivElement>(null);
-  const [videoFailed, setVideoFailed] = useState(false);
-  useEffect(() => setVideoFailed(false), [videoPath]);
-  useEffect(() => {
-    if (!videoPath) return;
-    const el = p.videoEl?.current;
-    const slot = videoSlotRef.current;
-    const home = p.videoHome?.current;
-    if (!el || !slot || !home) return;
-    const prevClassName = el.className;
-    const prevControls = el.controls;
-    // object-CONTAIN: the picture always keeps its original aspect ratio —
-    // no cropping, no stretching — and contain IS the largest it can be
-    // drawn on screen: it scales the frame up until one dimension touches
-    // the viewport edge (full height on a wider screen, full width on a
-    // taller one). Remaining edges stay black, like every video player.
-    el.className = "absolute inset-0 h-full w-full object-contain bg-black";
-    el.controls = false;
-    slot.appendChild(el);
-    const onError = () => setVideoFailed(true);
-    el.addEventListener("error", onError);
-    return () => {
-      el.removeEventListener("error", onError);
-      // Return the element before this slot unmounts — but only if React
-      // hasn't already detached it (track change remounts the popout's
-      // <video> elsewhere; re-homing a detached node would orphan it).
-      if (el.parentNode === slot) {
-        home.appendChild(el);
-        el.className = prevClassName;
-        el.controls = prevControls;
-      }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoPath, p.videoEl, p.videoHome]);
 
   // ---- auto-hiding chrome (video mode) ------------------------------------
   // Like every serious video player: any mouse movement / key / touch shows
@@ -377,9 +342,6 @@ export default function NowPlayingView(p: Props) {
   // While the next track's payload loads, the PREVIOUS track's lyrics stay
   // rendered (dimmed, no highlight): resetting to empty first is what made
   // the cover jump sizes / flash to the middle on next / previous.
-  // lyricsVersion is bumped after an AI word-sync so the fresh timings
-  // reload into the pane.
-  const [lyricsVersion] = useState(0); // bump target kept for future reload triggers
   useEffect(() => {
     let dead = false;
     setSmoothTime(0);
@@ -415,7 +377,7 @@ export default function NowPlayingView(p: Props) {
       dead = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [p.current.path, lyricsVersion]);
+  }, [p.current.path]);
 
   const instrumental = (tags?.INSTRUMENTAL ?? "").toString().trim() === "1";
   // The lyrics on screen belong to `lyricsFor`; until the new track's
@@ -494,76 +456,63 @@ export default function NowPlayingView(p: Props) {
   }, [lines, dispTime, staleLyrics]);
   const activeLine = aStart;
 
-  // Glider owns the lyrics pane's scrolling (zoom-safe, retargetable) —
-  // recreated whenever the pane mounts/unmounts (layout follows lyric
-  // presence, and music videos drop the column entirely).
-  const gliderRef = useRef<LyricsGlider | null>(null);
-  useEffect(() => {
-    const c = lyricsScrollRef.current;
-    if (!c) return;
-    const g = createLyricsGlider(c);
-    gliderRef.current = g;
-    return () => {
-      if (gliderRef.current === g) gliderRef.current = null;
-    };
-  }, [layoutHasLyrics, videoPath]);
-
-  // Auto-follow owns the pane. Nothing pauses it implicitly — not even the
+  // Auto-follow owns the pane — the shared controller, so this view and the
+  // sidebar can't drift apart. Nothing pauses it implicitly, not even the
   // pointer resting on the lyrics (that hover-pause read as "auto-scroll
-  // stopped working" whenever the cursor was parked over the pane). Only
-  // an explicit wheel / touch takes over, and following picks back up at
-  // the next line change, gliding from wherever the pane is.
+  // stopped working" whenever the cursor was parked over the pane). A wheel /
+  // touch hands the pane to the reader for a few seconds; a seek, a click on
+  // a line, or pressing play takes it straight back.
+  const { centerLine, takeOver } = useLyricsFollow({
+    active: activeLine,
+    time: dispTime,
+    playing: p.playing,
+    scroll: lyricsScrollRef,
+    rows: primaryRefs,
+    reset: p.current.path,
+  });
 
-  // Seek vs glide: a real jump of the song clock (>1.2s between frames)
-  // marks a SEEK — the pane snaps to the new position. Everything else
-  // (normal line steps, clicking a lyric line) glides. Clicking a line
-  // also moves the audio clock, so it sets a short glide window that wins
-  // over the seek mark: navigating by lyric line stays animated even at
-  // song start — and the click centers the line directly, so it lands
-  // correctly even when it doesn't change the active line or while the
-  // pointer hovers the pane.
-  const seekMarkRef = useRef(0);
-  const glideMarkRef = useRef(0);
-  const prevDispRef = useRef(-1);
+  // A word / syllable sweep on screen is the one consumer that needs the
+  // clock at full rate; line changes ride the 20 Hz tick.
+  const sweeping = karaoke && !!lines[aStart]?.words?.length;
   useEffect(() => {
-    const prev = prevDispRef.current;
-    prevDispRef.current = dispTime;
-    if (prev >= 0 && Math.abs(dispTime - prev) > 1.2) seekMarkRef.current = Date.now();
-  }, [dispTime]);
+    sweepRef.current = sweeping;
+  }, [sweeping]);
 
-  useEffect(() => {
-    if (activeLine < 0) return;
-    const el = primaryRefs.current[activeLine] ?? lineRefs.current[activeLine];
-    if (!el) return;
-    const now = Date.now();
-    const animate = now - glideMarkRef.current < 1500 || now - seekMarkRef.current > 600;
-    gliderRef.current?.center(el, !animate);
-    // Deps: activeLine only — the effect intentionally ignores dispTime so
-    // the pane moves one step per line change, not per frame.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeLine]);
-
-  // New track → rewind the lyrics pane to the top.
-  useEffect(() => {
-    const c = lyricsScrollRef.current;
-    gliderRef.current?.stop();
-    if (c) c.scrollTop = 0;
-  }, [p.current.path]);
+  // The viewer's close handler is recreated on every parent render, so the
+  // fullscreenchange listener below reads it through a ref to stay correct.
+  const closeRef = useRef(p.onClose);
+  closeRef.current = p.onClose;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        // Esc steps OUT of the browser fullscreen first (matching native
-        // video players); a second Esc then closes the viewer itself.
-        if (plOpen) setPlOpen(false);
-        else if (document.fullscreenElement) document.exitFullscreen().catch(() => { /* gone */ });
-        else p.onClose();
+      if (e.key !== "Escape") return;
+      // An inner surface gets first refusal: something that already consumed
+      // the key (a capture field), or the add-to-playlist popover.
+      if (e.defaultPrevented || document.querySelector("[data-lrc-editor]")) return;
+      if (plOpen) {
+        setPlOpen(false);
+        return;
       }
+      // ONE press leaves the player for good. Esc used to be spent stepping
+      // out of the browser fullscreen, so closing the viewer took two presses.
+      closeRef.current();
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => { /* gone */ });
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plOpen]);
+
+  // Some browsers swallow Esc themselves while in native fullscreen — the page
+  // never sees a keydown, only the resulting fullscreenchange. Treating that
+  // transition as "the user is done" is what makes a single Esc enough
+  // everywhere. The listener only exists while the viewer is mounted.
+  useEffect(() => {
+    const onFs = () => {
+      if (!document.fullscreenElement) closeRef.current();
+    };
+    document.addEventListener("fullscreenchange", onFs);
+    return () => document.removeEventListener("fullscreenchange", onFs);
+  }, []);
 
   const toggleOpt = (which: "xlit" | "trans") => {
     if (which === "xlit") {
@@ -616,6 +565,12 @@ export default function NowPlayingView(p: Props) {
     // Every line of the current same-time cluster (duets / backing vocals)
     // reads as active; the anchor is the cluster's first line.
     const isActive = synced && aEnd >= aStart && i >= aStart && i <= aEnd;
+    // Clickable only once the rows belong to the CURRENT track: while the
+    // previous track's payload is still up (staleLyrics — kept on purpose for
+    // layout stability) a click would seek the new track to the OLD track's
+    // timestamp, and a past-the-duration target drives it straight into
+    // `ended`, advancing the queue again.
+    const seekable = synced && !staleLyrics;
     const xlit = showXlit ? transforms.transliterate?.[i] : undefined;
     const trans = showTrans ? transforms.translate?.[i] : undefined;
     // When transliteration is on, the romanized text IS the primary line —
@@ -635,26 +590,20 @@ export default function NowPlayingView(p: Props) {
     return (
       <div
         key={i}
-        ref={(el) => {
-          lineRefs.current[i] = el;
-        }}
-        className={`py-2 ${synced ? "cursor-pointer" : ""} ${
+        className={`py-2 ${seekable ? "cursor-pointer" : ""} ${
           isActive ? "opacity-100" : synced ? LINE_BLUR : ""
         }`}
         onClick={
-          synced
+          seekable
             ? () => {
-                glideMarkRef.current = Date.now();
                 p.onSeek(l.time);
-                // Center the clicked line NOW — the activeLine effect alone
-                // misses clicks within the same line and is suppressed
-                // while the pointer hovers the pane.
-                const el = primaryRefs.current[i];
-                if (el) gliderRef.current?.center(el, false);
+                // Center the clicked line NOW — the active-line step alone
+                // misses clicks inside the line already playing.
+                centerLine(i);
               }
             : undefined
         }
-        title={synced ? "Click to seek" : undefined}
+        title={seekable ? "Click to seek" : undefined}
       >
         {/* One layout for every state: the line block is laid out at the
             active size and scaled down when inactive — a compositor-only
@@ -853,7 +802,7 @@ export default function NowPlayingView(p: Props) {
   );
 
   return (
-    <div className={`fixed inset-0 z-50 bg-zinc-950 overflow-clip ${videoPath && !chromeVisible ? "cursor-none" : ""}`}>
+    <div className={`fixed inset-0 z-50 overflow-clip ${videoPath ? "bg-transparent" : "bg-zinc-950"} ${videoPath && !chromeVisible ? "cursor-none" : ""}`}>
       {/* overflow-clip (not hidden): a hidden box is still a scroll container,
           so wheel / scrollIntoView can silently scroll the whole overlay and
           leave the view "stuck" half-rendered. Clip can never be scrolled. */}
@@ -909,28 +858,18 @@ export default function NowPlayingView(p: Props) {
       )}
 
       {videoPath && (
-        <div className="absolute inset-0 bg-black">
-          {!videoFailed ? (
-            <>
-              {/* the popout's live <video> is adopted into this slot */}
-              <div ref={videoSlotRef} className="absolute inset-0" />
-              {/* click surface for play/pause — sits above the video, below
-                  the bottom controls, and keeps working while the chrome is
-                  hidden */}
-              <div
-                className="absolute inset-0 z-[1] cursor-pointer"
-                onClick={p.onTogglePlay}
-                title="Play / pause (Space)"
-              />
-            </>
-          ) : (
-            <div className="absolute inset-0 flex items-center justify-center p-8">
-              <div className="max-w-lg text-center text-xs text-zinc-400 border border-white/10 rounded-2xl bg-black/60 p-6">
-                This video can't be decoded by this browser. Install ffmpeg (Dependencies) to enable automatic
-                transcoding, remux it (album page → Remux videos), or open the file externally.
-              </div>
-            </div>
-          )}
+        /* the picture itself is the player bar's portaled <video>, filling
+           the viewport one z-step below this overlay — this layer only
+           carries the click surface and the control bar */
+        <div className="absolute inset-0">
+          {/* click surface for play/pause — sits above the video, below
+              the bottom controls, and keeps working while the chrome is
+              hidden */}
+          <div
+            className="absolute inset-0 z-[1] cursor-pointer"
+            onClick={p.onTogglePlay}
+            title="Play / pause (Space)"
+          />
           {/* bottom control overlay — same blocks as the audio layout; eases
               away (with the cursor) while the video plays untouched */}
           <div
@@ -1176,17 +1115,25 @@ export default function NowPlayingView(p: Props) {
                   staleLyrics ? "opacity-50" : "opacity-100"
                 }`}
                 style={{ zoom: lyricZoom }}
-                onWheel={() => gliderRef.current?.stop()}
-                onTouchStart={() => gliderRef.current?.stop()}
+                onWheel={(e) => {
+                  if (e.deltaY !== 0) takeOver();
+                }}
+                onTouchStart={takeOver}
               >
+                {/* Symmetric pads so the first and last line can both reach
+                    the anchor line: with a fixed tail spacer the pane ran out
+                    of travel at the end of the song and looked frozen. */}
                 {displayLines.length > 0 ? (
-                  displayLines.map(renderLine)
+                  <>
+                    <div style={{ height: LYRICS_PAD_TOP }} />
+                    {displayLines.map(renderLine)}
+                    <div style={{ height: LYRICS_PAD_BOTTOM }} />
+                  </>
                 ) : (
                   <div className="text-zinc-400 text-sm whitespace-pre-wrap leading-relaxed opacity-80">
                     {lyricsText}
                   </div>
                 )}
-                <div className="h-32" />
               </div>
             </div>
           )}
@@ -1261,7 +1208,14 @@ export default function NowPlayingView(p: Props) {
                 >
                   <button
                     className="min-w-0 flex-1 flex items-center gap-3 text-left"
-                    onClick={() => setIndex(i)}
+                    onClick={() => {
+                      // Same as the player bar's queue popover: the track
+                      // change starts playback, but the store's `playing`
+                      // would stay stale — wrong icon, and the first
+                      // play/pause click would be a no-op.
+                      setIndex(i);
+                      setPlaying(t.path);
+                    }}
                     title="Play this track now"
                   >
                     <span className={`text-[10px] font-mono w-5 text-right shrink-0 ${isCurrent ? "text-accent" : "text-zinc-600"}`}>

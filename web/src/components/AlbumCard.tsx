@@ -8,20 +8,27 @@ import CoverImg from "./CoverImg";
 import FavHeart from "./FavHeart";
 import { albumRef } from "../lib/refs";
 import { originalYear } from "../lib/fmt";
+import type { ReactNode } from "react";
 import type { Album } from "../types";
 
 /** The library's album grid card, shared by the Library and Favorites pages
  * so favorites render with exactly the same layout. The library payload
  * enriches albums with an `artist` display name; elsewhere it falls back to
  * the album-artist tag. */
-export default function AlbumCard({ al, artistName, selectable, selected, onSelect }: {
+export default function AlbumCard({ al, artistName, selectable, selected, onSelect, href, actions }: {
   al: Album & { artist?: string };
   artistName?: string;
   selectable?: boolean;
   selected?: boolean;
   onSelect?: (path: string) => void;
+  /** Album page target; pass `null` to render the card without links
+   * (e.g. entries that have no album page, like trashed folders). */
+  href?: string | null;
+  /** Overrides the play button (top-left overlay); defaults to today's button. */
+  actions?: ReactNode;
 }) {
   const st = statusFor(!!al.pass, al.audit_summary);
+  const ref = href === undefined ? albumRef(al) : href;
   const artist = artistName ?? al.artist ?? al.album_artist ?? al.path.split(/[\\/]/).slice(0, -1).pop() ?? "";
   const ms = mediaShort(al.media || al.meta?.MEDIA);
   return (
@@ -30,18 +37,26 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
       onClick={selectable ? () => onSelect?.(al.path) : undefined}
     >
       <div className="relative">
-        <Link
-          to={albumRef(al)}
-          onClick={selectable ? (e) => e.preventDefault() : undefined}
-          title={selectable ? "Click to select" : "Open album page"}
-          className="block"
-        >
+        {ref ? (
+          <Link
+            to={ref}
+            onClick={selectable ? (e) => e.preventDefault() : undefined}
+            title={selectable ? "Click to select" : "Open album page"}
+            className="block"
+          >
+            <CoverImg
+              albumPath={al.path}
+              coverFile={al.cover_file}
+              wrapperClass="aspect-square w-full rounded-xl shadow-lg ring-1 ring-black/40 overflow-hidden"
+            />
+          </Link>
+        ) : (
           <CoverImg
             albumPath={al.path}
             coverFile={al.cover_file}
             wrapperClass="aspect-square w-full rounded-xl shadow-lg ring-1 ring-black/40 overflow-hidden"
           />
-        </Link>
+        )}
         {selectable && (
           <div
             className="absolute top-1.5 right-10 row-hover transition-opacity bg-black/60 rounded-md px-1 py-0.5"
@@ -88,30 +103,38 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
         <div className="absolute top-1.5 right-1.5 row-hover transition-opacity">
           <FavHeart kind="album" id={al.path} mbid={al.meta?.MUSICBRAINZ_ALBUMID} className="!p-1.5 bg-black/60" iconClass="h-4 w-4" />
         </div>
-        <button
-          className="btn-primary absolute left-2 top-9 !rounded-lg !p-3 row-hover transition-opacity shadow-2xl"
-          title="Play album"
-          onClick={(e) => {
-            e.stopPropagation();
-            useStore.getState().playNow(
-              (al.tracks ?? []).map((t) => ({
-                path: t.path, file: t.file, albumPath: al.path,
-                artist, album: al.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined,
-              }))
-            );
-          }}
-        >
-          <Play className="h-4 w-4 fill-current" />
-        </button>
+        {actions ?? (
+          <button
+            className="btn-primary absolute left-2 top-9 !rounded-lg !p-3 row-hover transition-opacity shadow-2xl"
+            title="Play album"
+            onClick={(e) => {
+              e.stopPropagation();
+              useStore.getState().playNow(
+                (al.tracks ?? []).map((t) => ({
+                  path: t.path, file: t.file, albumPath: al.path,
+                  artist, album: al.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined,
+                }))
+              );
+            }}
+          >
+            <Play className="h-4 w-4 fill-current" />
+          </button>
+        )}
       </div>
       <div className="mt-2 px-0.5">
-        <Link
-          to={albumRef(al)}
-          className="text-sm font-medium truncate block hover:text-accent-soft"
-          title={al.meta?.ALBUM ?? al.path}
-        >
-          {al.meta?.ALBUM ?? al.path.split("/").pop()}
-        </Link>
+        {ref ? (
+          <Link
+            to={ref}
+            className="text-sm font-medium truncate block hover:text-accent-soft"
+            title={al.meta?.ALBUM ?? al.path}
+          >
+            {al.meta?.ALBUM ?? al.path.split("/").pop()}
+          </Link>
+        ) : (
+          <span className="text-sm font-medium truncate block" title={al.meta?.ALBUM ?? al.path}>
+            {al.meta?.ALBUM ?? al.path.split("/").pop()}
+          </span>
+        )}
         {/* artist left · ORIGINAL release year bottom-right (no separator —
             the two ends read as their own columns) */}
         <div className="text-[11px] text-zinc-500 truncate flex items-center gap-1.5 mt-0.5">

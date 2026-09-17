@@ -1,7 +1,9 @@
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2, X } from "lucide-react";
 import { api } from "../api";
 import { toast } from "../store";
+import { invalidateLibrary } from "../lib/invalidate";
 
 // Common tags worth offering as one-click removals — everything else can
 // be typed. Deliberately EXCLUDES identity tags (TITLE/ARTIST/ALBUM/
@@ -25,6 +27,7 @@ export default function BulkTagsDialog({
   paths: string[];
   onClose: () => void;
 }) {
+  const qc = useQueryClient();
   const [removals, setRemovals] = useState<string[]>([]);
   const [customRemove, setCustomRemove] = useState("");
   const [setRows, setSetRows] = useState<SetRow[]>([{ name: "", value: "" }]);
@@ -49,6 +52,7 @@ export default function BulkTagsDialog({
     try {
       const res = await api.tagsBulk({ paths, remove, set });
       toast(`Tags updated on ${paths.length} track(s) — ${res.added} set, ${res.removed} removed${res.failed ? `, ${res.failed} failed` : ""}`);
+      invalidateLibrary(qc);
       onClose();
     } catch (e) {
       toast(`Bulk tag failed: ${e instanceof Error ? e.message : e}`);

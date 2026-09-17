@@ -1,5 +1,5 @@
 import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react";
-import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 export interface SortState {
   key: string;
@@ -65,6 +65,19 @@ export function sortRows<T extends Record<string, any>>(rows: T[], sort: SortSta
   });
 }
 
+/** Disc then track number (missing numbers last), filename as the tie-break —
+ *  the canonical order of an album tracklist and its disc groups. */
+export function byDiscThenTrack(
+  a: { discnumber?: number | null; tracknumber?: number | null; file?: string },
+  b: { discnumber?: number | null; tracknumber?: number | null; file?: string },
+): number {
+  return (
+    (a.discnumber ?? 99) - (b.discnumber ?? 99) ||
+    (a.tracknumber ?? 999) - (b.tracknumber ?? 999) ||
+    String(a.file).localeCompare(String(b.file))
+  );
+}
+
 export interface DiscGroup<T> {
   disc: number | null;
   tracks: T[];
@@ -107,8 +120,19 @@ export function SortHeader({
 }) {
   const active = sort?.key === sortKey;
   return (
-    <th className={`th cursor-pointer hover:text-zinc-300 ${className ?? ""}`} style={style} onClick={() => onSort(sortKey)}>
-      <span className="inline-flex items-center gap-1">
+    <th
+      scope="col"
+      aria-sort={active ? (sort!.dir === 1 ? "ascending" : "descending") : "none"}
+      className={`th ${className ?? ""}`}
+      style={style}
+    >
+      {/* the sort target is a real button so Enter/Space sort too — the resizer
+          (children) stays a sibling, outside the button */}
+      <button
+        type="button"
+        className="inline-flex items-center gap-1 cursor-pointer hover:text-zinc-300"
+        onClick={() => onSort(sortKey)}
+      >
         {label}
         {active ? (
           sort!.dir === 1 ? (
@@ -119,46 +143,11 @@ export function SortHeader({
         ) : (
           <ArrowUpDown className="h-3 w-3 opacity-30" />
         )}
-      </span>
+      </button>
       {children}
     </th>
   );
 }
 
-/** Drag handle that resizes the column it lives in (persisted per view by
- * the caller). Lives at a th's right edge; the th needs `relative`. */
-export function ColumnResizer({ width, onDrag, onReset }: {
-  width: number | undefined;
-  onDrag: (deltaPx: number) => void;
-  onReset: () => void;
-}) {
-  const start = (e: ReactMouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const x0 = e.clientX;
-    const w0 = width ?? (e.currentTarget.parentElement as HTMLElement)?.getBoundingClientRect().width ?? 100;
-    const move = (ev: MouseEvent) => onDrag(ev.clientX - x0 + w0);
-    const up = () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-  };
-  return (
-    <span
-      className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize hover:bg-accent/40"
-      onMouseDown={start}
-      onDoubleClick={(e) => {
-        e.stopPropagation();
-        onReset();
-      }}
-      title="Drag to resize · double-click to reset"
-      onClick={(e) => e.stopPropagation()}
-    />
-  );
-}
+/* The ColumnResizer handle lives in lib/columns.tsx (with the prefs hooks
+   that persist the widths it edits) — one implementation, one import site. */

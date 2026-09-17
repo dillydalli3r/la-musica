@@ -75,7 +75,7 @@ TAG_MAP = {
         "mp4": ("freeform", "com.apple.iTunes", "DISCTOTAL"),
     },
     "ISRC": {
-        "flac": "ISRC", "mp3": "TSRC",
+        "flac": "ISRC", "mp3": ("TSRC", None),
         "mp4": ("freeform", "com.apple.iTunes", "ISRC"),
     },
     "LICENSE": {
@@ -215,11 +215,10 @@ TAG_MAP = {
         "mp3": ("TXXX", "LOG_GRADE"),
         "mp4": ("freeform", "com.apple.iTunes", "LOG_GRADE"),
     },
-    # Integrity verification tags (see mlo/integrity.py):
-    #   AUDIO_MD5  MD5 hex of the audio data (PCM for FLAC via decode,
-    #              tag-stable audio region for MP3/MP4/OGG).
+    # Integrity verdict tags:
     #   INTEGRITY  OK / FAIL verdict of the audio integrity test.
     #   LOG_CRC    CD rips: OK / MISMATCH vs the rip log's per-track CRC.
+    # AUDIO_MD5 is accepted for legacy files (nothing writes it any more).
     "AUDIO_MD5": {
         "flac": "AUDIO_MD5",
         "mp3": ("TXXX", "AUDIO_MD5"),
@@ -309,6 +308,16 @@ _VIDEO_TAG_ALIASES = {
     "YEAR": "DATE",
     "RETAILDATE": "DATE",
 }
+
+# MKV muxers expose the track number as PART_NUMBER and the disc as DISC;
+# every other semantic name is stored verbatim.
+_MKV_TAG_KEYS = {"TRACKNUMBER": "PART_NUMBER", "DISCNUMBER": "DISC"}
+
+
+def _to_mkv_meta(tags):
+    """Container-native metadata keys for a semantic tag mapping."""
+    return {_MKV_TAG_KEYS.get(str(k).upper(), k): v for k, v in tags.items()}
+
 
 _FFPROBE_CACHE = {"exe": None, "checked": False}
 
@@ -532,6 +541,7 @@ class AudioFile:
         """Write several tags into a video container in ONE ffmpeg pass
         (each individual write would be a full stream-copy rewrite)."""
         clean = {}
+        dropped = []
         for k, v in (mapping or {}).items():
             if v is None:
                 continue
@@ -540,16 +550,39 @@ class AudioFile:
                 continue
             key = str(k).upper()
             if key in ("LYRICS", "UNSYNCEDLYRICS"):
+                # Nothing reads lyrics back out of a video container
+                # (get_lyrics only knows embedded audio lyrics), so a video
+                # lyric write cannot be honoured: fail loudly instead of
+                # reporting a write that never happened.
+                dropped.append(key)
                 continue
             clean[key] = v
+        if dropped:
+            self.error = ("video containers cannot store "
+                          + "/".join(sorted(set(dropped)))
+                          + " — no lyrics were written")
+            return False
         if not clean:
             return True
-        # MKV muxers expose the track number as PART_NUMBER and the disc
-        # as DISC; every other semantic name is stored verbatim.
-        mkv_keys = {"TRACKNUMBER": "PART_NUMBER", "DISCNUMBER": "DISC"}
-        return self._set_video_tags_batch({mkv_keys.get(k, k): v for k, v in clean.items()})
+        return self._set_video_tags_batch(_to_mkv_meta(clean))
 
-    def _set_video_tags_batch(self, mkv_meta):
+    def _delete_video_tag(self, name):
+        """Drop one tag from a video container in ONE ffmpeg rewrite.
+
+        Video containers have no per-key delete, so the metadata block is
+        rewritten from the tags that stay (`-map_metadata -1` plus every
+        remaining tag), stream-copied. False when nothing was stored under
+        that name, so callers never report a removal that did not happen.
+        """
+        canonical = self._video_canonical(name)
+        current = self._video_tags or {}
+        if canonical not in current:
+            return False
+        remaining = {k: v for k, v in current.items() if k != canonical}
+        return self._set_video_tags_batch(_to_mkv_meta(remaining),
+                                          drop_existing=True)
+
+    def _set_video_tags_batch(self, mkv_meta, drop_existing=False):
         import tempfile
 
         ffprobe = _ffprobe_exe()
@@ -585,7 +618,9 @@ class AudioFile:
                 ffmpeg, "-y", "-v", "error", "-nostdin",
                 "-fflags", "+genpts", "-i", str(src).replace("\\", "/"),
                 "-map", "0", "-c", "copy", "-ignore_unknown",
-                "-map_metadata", "0", *meta_args,
+                # 0 copies the source metadata and layers mkv_meta on top;
+                # -1 starts clean, so a delete rewrite keeps only mkv_meta.
+                "-map_metadata", "-1" if drop_existing else "0", *meta_args,
                 "-f", "matroska", str(dest).replace("\\", "/"),
             ]
             from .subproc import run_tool
@@ -663,7 +698,9 @@ class AudioFile:
 
     @staticmethod
     def _mp4_text(value):
-        if isinstance(value, (tuple, list)) and value:
+        # Only lists are unwrapped: a bare tuple is a trkn/disk pair and
+        # must render as "n/total" (all_tags passes it unwrapped).
+        if isinstance(value, list) and value:
             value = value[0]
         if isinstance(value, tuple) and len(value) >= 2:
             return f"{value[0]}/{value[1]}"
@@ -681,6 +718,22 @@ class AudioFile:
             return (first, second)
         except (TypeError, ValueError):
             return None
+
+    def _mp4_freeform_keys(self, mean, name):
+        """Stored freeform keys matching mean/name, ignoring case.
+
+        Freeform atom names are case-sensitive in the container but taggers
+        disagree on case (rsgain writes UPPER, simple-dr-meter lower), so
+        reads, writes and deletes all match case-insensitively.
+        """
+        tags = self.audio.tags if self.audio is not None else None
+        if not tags:
+            return []
+        prefix = f"----:{mean}:".lower()
+        want = str(name).lower()
+        return [k for k in tags.keys()
+                if str(k).lower().startswith(prefix)
+                and str(k).lower()[len(prefix):] == want]
 
     def get_tag(self, name):
         if self.audio is None:
@@ -739,16 +792,11 @@ class AudioFile:
                     key = f"----:{mean}:{name2}"
                     vals = self.audio.tags.get(key) if self.audio.tags else None
                     if not vals:
-                        # Freeform atom names are case-sensitive in the
-                        # container but taggers disagree on case (rsgain
-                        # writes UPPER, simple-dr-meter lower) — match
-                        # case-insensitively on the subname.
-                        prefix = f"----:{mean}:".lower()
-                        want = str(name2).lower()
-                        for k in (self.audio.tags.keys() if self.audio.tags else []):
-                            kl = str(k).lower()
-                            if kl.startswith(prefix) and kl[len(prefix):] == want:
-                                vals = self.audio.tags.get(k)
+                        # Atom subnames are case-sensitive in the container
+                        # but taggers disagree on case (see the scan).
+                        for k in self._mp4_freeform_keys(mean, name2):
+                            vals = self.audio.tags.get(k)
+                            if vals:
                                 break
                     if not vals:
                         return None
@@ -765,14 +813,17 @@ class AudioFile:
         v = self.get_tag(name)
         return v is not None and str(v).strip() != ""
 
-    def get_lyrics_transform(self, kind, lang=None):
+    def get_lyrics_transform(self, kind, lang=None, exact=False):
         """Stored translation / transliteration text for this track.
 
         kind is "TRANSLATION" or "TRANSLITERATION". The specific tags are
         language-suffixed — TRANSLATION-EN, TRANSLITERATION-JA-LATN — so the
         stored language is explicit and gradeable; the bare legacy names
         still read. *lang* ("en") prefers that language when several are
-        stored (first subtag match: JA-LATN satisfies "ja").
+        stored (first subtag match: JA-LATN satisfies "ja"). With
+        *exact* only that language's own suffix counts — no fallback to
+        another stored language (used to decide whether a per-language
+        translation still has to be generated).
         """
         if self.audio is None:
             return None
@@ -794,6 +845,8 @@ class AudioFile:
             for suffix, val in found.items():
                 if suffix and suffix.lower().split("-")[0] == want_lang:
                     return val
+            if exact:
+                return None
         for suffix in sorted(found):
             if suffix:
                 return found[suffix]
@@ -970,12 +1023,16 @@ class AudioFile:
 
     def delete_any_tag(self, key):
         """Remove an arbitrary tag key (raw container key). MP4 atoms
-        are matched case-insensitively over the full key list."""
+        are matched case-insensitively over the full key list; video
+        containers rewrite the metadata block in one ffmpeg pass."""
         self._invalidate_cache()
         if self.audio is None:
             return False
 
         try:
+            if self.kind == "video":
+                return self._delete_video_tag(key)
+
             if self.kind in ("flac", "ogg", "opus"):
                 if self.audio.tags is None:
                     return True
@@ -1110,6 +1167,11 @@ class AudioFile:
                     _, mean, name2 = atom
                     key = f"----:{mean}:{name2}"
 
+                    # Replace, never append next to a differently-cased
+                    # atom of the same name (taggers disagree on case).
+                    for k in self._mp4_freeform_keys(mean, name2):
+                        del self.audio[k]
+
                     fmt = getattr(MP4FreeForm, "FORMAT_UTF8", 1)
 
                     try:
@@ -1127,6 +1189,16 @@ class AudioFile:
                     pair = self._mp4_pair(value)
                     if pair is None:
                         return False
+                    if "/" not in str(value):
+                        # A bare "4" carries no total: keep the stored one
+                        # instead of rewriting 3/12 into 4/0.
+                        cur = self.audio.get(atom) or []
+                        old = cur[0] if isinstance(cur, list) and cur else cur
+                        if isinstance(old, (tuple, list)) and len(old) > 1:
+                            try:
+                                pair = (pair[0], int(old[1]))
+                            except (TypeError, ValueError):
+                                pass
                     self.audio[atom] = [pair]
                 elif atom == "tmpo":
                     try:
@@ -1151,6 +1223,8 @@ class AudioFile:
             return False
 
         name = str(name).upper()
+        if self.kind == "video":
+            return self._delete_video_tag(name)
         if name == "LYRICS":
             return self.delete_lyrics()
         spec = TAG_MAP.get(name)
@@ -1215,19 +1289,24 @@ class AudioFile:
 
             elif kind == "mp4":
                 atom = spec["mp4"]
+                changed = False
 
                 if isinstance(atom, tuple) and atom[0] == "freeform":
-                    _, mean, name2 = atom
-                    key = f"----:{mean}:{name2}"
-                    if key in self.audio:
-                        del self.audio[key]
-                        self._save()
-                    return True
-
-                if atom in self.audio:
+                    # Case-insensitive: the atom may be stored in another
+                    # tagger's case (see _mp4_freeform_keys).
+                    for k in self._mp4_freeform_keys(atom[1], atom[2]):
+                        del self.audio[k]
+                        changed = True
+                elif atom in self.audio:
                     del self.audio[atom]
+                    changed = True
+
+                if changed:
                     self._save()
 
+                # Absent tag is still True: delete is an idempotent no-op in
+                # every branch — /api/mb/assign sends null for each optional
+                # key and turns a False into a 500 for the whole request.
                 return True
 
         except Exception as e:

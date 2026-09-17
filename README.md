@@ -9,8 +9,10 @@ player cache, multi-format export, and a Soulseek client with an automatic
 MusicBrainz-driven importer.
 
 All app state (config, playlists, favourites, the beets library, the
-Soulseek config) lives in a single `.data` folder inside your music
-directory — one folder to back up or carry between machines.
+Soulseek config) lives in a single hidden `.mlo` folder inside your music
+directory — app state in `.mlo/data`, with downloads (`.mlo/downloads`) and
+trash (`.mlo/trash`) beside it — one folder to back up or carry between
+machines.
 
 ## Highlights
 
@@ -69,6 +71,41 @@ directory — one folder to back up or carry between machines.
   **auto-importer** that searches releases by catalog number / artist +
   album, verifies rip logs (minimum logchecker score) and download
   completeness, then imports and organizes the album automatically.
+  The query list runs most-specific-first — catalog number, then artist +
+  album — and stops the moment one query returns a folder that is both
+  complete and lossless, instead of waiting out every template. Each query
+  gets a **search window** (`soulseek_auto_search_wait`, Settings →
+  *Auto-import*, default 15 s) counted as quiet time since the network's
+  last response, and a transfer that moves no bytes for 3 min is abandoned
+  rather than tying up the job. While a job runs, the Soulseek page shows
+  live per-query progress: elapsed against the window, plus response and
+  file counts.
+  Search returns every codec the network offers, grouped per shared folder
+  and ordered CD rip (log + cue) → lossless → free slot / shortest queue,
+  with All / CD rips (log + cue) / Lossless / Lossy chips plus a codec
+  filter built from what the results actually contain. The search box keeps
+  your last 10 queries in a recent-searches list under it. From any result
+  group, **Browse** opens that peer's whole share tree — filterable and
+  paged — where a folder can be queued as-is or handed to the
+  auto-importer; a browsed folder needs no MusicBrainz release, because its
+  audio files become the track list.
+  Lossless means the
+  files' extensions — M4A/MP4 count as lossless only when the peer reports
+  a bit depth, since those containers hold ALAC or AAC. Downloading a
+  folder with no lossless audio asks for confirmation first. slskd
+  publishes a search's file responses only after the search has ended, so
+  the UI polls and shows live response/file counts while it aggregates
+  (up to 180 s). Imports convert any lossless source (WAV, AIFF, APE, WV,
+  SHN, TTA; ALAC in MP4) into the codec set by `lossless_target_codec`
+  *before* the files are named and graded — the same conversion script 3
+  applies library-wide. The *Downloads* tab buckets transfers into active,
+  queued, completed and failed, with per-transfer **Cancel**, **Retry** on
+  the failed ones and **Clear finished** to empty the history.
+  The sidebar dot is green when logged into the
+  Soulseek network (tooltip names the account), amber when slskd runs but
+  isn't logged in (tooltip carries the daemon's own error, e.g.
+  `INVALIDPASS`), red when another app's slskd holds the web port, and
+  hidden when slskd isn't running.
 - **Grading** — a configurable battery of ~45 checks per album (tags,
   encoder identity, naming + capitalization, lowercase extensions, links,
   covers, CUE/log/AccurateRip, lyrics formatting, file categories…). Every
@@ -87,7 +124,7 @@ forced to redo work.
 | --- | --- | --- |
 | 1 | Format lyrics | Canonical embedded LYRICS / .lrc (padding, blank lines, zero-timestamp rule, Enhanced/Extended LRC word-sync tags) |
 | 2 | Format CUEs | Canonical CUE text, FILE-line fixes, CD-N sheet renaming |
-| 3 | Optimize FLACs | Re-encode at target level, strip padding/CUESHEET/APPLICATION, remove tags outside the canonical set, convert WAV/AIFF/APE/WV/SHN to FLAC losslessly |
+| 3 | Optimize FLACs | Re-encode at target level, strip padding/CUESHEET/APPLICATION, remove tags outside the canonical set, convert every other lossless source (WAV, AIFF, APE, WV, SHN, TTA; ALAC in MP4) to the codec set by `lossless_target_codec` losslessly (default FLAC, alternative ALAC — Settings → *FLACs & lossless sources*); `lossless_remove_original` decides whether the pre-conversion file survives a verified conversion |
 | 4 | Grade | The full grading battery below |
 | 5 | Process images | Covers resized/cropped (default 1200×1200 JPEG q90, configurable), JPEG/PNG/JXL optimization, optional JPEG XL conversion |
 | 6 | Audit library | AudioAuditor detectors (silence, DR, peaks, LUFS, BPM, MQA, fake stereo…) + CD .log CRC verification → AUDIT tag |
@@ -162,7 +199,11 @@ filled in automatically later:
 2. A background worker re-searches Soulseek for every open wish on the
    configured interval (default every 6 h), running the same
    find → verify-logs → download → audit → import pipeline as the one-shot
-   auto-importer.
+   auto-importer. Auto-import ranks lossless folders ahead of lossy ones:
+   when no lossless candidate turns up, an interactive run parks and asks
+   *Only lossy copies found — download anyway?* on the Soulseek page, while
+   a wish-filling run never takes a lossy copy — it leaves the wish open
+   for a lossless match.
 3. When a verified copy is found the release is imported and organized, and
    the wish flips to **Imported**. Wishes whose release already exists in the
    library (e.g. a manual download) are reconciled too — the **Sync library**
@@ -231,7 +272,9 @@ docker compose up --build
 ```
 
 The image bundles the React build and the audio/image toolchain
-(`ffmpeg`, `flac`, `libjxl`, `jpegtran`, `oxipng`).
+(`ffmpeg`, `flac`, `libjxl`, `jpegtran`). `oxipng` is installed when the
+base image provides it and otherwise fetched at runtime from Settings →
+Dependencies (a silent `|| true` in the Dockerfile keeps the build alive).
 
 ## Architecture
 
@@ -255,18 +298,19 @@ tools/       test-library generator and test suites
 | `GET /api/album` `GET /api/artist` | entity details |
 | `GET /api/stream` `GET /api/videos/stream` | audio/video streaming (Range; `?transcode=1` pipes fragmented MP4) |
 | `GET /api/videos/meta` | codec probe deciding direct play vs transcode |
-| `GET/POST /api/tags` | tag read/edit + video tag writes |
+| `GET /api/tags` | per-track tag/lyrics/cover read view |
+| `POST /api/tags/bulk` `POST /api/videos/tag` | bulk tag surgery; music-video tag writes |
 | `POST /api/lyrics/embed` `POST /api/lyrics/write` | embedded LYRICS / .lrc sidecar writes |
 | `POST /api/run` | run any of scripts 1–15 on targets |
 | `POST /api/organize` | apply the naming script (dry-run supported) |
 | `POST /api/export` | multi-format export with codec/bitrate config |
 | `GET/POST /api/playlists…` | manual + smart playlists, .m3u8 |
-| `GET /api/mb/release/{id}` `…/genres` | MusicBrainz release + genre cascade |
+| `GET /api/mb/release?mbid=…` `GET /api/mb/release-genres?mbid=…` | MusicBrainz release + genre cascade |
 | `POST /api/mb/match` `POST /api/mb/assign` | track/disc matching, MB/RYM/genre/advisory writes |
 | `GET /api/lyrics/*` `POST /api/lyrics/write` | LRCLIB proxy + LRC sidecar write |
 | `POST /api/cover` | album cover upload (`?track=` writes per-track sidecar covers) |
 | `POST /api/import/upload` `…/commit` | upload + link assignment |
-| `POST /api/ai/*` | AI chat/config + lyric transforms (cleanup, repair, translate, transliterate) |
+| `POST /api/lyrics/ai` `POST /api/lyrics/ai/lines` | AI lyric transforms (cleanup, repair, translate, transliterate; line-aligned for the player) |
 | `WS /ws/progress` | live progress |
 
 ## Tests
@@ -281,14 +325,16 @@ python tools/smoke_api.py           # route smoke test against a running backend
                                     # (python tools/smoke_api.py http://127.0.0.1:8000)
 ```
 
-The browser-side checks (`tools/check_menus.cjs` — every sidebar entry and
-route renders with no page errors; `tools/shot.cjs` — screenshots every route)
-need a running backend and a local Playwright install.
+The browser-side check (`tools/check_menus.cjs` — every sidebar entry and
+route renders with no page errors) needs a running backend and Playwright
+(`npm i -D playwright`).
 
 The other `tools/test_*.py` suites cover config migration, CUE disc renaming,
 grading paths, Home shelves, lyrics merge/repair and the Soulseek client.
 Run them all before a release. The frontend gate is `cd web && npx tsc -b &&
-npx oxlint && npm run build`.
+npx oxlint && npm run build`. CI (`.github/workflows/ci.yml`) runs the Python
+suites and that frontend gate on every push and pull request; the suites that
+need a live backend (the browser check and `smoke_api.py`) are manual.
 
 ---
 

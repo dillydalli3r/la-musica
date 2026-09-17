@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from mlo.stats import _find_albums, worker_count
 from mlo.grader import _grade_album
 from mlo.audio import AudioFile
-from mlo.paths import LIB_VIDEO_EXTS, get_sidecar_cover_path
+from mlo.paths import LIB_VIDEO_EXTS, get_track_cover, load_expected_tracks
 from server import tagcache
 
 # Tags surfaced per track for sorting/filtering on the frontend.
@@ -103,9 +103,10 @@ def _enrich_track(tr, album_dir):
     tags, tech = tagcache.read_track(p, TRACK_TAGS)
     tr["tags"] = tags
     tr["tech"] = tech
-    # Per-track sidecar cover: "01 - Song.jpg" next to "01 - Song.flac"
+    # Per-track cover: manifest entry ("01 - Song.jpg", possibly shared with
+    # other tracks) or a same-stem sidecar next to "01 - Song.flac".
     try:
-        sc = get_sidecar_cover_path(album_dir, tr["file"])
+        sc = get_track_cover(album_dir, tr["file"])
         tr["cover_file"] = os.path.basename(sc) if sc else None
     except Exception:
         tr["cover_file"] = None
@@ -181,10 +182,39 @@ def build_album(album_dir, cfg):
     for tr in res.get("tracks", []):
         _enrich_track(tr, album_dir)
     res["meta"] = _album_meta(album_dir, res.get("tracks", []))
+    _add_expected_tracks(res, album_dir)
     tc = res.get("total_checks", 0)
     res["grade_pct"] = round(100.0 * res.get("pass_count", 0) / tc, 1) if tc else None
     res["pass"] = res.get("pass_count", 0) == tc and tc > 0
     return res
+
+
+def _add_expected_tracks(res, album_dir):
+    """Attach the recorded release tracklist, flagged present/missing.
+
+    A partially imported album has no on-disk trace of the tracks that never
+    arrived, so the release's own running order (written by the import
+    wizard) is diffed against the files here. `expected_tracks` carries every
+    release track with a `missing` flag; `partial` is the album-level "this
+    is not the whole release" answer the album page greys out on."""
+    res.setdefault("expected_tracks", [])
+    res.setdefault("partial", False)
+    try:
+        exp = load_expected_tracks(album_dir)
+    except Exception:
+        return
+    tracks = exp.get("tracks") or []
+    if not tracks:
+        return
+    # (disc, track) as the library derived them — tags first, file name
+    # fallback — so an untagged partial import still lines up.
+    on_disk = {(tr.get("discnumber") or 1, tr.get("tracknumber"))
+               for tr in res.get("tracks", [])}
+    rows = [{**e, "missing": (e["disc"], e["position"]) not in on_disk}
+            for e in tracks]
+    res["expected_tracks"] = rows
+    res["expected_release_id"] = exp.get("release_id")
+    res["partial"] = any(r["missing"] for r in rows)
 
 
 def build_albums_parallel(album_dirs, cfg):

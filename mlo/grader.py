@@ -16,7 +16,7 @@ from .lyrics_xlit import (
 )
 from .cue import canonical_cue_text
 from .naming import DEFAULT_NAMING_SCRIPT
-from .paths import AUDIO_EXTS, IMAGE_EXTS, LIB_AUDIO_EXTS, LIB_VIDEO_EXTS, get_sidecar_cover_path
+from .paths import AUDIO_EXTS, IMAGE_EXTS, LIB_AUDIO_EXTS, LIB_VIDEO_EXTS, get_track_cover, load_track_covers
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, is_audio_file,
     _find_albums, _clean_set, _summarize_values, _collect_targets,
@@ -28,12 +28,28 @@ from .ui import print_header, log, c, Color, print_separator, _short_val
 # Media formats the library understands (MusicBrainz-style MEDIA values).
 # Everything outside CD / Digital Media in this set is graded like any other
 # release — the CUE/LOG/AccurateRip expectations are already gated on
-# media_summary == "CD" — while unknown values still fail grading.
+# _is_cd(media_summary) — while unknown values still fail grading.
 KNOWN_MEDIA = {
     "cd", "cd-r", "digital media", "vinyl", '12" vinyl', '10" vinyl', '7" vinyl',
     "sacd", "dvd", "dvd-video", "dvd-audio", "blu-ray", "blu-spec cd", "shm-cd",
     "cassette", "minidisc", "8-track", "vhs", "laserdisc",
 }
+
+
+def _is_cd(media_summary):
+    """Whether the album's MEDIA summary is a CD-DA release.
+
+    MEDIA is user-written tag data, so the test is case-insensitive:
+    MEDIA=cd is the same medium as CD (the unknown-value check against
+    KNOWN_MEDIA lowercases too, so "cd" is accepted as known either way).
+    """
+    return str(media_summary or "").strip().lower() == "cd"
+
+
+def _is_digital(media_summary):
+    """Whether the album's MEDIA summary is Digital Media (case-insensitive
+    for the same reason as _is_cd)."""
+    return str(media_summary or "").strip().lower() == "digital media"
 
 
 def _get_cover_dimensions(cover_path):
@@ -206,7 +222,8 @@ def _zero_target_allows_grader(cfg, is_for_lrc: bool) -> bool:
     return True
 
 
-def _lyrics_formatted(text, cfg, is_for_lrc=False):
+def _lyrics_formatted(text, cfg, is_for_lrc=False, check_spaces=True,
+                      check_blank_lines=True):
     """True when the lyrics already match the configured formatting
     (timestamps, metadata stripping, blank collapse, no trailing blanks).
 
@@ -215,6 +232,11 @@ def _lyrics_formatted(text, cfg, is_for_lrc=False):
     precision drift is caught too). When enhanced LRC is enabled, word-level
     <mm:ss.xx> timestamps are also validated for correct precision/formatting.
     Respects lrc_zero_timestamp_target and blank mode.
+
+    *check_spaces* / *check_blank_lines* mirror grade_check_lyrics_spaces
+    and grade_check_lyrics_blank_lines: a disabled toggle must not fail the
+    album for that difference (the CUE check relaxes its comparison the same
+    way). Both default to the strict canonical comparison.
     """
     if not text or not str(text).strip():
         return True
@@ -238,7 +260,19 @@ def _lyrics_formatted(text, cfg, is_for_lrc=False):
     except Exception:
         return True
     if raw != expected:
-        return False
+        if check_spaces and check_blank_lines:
+            return False
+        # A disabled toggle ignores its difference instead of failing the
+        # album for it (same idea as _cue_formatted's space mode).
+        def _relaxed(s):
+            lines = str(s).split("\n")
+            if not check_spaces:
+                lines = [ln.strip() for ln in lines]
+            if not check_blank_lines:
+                lines = [ln for ln in lines if ln.strip()]
+            return lines
+        if _relaxed(raw) != _relaxed(expected):
+            return False
     # Zero-timestamp compatibility: when enabled for this target, first lyric line must be [00:00.00]
     if bool(cfg.get("lrc_add_zero_timestamp", False)) and _zero_target_allows_grader(cfg, is_for_lrc):
         try:
@@ -365,11 +399,6 @@ def _lyrics_word_timestamps_valid(text, cfg):
     return True
 
 
-# Alias for task description naming
-def _lyrics_enhanced_valid(text, cfg):
-    return _lyrics_word_timestamps_valid(text, cfg)
-
-
 def _lyrics_zero_timestamp_ok(text, cfg, is_for_lrc=False):
     """True when the first lyric line matches the zero timestamp expectation.
 
@@ -490,16 +519,27 @@ def _video_exts():
     return _VIDEO_EXTS_CACHE
 
 
+def _video_category_exts():
+    """Extensions classified as the 'video' file category: every library
+    video container (LIB_VIDEO_EXTS — MP4/M4V included) plus the exotic
+    containers only the remuxer accepts."""
+    return LIB_VIDEO_EXTS + tuple(
+        e for e in _video_exts() if e not in LIB_VIDEO_EXTS)
+
+
 def _classify_file(f):
     """Category of a filename: music / cover / cue / log / lrc / accurip / video / other."""
     low = f.lower()
-    if low.endswith(LIB_AUDIO_EXTS):
-        return "music"
-    if low.endswith(_video_exts()):
+    if low.endswith(_video_category_exts()):
+        # Video containers FIRST: LIB_AUDIO_EXTS is AUDIO_EXTS +
+        # LIB_VIDEO_EXTS, so the music branch below would swallow every
+        # music video and grade_include_video would never gate anything.
         # Remuxed (MKV) and raw (VOB/AVI/WMV/...) videos are their own
         # allowed-by-default category, so a raw VOB only fails the dedicated
         # un-remuxed-video check — never the generic disallowed-files check.
         return "video"
+    if low.endswith(LIB_AUDIO_EXTS):
+        return "music"
     if low.endswith(IMAGE_EXTS):
         return "cover"
     if low.endswith(".cue"):
@@ -516,8 +556,11 @@ def _classify_file(f):
 def _is_video_file(f):
     """Video-container tracks (music videos) are library tracks but are
     never CD-DA: the CD-only checks (rip-log score, CRC coverage, 16/44.1
-    format, AccurateRip requirement) must not apply to them."""
-    return os.path.splitext(f or "")[1].lower() in (".mp4", ".m4a", ".aac")
+    format, AccurateRip requirement) must not apply to them. Uses the
+    library's canonical video set (paths.LIB_VIDEO_EXTS) — the same one the
+    per-track tag checks use — so AAC/M4A audio rips keep every CD check.
+    """
+    return os.path.splitext(f or "")[1].lower() in LIB_VIDEO_EXTS
 
 
 def _category_allowed(cfg, category):
@@ -565,8 +608,11 @@ def _extra_images(album_dir, all_files, audio_files):
     """Image files that belong to no track and no album slot: neither the
     album cover (cover.*) nor a per-track sidecar whose stem matches a track
     ("01 - Song.jpg", extended stems like "01 - Song.front.jpg" count too —
-    the same convention the organizer's sidecar pass follows)."""
+    the same convention the organizer's sidecar pass follows), nor an image
+    listed in the per-track cover manifest (a shared image is named after one
+    track only, so its stem says nothing about the other tracks that use it)."""
     track_stems = {os.path.splitext(f)[0].lower() for f in audio_files}
+    mapped = {v.lower() for v in load_track_covers(album_dir).values()}
     out = []
     for f in sorted(all_files):
         low = f.lower()
@@ -574,6 +620,8 @@ def _extra_images(album_dir, all_files, audio_files):
             continue
         full = os.path.join(album_dir, f)
         if _skip_grading_file(full):
+            continue
+        if low in mapped:
             continue
         stem = os.path.splitext(f)[0].lower()
         if stem in track_stems or any(
@@ -592,25 +640,6 @@ def _log_file_ok(path):
     except OSError:
         return False
     return bool(content and content.strip())
-
-
-def _image_file_ok(path, config=None):
-    """An image sidecar passes when it is a real, non-empty file.
-
-    When *config* is provided and cover enforcement is enabled,
-    delegates to _cover_image_ok for dimension/square checks.
-    """
-    if config is not None:
-        # Treat any image as cover for the generic check; _cover_image_ok
-        # will handle the non-enforced case by just checking size >0
-        try:
-            return _cover_image_ok(path, config)
-        except NameError:
-            pass
-    try:
-        return os.path.getsize(path) > 0
-    except OSError:
-        return False
 
 
 def _get_cover_target_size(ext, config):
@@ -780,7 +809,7 @@ def _grade_sidecars(album_dir, all_files, cfg):
             try:
                 with open(full, "r", encoding="utf-8", errors="replace") as fh:
                     lrc_text = fh.read()
-                ok = _lyrics_formatted(lrc_text, cfg) and \
+                ok = _lyrics_formatted(lrc_text, cfg, is_for_lrc=True) and \
                     not _lyrics_merged_timestamps(lrc_text, cfg)
                 # Enhanced LRC validity: word timestamps must be in order / correctly formatted
                 if ok and cfg.get("lrc_enhanced_enabled", True) and cfg.get("lrc_enhanced_word_sync", True):
@@ -847,7 +876,7 @@ def _grade_sidecars(album_dir, all_files, cfg):
                                 if enforce_size and (abs(_w - tgt) > 1 or abs(_h - tgt) > 1):
                                     detail = f"wrong size {_w}x{_h} (need {tgt}x{tgt})"
                                 elif enforce_square:
-                                    thr = float(cfg.get("cover_crop_threshold", 0.05) or 0.05)
+                                    thr = float(cfg.get("cover_crop_threshold", 0.0) or 0.0)
                                     thr = max(0.0, min(0.5, thr))
                                     ratio = _w / _h if _h else 1.0
                                     if abs(ratio - 1.0) > thr:
@@ -876,8 +905,33 @@ def _norm_path_case(p):
     return os.path.normcase(str(p or "").replace("/", os.sep).replace("\\", os.sep))
 
 
+def _mb_release_type(mbid):
+    """Release type MusicBrainz reports for *mbid*, or None.
+
+    The organizer resolves a missing RELEASETYPE from the MusicBrainz
+    release before running the naming script (server.main organize), and the
+    default script writes it into the folder — so grading a folder the app
+    organized must resolve it from the same source, or every organized album
+    grades as "expected '[album] …'" forever. Lazy import (the pattern the
+    CLI already uses for server.beetscfg) keeps the plain CLI importable;
+    any failure — offline, rate-limited, unknown ID — falls back to today's
+    tag-only behaviour.
+    """
+    try:
+        from server.integrations import release_lookup
+
+        return str(release_lookup(mbid).get("release_type") or "").strip() or None
+    except Exception:
+        return None
+
+
 def _naming_mismatch(ap, folder, script, release_type, tags):
     """Expected-relative-path comparison for grade_check_naming.
+
+    *folder* is the MUSIC folder; the paths are compared against the library
+    root inside it (<music>/Artists) — the same base the organizer's
+    organize() uses — so an album sitting in the music folder root is a
+    mismatch, not a false pass.
 
     The naming script defines the target path WITHOUT the file extension
     (beets-style — the extension is preserved from the source file), so the
@@ -889,8 +943,10 @@ def _naming_mismatch(ap, folder, script, release_type, tags):
     produce false failures.
     """
     from mlo.naming import eval_script, track_variables
+    from mlo.paths import library_root
 
-    actual = os.path.relpath(ap, folder)
+    base = library_root(folder) if folder else folder
+    actual = os.path.relpath(ap, base)
     variables = track_variables(tags or {}, release_type=release_type)
     ext = os.path.splitext(ap)[1]
     expected_full = eval_script(script, variables, shorter_ids=False) + ext
@@ -907,6 +963,20 @@ def _naming_mismatch(ap, folder, script, release_type, tags):
         if exp and _norm_path_case(exp) == _norm_path_case(actual):
             return ("case", expected_full or expected_short)
     return ("path", expected_full or expected_short)
+
+
+def _audio_format_info(af):
+    """(bit depth, sample rate) of an already-parsed AudioFile, or
+    (None, None) when the format doesn't report them. mutagen names bit
+    depth inconsistently — some formats expose bits_per_sample, others bits.
+    """
+    info = getattr(getattr(af, "audio", None), "info", None)
+    if info is None:
+        return (None, None)
+    bits = getattr(info, "bits_per_sample", None)
+    if bits is None:
+        bits = getattr(info, "bits", None)
+    return (bits, getattr(info, "sample_rate", None))
 
 
 def _grade_album(album_dir, lyrics_format, cfg=None):
@@ -938,8 +1008,10 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
     album_artist = None
 
     # Path-grading setup (grade_check_naming): the naming script is evaluated
-    # per track exactly like the organizer does, minus the network MB lookup —
-    # RELEASETYPE comes from tags only.
+    # per track exactly like the organizer does. RELEASETYPE comes from tags;
+    # when the tag is missing it is resolved from the MusicBrainz release the
+    # same way organize does (see _mb_release_type), so an organized folder
+    # matches its own naming script.
     music_folder = str(cfg.get("music_folder") or "").strip()
     naming_script = (str(cfg.get("naming_script") or "").strip() or DEFAULT_NAMING_SCRIPT)
     try:
@@ -956,6 +1028,10 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
     lyrics_present_count = 0
     lyrics_expected_count = 0
     instrumental_count = 0
+    # Bit depth / sample rate per audio path, captured from the mutagen info
+    # parsed in the loop below — the CD format pass reads it from here
+    # instead of re-opening every file.
+    format_by_path = {}
 
     def add_issue(field, where="album"):
         issues.setdefault(field, set()).add(where)
@@ -1003,6 +1079,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
 
         # Required per-track tags (skip if per-filetype disabled).
         is_video_track = os.path.splitext(ap)[1].lower() in LIB_VIDEO_EXTS
+        format_by_path[ap] = _audio_format_info(af)
         for t in PER_TRACK_TAGS:
             if is_video_track and t in VIDEO_SKIP_TAGS:
                 # Video containers: ReplayGain / DR never apply (no engine
@@ -1155,11 +1232,19 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 tags_map = af.all_tags() or {}
             except Exception:
                 tags_map = {}
-            if album_release_type is None and tags_map.get("RELEASETYPE"):
-                album_release_type = tags_map.get("RELEASETYPE")
+            if album_release_type is None:
+                # Tags first; the organizer's MusicBrainz fallback only when
+                # the tag is absent and an album MBID is there to resolve.
+                # Resolved once per album — the value is sticky (the release
+                # medium is an album property, not a per-track one).
+                album_release_type = str(tags_map.get("RELEASETYPE") or "").strip()
+                if not album_release_type and tags_map.get("MUSICBRAINZ_ALBUMID"):
+                    album_release_type = _mb_release_type(
+                        tags_map["MUSICBRAINZ_ALBUMID"]) or ""
             kind, expected = _naming_mismatch(
                 ap, music_folder, naming_script,
-                tags_map.get("RELEASETYPE") or album_release_type,
+                str(tags_map.get("RELEASETYPE") or "").strip()
+                or album_release_type or None,
                 tags_map,
             )
             if kind == "path" and cfg.get("grade_check_naming", True):
@@ -1358,10 +1443,19 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         if source_clean and not is_video_track:
             source_values.append(source_clean)
 
-        # Lyrics status.
+        # Lyrics status. A sidecar only counts when it actually holds text:
+        # an empty .lrc left behind by an aborted run used to make a
+        # lyric-less track report (and grade as) having lyrics.
         lyr = af.get_lyrics()
         embedded = bool(lyr and str(lyr).strip())
-        lrc = os.path.exists(_lrc_for(ap))
+        lrc = False
+        _lrc_path = _lrc_for(ap)
+        if os.path.exists(_lrc_path):
+            try:
+                with open(_lrc_path, "r", encoding="utf-8", errors="replace") as _f:
+                    lrc = bool(_f.read().strip())
+            except OSError:
+                lrc = False
 
         track["lyrics_embedded"] = embedded
         track["lyrics_lrc"] = lrc
@@ -1369,6 +1463,12 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         inst = af.get_tag("INSTRUMENTAL")
         inst_val = str(inst).strip() if inst is not None else None
         track["values"]["INSTRUMENTAL"] = inst_val
+
+        # Manual AudioAuditor override. Read here (where the file's tags are
+        # already open) so it rides the track payload; it is APPLIED much
+        # later, after every derived REAL/FAKE verdict, so it wins over them.
+        _ov = str(af.get_tag("AUDIOAUDITOR_OVERRIDE") or "").strip().upper()
+        track["values"]["AUDIOAUDITOR_OVERRIDE"] = _ov if _ov in ("REAL", "FAKE") else None
 
         if inst_val == "1":
             instrumental_count += 1
@@ -1420,9 +1520,17 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 fmt_ok = True
                 # Check formatting (trailing/leading spaces, blank lines) if enabled
                 if cfg.get("grade_check_lyrics_spaces", True) or cfg.get("grade_check_lyrics_blank_lines", True):
-                    if lyr_text and not _lyrics_formatted(lyr_text, cfg, is_for_lrc=False):
+                    # Each toggle gates its own comparison: turning off just
+                    # one must not still fail the album for that difference.
+                    _ly_spaces = cfg.get("grade_check_lyrics_spaces", True)
+                    _ly_blanks = cfg.get("grade_check_lyrics_blank_lines", True)
+                    if lyr_text and not _lyrics_formatted(
+                            lyr_text, cfg, is_for_lrc=False,
+                            check_spaces=_ly_spaces, check_blank_lines=_ly_blanks):
                         fmt_ok = False
-                    if lrc_text and not _lyrics_formatted(lrc_text, cfg, is_for_lrc=True):
+                    if lrc_text and not _lyrics_formatted(
+                            lrc_text, cfg, is_for_lrc=True,
+                            check_spaces=_ly_spaces, check_blank_lines=_ly_blanks):
                         fmt_ok = False
                 # Zero timestamp check if enabled
                 if cfg.get("grade_check_lyrics_zero", True):
@@ -1516,7 +1624,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 and needs_translation(_xlit_src, cfg):
             lang = primary_translation_lang(cfg)
             total_checks += 1
-            trans_text = str(af.get_lyrics_transform("TRANSLATION", lang) or "").strip()
+            trans_text = str(af.get_lyrics_transform("TRANSLATION", lang, exact=True) or "").strip()
             if not trans_text:
                 _trans_side = os.path.splitext(ap)[0] + f".{lang}.lrc"
                 if os.path.isfile(_trans_side):
@@ -1557,12 +1665,14 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     basename)
                 track["issues"].append("LYRICS")
 
-        # Sidecar track cover (e.g. "01 - Song.flac" → "01 - Song.jpg" in same folder)
+        # Per-track cover — a manifest entry (one image shared by several
+        # tracks, e.g. 7 and 8) or a same-stem sidecar for this track.
         # Graded with the same cover checks as the album cover.* (size, square, etc.)
-        # when such a sidecar exists for this track. Uses the same config keys
+        # when such an image exists for this track. Uses the same config keys
         # (cover_target_size, cover_enforce_size/square, cover_crop_threshold, etc.)
+        # Shared image => graded per referencing track, same verdict each time.
         try:
-            sidecar = get_sidecar_cover_path(album_dir, basename)
+            sidecar = get_track_cover(album_dir, basename)
             track["sidecar_cover"] = sidecar
             track["sidecar_cover_file"] = os.path.basename(sidecar) if sidecar else None
             if sidecar and cfg.get("grade_check_sidecar_cover", True):
@@ -1589,7 +1699,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                                     if enforce_size_sc and (abs(_w_sc - tgt_sc) > 1 or abs(_h_sc - tgt_sc) > 1):
                                         detail = f"wrong size {_w_sc}x{_h_sc} (need {tgt_sc}x{tgt_sc})"
                                     elif enforce_square_sc:
-                                        thr_sc = float(cfg.get("cover_crop_threshold", 0.05) or 0.05)
+                                        thr_sc = float(cfg.get("cover_crop_threshold", 0.0) or 0.0)
                                         thr_sc = max(0.0, min(0.5, thr_sc))
                                         ratio_sc = _w_sc / _h_sc if _h_sc else 1.0
                                         if abs(ratio_sc - 1.0) > thr_sc:
@@ -1610,6 +1720,10 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
 
         tracks.append(track)
 
+    # CD passes below look a track up by its full path; build the index once
+    # instead of scanning the track list per file.
+    track_by_path = {os.path.join(album_dir, tr["file"]): tr for tr in tracks}
+
     # MEDIA consistency (skip if MEDIA_SOURCE disabled for all tracks).
     any_media_enabled = any(
         should_write_audio_tag(cfg, "MEDIA", filepath=os.path.join(album_dir, tr["file"]))
@@ -1628,7 +1742,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         # No enabled tracks — treat as unknown but not failing
         media_summary = None
 
-    digital = media_summary == "Digital Media"
+    digital = _is_digital(media_summary)
 
     # SOURCE policy per track (skipped if MEDIA_SOURCE disabled for this filetype).
     if cfg.get("grade_check_source", True):
@@ -1707,7 +1821,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 tr["values"][t] = album_val
 
     # Media-specific file requirements.
-    if media_summary == "CD":
+    if _is_cd(media_summary):
         if cfg.get("grade_check_cd_log", True):
             total_checks += 1
             if not has_log:
@@ -1747,7 +1861,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
 
         # CD releases must carry the rip-log score on every track (skipped if
         # LOG_GRADE disabled for this filetype). Digital Media has no log.
-        if media_summary == "CD" and cfg.get("grade_check_log_grade", True):
+        if _is_cd(media_summary) and cfg.get("grade_check_log_grade", True):
             for tr in tracks:
                 if tr.get("unreadable"):
                     continue
@@ -1803,12 +1917,8 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     discs_map = _album_discs(album_dir)
                     multi = bool(discs_map)
                     for ap in audio_paths:
-                        tr_track = next(
-                            (t for t in tracks
-                             if t.get("unreadable") is False
-                             and os.path.join(album_dir, t["file"]) == ap),
-                            None)
-                        if tr_track is None:
+                        tr_track = track_by_path.get(ap)
+                        if tr_track is None or tr_track.get("unreadable"):
                             continue
                         if _is_video_file(tr_track.get("file")):
                             continue
@@ -1836,54 +1946,35 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 pass
 
         # CD format: must be 16-bit 44.1 kHz (CD-DA) — helps detect fake rips from hi-res upsampled sources
-        if cfg.get("grade_check_cd_format", True) and media_summary == "CD":
+        if cfg.get("grade_check_cd_format", True) and _is_cd(media_summary):
             try:
                 for ap in audio_paths:
-                    tr_track = next(
-                        (t for t in tracks
-                         if t.get("unreadable") is False
-                         and os.path.join(album_dir, t["file"]) == ap),
-                        None)
-                    if tr_track is None:
+                    tr_track = track_by_path.get(ap)
+                    if tr_track is None or tr_track.get("unreadable"):
                         continue
                     if _is_video_file(tr_track.get("file")):
                         continue
-                    # Get audio format details via mutagen
-                    try:
-                        af_fmt = AudioFile(ap)
-                        if af_fmt.audio is None or not hasattr(af_fmt.audio, "info") or af_fmt.audio.info is None:
-                            continue
-                        info = af_fmt.audio.info
-                        # mutagen FLAC/OGG: bits_per_sample + sample_rate; MP3: sample_rate; MP4: sample_rate/bits
-                        bits = getattr(info, "bits_per_sample", None)
-                        if bits is None:
-                            bits = getattr(info, "bits_per_sample", None)  # fallback
-                            # For some formats, bits may be in different attr
-                            if bits is None:
-                                bits = getattr(info, "bits", None)
-                        rate = getattr(info, "sample_rate", None)
-                        if rate is None:
-                            rate = getattr(info, "sample_rate", None)
-                        # Only check when we can determine both; CD must be 16/44.1
-                        # For MP3/MP4 where bits not available, check rate only
-                        is_ok = True
-                        detail = ""
-                        if bits is not None and bits != 16:
-                            is_ok = False
-                            detail = f"{bits}-bit"
-                        if rate is not None and rate != 44100:
-                            is_ok = False
-                            detail = f"{detail} {rate}Hz".strip() if detail else f"{rate}Hz"
-                        elif rate is None:
-                            # No rate info: cannot verify, skip
-                            continue
-                        total_checks += 1
-                        if not is_ok:
-                            failed_checks += 1
-                            add_issue(f"CD must be 16-bit 44.1 kHz (found {detail or 'unknown format'})", tr_track["file"])
-                            tr_track["issues"].append("CD_FORMAT")
-                    except Exception:
+                    # Format info captured when the file was parsed for its
+                    # tags — no second AudioFile() per track.
+                    bits, rate = format_by_path.get(ap) or (None, None)
+                    if rate is None:
+                        # No rate info: cannot verify, skip
                         continue
+                    # CD must be 16/44.1. Not every format reports bit depth
+                    # (MP3/MP4 usually don't) — then the rate is the only check.
+                    is_ok = True
+                    detail = ""
+                    if bits is not None and bits != 16:
+                        is_ok = False
+                        detail = f"{bits}-bit"
+                    if rate != 44100:
+                        is_ok = False
+                        detail = f"{detail} {rate}Hz".strip() if detail else f"{rate}Hz"
+                    total_checks += 1
+                    if not is_ok:
+                        failed_checks += 1
+                        add_issue(f"CD must be 16-bit 44.1 kHz (found {detail or 'unknown format'})", tr_track["file"])
+                        tr_track["issues"].append("CD_FORMAT")
             except Exception:
                 pass
 
@@ -2048,16 +2139,23 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             else:
                 accuraterip_status = "NONE"
             # Store for viewer columns (album-level and per-track)
+            # Album disc mapping — scanned once for the whole album; both
+            # per-track lookups below used to re-list the folder per track.
+            try:
+                from .discs import album_discs as _ad_tracks
+                discs_all_tracks = _ad_tracks(album_dir)
+            except Exception:
+                discs_all_tracks = {}
             # Per-disc checksum (fixes whole-album FAKE when only one disc's log is bad) and per-track accuraterip
             for tr in tracks:
                 # Per-disc checksum lookup — only that disc's tracks show FAKE
                 try:
-                    from .discs import disc_of_filename as _dof_c, _track_num_of as _tnof_c, album_discs as _ad_c2
+                    from .discs import disc_of_filename as _dof_c
                     base_c = tr["file"]
                     disc_n_c = _dof_c(base_c)
                     if disc_n_c is None:
                         try:
-                            discs_all_c = _ad_c2(album_dir)
+                            discs_all_c = discs_all_tracks
                             if discs_all_c:
                                 full_c = os.path.join(album_dir, base_c)
                                 for dn_c, tlist_c in discs_all_c.items():
@@ -2076,14 +2174,14 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     tr["checksum_status"] = checksum_status
                 # Resolve per-track AccurateRip: disc + track number lookup
                 try:
-                    from .discs import disc_of_filename as _dof, _track_num_of as _tnof, _file_track_number as _ftn, album_discs as _ad2
+                    from .discs import disc_of_filename as _dof, _track_num_of as _tnof, _file_track_number as _ftn
                     # Determine disc for this track file
                     base = tr["file"]
                     disc_n = _dof(base)
                     if disc_n is None:
                         # Fallback: infer from album discs mapping
                         try:
-                            discs_all = _ad2(album_dir)
+                            discs_all = discs_all_tracks
                             if discs_all:
                                 # Find which disc contains this file path
                                 full = os.path.join(album_dir, base)
@@ -2133,10 +2231,10 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     if _is_video_file(tr.get("file")):
                         pass
                     else:
-                        if media_summary == "CD" and cfg.get("audit_require_accuraterip", True) and cfg.get("grade_check_accuraterip", True):
+                        if _is_cd(media_summary) and cfg.get("audit_require_accuraterip", True) and cfg.get("grade_check_accuraterip", True):
                             if tr.get("accuraterip_status") in ("NONE", "FAKE"):
                                 tr["audit"] = "FAKE"
-                        if media_summary == "CD" and cfg.get("audit_verify_log_checksum", True) and cfg.get("grade_check_log_checksum", True):
+                        if _is_cd(media_summary) and cfg.get("audit_verify_log_checksum", True) and cfg.get("grade_check_log_checksum", True):
                             if tr.get("checksum_status") == "FAKE":
                                 tr["audit"] = "FAKE"
                 except Exception:
@@ -2146,22 +2244,39 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 if _is_video_file(tr.get("file")):
                     continue
                 try:
-                    if media_summary == "CD" and cfg.get("audit_require_accuraterip", True) and cfg.get("grade_check_accuraterip", True):
+                    if _is_cd(media_summary) and cfg.get("audit_require_accuraterip", True) and cfg.get("grade_check_accuraterip", True):
                         if tr.get("accuraterip_status") in ("NONE", "FAKE"):
                             if tr.get("audit") != "FAKE":
                                 tr["audit"] = "FAKE"
-                    if media_summary == "CD" and cfg.get("audit_verify_log_checksum", True) and cfg.get("grade_check_log_checksum", True):
+                    if _is_cd(media_summary) and cfg.get("audit_verify_log_checksum", True) and cfg.get("grade_check_log_checksum", True):
                         if tr.get("checksum_status") == "FAKE" and tr.get("audit") != "FAKE":
                             tr["audit"] = "FAKE"
                 except Exception:
                     pass
+            # ---- manual override wins over every derived verdict ----------
+            # AudioAuditor's REAL/FAKE is EVIDENCE, not a fact: a user who has
+            # verified a rip by other means (a second drive, a different tool,
+            # a known-good source) must be able to say so and have it stick.
+            # The AUDIOAUDITOR_OVERRIDE tag is applied LAST, after every
+            # derived path above, and both the per-track statuses and the
+            # album-level ALL-REAL gates are made to agree with it — so a
+            # forced re-audit reproduces the override instead of erasing it.
+            for tr in tracks:
+                ov = str(tr.get("values", {}).get("AUDIOAUDITOR_OVERRIDE") or "").strip().upper()
+                if ov not in ("REAL", "FAKE"):
+                    continue
+                tr["audit"] = ov
+                tr["audit_override"] = ov
+                tr["accuraterip_status"] = ov
+                if ov == "REAL":
+                    tr["checksum_status"] = "REAL"
         except Exception:
             pass
 
         # Grading: AccurateRip is AUDIT-only per user request — grading is reserved to tagging.
         # Do NOT fail grading on missing/FAKE accurip; only auditing fails. Viewer column still shows REAL/NONE/FAKE.
 
-    elif media_summary == "Digital Media":
+    elif _is_digital(media_summary):
         # SOURCE requirements already checked per-track.
         pass
 
@@ -2477,7 +2592,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         if "accuraterip_status" not in locals():
             accuraterip_status = "NONE"
         # For non-CD, ensure per-track values exist
-        if media_summary != "CD":
+        if not _is_cd(media_summary):
             for tr in tracks:
                 if "checksum_status" not in tr:
                     tr["checksum_status"] = "NONE"
@@ -2504,7 +2619,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         # Music-video tracks are never CD-DA — CD-only audit checks exclude them.
         cd_tracks = [tr for tr in tracks if not _is_video_file(tr.get("file"))]
         try:
-            if media_summary == "CD" and cfg.get("audit_require_accuraterip", True) and cfg.get("grade_check_accuraterip", True):
+            if _is_cd(media_summary) and cfg.get("audit_require_accuraterip", True) and cfg.get("grade_check_accuraterip", True):
                 # Check per-track accuraterip: if any track is NONE/FAKE, album audit is FAKE, but per-track already set correctly above
                 for tr in cd_tracks:
                     if tr.get("accuraterip_status") in ("NONE", "FAKE"):
@@ -2513,7 +2628,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             pass
         # Check log checksum per-track (per-disc)
         try:
-            if media_summary == "CD" and cfg.get("audit_verify_log_checksum", True) and cfg.get("grade_check_log_checksum", True):
+            if _is_cd(media_summary) and cfg.get("audit_verify_log_checksum", True) and cfg.get("grade_check_log_checksum", True):
                 for tr in tracks:
                     if tr.get("checksum_status") == "FAKE":
                         return "FAKE"
@@ -2521,7 +2636,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             pass
         # Check CD format (lightweight) — per-track already
         try:
-            if media_summary == "CD" and cfg.get("audit_check_cd_format", True):
+            if _is_cd(media_summary) and cfg.get("audit_check_cd_format", True):
                 # CD must be 16/44.1 — if any track failed CD_FORMAT grading, audit is FAKE
                 for tr in tracks:
                     if "CD_FORMAT" in tr.get("issues", []):
@@ -2535,8 +2650,8 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             return "FAKE"
         # For REAL, require all per-track checks to be REAL as well (not just album aggregate)
         try:
-            all_ar_real = all(tr.get("accuraterip_status") == "REAL" for tr in cd_tracks) if media_summary == "CD" and cfg.get("audit_require_accuraterip", True) and cfg.get("grade_check_accuraterip", True) else True
-            all_csum_ok = all(tr.get("checksum_status") != "FAKE" for tr in tracks) if media_summary == "CD" and cfg.get("audit_verify_log_checksum", True) and cfg.get("grade_check_log_checksum", True) else True
+            all_ar_real = all(tr.get("accuraterip_status") == "REAL" for tr in cd_tracks) if _is_cd(media_summary) and cfg.get("audit_require_accuraterip", True) and cfg.get("grade_check_accuraterip", True) else True
+            all_csum_ok = all(tr.get("checksum_status") != "FAKE" for tr in tracks) if _is_cd(media_summary) and cfg.get("audit_verify_log_checksum", True) and cfg.get("grade_check_log_checksum", True) else True
         except Exception:
             all_ar_real = accuraterip_status == "REAL"
             all_csum_ok = checksum_status != "FAKE"
@@ -2546,12 +2661,12 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         # (audit hasn't been run, but files would pass)
         if tag_summary is None and all_ar_real and all_csum_ok:
             # Need to ensure accuraterip is REAL when required
-            if media_summary == "CD" and cfg.get("audit_require_accuraterip", True) and cfg.get("grade_check_accuraterip", True):
+            if _is_cd(media_summary) and cfg.get("audit_require_accuraterip", True) and cfg.get("grade_check_accuraterip", True):
                 if all_ar_real:
                     return "REAL"
             else:
                 return "REAL"
-        if tag_summary is None and media_summary == "CD":
+        if tag_summary is None and _is_cd(media_summary):
             # No accurip and no tag → treat as not yet audited, but per user should be FAKE
             # Only when audit_require_accuraterip is on and any track is NONE
             if cfg.get("audit_require_accuraterip", True) and cfg.get("grade_check_accuraterip", True):

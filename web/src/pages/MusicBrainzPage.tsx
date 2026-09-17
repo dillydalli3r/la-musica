@@ -28,6 +28,25 @@ const TYPES = [
 ] as const;
 type MBType = (typeof TYPES)[number]["id"];
 
+/** MusicBrainz release types, split the way MusicBrainz splits them: a
+ *  release group has ONE primary type (Album / Single / EP / Broadcast /
+ *  Other) plus any number of secondary types (Soundtrack / Live /
+ *  Compilation / Remix / DJ-mix / Mixtape/Street / Demo / Spokenword /
+ *  Interview / Audiobook / Audio drama / Field recording). "Score album"
+ *  lives as Album + Soundtrack, never as its own primary type. */
+const PRIMARY_TYPES = ["Album", "Single", "EP", "Broadcast", "Other"] as const;
+const SECONDARY_TYPES = [
+  "Compilation", "Soundtrack", "Spokenword", "Interview", "Audiobook",
+  "Audio drama", "Live", "Remix", "DJ-mix", "Mixtape/Street", "Demo",
+  "Field recording",
+] as const;
+
+/** "Album + Soundtrack" — the full type of a release/release group. */
+const typeLabel = (
+  primary?: string | null,
+  secondary?: readonly string[] | null
+) => [primary, ...(secondary ?? [])].filter(Boolean).join(" + ");
+
 /** app route path for an entity ("release-group" browses at /mb/rg/…) */
 const routeFor = (type: string) =>
   type === "release-group" ? "rg" : type === "release" ? "release" : type;
@@ -48,6 +67,8 @@ interface RelRow {
   formats?: string; disc_count?: number; track_count?: number;
   track_breakdown?: string; barcode?: string; release_group?: string;
   disambiguation?: string;
+  /** the release group's type: primary + secondary ("Album + Soundtrack") */
+  primary_type?: string; secondary_types?: string[];
 }
 const mbUrl = (type: string, id: string) =>
   `https://musicbrainz.org/${type === "release-group" ? "release-group" : type}/${id}`;
@@ -271,11 +292,12 @@ const COLUMNS: Record<MBType, { k: string; label: string; className?: string }[]
   release: [
     { k: "title", label: "Title" },
     { k: "artist", label: "Artist", className: "w-[20%]" },
+    { k: "typeLabel", label: "Type", className: "w-[11%]" },
     { k: "date", label: "Date", className: "w-[9%]" },
-    { k: "formats", label: "Format", className: "w-[12%]" },
+    { k: "formats", label: "Format", className: "w-[11%]" },
     { k: "track_count", label: "Tracks", className: "w-[7%] text-right" },
     { k: "country", label: "Country", className: "w-[8%]" },
-    { k: "catalog_number", label: "Cat #", className: "w-[12%]" },
+    { k: "catalog_number", label: "Cat #", className: "w-[11%]" },
     { k: "score", label: "Score", className: "w-20 cell-nowrap text-right" },
   ],
   recording: [
@@ -291,6 +313,8 @@ export function MBSearchPage() {
   const [params, setParams] = useSearchParams();
   const q = params.get("q") ?? "";
   const type = (params.get("type") as MBType) || "release";
+  const ptype = params.get("ptype") ?? "";
+  const stype = params.get("stype") ?? "";
   const [text, setText] = useState(q);
   const nav = useNavigate();
   const prefetch = useMbPrefetch();
@@ -301,6 +325,15 @@ export function MBSearchPage() {
     const next = new URLSearchParams();
     if (nextQ.trim()) next.set("q", nextQ.trim());
     next.set("type", type);
+    if (ptype) next.set("ptype", ptype);
+    if (stype) next.set("stype", stype);
+    setParams(next, { replace: true });
+  };
+
+  const setTypeFilter = (key: "ptype" | "stype", value: string) => {
+    const next = new URLSearchParams(params);
+    if (value) next.set(key, value);
+    else next.delete(key);
     setParams(next, { replace: true });
   };
 
@@ -337,12 +370,12 @@ export function MBSearchPage() {
   const mode = type === "release" ? (looksBarcode ? "barcode" : looksCatno ? "catno" : "free") : "free";
   const idLike = !!urlMatch || !!bareId;
   const search = useInfiniteQuery({
-    queryKey: ["mbSearch", type, q, mode],
+    queryKey: ["mbSearch", type, q, mode, ptype, stype],
     queryFn: async ({ pageParam }) => {
-      const page = await api.mbSearch(type, q, PAGE, mode, pageParam as number);
+      const page = await api.mbSearch(type, q, PAGE, mode, pageParam as number, ptype, stype);
       if (mode === "free" || page.rows.length) return page;
       // exact search found nothing at this offset — show the free-text list
-      return api.mbSearch(type, q, PAGE, "free", pageParam as number);
+      return api.mbSearch(type, q, PAGE, "free", pageParam as number, ptype, stype);
     },
     initialPageParam: 0,
     getNextPageParam: (last, all) => {
@@ -367,12 +400,9 @@ export function MBSearchPage() {
             tags: (r.tags ?? []).join(" · "),
           };
         if (type === "release-group")
-          return {
-            ...r,
-            typeLabel: [r.primary_type, ...(r.secondary_types ?? [])].filter(Boolean).join("/"),
-          };
+          return { ...r, typeLabel: typeLabel(r.primary_type, r.secondary_types) };
         if (type === "recording") return { ...r, len: r.length ? fmtLen(Number(r.length)) : "" };
-        return r;
+        return { ...r, typeLabel: typeLabel(r.primary_type, r.secondary_types) };
       }),
     [rows, type]
   );
@@ -415,6 +445,7 @@ export function MBSearchPage() {
               {r.disambiguation ? <span className="text-zinc-500"> ({r.disambiguation})</span> : null}
             </td>
             <td className="td text-zinc-400 truncate">{r.artist || "—"}</td>
+            <td className="td text-zinc-500 truncate">{r.typeLabel || "—"}</td>
             <td className="td text-zinc-500">{r.date || "—"}</td>
             <td className="td text-zinc-500">{r.formats || "—"}</td>
             <td className="td text-zinc-500 text-right">{r.track_count || "—"}</td>
@@ -465,6 +496,44 @@ export function MBSearchPage() {
           setParams(next, { replace: true });
         }} options={TYPES} />
       </div>
+
+      {/* Release types are two axes in MusicBrainz: a primary type (Album /
+          Single / EP / …) and any number of secondary types (Soundtrack /
+          Live / Compilation / …) — both narrow the search server-side. */}
+      {(type === "release" || type === "release-group") && (
+        <div className="mt-2 flex items-center gap-2 flex-wrap text-xs">
+          <span className="text-[10px] uppercase tracking-widest text-zinc-500">Type</span>
+          <select
+            className="input !py-1 !w-auto"
+            value={ptype}
+            onChange={(e) => setTypeFilter("ptype", e.target.value)}
+            title="MusicBrainz primary release type"
+          >
+            <option value="">Any</option>
+            {PRIMARY_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+          <span className="text-zinc-600">+</span>
+          <select
+            className="input !py-1 !w-auto"
+            value={stype}
+            onChange={(e) => setTypeFilter("stype", e.target.value)}
+            title="MusicBrainz secondary release type"
+          >
+            <option value="">Any</option>
+            {SECONDARY_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+          {(ptype || stype) && (
+            <button className="btn-ghost !py-1 text-[11px]" onClick={() => {
+              const next = new URLSearchParams(params);
+              next.delete("ptype");
+              next.delete("stype");
+              setParams(next, { replace: true });
+            }}>
+              Clear
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="mt-4">
         {urlMatch ? (
@@ -531,6 +600,7 @@ export function MBSearchPage() {
 
 export function MBArtistPage() {
   const { id = "" } = useParams();
+  const nav = useNavigate();
   const prefetch = useMbPrefetch();
   const discography = useInfiniteQuery({
     queryKey: ["mbArtist", id],
@@ -622,7 +692,7 @@ export function MBArtistPage() {
                     <div
                       key={rg.id}
                       className="table-row !cursor-pointer"
-                      onClick={() => location.assign(`/mb/rg/${rg.id}`)}
+                      onClick={() => nav(`/mb/rg/${rg.id}`)}
                       onMouseEnter={() => prefetch("release-group", rg.id)}
                     >
                       <div className="px-3 py-2 flex items-center gap-3 min-w-0">
@@ -661,6 +731,7 @@ export function MBArtistPage() {
 
 export function MBReleaseGroupPage() {
   const { id = "" } = useParams();
+  const nav = useNavigate();
   const prefetch = useMbPrefetch();
   const editions = useInfiniteQuery({
     queryKey: ["mbRG", id],
@@ -731,7 +802,7 @@ export function MBReleaseGroupPage() {
                 <tr
                   key={r.id}
                   className="table-row !cursor-pointer"
-                  onClick={() => location.assign(`/mb/release/${r.id}`)}
+                  onClick={() => nav(`/mb/release/${r.id}`)}
                   onMouseEnter={() => prefetch("release", r.id)}
                   title="Open this release"
                 >
@@ -810,7 +881,7 @@ export function MBReleasePage() {
         soulseekQuery={[r.artists?.[0]?.name, r.title].filter(Boolean).join(" ")}
         meta={[
           artist,
-          r.release_type,
+          typeLabel(r.primary_type, r.secondary_types) || r.release_type,
           r.date,
           [r.label, r.catalog_number].filter(Boolean).join(" · "),
           r.country,
@@ -930,6 +1001,7 @@ export function MBReleasePage() {
 
 export function MBRecordingPage() {
   const { id = "" } = useParams();
+  const nav = useNavigate();
   const prefetch = useMbPrefetch();
   const appearances = useInfiniteQuery({
     queryKey: ["mbRecording", id],
@@ -998,7 +1070,7 @@ export function MBRecordingPage() {
                 <tr
                   key={rel.id}
                   className="table-row !cursor-pointer"
-                  onClick={() => location.assign(`/mb/release/${rel.id}`)}
+                  onClick={() => nav(`/mb/release/${rel.id}`)}
                   onMouseEnter={() => prefetch("release", rel.id)}
                 >
                   <td className="td text-zinc-500 cell-nowrap">{rel.date || "—"}</td>
@@ -1006,7 +1078,9 @@ export function MBRecordingPage() {
                     <span className="truncate">{rel.title}</span>
                   </td>
                   <td className="td text-zinc-500">{rel.formats || "—"}</td>
-                  <td className="td text-zinc-500">{rel.release_group || "—"}</td>
+                  <td className="td text-zinc-500 truncate">
+                    {typeLabel(rel.primary_type, rel.secondary_types) || "—"}
+                  </td>
                   <td className="td text-zinc-500 text-right tabular-nums cell-nowrap">{tracksLabel(rel) || "—"}</td>
                   <td className="td text-zinc-500">{rel.country || "—"}</td>
                   <td className="td w-10 pr-2">

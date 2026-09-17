@@ -54,9 +54,15 @@ export default function PlaylistsPage() {
   });
 
   const importM3u8 = async (file: File) => {
-    await api.playlistImport(file.name.replace(/\.m3u8?$/i, ""), file);
-    refresh();
-    toast("Playlist imported");
+    try {
+      await api.playlistImport(file.name.replace(/\.m3u8?$/i, ""), file);
+      refresh();
+      toast("Playlist imported");
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      if (fileRef.current) fileRef.current.value = "";
+    }
   };
 
   const queueFor = (paths: string[]) =>

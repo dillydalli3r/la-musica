@@ -67,7 +67,11 @@ def edit_run_all_order(config):
         print("    8. Auto Tagging")
         print("    9. AccurateRip")
         print("   10. Format All")
-        print("   11. Video Remux (MP4)")
+        print("   11. Video Remux (MKV)")
+        print("   12. Key & BPM")
+        print("   13. Fetch Lyrics")
+        print("   14. Beets Tagging")
+        print("   15. Lyrics Translate/Transliterate")
         print("-" * 72)
 
         current = config.get("run_all_order", DEFAULT_RUN_ALL_ORDER)
@@ -84,7 +88,7 @@ def edit_run_all_order(config):
         valid = True
 
         for p in parts:
-            if p in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"):
+            if p.isdigit() and 1 <= int(p) <= 15:
                 pid = int(p)
                 if pid not in order:
                     order.append(pid)
@@ -448,7 +452,7 @@ def show_custom_menu():
     print("    8. Auto Tagging")
     print("    9. AccurateRip")
     print("   10. Format All")
-    print("   11. Video Remux (MP4)")
+    print("   11. Video Remux (MKV)")
     print("   12. Key & BPM")
     print("   13. Fetch Lyrics")
     print("   14. Beets Tagging")
@@ -475,7 +479,12 @@ def show_custom_menu():
     return []
 
 
-def run_scripts_sequence(config, script_ids, title):
+def build_script_runners():
+    """Map script id -> (label, runner) for every pipeline script.
+
+    Optional scripts whose dependency fails to import are omitted, so a
+    caller can degrade gracefully (report/skip) instead of crashing.
+    """
     runners = {
         1: ("Format Lyrics", run_format_lyrics),
         2: ("Format CUEs", run_format_cues),
@@ -509,6 +518,11 @@ def run_scripts_sequence(config, script_ids, title):
         runners[15] = ("Lyrics Translate/Transliterate", run_lyrics_xlit)
     except ImportError:
         pass
+    return runners
+
+
+def run_scripts_sequence(config, script_ids, title):
+    runners = build_script_runners()
 
     auto_advance = config.get("auto_advance", True)
 
@@ -593,7 +607,7 @@ def show_main_menu(config):
     print("  8. Auto Tagging     (advisory + instrumental)")
     print("  9. AccurateRip     (CUETools .accurip files)")
     print(" 10. Format All      (canonical trim pass)")
-    print(" 11. Video Remux     (any video -> MP4, audio -> FLAC)")
+    print(" 11. Video Remux     (any video -> MKV, audio -> FLAC)")
     print(" 12. Key & BPM       (musical key + tempo tags)")
     print(" 13. Fetch Lyrics    (LRCLIB synced/plain)")
     print(" 14. Beets Tagging   (MusicBrainz via beets)")
@@ -648,7 +662,7 @@ def manage_dependencies():
         tools = refresh_tool_cache()
         log(
             c(
-                f"Detected {len(tools)}/8 tools: "
+                f"Detected {len(tools)}/{len(DISPLAY_NAMES)} tools: "
                 + ", ".join(f"{k} v{v['version']}" for k, v in tools.items()),
                 Color.GREEN,
             )
@@ -667,19 +681,7 @@ def main():
 
     config = load_config()
 
-    runners = {
-        1: ("Format Lyrics", run_format_lyrics),
-        2: ("Format CUEs", run_format_cues),
-        3: ("Optimize FLACs", run_optimize_flacs),
-        4: ("Grade Library", run_grade_library),
-        5: ("Process Images", run_process_images),
-        6: ("Audit Library", run_audit_library),
-        7: ("DR & ReplayGain", run_calc_dr_replaygain),
-        8: ("Auto Tagging", run_auto_tagging),
-        9: ("AccurateRip", run_generate_accurip),
-        10: ("Format All", run_format_all),
-        11: ("Video Remux", run_remux_videos),
-    }
+    runners = build_script_runners()
 
     while True:
         show_main_menu(config)

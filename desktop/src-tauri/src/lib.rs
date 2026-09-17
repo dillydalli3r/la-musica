@@ -1,8 +1,10 @@
-//! Music Library Optimizer — Tauri desktop shell.
+//! la musica — Tauri desktop shell.
 //!
 //! Spawns the Python FastAPI backend (`server.main:app` on 127.0.0.1:8000)
-//! when the app starts and kills it on exit. The React UI (web/dist) is
-//! served by the Tauri webview and talks to the backend over HTTP.
+//! when the app starts and stops it on exit, using the bundled `mlo-server`
+//! sidecar when there is one and the repo checkout otherwise. The React UI
+//! (web/dist) is served by the Tauri webview and talks to the backend over
+//! HTTP.
 
 use std::path::PathBuf;
 use std::process::{Child, Command};
@@ -28,21 +30,29 @@ const PORT: &str = "8000";
 /// Preference order:
 ///   1. bundled `mlo-server.exe` sidecar next to the app binary
 ///   2. `python`/`python3` on PATH running `-m uvicorn server.main:app`
-///      from the project root (works from the repo checkout)
-fn find_backend(app: &tauri::AppHandle) -> (String, Vec<String>, Option<PathBuf>) {
+///      from the repo checkout — the checkout must actually contain
+///      `server/main.py`, or there is nothing to run
+///
+/// `None` means "no backend available"; a packaged build without the sidecar
+/// has no checkout to point Python at, and spawning a bare `python` there
+/// would only produce a process that dies immediately.
+fn find_backend(app: &tauri::AppHandle) -> Option<(String, Vec<String>, Option<PathBuf>)> {
     // 1. bundled executable (PyInstaller one-file build of server.main)
     if let Ok(dir) = app.path().resource_dir() {
         for name in ["mlo-server.exe", "mlo-server"] {
             let cand = dir.join(name);
             if cand.is_file() {
-                return (cand.to_string_lossy().to_string(), Vec::new(), None);
+                return Some((cand.to_string_lossy().to_string(), Vec::new(), None));
             }
         }
     }
 
-    // 2. project-root checkout: python -m uvicorn server.main:app
+    // 2. repo checkout: python -m uvicorn server.main:app
     let root = project_root();
-    let mut args = vec![
+    if !root.join("server").join("main.py").is_file() {
+        return None;
+    }
+    let args = vec![
         "-m".into(),
         "uvicorn".into(),
         "server.main:app".into(),
@@ -51,12 +61,7 @@ fn find_backend(app: &tauri::AppHandle) -> (String, Vec<String>, Option<PathBuf>
         "--port".into(),
         PORT.into(),
     ];
-    if !root.is_dir() {
-        // absolute fallback: rely on a python module installed elsewhere
-        args.clear();
-    }
-    let py = which_python();
-    (py, args, root.is_dir().then_some(root))
+    Some((which_python(), args, Some(root)))
 }
 
 fn which_python() -> String {
@@ -135,13 +140,26 @@ fn spawn_backend(app: &tauri::AppHandle) {
         println!("[mlo-desktop] adopting already-running backend");
         return;
     }
-    let (exe, args, cwd) = find_backend(app);
+    let (exe, args, cwd) = match find_backend(app) {
+        Some(found) => found,
+        None => {
+            let msg = "la musica cannot start its backend: no bundled mlo-server \
+                       next to the app binary and no server/main.py in the working \
+                       directory. Install the packaged build, or launch from the \
+                       repository checkout.";
+            eprintln!("[la musica] {msg}");
+            app.dialog()
+                .message(msg)
+                .title("la musica — backend not found")
+                .blocking_show();
+            return;
+        }
+    };
     let mut cmd = Command::new(&exe);
     cmd.args(&args);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
-    cmd.env("MLO_BACKEND_PORT", PORT);
     cmd.env("MLO_ALLOW_SHUTDOWN", "1");
     #[cfg(windows)]
     {

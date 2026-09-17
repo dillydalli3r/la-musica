@@ -9,7 +9,7 @@ pipeline as the one-shot auto-importer (see server/soulseek_auto.py). The wish
 flips to ``imported`` when it lands.
 
 The wishlist lives in its own SQLite database next to playlists.db, so it
-survives restarts and travels with the ``Data`` folder.
+survives restarts and travels with the ``.mlo/data`` folder.
 """
 import json
 import os
@@ -27,10 +27,27 @@ def db_path():
     return os.path.join(app_data_dir(), "wishes.db")
 
 
+_init_lock = threading.Lock()
+_initialized = False
+
+
 def _conn():
+    global _initialized
     os.makedirs(os.path.dirname(db_path()), exist_ok=True)
     conn = sqlite3.connect(db_path(), timeout=30)
     conn.row_factory = sqlite3.Row
+    # Schema on FIRST USE, not on import: creating the file at import time
+    # planted an empty wishes.db in the state dir before the migration could
+    # move the user's real one in (see mlo.config._move_state_dir).
+    if not _initialized:
+        with _init_lock:
+            if not _initialized:
+                _initialized = True  # set first — _init() re-enters _conn()
+                try:
+                    _init()
+                except Exception:
+                    _initialized = False
+                    raise
     return conn
 
 
@@ -64,9 +81,6 @@ def _init():
                 );
                 """
             )
-
-
-_init()
 
 
 # --------------------------------------------------------------------------- #
@@ -121,12 +135,6 @@ def list_wishes():
 def get_wish(wid):
     with _conn() as c:
         r = c.execute("SELECT * FROM wishes WHERE id=?", (int(wid),)).fetchone()
-    return _row(r) if r else None
-
-
-def find_by_mbid(mbid):
-    with _conn() as c:
-        r = c.execute("SELECT * FROM wishes WHERE release_mbid=?", (str(mbid),)).fetchone()
     return _row(r) if r else None
 
 

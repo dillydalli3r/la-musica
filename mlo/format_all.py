@@ -24,6 +24,7 @@ from .audio import AudioFile
 from .config import should_write_audio_tag
 from .cue import canonical_cue_text
 from .deps import HAS_PIL, Image
+from .images import _exif_transposed
 from .lyrics import _canonical_lyrics, format_lyrics_text
 from .paths import AUDIO_EXTS
 from .stats import _collect_targets, _walk_files, new_stats, _make_pbar, worker_count
@@ -72,12 +73,19 @@ def _prepare_embedded_cover(album_dir, cfg):
     resolution = int(cfg.get("embed_cover_resolution") or 0)
     try:
         img = Image.open(io.BytesIO(data))
+        img = _exif_transposed(img)
+        resized = False
         if resolution > 0 and max(img.size) > resolution:
             # thumbnail() never upscales and keeps the aspect ratio
             img = img.convert("RGB") if mime == "image/jpeg" else img
             img.thumbnail((resolution, resolution), Image.LANCZOS)
+            resized = True
         if mime != "image/jpeg":
-            return (data, mime)
+            if not resized:
+                return (data, mime)
+            out = io.BytesIO()
+            img.save(out, "PNG", optimize=True)
+            return (out.getvalue(), mime)
         out = io.BytesIO()
         img.convert("RGB").save(
             out, "JPEG", quality=quality,
@@ -240,8 +248,16 @@ def _lrc_expected(original, cfg, is_lrc_file=True):
 
 def _format_lrc_file(path, cfg, force=False):
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            original = f.read()
+        with open(path, "rb") as raw:
+            data = raw.read()
+        if b"\x00" in data:
+            return (path, False, None)
+        # Never errors="replace": this text is written back, so a mis-decode
+        # would permanently corrupt a CP1252/Shift-JIS sidecar into U+FFFD.
+        try:
+            original = data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            original = data.decode("latin-1")
         if not original.strip():
             return (path, False, None)
         expected = _lrc_expected(original, cfg, is_lrc_file=True)
@@ -289,7 +305,7 @@ def _format_audio_tags(path, cfg, force=False):
             if key.upper() in ("LYRICS", "UNSYNCEDLYRICS"):
                 try:
                     expected = _lrc_expected(raw, cfg, is_lrc_file=False)
-                    if expected != raw:
+                    if force or expected != raw:
                         if af.set_tag(key, expected):
                             changed = True
                         else:
@@ -305,7 +321,7 @@ def _format_audio_tags(path, cfg, force=False):
                 fixed = ""
             else:
                 fixed = "\n".join(fixed_lines)
-            if fixed != raw:
+            if force or fixed != raw:
                 if af.set_tag(key, fixed):
                     changed = True
                 else:

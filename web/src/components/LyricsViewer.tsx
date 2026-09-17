@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CloudDownload, PenLine, Play, Square, Plus, Trash2, Undo2, Sparkles, Keyboard, Eraser, Upload } from "lucide-react";
 import { api } from "../api";
-import { toast } from "../store";
+import { toast, useStore } from "../store";
 import LrclibPublishPanel from "./LrclibPublish";
+import { nextSpeed, fmtSpeed } from "../lib/playback";
+import { useLyricsFollow } from "../lib/lyrScroll";
 import {
   loadLyricsKeys, saveLyricsKeys, resetLyricsKeys,
   keyLabel, matchKey, LYRICS_ACTIONS, LYRICS_KEY_DEFAULTS,
@@ -231,6 +233,8 @@ export default function LyricsViewer({
   const [raw, setRaw] = useState(initialLyrics);
   const [playing, setPlaying] = useState(false);
   const [playTime, setPlayTime] = useState(0);
+  const [speed, setSpeed] = useState(1);
+  const { vol } = useStore();
   const [dur, setDur] = useState(duration ?? 0);
   const [selIdx, setSelIdx] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -272,11 +276,29 @@ export default function LyricsViewer({
     return idx;
   }, [playTime, lines]);
 
-  // Follow the playing line.
+  // Follow the playing line. The pane scrolls ITSELF: scrollIntoView walks
+  // every scrollable ancestor, so the editor's list used to drag the whole
+  // page it sits in along with it. Centring (0.5) reads better than the
+  // player's upper-third anchor on a short editing list.
+  const { takeOver } = useLyricsFollow({
+    active: activeLine,
+    time: playTime,
+    playing,
+    scroll: listRef,
+    rows: lineRefs,
+    reset: path,
+    anchor: 0.5,
+  });
+
+  // The preview is a second decoder: the player bar's volume effect only
+  // reaches its own elements, so this one follows the shared app volume
+  // (and the speed bindings) itself.
   useEffect(() => {
-    if (!playing || activeLine < 0) return;
-    lineRefs.current[activeLine]?.scrollIntoView({ block: "center", behavior: "smooth" });
-  }, [activeLine, playing]);
+    const a = audioRef.current;
+    if (!a) return;
+    a.playbackRate = speed;
+    a.volume = vol;
+  }, [speed, vol, playing]);
 
   const emit = (ls: LrcLine[]) => onChange(serializeLrc(ls, dec));
 
@@ -353,9 +375,20 @@ export default function LyricsViewer({
       setPlaying(false);
     } else {
       audio.src = api.streamUrl(path);
+      audio.playbackRate = speed;
+      audio.volume = vol;
       audio.play().catch(() => toast("Playback failed — audio format unsupported in browser"));
       setPlaying(true);
     }
+  };
+
+  /** Step the PREVIEW's rate — the hotkeys advertised in the keys menu are
+   * the editor's, not the main player's. */
+  const stepSpeed = (dir: 1 | -1) => {
+    const next = nextSpeed(speed, dir);
+    setSpeed(next);
+    if (audioRef.current) audioRef.current.playbackRate = next;
+    toast(`Preview speed ${fmtSpeed(next)}`);
   };
 
   const seekTo = (time: number) => {
@@ -487,12 +520,18 @@ export default function LyricsViewer({
       } else if (matchKey(e, keys, "undo")) {
         e.preventDefault();
         undo();
+      } else if (matchKey(e, keys, "speedSlower")) {
+        e.preventDefault();
+        stepSpeed(-1);
+      } else if (matchKey(e, keys, "speedFaster")) {
+        e.preventDefault();
+        stepSpeed(1);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playing, selIdx, lines, activeLine, playTime, keys, capturing, onSave]);
+  }, [playing, selIdx, lines, activeLine, playTime, keys, capturing, onSave, speed]);
 
   // ---- AI-assisted actions ------------------------------------------------
   const runAi = async (mode: "clean" | "repair") => {
@@ -803,7 +842,14 @@ export default function LyricsViewer({
           timestamp — or import from LRCLIB / use the AI menu.
         </div>
       ) : (
-        <div ref={listRef} className="flex-1 space-y-1 max-h-[420px] overflow-auto pr-1">
+        <div
+          ref={listRef}
+          className="flex-1 space-y-1 max-h-[420px] overflow-auto pr-1"
+          onWheel={(e) => {
+            if (e.deltaY !== 0) takeOver();
+          }}
+          onTouchStart={takeOver}
+        >
           {lines.map((l, i) => (
             <div
               key={i}

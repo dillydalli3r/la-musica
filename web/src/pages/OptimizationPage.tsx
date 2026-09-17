@@ -1,13 +1,14 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Check, ChevronDown, ChevronDown as Down, ChevronUp as Up, Gauge, Play, RefreshCw, Wand2, X, Zap,
+  Check, ChevronDown, ChevronDown as Down, ChevronUp as Up, FolderTree, Gauge, Play, RefreshCw, Wand2, X, Zap,
 } from "lucide-react";
 import { api } from "../api";
-import { useStore } from "../store";
+import { toast, useStore } from "../store";
 import { ProgressInline } from "../components/ProgressBar";
 import { FORCE_SCRIPTS, forceDict, loadForceSel, saveForceSel } from "../lib/force";
 import { SCRIPTS, DEFAULT_RUN_ALL, isScriptId } from "../lib/scripts";
+import type { LayoutIssue, LayoutReport } from "../types";
 
 // Selected scripts + their custom run order, persisted across reloads.
 const SEL_KEY = "mlo.opt.sel.v1";
@@ -299,6 +300,154 @@ export default function OptimizationPage() {
           touch what you selected.
         </div>
       </div>
+
+      <LayoutPanel />
+    </div>
+  );
+}
+
+/** Readable names for the layout scanner's issue kinds, in report order. */
+const LAYOUT_KINDS: { kind: string; label: string; bad: boolean }[] = [
+  { kind: "audio_at_root", label: "Audio loose in the music folder root", bad: true },
+  { kind: "audio_in_artists", label: "Audio loose in Artists/", bad: true },
+  { kind: "audio_in_artist", label: "Audio loose in an artist folder (no album)", bad: true },
+  { kind: "unexpected_folder", label: "Unexpected folder in the music folder root", bad: true },
+  { kind: "unexpected_subfolder", label: "Unexpected folder inside an album", bad: true },
+  { kind: "empty_album", label: "Album folder with no audio", bad: true },
+  { kind: "legacy_state_file", label: "Leftover from the old .mlo_data layout", bad: false },
+  { kind: "stray_in_artists", label: "Stray file directly in Artists/", bad: false },
+  { kind: "hidden_folder", label: "Hidden folder inside Artists/", bad: false },
+  { kind: "stray_file", label: "Stray file inside an album", bad: false },
+];
+
+/** Library-layout audit: every place the music folder does not match
+ *  `Artists/<Artist>/<Album>/<files>`.
+ *
+ *  Deliberately read-only. A wrong guess here moves somebody's music, so the
+ *  panel reports what is where and how to fix it; the moving stays a decision
+ *  the user makes with their own file manager. */
+function LayoutPanel() {
+  const [report, setReport] = useState<LayoutReport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState<Set<string>>(new Set());
+  const [copied, setCopied] = useState<string | null>(null);
+
+  const scan = async () => {
+    setBusy(true);
+    try {
+      const r = await api.libraryLayout();
+      setReport(r);
+      // Open the kinds that actually have rows, so a scan lands on its findings.
+      setOpen(new Set(LAYOUT_KINDS.filter((k) => r.counts[k.kind]).map((k) => k.kind)));
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copyPath = async (p: string) => {
+    try {
+      await navigator.clipboard.writeText(p);
+      setCopied(p);
+      setTimeout(() => setCopied((c) => (c === p ? null : c)), 1500);
+    } catch {
+      toast("Could not reach the clipboard");
+    }
+  };
+
+  const toggle = (kind: string) =>
+    setOpen((s) => {
+      const next = new Set(s);
+      if (next.has(kind)) next.delete(kind);
+      else next.add(kind);
+      return next;
+    });
+
+  const byKind = (kind: string): LayoutIssue[] =>
+    (report?.issues ?? []).filter((i) => i.kind === kind);
+
+  return (
+    <div className="bg-card rounded-lg border border-border p-4 mt-4">
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="text-xs font-bold text-zinc-300 flex items-center gap-1.5 flex-1 min-w-0">
+          <FolderTree className="h-3.5 w-3.5" /> Library layout
+        </div>
+        {report && (
+          <span className="text-[11px] text-zinc-500">
+            {report.audio_files} audio file(s) · {report.albums} album folder(s) · {report.artists} artist(s)
+          </span>
+        )}
+        <button className="btn-primary !py-1 text-xs" disabled={busy} onClick={scan}>
+          <RefreshCw className={`h-3.5 w-3.5 ${busy ? "animate-spin" : ""}`} />
+          {busy ? "Scanning…" : report ? "Rescan" : "Scan library layout"}
+        </button>
+      </div>
+
+      <div className="text-[10px] text-zinc-600 mt-1.5">
+        Walks the whole music folder and reports anything that is not
+        <span className="font-mono text-zinc-500"> Artists/&lt;Artist&gt;/&lt;Album&gt;/ </span>
+        — misplaced files, unexpected folders, empty albums. Read-only: nothing is moved or deleted.
+      </div>
+
+      {report && !report.exists && (
+        <div className="mt-3 text-xs text-amber-200 bg-amber-950/30 border border-amber-900/60 rounded-lg px-3 py-2">
+          The music folder is not set or does not exist.
+        </div>
+      )}
+
+      {report && report.exists && report.total === 0 && (
+        <div className="mt-3 text-xs text-emerald-300 bg-emerald-950/30 border border-emerald-900/60 rounded-lg px-3 py-2 flex items-center gap-2">
+          <Check className="h-3.5 w-3.5" /> The library is laid out correctly — no misplaced files or unexpected folders.
+        </div>
+      )}
+
+      {report && report.total > 0 && (
+        <div className="mt-3 space-y-2">
+          <div className="text-xs text-amber-200 bg-amber-950/30 border border-amber-900/60 rounded-lg px-3 py-2">
+            {report.total} problem{report.total === 1 ? "" : "s"} found in{" "}
+            {Object.keys(report.counts).length} categor{Object.keys(report.counts).length === 1 ? "y" : "ies"}.
+          </div>
+          {LAYOUT_KINDS.map(({ kind, label, bad }) => {
+            const rows = byKind(kind);
+            if (!rows.length) return null;
+            const isOpen = open.has(kind);
+            return (
+              <div key={kind} className="border border-border rounded-lg overflow-hidden">
+                <button
+                  className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs bg-panel hover:bg-raise text-left"
+                  onClick={() => toggle(kind)}
+                >
+                  {isOpen ? <Down className="h-3 w-3 shrink-0" /> : <Up className="h-3 w-3 shrink-0 rotate-90" />}
+                  <span className={`flex-1 min-w-0 truncate ${bad ? "text-amber-200" : "text-zinc-300"}`}>{label}</span>
+                  <span className="chip bg-raise border border-border text-zinc-400 shrink-0">{rows.length}</span>
+                </button>
+                {isOpen && (
+                  <div className="divide-y divide-border/60">
+                    {rows.map((i) => (
+                      <div key={i.abs} className="px-2.5 py-1.5 text-[11px] space-y-0.5">
+                        <div className="flex items-center gap-2">
+                          <span className="flex-1 min-w-0 break-words text-zinc-300 font-mono" title={i.abs}>
+                            {i.path}
+                          </span>
+                          <button
+                            className="btn-ghost !px-1.5 !py-0.5 text-[10px] shrink-0"
+                            onClick={() => copyPath(i.abs)}
+                            title={i.abs}
+                          >
+                            {copied === i.abs ? "copied" : "copy path"}
+                          </button>
+                        </div>
+                        <div className="text-zinc-500">{i.detail} — {i.hint}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

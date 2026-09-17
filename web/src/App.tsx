@@ -2,8 +2,8 @@ import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  ArrowDownUp, ChevronLeft, ChevronRight, ClipboardCheck, Gauge, HardDriveDownload, Heart, Home, Import,
-  Library, ListMusic, Menu, Music4, PanelLeftClose, Search, X,
+  ArrowDownToLine, ArrowDownUp, ChevronLeft, ChevronRight, ClipboardCheck, Gauge, HardDriveDownload, Heart, Home, Import,
+  Library, ListMusic, Menu, Music4, PanelLeftClose, Search, Trash2, X,
   Settings as SettingsIcon, Wrench,
 } from "lucide-react";
 import { api } from "./api";
@@ -14,6 +14,8 @@ import { useStore } from "./store";
 // app (library, player, soulseek, import wizard, settings) loads up front.
 const HomePage = lazy(() => import("./pages/HomePage"));
 const LibraryPage = lazy(() => import("./pages/LibraryPage"));
+const DownloadsPage = lazy(() => import("./pages/DownloadsPage"));
+const TrashPage = lazy(() => import("./pages/TrashPage"));
 const ArtistPage = lazy(() => import("./pages/ArtistPage"));
 const AlbumPage = lazy(() => import("./pages/AlbumPage"));
 const TrackPage = lazy(() => import("./pages/TrackPage"));
@@ -40,6 +42,8 @@ import { ProgressInline } from "./components/ProgressBar";
 const NAV = [
   { to: "/", label: "Home", icon: Home, end: true },
   { to: "/library", label: "Library", icon: Library, end: false },
+  { to: "/downloads", label: "Downloads", icon: ArrowDownToLine, end: true },
+  { to: "/trash", label: "Trash", icon: Trash2, end: true },
   { to: "/playlists", label: "Playlists", icon: ListMusic, end: false },
   { to: "/favorites", label: "Favorites", icon: Heart, end: false },
   { to: "/import", label: "Import", icon: Import, end: false },
@@ -92,7 +96,15 @@ function useSlskDot() {
     };
   }
   if (st?.conflict) return { cls: "bg-red-500", tip: `Soulseek — ${st.conflict}`, name: null };
-  if (st?.running) return { cls: "bg-amber-400", tip: "Soulseek — running, not logged in", name: null };
+  if (st?.running) {
+    // The daemon's own words (INVALIDPASS, no credentials…) beat a generic
+    // "not logged in" — the dot is the only place some users will look.
+    return {
+      cls: "bg-amber-400",
+      tip: st.error ? `Soulseek — not logged in: ${st.error}` : "Soulseek — running, not logged in",
+      name: null,
+    };
+  }
   return null;
 }
 
@@ -123,7 +135,7 @@ function PageLoading() {
 
 export default function App() {
   const { progress, setProgress, toast: toastMsg, query, setQuery } = useStore();
-  const progressClear = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const progressClear = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   const slskDot = useSlskDot();
 
@@ -205,31 +217,48 @@ export default function App() {
     const inTauri = !!(window as any).__TAURI_INTERNALS__;
     // window.location (not the router's location object) — this is a URL.
     const wsBase = inTauri ? "ws://127.0.0.1:8000" : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`;
-    const ws = new WebSocket(`${wsBase}/ws/progress`);
-    ws.onmessage = (e) => {
-      try {
-        const p = JSON.parse(e.data);
-        if (typeof p?.done !== "number") return; // ping / non-progress frame
-        setProgress(p);
-        // The relay never sends an explicit "finished" frame — clear the
-        // indicator shortly after the bar completes.
-        if (progressClear.current) clearTimeout(progressClear.current);
-        if (p.total && p.done >= p.total) {
-          progressClear.current = setTimeout(() => setProgress(null), 2500);
+    let alive = true;
+    let ws: WebSocket | null = null;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    const connect = () => {
+      ws = new WebSocket(`${wsBase}/ws/progress`);
+      ws.onmessage = (e) => {
+        try {
+          const p = JSON.parse(e.data);
+          if (typeof p?.done !== "number") return; // ping / non-progress frame
+          setProgress(p);
+          // The relay never sends an explicit "finished" frame — clear the
+          // indicator shortly after the bar completes.
+          if (progressClear.current) clearTimeout(progressClear.current);
+          if (p.total && p.done >= p.total) {
+            progressClear.current = setTimeout(() => setProgress(null), 2500);
+          }
+        } catch {
+          /* ignore */
         }
-      } catch {
-        /* ignore */
-      }
+      };
+      // The backend restarts on every config save / Soulseek restart /
+      // dependency install — without this retry the progress bars never come
+      // back until a full page reload.
+      ws.onclose = () => {
+        if (!alive) return;
+        retry = setTimeout(connect, 3000);
+      };
     };
+    connect();
     return () => {
-      ws.close();
-      if (progressClear.current) clearTimeout(progressClear.current);
+      alive = false;
+      clearTimeout(retry);
+      ws?.close();
+      clearTimeout(progressClear.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // First-run gate: no music folder (or setup not completed) → setup wizard.
-  if (config && (!String(config.music_folder ?? "").trim() || !config.first_run_done)) {
+  // First-run gate: setup not completed → setup wizard. Only first_run_done
+  // is checked — an empty music folder is a normal unconfigured state, so the
+  // setup page's "Skip for now" leaves Settings (and the app) reachable.
+  if (config && !config.first_run_done) {
     return (
       <Routes>
         <Route path="/setup" element={<SetupPage />} />
@@ -247,18 +276,17 @@ export default function App() {
         className={`${collapsed ? "w-14" : "w-48"} hidden md:flex h-full shrink-0 border-r border-border bg-panel p-2 flex-col gap-1 overflow-y-auto transition-[width] duration-150 relative z-20`}
       >
         {/* sidebar header: brand + collapse toggle, split from the nav by a
-            hairline. Collapses to a stacked icon rail. */}
-        <div
-          className={`flex items-center gap-2 border-b border-border pb-2 mb-1 shrink-0 transition-[padding] duration-150 ${
-            collapsed ? "px-1.5" : "px-1"
-          }`}
-        >
-          {/* the logo itself expands the sidebar when collapsed, so the
-              header never rearranges (no column flip, no icon jump) */}
+            hairline. Collapses to a stacked icon rail. Every metric here is
+            the SAME in both states on purpose: the logo button used to gain
+            p-0.5 only while collapsed, which made the header 4px taller and
+            pushed the whole nav below it down (the icon jump). */}
+        <div className="flex items-center gap-2 border-b border-border pb-2 mb-1 shrink-0 px-1.5">
+          {/* the logo toggles the rail in both directions, so the header never
+              rearranges (no column flip, no icon jump) */}
           <button
-            className={`shrink-0 rounded-md ${collapsed ? "cursor-pointer hover:bg-raise p-0.5 -ml-0.5" : "cursor-default"}`}
-            onClick={() => collapsed && toggleCollapse()}
-            title={collapsed ? "Expand sidebar" : undefined}
+            className="shrink-0 rounded-md cursor-pointer hover:bg-raise p-0.5 -ml-0.5"
+            onClick={toggleCollapse}
+            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           >
             <img
               src="/icon.png"
@@ -465,6 +493,8 @@ export default function App() {
             <Routes>
             <Route path="/" element={<HomePage />} />
             <Route path="/library" element={<LibraryPage />} />
+            <Route path="/downloads" element={<DownloadsPage />} />
+            <Route path="/trash" element={<TrashPage />} />
             <Route path="/artist/:path" element={<ArtistPage />} />
             <Route path="/album/:path" element={<AlbumPage />} />
             <Route path="/track/:path" element={<TrackPage />} />

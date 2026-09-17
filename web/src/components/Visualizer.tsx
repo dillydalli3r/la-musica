@@ -24,7 +24,12 @@ export default function Visualizer({
   const peaks = useRef<Float32Array>(new Float32Array(bars));
   const stale = useRef(0); // consecutive frames with no analyser signal
   const playingRef = useRef(playing);
-  useEffect(() => { playingRef.current = playing; }, [playing]);
+  const startRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    playingRef.current = playing;
+    // Idle frames are skipped, so playback must restart the loop.
+    if (playing) startRef.current();
+  }, [playing]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -42,6 +47,11 @@ export default function Visualizer({
     let raf = 0;
     let freq: Uint8Array | null = null;
     let lastW = 0;
+
+    const start = () => {
+      if (!raf) raf = requestAnimationFrame(tick);
+    };
+    startRef.current = start;
 
     const tick = () => {
       raf = requestAnimationFrame(tick);
@@ -138,9 +148,24 @@ export default function Visualizer({
           ctx.fillRect(x, py, bw, 1.5);
         }
       }
+
+      // Nothing left to animate (paused and fully settled): the flat
+      // baseline is drawn, so stop burning frames until playback resumes.
+      if (
+        synthetic &&
+        stale.current > 30 &&
+        levels.current.every((v) => v < 0.02) &&
+        peaks.current.every((p) => p <= 0.03)
+      ) {
+        cancelAnimationFrame(raf);
+        raf = 0;
+      }
     };
     raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
+    return () => {
+      cancelAnimationFrame(raf);
+      raf = 0;
+    };
   }, [bars, mirror]);
 
   return <canvas ref={canvasRef} className={className} aria-hidden />;

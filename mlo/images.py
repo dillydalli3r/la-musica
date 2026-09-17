@@ -7,9 +7,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from .containers import (
     _read_jxl_tags, _write_jxl_tags, _read_jpeg_xmp_tags, _insert_jpeg_xmp,
     _read_png_text, _strip_png_metadata, _inject_png_text, _encoder_dict,
-    _identity_missing,
+    _identity_missing, _quality_meets,
 )
 from .deps import HAS_PIL, Image
+try:
+    from PIL import ImageOps
+except ImportError:
+    ImageOps = None
 from .subproc import run_tool
 from .paths import (
     VALID_EXTENSIONS, ALL_IMAGE_EXTS, LOSSLESS_IMAGE_EXTS, CONVERTIBLE_EXTENSIONS,
@@ -21,6 +25,22 @@ from .stats import (
 )
 from .tools import detect_all_tools, _version_is_older
 from .ui import log, fmt_size, print_header, c, Color, log_file_result
+
+def _exif_transposed(img):
+    """*img* with its EXIF orientation applied, or *img* unchanged.
+
+    A cover whose orientation tag says "rotate" stores wrong-axis dimensions;
+    cropping/resizing before applying it produces rotated or mis-cropped art.
+    """
+    if ImageOps is None:
+        return img
+    try:
+        if img.getexif().get(0x0112):
+            return ImageOps.exif_transpose(img)
+    except Exception:
+        pass
+    return img
+
 
 def _strip_jpeg_metadata(input_path, output_path):
     try:
@@ -118,6 +138,27 @@ def _flatten_png_alpha(src_path, dst_path):
         return False
 
 
+def _unique_target_path(src_path, out_path, target_ext):
+    """Destination for *out_path* that will not clobber an unrelated file.
+
+    Returns *out_path* when it is free (or is the source itself), otherwise the
+    first free ``stem_N`` sibling, or None when ten candidates all exist.
+    Shared by the conversion paths so a cover.jxl -> cover.jpg pass cannot
+    destroy an existing cover.jpg.
+    """
+    if os.path.normcase(os.path.normpath(out_path)) == os.path.normcase(os.path.normpath(src_path)):
+        return out_path
+    if not os.path.exists(out_path):
+        return out_path
+    out_dir = os.path.dirname(out_path)
+    base = os.path.splitext(os.path.basename(out_path))[0]
+    for i in range(1, 11):
+        alt = os.path.join(out_dir, f"{base}_{i}{target_ext}")
+        if not os.path.exists(alt):
+            return alt
+    return None
+
+
 def _convert_to_jpeg(src_path, dst_path, quality, config=None):
     """Convert any image to JPEG (lossy) with given quality, handling cover crop/resize."""
     if not HAS_PIL:
@@ -158,6 +199,7 @@ def _prepare_image_streamlined(src_path, dst_path, config, remove_alpha=False):
                 img.load()
             except Exception:
                 pass
+            img = _exif_transposed(img)
             # 1) Alpha handling (PNG only)
             if remove_alpha and img.mode in ("RGBA", "LA", "P"):
                 if img.mode == "P" and "transparency" not in img.info and img.mode not in ("RGBA", "LA"):
@@ -406,6 +448,7 @@ def _resize_and_crop_image(src_path, dst_path, target_size, crop_enabled, crop_t
                     img.load()
                 except Exception:
                     pass
+                img = _exif_transposed(img)
                 w, h = img.size
                 if w <= 0 or h <= 0:
                     return False
@@ -698,7 +741,7 @@ def _process_image_to_jxl(args):
                 log(f"[jxl check] {os.path.basename(src_path)} q={q} v={v} p={p} effort={effort} jxl_version={jxl_version} enabled={enabled} cover_needs={_cover_needs}")
                 if not _identity_missing(enabled, q, v, p):
                     try:
-                        if int(q) >= int(effort) and not _version_is_older(v, jxl_version):
+                        if _quality_meets(enabled, q, effort) and not _version_is_older(v, jxl_version):
                             log(f"[jxl skip] {os.path.basename(src_path)} already at q={q} v={v} (need q>={effort} v>={jxl_version})")
                             return (
                                 src_path,
@@ -909,7 +952,7 @@ def _process_image_to_jxl(args):
             temp_out_path,
             "-d", dist_s,
             "-e", str(effort),
-            "-j", str(threads_to_use),
+            "--num_threads", str(threads_to_use),
             "--container=1",
         ]
 
@@ -1034,7 +1077,7 @@ def _process_jpeg_in_place(args):
         q, v, p = _read_jpeg_xmp_tags(filepath)
         if not _identity_missing(enabled, q, v, p):
             try:
-                if int(q) >= JPEG_QUALITY_MARKER and not _version_is_older(v, ljt_version):
+                if _quality_meets(enabled, q, JPEG_QUALITY_MARKER) and not _version_is_older(v, ljt_version):
                     return (
                         filename,
                         "unchanged",
@@ -1179,6 +1222,7 @@ def _process_png_in_place(args):
     filename = os.path.basename(filepath)
     temp_path = filepath + ".opttmp.png"
     _cover_resized_tmp = None
+    _flat_alpha_tmp = None
     _input_for_oxipng = filepath
 
     try:
@@ -1231,7 +1275,7 @@ def _process_png_in_place(args):
 
         if not _identity_missing(enabled, q, v):
             try:
-                if int(q) >= optimization_level and not _version_is_older(v, oxipng_version):
+                if _quality_meets(enabled, q, optimization_level) and not _version_is_older(v, oxipng_version):
                     return (
                         filename,
                         "unchanged",
@@ -1248,10 +1292,15 @@ def _process_png_in_place(args):
         has_alpha = _png_has_alpha(filepath)
         if has_alpha:
             flat_path = filepath + ".no_alpha.png"
+            _safe_remove(flat_path)
 
             try:
-                if _flatten_png_alpha(filepath, flat_path):
-                    os.replace(flat_path, filepath)
+                # Feed the flattened copy to oxipng; the original is only
+                # replaced by the existing success path below, so a later
+                # failure leaves the source (and its transparency) intact.
+                if _flatten_png_alpha(filepath, flat_path) and os.path.getsize(flat_path) > 0:
+                    _flat_alpha_tmp = flat_path
+                    _input_for_oxipng = flat_path
                 else:
                     _safe_remove(flat_path)
             except Exception:
@@ -1276,14 +1325,19 @@ def _process_png_in_place(args):
                 if (re_en and tgt_cov > 0) or cr_en:
                     _cover_resized_tmp = filepath + ".cover_resized.tmp.png"
                     _safe_remove(_cover_resized_tmp)
-                    did = _resize_and_crop_image(filepath, _cover_resized_tmp, tgt_cov if re_en else 0, cr_en, thr_cov, config)
+                    did = _resize_and_crop_image(_input_for_oxipng, _cover_resized_tmp, tgt_cov if re_en else 0, cr_en, thr_cov, config)
                     if did and os.path.exists(_cover_resized_tmp) and os.path.getsize(_cover_resized_tmp) > 0:
                         _input_for_oxipng = _cover_resized_tmp
                         log(f"[cover] resized/cropped {os.path.basename(filepath)} -> {tgt_cov}x{tgt_cov}" if re_en and tgt_cov else f"[cover] cropped {os.path.basename(filepath)}")
                     else:
                         _safe_remove(_cover_resized_tmp)
                         _cover_resized_tmp = None
-                        _input_for_oxipng = filepath
+                        if _flat_alpha_tmp:
+                            _input_for_oxipng = _flat_alpha_tmp
+                        else:
+                            _input_for_oxipng = filepath
+                elif _flat_alpha_tmp:
+                    _input_for_oxipng = _flat_alpha_tmp
                 else:
                     _input_for_oxipng = filepath
         except Exception as e:
@@ -1291,7 +1345,9 @@ def _process_png_in_place(args):
             if _cover_resized_tmp:
                 _safe_remove(_cover_resized_tmp)
                 _cover_resized_tmp = None
-            _input_for_oxipng = filepath
+            _input_for_oxipng = _flat_alpha_tmp or filepath
+    elif _flat_alpha_tmp:
+        _input_for_oxipng = _flat_alpha_tmp
     else:
         _input_for_oxipng = filepath
 
@@ -1300,7 +1356,7 @@ def _process_png_in_place(args):
         "-o", str(optimization_level),
         "--strip", "safe",
         "--force",
-        "--output", temp_path,
+        "--out", temp_path,
         _input_for_oxipng,
     ]
 
@@ -1366,6 +1422,11 @@ def _process_png_in_place(args):
                 pass
         try:
             _safe_remove(_cover_resized_tmp)
+        except Exception:
+            pass
+        try:
+            if _flat_alpha_tmp:
+                _safe_remove(_flat_alpha_tmp)
         except Exception:
             pass
 
@@ -1457,7 +1518,7 @@ def _process_jxl_in_place(args):
             q, v, p = _read_jxl_tags(src_path)
             if not _identity_missing(enabled, q, v, p):
                 try:
-                    if int(q) >= int(effort) and not _version_is_older(v, jxl_version):
+                    if _quality_meets(enabled, q, effort) and not _version_is_older(v, jxl_version):
                         return (
                             filename,
                             "unchanged",
@@ -1573,7 +1634,7 @@ def _process_jxl_in_place(args):
             temp_out_path,
             "-d", dist_s,
             "-e", str(effort),
-            "-j", str(threads_to_use),
+            "--num_threads", str(threads_to_use),
             "--container=1",
         ]
 
@@ -1693,6 +1754,11 @@ def _process_jxl_back_to_original(args):
                 if rename_to_cover
                 else os.path.splitext(src_path)[0] + ".jpg"
             )
+            alt_out = _unique_target_path(src_path, out_path, ".jpg")
+            if alt_out is None:
+                return (src_path, "failed", 0, 0,
+                        f"target exists: {os.path.basename(out_path)}")
+            out_path = alt_out
 
             existing_dest_size = _existing_size(out_path, src_path)
 
@@ -1833,6 +1899,11 @@ def _process_jxl_back_to_original(args):
             if rename_to_cover
             else os.path.splitext(src_path)[0] + ".png"
         )
+        alt_out = _unique_target_path(src_path, out_path, ".png")
+        if alt_out is None:
+            return (src_path, "failed", 0, 0,
+                    f"target exists: {os.path.basename(out_path)}")
+        out_path = alt_out
 
         existing_dest_size = _existing_size(out_path, src_path)
 
@@ -1890,7 +1961,7 @@ def _process_jxl_back_to_original(args):
                         "-o", str(optimization_level),
                         "--strip", "safe",
                         "--force",
-                        "--output", optimized,
+                        "--out", optimized,
                         input_file,
                     ],
                     stdout=subprocess.DEVNULL,
@@ -1993,15 +2064,10 @@ def _process_convert_image(args):
         if os.path.normcase(os.path.normpath(src_path)) == os.path.normcase(os.path.normpath(final_out)):
             return (src_path, "skipped", 0, 0, "already correct format")
         # Handle collision when two files with same base but different ext convert to same target (e.g., cover.bmp + cover.tiff -> cover.png)
-        if os.path.exists(final_out):
-            # Try base + target_ext, then base + _1 + target_ext, etc., up to 10 tries
-            for i in range(1, 11):
-                alt = os.path.join(out_dir, f"{base}_{i}{target_ext}")
-                if not os.path.exists(alt):
-                    final_out = alt
-                    break
-            else:
-                return (src_path, "skipped", 0, 0, f"target exists: {os.path.basename(final_out)}")
+        alt_out = _unique_target_path(src_path, final_out, target_ext)
+        if alt_out is None:
+            return (src_path, "skipped", 0, 0, f"target exists: {os.path.basename(final_out)}")
+        final_out = alt_out
 
     # Avoid clobbering existing cover
     if rename_to_cover and os.path.exists(final_out) and os.path.normcase(os.path.normpath(src_path)) != os.path.normcase(os.path.normpath(final_out)):
@@ -2017,7 +2083,10 @@ def _process_convert_image(args):
                     final_out = alt2
                     break
 
-    temp_out = final_out + ".tmp"
+    # The temp keeps the target extension: _prepare_image_streamlined picks the
+    # output format from the dst extension, so a bare ".tmp" would silently
+    # write PNG bytes into a .jpg file.
+    temp_out = final_out + ".tmp" + target_ext
     try:
         original_size = os.path.getsize(src_path)
     except OSError as e:

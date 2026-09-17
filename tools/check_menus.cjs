@@ -1,13 +1,22 @@
 #!/usr/bin/env node
 /* Sidebar/menu assertions against a running app — text evidence instead of
  * eyeballing screenshots. Run: node tools/check_menus.cjs [baseUrl] */
-const { chromium } = require("C:/Users/dillydallier/AppData/Roaming/npm/node_modules/omniroute/node_modules/playwright");
+let chromium;
+try {
+  // Plain require resolves from this file's folder up to the repo root's
+  // node_modules; PLAYWRIGHT overrides it (e.g. a global install).
+  ({ chromium } = require(process.env.PLAYWRIGHT || "playwright"));
+} catch (e) {
+  console.error("[check_menus] Playwright not found — install it with " +
+    "`npm i -D playwright` (or set PLAYWRIGHT=/path/to/playwright).");
+  process.exit(1);
+}
 
 const BASE = process.argv[2] || process.env.BASE || "http://127.0.0.1:8000";
 
 // Must stay in sync with NAV in web/src/App.tsx.
 const EXPECTED_NAV = [
-  "Home", "Library", "Playlists", "Favorites", "Import", "Soulseek",
+  "Home", "Library", "Trash", "Playlists", "Favorites", "Import", "Soulseek",
   "MusicBrainz", "Export", "Optimization", "Grading", "Dependencies", "Settings",
 ];
 

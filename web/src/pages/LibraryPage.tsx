@@ -3,20 +3,21 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 import {
   ArrowDownUp, BarChart3, ChevronDown, ChevronRight, CloudDownload,
-  FileVideo, FolderOpen, FolderSync, Info as InfoIcon, Layers, Library, ListChecks,
+  FileVideo, FolderSync, Info as InfoIcon, Layers, Library, ListChecks,
   ListFilter, ListPlus, Play, Tag, Trash2, Wand2,
 } from "lucide-react";
 import { api } from "../api";
 import { SCRIPTS, DEFAULT_RUN_ALL, isScriptId } from "../lib/scripts";
 import { toast, useStore } from "../store";
 import {
-  sortRows, SortHeader, groupByDisc, type SortState,
+  sortRows, SortHeader, groupByDisc, byDiscThenTrack, type SortState,
 } from "../lib/sort.tsx";
 import {
   ColumnResizer, ColumnsMenu, useColumnPrefs, useColumnWidths,
   ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, type Col,
 } from "../lib/columns";
 import { gradeSliver, statusFor, auditFails } from "../lib/status";
+import { invalidateLibrary } from "../lib/invalidate";
 import { albumRef, trackRef, artistRef, entityLinkClick } from "../lib/refs";
 import { fmtTech, fmtDuration, fmtDateCell, originalYear, GRID_SIZE_MIN } from "../lib/fmt";
 import { EmptyState, GradeBadge, MediaChip, AdvisoryMark } from "../components/Badges";
@@ -25,6 +26,7 @@ import Segmented from "../components/Segmented";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import FavHeart from "../components/FavHeart";
 import AlbumCard from "../components/AlbumCard";
+import AlbumRow, { type AlbumRowCell } from "../components/AlbumRow";
 import StatsPanel from "../components/StatsPanel";
 import TrackDetails from "../components/TrackDetails";
 import BulkTagsDialog from "../components/BulkTagsDialog";
@@ -222,10 +224,17 @@ export default function LibraryPage() {
     : DEFAULT_RUN_ALL;
   const qc = useQueryClient();
   const navigate = useNavigate();
-  const { query, setToast, folder } = useStore();
-  const {
-    selection, setSelection, toggleTrack, toggleAlbum, toggleArtist, clearSelection, playNow,
-  } = useStore();
+  // Per-slice selectors: a bare useStore() subscribes this page to every
+  // store write (progress ticks, volume, queue) and re-renders the tables.
+  const query = useStore((s) => s.query);
+  const setToast = useStore((s) => s.setToast);
+  const selection = useStore((s) => s.selection);
+  const setSelection = useStore((s) => s.setSelection);
+  const toggleTrack = useStore((s) => s.toggleTrack);
+  const toggleAlbum = useStore((s) => s.toggleAlbum);
+  const toggleArtist = useStore((s) => s.toggleArtist);
+  const clearSelection = useStore((s) => s.clearSelection);
+  const playNow = useStore((s) => s.playNow);
   const [view, setView] = useState<View>(() => (localStorage.getItem("mlo.defaultView.v2") as View) ?? "grid");
   // checkboxes (and the batch toolbar they feed) only exist in select mode
   const [selectMode, setSelectMode] = useState(false);
@@ -238,11 +247,13 @@ export default function LibraryPage() {
   const [preset, setPreset] = useState<Preset>("all");
   const [filterOpen, setFilterOpen] = useState(false);
   const [sortOpen, setSortOpen] = useState(false);
-  const [albumSort, setAlbumSort] = useLocalSort("album");
-  const [artistSort, setArtistSort] = useLocalSort("artist");
-  const [trackSort, setTrackSort] = useLocalSort("track");
+  const [albumSort, setAlbumSort] = useLocalSort("albums");
+  const [artistSort, setArtistSort] = useLocalSort("artists");
+  const [trackSort, setTrackSort] = useLocalSort("tracks");
   const [removing, setRemoving] = useState<string | null>(null);
   const [lyricsBusy, setLyricsBusy] = useState(false);
+  // Organize / Scripts on a selection run server-side batches — one at a time.
+  const [busy, setBusy] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [groupByArtist, setGroupByArtist] = useState(false);
   const [gridSize, setGridSize] = useState<"s" | "m" | "l">(() => {
@@ -402,13 +413,13 @@ export default function LibraryPage() {
   const removeAlbums = async (paths: string[]) => {
     if (!paths.length) return;
     const names = paths.map((d) => d.split("/").pop()).join(", ");
-    if (!window.confirm(`Remove ${paths.length} album(s) from the library?\n${names}\n\nThey move to .mlo_trash in your music folder (recoverable).`)) return;
+    if (!window.confirm(`Remove ${paths.length} album(s) from the library?\n${names}\n\nThey move to .mlo/trash in your music folder (recoverable).`)) return;
     setRemoving("batch");
     try {
       for (const d of paths) await api.removeAlbum(d);
       setToast(`Moved ${paths.length} album(s) to trash`);
       clearSelection();
-      qc.invalidateQueries({ queryKey: ["library"] });
+      invalidateLibrary(qc);
     } catch (e) {
       toast(String(e));
     } finally {
@@ -472,7 +483,7 @@ export default function LibraryPage() {
       toast(`Lyrics: ${fetched} downloaded · ${skipped} skipped · ${missing} not on LRCLIB${failed ? ` · ${failed} failed` : ""}`);
       if (fetched) {
         clearSelection();
-        qc.invalidateQueries({ queryKey: ["library"] });
+        invalidateLibrary(qc);
       }
     } catch (e) {
       toast(String(e));
@@ -482,21 +493,28 @@ export default function LibraryPage() {
   };
 
   const organizeSelection = async () => {
+    if (busy) {
+      toast("Still organizing the previous selection");
+      return;
+    }
     if (!selectionAlbumDirs.length) {
       toast("Select albums or artists to organize");
       return;
     }
     if (!window.confirm(`Organize ${selectionAlbumDirs.length} album(s) with the naming script from Settings?\nFiles are MOVED into the scripted folder structure.`)) return;
+    setBusy(true);
     try {
       const r = await api.organize(selectionAlbumDirs);
-      const moved = r.results.reduce((n: number, x: any) => n + (x.moved ?? 0), 0);
-      const errs = r.results.filter((x: any) => x.error);
+      const moved = r.results.reduce((n: number, x: { moved?: number }) => n + (x.moved ?? 0), 0);
+      const errs = r.results.filter((x: { error?: string }) => x.error);
       if (errs.length) toast(`Organized ${moved} file(s) — ${errs.length} album(s) had errors`);
       else toast(`Organized ${moved} file(s)`);
       clearSelection();
-      qc.invalidateQueries({ queryKey: ["library"] });
+      invalidateLibrary(qc);
     } catch (e) {
       toast(String(e));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -516,19 +534,26 @@ export default function LibraryPage() {
   };
 
   const runScriptsOnSelection = async (ids: number[], force = false) => {
+    if (busy) {
+      toast("Still working on the previous selection");
+      return;
+    }
     if (!selectionAlbumDirs.length) {
       toast("Select albums or artists to run scripts on");
       return;
     }
+    setBusy(true);
     try {
       // Same selection the header Force menu configures (Settings → General
       // force toggles keep working independently as saved defaults).
       const forceOpts = force ? forceDict(loadForceSel()) : undefined;
       await api.run(ids, selectionAlbumDirs, forceOpts);
       setToast(`Scripts run on ${selectionAlbumDirs.length} album(s)${force ? " (forced)" : ""}`);
-      qc.invalidateQueries({ queryKey: ["library"] });
+      invalidateLibrary(qc);
     } catch (e) {
       toast(String(e));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -545,6 +570,15 @@ export default function LibraryPage() {
   const sortedAlbums = useMemo(() => sortRows(filtered.albums, albumSort), [filtered.albums, albumSort]);
   const sortedArtists = useMemo(() => sortRows(filtered.artists, artistSort), [filtered.artists, artistSort]);
   const sortedTracks = useMemo(() => sortRows(filtered.tracks, trackSort), [filtered.tracks, trackSort]);
+
+  // Compact rows re-render on every selection toggle and their tracklist is
+  // built inside a .map (no hook allowed there) — order each album's tracks
+  // once here instead of re-sorting them on every render.
+  const tracksByAlbum = useMemo(() => {
+    const out: Record<string, Track[]> = {};
+    for (const al of sortedAlbums) out[al.path] = [...(al.tracks ?? [])].sort(byDiscThenTrack);
+    return out;
+  }, [sortedAlbums]);
 
   // Grid sections: one flat list, or artist-headed groups.
   const gridSections = useMemo(() => {
@@ -752,11 +786,6 @@ export default function LibraryPage() {
           <span className="text-xs text-zinc-500 whitespace-nowrap">
             {sortedAlbums.length} albums · {sortedTracks.length} tracks
           </span>
-          {folder && (
-            <span className="hidden xl:flex text-xs text-zinc-600 items-center gap-1">
-              <FolderOpen className="h-3 w-3" /> {folder}
-            </span>
-          )}
         </div>
       </div>
 
@@ -773,15 +802,16 @@ export default function LibraryPage() {
             <button className="btn-ghost !py-1 text-xs" onClick={() => addToPlaylist([...selTracks])}>
               <ListPlus className="h-3.5 w-3.5" /> Playlist
             </button>
-            <button
-              className="btn-danger !py-1 text-xs"
-              onClick={() => removeAlbums(selectionAlbumDirs)}
-              disabled={removing === "batch" || !selectionAlbumDirs.length}
-              title={selectionAlbumDirs.length ? "Move selected albums to trash" : "Select albums or artists to remove"}
-              hidden={!selection.albums.length && !selection.artists.length}
-            >
-              <Trash2 className="h-3.5 w-3.5" /> Remove
-            </button>
+            {(selection.albums.length > 0 || selection.artists.length > 0) && (
+              <button
+                className="btn-danger !py-1 text-xs"
+                onClick={() => removeAlbums(selectionAlbumDirs)}
+                disabled={busy || removing === "batch" || !selectionAlbumDirs.length}
+                title="Move selected albums to trash"
+              >
+                <Trash2 className="h-3.5 w-3.5" /> Remove
+              </button>
+            )}
             <ScriptsDropdown onRun={runScriptsOnSelection} runAllIds={runAllIds} />
             <button
               className="btn-ghost !py-1 text-xs"
@@ -802,10 +832,10 @@ export default function LibraryPage() {
             <button
               className="btn-ghost !py-1 text-xs"
               onClick={organizeSelection}
-              disabled={removing === "batch" || !selectionAlbumDirs.length}
+              disabled={busy || removing === "batch" || !selectionAlbumDirs.length}
               title="Apply the naming script from Settings"
             >
-              <FolderSync className="h-3.5 w-3.5" /> Organize
+              <FolderSync className="h-3.5 w-3.5" /> {busy ? "Organizing…" : "Organize"}
             </button>
             <button className="btn-ghost !py-1 text-xs" onClick={clearSelection}>
               Clear
@@ -836,7 +866,7 @@ export default function LibraryPage() {
           paths={[...selTracks]}
           onClose={() => {
             setBulkTagsOpen(false);
-            qc.invalidateQueries({ queryKey: ["library"] });
+            invalidateLibrary(qc);
           }}
         />
       )}
@@ -890,11 +920,7 @@ export default function LibraryPage() {
             const st = statusFor(!!al.pass, al.audit_summary);
             const sel = selection.albums.includes(al.path);
             const isExp = expanded.has(al.path);
-            const tracks = [...(al.tracks ?? [])].sort((a, b) =>
-              (a.discnumber ?? 99) - (b.discnumber ?? 99) ||
-              (a.tracknumber ?? 999) - (b.tracknumber ?? 999) ||
-              String(a.file).localeCompare(String(b.file))
-            );
+            const tracks = tracksByAlbum[al.path] ?? [];
             return (
               <div key={al.path}>
                 <div
@@ -1122,7 +1148,7 @@ export default function LibraryPage() {
                         <td className="td text-zinc-500">{a.aggregate.pass_count}/{a.aggregate.total_checks}</td>
                       )}
                       {artistCols.includes("grade") && (
-                        <td className="td"><GradeBadge pass={(a.aggregate.grade_pct ?? 0) >= 100} score={a.aggregate.grade_pct} audit={a.aggregate.audit_summary} /></td>
+                        <td className="td"><GradeBadge pass={(a.aggregate.grade_pct ?? 0) >= 100 && !auditFails(a.aggregate.audit_summary)} score={a.aggregate.grade_pct} audit={a.aggregate.audit_summary} /></td>
                       )}
                     </tr>
                   );
@@ -1321,102 +1347,76 @@ function AlbumRowGroup({
   onResetTrackWidths: () => void;
 }) {
   const navigate = useNavigate();
-  const tracks = [...(album.tracks ?? [])].sort((a, b) =>
-    (a.discnumber ?? 99) - (b.discnumber ?? 99) ||
-    (a.tracknumber ?? 999) - (b.tracknumber ?? 999) ||
-    String(a.file).localeCompare(String(b.file))
-  );
+  const tracks = useMemo(() => [...(album.tracks ?? [])].sort(byDiscThenTrack), [album.tracks]);
+  // The album-name cell IS the row title (AlbumRow renders it, with the link
+  // and select-mode handling); the rest of the visible columns become cells.
+  const showAlbumCol = visibleCols.includes("album");
+  const cells: AlbumRowCell[] = [];
+  if (visibleCols.includes("artist"))
+    cells.push({ id: "artist", cls: "td text-zinc-400 break-words", node: album.artist });
+  if (visibleCols.includes("year"))
+    cells.push({
+      id: "year", cls: "td text-zinc-500",
+      title: album.meta?.ORIGINALDATE ?? album.meta?.DATE ?? undefined,
+      node: fmtDateCell(album.meta?.ORIGINALDATE || album.meta?.DATE, fullDates),
+    });
+  if (visibleCols.includes("tracks"))
+    cells.push({ id: "tracks", cls: "td text-zinc-500", node: album.track_count });
+  if (visibleCols.includes("grade"))
+    cells.push({
+      id: "grade",
+      node: <GradeBadge pass={!!album.pass && !auditFails(album.audit_summary)} score={album.grade_pct} audit={album.audit_summary} />,
+    });
+  if (visibleCols.includes("media")) cells.push({ id: "media", node: <MediaChip media={album.media} /> });
+  if (visibleCols.includes("dr"))
+    cells.push({
+      id: "dr", cls: "td text-zinc-500 tabular-nums", title: "Album dynamic range",
+      node: album.meta?.["ALBUM DYNAMIC RANGE"] ?? "—",
+    });
+  if (visibleCols.includes("source"))
+    cells.push({ id: "source", cls: "td text-zinc-500 break-words", node: album.source_summary ?? "—" });
+  if (visibleCols.includes("videos"))
+    cells.push({
+      id: "videos", cls: "td text-zinc-500 tabular-nums", title: "Music videos in this album",
+      node: album.video_count || "—",
+    });
+  if (visibleCols.includes("inst"))
+    cells.push({
+      id: "inst", cls: "td text-zinc-500 tabular-nums", title: "Instrumental tracks in this album",
+      node: album.inst_count || "—",
+    });
 
   return (
     <>
-      <tr className={`table-row group ${selected ? "bg-accent/15" : ""}`} onClick={selectMode ? onToggleSel : onToggle}>
-        {selectMode && (
-          <td className="td pr-0" onClick={(e) => e.stopPropagation()}>
-            <input type="checkbox" className="" checked={selected} onChange={onToggleSel} />
-          </td>
-        )}
-        <td className="td pr-0">
-          <button className="p-1 text-zinc-500 hover:text-white" onClick={(e) => { e.stopPropagation(); onToggle(); }}>
-            {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-          </button>
-        </td>
-        <td className="td">
-          <Link
-            to={albumRef(album)}
-            onClick={(e) => {
-              if (selectMode) {
-                e.preventDefault();
-                onToggleSel();
-              } else e.stopPropagation();
-            }}
-            title={selectMode ? "Click to select" : "Open album page"}
-            className="inline-block"
-          >
-            <CoverImg albumPath={album.path} coverFile={album.cover_file} />
-          </Link>
-        </td>
-        {visibleCols.includes("album") && (
-          <td className="td">
-            <div className="flex items-center gap-1.5 min-w-0">
-              <Link
-                to={albumRef(album)}
-                onClick={(e) => {
-                  if (selectMode) {
-                    e.preventDefault();
-                    onToggleSel();
-                  } else e.stopPropagation();
-                }}
-                className="font-medium hover:text-accent-soft break-words flex-1 min-w-0"
-              >
-                {album.meta?.ALBUM ?? album.path.split("/").pop()}
-              </Link>
-              <AdvisoryMark value={album.meta?.ITUNESADVISORY ?? album.meta?.ALBUMITUNESADVISORY} />
-            </div>
-          </td>
-        )}
-        {visibleCols.includes("artist") && <td className="td text-zinc-400 break-words">{album.artist}</td>}
-        {visibleCols.includes("year") && (
-          <td className="td text-zinc-500" title={album.meta?.ORIGINALDATE ?? album.meta?.DATE ?? undefined}>
-            {fmtDateCell(album.meta?.ORIGINALDATE || album.meta?.DATE, fullDates)}
-          </td>
-        )}
-        {visibleCols.includes("tracks") && <td className="td text-zinc-500">{album.track_count}</td>}
-        {visibleCols.includes("grade") && (
-          <td className="td">
-            <GradeBadge pass={!!album.pass && !auditFails(album.audit_summary)} score={album.grade_pct} audit={album.audit_summary} />
-          </td>
-        )}
-        {visibleCols.includes("media") && <td className="td"><MediaChip media={album.media} /></td>}
-        {visibleCols.includes("dr") && (
-          <td className="td text-zinc-500 tabular-nums" title="Album dynamic range">
-            {album.meta?.["ALBUM DYNAMIC RANGE"] ?? "—"}
-          </td>
-        )}
-        {visibleCols.includes("source") && <td className="td text-zinc-500 break-words">{album.source_summary ?? "—"}</td>}
-        {visibleCols.includes("videos") && (
-          <td className="td text-zinc-500 tabular-nums" title="Music videos in this album">
-            {album.video_count || "—"}
-          </td>
-        )}
-        {visibleCols.includes("inst") && (
-          <td className="td text-zinc-500 tabular-nums" title="Instrumental tracks in this album">
-            {album.inst_count || "—"}
-          </td>
-        )}
-        <td className="td text-right">
-          <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity" onClick={(e) => e.stopPropagation()}>
+      <AlbumRow
+        title={showAlbumCol ? (album.meta?.ALBUM ?? album.path.split("/").pop()) : null}
+        titleHref={albumRef(album)}
+        titleExtra={
+          showAlbumCol ? <AdvisoryMark value={album.meta?.ITUNESADVISORY ?? album.meta?.ALBUMITUNESADVISORY} /> : null
+        }
+        coverPath={album.path}
+        coverFile={album.cover_file}
+        coverTitle={selectMode ? "Click to select" : "Open album page"}
+        cells={cells}
+        actions={
+          <>
             <button className="btn-ghost !px-1.5 !py-1" title="Add to playlist" onClick={onPlaylist}>
               <ListPlus className="h-3.5 w-3.5" />
             </button>
             <button className="btn-danger !px-1.5 !py-1" title="Remove album (to trash)" disabled={removing} onClick={onRemove}>
               <Trash2 className="h-3.5 w-3.5" />
             </button>
-          </div>
-        </td>
-      </tr>
-      {expanded && (
-        <tr className="bg-panel/30">
-          <td colSpan={colSpan} className="p-0">
+          </>
+        }
+        onRowClick={onToggle}
+        selected={selected}
+        selectMode={selectMode}
+        onToggleSel={onToggleSel}
+        showExpand
+        expanded={expanded}
+        onToggle={onToggle}
+        colSpan={colSpan}
+        expandedContent={
             <table className="w-full">
               <thead className="border-b border-border">
                 <tr>
@@ -1471,7 +1471,6 @@ function AlbumRowGroup({
                               <TrackCover
                                 albumPath={album.path}
                                 trackCover={t.cover_file}
-                                albumFallback={false}
                                 wrapperClass="h-8 w-8 rounded bg-raise border border-border overflow-hidden shrink-0"
                               />
                             </td>
@@ -1538,9 +1537,8 @@ function AlbumRowGroup({
                 })()}
               </tbody>
             </table>
-          </td>
-        </tr>
-      )}
+        }
+      />
     </>
   );
 }
@@ -1600,12 +1598,34 @@ function useLocalPref(key: string, initial: boolean): [boolean, (v: boolean) => 
   return [value, set];
 }
 
+/** Sort state per table view, persisted like the column prefs (each view —
+ * albums / artists / tracks — keeps its own key, so switching tabs or
+ * reloading no longer resets the other tables). */
 function useLocalSort(key: string): [SortState | null, (key: string) => void] {
-  const { sort, setSort } = useStore();
-  const cur = sort && sort.key.startsWith(`${key}:`) ? { key: sort.key.slice(key.length + 1), dir: sort.dir } : null;
+  const storageKey = `mlo-sort-${key}`;
+  const [sort, setSort] = useState<SortState | null>(() => {
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (raw) {
+        const parsed = JSON.parse(raw) as SortState;
+        if (parsed && typeof parsed.key === "string" && (parsed.dir === 1 || parsed.dir === -1)) return parsed;
+      }
+    } catch {
+      /* fall through to unsorted */
+    }
+    return null;
+  });
   const set = (k: string) => {
-    const dir = cur?.key === k ? (cur.dir === 1 ? -1 : 1) : 1;
-    setSort({ key: `${key}:${k}`, dir });
+    setSort((cur) => {
+      const dir: 1 | -1 = cur && cur.key === k && cur.dir === 1 ? -1 : 1;
+      const next: SortState = { key: k, dir };
+      try {
+        localStorage.setItem(storageKey, JSON.stringify(next));
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
   };
-  return [cur, set];
+  return [sort, set];
 }

@@ -7,7 +7,8 @@ next interval. After each cycle the library is reconciled so wishes filled
 out-of-band (a manual download) are resolved too.
 
 Started from the FastAPI lifespan; the interval and master switch live in the
-config (``wishes_enabled`` / ``wishes_interval_hours``).
+config (``wishes_enabled`` / ``wishes_interval_hours``). ``wishes_auto_import``
+turns the downloading off: wishes are then only flagged for a manual import.
 """
 import threading
 import time
@@ -30,9 +31,9 @@ _state = {
     "next_run": 0.0,
 }
 
-# One wish can legitimately download for a while; cap so the worker stays
-# responsive to cancellation / config changes between wishes.
-_WISH_TIMEOUT_S = 45 * 60
+# Shown on a wish the user has to fill by hand.
+_MANUAL_NOTE = ("Auto-import is off — import this release manually from the "
+                "Soulseek page (or turn the switch back on in Settings).")
 
 
 def status():
@@ -51,34 +52,42 @@ def _set(**fields):
 def _job_running():
     try:
         from server import soulseek_auto
-        return soulseek_auto.job_state().get("state") == "running"
+        return soulseek_auto.job_active()
     except Exception:
         return False
 
 
-def _wait_job(cancel_check, timeout_s=_WISH_TIMEOUT_S):
-    """Block until the current auto-import job finishes; returns its state."""
+def _wait_job(cancel_check):
+    """Block until the current auto-import job settles; returns its state.
+
+    The job carries its own per-candidate ceilings (up to 2 h for a download
+    plus the log stage), so a fixed wait here would abandon a download that is
+    still progressing and charge the wish a bogus attempt. `cancel_check` lets
+    a stop / disable break the wait instead."""
     from server import soulseek_auto
-    deadline = time.time() + timeout_s
     time.sleep(1.0)  # let the job transition to running first
-    while time.time() < deadline:
+    while True:
         st = soulseek_auto.job_state()
-        if st.get("state") != "running":
-            return st
-        if cancel_check():
+        if st.get("state") != "running" or cancel_check():
             return st
         time.sleep(2.0)
-    return soulseek_auto.job_state()
 
 
 def _run_one(wish, cfg):
     """Search + fill one wish. Returns 'imported' | 'pending' | 'skipped'."""
+    wid = wish["id"]
+    if not cfg.get("wishes_auto_import", True):
+        # The user turned auto-import off: never search or download for them —
+        # the wish stays open with a note so they can fill it by hand.
+        if wish.get("last_error") != _MANUAL_NOTE:
+            wishes.mark_wanted(wid, error=_MANUAL_NOTE)
+        return "pending"
+
     from server import soulseek
     from server import soulseek_auto
 
-    wid = wish["id"]
     label = f"{wish.get('artist') or '?'} — {wish.get('title') or '?'}"
-    if soulseek_auto.job_state().get("state") == "running":
+    if soulseek_auto.job_active():
         # a user-initiated job owns the pipeline right now
         return "skipped"
     if not (soulseek.is_running() or soulseek.web_up(cfg)):
@@ -101,6 +110,10 @@ def _run_one(wish, cfg):
                            attempts=int(wish.get("attempts") or 0) + 1)
         return "pending"
     st = _wait_job(_stopped)
+    if st.get("state") == "running":
+        # Stopped by cancellation while the download is still going — leave the
+        # wish alone (the next cycle resets the stale 'searching' status).
+        return "pending"
     result = st.get("result") or {}
     if st.get("state") == "done" and result.get("imported"):
         wishes.mark_imported(wid, result.get("album_path") or "")
@@ -194,24 +207,41 @@ def _stopped():
 
 
 def _loop():
-    # initial settle, then cycle on the configured interval
-    time.sleep(20.0)
+    """Search constantly: one pass IMMEDIATELY, then keep polling for wishes
+    that have come due.
+
+    Previously the loop ran one cycle and then slept the WHOLE interval, so a
+    wish added a minute after a cycle waited up to `wishes_interval_hours`
+    before it was ever looked for. `_due()` is now consulted on a short tick,
+    which makes the searching effectively continuous: a wish is picked up as
+    soon as its own interval has elapsed (a brand-new one has `last_search`
+    0, so it is due on the very next tick), without hammering the network —
+    each wish still has its own interval between its searches.
+    """
+    time.sleep(20.0)   # initial settle: let the app finish booting
     while not _stop.is_set():
+        cfg = load_config()
+        if not cfg.get("wishes_enabled", True):
+            time.sleep(30.0)
+            continue
         try:
-            cfg = load_config()
-            if cfg.get("wishes_enabled", True):
-                run_cycle()
+            # run_cycle() only picks up wishes that are actually due, so
+            # calling it on every tick is safe and is what keeps searching
+            # continuous instead of bursty.
+            run_cycle()
         except Exception:
             traceback.print_exc()
-        interval = int(load_config().get("wishes_interval_hours", 6) or 6) * 3600
-        # wake often enough to notice a disabled worker / stop signal
-        slept = 0
-        while slept < interval and not _stop.is_set():
-            time.sleep(30.0)
-            slept += 30
-            cfg = load_config()
-            if not cfg.get("wishes_enabled", True):
-                slept = interval  # park until re-enabled
+        for _ in range(_TICK_S // 5):
+            if _stop.is_set():
+                return
+            time.sleep(5.0)
+            if not load_config().get("wishes_enabled", True):
+                break
+
+
+# How often the loop looks for wishes that have come due. Each individual
+# wish still honours `wishes_interval_hours` between its own searches.
+_TICK_S = 120
 
 
 def start():

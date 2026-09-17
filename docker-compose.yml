@@ -9,7 +9,8 @@ services:
     volumes:
       # Point this at your music library (artist/album folders).
       # ALL app state (config.json, playlists + favourites database, beets
-      # library, slskd config, lyrics-AI cache) lives in /music/.data, so
+      # library, slskd config, lyrics-AI cache) lives in /music/.mlo/data,
+      # beside the transient /music/.mlo/downloads and /music/.mlo/trash, so
       # this one mount persists everything across rebuilds.
       - ./music:/music
     restart: unless-stopped

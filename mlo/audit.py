@@ -21,7 +21,6 @@ Outputs written to tags:
 """
 import json
 import os
-import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 
@@ -214,13 +213,15 @@ def _audit_batch(cli, paths, config):
     return items
 
 
-def _classify(item):
+def _classify(item, config=None):
     """Return (severity, label): 'fail' | 'warn' | 'ok' and a reason."""
     status = str(item.get("status", "")).strip()
     err = str(item.get("errorMessage") or "").strip()
 
     if status == STATUS_REAL:
         flags = [label for key, label in FLAG_KEYS if item.get(key)]
+        if config is not None and not config.get("audit_scaled_clipping", True):
+            flags = [f for f in flags if f != "scaled clipping"]
         if flags:
             return "warn", ", ".join(flags)
         return "ok", ""
@@ -488,77 +489,6 @@ def run_audit_library(config):
         else:
             log("Integrity: all files passed verification")
 
-    # ------------------------------------------------------------------
-    # FLAC MD5 verification — ensure the file's actual MD5 matches
-    # what the tags claim and what the FLAC STREAMINFO says.
-    # Like foobar2000's "Verify Integrity", this catches files where the
-    # audio was replaced but the tag was not updated, or where the
-    # STREAMINFO MD5 is incorrect.
-    # Per-track: only the mismatched file fails, not the whole album.
-    # ------------------------------------------------------------------
-    flac_md5_failed = {}
-    if config.get("audit_integrity", True):
-        flac_exe = (tools.get("flac") or {}).get("flac_exe")
-        metaflac_exe = (tools.get("flac") or {}).get("metaflac_exe")
-        # Fallback scan for metaflac if not in tools
-        if not metaflac_exe and flac_exe:
-            try:
-                metaflac_exe = os.path.join(os.path.dirname(flac_exe), "metaflac.exe")
-                if not os.path.isfile(metaflac_exe):
-                    metaflac_exe = None
-            except Exception:
-                metaflac_exe = None
-        def _flac_actual_md5(path):
-            # Try metaflac --show-md5sum first (fast, reads STREAMINFO)
-            if metaflac_exe and os.path.isfile(metaflac_exe):
-                try:
-                    proc = run_tool([metaflac_exe, "--show-md5sum", path],
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                   text=True, encoding="utf-8", errors="replace", timeout=15)
-                    if proc.returncode == 0 and proc.stdout:
-                        md5 = proc.stdout.strip().split()[0].lower()
-                        if re.fullmatch(r"[0-9a-f]{32}", md5) and md5 != "0"*32:
-                            return md5
-                except Exception:
-                    pass
-            # Fallback: decode and compute MD5 via ffmpeg? For now, return None to skip
-            return None
-        for p in files:
-            if not p.lower().endswith(".flac"):
-                continue
-            if p in integrity_failed:
-                # Already failed integrity (flac -t), no need to double-check MD5
-                continue
-            try:
-                af = AudioFile(p)
-                if af.audio is None:
-                    continue
-                tag_md5 = str(af.get_tag("AUDIO_MD5") or "").strip().lower()
-                # Also check STREAMINFO MD5 via mutagen if available
-                actual_md5 = _flac_actual_md5(p)
-                if actual_md5 and tag_md5:
-                    # Both present: must match
-                    if tag_md5 != actual_md5:
-                        flac_md5_failed[p] = f"AUDIO_MD5 tag {tag_md5[:8]}… != file MD5 {actual_md5[:8]}…"
-                        continue
-                # If tag present but actual is all zeros (old FLAC), ignore
-                # If actual is None, skip
-                # Also verify STREAMINFO MD5 matches decoded audio via flac -t already did,
-                # but if actual is zeros, file is old and MD5 not computed — not a failure
-            except Exception as e:
-                flac_md5_failed[p] = str(e)[:120]
-                continue
-        if flac_md5_failed:
-            log(c(f"FLAC MD5: {len(flac_md5_failed)} file(s) have MD5 mismatch (tag vs file) — will be AUDIT=FAKE", Color.RED))
-            for p in sorted(flac_md5_failed)[:10]:
-                try:
-                    rel = os.path.relpath(p, folder)
-                except ValueError:
-                    rel = os.path.basename(p)
-                log(f"  {c('✕', Color.RED)} {rel} {c(flac_md5_failed[p][:80], Color.RED)}")
-            if len(flac_md5_failed) > 10:
-                log(f"  … and {len(flac_md5_failed) - 10} more")
-
     # When require_both is False, CD rips are excluded from AudioAuditor;
     # when True, they are included and the final verdict is the AND of both
     # sources (both must be REAL, otherwise FAKE). Checksum tags were already
@@ -623,15 +553,10 @@ def run_audit_library(config):
         for p, err in list(integrity_failed.items()):
             if p not in todo and p in files and should_write_audio_tag(config, "AUDIT", filepath=p):
                 todo.append(p)
-    # FLAC MD5 mismatches that were skipped due to already having an AUDIT tag
-    # still need to be handled — per-track, only the mismatched file fails.
-    if flac_md5_failed:
-        for p, err in list(flac_md5_failed.items()):
-            if p not in todo and p in files and should_write_audio_tag(config, "AUDIT", filepath=p):
-                todo.append(p)
 
     log(f"auditing {len(todo)} file(s) · fast scan "
         f"{'off (--thorough)' if thorough else 'on'}")
+    todo_paths = set(todo)
 
     counts = {"ok": 0, "skip": 0, "fail": 0}
     status_counts = {"Real": 0, "Fake": 0, "Unknown": 0,
@@ -679,14 +604,10 @@ def run_audit_library(config):
 
         missing = {canon(p) for p in batch}
         canon_failed = {canon(k): v for k, v in integrity_failed.items()} if config.get("audit_integrity", True) else {}
-        canon_flac_md5 = {canon(k): v for k, v in flac_md5_failed.items()} if flac_md5_failed else {}
         for item in items:
             path = item.get("filePath") or ""
             missing.discard(canon(path))
-            severity, reason = _classify(item)
-            # Scaled clipping is very common on loud masters; allow silencing just this warning
-            if reason == "scaled clipping" and not config.get("audit_scaled_clipping", True):
-                severity, reason = "ok", ""
+            severity, reason = _classify(item, config)
             cli_status = str(item.get("status", "")).strip()
 
             stats["total_scanned"] += 1
@@ -745,12 +666,6 @@ def run_audit_library(config):
                 tag_value = "FAKE"
                 severity = "fail"
                 reason = f"integrity check failed: {canon_failed[canon(path)]}"
-
-            # FLAC MD5 tag vs file verification — per-track, only mismatched file fails
-            if canon(path) in canon_flac_md5 and should_write_audio_tag(config, "AUDIT", filepath=path):
-                tag_value = "FAKE"
-                severity = "fail"
-                reason = f"FLAC MD5 mismatch: {canon_flac_md5[canon(path)]}"
 
             # Persist the verdict into the file's AUDIT tag (respects per-filetype).
             if config.get("write_audit_tag", True) and should_write_audio_tag(config, "AUDIT", filepath=path):
@@ -1569,6 +1484,21 @@ def run_audit_library(config):
                         _write_audit_tag(fp, "FAKE")
                     except Exception:
                         pass
+
+    # .log CRC verdicts never pass through the AudioAuditor loop above, so
+    # count them for the summary — otherwise a CRC-only CD library reports
+    # "Real 0 · Fake 0". Anything the loop already counted is in
+    # file_status_map and is skipped (no double counting).
+    if not require_both and checksum_verified:
+        for p, verdict in checksum_verified.items():
+            if p in todo_paths or _canon2(p) in file_status_map:
+                continue
+            stats["total_scanned"] += 1
+            if verdict == "REAL":
+                status_counts["Real"] += 1
+            else:
+                status_counts["Fake"] += 1
+                stats["grade_dist"]["FAIL"] = stats["grade_dist"].get("FAIL", 0) + 1
 
     stats["grade_dist"]["PASS"] = status_counts["Real"]
     stats["summary_pass"] = max(0, status_counts["Real"] - warned)

@@ -208,7 +208,16 @@ def format_lyrics_text(text, precision=2, strip_metadata=True,
         # text line (dropped for good at a blank line, at EOF, or when
         # the next line carries timestamps of its own).
         if parts and all(_stamp_only(p) for p in parts):
-            pending_stamps.extend(_part_stamp(p) for p in parts)
+            stamps = [_part_stamp(p) for p in parts]
+            if (lrc_add_zero_timestamp and lrc_zero_timestamp_blank
+                    and all(ts == zero_ts for ts in stamps)):
+                # Blank leader: the bare [00:00.00] is a line of its own.
+                # Lending it to the next line would glue it back on and
+                # destroy the blank form on a second pass.
+                pending_stamps = []
+                lines.append(zero_ts)
+                continue
+            pending_stamps.extend(stamps)
             continue
 
         if pending_stamps and not _TS_TOKEN_RE.search(s):
@@ -276,8 +285,10 @@ def format_lyrics_text(text, precision=2, strip_metadata=True,
             first_line = cleaned[first_idx]
             if lrc_add_zero_timestamp:
                 if lrc_zero_timestamp_blank:
-                    # Blank leader: ensure a bare [00:00.00] line exists.
-                    if not first_line.strip().startswith(zero_ts):
+                    # Blank leader: ensure a bare [00:00.00] line exists —
+                    # a tight "[00:00.00]text" leader does NOT count (the
+                    # grader wants the bare stamp as the first lyric line).
+                    if first_line.strip() != zero_ts:
                         cleaned.insert(first_idx, zero_ts)
                 elif not first_line.strip().startswith(zero_ts):
                     # Tight leader: "[00:00.00]" + the first lyric's text.
@@ -544,17 +555,21 @@ def _process_lyrics_for_audio(audio_path, cfg):
                     modified = True
 
             elif embedded_canonical and lrc_canonical != embedded_canonical:
-                # Write embedded's text formatted for LRC target
+                # Write embedded's text formatted for LRC target — only
+                # when it actually differs from what the sidecar holds
+                # (rewriting an identical file churns mtime for nothing).
                 dest_for_lrc = _format_for_storage(embedded_raw, cfg, optimize=True, is_for_lrc=True)
-                _atomic_write_text(lrc_path, dest_for_lrc)
+                if dest_for_lrc != lrc_raw:
+                    _atomic_write_text(lrc_path, dest_for_lrc)
+                    modified = True
                 lrc_exists = True
-                modified = True
 
             elif embedded_canonical and not lrc_canonical:
                 dest_for_lrc = _format_for_storage(embedded_raw, cfg, optimize=True, is_for_lrc=True)
-                _atomic_write_text(lrc_path, dest_for_lrc)
+                if dest_for_lrc != lrc_raw:
+                    _atomic_write_text(lrc_path, dest_for_lrc)
+                    modified = True
                 lrc_exists = True
-                modified = True
 
         except Exception as e:
             return ("fail", 0, 0, f"both sync: {e}")
@@ -1154,26 +1169,30 @@ def elrc_word_sync(lrc_text, max_line_spread_s=6.0, min_word_span_s=0.18,
         stamps = all_times_re.findall(raw)
         body = all_times_re.sub("", raw).strip()
         if not stamps:
-            rows.append((None, raw.strip()))
+            rows.append((None, raw.strip(), ""))
             continue
         t = ts_to_s(stamps[-1][0], stamps[-1][1], stamps[-1][2])
-        rows.append((t, body))
+        # every leading stamp is kept: a repeated "[t1][t2]text" line is
+        # one line the player shows at both times, so all stamps prefix
+        # the word-tagged body (only the last one anchors the word timings)
+        prefix = "".join(fmt_ts(ts_to_s(m[0], m[1], m[2])) for m in stamps)
+        rows.append((t, body, prefix))
 
     out = []
     n = len(rows)
-    for i, (t, body) in enumerate(rows):
+    for i, (t, body, prefix) in enumerate(rows):
         if t is None:
             out.append(body)
             continue
         if not body:
             # empty (instrumental) line: canonical form, no trailing space
-            out.append(f"{fmt_ts(t)}".rstrip())
+            out.append(prefix.rstrip())
             continue
         if word_tag_re.search(body):
             if not syllables or _body_has_glued_tags(body):
                 # already word-synced (or already syllable-synced):
                 # keep as-is
-                out.append(f"{fmt_ts(t)}{body}".rstrip())
+                out.append(f"{prefix}{body}".rstrip())
                 continue
             # word-level input + syllable target: upgrade in place. Merge
             # the tagged pieces back into words (a piece NOT ending in
@@ -1199,7 +1218,7 @@ def elrc_word_sync(lrc_text, max_line_spread_s=6.0, min_word_span_s=0.18,
                     w_end = w_start + max(0.4, 0.16 * len(stripped))
                 rebuilt.append((w_start, w_end, stripped))
             pieces = [word_span_syllables(a, b, w) for a, b, w in rebuilt]
-            out.append(fmt_ts(t) + " ".join(pieces))
+            out.append(prefix + " ".join(pieces))
             continue
         # resolve the line's end: next timed line, capped spread
         end = None
@@ -1225,6 +1244,6 @@ def elrc_word_sync(lrc_text, max_line_spread_s=6.0, min_word_span_s=0.18,
         # canonical spacing: no space after the line stamp; single spaces
         # between word tags (the trailing word keeps its punctuation);
         # syllable tags inside a word are glued together with no space
-        out.append(fmt_ts(t) + " ".join(pieces))
+        out.append(prefix + " ".join(pieces))
     return "\n".join(out)
 

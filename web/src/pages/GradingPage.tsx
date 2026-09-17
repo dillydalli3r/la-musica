@@ -17,8 +17,6 @@ interface CheckDef {
   k: string;
   label: string;
   desc: string;
-  /** the companion feature must be enabled for the check to ever fire */
-  requires?: string;
   /** check fires only when AI tooling is configured */
   needsAi?: boolean;
 }
@@ -150,6 +148,10 @@ const GRADING_KEYS = [
   ...NUMBERS.map((n) => n.k),
 ];
 
+/** The real toggles, minus the file-category permissions: a preset may force
+ * checks on, but choosing what counts toward a grade is the user's call. */
+const CHECK_KEYS = GROUPS.filter((g) => g.id !== "categories").flatMap((g) => g.items.map((i) => i.k));
+
 export default function GradingPage() {
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   const { data: defaults } = useQuery({ queryKey: ["configDefaults"], queryFn: api.configDefaults });
@@ -234,7 +236,7 @@ export default function GradingPage() {
     setLocal((c) => {
       const next = { ...(c ?? {}) };
       for (const k of GRADING_KEYS) if (d[k] !== undefined) next[k] = d[k];
-      if (name === "strict") for (const k of GRADING_KEYS) next[k] = true;
+      if (name === "strict") for (const k of CHECK_KEYS) next[k] = true;
       else if (name === "relaxed") for (const k of relaxedOff) next[k] = false;
       return next;
     });
@@ -323,7 +325,6 @@ export default function GradingPage() {
                       <span className="text-sm text-zinc-200 block">
                         {it.label}
                         {off && <span className="ml-2 text-[10px] font-mono text-zinc-600">needs AI configured</span>}
-                        {it.requires && <span className="ml-2 text-[10px] font-mono text-zinc-600">requires {it.requires}</span>}
                       </span>
                       <span className="text-[11px] text-zinc-500 block leading-snug">{it.desc}</span>
                     </span>

@@ -361,14 +361,23 @@ def run_remux_videos(config):
                 pbar.update(1)
                 continue
             if dest is None:
-                stats["skipped_count"] += 1
-                if msg == "already remuxed — stray original removed":
-                    log(f"  - {os.path.basename(path)}: stray original removed (same-stem MKV verified)")
-                elif msg not in ("already MKV", "already remuxed (same-stem MKV exists)"):
+                # dest is None for skips (already MKV / already remuxed) AND for
+                # real failures, so tell them apart by the message: everything
+                # other than the "already …" cases is a failure to report.
+                is_skip = msg == "already MKV" or msg.startswith("already remuxed")
+                if is_skip:
+                    stats["skipped_count"] += 1
+                    if msg == "already remuxed — stray original removed":
+                        log(f"  - {os.path.basename(path)}: stray original removed (same-stem MKV verified)")
+                    elif msg in ("already MKV", "already remuxed (same-stem MKV exists)"):
+                        log(c(f"  = {os.path.basename(path)}: {msg}", Color.YELLOW))
+                    else:
+                        stats["errors"].append(f"{os.path.basename(path)}: {msg}")
+                        log(c(f"  ! {os.path.basename(path)}: {msg}", Color.YELLOW))
+                else:
+                    stats["error_count"] += 1
                     stats["errors"].append(f"{os.path.basename(path)}: {msg}")
                     log(c(f"  ! {os.path.basename(path)}: {msg}", Color.YELLOW))
-                else:
-                    log(c(f"  = {os.path.basename(path)}: {msg}", Color.YELLOW))
             else:
                 stats["converted"] += 1
                 stats["modified_count"] += 1

@@ -5,7 +5,7 @@ import {
   Trash2, Undo2, Wand2, X,
 } from "lucide-react";
 import { api } from "../api";
-import { toast } from "../store";
+import { toast, useStore } from "../store";
 import {
   parseLrc, serializeLrc, KaraokeWords, type LrcLine, type LrcWord,
 } from "./LyricsViewer";
@@ -78,6 +78,9 @@ export default function LyricsEditorModal({
   const [playing, setPlaying] = useState(false);
   const [playTime, setPlayTime] = useState(0);
   const [dur, setDur] = useState(duration ?? 0);  const [speed, setSpeed] = useState(1);
+  // The preview element is a second decoder — the player bar's volume effect
+  // never reaches it, so it follows the shared app volume itself.
+  const { vol } = useStore();
   const [mode, setMode] = useState<StampMode>("line");
   const [busy, setBusy] = useState<string | null>(null);
   const [keysMenu, setKeysMenu] = useState(false);
@@ -108,10 +111,14 @@ export default function LyricsEditorModal({
     rowRefs.current[selIdx]?.scrollIntoView({ block: "nearest" });
   }, [selIdx]);
 
-  // Playback rate follows the speed control (pitch preserved).
+  // Playback rate follows the speed control (pitch preserved); volume
+  // follows the app-wide setting.
   useEffect(() => {
-    if (audioRef.current) audioRef.current.playbackRate = speed;
-  }, [speed, playing]);
+    const a = audioRef.current;
+    if (!a) return;
+    a.playbackRate = speed;
+    a.volume = vol;
+  }, [speed, vol, playing]);
 
   // Smooth clock while playing.
   useEffect(() => {
@@ -161,6 +168,7 @@ export default function LyricsEditorModal({
     } else {
       if (!a.src) a.src = api.streamUrl(path);
       a.playbackRate = speed;
+      a.volume = vol;
       a.play().catch(() => toast("Playback failed — audio format unsupported in browser"));
       setPlaying(true);
     }
@@ -576,6 +584,10 @@ export default function LyricsEditorModal({
                   const isActive = i === activeLine && playing;
                   const pieces = isSel && mode === "syllable" && !l.words ? syllabifyLine(l.text) : null;
                   const pending = pendingRef.current && pendingRef.current.idx === i ? pendingRef.current : null;
+                  // The field shows the stamp TEXT that was typed (or
+                  // parsed); an empty one — freshly stamped — falls back to
+                  // the line's time.
+                  const tsText = l.ts ? (l.ts.startsWith("[") ? l.ts.slice(1, -1) : l.ts) : fmtDur(l.time);
                   return (
                     <div
                       key={i}
@@ -600,14 +612,20 @@ export default function LyricsEditorModal({
                         <input
                           data-lyrictime
                           className="w-[58px] text-right font-mono text-[11px] text-zinc-400 outline-none border border-transparent focus:border-accent rounded px-1 py-0.5 shrink-0 tabular-nums"
-                          value={l.ts && l.ts !== "[00:00.00]" ? l.ts.slice(1, -1) : fmtDur(l.time)}
+                          value={tsText}
                           placeholder="0:00.00"
                           title="Line start — type m:ss.xx"
                           onChange={(e) => {
-                            const m = e.target.value.match(/^(?:(\d+):)?(\d{1,2})(?:[.:](\d{1,2}))?$/);
-                            if (!m) return;
+                            const v = e.target.value;
+                            const m = v.match(/^(?:(\d+):)?(\d{1,2})(?:[.:](\d{1,2}))?$/);
+                            // Half-typed text stays in the field (and in
+                            // `ts`) without touching the line's time.
+                            if (!m) {
+                              updateLine(i, { ts: v });
+                              return;
+                            }
                             const t = (m[1] ? parseInt(m[1], 10) * 60 : 0) + parseInt(m[2], 10) + (m[3] ? parseInt(m[3].padEnd(2, "0").slice(0, 2), 10) / 100 : 0);
-                            updateLine(i, { time: t });
+                            updateLine(i, { ts: v, time: t });
                           }}
                         />
                         <input

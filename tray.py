@@ -9,7 +9,12 @@ Shows a tray icon while the backend runs and provides:
 
 Launched by "Start la musica.bat". If pystray is missing it
 degrades to the plain launcher (start backend + open browser + exit).
+
+The tray only ever manages ITS OWN backend: anything listening on the port
+that does not answer /api/health as ours is reported as a foreign app and
+never opened, shut down or force-killed.
 """
+import json
 import os
 import shutil
 import socket
@@ -41,6 +46,30 @@ def port_open(port):
             return False
 
 
+def backend_ours():
+    """True when the thing on PORT answers like OUR API (not a stray app).
+
+    Same ownership probe start_app.py uses: without it the tray adopted any
+    listener on :8000 — reporting a running backend, opening the foreign app
+    in the browser, and taskkilling it on "Exit (stop backend)".
+    """
+    import urllib.request
+    try:
+        with urllib.request.urlopen(URL + "/api/health", timeout=2) as r:
+            if r.status != 200:
+                return False
+            return (json.loads(r.read()) or {}).get("status") == "ok"
+    except Exception:
+        return False
+
+
+def backend_state():
+    """'down' (nothing listening) | 'ours' | 'foreign' (someone else's app)."""
+    if not port_open(PORT):
+        return "down"
+    return "ours" if backend_ours() else "foreign"
+
+
 class Backend:
     """Owns the uvicorn child process (when started by us)."""
 
@@ -48,8 +77,11 @@ class Backend:
         self.proc = None
 
     def ensure_running(self):
-        if port_open(PORT):
+        state = backend_state()
+        if state == "ours":
             return "already-running"
+        if state == "foreign":
+            return "foreign"  # never spawn into, adopt or kill someone else's port
         flags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
         exe = sys.executable
         if os.name == "nt" and exe.lower().endswith("python.exe"):
@@ -70,7 +102,7 @@ class Backend:
         )
         for _ in range(30):
             time.sleep(1)
-            if port_open(PORT):
+            if backend_state() == "ours":
                 return "started"
         return "failed"
 
@@ -97,7 +129,11 @@ backend = Backend()
 
 def _request_backend_shutdown(timeout=2.0):
     """Ask a running backend to exit (only works when it was spawned by a
-    launcher that set MLO_ALLOW_SHUTDOWN=1)."""
+    launcher that set MLO_ALLOW_SHUTDOWN=1).
+
+    Only ever called once backend_state() said the listener is ours."""
+    if not backend_ours():
+        return False
     try:
         import urllib.request
         req = urllib.request.Request(f"{URL}/api/shutdown", method="POST", data=b"")
@@ -108,14 +144,23 @@ def _request_backend_shutdown(timeout=2.0):
 
 
 def _kill_port_listener(port=None):
-    """Force-kill whatever process is LISTENING on the backend port."""
+    """Force-kill whatever process is LISTENING on the backend port.
+
+    Never called for a foreign listener: stop_any_backend() checks ownership
+    first, and this re-checks so a caller cannot taskkill a stray app."""
     if os.name != "nt":
+        return False
+    if not backend_ours():
         return False
     port = port or PORT
     killed = False
     try:
+        # CREATE_NO_WINDOW on both: the tray runs windowed, so console tools
+        # like netstat/taskkill would otherwise flash a terminal each call.
+        _no_win = 0x08000000 if os.name == "nt" else 0
         out = subprocess.run(["netstat", "-aon"], capture_output=True,
-                             text=True, timeout=15).stdout or ""
+                             text=True, timeout=15,
+                             creationflags=_no_win).stdout or ""
         suffix = f":{port}"
         for line in out.splitlines():
             if "LISTENING" not in line:
@@ -125,7 +170,8 @@ def _kill_port_listener(port=None):
                 pid = parts[-1]
                 if pid.isdigit() and int(pid) != os.getpid():
                     subprocess.run(["taskkill", "/F", "/PID", pid],
-                                   capture_output=True, timeout=15)
+                                   capture_output=True, timeout=15,
+                                   creationflags=_no_win)
                     killed = True
     except Exception:
         pass
@@ -134,8 +180,13 @@ def _kill_port_listener(port=None):
 
 def stop_any_backend():
     """Stop our child if we have one, then any adopted/orphaned backend:
-    graceful shutdown endpoint first, force-kill as the last resort."""
+    graceful shutdown endpoint first, force-kill as the last resort.
+
+    A listener that does not answer /api/health is another app's: it is left
+    completely alone (no shutdown request, no taskkill)."""
     stopped = backend.stop()
+    if backend_state() == "foreign":
+        return stopped
     if port_open(PORT):
         _request_backend_shutdown()
         for _ in range(6):
@@ -219,10 +270,14 @@ def set_autostart(enabled):
 # Tray menu actions
 # --------------------------------------------------------------------------- #
 def on_open(icon, item):
+    if backend_state() == "foreign":
+        return  # opening another app's page is not what this icon means
     webbrowser.open(URL)
 
 
 def on_restart(icon, item):
+    if backend_state() == "foreign":
+        return  # never stop/restart a listener that is not ours
     stop_any_backend()
     time.sleep(1)
     backend.ensure_running()
@@ -336,6 +391,32 @@ def _acquire_single_instance():
         return False
 
 
+def _alert(msg):
+    """Visible error when there is no console (pythonw has none)."""
+    print(msg)
+    try:
+        subprocess.Popen(["cmd", "/c", f"echo {msg} & pause"])
+    except Exception:
+        pass
+
+
+def _run_foreign_tray():
+    """Tray for a port owned by another app: report it and manage nothing.
+
+    Deliberately has no Open/Restart/Stop: those would drive or kill a
+    process that is not ours."""
+    icon = pystray.Icon(
+        "la-musica", make_icon(),
+        f"la musica - port {PORT} is in use by another app",
+        menu=pystray.Menu(
+            pystray.MenuItem(f"Port {PORT} belongs to another app",
+                             lambda *_: None, enabled=False),
+            pystray.MenuItem("Exit", lambda icon, item: icon.stop()),
+        ),
+    )
+    icon.run()
+
+
 def run_tray():
     migrate_legacy_autostart()
     if not _acquire_single_instance():
@@ -343,12 +424,12 @@ def run_tray():
         webbrowser.open(URL)
         return
     status = backend.ensure_running()
+    if status == "foreign":
+        _run_foreign_tray()
+        return
     if status == "failed":
-        # no console on pythonw — fall back to a spawned console for errors
-        try:
-            subprocess.Popen(["cmd", "/c", "echo Backend failed to start & pause"])
-        except Exception:
-            pass
+        _alert("Backend failed to start - run `python -m uvicorn server.main:app` "
+               "to see errors.")
         return
     icon = pystray.Icon("la-musica", make_icon(),
                         "la musica — backend running",
@@ -362,6 +443,10 @@ def run_tray():
 def run_plain():
     """Fallback when pystray is unavailable."""
     status = backend.ensure_running()
+    if status == "foreign":
+        print(f"Port {PORT} is in use by another app (not la musica) — stop that "
+              "app or free the port. Nothing was started or stopped.")
+        return
     webbrowser.open(URL)
     if status == "failed":
         print("Backend failed to start — run `python -m uvicorn server.main:app` "

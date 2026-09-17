@@ -2,8 +2,11 @@
 """Launch la musica.
 
 Starts the FastAPI backend (if not already running), waits for it to come
-up, then opens the app in your browser. Double-click "Start la musica.bat"
-(Windows) or run `python start_app.py`.
+up, then opens the app in your browser. Run `python start_app.py` (or
+double-click "Start la musica.bat", which is just a wrapper).
+
+This script is standalone: it sets MLO_ALLOW_SHUTDOWN=1 on the backend it
+spawns itself, so the tray / desktop shell can stop that backend later.
 """
 import os
 import socket

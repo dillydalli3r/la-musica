@@ -1,9 +1,12 @@
 name: Release
 
-# Creating a v* tag builds the app, publishes a stable GitHub release with
-# the packaged zip, and pushes a Docker image to GHCR. The in-app updater
-# only ever sees stable (non-draft, non-prerelease) releases, so this
-# workflow never creates drafts or prereleases.
+# Creating a v* tag builds the web frontend, publishes a GitHub release with
+# the packaged source zip (la-musica-<version>-windows-x64.zip: mlo/, server/,
+# tools/, web/dist, start_app.py, tray.py), and pushes a Docker image to GHCR.
+# There is no in-app updater (desktop/src-tauri/tauri.conf.json configures no
+# updater plugin/endpoints/pubkey), so a release is consumed by downloading
+# the zip or pulling the image; the draft/prerelease flags below are just the
+# default "this is a real release" choice.
 
 on:
   push:
@@ -46,7 +49,6 @@ jobs:
           cp -r web/dist "${STAGE}/web/dist"
           cp start_app.py tray.py README.md LICENSE THIRD-PARTY-NOTICES.md "${STAGE}/" 2>/dev/null || true
           [ -f "Start la musica.bat" ] && cp "Start la musica.bat" "${STAGE}/"
-          python -m pip download -r server/requirements.txt -d /tmp/wheels --only-binary :all: >/dev/null 2>&1 || true
           echo "${VERSION}" > "${STAGE}/.version"
           zip -qr "la-musica-${VERSION}-windows-x64.zip" "${STAGE}"
           rm -rf "${STAGE}"

@@ -4,7 +4,8 @@ import json
 import os
 import tempfile
 
-from .paths import CONFIG_FILE, DEFAULT_DIGITAL_SOURCE, app_data_dir, read_music_folder_guess
+from .paths import (CONFIG_FILE, DEFAULT_DIGITAL_SOURCE, app_data_dir, downloads_dir,
+                    legacy_state_dirs, read_music_folder_guess, trash_dir)
 from .naming import DEFAULT_NAMING_SCRIPT
 from .ui import c, Color
 
@@ -174,6 +175,12 @@ DEFAULT_CONFIG = {
     "cover_jpeg_target_size": 0,
     "cover_png_target_size": 0,
     "cover_jxl_target_size": 0,
+    # Cover FINDER (covers.musichoarders.xyz meta-search): which region the
+    # storefront sources are queried against, and which sources to query.
+    # An empty `cover_sources` means "use the providers' own enabled list in
+    # the app's quality order"; the region defaults to the US storefront.
+    "cover_country": "us",
+    "cover_sources": [],
     # Album covers re-encode to 90% quality; other images keep max quality.
     "cover_jpeg_quality": 90,
 
@@ -424,10 +431,15 @@ DEFAULT_CONFIG = {
     "video_process_mp4": False,
 
     # Lossless source conversion (part of script 3): uncompressed WAV /
-    # AIFF (and ffmpeg-decodable APE/WV/SHN) are re-encoded to FLAC with
-    # tags copied over. The original is only removed after a verified
-    # conversion and when lossless_remove_original is on.
+    # AIFF (and ffmpeg-decodable APE/WV/SHN/TTA, plus ALAC in MP4) are
+    # re-encoded to the target lossless codec with tags copied over. The
+    # original is only removed after a verified conversion and when
+    # lossless_remove_original is on.
     "optimize_convert_lossless": True,
+    # Target codec every lossless file ends up in ("flac" or "alac"). FLAC is
+    # what the rest of the pipeline assumes; ALAC exists for Apple-centric
+    # libraries (m4a containers, no metaflac).
+    "lossless_target_codec": "flac",
     "lossless_remove_original": True,
 
     # Auto Tagging (script 8)
@@ -505,9 +517,12 @@ DEFAULT_CONFIG = {
     "soulseek_auto_log_min_score": 100,
     # Fraction of the release track list a candidate folder must contain.
     "soulseek_auto_complete_ratio": 1.0,
+    # How many candidates may be rejected before the search gives up on the
+    # release (the first candidate that verifies is imported immediately).
+    "soulseek_auto_max_attempts": 3,
     # How long to let a Soulseek search collect responses before scoring the
     # candidates (seconds). Longer = more peers + better chance of a match.
-    "soulseek_auto_search_wait": 45,
+    "soulseek_auto_search_wait": 15,
     # Explicit shared folders (empty = share the whole music folder).
     "soulseek_share_dirs": [],
     # Extra share filters — substrings/paths slskd must NOT share.
@@ -579,6 +594,7 @@ _INT_RANGES = {
     "cover_png_target_size": (0, 4000),
     "cover_jxl_target_size": (0, 4000),
     "soulseek_auto_log_min_score": (0, 100),
+    "soulseek_auto_max_attempts": (1, 50),
     "soulseek_auto_search_wait": (5, 300),
     "wishes_interval_hours": (1, 168),
     "wishes_max_attempts": (0, 1000),
@@ -594,7 +610,10 @@ _CHOICES = {
     # LINE = plain [mm:ss.xx] line timestamps only.
     "lrc_sync_level": {"SYLLABLE", "WORD", "LINE"},
     # AI reasoning effort (thinking budget) for every AI-assisted feature.
-    "ai_effort": {"MINIMAL", "LOW", "MEDIUM", "HIGH"},
+    # Lowercase is canonical (matches the Settings dropdown); the
+    # canonicalization below is case-insensitive, so a stored "HIGH" from an
+    # older version normalizes to "high" instead of being rejected.
+    "ai_effort": {"minimal", "low", "medium", "high"},
     "cue_file_type": {"WAVE", "MP3"},
     "audiometa_key_notation": {"musical", "camelot", "openkey"},
     "video_preset": {"ultrafast", "superfast", "veryfast", "faster", "fast",
@@ -808,7 +827,7 @@ def normalize_config(user=None) -> dict:
 
 
 def active_config_file():
-    """Where the live configuration lives: <music folder>/.data/config.json
+    """Where the live configuration lives: <music folder>/.mlo/data/config.json
     once a music folder is known, the repo-local config.json otherwise."""
     mf = read_music_folder_guess()
     if mf:
@@ -822,12 +841,17 @@ _MIGRATED = False
 
 
 def _migrate_to_data_dir():
-    """One-time move of ALL app state into <music folder>/.data:
-    config.json plus everything in the legacy repo-local server/data
-    (beets library + config, playlists/likes database, slskd.yaml, the
-    lyrics-AI cache). Existing files are moved, never clobbered, and a
-    stub config.json stays behind at the legacy path so the music folder
-    can still be located on the next run."""
+    """One-time move of ALL app state into the new layout:
+    <music folder>/.mlo/data (config.json plus everything from the legacy
+    state dirs: beets library + config, playlists/likes database, slskd.yaml,
+    the lyrics-AI cache) and the transient dirs into <music folder>/.mlo —
+    .mlo_downloads -> .mlo/downloads (incl. .incomplete/) and .mlo_trash ->
+    .mlo/trash (incl. .mlo_manifest.json). The old top-level .mlo_data is one
+    of the legacy sources and is removed once drained. Existing files are
+    moved, never clobbered — except an app-created EMPTY database at the
+    destination (see _is_empty_db) — and a stub config.json stays behind at
+    the legacy path so the music folder can still be located on the next
+    run."""
     global _MIGRATED
     if _MIGRATED:
         return
@@ -842,23 +866,32 @@ def _migrate_to_data_dir():
         return
     try:
         os.makedirs(d, exist_ok=True)
-        legacy_data = os.path.join(os.path.dirname(CONFIG_FILE), "server", "data")
-        # A music-folder change can leave the state in the *previous* folder's
-        # Data dir (nobody rewrote the stub); migrate that forward too so
-        # nothing is orphaned. Existing files are never clobbered.
-        other_data = None
-        try:
-            with open(CONFIG_FILE, encoding="utf-8") as f:
-                prev_mf = (json.load(f) or {}).get("music_folder")
-            if prev_mf and os.path.abspath(prev_mf) != os.path.abspath(mf):
-                other_data = app_data_dir(prev_mf)
-        except Exception:
-            pass
-        _move_state_dir(legacy_data, d)
-        _move_state_dir(other_data, d)
+        # Every dir that may hold pre-migration state, most authoritative
+        # first: this scope's Data/.mlo_data, then a previous music folder's
+        # (nobody rewrote the stub), then repo-local server/data. Never
+        # clobbered.
+        # A source that belongs to the PREVIOUS music folder is another
+        # install's state — a scope handed in through MLO_MUSIC_FOLDER or a
+        # stale stub. COPY those, never move: a throwaway scope (a test, a
+        # probe run) that is deleted afterwards must not be able to strand
+        # the real install's config, playlists or beets library.
+        from .paths import previous_state_dirs
+
+        foreign = {os.path.normcase(os.path.abspath(p))
+                   for p in previous_state_dirs(mf)}
+        for src in legacy_state_dirs(mf):
+            _move_state_dir(src, d,
+                            copy=os.path.normcase(os.path.abspath(src)) in foreign)
+        # Transient dirs keep their contents (downloads' .incomplete/ and the
+        # bin's .mlo_manifest.json simply travel as entries).
+        _move_state_dir(os.path.join(mf, ".mlo_downloads"), downloads_dir(mf))
+        _move_state_dir(os.path.join(mf, ".mlo_trash"), trash_dir(mf))
         new_cfg = os.path.join(d, "config.json")
         if os.path.isfile(CONFIG_FILE) and not os.path.exists(new_cfg):
-            shutil.move(CONFIG_FILE, new_cfg)
+            # Copy, not move: the stub path is rewritten right below anyway,
+            # and a scope that is thrown away afterwards must not take the
+            # only copy of the settings with it.
+            shutil.copy2(CONFIG_FILE, new_cfg)
         # A carried-over config may still point at its old location (the very
         # bug this fixes): keep the live value aligned with the new folder.
         if os.path.isfile(new_cfg):
@@ -875,7 +908,7 @@ def _migrate_to_data_dir():
         # stub so read_music_folder_guess() keeps resolving after the move
         _write_stub(mf)
     except Exception as e:
-        print(f"WARNING: .data migration failed: {e}")
+        print(f"WARNING: state migration to {d} failed: {e}")
 
 
 def load_config() -> dict:
@@ -891,16 +924,48 @@ def load_config() -> dict:
     return normalize_config(user)
 
 
-def _move_state_dir(src, dst):
-    """Move app state files from one Data dir to another (never clobber).
+def _is_empty_db(path):
+    """True when *path* is a SQLite file with no row in any of its tables.
 
-    Used both by the legacy .data migration and by a music-folder change, so
-    playlists, the beets DB, wishes and slskd.yaml follow the library.
-    Returns True when a move was attempted.
+    Safety net for the no-clobber rule: an empty database can already sit at
+    the destination when the migration runs (an older build opened its
+    playlists/wishes database during startup, or an interrupted run left a
+    freshly created file behind). Treating that as 'existing data' would
+    skip the user's real database and orphan it in the old folder — an empty
+    app-created DB never outranks pre-migration state."""
+    if not str(path).lower().endswith(".db") or not os.path.isfile(path):
+        return False
+    try:
+        import sqlite3
+        con = sqlite3.connect(path, timeout=5)
+        try:
+            tables = [r[0] for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            return not any(con.execute(f'SELECT 1 FROM "{t}" LIMIT 1').fetchone()
+                           for t in tables)
+        finally:
+            con.close()
+    except Exception:
+        return False
+
+
+def _move_state_dir(src, dst, copy=False):
+    """Move (or copy) app state files from one dir to another (never clobber).
+
+    Used by the legacy-state migration, by the transient dirs
+    (.mlo_downloads/.mlo_trash) and by a music-folder change, so playlists,
+    the beets DB, wishes, slskd.yaml and the download/trash contents follow
+    the library. ``copy=True`` leaves the source untouched — used when the
+    source belongs to a DIFFERENT install (a scope set by MLO_MUSIC_FOLDER),
+    where moving would strand that install. The one exception to no-clobber:
+    an empty database the app itself created at the destination (see
+    _is_empty_db). Returns True when a move was attempted.
     """
     import shutil
 
-    if not src or os.path.abspath(src) == os.path.abspath(dst):
+    if not src or not dst:
+        return False
+    if os.path.abspath(src) == os.path.abspath(dst):
         return False
     if not os.path.isdir(src):
         return False
@@ -910,8 +975,20 @@ def _move_state_dir(src, dst):
             if name == "tray.lock":  # runtime lock, not data
                 continue
             s, d = os.path.join(src, name), os.path.join(dst, name)
-            if not os.path.exists(d):
+            if os.path.exists(d) and not (os.path.isfile(s) and _is_empty_db(d)):
+                continue
+            if copy:
+                if os.path.isdir(s):
+                    shutil.copytree(s, d)
+                else:
+                    shutil.copy2(s, d)
+            else:
                 shutil.move(s, d)
+        if not copy:
+            try:
+                os.rmdir(src)  # only when nothing was left behind (tray.lock, skipped)
+            except OSError:
+                pass
         return True
     except Exception as e:
         print(f"WARNING: could not move app state: {e}")
@@ -919,8 +996,8 @@ def _move_state_dir(src, dst):
 
 
 def _write_stub(music_folder):
-    """Legacy-path config.json: records the folder that owns the .data dir
-    so read_music_folder_guess() keeps resolving on the next run."""
+    """Legacy-path config.json: records the folder that owns the .mlo/data
+    dir so read_music_folder_guess() keeps resolving on the next run."""
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump({"music_folder": music_folder}, f, indent=2)
@@ -933,14 +1010,30 @@ def save_config(cfg: dict) -> bool:
     """Validate and atomically replace the persisted configuration."""
     global _MIGRATED
     try:
-        normalized = normalize_config(cfg)
+        # Merge onto the live config: callers may POST a partial dict (e.g. the
+        # Soulseek port form sends two keys), and an omitted key must keep its
+        # saved value instead of reverting to the factory default.
+        current = load_config()
+        current.update(cfg or {})
+        # Drop keys outside the schema (obsolete/typo writes); 'targets' is
+        # transient GUI selection and is stripped by normalize_config anyway.
+        normalized = normalize_config(
+            {k: v for k, v in current.items() if k in DEFAULT_CONFIG}
+        )
         prev_mf = read_music_folder_guess() or ""
         new_mf = str(normalized.get("music_folder") or "").strip()
-        # App state lives in <music folder>/Data: a folder change must carry it
-        # along, or the new folder starts empty and the old one is orphaned.
+        # ALL app state lives in <music folder>/.mlo (data/, downloads/,
+        # trash/): a folder change must carry all of it along, or the new
+        # folder starts empty and the old one is orphaned.
         if (new_mf and prev_mf and os.path.isdir(new_mf)
                 and os.path.abspath(new_mf) != os.path.abspath(prev_mf)):
-            _move_state_dir(app_data_dir(prev_mf), app_data_dir(new_mf))
+            d = app_data_dir(new_mf)
+            # the previous folder's own state dir first, then every older
+            # layout it may still hold (Data, server/data)
+            for src in (app_data_dir(prev_mf), *legacy_state_dirs(prev_mf)):
+                _move_state_dir(src, d)
+            _move_state_dir(downloads_dir(prev_mf), downloads_dir(new_mf))
+            _move_state_dir(trash_dir(prev_mf), trash_dir(new_mf))
             _write_stub(new_mf)
         path = active_config_file()
         directory = os.path.dirname(path) or "."

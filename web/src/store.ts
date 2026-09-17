@@ -14,10 +14,6 @@ export interface QueueTrack {
 }
 
 interface Store {
-  folder: string | null;
-  setFolder: (f: string | null) => void;
-  config: Record<string, unknown> | null;
-  setConfig: (c: Record<string, unknown> | null) => void;
   progress: { done: number; total: number; desc: string } | null;
   setProgress: (p: { done: number; total: number; desc: string } | null) => void;
   playing: string | null;
@@ -39,10 +35,6 @@ interface Store {
   queueId: number; // bumped on every queue replacement — player reloads even
   // when the new queue starts at the same index
   playNow: (q: QueueTrack[], i?: number) => void;
-  selected: string[];
-  setSelected: (s: string[]) => void;
-  selectionAlbum: string | null;
-  setSelectionAlbum: (p: string | null) => void;
   query: string;
   setQuery: (q: string) => void;
   sort: { key: string; dir: 1 | -1 } | null;
@@ -73,10 +65,6 @@ function initialVol(): number {
 }
 
 export const useStore = create<Store>((set) => ({
-  folder: null,
-  setFolder: (folder) => set({ folder }),
-  config: null,
-  setConfig: (config) => set({ config }),
   progress: null,
   setProgress: (progress) => set({ progress }),
   playing: null,
@@ -121,10 +109,6 @@ export const useStore = create<Store>((set) => ({
   queueId: 0,
   playNow: (queue, index = 0) =>
     set((st) => ({ queue, index, queueId: st.queueId + 1, playing: queue[index]?.path ?? null })),
-  selected: [],
-  setSelected: (selected) => set({ selected }),
-  selectionAlbum: null,
-  setSelectionAlbum: (selectionAlbum) => set({ selectionAlbum }),
   query: "",
   setQuery: (query) => set({ query }),
   sort: null,

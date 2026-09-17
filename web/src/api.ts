@@ -1,8 +1,20 @@
+import type { CoverInfo, CoverSourceCatalog, CoverWriteResult, DownloadsPayload, LayoutReport } from "./types";
+
 // In the Tauri desktop shell the frontend is served from tauri://localhost,
 // so relative /api paths cannot reach the Python backend — use absolute.
 const IN_TAURI = !!(window as any).__TAURI_INTERNALS__;
 const BASE = IN_TAURI ? "http://127.0.0.1:8000" : "";
 const API = `${BASE}/api`;
+
+/** `track=` (one file) plus the comma-separated `tracks=` list — each name
+ *  URL-encoded on its own, so commas inside a name survive. */
+function coverQuery(track?: string, tracks?: string[]): string {
+  const list = (tracks ?? []).filter(Boolean);
+  return (
+    (track ? `&track=${encodeURIComponent(track)}` : "") +
+    (list.length ? `&tracks=${list.map(encodeURIComponent).join(",")}` : "")
+  );
+}
 
 async function json<T>(url: string, init?: RequestInit, timeoutMs = 20000): Promise<T> {
   const ctrl = new AbortController();
@@ -24,6 +36,162 @@ async function json<T>(url: string, init?: RequestInit, timeoutMs = 20000): Prom
     throw new Error(detail);
   }
   return r.json() as Promise<T>;
+}
+
+/** One item in <music folder>/.mlo/trash. `cover` is false when the cover
+ *  endpoint would 404 for this directory — render a placeholder then. */
+export interface TrashEntry {
+  name: string;
+  path: string;
+  kind: "album" | "file";
+  label: string;
+  tracks: number;
+  bytes: number;
+  /** ISO-8601 */
+  trashed_at: string;
+  cover: boolean;
+  /** Where the entry was removed from; null when the move did not record it
+   *  (older removals) — then it can only be restored to a chosen folder. */
+  origin: string | null;
+}
+
+export interface TrashPayload {
+  folder: string;
+  /** The library root `<music folder>/.mlo/trash` lives in — the default
+   *  destination when a trashed entry has no recorded origin. */
+  music_folder: string;
+  exists: boolean;
+  count: number;
+  bytes: number;
+  entries: TrashEntry[];
+}
+
+export interface TrashRestoreResult {
+  restored: { name: string; to: string }[];
+  failed: { name: string; error: string }[];
+}
+
+export interface TrashDeleteResult {
+  deleted: string[];
+  failed: { name: string; error: string }[];
+  /** Bytes reclaimed, only for what actually got deleted. */
+  freed: number;
+}
+
+/** Live per-query search progress (server/soulseek_auto.py job_state()) while
+ *  the search stage runs — null once the query has been scored. `elapsed` and
+ *  `wait` are seconds of the current query's window. */
+export interface SlskSearchProgress {
+  query: string;
+  elapsed: number;
+  wait: number;
+  state: string;
+  responses: number;
+  files: number;
+  /** Seconds left in this query's window, and the absolute deadline the
+   *  server computed for it. Older servers send neither. */
+  remaining?: number | null;
+  deadline_s?: number | null;
+}
+
+/** One file of the running auto-import download, as slskd reports it. */
+export interface SlskAutoFile {
+  name?: string;
+  bytes?: number;
+  size?: number;
+  percent?: number;
+  speed?: number;
+  state?: string;
+  done?: boolean;
+}
+
+/** Live download progress of the auto-import job — null while nothing is in
+ *  flight, and absent entirely on servers predating the payload. Every field
+ *  is optional: the panel renders whatever subset the backend publishes. */
+export interface SlskAutoProgress {
+  phase?: string;
+  username?: string;
+  dir?: string;
+  files_done?: number;
+  files_total?: number;
+  bytes?: number;
+  size?: number;
+  percent?: number;
+  speed?: number;
+  eta_s?: number | null;
+  files?: SlskAutoFile[] | null;
+}
+
+/** Auto-import job state (server/soulseek_auto.py job_state()). `confirm` is
+ *  set while the job waits for the user to approve a lossy-only download. */
+export interface SlskAutoJob {
+  state: "idle" | "running" | "confirm" | "done" | "error" | "cancelled";
+  stage: string;
+  search: SlskSearchProgress | null;
+  /** Present only while a download is in flight. */
+  progress?: SlskAutoProgress | null;
+  release: {
+    id?: string | null; title?: string; artist?: string; date?: string | null;
+    country?: string | null; catalog_number?: string | null; media?: string;
+  } | null;
+  log: { t: string; msg: string }[];
+  attempts: { username: string; dir: string; reason: string }[];
+  result: {
+    album_path?: string; staging_path?: string; imported?: boolean; organized?: boolean;
+    organize_error?: string | null; error?: string;
+  } | null;
+  confirm: {
+    reason: string;
+    formats: string[];
+    candidates: {
+      username: string; dir: string; format: string;
+      matched: number; expected: number; size: number; score: number;
+    }[];
+  } | null;
+}
+
+/** One slskd transfer (download or upload). `state` is slskd's own enum:
+ *  Queued / InProgress / Completed / Errored / Cancelled / Rejected / … */
+export interface SlskTransfer {
+  id: string;
+  filename: string;
+  size: number;
+  state: string;
+  bytesTransferred?: number | null;
+  percentComplete?: number | null;
+  averageSpeed?: number | null;
+}
+
+export interface SlskTransferUser {
+  username: string;
+  directories: { directory: string; files: SlskTransfer[] }[];
+}
+
+export interface SlskDownloads {
+  downloads: SlskTransferUser[];
+}
+
+export interface SlskBrowse {
+  username: string;
+  directories: { directory: string; files: { filename: string; size: number }[] }[];
+}
+
+/** One private-message conversation (slskd): the peer and its unread count.
+ *  slskd's list carries no last message — the thread holds the content. */
+export interface SlskConversation {
+  username: string;
+  is_active?: boolean;
+  unread?: number;
+}
+
+/** One private message. `direction` is slskd's own enum (In = from the peer). */
+export interface SlskMessage {
+  id?: number;
+  direction?: "In" | "Out";
+  message?: string;
+  timestamp?: string;
+  acknowledged?: boolean;
+  replayed?: boolean;
 }
 
 export const api = {
@@ -59,6 +227,24 @@ export const api = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
+    }),
+  /** <music folder>/.mlo/trash — what "Remove from library" moved aside. */
+  trash: () => json<TrashPayload>(`${API}/trash`),
+  trashDelete: (names: string[]) =>
+    json<TrashDeleteResult>(`${API}/trash/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names }),
+    }),
+  /** Move trashed items back into the library. `dest` only applies to entries
+   *  whose original location was never recorded — the server restores every
+   *  other name to its own origin, and validates `dest` is inside the music
+   *  folder. */
+  trashRestore: (names: string[], dest?: string | null) =>
+    json<TrashRestoreResult>(`${API}/trash/restore`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names, dest: dest ?? null }),
     }),
   mbDetect: (path: string) =>
     json<{ mbid: string | null; key?: string; track?: string }>(
@@ -125,8 +311,10 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path, tags }),
     }, 600000),
+  /** Dimensions etc. of an album's cover — or, with `coverFile`, of any image
+   *  in the album folder, which is how a track's own art is measured. */
   coverInfo: (albumPath: string, coverFile?: string | null) =>
-    json<{ file: string | null; format: string; bytes: number; width: number | null; height: number | null; aspect: string | null; aspect_label: string | null; megapixels: number | null }>(
+    json<CoverInfo>(
       `${API}/cover/info?album=${encodeURIComponent(albumPath)}${coverFile ? `&file=${encodeURIComponent(coverFile)}` : ""}`
     ),
 
@@ -146,8 +334,6 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, kind, filter }),
     }),
-  renamePlaylist: (id: number, name: string) =>
-    api.playlistUpdate(id, { name }),
   /** Partial update (currently: rename). */
   playlistUpdate: (id: number, patch: { name?: string }) =>
     json<import("./types").Playlist>(`${API}/playlists/${id}`, {
@@ -202,9 +388,17 @@ export const api = {
   mbSearchArtists: (q: string) => json<any[]>(`${API}/mb/search/artists?q=${encodeURIComponent(q)}`),
   // Generic MusicBrainz browser (in-app entity pages). Searches and
   // discographies page 100 rows at a time — pass offset for "load more".
-  mbSearch: (type: string, q: string, limit = 100, mode: "free" | "catno" | "barcode" = "free", offset = 0) =>
+  // primaryType/secondaryType map onto MusicBrainz's own release-type
+  // qualifiers (Album/EP/Single + Soundtrack/Live/Compilation/...).
+  mbSearch: (
+    type: string, q: string, limit = 100,
+    mode: "free" | "catno" | "barcode" = "free", offset = 0,
+    primaryType = "", secondaryType = ""
+  ) =>
     json<{ rows: any[]; total: number }>(
-      `${API}/mb/search?type=${encodeURIComponent(type)}&q=${encodeURIComponent(q)}&limit=${limit}&offset=${offset}&mode=${mode}`
+      `${API}/mb/search?type=${encodeURIComponent(type)}&q=${encodeURIComponent(q)}` +
+      `&limit=${limit}&offset=${offset}&mode=${mode}` +
+      `&primary_type=${encodeURIComponent(primaryType)}&secondary_type=${encodeURIComponent(secondaryType)}`
     ),
   mbArtist: (id: string, offset = 0, limit = 300) =>
     json<any>(`${API}/mb/artist/${id}?offset=${offset}&limit=${limit}`),
@@ -301,7 +495,8 @@ export const api = {
     for (const { file, relPath } of files) fd.append("files", file, relPath);
     return json<{ ok: boolean; saved: string[]; album_path: string }>(
       `${API}/import/upload?target_dir=${encodeURIComponent(targetDir)}`,
-      { method: "POST", body: fd }
+      { method: "POST", body: fd },
+      1800000
     );
   },
   importScan: (path: string) =>
@@ -320,6 +515,35 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target_dir: targetDir, mb_link: mbLink || null, rym_link: rymLink || null }),
     }),
+  /** Record the release's full tracklist on the album, so a PARTIAL import
+   *  can grey out the tracks that never came in. Empty tracks clears it. */
+  importExpected: (
+    targetDir: string,
+    releaseId: string | null,
+    tracks: { disc: number; position: number; title?: string; recording_mbid?: string | null }[]
+  ) =>
+    json<{ ok: boolean; tracks: number }>(`${API}/import/expected`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target_dir: targetDir, release_id: releaseId || null, tracks }),
+    }),
+
+  /** slskd's staging area: <music>/.mlo/downloads. */
+  downloads: () => json<DownloadsPayload>(`${API}/downloads`),
+  downloadsDelete: (names: string[]) =>
+    json<{ deleted: string[]; failed: { name: string; error: string }[]; freed: number }>(
+      `${API}/downloads/delete`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ names }) }
+    ),
+  downloadsImport: (names: string[]) =>
+    json<{ moved: { name: string; path: string }[]; failed: { name: string; error: string }[] }>(
+      `${API}/downloads/import`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ names }) }
+    ),
+
+  /** Read-only scan of the whole music folder: misplaced files, unexpected
+   *  folders, and anything that breaks the Artists/<Artist>/<Album> shape. */
+  libraryLayout: () => json<LayoutReport>(`${API}/library/layout`),
 
   namingPreview: (script: string, shortFolderNames: boolean, sample?: Record<string, string>) =>
     json<{ path: string | null; ok: boolean; error?: string }>(`${API}/naming/preview`, {
@@ -350,28 +574,50 @@ export const api = {
       900000
     ),
 
-  cover: (albumPath: string, file: File, track?: string) => {
+  /** Upload a cover. No track/tracks → the album cover; `track` → that file's
+   *  sidecar; `tracks` → ONE image for the whole selection (sidecar of the
+   *  first, recorded per track in the manifest). Never gated on size: the
+   *  response still carries `warning` when the image is under the target. */
+  cover: (albumPath: string, file: File, track?: string, tracks?: string[]) => {
     const fd = new FormData();
     fd.append("file", file);
-    const q = track ? `&track=${encodeURIComponent(track)}` : "";
-    return json<{ ok: boolean; path: string }>(
-      `${API}/cover?album=${encodeURIComponent(albumPath)}${q}`,
+    return json<CoverWriteResult>(
+      `${API}/cover?album=${encodeURIComponent(albumPath)}${coverQuery(track, tracks)}`,
       { method: "POST", body: fd }
     );
   },
 
-  coverSearch: (artist: string, album: string) =>
-    json<{ results: import("./types").CoverResult[] }>(
-      `${API}/cover/search?artist=${encodeURIComponent(artist)}&album=${encodeURIComponent(album)}`,
+  coverSearch: (
+    artist: string,
+    album: string,
+    opts?: { sources?: string[]; country?: string }
+  ) => {
+    const q = new URLSearchParams({ artist, album });
+    if (opts?.sources?.length) q.set("sources", opts.sources.join(","));
+    if (opts?.country) q.set("country", opts.country);
+    return json<{ results: import("./types").CoverResult[] }>(
+      `${API}/cover/search?${q}`,
       undefined,
       90000
-    ),
-  coverFromUrl: (albumPath: string, url: string) =>
-    json<{ ok: boolean; path: string }>(
-      `${API}/cover/fromurl?album=${encodeURIComponent(albumPath)}&url=${encodeURIComponent(url)}`,
+    );
+  },
+  /** Selectable cover sources + regions, plus the saved defaults. */
+  coverSources: () => json<CoverSourceCatalog>(`${API}/cover/sources`),
+  /** Apply a cover image from a URL; same track/tracks targeting as `cover`. */
+  coverFromUrl: (albumPath: string, url: string, track?: string, tracks?: string[]) =>
+    json<CoverWriteResult>(
+      `${API}/cover/fromurl?album=${encodeURIComponent(albumPath)}&url=${encodeURIComponent(url)}${coverQuery(track, tracks)}`,
       { method: "POST" },
       120000
     ),
+  /** Drop `tracks` from the album's per-track cover manifest (all of them when
+   *  omitted). The image file itself is never deleted. */
+  coverClear: (albumPath: string, tracks?: string[]) =>
+    json<{ ok: boolean }>(`${API}/cover/clear`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ album: albumPath, tracks: tracks?.length ? tracks : undefined }),
+    }),
 
   beetsStatus: () =>
     json<{ installed: boolean; version: string | null; db: string; config: string }>(`${API}/beets/status`),
@@ -440,8 +686,50 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username, files }),
     }, 60000),
-  soulseekDownloads: () =>
-    json<{ downloads: any[] }>(`${API}/soulseek/downloads`, undefined, 30000),
+  soulseekDownloads: () => json<SlskDownloads>(`${API}/soulseek/downloads`, undefined, 30000),
+  // Private messages — the conversation list carries the unread total (for the
+  // tab badge), the thread is fetched per peer, usernames percent-encoded.
+  soulseekMessages: () =>
+    json<{ ok: boolean; unread: number; conversations: SlskConversation[] }>(
+      `${API}/soulseek/messages`, undefined, 30000
+    ),
+  soulseekConversation: (username: string) =>
+    json<{ ok: boolean; username: string; messages: SlskMessage[] }>(
+      `${API}/soulseek/messages/${encodeURIComponent(username)}`, undefined, 30000
+    ),
+  soulseekSendMessage: (username: string, message: string) =>
+    json<{ ok: boolean; sent: boolean }>(`${API}/soulseek/messages/${encodeURIComponent(username)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+    }, 15000),
+  soulseekMarkRead: (username: string) =>
+    json<{ ok: boolean; acknowledged: boolean }>(
+      `${API}/soulseek/messages/${encodeURIComponent(username)}/read`, { method: "POST" }, 15000
+    ),
+  soulseekCloseConversation: (username: string) =>
+    json<{ ok: boolean; closed: boolean }>(
+      `${API}/soulseek/messages/${encodeURIComponent(username)}`, { method: "DELETE" }, 15000
+    ),
+  /** A peer's whole shared tree (slskd browse) — what they're offering, so a
+   *  folder can be queued or handed to auto-import without a search hit. */
+  soulseekBrowse: (username: string) =>
+    json<SlskBrowse>(`${API}/soulseek/browse/${encodeURIComponent(username)}`, undefined, 120000),
+  /** Drop transfers from slskd's list (per-file or whole-queue cancel). */
+  soulseekDownloadsCancel: (username: string, transfer_ids: string[]) =>
+    json<{ ok: boolean; cancelled: number }>(`${API}/soulseek/downloads/cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, transfer_ids }),
+    }, 30000),
+  /** Clear FINISHED transfers (completed / errored / cancelled) from the
+   *  history. In-progress and queued transfers are never touched. */
+  soulseekDownloadsClear: (username?: string, states?: string[]) =>
+    json<{ ok: boolean; cleared: number }>(`${API}/soulseek/downloads/clear`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, states }),
+    }, 30000),
   // Completed downloads on disk — the review workflow (preview → tag → import).
   soulseekReview: () =>
     json<{ dir: string; files: { path: string; file: string; ext: string; is_video: boolean; size: number; mtime: number; user: string; tags: Record<string, string | null>; tech: Record<string, number | string> }[] }>(
@@ -458,17 +746,24 @@ export const api = {
       body: JSON.stringify({ path }),
     }),
   soulseekImport: () =>
-    json<{ ok: boolean; moved: string[]; organized?: boolean; organize_error?: string }>(`${API}/soulseek/import`, { method: "POST" }, 120000),
+    json<{ ok: boolean; moved: string[]; failed?: { album: string; reason: string }[]; organized?: boolean; organize_error?: string; media_tagged?: number; converted?: number }>(`${API}/soulseek/import`, { method: "POST" }, 120000),
   soulseekAutoStatus: () =>
-    json<any>(`${API}/soulseek/auto`, undefined, 30000),
+    json<SlskAutoJob>(`${API}/soulseek/auto`, undefined, 30000),
   soulseekAutoStart: (body: { release_mbid?: string; queries?: string[]; username?: string; target_dir?: string }) =>
-    json<{ ok: boolean; job: any }>(`${API}/soulseek/auto`, {
+    json<{ ok: boolean; job: SlskAutoJob }>(`${API}/soulseek/auto`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }, 180000),
   soulseekAutoCancel: () =>
     json<{ ok: boolean }>(`${API}/soulseek/auto/cancel`, { method: "POST" }, 30000),
+  /** Answer the "only lossy copies found" prompt (accept = download anyway). */
+  soulseekAutoConfirm: (accept: boolean) =>
+    json<{ ok: boolean; accepted: boolean }>(`${API}/soulseek/auto/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ accept }),
+    }, 30000),
   soulseekTestLog: (username: string, files: { filename: string; size: number }[]) =>
     json<{ ok: boolean; threshold: number; logs: { file: string; score: number | null; checksum: string | null; detail: string | null }[] }>(`${API}/soulseek/test-log`, {
       method: "POST",

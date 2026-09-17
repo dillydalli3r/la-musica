@@ -105,12 +105,10 @@ export default function SetupPage() {
   };
 
   const finish = async () => {
-    if (!musicFolder.trim()) {
-      toast("Pick a music folder first");
-      return;
-    }
     setBusy(true);
     try {
+      // No music folder is a valid, supported state (the app then runs
+      // unconfigured) — never trap the user on this step for it.
       await api.saveConfig({ ...config, music_folder: musicFolder.trim(), first_run_done: true });
       qc.invalidateQueries({ queryKey: ["config"] });
       qc.invalidateQueries({ queryKey: ["library"] });
@@ -236,7 +234,7 @@ export default function SetupPage() {
                         {t.state === "update" && <span className="chip bg-amber-900/50 text-amber-300 border border-amber-900">update</span>}
                         {t.state === "missing" && <span className="chip bg-red-900/50 text-red-300 border border-red-900">missing</span>}
                       </td>
-                      <td className="td text-zinc-500">{t.installed_version ?? t.detected_version ?? t.latest_version ?? "—"}</td>
+                      <td className="td text-zinc-500">{t.installed_version ?? t.detected_version ?? "—"}</td>
                     </tr>
                   ))}
                 </tbody>
