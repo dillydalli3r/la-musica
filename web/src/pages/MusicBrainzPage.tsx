@@ -204,7 +204,9 @@ function MbHeaderActions({ href, query }: { href?: string; query: string }) {
 /** Bulk auto-import with a busy flag: queues one server-side job per id and
  *  reports what the server actually queued (`queued` / `skipped`), never what
  *  was asked for. `missing` is ids that had nothing to send (already counted
- *  as skipped). */
+ *  as skipped). A call that times out or fails toasts the reason instead of a
+ *  bare "nothing queued" — the server answers in a few seconds now, so a
+ *  timeout really is MusicBrainz (or the backend) being slow. */
 function useAutoImport() {
   const [busy, setBusy] = useState(false);
   const run = async (
@@ -216,24 +218,40 @@ function useAutoImport() {
     setBusy(true);
     let queued = 0;
     let skipped = missing;
+    let reason = "";
     try {
       for (const mbid of ids) {
         try {
           const res = await api.mbAutoImport({ mbid, kind, mode });
           queued += res.queued;
           skipped += res.skipped.length;
-        } catch {
-          skipped += 1; // one bad id must not abandon the rest of the batch
+        } catch (e) {
+          // one bad id must not abandon the rest of the batch
+          skipped += 1;
+          const msg = e instanceof Error ? e.message : String(e);
+          reason ||= /no answer within/i.test(msg)
+            ? "MusicBrainz is busy — try again"
+            : msg;
         }
       }
     } finally {
       setBusy(false);
     }
-    const msg = `${queued} queued${skipped ? ` · ${skipped} skipped` : ""}`;
-    if (queued) toast.success(msg);
-    else toast.error(`Nothing queued${skipped ? ` · ${skipped} skipped` : ""}`);
+    const tail = `${skipped ? ` · ${skipped} skipped` : ""}${reason ? ` · ${reason}` : ""}`;
+    if (queued) toast.success(`${queued} queued${tail}`);
+    else toast.error(`Nothing queued${tail || " — MusicBrainz is busy, try again"}`);
   };
   return { busy, run };
+}
+
+/** The Zap that becomes a spinner while a queue call is in flight — the
+ *  button must look busy, not dead, when MusicBrainz takes a few seconds. */
+function ImportIcon({ busy }: { busy: boolean }) {
+  return busy ? (
+    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+  ) : (
+    <Zap className="h-3.5 w-3.5" />
+  );
 }
 
 function LoadError({ e }: { e: unknown }) {
@@ -1083,7 +1101,7 @@ export function MBSearchPage() {
                     onClick={() => runImport(selIds, "release_group", "best", sel.length - selIds.length)}
                     title="Queue one release per group — the edition the auto-import policy prefers"
                   >
-                    <Zap className="h-3.5 w-3.5" /> Auto-import (best per group)
+                    <ImportIcon busy={importBusy} /> {importBusy ? "Queuing…" : "Auto-import (best per group)"}
                   </button>
                   <button
                     className="btn-ghost !py-1 text-xs"
@@ -1091,7 +1109,7 @@ export function MBSearchPage() {
                     onClick={() => runImport(selIds, "release_group", "all", sel.length - selIds.length)}
                     title="Queue every eligible edition of each selected group"
                   >
-                    Auto-import (all)
+                    {importBusy ? "Queuing…" : "Auto-import (all)"}
                   </button>
                   <button
                     className="btn-ghost !py-1 text-xs"
@@ -1302,7 +1320,7 @@ export function MBArtistPage() {
               title="Find → verify → download → import this artist's release groups from Soulseek (one job at a time)"
               onClick={() => run([String(a.id)], "artist", mode)}
             >
-              <Zap className="h-3.5 w-3.5" /> Auto-import
+              <ImportIcon busy={busy} /> {busy ? "Queuing…" : "Auto-import"}
             </button>
             <MbHeaderActions
               href={mbUrl("artist", a.id)}
@@ -1484,7 +1502,7 @@ export function MBReleaseGroupPage() {
               }
               onClick={() => run([String(rg.id)], "release_group", mode)}
             >
-              <Zap className="h-3.5 w-3.5" /> Auto-import
+              <ImportIcon busy={busy} /> {busy ? "Queuing…" : "Auto-import"}
             </button>
             <button
               className="btn-ghost !py-1.5 text-xs"
@@ -1520,7 +1538,7 @@ export function MBReleaseGroupPage() {
                 onClick={() => run(selIds, "release_group", "best", sel.length - selIds.length)}
                 title="Queue one release per selected group — the edition the auto-import policy prefers"
               >
-                <Zap className="h-3.5 w-3.5" /> Auto-import (best per group)
+                <ImportIcon busy={busy} /> {busy ? "Queuing…" : "Auto-import (best per group)"}
               </button>
               <button
                 className="btn-ghost !py-1 text-xs"
@@ -1528,7 +1546,7 @@ export function MBReleaseGroupPage() {
                 onClick={() => run(selIds, "release_group", "all", sel.length - selIds.length)}
                 title="Queue every eligible edition of each selected group"
               >
-                Auto-import (all)
+                {busy ? "Queuing…" : "Auto-import (all)"}
               </button>
               <button
                 className="btn-ghost !py-1 text-xs"
@@ -1729,7 +1747,7 @@ export function MBReleasePage() {
                 nav(`/soulseek?release=${encodeURIComponent(r.id)}`);
               }}
             >
-              <Zap className="h-3.5 w-3.5" /> Auto-import
+              <ImportIcon busy={busy} /> {busy ? "Queuing…" : "Auto-import"}
             </button>
             <button
               className="btn-ghost !py-1.5 text-xs"

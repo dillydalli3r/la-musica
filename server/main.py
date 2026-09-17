@@ -4186,33 +4186,25 @@ class MBAutoImportRequest(BaseModel):
     mode: Optional[str] = None   # best | all
 
 
-# Release groups handled per bulk call. Each group costs a MusicBrainz
-# browse (1 req/s etiquette), so an artist with hundreds of groups would hold
-# the request open for minutes — the remainder is reported in `skipped`
-# instead of being silently dropped or wedging the UI.
-_MB_BULK_MAX_GROUPS = 50
+# How long the auto-import route may spend resolving an ID inline before it
+# queues the item unresolved and lets the JOB do the lookup. MusicBrainz is
+# throttled to 1 req/s, so a quick answer is a bonus — never a reason to hold
+# the request open (a 503ing MusicBrainz used to sit here for minutes with the
+# page's Auto-import button disabled, i.e. "nothing happens").
+_MB_QUICK_RESOLVE_S = 3.0
 
 
-def _group_releases(rg_mbid, mode):
-    """([{mbid,title}], error) — the release ids of a release group to queue.
+def _quick(fn, seconds):
+    """`fn()`'s result, or None when it did not answer within `seconds`.
 
-    Ordered by the auto-import policy (Official, then medium preference, then
-    earliest date); `mode` "best" keeps only the best edition, "all" keeps
-    every eligible edition. Promotional/bootleg editions are never eligible
-    while auto_import_avoid_promo is on."""
-    try:
-        rg = intg.release_group_browse(rg_mbid, limit=100, offset=0)
-    except Exception as e:
-        return [], f"MusicBrainz release-group lookup failed: {e}"
-    if not rg.get("id"):
-        return [], "not a MusicBrainz release group"
-    rows = intg.pick_releases(rg.get("releases") or [])
-    if not rows:
-        return [], ("no eligible edition (only promotional/bootleg releases, "
-                    "skipped by auto_import_avoid_promo)")
-    if mode != "all":
-        rows = rows[:1]
-    return [{"mbid": r.get("id"), "title": r.get("title") or ""} for r in rows], None
+    Runs on a daemon thread so a resolver stuck on a MusicBrainz outage cannot
+    hold the request; the abandoned thread finishes on its own and only ever
+    writes its own box (a late answer is simply not used)."""
+    box = {}
+    t = threading.Thread(target=lambda: box.setdefault("v", fn()), daemon=True)
+    t.start()
+    t.join(seconds)
+    return box.get("v")
 
 
 @app.post("/api/mb/auto-import")
@@ -4224,8 +4216,13 @@ def mb_auto_import(req: MBAutoImportRequest):
     mode "all" only widens a RELEASE GROUP (every edition instead of the best
     one); for an artist it stays one release per release group, because
     downloading every pressing of a discography is never what "download the
-    artist" means."""
-    from server import soulseek_auto, wishes
+    artist" means.
+
+    The request resolves WHICH releases to queue in at most
+    `_MB_QUICK_RESOLVE_S` seconds: an ID that does not resolve inside that
+    budget is queued anyway (status "queued (resolving)") and the job looks it
+    up — the button must come back whatever MusicBrainz is doing."""
+    from server import soulseek_auto
 
     mbid = intg._mbid(req.mbid)
     if not mbid:
@@ -4234,63 +4231,29 @@ def mb_auto_import(req: MBAutoImportRequest):
     if mode not in ("best", "all"):
         raise HTTPException(400, "mode must be 'best' or 'all'")
     kind = (req.kind or "auto").strip().lower()
-    if kind == "auto":
-        try:
-            kind = (intg.detect_mbid(mbid) or {}).get("type") or ""
-        except Exception as e:
-            raise HTTPException(502, f"MusicBrainz lookup failed: {e}")
-        kind = {"release-group": "release_group"}.get(kind, kind)
-    if kind not in ("release", "release_group", "artist"):
+    if kind not in ("auto", "release", "release_group", "artist"):
         raise HTTPException(400, "kind must be release, release_group or artist")
 
-    targets, skipped = [], []
-    if kind == "release":
-        # resolving here (not in the job) both validates the ID and gives the
-        # response a title; an id that is not a release is refused outright
-        rel, rid = intg.resolve_release(mbid)
-        if not rid:
-            raise HTTPException(502, "MusicBrainz release not found")
-        targets.append({"mbid": rid, "title": (rel or {}).get("title") or ""})
-    elif kind == "release_group":
-        rows, err = _group_releases(mbid, mode)
-        if err:
-            raise HTTPException(502, err)
-        targets = rows
-    else:
-        cfg = load_config()
-        try:
-            artist = intg.artist_browse(mbid, limit=500, offset=0)
-        except Exception as e:
-            raise HTTPException(502, f"MusicBrainz artist lookup failed: {e}")
-        groups = artist.get("release_groups") or []
-        if not groups:
-            raise HTTPException(404, "this artist has no release groups on MusicBrainz")
-        owned = wishes.owned_mbids(cfg)
-        done_groups = 0
-        for g in groups:
-            gid = str(g.get("id") or "")
-            if not gid:
-                continue
-            if str(gid).lower() in owned:
-                skipped.append({"mbid": gid, "reason": "already in the library"})
-                continue
-            if done_groups >= _MB_BULK_MAX_GROUPS:
-                skipped.append({"mbid": gid,
-                                "reason": f"per-call limit of {_MB_BULK_MAX_GROUPS} "
-                                          "release groups reached — call again"})
-                continue
-            rows, err = _group_releases(gid, "best")
-            if err:
-                skipped.append({"mbid": gid, "reason": err})
-                continue
-            done_groups += 1
-            targets.extend(rows)
+    # kind "auto" needs a lookup of its own; the job does it when this does
+    # not answer in time, so an unresolved kind is queued, never dropped.
+    resolved = _quick(lambda: intg.auto_import_targets(mbid, kind, mode),
+                      _MB_QUICK_RESOLVE_S)
+    deferred = resolved is None
+    targets, skipped = ([{"mbid": mbid, "title": ""}], []) if deferred else resolved
 
     items = []
     for t in targets:
-        depth = soulseek_auto.enqueue(release_mbid=t["mbid"])
-        items.append({"mbid": t["mbid"], "title": t.get("title") or "",
-                      "status": "queued" if depth else "running"})
+        # kind/mode ride along ONLY for a deferred item: the ones the quick
+        # pass resolved are concrete releases, and the job must not resolve
+        # them a second time (a release id is not a release group).
+        depth = soulseek_auto.enqueue(release_mbid=t["mbid"],
+                                      kind=kind if deferred else None,
+                                      mode=mode if deferred else None)
+        items.append({
+            "mbid": t["mbid"], "title": t.get("title") or "",
+            "status": ("queued (resolving)" if deferred
+                       else "queued" if depth else "running"),
+        })
     return {"queued": len(items), "items": items, "skipped": skipped}
 
 

@@ -52,6 +52,10 @@ async function json<T>(url: string, init?: RequestInit, timeoutMs = 20000): Prom
   let r: Response;
   try {
     r = await fetch(url, { ...init, signal: ctrl.signal });
+  } catch (e) {
+    // an aborted fetch is OUR timeout, not the network being down — say which
+    if (ctrl.signal.aborted) throw new Error(`no answer within ${Math.round(timeoutMs / 1000)}s`);
+    throw e;
   } finally {
     clearTimeout(timer);
   }
@@ -1204,12 +1208,14 @@ export const api = {
   // ----------------------------------------------------------------- //
   /** Queue a release / release group / whole artist into the auto-import
    *  pipeline. `mode: "best"` takes one release per release group (the
-   *  preferred format), `"all"` every release. */
+   *  preferred format), `"all"` every release. The server only RESOLVES for a
+   *  few seconds and queues the rest unresolved, so a slow MusicBrainz must
+   *  not hold the button: 20 s is already generous. */
   mbAutoImport: (body: { mbid: string; kind?: "release" | "release_group" | "artist" | "auto"; mode?: "best" | "all" }) =>
     json<{ queued: number; items: { mbid: string; title: string; status: string }[]; skipped: { mbid: string; reason: string }[] }>(
       `${API}/mb/auto-import`,
       { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
-      180000
+      20000
     ),
   /** Fetch the advisory rating (ITUNESADVISORY) for one release or a set of
    *  tracks — the values land in `values` and are written to `paths`, and

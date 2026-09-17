@@ -88,7 +88,8 @@ machines.
   source toggle — *auto* (discovery first, MusicBrainz fallback),
   *discovery*, or *MusicBrainz only*. Rows that MusicBrainz knows drill into
   the release-group / release views and can be added to *Wishes*,
-  auto-imported (one best edition per group, or every eligible edition), or
+  auto-imported (one best edition per group, or every eligible edition —
+  queued in about a second and resolved/downloaded in the background), or
   matched against the library; rows that only Deezer/iTunes know open an in-page
   detail panel (cover, label, genres, track list) whose *Add to wishes*
   button resolves the release group on MusicBrainz first — so **search is
@@ -126,9 +127,21 @@ machines.
   be downloaded without picking an edition by hand: *best* takes one release
   per release group, *all* takes every eligible edition of that group (an
   artist page keeps one per group either way, and skips groups you already
-  own). The pick is the auto-import policy below: Official first,
-  promotional/bootleg editions dropped while `auto_import_avoid_promo` is on,
-  then the medium order `CD → Digital Media → Vinyl → Cassette → Other`
+  own). The button **queues first, resolves later**: the request comes back
+  in about a second with `{queued, items, skipped}` and the background job
+  does the MusicBrainz lookups and the downloading. An ID MusicBrainz does
+  not answer for within a few seconds is still queued, as
+  `queued (resolving)`, and the job resolves it itself — an artist or group
+  with nothing to queue answers `queued: 0` plus a `skipped` reason, never a
+  404. MusicBrainz calls retry with backoff (429/5xx and connection errors,
+  `Retry-After` honoured) under a ~45 s ceiling, so an outage fails only
+  that job with a readable reason ("MusicBrainz is busy (HTTP 503)") while
+  the queue moves on; the client stops after ~20 s and reports the reason
+  ("MusicBrainz is busy — try again") while every Auto-import button shows a
+  spinner and *Queuing…*. The pick is the auto-import policy below: Official
+  first, promotional/bootleg editions dropped while
+  `auto_import_avoid_promo` is on, then the medium order
+  `CD → Digital Media → Vinyl → Cassette → Other`
   (`auto_import_medium_order`), earliest date breaking ties.
 - **Soulseek** — managed slskd instance (autostart, shares = music folder),
   search & download UI with a live status dot in the sidebar, and an
@@ -890,7 +903,7 @@ Where the app stores what it fetches:
 | `GET/POST /api/playlists…` | manual + smart playlists, .m3u8 |
 | `GET /api/mb/release?mbid=…` `GET /api/mb/release-genres?mbid=…` | MusicBrainz release + genre cascade |
 | `POST /api/mb/match` `POST /api/mb/assign` | track/disc matching, MB/RYM/genre/advisory writes (ITUNESADVISORY is accepted only as 0/1/2 or empty) |
-| `POST /api/mb/auto-import` | queue a release / release group / artist for download: `mode=best` (one edition per group) or `all` (every eligible edition); returns `queued`, per-item status and `skipped` reasons |
+| `POST /api/mb/auto-import` | enqueue a release / release group / artist for download: `mode=best` (one edition per group) or `all` (every eligible edition). Returns in about a second — `{queued, items: [{mbid, title, status}], skipped: [{mbid, reason}]}` — with `status` `queued` (waiting behind a running job), `running` (started at once) or `queued (resolving)` when MusicBrainz did not answer inside the inline budget and the job resolves the ID itself; nothing to queue is `queued: 0` plus a `skipped` reason, never a 404 |
 | `POST /api/mb/advisory/fetch` | resolve `ITUNESADVISORY` for tracks (or a release): every applicable source is asked on every track (Deezer and Spotify by ISRC, Apple's explicit-edition album route, Apple's song search, Discogs' parental-advisory format when a token is set, yt-dlp's `age_limit` for a track with a YouTube id) and merged — explicit anywhere is 1, else clean is 0, else 0 — returning `sources` (who stated each path's value) and `answers` (what every source said, `{path: {source: 0\|1}}`) |
 | `POST /api/instrumental/fetch` | resolve and write `INSTRUMENTAL` (0/1) cross-referencing LRCLIB's `instrumental`, Spotify audio-features `instrumentalness` (when configured), the file's own name and lyrics evidence: an "instrumental" answer anywhere is 1, else a "not instrumental" answer is 0, else nothing is written; every name-based match passes the shared variant guard (an instrumental/karaoke/cover/tribute hit is never accepted as the track); returns `values` and `evidence` (`{path: {source: 0\|1}}`) |
 | `POST /api/genres/import` `GET /api/genres/facets` | import genres for paths through the genre chain (RYM-first priority list, per-track answers with `level` fallbacks, per-source counts + notes); facet list with category cards for the Genres page |

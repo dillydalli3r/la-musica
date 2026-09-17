@@ -9,6 +9,7 @@ import contextlib
 import html as _html
 import json
 import os
+import random
 import re
 import threading
 import time
@@ -25,46 +26,85 @@ _last_request = 0.0
 _mb_lock = threading.Lock()
 
 
-def mb_get(endpoint, params=None, timeout=30.0, retries=3):
+class MusicBrainzError(RuntimeError):
+    """MusicBrainz did not answer, after its retries (429/5xx/connection).
+
+    Typed so a caller can report it as a PER-ITEM reason — "MusicBrainz is
+    busy, try again" — instead of a request or a job that sits on an outage.
+    """
+
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
+
+
+_MB_MIN_INTERVAL = 1.0     # MusicBrainz etiquette: one request per second
+_MB_RETRY_STATUS = (429, 500, 502, 503, 504)
+_MB_BACKOFF_BASE = 1.0     # retry wait: base * 2**(attempt-1), plus jitter
+_MB_BACKOFF_MAX = 8.0
+# One mb_get — throttle, retries and backoff included — never runs longer than
+# this. A 503ing MusicBrainz used to hold its caller (and, for an auto-import
+# job, the single-job slot) for as long as the retry loop felt like it.
+MB_RETRY_DEADLINE = 45.0
+
+
+def mb_get(endpoint, params=None, timeout=30.0, retries=3, deadline=MB_RETRY_DEADLINE):
     """Rate-limited MusicBrainz WS/2 GET returning parsed JSON.
 
-    Retries 429/5xx (MusicBrainz rate-limits and has occasional 503s) with
-    Retry-After-aware backoff, while keeping the 1 request/second etiquette.
+    Retries 429/5xx and connection errors with exponential backoff + jitter,
+    keeping MusicBrainz's 1 request/second etiquette and a hard overall
+    `deadline`; when the retry budget or the deadline runs out it raises
+    MusicBrainzError — a typed, reportable reason. Any other status still
+    raises httpx's own error, so a 404 keeps meaning "no such entity".
     """
     global _last_request
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
-    for attempt in range(retries):
+    started = time.time()
+    attempts = 0
+    status = None
+    reason = "no response"
+    while attempts < max(1, int(retries)):
+        attempts += 1
+        retry_after = None
         with _mb_lock:
             elapsed = time.time() - _last_request
-            if elapsed < 1.0:
-                time.sleep(1.0 - elapsed)
+            if elapsed < _MB_MIN_INTERVAL:
+                time.sleep(min(_MB_MIN_INTERVAL - elapsed,
+                               max(0.0, deadline - (time.time() - started))))
             try:
                 r = httpx.get(
                     f"{MB_BASE}/{endpoint}",
                     params=params or {},
                     headers=headers,
-                    timeout=timeout,
+                    # never sit on the socket past the deadline either
+                    timeout=min(timeout, max(1.0, deadline - (time.time() - started))),
                 )
-            except httpx.HTTPError:
-                _last_request = time.time()
-                if attempt < retries - 1:
-                    time.sleep(1.5 * (attempt + 1))
-                    continue
-                raise
+            except httpx.HTTPError as e:
+                status, reason = None, f"connection error ({e.__class__.__name__})"
+            else:
+                if r.status_code not in _MB_RETRY_STATUS:
+                    r.raise_for_status()
+                    return r.json()
+                status, reason = r.status_code, f"HTTP {r.status_code}"
+                retry_after = r.headers.get("Retry-After")
             _last_request = time.time()
-        if r.status_code in (429, 500, 502, 503, 504):
-            wait = 1.5 * (attempt + 1)
-            retry_after = r.headers.get("Retry-After")
-            if retry_after:
-                try:
-                    wait = max(wait, float(retry_after))
-                except ValueError:
-                    pass
-            if attempt < retries - 1:
-                time.sleep(wait)
-                continue
-        r.raise_for_status()
-        return r.json()
+        if attempts >= retries:
+            break
+        wait = min(_MB_BACKOFF_BASE * (2 ** (attempts - 1)), _MB_BACKOFF_MAX)
+        wait += random.uniform(0.0, wait / 2.0)   # jitter: retries must not sync
+        if retry_after:
+            try:
+                wait = max(wait, float(retry_after))
+            except ValueError:
+                pass
+        if time.time() - started + wait > deadline:
+            break
+        time.sleep(wait)
+    raise MusicBrainzError(
+        f"MusicBrainz is busy ({reason}) for {endpoint} after {attempts} "
+        f"attempt(s) in {int(time.time() - started)}s — try again in a moment",
+        status=status,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -2918,16 +2958,22 @@ def resolve_release(mbid):
     are resolved to their best edition via the release-choice policy so no
     caller (HTTP route, wishes worker, bulk import) can queue a group job.
     Returns (None, mbid) when the id is a group with no usable edition, and
-    (None, None) when nothing matches at all."""
+    (None, None) when nothing matches at all. A MusicBrainz OUTAGE is not
+    "nothing matches" — that raises MusicBrainzError so the caller reports
+    "MusicBrainz is busy" instead of claiming the release does not exist."""
     rid = _mbid(mbid)
     if not rid:
         return None, None
     try:
         return release_lookup(rid), rid
+    except MusicBrainzError:
+        raise
     except Exception:
         pass
     try:
         rg = release_group_browse(rid, limit=100, offset=0)
+    except MusicBrainzError:
+        raise
     except Exception:
         return None, None
     best = pick_release(rg.get("releases") or []) if rg.get("id") else None
@@ -2935,8 +2981,103 @@ def resolve_release(mbid):
         return None, rid
     try:
         return release_lookup(best["id"]), best["id"]
+    except MusicBrainzError:
+        raise
     except Exception:
         return None, rid
+
+
+_NO_EDITION = ("no edition eligible for auto-import (promotional/bootleg "
+               "editions are skipped while auto_import_avoid_promo is on)")
+# Release groups one bulk call expands: each costs a MusicBrainz browse
+# (1 req/s), so an artist with hundreds of groups would take minutes — the
+# remainder is reported as skipped instead of silently dropped or wedging.
+BULK_MAX_GROUPS = 50
+
+
+def group_targets(rg_mbid, mode):
+    """([{mbid,title}], error) — the release ids of a release group to queue.
+
+    Ordered by the auto-import policy (Official, then medium preference, then
+    earliest date); `mode` "best" keeps only the best edition, "all" keeps
+    every eligible edition. `error` is a readable reason and never an
+    exception, so one unusable group cannot abort a whole discography."""
+    try:
+        rg = release_group_browse(rg_mbid, limit=100, offset=0)
+    except Exception as e:
+        return [], f"MusicBrainz release-group lookup failed: {e}"
+    if not rg.get("id"):
+        return [], "not a MusicBrainz release group"
+    rows = pick_releases(rg.get("releases") or [])
+    if not rows:
+        return [], _NO_EDITION
+    if mode != "all":
+        rows = rows[:1]
+    return [{"mbid": r.get("id"), "title": r.get("title") or ""} for r in rows], None
+
+
+def _kind_for(mbid):
+    """release / release_group / artist for an ID that did not say which."""
+    t = (detect_mbid(mbid) or {}).get("type") or ""
+    return {"release-group": "release_group"}.get(t, t) or None
+
+
+def auto_import_targets(mbid, kind=None, mode="best"):
+    """([{mbid,title}], [{mbid,reason}]) — what a bulk auto-import should queue.
+
+    ONE resolution path, shared by the HTTP route's bounded quick attempt and
+    by the auto-import job that redoes the whole thing when that attempt did
+    not finish: a release resolves to the edition the policy picks, a release
+    group to its best (or every eligible) edition, an artist to one best
+    release per release group it does not already own. A MusicBrainz outage
+    raises MusicBrainzError — reported per item, never as "does not exist".
+    """
+    mode = "all" if str(mode or "").lower() == "all" else "best"
+    kind = str(kind or "auto").strip().lower()
+    if kind in ("", "auto"):
+        kind = _kind_for(mbid) or "release"
+    if kind == "release":
+        rel, rid = resolve_release(mbid)
+        if not rid:
+            return [], [{"mbid": mbid, "reason": "no MusicBrainz release or "
+                                                 "release group matches this ID"}]
+        if not rel:
+            return [], [{"mbid": rid, "reason": _NO_EDITION}]
+        return [{"mbid": rid, "title": rel.get("title") or ""}], []
+    if kind == "release_group":
+        rows, err = group_targets(mbid, mode)
+        return rows, ([{"mbid": mbid, "reason": err}] if err else [])
+    if kind != "artist":
+        return [], [{"mbid": mbid, "reason": f"unknown MusicBrainz kind {kind!r}"}]
+    from mlo.config import load_config
+    from server import wishes
+
+    artist = artist_browse(mbid, limit=500, offset=0)
+    groups = artist.get("release_groups") or []
+    if not groups:
+        return [], [{"mbid": mbid,
+                     "reason": "this artist has no release groups on MusicBrainz"}]
+    owned = wishes.owned_mbids(load_config())
+    rows, skipped, done = [], [], 0
+    for g in groups:
+        gid = str(g.get("id") or "")
+        if not gid:
+            continue
+        if gid.lower() in owned:
+            skipped.append({"mbid": gid, "reason": "already in the library"})
+            continue
+        if done >= BULK_MAX_GROUPS:
+            skipped.append({"mbid": gid,
+                            "reason": f"per-call limit of {BULK_MAX_GROUPS} "
+                                      "release groups reached — call again"})
+            continue
+        sub, err = group_targets(gid, "best")
+        done += 1
+        if err:
+            skipped.append({"mbid": gid, "reason": err})
+            continue
+        rows.extend(sub)
+    return rows, skipped
 
 
 def release_group_browse(mbid, limit=300, offset=0):

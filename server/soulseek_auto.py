@@ -68,8 +68,14 @@ _confirm_answer = {"accept": False}
 # Bulk import queue (artist / release-group "download all"): the pipeline runs
 # ONE job at a time, so extra releases wait here and _finish() starts the next
 # one — same machinery, no second pipeline.
+#
+# Reentrant: _start_next holds it while calling start_job(), which reports the
+# new job through job_state() → queued() → this same lock. With a plain Lock
+# that was a self-deadlock — EVERY enqueue (the release/release-group/artist
+# Auto-import button) hung the request thread forever, holding _queue_lock so
+# no later job could ever start. The same trap server.wishes documents.
 _queue = []
-_queue_lock = threading.Lock()
+_queue_lock = threading.RLock()
 
 
 def _start_next():
@@ -83,11 +89,15 @@ def _start_next():
             _queue.insert(0, item)
 
 
-def enqueue(release_mbid=None, release=None, queries=None):
+def enqueue(release_mbid=None, release=None, queries=None, kind=None, mode=None):
     """Queue one release for auto-import; starts it immediately when idle.
 
+    kind/mode describe an ID the HTTP route queued BEFORE resolving it (a
+    release group or a whole artist): the job does that lookup — see _run.
+
     Returns the queue depth (0 when the release started right away)."""
-    item = {"release_mbid": release_mbid, "release": release, "queries": queries}
+    item = {"release_mbid": release_mbid, "release": release,
+            "queries": queries, "kind": kind, "mode": mode}
     with _queue_lock:
         _queue.append(item)
     _start_next()
@@ -1303,7 +1313,7 @@ def job_active():
 
 
 def start_job(release_mbid=None, release=None, queries=None, username=None,
-              target_dir=None, confirm_lossy=False):
+              target_dir=None, confirm_lossy=False, kind=None, mode=None):
     """Kick off an auto-import job in a daemon thread; returns the job state.
 
     release — a full release dict (from integrations.release_lookup); when
@@ -1330,7 +1340,8 @@ def start_job(release_mbid=None, release=None, queries=None, username=None,
                      kwargs=dict(release_mbid=release_mbid, release=release,
                                  queries=queries, username=username,
                                  target_dir=target_dir,
-                                 confirm_lossy=confirm_lossy),
+                                 confirm_lossy=confirm_lossy,
+                                 kind=kind, mode=mode),
                      daemon=True).start()
     return {"ok": True, "job": job_state()}
 
@@ -1387,7 +1398,7 @@ def _reject(username, folder, reason):
 
 
 def _run(release_mbid=None, release=None, queries=None, username=None,
-         target_dir=None, confirm_lossy=False):
+         target_dir=None, confirm_lossy=False, kind=None, mode=None):
     from server import soulseek as slsk
     from server import integrations as intg
 
@@ -1411,9 +1422,33 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
             release = _release_from_folder(username, target_dir, slsk)
             _log(f"No MusicBrainz release — treating the folder as the track "
                  f"list ({len(release.get('media') or [])} file(s))")
+        if release is None and (kind or "") not in ("", "release"):
+            # The HTTP route queued this ID before MusicBrainz resolved it
+            # (it refuses to hold a request on a lookup): resolve what it
+            # could not wait for — a release group to its edition(s), or a
+            # whole artist to one best release per release group. The extra
+            # editions go back on the queue and run after this job.
+            _log("Resolving the MusicBrainz release(s) to import…")
+            rows, skipped = intg.auto_import_targets(release_mbid, kind, mode or "best")
+            for s in skipped[:5]:
+                _log(f"  - skipped {s.get('mbid')}: {s.get('reason')}")
+            if not rows:
+                raise RuntimeError(skipped[0]["reason"] if skipped else
+                                   "MusicBrainz resolved nothing to import")
+            for extra in rows[1:]:
+                enqueue(release_mbid=extra["mbid"])
+            if len(rows) > 1:
+                _log(f"  {len(rows) - 1} more release(s) queued behind this one")
+            release_mbid = rows[0]["mbid"]
         if release is None:
             _log("Looking up the MusicBrainz release…")
-            release = intg.release_lookup(release_mbid)
+            release, rid = intg.resolve_release(release_mbid)
+            if not release or not rid:
+                raise RuntimeError(
+                    f"MusicBrainz has no importable release for {release_mbid} "
+                    "— it is neither a release nor a release group, or every "
+                    "edition of it is ineligible for auto-import")
+            release_mbid = rid
         is_cd = "CD" in (release.get("medium_formats") or [])
         with _lock:
             _job["release"] = {
@@ -1766,6 +1801,14 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
         raise RuntimeError("Every candidate was rejected "
                            f"({len(_job['attempts'])} attempt(s) — see the log).")
 
+    except intg.MusicBrainzError as e:
+        # MusicBrainz itself is down or rate-limiting — a per-item failure with
+        # a reason the queue/UI shows ("MusicBrainz is busy…"), not a wedged
+        # job: _finish frees the single-job slot so the next release runs. No
+        # traceback: the reason says everything, and this is an outage, not a
+        # bug in here.
+        _log(f"MusicBrainz did not answer: {e}")
+        _finish("error", {"error": f"MusicBrainz: {e}"})
     except Exception as e:
         traceback.print_exc()
         _log(f"ERROR: {e}")
