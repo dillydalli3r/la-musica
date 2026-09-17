@@ -79,7 +79,6 @@ def main():
         ("/api/soulseek/review", "GET", None),
         ("/api/beets/status", "GET", None),
         ("/api/videos/scan", "GET", None),
-        ("/api/fs/list", "GET", None),
         (f"/api/album?path={q(apath)}", "GET", None),
         (f"/api/artist?path={q(arpath)}", "GET", None),
         (f"/api/tags?path={q(tpath)}", "GET", None),

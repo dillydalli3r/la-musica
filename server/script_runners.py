@@ -1,4 +1,4 @@
-"""The 15 library scripts, in one place every caller shares.
+"""The 14 library scripts, in one place every caller shares.
 
 Extracted from ``server/main.py``'s ``RUNNERS`` table so the import pipeline
 (:mod:`server.imports`), the bulk queue and the Soulseek importer run exactly
@@ -54,7 +54,6 @@ RUNNERS: dict[int, tuple[str, "callable"]] = {
     12: ("Key & BPM", _optional("mlo.audiometa", "run_analyze_audiometa")),
     13: ("Fetch lyrics", _optional("mlo.lyrics_fetch", "run_fetch_lyrics")),
     14: ("Beets tagging", _optional("server.beetscfg", "run_beets_tagging")),
-    15: ("Lyrics xlit / translate (AI)", _optional("mlo.lyrics_xlit", "run_lyrics_xlit")),
 }
 
 # The config key a script's own force flag lives under. `force` may be keyed by
@@ -72,7 +71,6 @@ _FORCE_KEYS = {
     10: ("force_accurip", "force_cue", "force_lyrics", "force_auto_tag"),
     12: ("force_audiometa",),
     13: ("force_lyrics",),
-    15: ("force_xlit",),
 }
 _FORCE_ALIASES = {
     "lyrics": "force_lyrics",
@@ -84,14 +82,12 @@ _FORCE_ALIASES = {
     "autotag": "force_auto_tag",
     "accurip": "force_accurip",
     "audiometa": "force_audiometa",
-    "xlit": "force_xlit",
 }
 # Scripts whose feature has its own on/off switch: with it off the runner is a
 # no-op at best and a crash at worst, so a chain skips them instead.
 _DISABLED = {
     7: "dr_replaygain_enabled",
     12: "audiometa_enabled",
-    15: "lyrics_xlit_enabled",
 }
 
 

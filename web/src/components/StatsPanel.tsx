@@ -1,8 +1,10 @@
-import { BarChart3, X } from "lucide-react";
+import { BarChart3 } from "lucide-react";
 import { useMemo, type ReactNode } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { trackRef } from "../lib/refs";
+import { useStore } from "../store";
 import type { TrackTags } from "../types";
+import Modal from "./Modal";
 
 interface StatTrack {
   path?: string;
@@ -37,6 +39,8 @@ export default function StatsPanel({
   tracks: StatTrack[];
   onClose: () => void;
 }) {
+  const navigate = useNavigate();
+  const setQuery = useStore((s) => s.setQuery);
   const s = useMemo(() => {
     const albumsArr = albums ?? [];
     const checks = albumsArr.reduce((n, a) => n + (a.total_checks ?? 0), 0);
@@ -94,140 +98,141 @@ export default function StatsPanel({
         : null;
 
   return (
-    <div className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6" onClick={onClose}>
-      <div
-        className="bg-card border border-border rounded-xl w-full max-w-xl max-h-[85vh] overflow-auto shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center gap-2 px-5 py-3 border-b border-border sticky top-0 bg-card z-10">
-          <BarChart3 className="h-4 w-4 text-accent" />
-          <span className="font-semibold text-sm truncate">Statistics — {title}</span>
-          <button className="ml-auto p-1 text-zinc-500 hover:text-white" onClick={onClose}>
-            <X className="h-4 w-4" />
-          </button>
+    <Modal
+      onClose={onClose}
+      icon={BarChart3}
+      title={`Statistics — ${title}`}
+      width="max-w-xl"
+      bodyClass="px-5 py-5 space-y-4"
+    >
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+        <div className="rounded-lg bg-panel border border-border px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wider text-zinc-500">Tracks</div>
+          <div className="text-lg font-bold">{s.trackTotal}</div>
+          <div className="text-[11px] text-zinc-500">{s.trackPass} passing</div>
         </div>
-
-        <div className="p-5 space-y-4">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-            <div className="rounded-lg bg-panel border border-border px-3 py-2">
-              <div className="text-[10px] uppercase tracking-wider text-zinc-500">Tracks</div>
-              <div className="text-lg font-bold">{s.trackTotal}</div>
-              <div className="text-[11px] text-zinc-500">{s.trackPass} passing</div>
-            </div>
-            <div className="rounded-lg bg-panel border border-border px-3 py-2">
-              <div className="text-[10px] uppercase tracking-wider text-zinc-500">Grade</div>
-              <div className="text-lg font-bold">{gradePct === null ? "—" : `${gradePct}%`}</div>
-              <div className="text-[11px] text-zinc-500">
-                {s.checksPassed}/{s.checks} checks
-              </div>
-            </div>
-            <div className="rounded-lg bg-panel border border-border px-3 py-2">
-              <div className="text-[10px] uppercase tracking-wider text-zinc-500">Albums</div>
-              <div className="text-lg font-bold">{albums?.length ?? "—"}</div>
-              <div className="text-[11px] text-zinc-500">{(albums ?? []).filter((a) => a.pass).length} passing</div>
-            </div>
-            <div className="rounded-lg bg-panel border border-border px-3 py-2">
-              <div className="text-[10px] uppercase tracking-wider text-zinc-500">Lyrics</div>
-              <div className="text-lg font-bold">{s.lyricsCoverage}%</div>
-              <div className="text-[11px] text-zinc-500">{s.instrumental} instrumental</div>
-            </div>
+        <div className="rounded-lg bg-panel border border-border px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wider text-zinc-500">Grade</div>
+          <div className="text-lg font-bold">{gradePct === null ? "—" : `${gradePct}%`}</div>
+          <div className="text-[11px] text-zinc-500">
+            {s.checksPassed}/{s.checks} checks
           </div>
+        </div>
+        <div className="rounded-lg bg-panel border border-border px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wider text-zinc-500">Albums</div>
+          <div className="text-lg font-bold">{albums?.length ?? "—"}</div>
+          <div className="text-[11px] text-zinc-500">{(albums ?? []).filter((a) => a.pass).length} passing</div>
+        </div>
+        <div className="rounded-lg bg-panel border border-border px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wider text-zinc-500">Lyrics</div>
+          <div className="text-lg font-bold">{s.lyricsCoverage}%</div>
+          <div className="text-[11px] text-zinc-500">{s.instrumental} instrumental</div>
+        </div>
+      </div>
 
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">AUDIT</div>
-            <div className="flex flex-wrap gap-1.5">
-              <span className="chip bg-emerald-900/50 text-emerald-300 border border-emerald-800">{s.audit.REAL} real</span>
-              <span className="chip bg-red-900/50 text-red-300 border border-red-900">{s.audit.FAKE} fake</span>
-              <span className="chip bg-amber-900/50 text-amber-300 border border-amber-900">{s.audit.MIX} mixed</span>
-              <span className="chip bg-raise border border-border text-zinc-400">{s.audit.none} not audited</span>
-              {s.avgLogGrade !== null && (
-                <span className="chip bg-raise border border-border text-zinc-400">log score avg {s.avgLogGrade}/100 ({s.logGradeCount})</span>
-              )}
-            </div>
-          </div>
-
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">Media</div>
-            <div className="flex flex-wrap gap-1.5">
-              {Object.entries(s.media).map(([m, n]) => (
-                <span key={m} className="chip bg-raise border border-border text-zinc-300">{m}: {n}</span>
-              ))}
-              {!Object.keys(s.media).length && <span className="text-xs text-zinc-600">no album media info</span>}
-            </div>
-          </div>
-
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">Advisory</div>
-            <div className="flex flex-wrap gap-1.5">
-              <span className="chip bg-raise border border-border text-zinc-300">0 clean: {s.advisory["0"]}</span>
-              <span className="chip bg-raise border border-border text-zinc-300">1 explicit: {s.advisory["1"]}</span>
-              <span className="chip bg-raise border border-border text-zinc-300">2 safe: {s.advisory["2"]}</span>
-              <span className="chip bg-raise border border-border text-zinc-500">unset: {s.advisory.none}</span>
-            </div>
-          </div>
-
-          <div>
-            <div className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">Top genres</div>
-            <div className="flex flex-wrap gap-1.5">
-              {s.genres.map(([g, n]) => (
-                <span key={g} className="chip bg-accent/10 text-accent-soft border border-accent/25">{g} × {n}</span>
-              ))}
-              {!s.genres.length && <span className="text-xs text-zinc-600">no genre tags</span>}
-            </div>
-          </div>
-
-          {tracks.length > 0 && (
-            <div>
-              <div className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">
-                Per-track breakdown ({tracks.length})
-              </div>
-              <div className="rounded-md border border-border overflow-hidden max-h-64 overflow-y-auto">
-                <table className="w-full text-xs">
-                  <thead className="bg-panel/60">
-                    <tr>
-                      <th className="th">Title</th>
-                      <th className="th">Grade</th>
-                      <th className="th">Checks</th>
-                      <th className="th">Audit</th>
-                      <th className="th">Log</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {tracks.map((t, i) => {
-                      const name = t.tags?.TITLE ?? `Track ${i + 1}`;
-                      const cell = (inner: ReactNode) =>
-                        t.path ? (
-                          <Link to={trackRef(t)} className="hover:text-accent-soft">
-                            {inner}
-                          </Link>
-                        ) : (
-                          <span>{inner}</span>
-                        );
-                      return (
-                        <tr key={t.path ?? i} className={`table-row ${t.issues?.length ? "bg-red-950/20" : ""}`}>
-                          <td className="td truncate max-w-[220px]">{cell(name)}</td>
-                          <td className="td">{cell(t.grade_pass ? <span className="text-emerald-400">PASS</span> : <span className="text-red-400">FAIL</span>)}</td>
-                          <td className="td text-zinc-500">{cell(t.issues?.length ?? 0)}</td>
-                          <td className="td">
-                            {cell(
-                              t.audit === "REAL" ? <span className="text-emerald-400">REAL</span>
-                              : t.audit === "FAKE" ? <span className="text-red-400">FAKE</span>
-                              : t.audit === "MIX" ? <span className="text-amber-400">MIX</span>
-                              : <span className="text-zinc-600">—</span>
-                            )}
-                          </td>
-                          <td className="td text-zinc-500">{cell(t.log_grade != null && t.log_grade !== "" ? `${t.log_grade}/100` : "—")}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              <div className="text-[10px] text-zinc-600 mt-1">Click a row to open the track page with full check details.</div>
-            </div>
+      <div>
+        <div className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">AUDIT</div>
+        <div className="flex flex-wrap gap-1.5">
+          <span className="chip bg-emerald-900/50 text-emerald-300 border border-emerald-800">{s.audit.REAL} real</span>
+          <span className="chip bg-red-900/50 text-red-300 border border-red-900">{s.audit.FAKE} fake</span>
+          <span className="chip bg-amber-900/50 text-amber-300 border border-amber-900">{s.audit.MIX} mixed</span>
+          <span className="chip bg-raise border border-border text-zinc-400">{s.audit.none} not audited</span>
+          {s.avgLogGrade !== null && (
+            <span className="chip bg-raise border border-border text-zinc-400">log score avg {s.avgLogGrade}/100 ({s.logGradeCount})</span>
           )}
         </div>
       </div>
-    </div>
+
+      <div>
+        <div className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">Media</div>
+        <div className="flex flex-wrap gap-1.5">
+          {Object.entries(s.media).map(([m, n]) => (
+            <span key={m} className="chip bg-raise border border-border text-zinc-300">{m}: {n}</span>
+          ))}
+          {!Object.keys(s.media).length && <span className="text-xs text-zinc-600">no album media info</span>}
+        </div>
+      </div>
+
+      <div>
+        <div className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">Advisory</div>
+        <div className="flex flex-wrap gap-1.5">
+          <span className="chip bg-raise border border-border text-zinc-300">0 clean: {s.advisory["0"]}</span>
+          <span className="chip bg-raise border border-border text-zinc-300">1 explicit: {s.advisory["1"]}</span>
+          <span className="chip bg-raise border border-border text-zinc-300">2 safe: {s.advisory["2"]}</span>
+          <span className="chip bg-raise border border-border text-zinc-500">unset: {s.advisory.none}</span>
+        </div>
+      </div>
+
+      <div>
+        <div className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">Top genres</div>
+        <div className="flex flex-wrap gap-1.5">
+          {s.genres.map(([g, n]) => (
+            <button
+              key={g}
+              className="chip bg-accent/10 text-accent-soft border border-accent/25 hover:border-accent hover:bg-accent/20 transition-colors"
+              title={`Show every ${g} track in the library`}
+              onClick={() => {
+                setQuery(`genre:"${g}"`);
+                navigate("/library");
+              }}
+            >
+              {g} × {n}
+            </button>
+          ))}
+          {!s.genres.length && <span className="text-xs text-zinc-600">no genre tags</span>}
+        </div>
+      </div>
+
+      {tracks.length > 0 && (
+        <div>
+          <div className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">
+            Per-track breakdown ({tracks.length})
+          </div>
+          <div className="rounded-md border border-border overflow-hidden max-h-64 overflow-y-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-panel/60">
+                <tr>
+                  <th className="th">Title</th>
+                  <th className="th">Grade</th>
+                  <th className="th">Checks</th>
+                  <th className="th">Audit</th>
+                  <th className="th">Log</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tracks.map((t, i) => {
+                  const name = t.tags?.TITLE ?? `Track ${i + 1}`;
+                  const cell = (inner: ReactNode) =>
+                    t.path ? (
+                      <Link to={trackRef(t)} className="hover:text-accent-soft">
+                        {inner}
+                      </Link>
+                    ) : (
+                      <span>{inner}</span>
+                    );
+                  return (
+                    <tr key={t.path ?? i} className={`table-row ${t.issues?.length ? "bg-red-950/20" : ""}`}>
+                      <td className="td truncate max-w-[220px]">{cell(name)}</td>
+                      <td className="td">{cell(t.grade_pass ? <span className="text-emerald-400">PASS</span> : <span className="text-red-400">FAIL</span>)}</td>
+                      <td className="td text-zinc-500">{cell(t.issues?.length ?? 0)}</td>
+                      <td className="td">
+                        {cell(
+                          t.audit === "REAL" ? <span className="text-emerald-400">REAL</span>
+                          : t.audit === "FAKE" ? <span className="text-red-400">FAKE</span>
+                          : t.audit === "MIX" ? <span className="text-amber-400">MIX</span>
+                          : <span className="text-zinc-600">—</span>
+                        )}
+                      </td>
+                      <td className="td text-zinc-500">{cell(t.log_grade != null && t.log_grade !== "" ? `${t.log_grade}/100` : "—")}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div className="text-[10px] text-zinc-600 mt-1">Click a row to open the track page with full check details.</div>
+        </div>
+      )}
+    </Modal>
   );
 }

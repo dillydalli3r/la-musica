@@ -1,9 +1,8 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { FolderOpen, Check, ArrowRight, ArrowLeft, RotateCcw, Users } from "lucide-react";
+import { Check, ArrowRight, ArrowLeft, RotateCcw, Users } from "lucide-react";
 import { api } from "../api";
-import FolderPicker from "../components/FolderPicker";
 import { toast } from "../store";
 
 type Step = 1 | 2 | 3 | 4;
@@ -60,20 +59,9 @@ export default function SetupPage() {
       }
       setStep(4);
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
-    }
-  };
-
-  const [showFolderPicker, setShowFolderPicker] = useState(false);
-  const pickMusicFolder = async () => {
-    try {
-      const r = await api.fsPickFolder(musicFolder.trim());
-      if (!r.supported) setShowFolderPicker(true); // headless/remote → in-app browser
-      else if (r.path) setMusicFolder(r.path);
-    } catch {
-      setShowFolderPicker(true);
     }
   };
 
@@ -85,7 +73,7 @@ export default function SetupPage() {
       toast(failed.length ? "Install finished with " + failed.length + " failure(s)" : "Dependencies installed / updated");
       refetchDeps();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -98,7 +86,7 @@ export default function SetupPage() {
       qc.invalidateQueries({ queryKey: ["config"] });
       navigate("/", { replace: true });
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -107,14 +95,14 @@ export default function SetupPage() {
   const finish = async () => {
     setBusy(true);
     try {
-      // No music folder is a valid, supported state (the app then runs
-      // unconfigured) — never trap the user on this step for it.
-      await api.saveConfig({ ...config, music_folder: musicFolder.trim(), first_run_done: true });
+      // The music folder is startup-owned (MLO_MUSIC_FOLDER / config.json),
+      // never written from the UI — this step only marks the wizard done.
+      await api.saveConfig({ ...config, first_run_done: true });
       qc.invalidateQueries({ queryKey: ["config"] });
       qc.invalidateQueries({ queryKey: ["library"] });
       navigate("/", { replace: true });
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -153,38 +141,28 @@ export default function SetupPage() {
         </div>
 
         {step === 1 && (
-          <div className="bg-card rounded-lg border border-border p-6 space-y-4">
-            <div className="text-sm font-semibold">Where is your music library?</div>
+          <div className="panel p-6 space-y-4">
+            <div className="text-sm font-semibold">Your music library</div>
             <p className="text-xs text-zinc-400 leading-relaxed">
-              Point this at the folder that contains your artist/album folders (e.g.{" "}
-              <code className="font-mono">F:\Music</code>). Everything the app grades, tags and optimizes lives under it.
+              Everything the app grades, tags and optimizes lives under one folder (your artist/album tree). It is
+              chosen when the app starts — this step only shows what it resolved to.
             </p>
-            <label className="block">
-              <span className="text-xs text-zinc-500 uppercase">Music folder</span>
-              <div className="flex gap-2 mt-1">
-                <input
-                  className="input"
-                  value={musicFolder}
-                  onChange={(e) => setMusicFolder(e.target.value)}
-                  placeholder="F:\Music"
-                />
-                <button className="btn-ghost" onClick={pickMusicFolder} title="Browse for a folder">
-                  <FolderOpen className="h-4 w-4" />
-                </button>
+            <div className="rounded-md border border-border bg-bg/60 px-3 py-2">
+              <div className="text-xs text-zinc-500 uppercase">Music folder</div>
+              <div className="font-mono text-xs text-zinc-200 break-all mt-1">
+                {musicFolder.trim() || "not configured yet"}
               </div>
-            </label>
-            {showFolderPicker && (
-              <FolderPicker
-                initial={musicFolder.trim()}
-                onPick={setMusicFolder}
-                onClose={() => setShowFolderPicker(false)}
-              />
-            )}
+              <div className="text-[11px] text-zinc-500 mt-1 leading-relaxed">
+                Fixed at startup, not editable here: set <code className="font-mono">MLO_MUSIC_FOLDER</code> (Docker /
+                compose) or <code className="font-mono">music_folder</code> in config.json, then restart. Settings →
+                General shows the resolved folder.
+              </div>
+            </div>
             <div className="flex items-center justify-between">
               <button className="btn-ghost" onClick={skip} disabled={busy}>
-                Skip for now — set it later in Settings
+                Skip for now
               </button>
-              <button className="btn-primary" disabled={!musicFolder.trim()} onClick={() => setStep(2)}>
+              <button className="btn-primary" disabled={busy} onClick={() => setStep(2)}>
                 Next <ArrowRight className="h-3.5 w-3.5" />
               </button>
             </div>
@@ -192,7 +170,7 @@ export default function SetupPage() {
         )}
 
         {step === 2 && (
-          <div className="bg-card rounded-lg border border-border p-6 space-y-4">
+          <div className="panel p-6 space-y-4">
             <div className="flex items-center justify-between flex-wrap gap-2">
               <div>
                 <div className="text-sm font-semibold">External tools</div>
@@ -252,7 +230,7 @@ export default function SetupPage() {
         )}
 
         {step === 3 && (
-          <div className="bg-card rounded-lg border border-border p-6 space-y-4">
+          <div className="panel p-6 space-y-4">
             <div className="flex items-center gap-2 text-sm font-semibold">
               <Users className="h-4 w-4 text-accent" /> Share your library on Soulseek
             </div>
@@ -305,7 +283,7 @@ export default function SetupPage() {
         )}
 
         {step === 4 && (
-          <div className="bg-card rounded-lg border border-border p-6 space-y-4">
+          <div className="panel p-6 space-y-4">
             <div className="flex items-center gap-2 text-sm font-semibold">
               <Check className="h-4 w-4 text-emerald-400" /> You're all set
             </div>

@@ -2,6 +2,7 @@
 import os
 import re
 import math
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .audio import AudioFile
@@ -12,7 +13,7 @@ from .stats import (
     _walk_files, is_audio_file, _find_albums, _clean_set, _summarize_values,
     _collect_targets, worker_count,
 )
-from .ui import print_header, log, c, Color, log_file_result
+from .ui import print_header, log, c, Color
 import tempfile
 
 TIMESTAMP_RE = re.compile(r"\[(\d{1,2}):(\d{1,2})(?:\.(\d+))?\]")
@@ -810,7 +811,6 @@ def _normalize_media_source_library(config, stats):
 
             if status in ("unchanged", "skipped"):
                 stats["skipped_count"] += 1
-                log_file_result(album, "skip", info=info or "unchanged")
                 _pbar_skip(pbar, counts)
                 continue
 
@@ -820,12 +820,10 @@ def _normalize_media_source_library(config, stats):
                 stats["modified_count"] += 1
                 stats["total_bytes_removed"] += b_rem
                 stats["total_bytes_added"] += b_add
-                log_file_result(album, "ok", b_rem, b_add)
                 _pbar_update(pbar, counts, kind="ok")
             else:
                 stats["error_count"] += 1
                 stats["errors"].append((path, info))
-                log_file_result(album, "fail", info=info)
                 _pbar_update(pbar, counts, kind="fail")
 
         if pbar:
@@ -890,7 +888,6 @@ def run_format_lyrics(config):
 
                 if status == "unchanged":
                     stats["skipped_count"] += 1
-                    log_file_result(p, "skip", info="unchanged")
                     _pbar_skip(pbar, counts)
                     continue
 
@@ -900,12 +897,10 @@ def run_format_lyrics(config):
                     stats["modified_count"] += 1
                     stats["total_bytes_removed"] += b_rem
                     stats["total_bytes_added"] += b_add
-                    log_file_result(p, "ok", b_rem, b_add)
                     _pbar_update(pbar, counts, kind="ok")
                 else:
                     stats["error_count"] += 1
                     stats["errors"].append((p, info))
-                    log_file_result(p, "fail", info=info)
                     _pbar_update(pbar, counts, kind="fail")
 
             if pbar:
@@ -920,10 +915,10 @@ def run_format_lyrics(config):
 
 
 # ---------------------------------------------------------------------------- #
-# Enhanced LRC (ELRC) word-level sync. Shared by the player-bar AI sync
-# (server/ai.py) and the transliterate/translate script (mlo/lyrics_xlit.py)
-# so every lyric variant — original, romanized, translated — carries the
-# same kind of word-level timings.
+# Enhanced LRC (ELRC) word-level sync. Shared by the lyrics formatter and
+# the deterministic word-sync endpoint (POST /api/lyrics/wordsync) so every
+# lyric variant — original, romanized, translated — carries the same kind of
+# word-level timings.
 # ---------------------------------------------------------------------------- #
 
 # CJK ranges: hiragana, katakana, CJK punctuation, ideographs, compat
@@ -967,8 +962,8 @@ def _syllabify_token(word):
     first consonant of a longer cluster (mon-ster). "y" is a vowel except
     word-initially, and a mid-run y starts a new nucleus (be-yond, ka-yak)
     unless it ends the run (boy, play). Punctuation never splits. Returns
-    [word] unchanged when no split is found — an imperfect fallback, the
-    AI audio alignment is what produces real syllable timings.
+    [word] unchanged when no split is found — a rule-based approximation,
+    there is no acoustic alignment to fall back on.
     """
     if not word:
         return [word]
@@ -1246,4 +1241,78 @@ def elrc_word_sync(lrc_text, max_line_spread_s=6.0, min_word_span_s=0.18,
         # syllable tags inside a word are glued together with no space
         out.append(prefix + " ".join(pieces))
     return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------- #
+# Stored lyric transforms: TRANSLATION-* / TRANSLITERATION-* tags and the
+# .romaji.lrc / .<lang>.lrc sidecars. Nothing here generates them — they are
+# stored data the player only renders — so these helpers decide whether a
+# stored variant is worth showing for a track.
+# ---------------------------------------------------------------------------- #
+
+# Sidecar suffix for romanized lyrics (de-facto karaoke convention).
+XLIT_SIDECAR = ".romaji.lrc"
+
+# Below this fraction of non-Latin letters a text counts as "already Latin".
+_LATIN_THRESHOLD = 0.15
+
+# Script family per Unicode name fragment, in match order (kana before the
+# generic CJK/ideograph tests).
+_SCRIPT_NAMES = (
+    ("KATAKANA", "japanese"), ("HIRAGANA", "japanese"), ("HANGUL", "hangul"),
+    ("CJK", "han"), ("IDEOGRAPH", "han"), ("CYRILLIC", "cyrillic"),
+    ("ARABIC", "arabic"), ("HEBREW", "hebrew"), ("DEVANAGARI", "devanagari"),
+    ("THAI", "thai"), ("GEORGIAN", "georgian"), ("ARMENIAN", "armenian"),
+    ("GREEK", "greek"), ("LATIN", "latin"),
+)
+
+
+def non_latin_ratio(text):
+    """Fraction of alphabetic characters that are NOT Latin script.
+    Whitespace, digits and punctuation are ignored — they carry no script."""
+    letters = total = 0
+    for ch in str(text or ""):
+        if not ch.isalpha():
+            continue
+        total += 1
+        try:
+            if "LATIN" not in unicodedata.name(ch, ""):
+                letters += 1
+        except Exception:
+            letters += 1
+    return letters / total if total else 0.0
+
+
+def dominant_script(text):
+    """The script family carrying most of the text's letters."""
+    counts: dict = {}
+    for ch in str(text or ""):
+        if not ch.isalpha():
+            continue
+        name = unicodedata.name(ch, "")
+        for needle, key in _SCRIPT_NAMES:
+            if needle in name:
+                counts[key] = counts.get(key, 0) + 1
+                break
+    if not counts:
+        return "latin"
+    return max(counts, key=lambda k: counts[k])
+
+
+def needs_transliteration(text):
+    """True when a stored romanization is worth rendering: the text is
+    mostly non-Latin AND its dominant script is not Latin, so the stored
+    reading actually says something the original lyrics don't."""
+    return (non_latin_ratio(text) >= _LATIN_THRESHOLD
+            and dominant_script(text) != "latin")
+
+
+def _same_essence(a, b):
+    """True when two lyric texts are the same words ignoring case, spacing
+    and punctuation — a stored "translation" that matches its source line
+    for line (English → English) is a no-op, not a translation. Compared on
+    the whole text; translations that only mirror some lines still differ
+    enough to be worth keeping."""
+    norm = lambda s: re.sub(r"[\W_]+", "", str(s or "").lower())
+    return norm(a) == norm(b) and bool(norm(a))
 

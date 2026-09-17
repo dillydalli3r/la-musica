@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Menu-consistency gate: every surface that lists the 15 scripts must agree.
+"""Menu-consistency gate: every surface that lists the 14 scripts must agree.
 
 Sources checked:
   * ``EXPECTED_SCRIPTS`` below — the frozen expected registry (number + name)
   * ``server/main.py``       RUNNERS      — the numbers /api/run accepts
   * ``web/src/lib/scripts.ts`` SCRIPTS    — the UI's single source of truth
-  * ``README.md``            the 15-script table
+  * ``README.md``            the 14-script table
   * ``web/src/lib/force.ts`` FORCE_SCRIPTS, ``SettingsPage`` FORCE_KEYS —
     the one-shot force switches must map onto /api/run's force dict keys
 
@@ -36,7 +36,6 @@ EXPECTED_SCRIPTS = {
     12: "Key & BPM",
     13: "Fetch Lyrics",
     14: "Beets Tagging",
-    15: "Lyrics Translate/Transliterate",
 }
 
 
@@ -112,25 +111,24 @@ def force_defaults_are_false():
 
 
 def check_run_all_migration(check):
-    """A saved Run All order from before script 15 existed must gain it on
-    load — otherwise an upgrade silently stops running xlit/translate."""
+    """A saved Run All order from before script 15 was removed must shed it
+    on load — 15 is not a runner any more, and a chain entry for it would
+    come back as an error entry."""
     sys.path.insert(0, ROOT)
     import mlo.config as cfg  # noqa: PLC0415 - needs ROOT on sys.path first
 
     legacy = {
         "music_folder": "X",
-        "run_all_order": [11, 14, 1, 2, 8, 13, 12, 3, 5, 9, 6, 4, 7, 10],
+        "run_all_order": [11, 14, 1, 2, 8, 13, 15, 12, 3, 5, 9, 6, 4, 7, 10],
     }
     got = cfg.normalize_config(legacy)["run_all_order"]
-    check("a saved order without script 15 gains it", 15 in got, str(got))
-    check("script 15 lands after the lyrics fetch (13)",
-          13 in got and 15 in got and got.index(15) == got.index(13) + 1, str(got))
-    check("the migrated order matches DEFAULT_RUN_ALL_ORDER",
+    check("a saved order naming the removed script 15 drops it", 15 not in got, str(got))
+    check("the sanitised order matches DEFAULT_RUN_ALL_ORDER",
           got == list(cfg.DEFAULT_RUN_ALL_ORDER), str(got))
 
     junk = cfg.normalize_config({"music_folder": "X", "run_all_order": [99, "a", 4, 4, -1]})
     check("unknown / duplicate run-all ids are dropped",
-          all(1 <= n <= 15 for n in junk["run_all_order"]) and len(set(junk["run_all_order"])) == len(junk["run_all_order"]),
+          all(1 <= n <= 14 for n in junk["run_all_order"]) and len(set(junk["run_all_order"])) == len(junk["run_all_order"]),
           str(junk["run_all_order"]))
 
     twice = cfg.normalize_config(cfg.normalize_config({"music_folder": "X"}))
@@ -153,8 +151,8 @@ def main():
             fail += 1
 
     print("scripts registry")
-    check("canonical registry has 15 scripts", len(canon) == 15, str(sorted(canon)))
-    check("canonical numbers are 1..15", sorted(canon) == list(range(1, 16)))
+    check("canonical registry has 14 scripts", len(canon) == 14, str(sorted(canon)))
+    check("canonical numbers are 1..14", sorted(canon) == list(range(1, 15)))
     check("server RUNNERS == canonical numbers", runners == set(canon), f"server={sorted(runners)}")
     check("web SCRIPTS == canonical numbers", set(web) == set(canon), f"web={sorted(web)}")
     check("README table == canonical numbers", readme == set(canon), f"readme={sorted(readme)}")
@@ -173,10 +171,10 @@ def main():
 
     print("run-all order")
     py_run_all = python_default_run_all()
-    check("DEFAULT_RUN_ALL covers every script", sorted(run_all) == list(range(1, 16)), str(sorted(run_all)))
+    check("DEFAULT_RUN_ALL covers every script", sorted(run_all) == list(range(1, 15)), str(sorted(run_all)))
     check("DEFAULT_RUN_ALL has no duplicates", len(run_all) == len(set(run_all)), str(run_all))
     check("mlo/config.py DEFAULT_RUN_ALL_ORDER covers every script",
-          sorted(py_run_all) == list(range(1, 16)), str(sorted(py_run_all)))
+          sorted(py_run_all) == list(range(1, 15)), str(sorted(py_run_all)))
     check("python and web run-all order agree", py_run_all == run_all,
           f"python={py_run_all} web={run_all}")
 

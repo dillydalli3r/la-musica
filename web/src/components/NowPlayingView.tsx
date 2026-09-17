@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  AudioLines, ChevronDown, Heart, ListMusic, ListPlus, Pause, Play, Repeat, Settings2, Shuffle,
+  AudioLines, Captions, ChevronDown, Heart, ListMusic, ListPlus, Pause, Play, Repeat, Settings2, Shuffle,
   SkipBack, SkipForward, Volume1, Volume2, VolumeX, X,
 } from "lucide-react";
 import { api } from "../api";
@@ -17,6 +17,8 @@ import type { Playlist } from "../types";
 import { useLyricsFollow, LYRICS_PAD_BOTTOM, LYRICS_PAD_TOP } from "../lib/lyrScroll";
 import { nextSpeed, fmtSpeed } from "../lib/playback";
 import { fmtDuration } from "../lib/fmt";
+import useSubtitleTracks from "./SubtitledVideo";
+import type { VideoAspect } from "../lib/video";
 
 const XLIT_KEY = "mlo.np.xlit";
 const TRANS_KEY = "mlo.np.trans";
@@ -52,6 +54,15 @@ interface Props {
    * view mirrors and edits the rate through these. */
   speed: number;
   onSpeedChange: (s: number) => void;
+  /** Music-video presentation — the bar owns the single <video>, so the
+   *  fullscreen pickers drive it through these. */
+  video: {
+    aspect: VideoAspect;
+    /** null = as tagged (the default track), -1 = off, else that track index. */
+    captions: number | null;
+    onAspect: (a: VideoAspect) => void;
+    onCaptions: (i: number | null) => void;
+  };
   /** ReplayGain is stored in the config and applied by the player bar (it owns
    * the decoders); the fullscreen options menu is where it gets edited. */
   rg: {
@@ -98,9 +109,9 @@ const LINE_BLUR = "blur-[2px] opacity-60 hover:blur-none hover:opacity-100 trans
 
 export default function NowPlayingView(p: Props) {
   const { vol, setVol } = useStore();
-  // Transliteration + translation default ON: script 15 stores the
-  // transforms in tags/sidecars, so they render instantly for processed
-  // tracks and the AI is only asked for tracks it hasn't seen yet.
+  // Stored transliteration + translation default ON — they arrive with the
+  // track's tags (or a .romaji.lrc / .<lang>.lrc sidecar) and render as
+  // sub-lines under each line; nothing is generated on the fly.
   const [showXlit, setShowXlit] = useState(() => localStorage.getItem(XLIT_KEY) !== "0");
   const [showTrans, setShowTrans] = useState(() => localStorage.getItem(TRANS_KEY) !== "0");
   const [lyricSize, setLyricSize] = useState<keyof typeof LYRIC_SIZES>(
@@ -147,31 +158,12 @@ export default function NowPlayingView(p: Props) {
   // where wrong info would matter (title fallback, instrumental, BPM).
   const [tagsFor, setTagsFor] = useState<string | null>(null);
   const [transforms, setTransforms] = useState<Record<string, string[]>>({});
-  const inFlight = useRef<Set<string>>(new Set());
   // The PRIMARY text line of each block — with translations/romanization the
   // outer block also carries sub-lines, and centering the block would push
   // the sung line off the middle. The scroller centers this element.
   const primaryRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const lyricsScrollRef = useRef<HTMLDivElement>(null);
   const qc = useQueryClient();
-
-  // AI availability (checked once): when unconfigured, translation /
-  // transliteration are never requested so no endless spinner can appear.
-  const [aiReady, setAiReady] = useState<boolean | null>(null);
-  useEffect(() => {
-    let dead = false;
-    api
-      .config()
-      .then((c) => {
-        if (!dead) setAiReady(!!String((c as Record<string, unknown>).ai_base_url ?? "").trim());
-      })
-      .catch(() => {
-        if (!dead) setAiReady(false);
-      });
-    return () => {
-      dead = true;
-    };
-  }, []);
 
   const { time, duration } = p;
   const { queue, index, setIndex, setQueue, queueRemoveAt, queueMove, setPlaying } = useStore();
@@ -329,6 +321,9 @@ export default function NowPlayingView(p: Props) {
   // doesn't know about (NotFoundError on the next track change). All this
   // overlay adds is the click surface and the control bar painted above it.
   const videoPath = isVideoFile(p.current.file || p.current.path) ? p.current.path : null;
+  // Same query key as the <video>'s own hook, so the <track> list the picker
+  // shows is the one the element actually carries — no second fetch.
+  const captionTracks = useSubtitleTracks(videoPath);
 
   // ---- auto-hiding chrome (video mode) ------------------------------------
   // Like every serious video player: any mouse movement / key / touch shows
@@ -366,7 +361,8 @@ export default function NowPlayingView(p: Props) {
   }, [p.playing]);
 
   // ---- lyrics for the current track --------------------------------------
-  // Stored transforms (script 15 tags / .romaji.lrc / .<lang>.lrc sidecars)
+  // Stored translations / transliterations (TRANSLATION-<lang> /
+  // TRANSLITERATION-<lang>-LATN tags, or .romaji.lrc / .<lang>.lrc sidecars)
   // arrive with the same payload and are parsed exactly like the original
   // lyrics, so their lines stay 1:1 with `plainLines` without re-alignment.
   // While the next track's payload loads, the PREVIOUS track's lyrics stay
@@ -375,7 +371,6 @@ export default function NowPlayingView(p: Props) {
   useEffect(() => {
     let dead = false;
     setSmoothTime(0);
-    inFlight.current.clear();
     api
       .tags(p.current.path)
       .then((t) => {
@@ -411,8 +406,8 @@ export default function NowPlayingView(p: Props) {
 
   const instrumental = (tags?.INSTRUMENTAL ?? "").toString().trim() === "1";
   // The lyrics on screen belong to `lyricsFor`; until the new track's
-  // payload arrives they are stale — kept for layout stability, dimmed,
-  // never highlighted and never sent to the AI.
+  // payload arrives they are stale — kept for layout stability, dimmed and
+  // never highlighted.
   const staleLyrics = lyricsFor !== p.current.path;
   const tagsStale = tagsFor !== p.current.path;
   const lines: LrcLine[] = useMemo(
@@ -420,8 +415,7 @@ export default function NowPlayingView(p: Props) {
     [lyricsText, instrumental]
   );
   // Layout (cover sizing, pane presence) follows the on-screen lyrics even
-  // while stale so next/previous never reflows the whole view; AI work only
-  // ever runs on fresh lyrics.
+  // while stale so next/previous never reflows the whole view.
   const layoutHasLyrics = !!lyricsText?.trim() && !instrumental;
   const hasLyrics = layoutHasLyrics && !staleLyrics;
   const plainLines = useMemo(() => {
@@ -436,44 +430,6 @@ export default function NowPlayingView(p: Props) {
     () => (synced ? lines : plainLines.map((text) => ({ ts: "", time: 0, text }))),
     [synced, lines, plainLines]
   );
-
-  // ---- translation / transliteration -------------------------------------
-  // aiReady === null means the config probe is still running — hold off so
-  // we never fire a request that's destined to fail (and spin forever).
-  useEffect(() => {
-    if (aiReady === null || !aiReady || staleLyrics) return;
-    let dead = false;
-    const modes = [
-      ...(showXlit ? ["transliterate"] : []),
-      ...(showTrans ? ["translate"] : []),
-    ];
-    if (!hasLyrics || !plainLines.length) return;
-    for (const mode of modes) {
-      const key = `${p.current.path}|${mode}`;
-      if (inFlight.current.has(key) || transforms[mode]) continue;
-      inFlight.current.add(key);
-      api
-        .lyricsAiLines(mode as "translate" | "transliterate", plainLines)
-        .then((r) => {
-          // Track changed while the request was in flight — drop the result
-          // so track A's lines can never land on track B.
-          if (!dead) setTransforms((prev) => ({ ...prev, [mode]: r.lines }));
-        })
-        .catch((e) => {
-          // AI failed (rate limit, bad key…) — mark done with no output so
-          // the "transforming…" indicator never gets stuck on screen, and
-          // surface the reason instead of failing silently.
-          if (dead) return;
-          setTransforms((prev) => (prev[mode] ? prev : { ...prev, [mode]: [] }));
-          toast(`${mode === "translate" ? "Translation" : "Transliteration"} failed: ${e instanceof Error ? e.message : e}`);
-        })
-        .finally(() => inFlight.current.delete(key));
-    }
-    return () => {
-      dead = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [aiReady, showXlit, showTrans, hasLyrics, plainLines, p.current.path]);
 
   // ---- active line ---------------------------------------------------------
   // A RANGE, not a single line: lines stamped at the same moment (duets,
@@ -565,11 +521,11 @@ export default function NowPlayingView(p: Props) {
   const addToPlaylist = async (pl: Playlist) => {
     try {
       await api.playlistAdd(pl.id, [p.current.path]);
-      toast(`Added "${title}" to ${pl.name}`);
+      toast.success(`Added "${title}" to ${pl.name}`);
       setPlOpen(false);
       qc.invalidateQueries({ queryKey: ["playlist", pl.id] });
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
   const createPlaylistAndAdd = async () => {
@@ -578,18 +534,16 @@ export default function NowPlayingView(p: Props) {
     try {
       const pl = await api.createPlaylist(name, "manual");
       await api.playlistAdd(pl.id, [p.current.path]);
-      toast(`Added "${title}" to ${pl.name}`);
+      toast.success(`Added "${title}" to ${pl.name}`);
       setNewPlName("");
       setPlOpen(false);
       qc.invalidateQueries({ queryKey: ["playlists"] });
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
   const size = LYRIC_SIZES[lyricSize];
-  const transforming =
-    !!aiReady && hasLyrics && ((showXlit && !transforms.transliterate) || (showTrans && !transforms.translate));
 
   const renderLine = (l: LrcLine, i: number) => {
     // Every line of the current same-time cluster (duets / backing vocals)
@@ -707,7 +661,7 @@ export default function NowPlayingView(p: Props) {
     /* Every text row keeps a fixed height and is ALWAYS rendered —
        blanking a row while the next track's tags load is what made
        the block (and the title itself) shake on next/previous. */
-    <div className="text-center w-full max-w-[26rem] min-w-0">
+    <div className="text-center w-[26rem] min-w-0">
       <div className="h-8 flex items-center justify-center gap-2" title={title}>
         <div className="text-2xl font-bold text-white truncate">{title}</div>
         <AdvisoryMark value={freshTags?.ITUNESADVISORY} />
@@ -729,27 +683,27 @@ export default function NowPlayingView(p: Props) {
   );
   const transportRow = (
     <div className="flex items-center justify-center gap-2.5 flex-wrap">
-      <button className={`p-2 rounded-lg hover:bg-white/10 ${p.shuffle ? "text-accent" : "text-zinc-500"}`} onClick={p.onToggleShuffle} title="Shuffle">
+      <button className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${p.shuffle ? "text-accent" : "text-zinc-500"}`} onClick={p.onToggleShuffle} title="Shuffle">
         <Shuffle className="h-4 w-4" />
       </button>
-      <button className="p-2.5 rounded-lg hover:bg-white/10 text-white" onClick={() => p.onStep(-1)} title="Previous track">
+      <button className="p-2.5 rounded-lg transition-colors hover:bg-white/10 text-white" onClick={() => p.onStep(-1)} title="Previous track">
         <SkipBack className="h-5 w-5" />
       </button>
       <button
-        className="p-4 rounded-lg bg-accent on-accent hover:bg-accent-soft shadow-lg"
+        className="p-4 rounded-lg bg-accent on-accent hover:bg-accent-soft shadow-lg transition-colors"
         onClick={p.onTogglePlay}
         title="Play / pause (Space)"
       >
         {p.playing ? <Pause className="h-6 w-6" /> : <Play className="h-6 w-6 ml-0.5" />}
       </button>
-      <button className="p-2.5 rounded-lg hover:bg-white/10 text-white" onClick={() => p.onStep(1)} title="Next track">
+      <button className="p-2.5 rounded-lg transition-colors hover:bg-white/10 text-white" onClick={() => p.onStep(1)} title="Next track">
         <SkipForward className="h-5 w-5" />
       </button>
-      <button className={`p-2 rounded-lg hover:bg-white/10 ${p.loop ? "text-accent" : "text-zinc-500"}`} onClick={p.onToggleLoop} title="Repeat one">
+      <button className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${p.loop ? "text-accent" : "text-zinc-500"}`} onClick={p.onToggleLoop} title="Repeat one">
         <Repeat className="h-4 w-4" />
       </button>
       <button
-        className="p-2 rounded-lg hover:bg-white/10 text-xs font-mono text-zinc-400 min-w-[46px]"
+        className="p-2 rounded-lg transition-colors hover:bg-white/10 text-xs font-mono text-zinc-400 min-w-[46px]"
         onClick={() => p.onSpeedChange(nextSpeed(p.speed, 1))}
         title="Playback speed — [ slower · ] faster · 0 reset to 1×"
       >
@@ -757,7 +711,7 @@ export default function NowPlayingView(p: Props) {
       </button>
       <span className="w-px h-6 bg-white/15 mx-1" />
       <button
-        className={`p-2 rounded-lg hover:bg-white/10 ${p.liked ? "text-accent" : "text-zinc-500 hover:text-zinc-300"}`}
+        className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${p.liked ? "text-accent" : "text-zinc-500 hover:text-zinc-300"}`}
         onClick={p.onToggleLike}
         title={p.liked ? "Unlike" : "Like this track"}
       >
@@ -765,7 +719,7 @@ export default function NowPlayingView(p: Props) {
       </button>
       <div className="relative">
         <button
-          className={`p-2 rounded-lg hover:bg-white/10 ${plOpen ? "text-accent bg-white/10" : "text-zinc-500 hover:text-zinc-300"}`}
+          className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${plOpen ? "text-accent bg-white/10" : "text-zinc-500 hover:text-zinc-300"}`}
           onClick={() => setPlOpen(!plOpen)}
           title="Add this track to a playlist"
         >
@@ -813,7 +767,7 @@ export default function NowPlayingView(p: Props) {
     </div>
   );
   const seekRow = (
-    <div className="flex items-center gap-2 text-xs text-zinc-400 w-full max-w-[26rem] px-2">
+    <div className="flex items-center gap-2 text-xs text-zinc-400 w-[26rem] px-2">
       <span className="w-10 text-right font-mono tabular-nums">{fmtDuration(dispTime)}</span>
       <input
         type="range"
@@ -842,6 +796,54 @@ export default function NowPlayingView(p: Props) {
           title="Volume"
         />
         <VolumePct value={vol} onChange={setVol} />
+      </div>
+    </div>
+  );
+
+  // Music-video controls: caption track + how the picture fills the screen.
+  // Both live in the bottom overlay with the transport, so they are one click
+  // away while the picture plays (and ride the same auto-hide).
+  const taggedCaption = captionTracks.find((t) => t.default);
+  const videoRow = (
+    <div className="flex items-center justify-center gap-4 flex-wrap">
+      <label className="flex items-center gap-1.5 text-xs text-zinc-300" title="Subtitle / caption track">
+        <Captions className="h-4 w-4 text-zinc-400 shrink-0" />
+        <select
+          className="chip text-[11px] bg-white/10 border border-white/15 text-zinc-200 px-1.5 py-1 rounded-md"
+          value={p.video.captions === null ? "tagged" : String(p.video.captions)}
+          onChange={(e) =>
+            p.video.onCaptions(e.target.value === "tagged" ? null : Number(e.target.value))
+          }
+        >
+          <option value="tagged">As tagged{taggedCaption ? ` — ${taggedCaption.label}` : ""}</option>
+          <option value="-1">Off</option>
+          {captionTracks.map((t, i) => (
+            <option key={t.key} value={i}>
+              {t.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="flex items-center gap-1 text-xs text-zinc-300" title="How the picture fills the screen">
+        <span className="text-[11px] text-zinc-400 mr-0.5">Fit</span>
+        {(["contain", "cover", "stretch"] as const).map((a) => (
+          <button
+            key={a}
+            className={`chip text-[10px] border ${
+              p.video.aspect === a ? "bg-accent on-accent border-accent" : "bg-white/5 border-white/15 text-zinc-400 hover:text-white"
+            }`}
+            onClick={() => p.video.onAspect(a)}
+            title={
+              a === "contain"
+                ? "Whole picture, letterboxed (default)"
+                : a === "cover"
+                  ? "Fill the screen, cropping the overflow"
+                  : "Fill the screen, ignoring the aspect ratio"
+            }
+          >
+            {a.toUpperCase()}
+          </button>
+        ))}
       </div>
     </div>
   );
@@ -923,6 +925,7 @@ export default function NowPlayingView(p: Props) {
             }`}
           >
             <div className="max-w-3xl mx-auto flex flex-col items-center gap-4">
+              {videoRow}
               {textBlock}
               {transportRow}
               {seekRow}
@@ -945,7 +948,7 @@ export default function NowPlayingView(p: Props) {
           }`}
         >
           <button
-            className="p-2 rounded-lg hover:bg-white/10 text-zinc-400 hover:text-white"
+            className="p-2 rounded-lg transition-colors hover:bg-white/10 text-zinc-400 hover:text-white"
             onClick={p.onClose}
             title="Exit fullscreen (Esc)"
           >
@@ -962,7 +965,7 @@ export default function NowPlayingView(p: Props) {
             <button
               className={`max-w-[15rem] min-w-0 items-center gap-1.5 px-1.5 py-1 rounded-md text-[10px] font-mono hidden sm:flex ${
                 upNextLabel
-                  ? "text-zinc-500 hover:text-white hover:bg-white/10"
+                  ? "text-zinc-500 hover:text-white hover:bg-white/10 transition-colors"
                   : "text-zinc-600 opacity-40 pointer-events-none"
               }`}
               onClick={() => setQueueOpen(true)}
@@ -972,26 +975,30 @@ export default function NowPlayingView(p: Props) {
               <span className="truncate">{upNextLabel || "—"}</span>
             </button>
             <button
-              className={`p-2 rounded-lg hover:bg-white/10 ${queueOpen ? "text-white bg-white/10" : "text-zinc-400 hover:text-white"}`}
+              className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${queueOpen ? "text-white bg-white/10" : "text-zinc-400 hover:text-white"}`}
               onClick={() => setQueueOpen(!queueOpen)}
               title="Up next (queue)"
             >
               <ListMusic className="h-5 w-5" />
             </button>
-            <button
-              className={`p-2 rounded-lg hover:bg-white/10 ${viz ? "text-accent" : "text-zinc-400 hover:text-white"}`}
-              onClick={() => {
-                const v = !viz;
-                setViz(v);
-                persist(VIZ_KEY, v ? "1" : "0");
-              }}
-              title="Toggle visualizer bars"
-            >
-              <AudioLines className="h-5 w-5" />
-            </button>
+            {/* inert over a music video: <Visualizer> only renders in the
+                audio layout, so the toggle is hidden rather than a no-op */}
+            {!videoPath && (
+              <button
+                className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${viz ? "text-accent" : "text-zinc-400 hover:text-white"}`}
+                onClick={() => {
+                  const v = !viz;
+                  setViz(v);
+                  persist(VIZ_KEY, v ? "1" : "0");
+                }}
+                title="Toggle visualizer bars"
+              >
+                <AudioLines className="h-5 w-5" />
+              </button>
+            )}
             <div className="relative">
               <button
-                className={`p-2 rounded-lg hover:bg-white/10 ${options ? "text-white bg-white/10" : "text-zinc-400 hover:text-white"}`}
+                className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${options ? "text-white bg-white/10" : "text-zinc-400 hover:text-white"}`}
                 onClick={() => setOptions(!options)}
                 title="Lyrics & display options"
               >
@@ -1006,7 +1013,7 @@ export default function NowPlayingView(p: Props) {
                   <div className="absolute right-0 top-full mt-1 z-50 rounded-lg shadow-2xl p-1.5 w-72 max-w-[calc(100vw-1.5rem)] bg-zinc-950 border border-border">
                   <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2 pt-1 pb-1">Lyrics</div>
                 {[
-                    { id: "xlit" as const, label: "Transliteration (romanized)", on: showXlit, act: () => toggleOpt("xlit") },
+                    { id: "xlit" as const, label: "Transliteration", on: showXlit, act: () => toggleOpt("xlit") },
                     { id: "trans" as const, label: "Translation", on: showTrans, act: () => toggleOpt("trans") },
                     {
                       id: "karaoke" as const,
@@ -1083,19 +1090,23 @@ export default function NowPlayingView(p: Props) {
                     />
                     Background pulse
                   </label>
-                  <label className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-white/10 cursor-pointer text-xs text-zinc-300">
-                    <input
-                      type="checkbox"
-                      className="accent-[var(--accent)]"
-                      checked={viz}
-                      onChange={() => {
-                        const v = !viz;
-                        setViz(v);
-                        persist(VIZ_KEY, v ? "1" : "0");
-                      }}
-                    />
-                    Visualizer bars
-                  </label>
+                  {/* inert over a music video: <Visualizer> only renders in the
+                      audio layout, so the toggle is hidden rather than a no-op */}
+                  {!videoPath && (
+                    <label className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-white/10 cursor-pointer text-xs text-zinc-300">
+                      <input
+                        type="checkbox"
+                        className="accent-[var(--accent)]"
+                        checked={viz}
+                        onChange={() => {
+                          const v = !viz;
+                          setViz(v);
+                          persist(VIZ_KEY, v ? "1" : "0");
+                        }}
+                      />
+                      Visualizer bars
+                    </label>
+                  )}
                   {/* loudness matching — stored in the config (Settings → DR /
                       ReplayGain) but felt right here, so it is edited here */}
                   <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-1 pt-2 pb-1">Loudness · ReplayGain</div>
@@ -1134,9 +1145,6 @@ export default function NowPlayingView(p: Props) {
                     <span className="w-14 text-right text-[10px] text-zinc-500 tabular-nums">{rgDb(preampDraft)}</span>
                   </div>
                   <div className="text-[10px] text-zinc-600 px-2 pb-1">{rgLine}</div>
-                  <div className="text-[10px] text-zinc-600 px-2 pt-1">
-                    AI translation uses Settings → AI; results are cached per track.
-                  </div>
                 </div>
                 </>
               )}
@@ -1178,7 +1186,7 @@ export default function NowPlayingView(p: Props) {
             {/* frequency-bar visualizer — the same one the fullscreen view
                 uses; toggle via the button in the top bar or options menu */}
             {viz && (
-              <div className="w-full max-w-[26rem] px-2">
+              <div className="w-[26rem] px-2">
                 <Visualizer playing={p.playing} className="h-12 w-full" />
               </div>
             )}
@@ -1218,11 +1226,6 @@ export default function NowPlayingView(p: Props) {
                   </div>
                 )}
               </div>
-            </div>
-          )}
-          {transforming && (
-            <div className="absolute bottom-6 right-8 text-[10px] text-zinc-600 flex items-center gap-1">
-              <span className="h-3 w-3 rounded-full border border-zinc-600 border-t-transparent animate-spin inline-block" /> transforming lyrics…
             </div>
           )}
         </div>
@@ -1315,7 +1318,7 @@ export default function NowPlayingView(p: Props) {
                     {isCurrent && <span className="text-[10px] text-zinc-500 shrink-0">playing</span>}
                   </button>
                   <button
-                    className="p-1 rounded text-zinc-600 hover:text-red-300 hover:bg-white/5 opacity-0 group-hover/qr:opacity-100 transition-opacity shrink-0"
+                    className="p-1 rounded text-zinc-600 hover:text-red-300 hover:bg-white/5 opacity-0 group-hover/qr:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity shrink-0"
                     onClick={() => queueRemoveAt(i)}
                     title="Remove from queue"
                   >

@@ -161,7 +161,7 @@ try:
         "playlists.db": b"playlists",
         "wishes.db": b"wishes",
         "beets-library.db": b"beets",
-        os.path.join("lyrics_ai_cache", "a.json"): b"{}",
+        os.path.join("lyrics_cache", "a.json"): b"{}",
     }
     for rel, data in carried.items():
         write(os.path.join(s1_old, "Data", rel), data)
@@ -199,7 +199,7 @@ try:
     s3 = make_folder("S3Music")
     write_stub(s3)
     write(os.path.join(s3, "Data", "config.json"),
-          json.dumps({"music_folder": s3, "ai_model": "kept"}, indent=2, sort_keys=True) + "\n")
+          json.dumps({"music_folder": s3, "beets_locale": "en"}, indent=2, sort_keys=True) + "\n")
     write(os.path.join(s3, "Data", "beets-library.db"), b"beets")
     write(os.path.join(s3, ".mlo_downloads", ".incomplete", "user", "x.flac"), b"PARTIAL")
     write(os.path.join(s3, ".mlo_trash", "Album 1", "01 - a.flac"), b"AUDIO")
@@ -209,7 +209,7 @@ try:
     migrate()
     s3_cfg = os.path.join(state(s3), "config.json")
     assert os.path.isfile(s3_cfg), f"config.json not in {s3_cfg}"
-    assert read_json(s3_cfg) == {"music_folder": s3, "ai_model": "kept"}, read_json(s3_cfg)
+    assert read_json(s3_cfg) == {"music_folder": s3, "beets_locale": "en"}, read_json(s3_cfg)
     assert os.path.isfile(os.path.join(state(s3), "beets-library.db")), \
         "state file did not move out of <mf>/Data"
     partial = os.path.join(downloads(s3), ".incomplete", "user", "x.flac")
@@ -233,21 +233,21 @@ try:
     write_stub(s4i)
     old_state = legacy_mlo_data(s4i)
     write(os.path.join(old_state, "config.json"),
-          json.dumps({"music_folder": s4i, "ai_model": "intermediate"},
+          json.dumps({"music_folder": s4i, "beets_locale": "ja"},
                      indent=2, sort_keys=True) + "\n")
     sqlite_db(os.path.join(old_state, "playlists.db"), rows=("liked",))
     write(os.path.join(old_state, "beets-config.yaml"), b"intermediate\n")
-    write(os.path.join(old_state, "lyrics_ai_cache", "a.json"), b"{}")
+    write(os.path.join(old_state, "lyrics_cache", "a.json"), b"{}")
     migrate()
     s4i_cfg = os.path.join(state(s4i), "config.json")
     assert os.path.isfile(s4i_cfg), f"config.json not in {s4i_cfg}"
-    assert read_json(s4i_cfg) == {"music_folder": s4i, "ai_model": "intermediate"}, \
+    assert read_json(s4i_cfg) == {"music_folder": s4i, "beets_locale": "ja"}, \
         read_json(s4i_cfg)
     assert db_rows(os.path.join(state(s4i), "playlists.db")) == ["liked"], \
         "playlists.db lost its rows on the way out of .mlo_data"
     with open(os.path.join(state(s4i), "beets-config.yaml"), "rb") as f:
         assert f.read() == b"intermediate\n", "beets config arrived altered"
-    assert os.path.isfile(os.path.join(state(s4i), "lyrics_ai_cache", "a.json")), \
+    assert os.path.isfile(os.path.join(state(s4i), "lyrics_cache", "a.json")), \
         "nested cache did not leave .mlo_data"
     left = files_under(old_state)
     assert not left, f".mlo_data still holds files after the move: {sorted(left)}"
@@ -266,8 +266,8 @@ try:
     sqlite_db(os.path.join(s4, "Data", "wishes.db"), ["source"])
     write(os.path.join(state(s4), "beets-config.yaml"), b"destination")
     write(os.path.join(s4, "Data", "beets-config.yaml"), b"source")
-    write(os.path.join(state(s4), "lyrics_ai_cache", "kept.json"), b"destination")
-    write(os.path.join(s4, "Data", "lyrics_ai_cache", "kept.json"), b"source")
+    write(os.path.join(state(s4), "lyrics_cache", "kept.json"), b"destination")
+    write(os.path.join(s4, "Data", "lyrics_cache", "kept.json"), b"source")
     write(os.path.join(downloads(s4), "kept.flac"), b"destination")
     write(os.path.join(s4, ".mlo_downloads", "kept.flac"), b"source")
     write(os.path.join(bin_dir(s4), "Old", "01.flac"), b"destination")
@@ -285,9 +285,9 @@ try:
         assert f.read() == b"destination", "migration overwrote a destination file"
     with open(os.path.join(s4, "Data", "beets-config.yaml"), "rb") as f:
         assert f.read() == b"source", "refused move lost the source file"
-    with open(os.path.join(state(s4), "lyrics_ai_cache", "kept.json"), "rb") as f:
+    with open(os.path.join(state(s4), "lyrics_cache", "kept.json"), "rb") as f:
         assert f.read() == b"destination", "migration overwrote a cached file"
-    with open(os.path.join(s4, "Data", "lyrics_ai_cache", "kept.json"), "rb") as f:
+    with open(os.path.join(s4, "Data", "lyrics_cache", "kept.json"), "rb") as f:
         assert f.read() == b"source", "refused move lost the cached file"
     with open(os.path.join(downloads(s4), "kept.flac"), "rb") as f:
         assert f.read() == b"destination", "migration overwrote a downloaded file"
@@ -327,7 +327,7 @@ try:
     s6_old, s6_new = make_folder("S6Old"), make_folder("S6New")
     write_stub(s6_old)
     write(os.path.join(s6_old, "Data", "config.json"),
-          json.dumps({"music_folder": s6_old, "ai_model": "old-model"},
+          json.dumps({"music_folder": s6_old, "beets_locale": "ja"},
                      indent=2, sort_keys=True) + "\n")
     write(os.path.join(s6_old, "Data", "wishes.db"), b"wish")
     write(os.path.join(s6_old, ".mlo_downloads", ".incomplete", "u", "z.flac"), b"Z")
@@ -336,14 +336,14 @@ try:
     # Fresh process: the startup migration has not run for this folder yet, so
     # the folder change itself is what has to carry everything across.
     cfgmod._MIGRATED = False
-    ok = cfgmod.save_config({"music_folder": s6_new, "ai_model": "new-model"})
+    ok = cfgmod.save_config({"music_folder": s6_new, "beets_locale": "de"})
     assert ok, "save_config failed"
     s6_cfg = os.path.join(state(s6_new), "config.json")
     assert os.path.isfile(s6_cfg), f"state did not follow the folder change: {s6_cfg}"
     assert read_json(s6_cfg)["music_folder"] == s6_new, \
         f"save clobbered the new folder: {read_json(s6_cfg)['music_folder']}"
-    assert read_json(s6_cfg)["ai_model"] == "new-model", \
-        f"saved values lost: {read_json(s6_cfg).get('ai_model')}"
+    assert read_json(s6_cfg)["beets_locale"] == "de", \
+        f"saved values lost: {read_json(s6_cfg).get('beets_locale')}"
     assert os.path.isfile(os.path.join(state(s6_new), "wishes.db")), \
         "wishes.db did not follow the folder change"
     partial = os.path.join(downloads(s6_new), ".incomplete", "u", "z.flac")

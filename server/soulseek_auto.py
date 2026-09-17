@@ -65,6 +65,44 @@ _job = {
 _confirm_event = threading.Event()
 _confirm_answer = {"accept": False}
 
+# Bulk import queue (artist / release-group "download all"): the pipeline runs
+# ONE job at a time, so extra releases wait here and _finish() starts the next
+# one — same machinery, no second pipeline.
+_queue = []
+_queue_lock = threading.Lock()
+
+
+def _start_next():
+    """Start the next queued release when the pipeline is idle."""
+    with _queue_lock:
+        if not _queue or job_active():
+            return
+        item = _queue.pop(0)
+        if not start_job(**item).get("ok"):
+            # the pipeline got taken between the check and the start: put it back
+            _queue.insert(0, item)
+
+
+def enqueue(release_mbid=None, release=None, queries=None):
+    """Queue one release for auto-import; starts it immediately when idle.
+
+    Returns the queue depth (0 when the release started right away)."""
+    item = {"release_mbid": release_mbid, "release": release, "queries": queries}
+    with _queue_lock:
+        _queue.append(item)
+    _start_next()
+    with _queue_lock:
+        # our item is gone once it started → depth 0
+        return len(_queue) if any(x is item for x in _queue) else 0
+
+
+def queued():
+    """Pending bulk-import releases (running job excluded)."""
+    with _queue_lock:
+        return [{"release_mbid": i.get("release_mbid"), "release": i.get("release")}
+                for i in _queue]
+
+
 
 def _job_search_done():
     """Clear the live search progress once a query has been scored."""
@@ -102,8 +140,10 @@ def _job_progress(payload):
 
 def job_state():
     with _lock:
-        return {k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
-                for k, v in _job.items() if k != "cancel"}
+        st = {k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
+              for k, v in _job.items() if k != "cancel"}
+    st["queue"] = queued()
+    return st
 
 
 def confirm(accept):
@@ -134,6 +174,14 @@ def cancel():
         else:
             released = False
     if released:
+        # Stop the bulk queue too: the user pressed stop, so the whole
+        # run stops (a single-job cancel is the same button).
+        with _queue_lock:
+            dropped = len(_queue)
+            del _queue[:]
+        if dropped:
+            with _lock:
+                _log(f"Stopped {dropped} queued release(s).")
         _confirm_event.set()  # a job parked on a prompt must wake up
         return True
     return False
@@ -154,6 +202,10 @@ def _finish(state, result=None):
         _job["progress"] = None   # nothing is downloading any more
         if state == "done":
             _job["stage"] = "Done"
+    if state != "cancelled":
+        # Bulk import: this release is over, start the next one in the queue.
+        # A cancelled job stops the queue instead (the user said stop).
+        _start_next()
 
 
 # --------------------------------------------------------------------------- #
@@ -1120,25 +1172,59 @@ def _verify_album(album_dir, cfg, is_cd):
 # --------------------------------------------------------------------------- #
 # Tag stamping + import
 # --------------------------------------------------------------------------- #
+def _mb_release_type(rel):
+    """'Album; Live' — MusicBrainz release types in Picard's casing.
+
+    Same rule as server/beets/mloplugin.py (EP uppercased, the rest Title
+    Case, '; '-joined) so the beets pass that may follow is a no-op."""
+    types = [rel.get("primary_type") or ""]
+    types += list(rel.get("secondary_types") or [])
+    if not any(str(t).strip() for t in types):
+        # a release dict built without the structured pair (e.g. a browsed
+        # folder) — fall back to the historical lowercase '+'-joined string
+        types = str(rel.get("release_type") or "").split("+")
+    out = []
+    for t in types:
+        t = str(t).strip()
+        if t:
+            out.append("EP" if t.lower() == "ep" else t.title())
+    return "; ".join(out)
+
+
 def _stamp_mb_tags(album_dir, release):
     """Write the exact MusicBrainz release identity into the tags so beets /
-    grading work with the release that drove the search — album-level IDs on
-    every track, plus the per-track recording ID matched by disc/position or
-    title+duration."""
+    grading work with the release that drove the search.
+
+    Identity tags (release/group/artist IDs, date, country, status, type,
+    catalog number, label) are FORCE-written: a download that arrived
+    carrying another pressing's IDs would otherwise keep them and drive beets
+    matching, the naming script and grading off the wrong release. Per-track
+    number/title/artist tags are corrected only when they contradict the
+    chosen release, so a matching uploader's spelling survives."""
     from mlo.audio import AudioFile
 
     tracks_meta = release.get("media") or []
-    artist_mbid = ((release.get("artists") or [{}])[0].get("mbid")) or ""
-    album_tags = {
+    artists = release.get("artists") or []
+    artist_mbid = (artists[0].get("mbid") if artists else "") or ""
+    artist_name = (artists[0].get("name") if artists else "") or ""
+    album_title = str(release.get("title") or "")
+
+    identity = {
         "MUSICBRAINZ_ALBUMID": release.get("id", ""),
         "MUSICBRAINZ_RELEASEGROUPID": release.get("release_group_id", ""),
+        # the release's artist credit IS the album artist (Picard semantics)
         "MUSICBRAINZ_ARTISTID": artist_mbid,
+        "MUSICBRAINZ_ALBUMARTISTID": artist_mbid,
         "CATALOGNUMBER": release.get("catalog_number", ""),
         "LABEL": release.get("label", ""),
         "BARCODE": release.get("barcode", ""),
         "DATE": release.get("date", ""),
         "ORIGINALDATE": release.get("originaldate", ""),
-        "COUNTRY": release.get("country", ""),
+        # canonical spelling: mlo.audio maps RELEASECOUNTRY, and the naming
+        # script's $releasecountry reads it (COUNTRY is a raw container key)
+        "RELEASECOUNTRY": release.get("country", ""),
+        "RELEASESTATUS": release.get("status", ""),
+        "RELEASETYPE": _mb_release_type(release),
     }
 
     audio = []
@@ -1172,18 +1258,34 @@ def _stamp_mb_tags(album_dir, release):
             used.add(hit)
             assign[hit] = t
 
+    def _write(af, key, value):
+        """Set a tag unless it already carries exactly this value."""
+        value = "" if value is None else str(value).strip()
+        if not value:
+            return
+        if str(af.get_tag(key) or "").strip() == value:
+            return
+        af.set_tag(key, value)
+
     n = 0
     for p in audio:
         try:
             af = AudioFile(p)
             if af.audio is None:
                 continue
-            for k, v in album_tags.items():
-                if v and not str(af.get_tag(k) or "").strip():
-                    af.set_tag(k, v)
+            for k, v in identity.items():
+                _write(af, k, v)
+            # Album-level spelling of the chosen release (corrected when the
+            # uploader's tags say something else).
+            _write(af, "ALBUM", album_title)
+            _write(af, "ALBUMARTIST", artist_name)
             t = assign.get(p)
-            if t and t.get("recording_mbid"):
-                af.set_tag("MUSICBRAINZ_TRACKID", t["recording_mbid"])
+            if t:
+                _write(af, "MUSICBRAINZ_TRACKID", t.get("recording_mbid"))
+                _write(af, "TRACKNUMBER", t.get("position"))
+                _write(af, "DISCNUMBER", t.get("disc"))
+                _write(af, "TITLE", t.get("title"))
+                _write(af, "ARTIST", t.get("artist_credit"))
             n += 1
         except Exception:
             continue

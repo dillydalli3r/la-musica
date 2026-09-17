@@ -102,11 +102,41 @@ def finish_album(album_dir, cfg=None, progress=None, force=None):
     out = {"path": path, "scripts": [], "chain": [], "errors": []}
     chain = chain_for(cfg)
     out["chain"] = chain
-    if not chain:
-        return out                      # auto scripts off / no ids configured
     if not os.path.isdir(path):
         out["errors"].append("album folder not found")
         return out
+
+    # RateYourMusic album + artist links: resolved and written once, only for
+    # the links the album does not carry yet. Deliberately BEFORE the chain
+    # check — an album imported with no scripts configured still gets its
+    # links. Gated by rym_links_auto; a lookup that finds nothing is one log
+    # line (the user pastes the URL in the links editor), never an error.
+    try:
+        rym = stamp_rym_links(path, cfg)
+        if rym["note"].startswith("could not resolve"):
+            print(f"[mlo] rateyourmusic: {rym['note']} — {os.path.basename(path)}")
+    except Exception:
+        traceback.print_exc()
+
+    if not chain:
+        return out                      # auto scripts off / no ids configured
+
+    # Advisory BEFORE the chain: script 8 derives ALBUMITUNESADVISORY from the
+    # per-track values, so writing ITUNESADVISORY afterwards would leave the
+    # album tag stale. Gated by advisory_auto_fetch; never fatal.
+    if cfg.get("advisory_auto_fetch", True):
+        try:
+            out["advisory"] = fetch_advisories([path], cfg)
+        except Exception:
+            traceback.print_exc()
+
+    # Artist image / descriptions: fetched here (the metadata step) so an
+    # import leaves the album graded-ready. metadata_review on stages the
+    # candidates instead of writing them. Never fatal.
+    try:
+        out["metadata"] = run_metadata_step(path, cfg)
+    except Exception:
+        traceback.print_exc()
 
     try:
         # wait=True: an import must not skip its chain just because a UI run
@@ -152,6 +182,249 @@ def _audio_files(folder):
 _ACOUSTID_ROW = {"release_group_id": None, "release_group_title": None,
                  "release_group_type": None, "artists": [], "score": None,
                  "matched": 0, "total": 0, "recordings": []}
+
+
+def fetch_advisories(paths, cfg=None):
+    """Resolve and write ITUNESADVISORY for these albums / tracks.
+
+    Each track is identified by its ISRC tag (or by the MusicBrainz recording
+    ID the import just stamped, whose ISRCs MusicBrainz supplies) and rated by
+    `integrations.resolve_advisory`: Deezer's ISRC lookup first, then Spotify
+    when configured, then Apple's album route and exact-title song search.
+    Only a stated rating (0/1/2) is written: an unknown track keeps NO
+    advisory, because a missing advisory means "unrated" and 0 would claim the
+    audio is clean. An existing valid value is left alone (the user's manual
+    edit wins).
+
+    Returns ``{"updated": n, "values": {path: 0|1|2}, "sources": {path:
+    provider}}`` — `sources` is who stated each value.
+    """
+    from mlo.audio import AudioFile
+    from mlo.config import should_write_audio_tag
+    from server import integrations as intg
+
+    cfg = cfg or load_config()
+    if not cfg.get("advisory_auto_fetch", True):
+        return {"updated": 0, "values": {}, "sources": {},
+                "skipped": "advisory_auto_fetch is off"}
+    targets = []
+    for p in paths or []:
+        p = os.path.normpath(str(p))
+        if os.path.isdir(p):
+            targets.extend(_audio_files(p))
+        elif os.path.isfile(p):
+            targets.append(p)
+
+    # Apple's album route prefers the collection whose trackCount matches the
+    # album, which is the number of audio files sitting in each folder.
+    per_folder = {}
+    for path in targets:
+        folder = os.path.dirname(path)
+        per_folder[folder] = per_folder.get(folder, 0) + 1
+
+    updated = 0
+    values = {}
+    sources = {}
+    for path in targets:
+        try:
+            af = AudioFile(path)
+            if af.audio is None:
+                continue
+            current = str(af.get_tag("ITUNESADVISORY") or "").strip()
+            if current in ("0", "1", "2"):
+                values[path] = int(current)
+                continue
+            if not should_write_audio_tag(cfg, "ITUNESADVISORY", filepath=path):
+                continue
+            route = intg.resolve_advisory_route(
+                isrc=str(af.get_tag("ISRC") or "").split(";")[0].strip(),
+                recording_mbid=str(af.get_tag("MUSICBRAINZ_TRACKID") or "").strip(),
+                title=str(af.get_tag("TITLE") or ""),
+                artist=str(af.get_tag("ARTIST") or af.get_tag("ALBUMARTIST") or ""),
+                album=str(af.get_tag("ALBUM") or ""),
+                disc=af.get_tag("DISCNUMBER"),
+                track=af.get_tag("TRACKNUMBER"),
+                track_count=per_folder.get(os.path.dirname(path)),
+                cfg=cfg,
+            )
+            value = route.get("value")
+            if value is None:
+                continue
+            if af.set_tag("ITUNESADVISORY", str(value)):
+                updated += 1
+                values[path] = value
+                if route.get("source"):
+                    sources[path] = route["source"]
+        except Exception:
+            continue
+    if updated:
+        _invalidate_caches()
+    return {"updated": updated, "values": values, "sources": sources}
+
+
+# --------------------------------------------------------------------------- #
+# Metadata step — artist image / artist description / album description
+# --------------------------------------------------------------------------- #
+# With metadata_review ON the candidates are STAGED here (nothing is written
+# until the user applies one through POST /api/metadata/apply); with it OFF
+# the best candidate is saved as part of the import.
+_METADATA_REVIEW_NAME = "metadata_review.json"
+
+
+def _metadata_review_path(cfg=None):
+    from mlo.paths import app_data_dir
+    cfg = cfg or load_config()
+    d = app_data_dir(str(cfg.get("music_folder") or "") or None)
+    return os.path.join(d, _METADATA_REVIEW_NAME) if d else None
+
+
+def _review_key(album_dir):
+    return os.path.normpath(str(album_dir)).replace("\\", "/").lower()
+
+
+def _review_load(path):
+    import json
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def staged_metadata(album_dir, cfg=None):
+    """The staged review entry for an album ({} when none)."""
+    path = _metadata_review_path(cfg)
+    if not path or not os.path.isfile(path):
+        return {}
+    return _review_load(path).get(_review_key(album_dir)) or {}
+
+
+def stage_metadata(album_dir, entry, cfg=None):
+    """Record an album's staged candidates (entry=None clears the entry)."""
+    import json
+    path = _metadata_review_path(cfg)
+    if not path:
+        return
+    data = _review_load(path) if os.path.isfile(path) else {}
+    key = _review_key(album_dir)
+    if entry is None:
+        data.pop(key, None)
+    else:
+        data[key] = entry
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=1)
+        os.replace(tmp, path)
+    except OSError:
+        traceback.print_exc()
+
+
+def _album_identity(album_dir):
+    """(artist, album) from the folder's own tags (folder name as fallback)."""
+    from mlo.audio import AudioFile
+    for path in _audio_files(album_dir):
+        try:
+            af = AudioFile(path)
+            if af.audio is None:
+                continue
+            artist = str(af.get_tag("ALBUMARTIST") or af.get_tag("ARTIST") or "").strip()
+            album = str(af.get_tag("ALBUM") or "").strip()
+            if artist or album:
+                return artist, album
+        except Exception:
+            continue
+    return "", os.path.basename(str(album_dir).rstrip("\\/"))
+
+
+def apply_metadata(album_dir, cfg=None):
+    """Fetch and store the best artist image / descriptions for an album.
+
+    The import chain's metadata step and the manual apply route share this:
+    it honours the per-feature switches (artist_image_enabled,
+    artist_description_enabled, album_description_enabled — what the app may
+    fetch on the user's behalf) and NEVER overwrites stored content. Returns
+    {"artist_image", "artist_description", "album_description"} with the paths
+    written (None where nothing was written). Never raises."""
+    from mlo import artistdata
+    from server import discovery
+    from server import integrations as intg
+
+    cfg = cfg or load_config()
+    out = {"artist_image": None, "artist_description": None, "album_description": None}
+    artist, album = _album_identity(album_dir)
+    if not artist:
+        return out
+    folder = artistdata.artist_dir(cfg, artist)
+
+    if folder and cfg.get("artist_image_enabled", True) and not artistdata.has_image(folder):
+        hit = discovery.artist_image(artist, cfg=cfg)
+        if hit and hit.get("url"):
+            try:
+                data, _ctype = intg.fetch_image_bytes(hit["url"])
+                out["artist_image"] = artistdata.save_image(
+                    folder, data, cfg, source=hit.get("source") or "auto",
+                    source_url=hit.get("url"), kind="artist",
+                    label=hit.get("label"))
+            except Exception:
+                traceback.print_exc()
+
+    if folder and cfg.get("artist_description_enabled", True) and not artistdata.has_description(folder):
+        found = discovery.artist_description(artist, cfg=cfg)
+        if found and str(found.get("text") or "").strip():
+            out["artist_description"] = artistdata.write_description(
+                folder, found["text"], cfg=cfg, source=found.get("source"),
+                source_url=found.get("source_url"), kind="artist")
+            artistdata.write_provenance(folder, {
+                "description_source": found.get("source"),
+                "description_source_url": found.get("source_url"),
+                "description_title": found.get("title")}, kind="artist", cfg=cfg)
+
+    if (album and cfg.get("album_description_enabled", True)
+            and not artistdata.has_description(album_dir)):
+        found = discovery.album_description(artist, album, cfg=cfg)
+        if found and str(found.get("text") or "").strip():
+            out["album_description"] = artistdata.write_description(
+                album_dir, found["text"], cfg=cfg, source=found.get("source"),
+                source_url=found.get("source_url"), kind="album")
+            artistdata.write_provenance(album_dir, {
+                "description_source": found.get("source"),
+                "description_source_url": found.get("source_url"),
+                "description_title": found.get("title")}, kind="album", cfg=cfg)
+
+    if any(out.values()):
+        _invalidate_caches()
+    return out
+
+
+def run_metadata_step(album_dir, cfg=None):
+    """The import chain's metadata step (metadata_auto_fetch / metadata_review).
+
+    auto-fetch off → nothing happens. On with review ON → the candidates are
+    staged for the user and nothing is written until their apply call. On with
+    review off → the best candidate is saved now. Never fatal."""
+    from server import discovery
+
+    cfg = cfg or load_config()
+    if not cfg.get("metadata_auto_fetch", True):
+        return {"staged": False, "applied": {}}
+    if cfg.get("metadata_review", False):
+        artist, album = _album_identity(album_dir)
+        try:
+            candidates = discovery.metadata_candidates(artist, album, cfg=cfg)
+        except Exception:
+            traceback.print_exc()
+            return {"staged": False, "applied": {}}
+        stage_metadata(album_dir, {"artist": artist, "album": album,
+                                   "candidates": candidates}, cfg)
+        return {"staged": True, "applied": {}}
+    try:
+        return {"staged": False, "applied": apply_metadata(album_dir, cfg)}
+    except Exception:
+        traceback.print_exc()
+        return {"staged": False, "applied": {}}
 
 
 def acoustid_match(paths, cfg=None, progress=None, apply=False):
@@ -262,8 +535,9 @@ def _stamp_release(album_dir, release, cfg):
     ``server.soulseek_auto._stamp_mb_tags`` — the same stamper the Soulseek
     import uses, so a bulk import and an auto-import tag identically. On top:
     GENRE from the MusicBrainz genre cascade (track → release → release group →
-    artist) and ITUNESADVISORY when the caller supplied one (script 8 then
-    derives ALBUMITUNESADVISORY from it).
+    artist). ITUNESADVISORY is not written here — ``finish_album`` resolves it
+    from the ISRCs (``fetch_advisories``) before the chain runs, which is the
+    only path that can state a real rating instead of echoing one.
 
     Returns the number of files written; a tag failure never fails an import.
     """
@@ -277,7 +551,6 @@ def _stamp_release(album_dir, release, cfg):
         soulseek_auto._stamp_mb_tags(album_dir, rel)
     except Exception:
         traceback.print_exc()
-
     genres = {}
     if rel.get("release_group_id") or rel.get("id"):
         try:
@@ -287,9 +560,6 @@ def _stamp_release(album_dir, release, cfg):
                 genres[key] = track.get("genres") or []
         except Exception:
             traceback.print_exc()
-
-    advisory = rel.get("itunesadvisory", rel.get("advisory"))
-    advisory = "" if advisory is None else str(advisory).strip()
 
     failed = 0
     for path in _audio_files(album_dir):
@@ -303,8 +573,6 @@ def _stamp_release(album_dir, release, cfg):
             names = genres.get((disc, pos)) or []
             if names and not str(af.get_tag("GENRE") or "").strip():
                 tags["GENRE"] = "; ".join(names)
-            if advisory and not str(af.get_tag("ITUNESADVISORY") or "").strip():
-                tags["ITUNESADVISORY"] = advisory
             for key, value in tags.items():
                 af.set_tag(key, value)
             if tags:
@@ -313,6 +581,76 @@ def _stamp_release(album_dir, release, cfg):
             failed += 1
             continue
     return written, failed
+
+
+def stamp_rym_links(album_dir, cfg=None):
+    """Resolve and write the album's / artist's RateYourMusic links.
+
+    One RATEYOURMUSIC_ALBUM and one RATEYOURMUSIC_ARTIST on every track — the
+    state the grader and the links editor read. A link already present on ANY
+    track of the album is left alone and NOT looked up: the user's own link
+    wins, and nothing here ever overwrites one. Only a link RYM itself
+    confirmed (``server.integrations.rym_links``) is written, so a failed
+    lookup writes nothing at all and reports "could not resolve" in its note
+    instead of failing the import.
+
+    Gated by `rym_links_auto` (config.py, default True). Returns
+    ``{"album", "artist", "note", "written"}``; never raises.
+    """
+    from mlo.audio import AudioFile
+    from server import integrations as intg
+
+    cfg = cfg or load_config()
+    out = {"album": None, "artist": None, "note": "", "written": 0}
+    files = []
+    for path in _audio_files(album_dir):
+        try:
+            af = AudioFile(path)
+        except Exception:
+            continue
+        if af.audio is not None:
+            files.append(af)
+    if not files:
+        return out
+
+    def _tag(af, name):
+        try:
+            return str(af.get_tag(name) or "").strip()
+        except Exception:
+            return ""
+
+    have_album = any(_tag(af, "RATEYOURMUSIC_ALBUM") for af in files)
+    have_artist = any(_tag(af, "RATEYOURMUSIC_ARTIST") for af in files)
+    if have_album and have_artist:
+        return out                      # nothing missing: no lookup at all
+
+    artist, album = _album_identity(album_dir)
+    links = intg.rym_links(artist, album, cfg=cfg)
+    out["note"] = links.get("note") or ""
+    if not have_album:
+        out["album"] = links.get("album")
+    if not have_artist:
+        out["artist"] = links.get("artist")
+    if not out["album"] and not out["artist"]:
+        return out
+
+    for af in files:
+        tags = {}
+        if out["album"] and not _tag(af, "RATEYOURMUSIC_ALBUM"):
+            tags["RATEYOURMUSIC_ALBUM"] = out["album"]
+        if out["artist"] and not _tag(af, "RATEYOURMUSIC_ARTIST"):
+            tags["RATEYOURMUSIC_ARTIST"] = out["artist"]
+        if not tags:
+            continue
+        try:
+            for key, value in tags.items():
+                af.set_tag(key, value)
+            out["written"] += 1
+        except Exception:
+            continue
+    if out["written"]:
+        _invalidate_caches()
+    return out
 
 
 # --------------------------------------------------------------------------- #

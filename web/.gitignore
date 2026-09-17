@@ -23,6 +23,6 @@ dist-ssr
 *.sln
 *.sw?
 
-# App state — secrets (Soulseek credentials, AI keys) and user data live here
+# App state — secrets (Soulseek credentials) and user data live here
 config.json
 server/data/

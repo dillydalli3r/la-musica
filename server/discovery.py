@@ -101,6 +101,12 @@ _HOST_WAIT = {
 TTL_META = 1800.0        # artist/album metadata, images, descriptions, MBIDs
 TTL_CHART = 900.0        # charts and recommendations (they move)
 
+# Per-album memo for `genre_lookup`: script 8 asks per TRACK, and the genre
+# chain (RYM, community sources, providers, MusicBrainz) must not run a dozen
+# times for one album.
+_GENRE_MEMO: dict = {}
+_GENRE_MEMO_LOCK = threading.Lock()
+
 
 def source_order(cfg, key, default):
     """Configured provider order for *key*, filtered to real providers.
@@ -110,7 +116,11 @@ def source_order(cfg, key, default):
     if not cfg:
         return list(default)
     if not cfg.get("discovery_enabled", True):
-        return ["musicbrainz"]
+        # Only a feature whose own provider list contains MusicBrainz can
+        # fall back to it. Returning it blindly made the artist-image chain
+        # walk a "musicbrainz" branch that does not exist and silently find
+        # nothing instead of reporting "no candidate".
+        return ["musicbrainz"] if "musicbrainz" in default else []
     raw = cfg.get(key) or []
     if isinstance(raw, str):
         raw = [t for t in raw.replace(";", ",").split(",") if t.strip()]
@@ -192,11 +202,15 @@ def _json(url, params=None, headers=None, timeout=None, ttl=TTL_META, host=None)
         # the storefront APIs (Deezer, Apple, TheAudioDB) serve a browser UA.
         polite = any(tag in target for tag in
                      ("musicbrainz", "listenbrainz", "wikimedia", "wikipedia"))
+        # A caller's own headers (Spotify's bearer token, for one) win over
+        # the defaults — they are required, not cosmetic.
+        sent = {"User-Agent": APP_UA if polite else BROWSER_UA,
+                "Accept": "application/json"}
+        sent.update(headers or {})
         resp = httpx.get(
             url,
             params=params or {},
-            headers={"User-Agent": APP_UA if polite else BROWSER_UA,
-                     "Accept": "application/json"},
+            headers=sent,
             timeout=timeout or 12.0,
             follow_redirects=True,
         )
@@ -580,6 +594,54 @@ def itunes_artist_artwork(name, limit=1, timeout=None):
     if not results:
         return None
     return itunes_artwork(results[0].get("artworkUrl100"))
+
+
+# --------------------------------------------------------------------------- #
+# Discogs / Last.fm — crowdsourced genres, both keyed
+# --------------------------------------------------------------------------- #
+DISCOGS_BASE = "https://api.discogs.com"
+LASTFM_BASE = "https://ws.audioscrobbler.com/2.0/"
+
+
+def discogs_album_genres(artist, album, cfg=None, timeout=None):
+    """Discogs genres+styles for an album; [] without a configured token.
+
+    Discogs' search endpoint requires authentication, so the source is skipped
+    (never guessed) until `discogs_token` is set in Settings. The release's
+    `genre` and `style` lists are both genres for tagging purposes.
+    """
+    token = str((cfg or {}).get("discogs_token") or "").strip()
+    if not token or not (artist or album):
+        return []
+    data = _json(f"{DISCOGS_BASE}/database/search",
+                 {"artist": artist, "release_title": album, "type": "release",
+                  "token": token, "per_page": 3}, timeout=timeout)
+    results = (data or {}).get("results") or []
+    if not results:
+        return []
+    rid = results[0].get("id")
+    if not rid:
+        return []
+    detail = _json(f"{DISCOGS_BASE}/releases/{rid}", {"token": token},
+                   timeout=timeout)
+    out = list((detail or {}).get("genres") or [])
+    out += list((detail or {}).get("styles") or [])
+    return [g for g in out if str(g).strip()]
+
+
+def lastfm_album_genres(artist, album, cfg=None, timeout=None):
+    """Last.fm top tags for an album; [] without a configured API key."""
+    key = str((cfg or {}).get("lastfm_api_key") or "").strip()
+    if not key or not (artist or album):
+        return []
+    data = _json(LASTFM_BASE,
+                 {"method": "album.getinfo", "artist": artist, "album": album,
+                  "api_key": key, "format": "json", "autocorrect": 1},
+                 timeout=timeout, host="ws.audioscrobbler.com")
+    tags = (((data or {}).get("album") or {}).get("tags") or {}).get("tag") or []
+    if isinstance(tags, dict):
+        tags = [tags]
+    return [t.get("name") for t in tags if t.get("name")]
 
 
 # --------------------------------------------------------------------------- #
@@ -1155,6 +1217,57 @@ def album_description(artist, album, mbid=None, cfg=None):
     return None
 
 
+def metadata_candidates(artist, album="", cfg=None):
+    """Image + description candidates for an artist (and their album).
+
+    One composition point for the reliable providers: the configured image
+    chain's own best pick plus every individual provider's images (Deezer
+    photo, TheAudioDB thumb/banner/wide/fanart, Apple artwork, Wikipedia lead
+    image) and the first artist/album description from the configured
+    description chain. Nothing is written here — callers save through
+    `mlo.artistdata` (see server.imports.apply_metadata).
+
+    Returns {"images": [{url, source, label, kind}], "artist_description":
+    {text, source, ...}|None, "album_description": {...}|None}.
+    """
+    artist = str(artist or "").strip()
+    album = str(album or "").strip()
+    images = []
+    seen = set()
+
+    def add(url, source, label, kind="photo"):
+        if url and url not in seen:
+            seen.add(url)
+            images.append({"url": url, "source": source, "label": label, "kind": kind})
+
+    if artist:
+        auto = artist_image(artist, cfg=cfg)
+        if auto:
+            add(auto.get("url"), auto.get("source"),
+                auto.get("label") or "Automatic pick", auto.get("kind") or "photo")
+        row = audiodb_artist(artist)
+        if row:
+            for key, label in (("thumb", "TheAudioDB artist thumb"),
+                               ("banner", "TheAudioDB artist banner"),
+                               ("wide_thumb", "TheAudioDB wide thumb"),
+                               ("fanart", "TheAudioDB fanart")):
+                add(row.get(key), "audiodb", label, "photo" if key == "thumb" else "wide")
+        dz = deezer_artist(artist)
+        if dz:
+            add(dz.get("image"), "deezer", "Deezer artist photo", "photo")
+        add(itunes_artist_artwork(artist), "itunes",
+            "Apple album artwork (artist has no photo API)", "album_art")
+        summary = wikipedia_summary(artist)
+        if summary:
+            add(summary.get("image"), "wikipedia", "Wikipedia lead image", "photo")
+    return {
+        "images": images,
+        "artist_description": artist_description(artist, cfg=cfg) if artist else None,
+        "album_description": (album_description(artist, album, cfg=cfg)
+                              if (artist and album) else None),
+    }
+
+
 def album_genres(artist, album, dz_id=None, cfg=None):
     """Genre names for an album from the discovery providers (Deezer first:
     its album detail carries a real genre list, iTunes carries one primary
@@ -1184,43 +1297,39 @@ def album_genres(artist, album, dz_id=None, cfg=None):
 def genre_lookup(artist, album, track_path=None, cfg=None):
     """Genre names for one track/album — the hook script 8 fills GENRE with.
 
-    MusicBrainz's artist genres come first (they are what the app's genre
-    cascade already writes on import, so a library stays consistent), then
-    the discovery providers' album genres fill the gaps. Capped at
-    `mb_genre_count` (default 1) exactly like the import cascade, deduped
-    case-insensitively, and never raising: an offline machine simply returns
-    an empty list and the tag stays missing (grading then flags it, which is
-    the honest outcome).
+    Delegates to ``integrations.genre_chain``, the ONE genre resolver (RYM →
+    community sources → streaming providers → MusicBrainz, merged, deduped,
+    Title-Cased, capped at `mb_genre_count`), so a library-wide Auto tagging
+    run and an import write genres the same way.
+
+    The answer is memoised per album for TTL_META: script 8 calls this hook
+    once PER TRACK, and a chain that reaches the network must not run a dozen
+    times for one album. Never raises — an offline machine returns [] and the
+    tag stays missing (grading then flags it, which is the honest outcome).
     """
     if cfg is None:
-        from mlo.config import load_config
         try:
+            from mlo.config import load_config
             cfg = load_config()
         except Exception:
             cfg = {}
-    limit = 1
     try:
-        limit = max(1, int(cfg.get("mb_genre_count") or 1))
+        limit = max(1, int(cfg.get("mb_genre_count") or 3))
     except (TypeError, ValueError):
-        limit = 1
-    names: list[str] = []
-    artist = (artist or "").strip()
-    album = (album or "").strip()
-    if artist:
-        mbid = resolve_artist_mbid(artist)
-        if mbid:
-            try:
-                names.extend(integrations.artist_genres(mbid))
-            except Exception:
-                pass
-    if album:
-        try:
-            names.extend(album_genres(artist, album, cfg=cfg))
-        except Exception:
-            pass
-    out = []
-    for name in names:
-        text = str(name).strip()
-        if text and text.lower() not in {g.lower() for g in out}:
-            out.append(text)
-    return out[:limit]
+        limit = 3
+    key = (_norm(artist), _norm(album), limit)
+    with _GENRE_MEMO_LOCK:
+        hit = _GENRE_MEMO.get(key)
+    if hit and time.time() - hit[0] < TTL_META:
+        return list(hit[1])
+    try:
+        names = integrations.genre_chain(artist=artist or "", album=album or "",
+                                         limit=limit, cfg=cfg).get("genres") or []
+    except Exception:
+        names = []
+    with _GENRE_MEMO_LOCK:
+        _GENRE_MEMO[key] = (time.time(), list(names))
+        if len(_GENRE_MEMO) > _CACHE_MAX:
+            oldest = min(_GENRE_MEMO.items(), key=lambda kv: kv[1][0])[0]
+            _GENRE_MEMO.pop(oldest, None)
+    return list(names)

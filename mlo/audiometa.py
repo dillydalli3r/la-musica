@@ -16,6 +16,7 @@ and respects the per-filetype audio_tag_writes gates (BPM / INITIALKEY).
 import math
 import os
 import sys
+import tempfile
 
 from .audio import AudioFile
 from .config import should_write_audio_tag
@@ -70,6 +71,53 @@ def _ensure_librosa():
         return getattr(librosa, "__version__", "?")
     except Exception:
         return None
+
+
+def _load_signal(path, sr, max_seconds=None):
+    """(y, sr) for one file — librosa, with the bundled ffmpeg as fallback.
+
+    The vendored librosa decodes through soundfile and then audioread, and
+    audioread only reaches ffmpeg when one is on PATH — the app's own
+    toolchain is not. So .aac (raw ADTS), the MP4/M4A family and the
+    music-video containers (all first-class, graded tracks) are decoded with
+    the DETECTED ffmpeg instead of being silently skipped. Both routes return
+    (None, None) on failure, never raise.
+    """
+    import librosa
+
+    try:
+        return librosa.load(path, sr=sr, mono=True, duration=max_seconds)
+    except Exception:
+        pass
+
+    try:
+        from .subproc import run_tool
+        from .tools import detect_all_tools
+        ffmpeg = (detect_all_tools().get("ffmpeg") or {}).get("ffmpeg_exe")
+    except Exception:
+        ffmpeg = None
+    if not ffmpeg:
+        return None, None
+
+    fd, tmp = tempfile.mkstemp(suffix=".wav", prefix=".decode_")
+    os.close(fd)
+    try:
+        cmd = [ffmpeg, "-y", "-v", "error", "-nostdin", "-i", path, "-vn"]
+        if max_seconds:
+            cmd += ["-t", str(max_seconds)]
+        cmd += ["-ac", "1", "-ar", str(sr), "-f", "wav", tmp]
+        proc = run_tool(cmd, capture_output=True, text=True, encoding="utf-8",
+                        errors="replace", timeout=30 * 60)
+        if proc.returncode != 0:
+            return None, None
+        return librosa.load(tmp, sr=sr, mono=True)
+    except Exception:
+        return None, None
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def _key_notation(tonic_idx, minor, notation):
@@ -193,7 +241,9 @@ def detect_key_bpm(path, min_seconds=10):
     import librosa
 
     sr = 22050
-    y, _ = librosa.load(path, sr=sr, mono=True)
+    y, _ = _load_signal(path, sr)
+    if y is None:
+        return None, None
     if y.size < sr * max(1, min_seconds):
         return None, None
     # Trim lead-in/lead-out silence — near-silent padding corrupts both the

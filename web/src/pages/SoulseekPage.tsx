@@ -10,7 +10,9 @@ import {
 import { api } from "../api";
 import type { SlskAutoFile, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskSearchProgress, SlskTransfer } from "../api";
 import { toast } from "../store";
-import { EmptyState } from "../components/Badges";
+import { EmptyState, PageLoading } from "../components/Badges";
+import PageHeader from "../components/PageHeader";
+import Modal from "../components/Modal";
 import type { Wish } from "../types";
 
 interface SlskFile {
@@ -220,14 +222,14 @@ function ReconnectingCard({ username, password, onDone }: {
       toast(r.message);
       if (r.logged_in) onDone();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
   };
   if (showForm) return <LoginCard onDone={onDone} initialUsername={username} initialPassword={password} />;
   return (
-    <div className="bg-card rounded-lg border border-amber-900/50 p-3 flex items-center gap-2 flex-wrap text-xs">
+    <div className="panel border-amber-900/50 flex items-center gap-2 flex-wrap text-xs">
       <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-300 shrink-0" />
       <span className="text-zinc-300">
         Reconnecting to Soulseek as <b>{username}</b>…
@@ -256,7 +258,7 @@ function PortConflictCard({ message, otherUser }: {
   otherUser?: string | null;
 }) {
   return (
-    <div className="bg-card rounded-lg border border-red-900/50 p-4">
+    <div className="panel border-red-900/50">
       <div className="text-xs font-semibold uppercase tracking-wider text-red-300 mb-1.5 flex items-center gap-1.5">
         <AlertTriangle className="h-3.5 w-3.5" /> Soulseek port already in use
       </div>
@@ -319,7 +321,7 @@ function LoginCard({ onDone, initialUsername, initialPassword, initialError }: {
   };
 
   return (
-    <div className="bg-card rounded-lg border border-amber-900/50 p-4">
+    <div className="panel border-amber-900/50">
       <div className="text-xs font-semibold uppercase tracking-wider text-amber-300 mb-1.5">
         Not logged in to Soulseek
       </div>
@@ -495,7 +497,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
       toast("Auto-import started");
       refetch();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -505,7 +507,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
       toast("Cancelling after the current step…");
       refetch();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -523,7 +525,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
         : (accept ? "Downloading the lossy copy" : "Stopped — waiting for a lossless copy"));
       refetch();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setAnswering(false);
     }
@@ -545,7 +547,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
     if (st === "running" || st === "confirm") return;
     if (st === "done") {
       if (job?.result?.wished) {
-        toast("Added to wishes — the background search keeps looking for it");
+        toast.success("Added to wishes — the background search keeps looking for it");
         return;
       }
       const album = fileName(job?.result?.album_path ?? job?.result?.staging_path ?? "");
@@ -571,7 +573,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
   // unorganized job leaves in the result.
   const tagPath = job?.result?.album_path ?? job?.result?.staging_path ?? "";
   return (
-    <div className="bg-card rounded-lg border border-border p-4">
+    <div className="panel">
       <div className="flex items-center justify-between mb-2">
         <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500 flex items-center gap-1.5">
           <Zap className="h-3.5 w-3.5" /> Auto-import a MusicBrainz release
@@ -785,6 +787,9 @@ function BrowseModal({ username, onAuto, onClose }: {
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<string | null>(null);
   const [limit, setLimit] = useState(200);
+  // Folders ticked for "Queue selected" — a whole-share rip is dozens of
+  // folders, so one request per folder is not an option.
+  const [picked, setPicked] = useState<Set<string>>(new Set());
 
   const dirs = data?.directories ?? [];
   const needle = text.trim().toLowerCase();
@@ -799,14 +804,73 @@ function BrowseModal({ username, onAuto, onClose }: {
       return next;
     });
 
+  const togglePick = (dir: string) =>
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(dir)) next.delete(dir);
+      else next.add(dir);
+      return next;
+    });
+
   const queue = async (d: SlskBrowseDir) => {
     setBusy(d.directory);
     try {
       const r = await api.soulseekDownload(username, d.files.map((f) => ({ filename: f.filename, size: f.size })));
-      toast(`Queued ${r.queued} file(s) from ${username}`);
+      toast.success(`Queued ${r.queued} file(s) from ${username}`);
       qc.invalidateQueries({ queryKey: ["soulseekDownloads"] });
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** One file row's Download: slskd takes a single-entry file list. */
+  const queueFile = async (f: { filename: string; size: number }) => {
+    setBusy(f.filename);
+    try {
+      const r = await api.soulseekDownload(username, [{ filename: f.filename, size: f.size }]);
+      toast.success(`Queued ${r.queued} file(s) from ${username}`);
+      qc.invalidateQueries({ queryKey: ["soulseekDownloads"] });
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** Every ticked folder in one request — the server walks each folder. */
+  const queuePicked = async () => {
+    const files = dirs
+      .filter((d) => picked.has(d.directory))
+      .flatMap((d) => d.files.map((f) => ({ filename: f.filename, size: f.size })));
+    if (files.length === 0) return;
+    setBusy("*");
+    try {
+      const r = await api.soulseekDownloadBulk(username, files);
+      toast.success(`Queued ${r.queued} of ${files.length} file(s) from ${picked.size} folder(s)`);
+      setPicked(new Set());
+      qc.invalidateQueries({ queryKey: ["soulseekDownloads"] });
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** The whole share — slskd enumerates their file list server-side, so this
+   *  can scan for minutes on a big user. */
+  const queueUser = async () => {
+    setBusy("*");
+    try {
+      const r = await api.soulseekDownloadUser(username);
+      toast.success(
+        `Queued ${r.queued} of ${r.scanned} file(s) from ${username}` +
+        (r.skipped ? ` · ${r.skipped} skipped` : "")
+      );
+      qc.invalidateQueries({ queryKey: ["soulseekDownloads"] });
+    } catch (e) {
+      toast.error(String(e));
     } finally {
       setBusy(null);
     }
@@ -820,116 +884,143 @@ function BrowseModal({ username, onAuto, onClose }: {
       qc.invalidateQueries({ queryKey: ["soulseekAuto"] });
       onAuto();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(null);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
-      <div
-        className="bg-card rounded-lg border border-border w-full max-w-3xl max-h-[85vh] flex flex-col"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center gap-2 px-4 py-3 border-b border-border">
-          <FolderOpen className="h-4 w-4 text-accent shrink-0" />
-          <div className="min-w-0">
-            <div className="text-sm font-semibold text-zinc-100 truncate">Shared folders — {username}</div>
-            <div className="text-[11px] text-zinc-500">
-              {isLoading ? "Reading their share list…" : `${dirs.length} folder(s) · ${fmtSize(totalBytes)}`}
-            </div>
-          </div>
+    <Modal
+      onClose={onClose}
+      icon={FolderOpen}
+      title={`Shared folders — ${username}`}
+      subtitle={isLoading ? "Reading their share list…" : `${dirs.length} folder(s) · ${fmtSize(totalBytes)}`}
+      width="max-w-3xl"
+      bodyClass="p-3 space-y-2"
+      headerExtra={
+        <>
           <button
-            className="btn-ghost !py-1 text-xs ml-auto shrink-0"
+            className="btn-ghost !py-1 text-xs shrink-0"
             disabled={isFetching}
             onClick={() => refetch()}
             title="Re-read the share list from slskd"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} />
           </button>
-          <button className="btn-ghost !py-1 text-xs shrink-0" onClick={onClose}>Close</button>
-        </div>
-        <div className="px-4 py-2 border-b border-border/60">
-          <input
-            className="input w-full !py-1.5 text-xs"
-            placeholder="Filter folders (artist, album, path…)"
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-          />
-        </div>
-        <div className="p-3 overflow-auto space-y-2">
-          {isLoading ? (
-            <div className="text-xs text-zinc-500 flex items-center justify-center gap-2 py-8">
-              <Loader2 className="h-4 w-4 animate-spin" /> Browsing {username}'s shares…
-            </div>
-          ) : error ? (
-            <div className="text-xs text-red-300 py-8 text-center">{String(error)}</div>
-          ) : shown.length === 0 ? (
-            <div className="text-xs text-zinc-500 py-8 text-center">
-              {dirs.length === 0 ? `${username} shares no folders.` : `No folder matches “${text.trim()}”.`}
-            </div>
-          ) : (
-            <>
-              {shown.slice(0, limit).map((d) => {
-                const isOpen = open.has(d.directory);
-                const total = d.files.reduce((n, f) => n + (f.size || 0), 0);
-                return (
-                  <div key={d.directory} className="rounded-lg border border-border overflow-hidden">
-                    <div className="flex items-center gap-2 px-3 py-2 bg-panel/60">
-                      <button className="flex-1 min-w-0 flex items-center gap-2 text-left" onClick={() => toggle(d.directory)} title={d.directory}>
-                        {isOpen
-                          ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
-                          : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-500" />}
-                        <span className="min-w-0">
-                          <span className="block text-xs text-zinc-100 truncate">
-                            {d.directory.split(/[\\/]/).filter(Boolean).slice(-2).join(" / ") || d.directory}
-                          </span>
-                          <span className="block text-[10px] text-zinc-500">
-                            {d.files.length} file(s) · {fmtSize(total)}
-                          </span>
+          <button
+            className="btn-ghost !py-1 text-xs shrink-0"
+            disabled={busy !== null || picked.size === 0}
+            onClick={queuePicked}
+            title="Queue every file in the ticked folders"
+          >
+            <Download className="h-3.5 w-3.5" /> Queue selected{picked.size > 0 ? ` (${picked.size})` : ""}
+          </button>
+          <button
+            className="btn-ghost !py-1 text-xs shrink-0"
+            disabled={busy !== null}
+            onClick={queueUser}
+            title={`Queue everything ${username} shares — slskd scans their whole file list`}
+          >
+            <PackageOpen className="h-3.5 w-3.5" /> All from {username}
+          </button>
+        </>
+      }
+    >
+      <input
+        className="input w-full !py-1.5 text-xs"
+        placeholder="Filter folders (artist, album, path…)"
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+      />
+      {isLoading ? (
+        <PageLoading label={`Browsing ${username}'s shares…`} />
+      ) : error ? (
+        <EmptyState title="Could not read the share list" hint={String(error)} />
+      ) : shown.length === 0 ? (
+        <EmptyState
+          title={dirs.length === 0 ? `${username} shares no folders` : `No folder matches “${text.trim()}”`}
+          hint={dirs.length === 0
+            ? "They may have sharing turned off, or slskd has not finished reading their file list yet."
+            : "Clear the filter to see their whole share."}
+        />
+      ) : (
+        <>
+          <div className="space-y-2 stagger">
+            {shown.slice(0, limit).map((d) => {
+              const isOpen = open.has(d.directory);
+              const total = d.files.reduce((n, f) => n + (f.size || 0), 0);
+              return (
+                <div key={d.directory} className="rounded-lg border border-border overflow-hidden">
+                  <div className="flex items-center gap-2 px-3 py-2 bg-panel/60">
+                    <input
+                      type="checkbox"
+                      className="accent-accent shrink-0"
+                      checked={picked.has(d.directory)}
+                      onChange={() => togglePick(d.directory)}
+                      title="Tick to include this folder in “Queue selected”"
+                      aria-label={`Select ${d.directory}`}
+                    />
+                    <button className="flex-1 min-w-0 flex items-center gap-2 text-left" onClick={() => toggle(d.directory)} title={d.directory}>
+                      {isOpen
+                        ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                        : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-zinc-500" />}
+                      <span className="min-w-0">
+                        <span className="block text-xs text-zinc-100 truncate">
+                          {d.directory.split(/[\\/]/).filter(Boolean).slice(-2).join(" / ") || d.directory}
                         </span>
-                      </button>
-                      <button
-                        className="btn-ghost !py-1 text-xs shrink-0"
-                        disabled={busy !== null || d.files.length === 0}
-                        onClick={() => queue(d)}
-                        title="Queue every file in this folder"
-                      >
-                        <Download className="h-3.5 w-3.5" /> Download
-                      </button>
-                      <button
-                        className="btn-ghost !py-1 text-xs shrink-0"
-                        disabled={busy !== null}
-                        onClick={() => auto(d)}
-                        title="Search the release this folder holds and import it fully tagged"
-                      >
-                        <Zap className="h-3.5 w-3.5" /> Auto-import
-                      </button>
-                    </div>
-                    {isOpen && (
-                      <div className="border-t border-border/60 max-h-64 overflow-auto">
-                        {d.files.map((f, i) => (
-                          <div key={i} className="flex items-center gap-3 px-3 py-1 border-t border-border/40 first:border-t-0 text-xs">
-                            <span className="flex-1 min-w-0 truncate text-zinc-300" title={f.filename}>{fileName(f.filename)}</span>
-                            <span className="text-zinc-500 w-16 text-right shrink-0">{fmtSize(f.size)}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                        <span className="block text-[10px] text-zinc-500">
+                          {d.files.length} file(s) · {fmtSize(total)}
+                        </span>
+                      </span>
+                    </button>
+                    <button
+                      className="btn-ghost !py-1 text-xs shrink-0"
+                      disabled={busy !== null || d.files.length === 0}
+                      onClick={() => queue(d)}
+                      title="Queue every file in this folder"
+                    >
+                      <Download className="h-3.5 w-3.5" /> Download
+                    </button>
+                    <button
+                      className="btn-ghost !py-1 text-xs shrink-0"
+                      disabled={busy !== null}
+                      onClick={() => auto(d)}
+                      title="Search the release this folder holds and import it fully tagged"
+                    >
+                      <Zap className="h-3.5 w-3.5" /> Auto-import
+                    </button>
                   </div>
-                );
-              })}
-              {shown.length > limit && (
-                <button className="btn-secondary w-full py-2 text-xs" onClick={() => setLimit((n) => n + 200)}>
-                  Show more ({shown.length - limit} folders remaining)
-                </button>
-              )}
-            </>
+                  {isOpen && (
+                    <div className="border-t border-border/60 max-h-64 overflow-auto">
+                      {d.files.map((f, i) => (
+                        <div key={i} className="flex items-center gap-3 px-3 py-1 border-t border-border/40 first:border-t-0 text-xs">
+                          <span className="flex-1 min-w-0 truncate text-zinc-300" title={f.filename}>{fileName(f.filename)}</span>
+                          <span className="text-zinc-500 w-16 text-right shrink-0">{fmtSize(f.size)}</span>
+                          <button
+                            className="btn-ghost !px-1.5 !py-0.5 shrink-0"
+                            disabled={busy !== null}
+                            onClick={() => queueFile(f)}
+                            title="Queue this file on its own"
+                          >
+                            <Download className="h-3 w-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {shown.length > limit && (
+            <button className="btn-secondary w-full py-2 text-xs" onClick={() => setLimit((n) => n + 200)}>
+              Show more ({shown.length - limit} folders remaining)
+            </button>
           )}
-        </div>
-      </div>
-    </div>
+        </>
+      )}
+    </Modal>
   );
 }
 
@@ -1022,10 +1113,9 @@ function ReviewRow({ f, onChanged }: { f: ReviewFile; onChanged: () => void }) {
       const clean: Record<string, string> = {};
       for (const [k, v] of Object.entries(form)) if (v.trim()) clean[k] = v.trim();
       if (f.is_video) {
-        const r = await api.videoTag(f.path, clean);
-        toast(r.renamed
-          ? `Tagged & remuxed to MKV: ${String(r.path).split(/[\\/]/).pop()}`
-          : "Tags written");
+        // a container swap (remux to MKV) announces itself from api.videoTag
+        await api.videoTag(f.path, clean);
+        toast("Tags written");
       } else {
         // audio downloads belong to the audio tag writer — /api/videos/tag
         // rejects anything that isn't a video container
@@ -1034,7 +1124,7 @@ function ReviewRow({ f, onChanged }: { f: ReviewFile; onChanged: () => void }) {
       }
       onChanged();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -1052,7 +1142,7 @@ function ReviewRow({ f, onChanged }: { f: ReviewFile; onChanged: () => void }) {
       toast(`Discarded ${f.file}`);
       onChanged();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
       setArmDelete(false);
@@ -1254,12 +1344,12 @@ function ReviewPanel() {
         toast(`${skipped} album(s) are still downloading — skipped for now, and they stay in the download folder until finished`);
       }
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
   return (
-    <div className="bg-card rounded-lg border border-border p-4">
+    <div className="panel">
       <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
         <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500 flex items-center gap-1.5">
           <PackageOpen className="h-3.5 w-3.5" /> Review downloads
@@ -1339,11 +1429,12 @@ function ReviewPanel() {
         </div>
       )}
       {files.length === 0 ? (
-        <div className="text-xs text-zinc-600 py-3 text-center">
-          Nothing waiting for review — finished downloads appear here automatically.
-        </div>
+        <EmptyState
+          title="Nothing waiting for review"
+          hint="Finished downloads appear here automatically — slskd writes them into the download folder first."
+        />
       ) : (
-        <div className="space-y-2 max-h-[420px] overflow-auto pr-1">
+        <div className="space-y-2 max-h-[420px] overflow-auto pr-1 stagger">
           {files.map((f) => (
             <ReviewRow key={f.path} f={f} onChanged={refresh} />
           ))}
@@ -1384,7 +1475,7 @@ function SharingCard({ running }: { running: boolean }) {
       qc.invalidateQueries({ queryKey: ["soulseekShares"] });
       qc.invalidateQueries({ queryKey: ["soulseekStatus"] });
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -1397,7 +1488,7 @@ function SharingCard({ running }: { running: boolean }) {
       toast("Share rescan started");
       qc.invalidateQueries({ queryKey: ["soulseekShares"] });
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -1410,14 +1501,14 @@ function SharingCard({ running }: { running: boolean }) {
       qc.invalidateQueries({ queryKey: ["soulseekShares"] });
       qc.invalidateQueries({ queryKey: ["soulseekStatus"] });
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="bg-card rounded-lg border border-border p-3 text-xs space-y-2">
+    <div className="panel text-xs space-y-2">
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-[10px] uppercase tracking-widest text-zinc-500">Sharing</span>
         {scanState && (
@@ -1527,7 +1618,7 @@ function WishRow({ w, onChanged }: { w: Wish; onChanged: () => void }) {
       else toast(`Searching for “${w.title}”…`);
       onChanged();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -1538,7 +1629,7 @@ function WishRow({ w, onChanged }: { w: Wish; onChanged: () => void }) {
       toast("Wish updated");
       onChanged();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
   const remove = async () => {
@@ -1547,7 +1638,7 @@ function WishRow({ w, onChanged }: { w: Wish; onChanged: () => void }) {
       toast("Wish removed");
       onChanged();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -1670,10 +1761,10 @@ function WishesPanel() {
     try {
       await api.wishAdd({ release_mbid: id });
       setMbid("");
-      toast("Added to wishes — it will be found automatically");
+      toast.success("Added to wishes — it will be found automatically");
       refetch();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -1687,7 +1778,7 @@ function WishesPanel() {
       else toast("Searching for all due wishes…");
       refetch();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -1701,7 +1792,7 @@ function WishesPanel() {
       qc.invalidateQueries({ queryKey: ["library"] });
       refetch();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -1709,7 +1800,7 @@ function WishesPanel() {
 
   return (
     <div className="space-y-3">
-      <div className="bg-card rounded-lg border border-border p-3 text-xs">
+      <div className="panel text-xs">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-[10px] uppercase tracking-widest text-zinc-500">Wishes</span>
           <span className="text-zinc-500">
@@ -1738,7 +1829,7 @@ function WishesPanel() {
         </div>
       </div>
 
-      <div className="bg-card rounded-lg border border-border p-3">
+      <div className="panel">
         <div className="flex gap-2">
           <Link2 className="h-4 w-4 text-zinc-600 self-center shrink-0" />
           <input
@@ -1758,9 +1849,7 @@ function WishesPanel() {
       </div>
 
       {isLoading ? (
-        <div className="space-y-2">
-          {[0, 1, 2].map((i) => <div key={i} className="skeleton h-16 rounded-lg" />)}
-        </div>
+        <PageLoading label="Loading wishes…" />
       ) : wishes.length === 0 ? (
         <EmptyState
           title="No wishes yet"
@@ -1775,7 +1864,7 @@ function WishesPanel() {
       )}
 
       {data?.log && data.log.length > 0 && (
-        <details className="bg-card rounded-lg border border-border p-3">
+        <details className="panel">
           <summary className="text-[10px] uppercase tracking-widest text-zinc-500 cursor-pointer">Wish log</summary>
           <div className="mt-2 space-y-0.5 max-h-48 overflow-auto font-mono text-[10px]">
             {data.log.slice(-40).reverse().map((l, i) => (
@@ -1870,7 +1959,7 @@ export default function SoulseekPage() {
       }
       refetchStatus();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setPortsBusy(false);
     }
@@ -1940,7 +2029,7 @@ export default function SoulseekPage() {
       // "slskd is up" toast fires when the status poll sees it running
     } catch (e) {
       setPending(null);
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -1950,7 +2039,7 @@ export default function SoulseekPage() {
       await api.soulseekStop();
     } catch (e) {
       setPending(null);
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -1960,6 +2049,7 @@ export default function SoulseekPage() {
     if (q) setQuery(q);
     setRecent((r) => saveRecentSearch(r, text));
     setSearching(true);
+    setSearchId(null); // a stale id would make Cancel search drop the wrong query
     setResults([]);
     setSearchMeta(null);
     setVisibleLimit(60);
@@ -2009,8 +2099,27 @@ export default function SoulseekPage() {
         }
       }, 2000);
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
       setSearching(false);
+    }
+  };
+
+  /** Stop waiting on a running search: drop it server-side and kill the poll.
+   *  Before slskd hands back an id there is nothing to cancel, so the poll is
+   *  all we can stop. */
+  const cancelSearch = async () => {
+    const id = searchId;
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    setSearching(false);
+    if (!id) return;
+    try {
+      await api.soulseekSearchCancel(id);
+      toast("Search cancelled");
+    } catch (e) {
+      toast.error(String(e));
     }
   };
 
@@ -2054,10 +2163,10 @@ export default function SoulseekPage() {
         files = siblings.map((s) => ({ filename: s.file, size: s.size }));
       }
       const r = await api.soulseekDownload(f.username, files);
-      toast(`Queued ${r.queued} file(s) from ${f.username}`);
+      toast.success(`Queued ${r.queued} file(s) from ${f.username}`);
       refetchDownloads();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusyUser(null);
     }
@@ -2099,20 +2208,20 @@ export default function SoulseekPage() {
 
   if (status && !status.installed) {
     return (
-      <div className="p-6 max-w-3xl">
+      <div className="p-6 space-y-5 mx-auto max-w-6xl">
+        <PageHeader icon={ArrowDownUp} title="Soulseek" subtitle="Managed slskd" />
         <EmptyState title="slskd is not installed" hint="Install it from Settings → Dependencies (key: slskd), then reload this page." />
       </div>
     );
   }
 
   return (
-    <div className="p-6 space-y-5">
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-            <ArrowDownUp className="h-6 w-6 text-accent" /> Soulseek
-          </h1>
-          <div className="text-xs text-zinc-500 mt-0.5">
+    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+      <PageHeader
+        icon={ArrowDownUp}
+        title="Soulseek"
+        subtitle={
+          <>
             Managed slskd · {pending === "start" ? (
               <span className="text-amber-300">starting…</span>
             ) : pending === "stop" ? (
@@ -2131,41 +2240,46 @@ export default function SoulseekPage() {
                 </span>
               </>
             )}
-          </div>
-        </div>
-        <div className="flex gap-2">
-          {running ? (
-            <button className="btn-ghost" onClick={stop} disabled={pending !== null}>
-              {pending === "stop" ? "Stopping…" : <><Power className="h-4 w-4" /> Stop</>}
+          </>
+        }
+        actions={
+          <>
+            {running ? (
+              <button className="btn-ghost" onClick={stop} disabled={pending !== null}>
+                {pending === "stop" ? "Stopping…" : <><Power className="h-4 w-4" /> Stop</>}
+              </button>
+            ) : (
+              <button className="btn-primary" onClick={start} disabled={pending !== null}>
+                {pending === "start" ? "Starting…" : <><Play className="h-4 w-4" /> Start slskd</>}
+              </button>
+            )}
+            <button className="btn-ghost" onClick={() => { refetchStatus(); refetchDownloads(); }} title="Reload status and the transfer list">
+              <RefreshCw className="h-4 w-4" />
             </button>
-          ) : (
-            <button className="btn-primary" onClick={start} disabled={pending !== null}>
-              {pending === "start" ? "Starting…" : <><Play className="h-4 w-4" /> Start slskd</>}
+          </>
+        }
+      >
+        {/* Tabs live in the header's extra row — they belong to the title. */}
+        <div className="flex rounded-md border border-border overflow-x-auto max-w-full w-fit">
+          {TAB_LIST.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+                tab === t.id ? "bg-accent on-accent" : "bg-panel text-zinc-400 hover:text-white"
+              }`}
+            >
+              {t.label}
+              {t.id === "downloads" && dlActive > 0 ? ` · ${dlActive}` : ""}
+              {t.id === "messages" && msgUnread > 0 ? ` · ${msgUnread}` : ""}
+              {t.id === "search" && results.length > 0 ? ` · ${results.length}` : ""}
             </button>
-          )}
-          <button className="btn-ghost" onClick={() => { refetchStatus(); refetchDownloads(); }}><RefreshCw className="h-4 w-4" /></button>
+          ))}
         </div>
-      </div>
-
-      <div className="flex rounded-md border border-border overflow-hidden w-fit">
-        {TAB_LIST.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-              tab === t.id ? "bg-accent on-accent" : "bg-panel text-zinc-400 hover:text-white"
-            }`}
-          >
-            {t.label}
-            {t.id === "downloads" && dlActive > 0 ? ` · ${dlActive}` : ""}
-            {t.id === "messages" && msgUnread > 0 ? ` · ${msgUnread}` : ""}
-            {t.id === "search" && results.length > 0 ? ` · ${results.length}` : ""}
-          </button>
-        ))}
-      </div>
+      </PageHeader>
 
       {tab === "settings" && status && (
-        <div className="bg-card rounded-lg border border-border p-3 flex items-center gap-2 flex-wrap text-xs">
+        <div className="panel flex items-center gap-2 flex-wrap text-xs">
           <span className="text-[10px] uppercase tracking-widest text-zinc-500 mr-1">Ports</span>
           <label className="flex items-center gap-1.5 text-zinc-500">
             Listen (Soulseek)
@@ -2235,8 +2349,8 @@ export default function SoulseekPage() {
       {tab === "wishes" && <WishesPanel />}
 
       {tab === "search" && (
-      <div className="bg-card rounded-lg border border-border p-4">
-        <div className="flex gap-2">
+      <div className="panel-hero">
+        <div className="flex flex-wrap gap-2">
           <input
             className="input flex-1"
             placeholder="Search Soulseek manually (artist — album, title, catalog #…)"
@@ -2247,6 +2361,11 @@ export default function SoulseekPage() {
           <button className="btn-primary" onClick={() => runSearch()} disabled={searching || !running}>
             <Search className="h-4 w-4" /> {searching ? "Searching…" : "Search"}
           </button>
+          {searching && (
+            <button className="btn-ghost" onClick={cancelSearch} title="Stop this search — slskd drops it and the results stop polling">
+              <Square className="h-4 w-4" /> Cancel search
+            </button>
+          )}
         </div>
         {!query.trim() && recent.length > 0 && (
           <div className="flex flex-wrap items-center gap-1.5 mt-2">
@@ -2320,13 +2439,13 @@ export default function SoulseekPage() {
               </div>
             </div>
 
-            <div className="mt-3 space-y-2 max-h-[560px] overflow-auto pr-1">
+            <div className="mt-3 space-y-2 max-h-[560px] overflow-auto pr-1 stagger">
               {visible.slice(0, visibleLimit).map((g) => {
                 const open = openGroups.has(g.key);
                 return (
                   <div key={g.key} className="rounded-lg border border-border overflow-hidden">
                     {/* folder header: what you'd actually download */}
-                    <div className="flex items-center gap-3 px-3 py-2 bg-panel/60">
+                    <div className="flex items-center gap-3 px-3 py-2 bg-panel/60 flex-wrap">
                       <button
                         className="flex-1 min-w-0 text-left"
                         onClick={() => toggleGroup(g.key)}
@@ -2408,9 +2527,10 @@ export default function SoulseekPage() {
                 );
               })}
               {visible.length === 0 && (
-                <div className="text-[11px] text-zinc-500 py-6 text-center">
-                  No {FILTERS.find((f) => f.id === filter)?.label.toLowerCase()} groups in this result set.
-                </div>
+                <EmptyState
+                  title={`No ${FILTERS.find((f) => f.id === filter)?.label.toLowerCase()} folders`}
+                  hint="Pick another filter above — the results below the chips are what the peers actually offered."
+                />
               )}
               {visible.length > visibleLimit && (
                 <button
@@ -2424,11 +2544,14 @@ export default function SoulseekPage() {
           </>
         )}
         {!searching && results.length === 0 && searchId && (
-          <div className="text-[11px] text-zinc-500 mt-3">No results (yet) — try a different query.</div>
+          <EmptyState
+            title="No results (yet)"
+            hint="Try a different query, or drop the catalog number — peers hold artist/album folders, not pressings."
+          />
         )}
         {searching && results.length === 0 && (
-          <div className="text-[11px] text-zinc-400 mt-3 flex items-center gap-2">
-            <span className="h-3.5 w-3.5 rounded-full border-2 border-accent border-t-transparent animate-spin inline-block shrink-0" />
+          <div className="text-[11px] text-zinc-400 mt-3 flex items-center gap-2 flex-wrap">
+            <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
             {searchMeta && searchMeta.fileCount > 0 ? (
               <span>
                 Searching Soulseek… found <strong className="text-zinc-200">{searchMeta.fileCount.toLocaleString()}</strong> files from <strong className="text-zinc-200">{searchMeta.responseCount}</strong> peers (aggregating…)
@@ -2436,6 +2559,9 @@ export default function SoulseekPage() {
             ) : (
               <span>Broadcasting query to Soulseek network…</span>
             )}
+            <button className="btn-ghost !py-0.5 !px-2 text-[11px]" onClick={cancelSearch} title="Stop this search">
+              Cancel search
+            </button>
           </div>
         )}
       </div>
@@ -2444,7 +2570,7 @@ export default function SoulseekPage() {
       {tab === "downloads" && (
         <>
           <ReviewPanel />
-          <DownloadsPanel downloads={downloads} />
+          <DownloadsPanel downloads={downloads} status={status} />
         </>
       )}
 
@@ -2540,7 +2666,7 @@ function MessagesPanel({ running }: { running: boolean }) {
       await thread.refetch();
       qc.invalidateQueries({ queryKey: ["soulseekMessages"] });
     } catch (e) {
-      toast(String(e)); // draft kept so it can be retried
+      toast.error(String(e)); // draft kept so it can be retried
     } finally {
       setSending(false);
     }
@@ -2554,14 +2680,14 @@ function MessagesPanel({ running }: { running: boolean }) {
       if (open === username) setOpen(null);
       await refetch();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setClosing(null);
     }
   };
 
   return (
-    <div className="bg-card rounded-lg border border-border p-4">
+    <div className="panel">
       <div className="flex items-center gap-2 flex-wrap">
         <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500 flex items-center gap-1.5">
           <MessageSquare className="h-3.5 w-3.5" /> Messages
@@ -2590,14 +2716,12 @@ function MessagesPanel({ running }: { running: boolean }) {
       </div>
 
       {!running ? (
-        <div className="text-xs text-zinc-600 py-3">slskd is not running — private messages need it.</div>
+        <EmptyState title="slskd is not running" hint="Private messages need the daemon — start slskd above." />
       ) : isError ? (
-        <div className="text-xs text-red-400 py-3">
-          Could not load conversations — slskd is unreachable. Retrying automatically.
-        </div>
+        <EmptyState title="Could not load conversations" hint="slskd is unreachable — this retries automatically." />
       ) : (
         <div className="flex gap-3 mt-3">
-          <div className="w-56 shrink-0 rounded-lg border border-border bg-panel/60 p-1 space-y-0.5 max-h-[420px] overflow-auto">
+          <div className="w-56 shrink-0 rounded-lg border border-border bg-panel/60 p-1 space-y-0.5 max-h-[420px] overflow-auto stagger">
             {peers.length === 0 ? (
               <div className="text-xs text-zinc-600 p-2">No conversations yet.</div>
             ) : (
@@ -2641,7 +2765,7 @@ function MessagesPanel({ running }: { running: boolean }) {
                 <div className="text-xs font-semibold text-zinc-300 truncate mb-1.5" title={open}>
                   {open}
                 </div>
-                <div ref={scrollRef} className="rounded-lg border border-border bg-panel/40 p-2 space-y-1.5 h-[320px] overflow-auto">
+                <div ref={scrollRef} className="rounded-lg border border-border bg-panel/40 p-2 space-y-1.5 h-[320px] overflow-auto stagger">
                   {messages.length === 0 ? (
                     <div className="text-xs text-zinc-600 py-3 text-center">
                       No messages yet — say hello.
@@ -2719,7 +2843,11 @@ type TransferRow = SlskTransfer & { username: string; dir: string };
  * bars, plus queued / completed / failed buckets so the history is
  * browsable instead of one flat list. Cancel drops a queued/running transfer,
  * Retry re-queues a failed one, and "Clear finished" empties the history. */
-function DownloadsPanel({ downloads }: { downloads: SlskDownloads | undefined }) {
+function DownloadsPanel({ downloads, status }: {
+  downloads: SlskDownloads | undefined;
+  /** daemon state — an empty list means different things running vs stopped */
+  status: { running?: boolean; installed?: boolean } | undefined;
+}) {
   const qc = useQueryClient();
   const [view, setView] = useState<"active" | "completed">("active");
   const [busy, setBusy] = useState<string | null>(null);
@@ -2754,28 +2882,51 @@ function DownloadsPanel({ downloads }: { downloads: SlskDownloads | undefined })
       <span className="chip text-[9px] bg-red-950/60 text-red-300 border border-red-900">{f.state.toLowerCase() || "failed"}</span>
     );
 
-  const cancel = async (f: TransferRow) => {
-    setBusy(f.id);
+  /** Cancel one or many transfers — slskd takes a transfer_id list, but only
+   *  per user, so a mixed bucket is one request per peer. */
+  const cancel = async (rows: TransferRow[]) => {
+    if (rows.length === 0) return;
+    setBusy("*");
     try {
-      const r = await api.soulseekDownloadsCancel(f.username, [f.id]);
-      toast(r.cancelled ? `Cancelled ${fileName(f.filename)}` : "Could not cancel that transfer");
+      const byUser = new Map<string, string[]>();
+      for (const f of rows) byUser.set(f.username, [...(byUser.get(f.username) ?? []), f.id]);
+      const answers = await Promise.all(
+        [...byUser].map(([user, ids]) => api.soulseekDownloadsCancel(user, ids))
+      );
+      const n = answers.reduce((a, r) => a + r.cancelled, 0);
+      toast(
+        n === 0
+          ? "Could not cancel those transfers"
+          : rows.length === 1
+            ? `Cancelled ${fileName(rows[0].filename)}`
+            : `Cancelled ${n} transfer(s)`
+      );
       qc.invalidateQueries({ queryKey: ["soulseekDownloads"] });
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(null);
     }
   };
 
   /** Same call as a fresh queue — slskd starts the file again from scratch. */
-  const retry = async (f: TransferRow) => {
-    setBusy(f.id);
+  const retry = async (rows: TransferRow[]) => {
+    if (rows.length === 0) return;
+    setBusy("*");
     try {
-      await api.soulseekDownload(f.username, [{ filename: f.filename, size: f.size }]);
-      toast(`Retrying ${fileName(f.filename)}`);
+      const byUser = new Map<string, { filename: string; size: number }[]>();
+      for (const f of rows) {
+        byUser.set(f.username, [...(byUser.get(f.username) ?? []), { filename: f.filename, size: f.size }]);
+      }
+      await Promise.all([...byUser].map(([user, list]) => api.soulseekDownload(user, list)));
+      toast(
+        rows.length === 1
+          ? `Retrying ${fileName(rows[0].filename)}`
+          : `Retrying ${rows.length} failed transfer(s)`
+      );
       qc.invalidateQueries({ queryKey: ["soulseekDownloads"] });
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(null);
     }
@@ -2788,17 +2939,17 @@ function DownloadsPanel({ downloads }: { downloads: SlskDownloads | undefined })
       toast(r.cleared ? `Cleared ${r.cleared} finished transfer(s)` : "Nothing to clear");
       qc.invalidateQueries({ queryKey: ["soulseekDownloads"] });
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(null);
     }
   };
 
   return (
-    <div className="bg-card rounded-lg border border-border p-4">
+    <div className="panel">
       <div className="flex items-center justify-between gap-2 flex-wrap mb-2">
         <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Downloads</div>
-        <div className="flex items-center gap-1 text-[10px]">
+        <div className="flex items-center gap-1 flex-wrap text-[10px]">
           {([["active", active.length], ["queued", queued.length], ["completed", completed.length], ["failed", failed.length]] as [string, number][]).map(([label, count]) => (
             <span key={label} className={`chip text-[9px] border ${count > 0 ? "bg-raise border-border text-zinc-300" : "bg-panel border-border/60 text-zinc-600"}`}>
               {label} {count}
@@ -2814,10 +2965,47 @@ function DownloadsPanel({ downloads }: { downloads: SlskDownloads | undefined })
               <Trash2 className="h-3 w-3" /> Clear finished
             </button>
           )}
+          {active.length + queued.length > 0 && (
+            <button
+              className="btn-ghost !py-0.5 !px-2 text-[11px]"
+              disabled={busy !== null}
+              onClick={() => cancel([...active, ...queued])}
+              title="Drop every running and queued transfer from slskd's queue"
+            >
+              <Square className="h-3 w-3" /> Cancel all active
+            </button>
+          )}
+          {failed.length > 0 && (
+            <button
+              className="btn-ghost !py-0.5 !px-2 text-[11px]"
+              disabled={busy !== null}
+              onClick={() => retry(failed)}
+              title="Queue every failed transfer's file again"
+            >
+              <RotateCw className="h-3 w-3" /> Retry all failed
+            </button>
+          )}
         </div>
       </div>
       {files.length === 0 ? (
-        <div className="text-xs text-zinc-600">No downloads queued.</div>
+        // A stopped daemon has no queue at all — "No downloads queued." there
+        // reads as "your queue is empty", which is not what happened.
+        !status?.installed ? (
+          <EmptyState
+            title="slskd is not installed"
+            hint="Install it from Settings → Dependencies (key: slskd) — downloads and transfers need the daemon."
+          />
+        ) : !status?.running ? (
+          <EmptyState
+            title="slskd is not running"
+            hint="Start slskd above — queued transfers resume and finished ones stay in the history."
+          />
+        ) : (
+          <EmptyState
+            title="No downloads queued"
+            hint="Search for an album and queue a folder (or browse a peer's share) — transfers appear here with live progress."
+          />
+        )
       ) : (
         <>
           <div className="flex rounded-md border border-border overflow-hidden w-fit mb-2">
@@ -2833,7 +3021,7 @@ function DownloadsPanel({ downloads }: { downloads: SlskDownloads | undefined })
               </button>
             ))}
           </div>
-          <div className="space-y-1 max-h-[360px] overflow-auto">
+          <div className="space-y-1 max-h-[360px] overflow-auto stagger">
             {shown.map((f, i) => (
               <div key={f.id || `${f.username}-${i}`} className="flex items-center gap-3 px-2 py-1.5 rounded hover:bg-white/[0.04] text-xs">
                 <div className="flex-1 min-w-0">
@@ -2841,17 +3029,22 @@ function DownloadsPanel({ downloads }: { downloads: SlskDownloads | undefined })
                   <div className="text-[10px] text-zinc-600 truncate" title={f.dir}>{f.username} · {f.dir}</div>
                 </div>
                 {view === "active" && (
-                  <div className="w-28 shrink-0 h-1.5 rounded-sm bg-border/70 overflow-hidden">
+                  <div className="w-16 sm:w-28 shrink-0 h-1.5 rounded-sm bg-border/70 overflow-hidden">
                     <div className={`h-full ${f.state === "InProgress" ? "bg-accent" : "bg-zinc-600"}`} style={{ width: `${pct(f)}%` }} />
                   </div>
                 )}
                 <span className="text-zinc-500 w-16 text-right shrink-0">{fmtSize(f.size ?? 0)}</span>
+                {/* slskd reports the running average per transfer — hidden on
+                    phones, where the row has no width to spare */}
+                <span className="text-zinc-500 w-20 text-right shrink-0 hidden sm:block" title="Average transfer rate">
+                  {fmtRate(f.averageSpeed)}
+                </span>
                 <span className="w-16 text-right shrink-0">{bucket(f)}</span>
                 {view === "active" ? (
                   <button
                     className="btn-ghost !px-1.5 !py-0.5 text-[11px] shrink-0 w-16 justify-center"
                     disabled={busy !== null}
-                    onClick={() => cancel(f)}
+                    onClick={() => cancel([f])}
                     title="Drop this transfer from slskd's queue"
                   >
                     <Square className="h-3 w-3" /> Cancel
@@ -2860,7 +3053,7 @@ function DownloadsPanel({ downloads }: { downloads: SlskDownloads | undefined })
                   <button
                     className="btn-ghost !px-1.5 !py-0.5 text-[11px] shrink-0 w-16 justify-center"
                     disabled={busy !== null}
-                    onClick={() => retry(f)}
+                    onClick={() => retry([f])}
                     title="Queue this file again"
                   >
                     <RotateCw className="h-3 w-3" /> Retry
@@ -2871,7 +3064,12 @@ function DownloadsPanel({ downloads }: { downloads: SlskDownloads | undefined })
               </div>
             ))}
             {shown.length === 0 && (
-              <div className="text-[11px] text-zinc-600 py-4 text-center">Nothing here.</div>
+              <EmptyState
+                title="Nothing here"
+                hint={view === "active"
+                  ? "No transfer is running or queued right now."
+                  : "No transfer has finished or failed yet."}
+              />
             )}
           </div>
         </>
@@ -2897,7 +3095,7 @@ function UploadsPanel({ running }: { running: boolean }) {
   const totalGiven = past.reduce((n: number, f: any) => n + (f.bytesTransferred ?? f.size ?? 0), 0);
 
   return (
-    <div className="bg-card rounded-lg border border-border p-4">
+    <div className="panel">
       <div className="flex items-center justify-between gap-2 flex-wrap mb-2">
         <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Shared history (uploads)</div>
         {files.length > 0 && (
@@ -2909,11 +3107,11 @@ function UploadsPanel({ running }: { running: boolean }) {
         )}
       </div>
       {!running ? (
-        <div className="text-xs text-zinc-600">slskd is stopped — start it to share your library.</div>
+        <EmptyState title="slskd is not running" hint="Start it above to share your library." />
       ) : files.length === 0 ? (
-        <div className="text-xs text-zinc-600">No uploads yet — other users haven't pulled from your shares.</div>
+        <EmptyState title="No uploads yet" hint="No one has pulled from your shares since slskd last started." />
       ) : (
-        <div className="space-y-1 max-h-[300px] overflow-auto">
+        <div className="space-y-1 max-h-[300px] overflow-auto stagger">
           {[...sharingNow, ...past].slice(0, 60).map((f: any, i: number) => (
             <div key={`${f.username}-${i}`} className="flex items-center gap-3 px-2 py-1.5 rounded hover:bg-white/[0.04] text-xs">
               <div className="flex-1 min-w-0">

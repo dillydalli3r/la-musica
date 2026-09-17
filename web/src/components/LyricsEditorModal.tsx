@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
-  Eraser, Keyboard, Languages, Loader2, Pause, Play, Plus, Save,
-  Trash2, Undo2, Wand2, X,
+  Eraser, Keyboard, Loader2, Pause, Play, Plus, Save,
+  Trash2, Undo2, Wand2,
 } from "lucide-react";
 import { api } from "../api";
 import { toast, useStore } from "../store";
@@ -16,6 +16,7 @@ import {
 } from "../lib/lyricsKeys";
 import { syllabifyLine } from "../lib/syllables";
 import { SPEEDS, fmtSpeed } from "../lib/playback";
+import Modal from "./Modal";
 
 type StampMode = "line" | "word" | "syllable";
 
@@ -48,11 +49,8 @@ interface Pending {
 
 /** Enhanced lyric editor / creator: stamp line, word and SYLLABLE times
  * along the vocals (at any playback speed), auto-distribute word/syllable
- * times inside stamped lines, romanize foreign scripts for tagging,
- * and save into the LYRICS tag / .lrc sidecar. The LYRICS field itself
- * always keeps the original language — romanization is stored separately
- * (TRANSLITERATION-<lang>-LATN), exactly like the Lyrics Translate
- * script. */
+ * times inside stamped lines, and save into the LYRICS tag / .lrc
+ * sidecar. */
 export default function LyricsEditorModal({
   path,
   artist,
@@ -86,7 +84,6 @@ export default function LyricsEditorModal({
   const [keysMenu, setKeysMenu] = useState(false);
   const [capturing, setCapturing] = useState<LyricsAction | null>(null);
   const [keys, setKeys] = useState(() => loadLyricsKeys());
-  const [xlitLines, setXlitLines] = useState<string[] | null>(null);
   const [saveTarget, setSaveTarget] = useState<"embedded" | "sidecar" | "both">(
     () => (localStorage.getItem("mlo.lyricsSaveTarget") as "embedded" | "sidecar" | "both") ?? "embedded"
   );
@@ -96,6 +93,7 @@ export default function LyricsEditorModal({
   });
   const historyRef = useRef<LrcLine[][]>([]);
   const pendingRef = useRef<Pending | null>(null);
+  const capturingRef = useRef<LyricsAction | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const rowRefs = useRef<Record<number, HTMLDivElement | null>>({});
@@ -310,56 +308,17 @@ export default function LyricsEditorModal({
 
   // ---- tools ---------------------------------------------------------------
   const textOut = () => serializeLrc(lines, dec);
-  const aiBusy = busy !== null;
 
   const runOfflineSync = async () => {
-    if (aiBusy) return;
+    if (busy) return;
     setBusy("offline");
     try {
-      const res = await api.lyricsAi("wordsync", textOut());
-      const parsed = parseLrc(res.result);
+      const res = await api.lyricsWordsync(path, textOut());
+      const parsed = parseLrc(res.lrc);
       if (parsed.length) commit(parsed);
       toast("Distributed timings (offline, length-weighted)");
     } catch (e) {
-      toast(String(e));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const romanize = async () => {
-    if (busy) return;
-    setBusy("xlit");
-    try {
-      const texts = lines.map((l) => l.text);
-      const res = await api.lyricsAiLines("transliterate", texts);
-      if (res.skipped || !res.lines.length) {
-        toast(res.skipped === "script" ? "Lyrics are already Latin script — no romanization needed" : "Nothing to romanize");
-        setXlitLines([]);
-        return;
-      }
-      setXlitLines(res.lines);
-      toast("Romanized — review below, then store in tags");
-    } catch (e) {
-      toast(`Romanization failed: ${e instanceof Error ? e.message : e}`);
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const storeXlit = async () => {
-    if (busy) return;
-    setBusy("xlit-store");
-    try {
-      const res = await api.lyricsXlitStore(path);
-      if (res.skipped) {
-        toast(res.skipped === "script" ? "Already Latin script — nothing stored" : "Romanization came back identical — nothing stored");
-      } else {
-        toast("Romanization stored (TRANSLITERATION tag — LYRICS keeps the original language)");
-        setXlitLines(null);
-      }
-    } catch (e) {
-      toast(`Store failed: ${e instanceof Error ? e.message : e}`);
+      toast.error(String(e));
     } finally {
       setBusy(null);
     }
@@ -383,6 +342,9 @@ export default function LyricsEditorModal({
 
   // ---- keybinds -------------------------------------------------------------
   useEffect(() => {
+    // Escape while a hotkey is being rebound cancels THAT, not the editor —
+    // the shared Modal owns Escape now, so it has to consult this first.
+    capturingRef.current = capturing;
     const onKey = (e: KeyboardEvent) => {
       if (capturing) {
         e.preventDefault();
@@ -448,8 +410,6 @@ export default function LyricsEditorModal({
       } else if (matchKey(e, keys, "speedFaster")) {
         e.preventDefault();
         stepSpeed(1);
-      } else if (e.key === "Escape") {
-        onClose();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -457,369 +417,353 @@ export default function LyricsEditorModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing, selIdx, lines, playTime, keys, capturing, mode, speed, saveTarget, dec]);
 
+  /** Backdrop, cross and Escape all land here. Rebinding a hotkey must not
+   *  close the editor — the "press key…" capture is cancelled with Escape. */
+  const requestClose = () => {
+    if (!capturingRef.current) onClose();
+  };
+
   const sylCount = lines.reduce((n, l) => n + (l.syl ? 1 : 0), 0);
   const wordCount = lines.reduce((n, l) => n + (l.words?.length && !l.syl ? 1 : 0), 0);
 
   // Portal to <body>: page containers stack above z-70 otherwise (the
   // sidebar would draw over the modal).
   return createPortal(
-    <div className="fixed inset-0 z-[70] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6">
-      <div className="rounded-2xl w-full max-w-6xl h-[92vh] flex flex-col shadow-2xl bg-card border border-border overflow-hidden">
-        {/* the editor owns a private decoder so stamping never fights the
-            main player; playbackRate follows the speed control */}
-        <audio
-          ref={audioRef}
-          onTimeUpdate={(e) => setPlayTime(e.currentTarget.currentTime)}
-          onLoadedMetadata={(e) => setDur(e.currentTarget.duration || 0)}
-          onEnded={() => setPlaying(false)}
-          className="hidden"
-        />
-        {/* header */}
-        <div className="flex items-center gap-3 px-4 py-3 border-b border-white/10 shrink-0">
-          <div className="flex-1 min-w-0">
-            <div className="text-sm font-semibold text-white truncate">
-              Lyrics editor <span className="text-zinc-500 font-normal">— {artist ? `${artist} — ` : ""}{track || "untitled"}</span>
-            </div>
-            <div className="text-[10px] text-zinc-500 mt-0.5">
-              {lines.length} lines · {sylCount} syllable-synced · {wordCount} word-synced
-              {album ? ` · ${album}` : ""}
-            </div>
-          </div>
-          <div className="relative">
-            <button className="btn-ghost !py-1.5 text-xs" onClick={() => setKeysMenu(!keysMenu)} title="Keyboard shortcuts">
-              <Keyboard className="h-4 w-4" />
-            </button>
-            {keysMenu && (
-              <>
-              <div className="fixed inset-0 z-30" onClick={() => setKeysMenu(false)} />
-              <div className="absolute right-0 top-full mt-1 z-40 bg-zinc-950 border border-border rounded-lg shadow-2xl p-1.5 w-80 max-h-[70vh] overflow-auto">
-                <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500 px-1 pb-1">Hotkeys</div>
-                {LYRICS_ACTIONS.map((a) => (
-                  <div key={a.id} className="flex items-center gap-2 py-0.5">
-                    <span className="flex-1 text-xs text-zinc-300" title={a.hint}>{a.label}</span>
-                    <button
-                      className={`chip text-[10px] font-mono border ${capturing === a.id ? "bg-accent/20 border-accent text-accent" : "bg-raise border-border text-zinc-400 hover:border-accent"}`}
-                      onClick={() => setCapturing(capturing === a.id ? null : a.id)}
-                      title="Click, then press the new key combination (Esc cancels)"
-                    >
-                      {capturing === a.id ? "press key…" : keys[a.id]}
-                    </button>
-                  </div>
-                ))}
-                <div className="flex justify-between items-center mt-2 pt-1.5 border-t border-border">
-                  <button
-                    className="text-[10px] text-zinc-500 hover:text-zinc-300 px-1"
-                    onClick={() => {
-                      resetLyricsKeys();
-                      setKeys(loadLyricsKeys());
-                      toast("Hotkeys reset to defaults");
-                    }}
-                  >
-                    reset to defaults
-                  </button>
-                  <span className="text-[10px] text-zinc-600 px-1">saved in this browser</span>
-                </div>
-              </div>
-              </>
-            )}
-          </div>
-          <button className="p-2 rounded-lg hover:bg-white/10 text-zinc-400 hover:text-white" onClick={onClose} title="Close (Esc)">
-            <X className="h-4 w-4" />
+    <Modal
+      onClose={requestClose}
+      title={
+        <>
+          Lyrics editor{" "}
+          <span className="text-zinc-500 font-normal">
+            — {artist ? `${artist} — ` : ""}{track || "untitled"}
+          </span>
+        </>
+      }
+      subtitle={`${lines.length} lines · ${sylCount} syllable-synced · ${wordCount} word-synced${album ? ` · ${album}` : ""}`}
+      width="max-w-6xl"
+      z="z-[70]"
+      bodyClass="!px-0 !py-0 flex flex-col"
+      headerExtra={
+        <div className="relative">
+          <button className="btn-ghost !py-1.5 text-xs" onClick={() => setKeysMenu(!keysMenu)} title="Keyboard shortcuts">
+            <Keyboard className="h-4 w-4" />
           </button>
+          {keysMenu && (
+            <>
+            <div className="fixed inset-0 z-30" onClick={() => setKeysMenu(false)} />
+            <div className="absolute right-0 top-full mt-1 z-40 bg-zinc-950 border border-border rounded-lg shadow-2xl p-1.5 w-80 max-h-[70vh] overflow-auto">
+              <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500 px-1 pb-1">Hotkeys</div>
+              {LYRICS_ACTIONS.map((a) => (
+                <div key={a.id} className="flex items-center gap-2 py-0.5">
+                  <span className="flex-1 text-xs text-zinc-300" title={a.hint}>{a.label}</span>
+                  <button
+                    className={`chip text-[10px] font-mono border ${capturing === a.id ? "bg-accent/20 border-accent text-accent" : "bg-raise border-border text-zinc-400 hover:border-accent"}`}
+                    onClick={() => setCapturing(capturing === a.id ? null : a.id)}
+                    title="Click, then press the new key combination (Esc cancels)"
+                  >
+                    {capturing === a.id ? "press key…" : keys[a.id]}
+                  </button>
+                </div>
+              ))}
+              <div className="flex justify-between items-center mt-2 pt-1.5 border-t border-border">
+                <button
+                  className="text-[10px] text-zinc-500 hover:text-zinc-300 px-1"
+                  onClick={() => {
+                    resetLyricsKeys();
+                    setKeys(loadLyricsKeys());
+                    toast("Hotkeys reset to defaults");
+                  }}
+                >
+                  reset to defaults
+                </button>
+                <span className="text-[10px] text-zinc-600 px-1">saved in this browser</span>
+              </div>
+            </div>
+            </>
+          )}
+        </div>
+      }
+    >
+      {/* the editor owns a private decoder so stamping never fights the
+          main player; playbackRate follows the speed control */}
+      <audio
+        ref={audioRef}
+        onTimeUpdate={(e) => setPlayTime(e.currentTarget.currentTime)}
+        onLoadedMetadata={(e) => setDur(e.currentTarget.duration || 0)}
+        onEnded={() => setPlaying(false)}
+        className="hidden"
+      />
+
+      <div className="flex-1 min-h-0 flex flex-col lg:flex-row">
+        {/* ---- lines ---- */}
+        <div className="flex-1 min-w-0 min-h-0 flex flex-col">
+          {/* stamp mode + speed */}
+          <div className="flex items-center gap-2 px-4 py-2 border-b border-white/10 flex-wrap shrink-0">
+            <span className="text-[10px] uppercase tracking-wider text-zinc-500">Stamp</span>
+            {(["line", "word", "syllable"] as StampMode[]).map((m) => (
+              <button
+                key={m}
+                className={`chip text-[10px] border capitalize ${mode === m ? "bg-accent on-accent border-accent" : "bg-white/5 border-white/15 text-zinc-400 hover:text-white"}`}
+                onClick={() => { setMode(m); pendingRef.current = null; }}
+                title={m === "line"
+                  ? `Space stamps the line's start time (${keys.stampLine})`
+                  : m === "word"
+                    ? `Space taps word by word (${keys.stampWord})`
+                    : `Space taps syllable by syllable (${keys.stampSyllable})`}
+              >
+                {m}
+              </button>
+            ))}
+            <span className="w-px h-5 bg-white/10 mx-1" />
+            <button className="btn-ghost !px-2 !py-1 text-xs font-mono" onClick={() => stepSpeed(-1)} title={`Slower (${keys.speedSlower})`}>−</button>
+            <span className="text-xs font-mono text-zinc-300 min-w-[38px] text-center" title="Playback speed — timestamps always land in song time">{fmtSpeed(speed)}</span>
+            <button className="btn-ghost !px-2 !py-1 text-xs font-mono" onClick={() => { setSpeed(1); }} title="Reset speed to 1×">1×</button>
+            <button className="btn-ghost !px-2 !py-1 text-xs font-mono" onClick={() => stepSpeed(1)} title={`Faster (${keys.speedFaster})`}>+</button>
+            <span className="w-px h-5 bg-white/10 mx-1" />
+            <button className="btn-ghost !px-1.5 !py-0.5 text-[10px]" onClick={() => shiftAll(-0.1)} title="Shift ALL timestamps 0.1s earlier">−0.1s all</button>
+            <button className="btn-ghost !px-1.5 !py-0.5 text-[10px]" onClick={() => shiftAll(0.1)} title="Shift ALL timestamps 0.1s later">+0.1s all</button>
+            <button className="btn-ghost !px-1.5 !py-0.5 text-[10px]" onClick={() => nudgeLine(-0.05)} title="Nudge the selected line 0.05s earlier">sel −0.05</button>
+            <button className="btn-ghost !px-1.5 !py-0.5 text-[10px]" onClick={() => nudgeLine(0.05)} title="Nudge the selected line 0.05s later">sel +0.05</button>
+            <div className="flex-1" />
+            <button className="btn-ghost !py-1 text-xs" onClick={undo} title={`Undo (${keys.undo})`}>
+              <Undo2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          {lines.length === 0 ? (
+            <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
+              <div className="text-sm text-zinc-400">No lyrics yet — paste plain or LRC lyrics to start.</div>
+              <textarea
+                className="input font-mono text-xs w-full max-w-xl min-h-[180px]"
+                placeholder={"Paste lyrics here, one line per line…\n(or full LRC with [mm:ss.xx] timestamps)"}
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+              />
+              <button className="btn-primary !py-1.5 text-xs" onClick={useDraft} disabled={!draft.trim()}>
+                Use these lyrics
+              </button>
+            </div>
+          ) : (
+            <div ref={listRef} className="flex-1 min-h-0 overflow-auto px-4 py-2 space-y-1">
+              {lines.map((l, i) => {
+                const isSel = i === selIdx;
+                const isActive = i === activeLine && playing;
+                const pieces = isSel && mode === "syllable" && !l.words ? syllabifyLine(l.text) : null;
+                const pending = pendingRef.current && pendingRef.current.idx === i ? pendingRef.current : null;
+                // The field shows the stamp TEXT that was typed (or
+                // parsed); an empty one — freshly stamped — falls back to
+                // the line's time.
+                const tsText = l.ts ? (l.ts.startsWith("[") ? l.ts.slice(1, -1) : l.ts) : fmtDur(l.time);
+                return (
+                  <div
+                    key={i}
+                    ref={(el) => { rowRefs.current[i] = el; }}
+                    className={`group rounded-lg border px-2 py-1.5 transition-colors ${
+                      isActive
+                        ? "border-accent/60 bg-accent/15"
+                        : isSel
+                          ? "border-accent/40 bg-white/[0.04]"
+                          : "border-transparent hover:border-white/10 hover:bg-white/[0.02]"
+                    }`}
+                    onClick={() => setSelIdx(i)}
+                  >
+                    <div className="flex items-center gap-2">
+                      <button
+                        className="p-0.5 text-zinc-600 hover:text-accent-soft shrink-0"
+                        title={`Play from ${fmtDur(l.time)}`}
+                        onClick={(e) => { e.stopPropagation(); seekTo(l.time); }}
+                      >
+                        <Play className="h-3 w-3" />
+                      </button>
+                      <input
+                        data-lyrictime
+                        className="w-[58px] text-right font-mono text-[11px] text-zinc-400 outline-none border border-transparent focus:border-accent rounded px-1 py-0.5 shrink-0 tabular-nums"
+                        value={tsText}
+                        placeholder="0:00.00"
+                        title="Line start — type m:ss.xx"
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          const m = v.match(/^(?:(\d+):)?(\d{1,2})(?:[.:](\d{1,2}))?$/);
+                          // Half-typed text stays in the field (and in
+                          // `ts`) without touching the line's time.
+                          if (!m) {
+                            updateLine(i, { ts: v });
+                            return;
+                          }
+                          const t = (m[1] ? parseInt(m[1], 10) * 60 : 0) + parseInt(m[2], 10) + (m[3] ? parseInt(m[3].padEnd(2, "0").slice(0, 2), 10) / 100 : 0);
+                          updateLine(i, { ts: v, time: t });
+                        }}
+                      />
+                      <input
+                        data-lyrictext
+                        className="flex-1 bg-transparent text-sm text-zinc-200 outline-none border border-transparent focus:border-accent rounded px-1 py-0.5 min-w-0"
+                        value={l.text}
+                        placeholder="Lyric line…"
+                        onChange={(e) => updateLine(i, { text: e.target.value })}
+                      />
+                      {l.syl ? (
+                        <span className="chip text-[9px] bg-accent/10 border border-accent/25 text-accent-soft shrink-0" title="Syllable-synced (glued ELRC tags)">
+                          {l.words?.length}s
+                        </span>
+                      ) : l.words?.length ? (
+                        <span className="chip text-[9px] bg-white/5 border border-white/15 text-zinc-400 shrink-0" title="Word-synced (ELRC)">
+                          {l.words.length}w
+                        </span>
+                      ) : null}
+                      <div className="opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 flex gap-1 transition-opacity shrink-0">
+                        {l.words?.length ? (
+                          <button className="text-zinc-500 hover:text-amber-300" onClick={(e) => { e.stopPropagation(); updateLine(i, { words: undefined }); }} title="Clear this line's word/syllable timings">
+                            <Eraser className="h-3.5 w-3.5" />
+                          </button>
+                        ) : null}
+                        <button className="text-zinc-500 hover:text-accent-soft" onClick={(e) => { e.stopPropagation(); addLine(i); }} title="Add line after">
+                          <Plus className="h-3.5 w-3.5" />
+                        </button>
+                        <button className="text-zinc-500 hover:text-red-400" onClick={(e) => { e.stopPropagation(); removeLine(i); }} title="Remove line">
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                    {isActive && l.words?.length && (
+                      <div className="text-sm px-1 mt-1">
+                        <KaraokeWords
+                          words={l.words}
+                          time={playTime}
+                          currentClass="text-accent font-semibold scale-110"
+                          sungClass="text-white"
+                          upcomingClass="text-zinc-500"
+                        />
+                      </div>
+                    )}
+                    {isSel && l.words?.length ? (
+                      // stamped syllable chips: click one to seek to it
+                      <div className="flex flex-wrap gap-1 px-1 mt-1" title="Stamped syllables — click to seek">
+                        {l.words!.map((w, wi) => (
+                          <button
+                            key={wi}
+                            className={`chip text-[9px] border ${w.time <= playTime ? "bg-accent/10 border-accent/25 text-accent-soft" : "bg-white/5 border-white/10 text-zinc-400"} hover:border-accent`}
+                            onClick={(e) => { e.stopPropagation(); seekTo(w.time); }}
+                            title={`Seek to ${fmtDur(w.time)}`}
+                          >
+                            {w.text.trim() || "·"}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                    {pieces && pieces.length > 0 && (
+                      <div className="flex flex-wrap gap-1 px-1 mt-1 items-center" title="Syllable chips — each stamp assigns the next one">
+                        {pieces.map((s, si) => {
+                          const doneCount = pending && pending.idx === i ? pending.done : 0;
+                          const isNext = si === doneCount;
+                          const isDone = si < doneCount;
+                          return (
+                            <span
+                              key={si}
+                              className={`chip text-[9px] border ${
+                                isNext
+                                  ? "bg-accent/20 border-accent text-white"
+                                  : isDone
+                                    ? "bg-accent/5 border-accent/30 text-zinc-300"
+                                    : "bg-white/5 border-white/10 text-zinc-500"
+                              }`}
+                            >
+                              {s.text.trim() || "·"}
+                            </span>
+                          );
+                        })}
+                        {pending && pending.done > 0 && (
+                          <span className="text-[9px] text-zinc-500 ml-1">{pending.done}/{pieces.length}</span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* transport */}
+          <div className="flex items-center gap-2 px-4 py-2.5 border-t border-white/10 shrink-0">
+            <button className={`p-2 rounded-lg ${playing ? "bg-accent on-accent" : "bg-white/10 hover:bg-white/20 text-white"}`} onClick={togglePlay} title={`Play / pause (${keys.playPause})`}>
+              {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4 ml-0.5" />}
+            </button>
+            <span className="text-[10px] font-mono text-zinc-500 w-10 text-right tabular-nums">{fmtDur(playTime)}</span>
+            <input
+              type="range"
+              min={0}
+              max={dur || 0}
+              step={0.05}
+              value={Math.min(playTime, dur || 0)}
+              onChange={(e) => seekTo(Number(e.target.value))}
+              className="flex-1 min-w-0"
+              title="Seek within the track"
+            />
+            <span className="text-[10px] font-mono text-zinc-500 w-10 tabular-nums">{fmtDur(dur || 0)}</span>
+          </div>
         </div>
 
-        <div className="flex-1 min-h-0 flex flex-col lg:flex-row">
-          {/* ---- lines ---- */}
-          <div className="flex-1 min-w-0 min-h-0 flex flex-col">
-            {/* stamp mode + speed */}
-            <div className="flex items-center gap-2 px-4 py-2 border-b border-white/10 flex-wrap shrink-0">
-              <span className="text-[10px] uppercase tracking-wider text-zinc-500">Stamp</span>
-              {(["line", "word", "syllable"] as StampMode[]).map((m) => (
-                <button
-                  key={m}
-                  className={`chip text-[10px] border capitalize ${mode === m ? "bg-accent on-accent border-accent" : "bg-white/5 border-white/15 text-zinc-400 hover:text-white"}`}
-                  onClick={() => { setMode(m); pendingRef.current = null; }}
-                  title={m === "line"
-                    ? `Space stamps the line's start time (${keys.stampLine})`
-                    : m === "word"
-                      ? `Space taps word by word (${keys.stampWord})`
-                      : `Space taps syllable by syllable (${keys.stampSyllable})`}
+        {/* ---- right rail ---- */}
+        <div className="lg:w-80 shrink-0 border-t lg:border-t-0 lg:border-l border-white/10 flex flex-col min-h-0 overflow-auto">
+          <div className="p-4 space-y-4">
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 pb-1.5">Tools</div>
+              <div className="space-y-1.5">
+                <button className="btn-ghost !py-1.5 text-xs w-full justify-start flex items-center gap-2" onClick={runOfflineSync} disabled={busy !== null} title="Distribute word/syllable times inside each line's slot, weighted by length — a quick first pass to refine by hand">
+                  {busy === "offline" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
+                  Auto-distribute timings
+                </button>
+              </div>
+            </div>
+
+            <div className="pt-1 border-t border-white/10">
+              <div className="text-[10px] uppercase tracking-wider text-zinc-500 pb-1.5 pt-3">Save</div>
+              <div className="flex gap-1.5">
+                <select
+                  className="input !py-1.5 !px-2 text-xs flex-1"
+                  value={saveTarget}
+                  title="Where Save writes lyrics"
+                  onChange={(e) => {
+                    const v = e.target.value as "embedded" | "sidecar" | "both";
+                    setSaveTarget(v);
+                    localStorage.setItem("mlo.lyricsSaveTarget", v);
+                  }}
                 >
-                  {m}
-                </button>
-              ))}
-              <span className="w-px h-5 bg-white/10 mx-1" />
-              <button className="btn-ghost !px-2 !py-1 text-xs font-mono" onClick={() => stepSpeed(-1)} title={`Slower (${keys.speedSlower})`}>−</button>
-              <span className="text-xs font-mono text-zinc-300 min-w-[38px] text-center" title="Playback speed — timestamps always land in song time">{fmtSpeed(speed)}</span>
-              <button className="btn-ghost !px-2 !py-1 text-xs font-mono" onClick={() => { setSpeed(1); }} title="Reset speed to 1×">1×</button>
-              <button className="btn-ghost !px-2 !py-1 text-xs font-mono" onClick={() => stepSpeed(1)} title={`Faster (${keys.speedFaster})`}>+</button>
-              <span className="w-px h-5 bg-white/10 mx-1" />
-              <button className="btn-ghost !px-1.5 !py-0.5 text-[10px]" onClick={() => shiftAll(-0.1)} title="Shift ALL timestamps 0.1s earlier">−0.1s all</button>
-              <button className="btn-ghost !px-1.5 !py-0.5 text-[10px]" onClick={() => shiftAll(0.1)} title="Shift ALL timestamps 0.1s later">+0.1s all</button>
-              <button className="btn-ghost !px-1.5 !py-0.5 text-[10px]" onClick={() => nudgeLine(-0.05)} title="Nudge the selected line 0.05s earlier">sel −0.05</button>
-              <button className="btn-ghost !px-1.5 !py-0.5 text-[10px]" onClick={() => nudgeLine(0.05)} title="Nudge the selected line 0.05s later">sel +0.05</button>
-              <div className="flex-1" />
-              <button className="btn-ghost !py-1 text-xs" onClick={undo} title={`Undo (${keys.undo})`}>
-                <Undo2 className="h-3.5 w-3.5" />
+                  <option value="embedded">LYRICS tag</option>
+                  <option value="sidecar">.lrc sidecar</option>
+                  <option value="both">tag + .lrc</option>
+                </select>
+                <select
+                  className="input !py-1.5 !px-2 text-xs w-auto"
+                  value={dec}
+                  title="Timestamp precision"
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    setDec(v);
+                    localStorage.setItem("mlo.lyricsDecimals", String(v));
+                  }}
+                >
+                  <option value={2}>2 dec</option>
+                  <option value={3}>3 dec</option>
+                </select>
+              </div>
+              <button className="btn-primary !py-1.5 text-xs w-full mt-1.5 flex items-center gap-2 justify-center" onClick={save} title={`Save (${keys.save})`}>
+                <Save className="h-3.5 w-3.5" /> Save lyrics ({keys.save})
               </button>
             </div>
 
-            {lines.length === 0 ? (
-              <div className="flex-1 flex flex-col items-center justify-center gap-3 p-6 text-center">
-                <div className="text-sm text-zinc-400">No lyrics yet — paste plain or LRC lyrics to start.</div>
-                <textarea
-                  className="input font-mono text-xs w-full max-w-xl min-h-[180px]"
-                  placeholder={"Paste lyrics here, one line per line…\n(or full LRC with [mm:ss.xx] timestamps)"}
-                  value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                />
-                <button className="btn-primary !py-1.5 text-xs" onClick={useDraft} disabled={!draft.trim()}>
-                  Use these lyrics
-                </button>
-              </div>
-            ) : (
-              <div ref={listRef} className="flex-1 min-h-0 overflow-auto px-4 py-2 space-y-1">
-                {lines.map((l, i) => {
-                  const isSel = i === selIdx;
-                  const isActive = i === activeLine && playing;
-                  const pieces = isSel && mode === "syllable" && !l.words ? syllabifyLine(l.text) : null;
-                  const pending = pendingRef.current && pendingRef.current.idx === i ? pendingRef.current : null;
-                  // The field shows the stamp TEXT that was typed (or
-                  // parsed); an empty one — freshly stamped — falls back to
-                  // the line's time.
-                  const tsText = l.ts ? (l.ts.startsWith("[") ? l.ts.slice(1, -1) : l.ts) : fmtDur(l.time);
-                  return (
-                    <div
-                      key={i}
-                      ref={(el) => { rowRefs.current[i] = el; }}
-                      className={`group rounded-lg border px-2 py-1.5 transition-colors ${
-                        isActive
-                          ? "border-accent/60 bg-accent/15"
-                          : isSel
-                            ? "border-accent/40 bg-white/[0.04]"
-                            : "border-transparent hover:border-white/10 hover:bg-white/[0.02]"
-                      }`}
-                      onClick={() => setSelIdx(i)}
-                    >
-                      <div className="flex items-center gap-2">
-                        <button
-                          className="p-0.5 text-zinc-600 hover:text-accent-soft shrink-0"
-                          title={`Play from ${fmtDur(l.time)}`}
-                          onClick={(e) => { e.stopPropagation(); seekTo(l.time); }}
-                        >
-                          <Play className="h-3 w-3" />
-                        </button>
-                        <input
-                          data-lyrictime
-                          className="w-[58px] text-right font-mono text-[11px] text-zinc-400 outline-none border border-transparent focus:border-accent rounded px-1 py-0.5 shrink-0 tabular-nums"
-                          value={tsText}
-                          placeholder="0:00.00"
-                          title="Line start — type m:ss.xx"
-                          onChange={(e) => {
-                            const v = e.target.value;
-                            const m = v.match(/^(?:(\d+):)?(\d{1,2})(?:[.:](\d{1,2}))?$/);
-                            // Half-typed text stays in the field (and in
-                            // `ts`) without touching the line's time.
-                            if (!m) {
-                              updateLine(i, { ts: v });
-                              return;
-                            }
-                            const t = (m[1] ? parseInt(m[1], 10) * 60 : 0) + parseInt(m[2], 10) + (m[3] ? parseInt(m[3].padEnd(2, "0").slice(0, 2), 10) / 100 : 0);
-                            updateLine(i, { ts: v, time: t });
-                          }}
-                        />
-                        <input
-                          data-lyrictext
-                          className="flex-1 bg-transparent text-sm text-zinc-200 outline-none border border-transparent focus:border-accent rounded px-1 py-0.5 min-w-0"
-                          value={l.text}
-                          placeholder="Lyric line…"
-                          onChange={(e) => updateLine(i, { text: e.target.value })}
-                        />
-                        {l.syl ? (
-                          <span className="chip text-[9px] bg-accent/10 border border-accent/25 text-accent-soft shrink-0" title="Syllable-synced (glued ELRC tags)">
-                            {l.words?.length}s
-                          </span>
-                        ) : l.words?.length ? (
-                          <span className="chip text-[9px] bg-white/5 border border-white/15 text-zinc-400 shrink-0" title="Word-synced (ELRC)">
-                            {l.words.length}w
-                          </span>
-                        ) : null}
-                        <div className="opacity-0 group-hover:opacity-100 flex gap-1 transition-opacity shrink-0">
-                          {l.words?.length ? (
-                            <button className="text-zinc-500 hover:text-amber-300" onClick={(e) => { e.stopPropagation(); updateLine(i, { words: undefined }); }} title="Clear this line's word/syllable timings">
-                              <Eraser className="h-3.5 w-3.5" />
-                            </button>
-                          ) : null}
-                          <button className="text-zinc-500 hover:text-accent-soft" onClick={(e) => { e.stopPropagation(); addLine(i); }} title="Add line after">
-                            <Plus className="h-3.5 w-3.5" />
-                          </button>
-                          <button className="text-zinc-500 hover:text-red-400" onClick={(e) => { e.stopPropagation(); removeLine(i); }} title="Remove line">
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                      {isActive && l.words?.length && (
-                        <div className="text-sm px-1 mt-1">
-                          <KaraokeWords
-                            words={l.words}
-                            time={playTime}
-                            currentClass="text-accent font-semibold scale-110"
-                            sungClass="text-white"
-                            upcomingClass="text-zinc-500"
-                          />
-                        </div>
-                      )}
-                      {isSel && l.words?.length ? (
-                        // stamped syllable chips: click one to seek to it
-                        <div className="flex flex-wrap gap-1 px-1 mt-1" title="Stamped syllables — click to seek">
-                          {l.words!.map((w, wi) => (
-                            <button
-                              key={wi}
-                              className={`chip text-[9px] border ${w.time <= playTime ? "bg-accent/10 border-accent/25 text-accent-soft" : "bg-white/5 border-white/10 text-zinc-400"} hover:border-accent`}
-                              onClick={(e) => { e.stopPropagation(); seekTo(w.time); }}
-                              title={`Seek to ${fmtDur(w.time)}`}
-                            >
-                              {w.text.trim() || "·"}
-                            </button>
-                          ))}
-                        </div>
-                      ) : null}
-                      {pieces && pieces.length > 0 && (
-                        <div className="flex flex-wrap gap-1 px-1 mt-1 items-center" title="Syllable chips — each stamp assigns the next one">
-                          {pieces.map((s, si) => {
-                            const doneCount = pending && pending.idx === i ? pending.done : 0;
-                            const isNext = si === doneCount;
-                            const isDone = si < doneCount;
-                            return (
-                              <span
-                                key={si}
-                                className={`chip text-[9px] border ${
-                                  isNext
-                                    ? "bg-accent/20 border-accent text-white"
-                                    : isDone
-                                      ? "bg-accent/5 border-accent/30 text-zinc-300"
-                                      : "bg-white/5 border-white/10 text-zinc-500"
-                                }`}
-                              >
-                                {s.text.trim() || "·"}
-                              </span>
-                            );
-                          })}
-                          {pending && pending.done > 0 && (
-                            <span className="text-[9px] text-zinc-500 ml-1">{pending.done}/{pieces.length}</span>
-                          )}
-                        </div>
-                      )}
-                      {xlitLines?.[i]?.trim() && (
-                        <div className="text-xs text-zinc-400 px-1 mt-0.5 italic" title="Romanization preview">{xlitLines[i]}</div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {/* transport */}
-            <div className="flex items-center gap-2 px-4 py-2.5 border-t border-white/10 shrink-0">
-              <button className={`p-2 rounded-lg ${playing ? "bg-accent on-accent" : "bg-white/10 hover:bg-white/20 text-white"}`} onClick={togglePlay} title={`Play / pause (${keys.playPause})`}>
-                {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4 ml-0.5" />}
-              </button>
-              <span className="text-[10px] font-mono text-zinc-500 w-10 text-right tabular-nums">{fmtDur(playTime)}</span>
-              <input
-                type="range"
-                min={0}
-                max={dur || 0}
-                step={0.05}
-                value={Math.min(playTime, dur || 0)}
-                onChange={(e) => seekTo(Number(e.target.value))}
-                className="flex-1 min-w-0"
-                title="Seek within the track"
-              />
-              <span className="text-[10px] font-mono text-zinc-500 w-10 tabular-nums">{fmtDur(dur || 0)}</span>
-            </div>
-          </div>
-
-          {/* ---- right rail ---- */}
-          <div className="lg:w-80 shrink-0 border-t lg:border-t-0 lg:border-l border-white/10 flex flex-col min-h-0 overflow-auto">
-            <div className="p-4 space-y-4">
-              <div>
-                <div className="text-[10px] uppercase tracking-wider text-zinc-500 pb-1.5">Tools</div>
-                <div className="space-y-1.5">
-                  <button className="btn-ghost !py-1.5 text-xs w-full justify-start flex items-center gap-2" onClick={runOfflineSync} disabled={aiBusy} title="Distribute word/syllable times inside each line's slot, weighted by length — a quick first pass to refine by hand">
-                    {busy === "offline" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
-                    Auto-distribute timings
-                  </button>
-                </div>
-              </div>
-
-              <div>
-                <div className="text-[10px] uppercase tracking-wider text-zinc-500 pb-1.5">Romanization (foreign scripts)</div>
-                <div className="flex gap-1.5">
-                  <button className="btn-ghost !py-1.5 text-xs flex-1 flex items-center gap-2 justify-center" onClick={romanize} disabled={!!busy || !lines.length} title="Romanize every line (e.g. Japanese → romaji) for review">
-                    {busy === "xlit" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Languages className="h-3.5 w-3.5" />}
-                    Romanize
-                  </button>
-                  <button className="btn-ghost !py-1.5 text-xs flex-1 flex items-center gap-2 justify-center" onClick={storeXlit} disabled={!!busy} title="Store the romanization in TRANSLITERATION-<lang>-LATN (+ .romaji.lrc sidecar per settings). The LYRICS field keeps the original language.">
-                    {busy === "xlit-store" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-                    Store in tags
-                  </button>
-                </div>
-                <div className="text-[10px] text-zinc-600 mt-1.5">
-                  The LYRICS tag always keeps the original script — romanization is stored beside it, so Japanese songs stay tagged in Japanese.
-                </div>
-              </div>
-
-              <div className="pt-1 border-t border-white/10">
-                <div className="text-[10px] uppercase tracking-wider text-zinc-500 pb-1.5 pt-3">Save</div>
-                <div className="flex gap-1.5">
-                  <select
-                    className="input !py-1.5 !px-2 text-xs flex-1"
-                    value={saveTarget}
-                    title="Where Save writes lyrics"
-                    onChange={(e) => {
-                      const v = e.target.value as "embedded" | "sidecar" | "both";
-                      setSaveTarget(v);
-                      localStorage.setItem("mlo.lyricsSaveTarget", v);
-                    }}
-                  >
-                    <option value="embedded">LYRICS tag</option>
-                    <option value="sidecar">.lrc sidecar</option>
-                    <option value="both">tag + .lrc</option>
-                  </select>
-                  <select
-                    className="input !py-1.5 !px-2 text-xs w-auto"
-                    value={dec}
-                    title="Timestamp precision"
-                    onChange={(e) => {
-                      const v = Number(e.target.value);
-                      setDec(v);
-                      localStorage.setItem("mlo.lyricsDecimals", String(v));
-                    }}
-                  >
-                    <option value={2}>2 dec</option>
-                    <option value={3}>3 dec</option>
-                  </select>
-                </div>
-                <button className="btn-primary !py-1.5 text-xs w-full mt-1.5 flex items-center gap-2 justify-center" onClick={save} title={`Save (${keys.save})`}>
-                  <Save className="h-3.5 w-3.5" /> Save lyrics ({keys.save})
-                </button>
-              </div>
-
-              <div className="pt-1 border-t border-white/10 text-[10px] text-zinc-600 leading-relaxed">
-                <div className="uppercase tracking-wider text-zinc-500 pb-1">How to sync</div>
-                Press <b>Play</b>, pick the <b>syllable</b> stamp mode, then tap{" "}
-                <kbd className="chip bg-raise border border-border px-1">{keys.stampLine}</kbd> (or{" "}
-                <kbd className="chip bg-raise border border-border px-1">{keys.stampSyllable}</kbd>) once per{" "}
-                syllable as it is sung — the line fills with syllable times and advances.
-                Line mode stamps whole lines; the AI button listens to the audio and does
-                the whole track for you. Slow the playback to 0.5× for fast passages —
-                timestamps always land in song time.
-              </div>
+            <div className="pt-1 border-t border-white/10 text-[10px] text-zinc-600 leading-relaxed">
+              <div className="uppercase tracking-wider text-zinc-500 pb-1">How to sync</div>
+              Press <b>Play</b>, pick the <b>syllable</b> stamp mode, then tap{" "}
+              <kbd className="chip bg-raise border border-border px-1">{keys.stampLine}</kbd> (or{" "}
+              <kbd className="chip bg-raise border border-border px-1">{keys.stampSyllable}</kbd>) once per{" "}
+              syllable as it is sung — the line fills with syllable times and advances.
+              Line mode stamps whole lines. Slow the playback to 0.5× for fast passages —
+              timestamps always land in song time.
             </div>
           </div>
         </div>
       </div>
-    </div>,
+    </Modal>,
     document.body
   );
 }

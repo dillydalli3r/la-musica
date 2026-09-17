@@ -1,5 +1,17 @@
-"""Interactive console menu (python -m mlo). The GUI app uses the modules directly."""
+"""Interactive terminal front end: start it with ``python -m mlo``.
+
+The menus, the Run All / Run Custom sequences and the configuration editor all
+live here; mlo/ui.py draws, mlo/report.py summarises, mlo/stats.py accounts.
+The scripts are the ones server/script_runners.py exposes over /api/run, so
+SCRIPTS below must keep the same ids and names.
+
+Every script runs isolated: one that fails (or whose module cannot be imported)
+is reported as an error and the rest of the sequence still runs. Ctrl+C aborts
+the session cleanly.
+"""
+import importlib
 import os
+import traceback
 
 from .audit import run_audit_library
 from .autotag import run_auto_tagging
@@ -11,33 +23,6 @@ from .grader import run_grade_library
 from .images import run_process_images
 from .loudness import run_calc_dr_replaygain
 from .lyrics import run_format_lyrics
-try:
-    from .accurip import run_generate_accurip
-except ImportError:
-    from .stats import new_stats as _ns_accurip
-
-    def run_generate_accurip(config):
-        from .ui import log
-        log("AccurateRip unavailable (import failed)")
-        return _ns_accurip()
-try:
-    from .format_all import run_format_all
-except ImportError:
-    from .stats import new_stats as _ns_fmtall
-
-    def run_format_all(config):
-        from .ui import log
-        log("Format All unavailable (import failed)")
-        return _ns_fmtall()
-from .remux import run_remux_videos
-try:
-    from .audiometa import run_analyze_audiometa
-except ImportError:
-    run_analyze_audiometa = None
-try:
-    from .lyrics_fetch import run_fetch_lyrics
-except ImportError:
-    run_fetch_lyrics = None
 from .report import print_results, print_grade_results, print_combined_results
 from .tools import detect_all_tools
 from .ui import (
@@ -50,6 +35,62 @@ from .config import load_config, save_config, DEFAULT_RUN_ALL_ORDER
 if os.name == "nt":
     os.system("")
 
+# The one list every menu is built from: id -> (name, what the script does).
+# Names must equal server/script_runners.py RUNNERS (and web/src/lib/scripts.ts)
+# so the terminal can never claim a number means something the API does not.
+SCRIPTS = (
+    (1, "Format lyrics", "multi-format + MEDIA/SOURCE normalization"),
+    (2, "Format CUEs", "CD-N rename + FILE/INDEX layout"),
+    (3, "Optimize FLACs", "lossless re-encode"),
+    (4, "Grade", "per-album tag/lyrics/cover report"),
+    (5, "Process images", "JXL / lossless / JXL-back"),
+    (6, "Audit library", "AudioAuditor: fake lossless / upscaled / MQA"),
+    (7, "DR & ReplayGain", "rsgain + simple-dr-meter tags"),
+    (8, "Auto tagging", "advisory / instrumental / mood / energy / genre"),
+    (9, "AccurateRip", "CUETools .accurip files"),
+    (10, "Format all", "final pass: .accurip / .cue / .lrc / tags"),
+    (11, "Remux videos (MKV)", "any video -> MKV, audio -> FLAC"),
+    (12, "Key & BPM", "musical key + tempo tags"),
+    (13, "Fetch lyrics", "LRCLIB synced/plain"),
+    (14, "Beets tagging", "MusicBrainz via beets"),
+)
+SCRIPT_LABELS = {sid: name for sid, name, _ in SCRIPTS}
+
+# Scripts whose feature has its own on/off switch (mirror of the server's
+# _DISABLED): with the switch off the runner is a no-op at best, so the CLI
+# skips the script instead of reporting an empty run.
+SCRIPT_GATES = {7: "dr_replaygain_enabled", 12: "audiometa_enabled"}
+
+
+def _print_script_list(with_desc=True):
+    """'Available scripts' block shared by every menu; numbers stay aligned."""
+    name_w = max(len(name) for name in SCRIPT_LABELS.values())
+    for sid, name, desc in SCRIPTS:
+        tail = f"  ({desc})" if with_desc else ""
+        print(f"  {sid:>2}. {name:<{name_w}}{tail}")
+
+
+def _gate_reason(config, script_id):
+    """Why *script_id* is skipped, or '' when it can run."""
+    gate = SCRIPT_GATES.get(script_id)
+    if gate and not config.get(gate, True):
+        return f"{SCRIPT_LABELS[script_id]}: {gate} is off (see Configuration)"
+    return ""
+
+
+def _run_isolated(name, runner, config):
+    """Run one script; a failure becomes an error result, never a crash.
+
+    Same contract as the server's run_script: the caller keeps going and the
+    failure shows up in the per-script results with a non-zero error count.
+    """
+    try:
+        return runner(config)
+    except Exception as e:
+        traceback.print_exc()
+        log(c(f"ERROR: {name} failed: {e}", Color.RED))
+        return {"error_count": 1, "errors": [(name, str(e))]}
+
 
 def edit_run_all_order(config):
     while True:
@@ -57,25 +98,13 @@ def edit_run_all_order(config):
         print_header("EDIT RUN ALL ORDER")
 
         print("  Available scripts:")
-        print("    1. Format Lyrics")
-        print("    2. Format CUEs")
-        print("    3. Optimize FLACs")
-        print("    4. Grade Library")
-        print("    5. Process Images")
-        print("    6. Audit Library")
-        print("    7. DR & ReplayGain")
-        print("    8. Auto Tagging")
-        print("    9. AccurateRip")
-        print("   10. Format All")
-        print("   11. Video Remux (MKV)")
-        print("   12. Key & BPM")
-        print("   13. Fetch Lyrics")
-        print("   14. Beets Tagging")
-        print("   15. Lyrics Translate/Transliterate")
-        print("-" * 72)
+        _print_script_list(with_desc=False)
+        print_separator()
 
         current = config.get("run_all_order", DEFAULT_RUN_ALL_ORDER)
         print(f"  Current order: {c(','.join(map(str, current)), Color.CYAN)}")
+        print("  Scripts you leave out are not dropped: they keep their default")
+        print("  order and run after the ones you list.")
         print("Enter new order (comma-separated, e.g. 3,1,2,5,4) or '0' to cancel:")
 
         choice = input(c("> ", Color.CYAN)).strip()
@@ -88,7 +117,7 @@ def edit_run_all_order(config):
         valid = True
 
         for p in parts:
-            if p.isdigit() and 1 <= int(p) <= 15:
+            if p.isdigit() and int(p) in SCRIPT_LABELS:
                 pid = int(p)
                 if pid not in order:
                     order.append(pid)
@@ -97,9 +126,17 @@ def edit_run_all_order(config):
                 valid = False
 
         if valid and order:
+            # Run All must cover every script: ids that were left out keep their
+            # default order behind the listed ones.
+            order += [sid for sid in DEFAULT_RUN_ALL_ORDER if sid not in order]
             config["run_all_order"] = order
             save_config(config)
-            print(c("\nSaved.", Color.GREEN))
+            # save_config normalizes on write (legacy orders are migrated and
+            # missing scripts anchored by position), so keep the stored order —
+            # the menu and Run All must show and execute what the next session
+            # loads.
+            config["run_all_order"] = load_config()["run_all_order"]
+            print(c(f"\nSaved. Effective order: {config['run_all_order']}", Color.GREEN))
             pause_for_input()
             return
         elif not valid:
@@ -151,7 +188,7 @@ def show_config_menu(config):
         print(f" 24. Audit Cutoff Allowance   : {config.get('audit_cutoff_allow', 0)} Hz (0=default)")
         print(f" 25. Audit Clipping           : {config.get('audit_clipping', True)}")
         print(f" 26. Audit MQA                : {config.get('audit_mqa', True)}")
-        print(f" 27. Audit AI Detection       : {config.get('audit_ai', True)}")
+        print(f" 27. Detect Upscaled Audio    : {config.get('audit_ai', True)}")
         print(f" 28. Audit Fake Stereo        : {config.get('audit_fake_stereo', True)}")
         print(f" 29. Audit Silence            : {config.get('audit_silence', True)}")
         print(f" 30. Audit Dynamic Range      : {config.get('audit_dynamic_range', True)}")
@@ -163,6 +200,7 @@ def show_config_menu(config):
         print(f" 36. Auto Album Advisory      : {config.get('auto_advisory', True)}")
         print(f" 37. Auto Instrumental Tag    : {config.get('auto_instrumental', True)}")
         print(f" 38. Force Auto Tagging       : {config.get('force_auto_tag', False)}")
+        print(f" 39. Key & BPM Enabled        : {config.get('audiometa_enabled', True)}")
 
         print_separator()
         print("  Auto-detected encoder versions (.dependencies):")
@@ -360,7 +398,10 @@ def show_config_menu(config):
 
         elif choice == "24":
             try:
-                new_val = int(input("Cutoff allowance in Hz (0 = CLI default 19600, 20000+ for HD masters): ").strip())
+                new_val = int(input(
+                    "Cutoff allowance in Hz (0 = pass no --cutoff-allow flag, "
+                    "20000+ for HD masters): "
+                ).strip())
                 if 0 <= new_val <= 24000:
                     config["audit_cutoff_allow"] = new_val
                     save_config(config)
@@ -386,7 +427,7 @@ def show_config_menu(config):
             label = {
                 "25": "clipping detection",
                 "26": "MQA detection",
-                "27": "AI detection",
+                "27": "upscaled-audio detection",
                 "28": "fake stereo detection",
                 "29": "silence detection",
                 "30": "dynamic range",
@@ -429,6 +470,14 @@ def show_config_menu(config):
             print(f"\nSaved. Force Auto Tagging = {config['force_auto_tag']}")
             pause_for_input()
 
+        elif choice == "39":
+            config["audiometa_enabled"] = tf("Enable Key & BPM analysis (script 12)? (y/n): ")
+            save_config(config)
+            print(f"\nSaved. Key & BPM Enabled = {config['audiometa_enabled']}")
+            if not config["audiometa_enabled"]:
+                print(c("  -> Script 12 is skipped by Run All while this is off.", Color.YELLOW))
+            pause_for_input()
+
         elif choice == "0":
             break
 
@@ -442,21 +491,7 @@ def show_custom_menu():
     print_header("CUSTOM RUN ORDER")
 
     print("  Available scripts:")
-    print("    1. Format Lyrics")
-    print("    2. Format CUEs")
-    print("    3. Optimize FLACs")
-    print("    4. Grade Library")
-    print("    5. Process Images")
-    print("    6. Audit Library")
-    print("    7. DR & ReplayGain")
-    print("    8. Auto Tagging")
-    print("    9. AccurateRip")
-    print("   10. Format All")
-    print("   11. Video Remux (MKV)")
-    print("   12. Key & BPM")
-    print("   13. Fetch Lyrics")
-    print("   14. Beets Tagging")
-    print("   15. Lyrics Translate/Transliterate")
+    _print_script_list(with_desc=False)
     print_separator()
 
     print("Enter the order of scripts to run (comma-separated, e.g. '3,1,2,5'):")
@@ -466,62 +501,61 @@ def show_custom_menu():
     order = []
 
     for p in parts:
-        if p in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11",
-                 "12", "13", "14", "15"):
+        if p.isdigit() and int(p) in SCRIPT_LABELS:
             order.append(int(p))
         else:
             print(c(f"  Ignoring invalid entry: '{p}'", Color.YELLOW))
 
-    if order:
-        input("\nPress Enter to start...")
-        return order
+    return order
 
-    return []
+
+def _optional_runner(module, attr):
+    """Resolve an optional script runner lazily.
+
+    A module that cannot be imported must not look like a clean run: the
+    returned callable raises, so the failure is reported as a per-script error
+    (the server answers 400 "runner N not available" for the same case).
+    """
+    try:
+        return getattr(importlib.import_module(module), attr)
+    except (ImportError, AttributeError) as e:
+        def _unavailable(config, _module=module, _err=e):
+            raise RuntimeError(f"{_module} unavailable: {_err}")
+
+        return _unavailable
 
 
 def build_script_runners():
     """Map script id -> (label, runner) for every pipeline script.
 
-    Optional scripts whose dependency fails to import are omitted, so a
-    caller can degrade gracefully (report/skip) instead of crashing.
+    Labels come from SCRIPTS, so the terminal and the API name every script the
+    same way; scripts 9-14 resolve their module on first use.
     """
     runners = {
-        1: ("Format Lyrics", run_format_lyrics),
-        2: ("Format CUEs", run_format_cues),
-        3: ("Optimize FLACs", run_optimize_flacs),
-        4: ("Grade Library", run_grade_library),
-        5: ("Process Images", run_process_images),
-        6: ("Audit Library", run_audit_library),
-        7: ("DR & ReplayGain", run_calc_dr_replaygain),
-        8: ("Auto Tagging", run_auto_tagging),
-        9: ("AccurateRip", run_generate_accurip),
-        10: ("Format All", run_format_all),
-        11: ("Video Remux", run_remux_videos),
+        1: run_format_lyrics,
+        2: run_format_cues,
+        3: run_optimize_flacs,
+        4: run_grade_library,
+        5: run_process_images,
+        6: run_audit_library,
+        7: run_calc_dr_replaygain,
+        8: run_auto_tagging,
+        9: _optional_runner("mlo.accurip", "run_generate_accurip"),
+        10: _optional_runner("mlo.format_all", "run_format_all"),
+        11: _optional_runner("mlo.remux", "run_remux_videos"),
+        12: _optional_runner("mlo.audiometa", "run_analyze_audiometa"),
+        13: _optional_runner("mlo.lyrics_fetch", "run_fetch_lyrics"),
+        14: _optional_runner("server.beetscfg", "run_beets_tagging"),
     }
-    try:
-        from .audiometa import run_analyze_audiometa
-        runners[12] = ("Key & BPM", run_analyze_audiometa)
-    except ImportError:
-        pass
-    try:
-        from .lyrics_fetch import run_fetch_lyrics
-        runners[13] = ("Fetch Lyrics", run_fetch_lyrics)
-    except ImportError:
-        pass
-    try:
-        from server.beetscfg import run_beets_tagging
-        runners[14] = ("Beets Tagging", run_beets_tagging)
-    except ImportError:
-        pass
-    try:
-        from .lyrics_xlit import run_lyrics_xlit
-        runners[15] = ("Lyrics Translate/Transliterate", run_lyrics_xlit)
-    except ImportError:
-        pass
-    return runners
+    return {sid: (SCRIPT_LABELS[sid], runner) for sid, runner in runners.items()}
 
 
 def run_scripts_sequence(config, script_ids, title):
+    """Run *script_ids* in order, one script per step.
+
+    Each script is isolated: a failure is reported for that script and the
+    sequence continues. Ctrl+C still aborts the whole session.
+    """
     runners = build_script_runners()
 
     auto_advance = config.get("auto_advance", True)
@@ -542,27 +576,31 @@ def run_scripts_sequence(config, script_ids, title):
     input("Press Enter to start...")
 
     for i, script_id in enumerate(script_ids):
-        try:
-            name, runner = runners[script_id]
-        except KeyError:
+        entry = runners.get(script_id)
+        if entry is None:
             log(c(f"  Skipping unknown script id: {script_id}", Color.YELLOW))
             continue
-        if runner is None:
-            log(c(f"  Skipping unavailable script: {name}", Color.YELLOW))
+        name, runner = entry
+
+        reason = _gate_reason(config, script_id)
+        if reason:
+            log(c(f"  Skipping {reason}", Color.YELLOW))
             continue
 
         if i > 0:
             if auto_advance:
+                # Clear first, then announce: the notice stays on screen while
+                # the script starts instead of being wiped right after printing.
+                clear_screen()
                 log(f"\n--- Auto-advancing to: {c(name, Color.CYAN)} ---\n")
             else:
                 pause_for_input()
                 clear_screen()
 
-        clear_screen()
         print(f">>> Starting: {c(name, Color.BOLD)}")
         print_separator()
 
-        s = runner(config)
+        s = _run_isolated(name, runner, config)
         per_script.append((name, s))
 
         if not s.get("is_grader"):
@@ -597,26 +635,13 @@ def show_main_menu(config):
     clear_screen()
     print_header("AUDIO & IMAGE PROCESSING SUITE (Stable Final Edition)")
 
-    print("  1. Format Lyrics    (multi-format + MEDIA/SOURCE normalization)")
-    print("  2. Format CUEs      (.cue files)")
-    print("  3. Optimize FLACs   (lossless re-encode)")
-    print("  4. Grade Library    (detailed human-readable report)")
-    print("  5. Process Images   (JXL / lossless / JXL-back)")
-    print("  6. Audit Library    (AudioAuditor: fake lossless / AI / MQA)")
-    print("  7. DR & ReplayGain  (rsgain + simple-dr-meter tags)")
-    print("  8. Auto Tagging     (advisory + instrumental)")
-    print("  9. AccurateRip     (CUETools .accurip files)")
-    print(" 10. Format All      (canonical trim pass)")
-    print(" 11. Video Remux     (any video -> MKV, audio -> FLAC)")
-    print(" 12. Key & BPM       (musical key + tempo tags)")
-    print(" 13. Fetch Lyrics    (LRCLIB synced/plain)")
-    print(" 14. Beets Tagging   (MusicBrainz via beets)")
-    print(" 15. Lyrics Xlit     (translate/transliterate)")
-    print(f" 16. Run All          {config.get('run_all_order', DEFAULT_RUN_ALL_ORDER)}")
-    print(" 17. Run Custom       (select order)")
-    print(" 18. Configuration")
-    print(" 19. Dependencies     (download latest tools)")
-    print(c("  0. Exit", Color.YELLOW))
+    _print_script_list()
+
+    print(f"  16. {'Run All':<23}  {config.get('run_all_order', DEFAULT_RUN_ALL_ORDER)}")
+    print(f"  17. {'Run Custom':<23}  (select order and scripts)")
+    print(f"  18. {'Configuration':<23}  (39 options incl. Run All order)")
+    print(f"  19. {'Dependencies':<23}  (download latest tools)")
+    print(c(f"   0. {'Exit':<23}", Color.YELLOW))
 
     print()
     print("  NOTE: Only FLAC receives lossless recompression.")
@@ -641,6 +666,7 @@ def manage_dependencies():
         return
 
     print()
+    name_w = max(len(name) for name in DISPLAY_NAMES.values())
     for key, name in DISPLAY_NAMES.items():
         iv = installed.get(key, "-")
         lv = latest.get(key, "?")
@@ -649,7 +675,7 @@ def manage_dependencies():
             else c("update available", Color.YELLOW) if iv != "-"
             else c("not installed", Color.RED)
         )
-        print(f"  {name:<15} installed {iv:<10} latest {lv:<10} {state}")
+        print(f"  {name:<{name_w}}  installed {iv:<10} latest {lv:<10} {state}")
     print()
 
     choice = input("Install/update all tools now? (y/n): ").strip().lower()
@@ -672,6 +698,22 @@ def manage_dependencies():
 
 
 def main():
+    """Interactive session; Ctrl+C aborts it, other errors are reported.
+
+    The handler lives here (not in `__main__`) so `python -m mlo` really gets
+    it: a failing runner used to kill the CLI with a raw traceback.
+    """
+    try:
+        _session()
+    except KeyboardInterrupt:
+        print(c("\nAborted (Ctrl+C).", Color.YELLOW))
+    except Exception:
+        print(c("\n--- FATAL ERROR ---", Color.RED))
+        traceback.print_exc()
+        print("-------------------")
+
+
+def _session():
     if not HAS_MUTAGEN:
         print(c("ERROR: mutagen is required.  pip install mutagen", Color.RED))
         return
@@ -690,18 +732,13 @@ def main():
         if choice == "0":
             break
 
-        elif choice in ("1", "2", "3", "4", "5", "6", "7", "8", "9", "10",
-                         "11", "12", "13", "14", "15"):
+        elif choice.isdigit() and int(choice) in SCRIPT_LABELS:
             script_id = int(choice)
-            try:
-                name, runner = runners[script_id]
-            except KeyError:
-                print(c("\nScript not available in this menu.", Color.YELLOW))
-                pause_for_input()
-                continue
-            if runner is None:
-                print(c("\nScript unavailable (missing optional dependency).",
-                        Color.YELLOW))
+            name, runner = runners[script_id]
+
+            reason = _gate_reason(config, script_id)
+            if reason:
+                print(c(f"\nSkipped: {reason}", Color.YELLOW))
                 pause_for_input()
                 continue
 
@@ -709,7 +746,7 @@ def main():
             print(f">>> Starting: {c(name, Color.BOLD)}")
             print_separator()
 
-            stats = runner(config)
+            stats = _run_isolated(name, runner, config)
 
             if stats.get("is_grader"):
                 print_grade_results(stats, title=f"RESULTS - {name}")
@@ -741,15 +778,3 @@ def main():
         else:
             print(c("\nInvalid option. Please try again.", Color.RED))
             pause_for_input()
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        pass
-    except Exception:
-        import traceback
-        print(c("\n--- FATAL ERROR ---", Color.RED))
-        traceback.print_exc()
-        print("-------------------")

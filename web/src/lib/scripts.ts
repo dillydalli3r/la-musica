@@ -18,7 +18,6 @@ export const SCRIPTS: { ids: number[]; label: string }[] = [
   { ids: [12], label: "Key & BPM" },
   { ids: [13], label: "Fetch lyrics" },
   { ids: [14], label: "Beets tagging" },
-  { ids: [15], label: "Lyrics xlit / translate (AI)" },
 ];
 
 /** Script number → label, for surfaces that render a bare id. */
@@ -27,7 +26,7 @@ export const SCRIPT_LABEL: Record<number, string> = Object.fromEntries(
 );
 
 /** Default Run All order: videos first (slow, bit-exact), grading last. */
-export const DEFAULT_RUN_ALL = [11, 14, 1, 2, 8, 13, 15, 12, 3, 5, 9, 6, 4, 7, 10];
+export const DEFAULT_RUN_ALL = [11, 14, 1, 2, 8, 13, 12, 3, 5, 9, 6, 4, 7, 10];
 
 /** True when the id is a script the runner knows about. */
 export function isScriptId(n: unknown): n is number {

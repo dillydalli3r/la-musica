@@ -58,7 +58,7 @@ export default function TrackDownloadExport({ path, title, compact, iconOnly, di
       if (cached) {
         await uncacheTrack(path);
         setCached(false);
-        toast("Removed from the offline cache");
+        toast.success("Removed from the offline cache");
       } else {
         toast("Caching for offline playback…");
         await cacheTrack(path);

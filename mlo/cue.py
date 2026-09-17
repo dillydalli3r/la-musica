@@ -8,7 +8,7 @@ from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _walk_files, _diff_bytes,
     _collect_targets, worker_count,
 )
-from .ui import print_header, log, log_file_result
+from .ui import print_header, log
 
 def canonical_cue_text(content, keep_empty_lines, keep_other_lines,
                        file_type, append_final_newline):
@@ -274,13 +274,11 @@ def run_format_cues(config):
                 stats["total_scanned"] += 1
                 stats["error_count"] += 1
                 stats["errors"].append((fn, err))
-                log_file_result(fn, "fail", info=err)
                 _pbar_update(pbar, counts, kind="fail")
                 continue
 
             if not ok:
                 stats["skipped_count"] += 1
-                log_file_result(fn, "skip", info=err or "unchanged")
                 _pbar_skip(pbar, counts)
                 continue
 
@@ -288,7 +286,6 @@ def run_format_cues(config):
             stats["modified_count"] += 1
             stats["total_bytes_removed"] += br
             stats["total_bytes_added"] += ba
-            log_file_result(fn, "ok", br, ba)
             _pbar_update(pbar, counts, kind="ok")
 
         if pbar:

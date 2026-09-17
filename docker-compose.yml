@@ -1,16 +1,79 @@
+# la musica - Docker Compose template.
+#
+# Music folder: MLO_MUSIC_FOLDER is the folder INSIDE the container holding your
+# library, and it must be the target of the bind mount below. Point the host
+# side (./music) at your real library:
+#
+#   volumes:
+#     - /path/to/your/music:/music      # Linux/macOS
+#     - D:/Music:/music                 # Windows (Docker Desktop)
+#
+# Everything the app writes lives under /music/.mlo (data/, downloads/, trash/)
+# except runtime-fetched tools, which go to the /app/.dependencies volume.
+#
+# Commands:
+#   docker compose up -d --build     # build from source and start
+#   docker compose logs -f           # follow the backend log
+#   docker compose pull              # fetch the prebuilt GHCR image
+#   docker compose up -d             # (re)start on that image
+#   docker compose down              # stop and remove
+#
+# Automatic updates (optional): uncomment the watchtower service at the bottom.
+# watchtower polls the registry and restarts this container when a new image
+# tag/digest appears - i.e. it needs the `image:` line below (a locally built
+# image has nothing to compare against). The label on this service plus
+# WATCHTOWER_LABEL_ENABLE means watchtower touches la musica and nothing else
+# you may run on the same host.
+
 services:
   lamusica:
     build: .
+    image: ghcr.io/dillydalli3r/la-musica:latest
     container_name: la-musica
     ports:
       - "8000:8000"
     environment:
+      # Folder inside the container to treat as the music library.
       - MLO_MUSIC_FOLDER=/music
     volumes:
-      # Point this at your music library (artist/album folders).
-      # ALL app state (config.json, playlists + favourites database, beets
-      # library, slskd config, lyrics-AI cache) lives in /music/.mlo/data,
-      # beside the transient /music/.mlo/downloads and /music/.mlo/trash, so
-      # this one mount persists everything across rebuilds.
+      # ALL app state (config.json, playlists.db + wishes.db, slskd.yaml,
+      # the beets config + beets-library.db, and the ReplayGain / RYM /
+      # metadata caches) lives in /music/.mlo/data, beside the transient
+      # /music/.mlo/downloads and /music/.mlo/trash, so this one mount
+      # persists everything across rebuilds.
       - ./music:/music
+      # Runtime-installed tools (Settings -> Dependencies: beets, librosa, ...).
+      - lamusica-dependencies:/app/.dependencies
     restart: unless-stopped
+    # Opt in to watchtower's automatic updates (WATCHTOWER_LABEL_ENABLE=true).
+    labels:
+      - com.centurylinklabs.watchtower.enable=true
+    # Mirrors the image's HEALTHCHECK so `docker compose ps` and watchtower
+    # see readiness. The container runs as uid 1000; if your library is owned
+    # by someone else, rebuild the image with matching build args or chown the
+    # host folder to 1000 - otherwise the app cannot write /music/.mlo.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+volumes:
+  lamusica-dependencies:
+
+# ---------------------------------------------------------------------------
+# Automatic updates - uncomment to enable (keeps every other container alone).
+#
+#   watchtower:
+#     image: containrrr/watchtower:latest
+#     container_name: watchtower
+#     restart: unless-stopped
+#     volumes:
+#       - /var/run/docker.sock:/var/run/docker.sock
+#     environment:
+#       - WATCHTOWER_LABEL_ENABLE=true      # only containers labelled above
+#       - WATCHTOWER_CLEANUP=true           # delete the replaced image
+#       - WATCHTOWER_SCHEDULE=0 0 4 * * *   # daily at 04:00 (6-field cron)
+#       - TZ=Etc/UTC
+# ---------------------------------------------------------------------------

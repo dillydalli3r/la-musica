@@ -13,6 +13,20 @@ export interface QueueTrack {
   albumCover?: string | null;
 }
 
+/** Severity drives the toast's colours and its screen-reader role: errors
+ *  announce as `role="alert"`, everything else as a polite status. */
+export type ToastSeverity = "info" | "success" | "error";
+
+export interface ToastItem {
+  id: number;
+  message: string;
+  severity: ToastSeverity;
+}
+
+const TOAST_MAX = 4;
+const TOAST_TTL_MS = 3000;
+const TOAST_TTL_ERROR_MS = 6000;
+
 interface Store {
   progress: { done: number; total: number; desc: string } | null;
   setProgress: (p: { done: number; total: number; desc: string } | null) => void;
@@ -41,8 +55,11 @@ interface Store {
   setSort: (s: { key: string; dir: 1 | -1 } | null) => void;
   filter: Record<string, unknown>;
   setFilter: (f: Record<string, unknown>) => void;
-  toast: string | null;
-  setToast: (t: string | null) => void;
+  /** Toasts queue instead of overwriting each other; the shell renders them
+   *  stacked, each with its own severity and dismiss control. */
+  toasts: ToastItem[];
+  addToast: (t: ToastItem) => void;
+  dismissToast: (id: number) => void;
   selection: { tracks: string[]; albums: string[]; artists: string[] };
   setSelection: (s: Partial<{ tracks: string[]; albums: string[]; artists: string[] }>) => void;
   toggleTrack: (p: string) => void;
@@ -115,8 +132,9 @@ export const useStore = create<Store>((set) => ({
   setSort: (sort) => set({ sort }),
   filter: {},
   setFilter: (filter) => set({ filter }),
-  toast: null,
-  setToast: (toast) => set({ toast }),
+  toasts: [],
+  addToast: (t) => set((st) => ({ toasts: [...st.toasts, t].slice(-TOAST_MAX) })),
+  dismissToast: (id) => set((st) => ({ toasts: st.toasts.filter((t) => t.id !== id) })),
   selection: { tracks: [], albums: [], artists: [] },
   setSelection: (s) => set((st) => ({ selection: { ...st.selection, ...s } })),
   toggleTrack: (p) =>
@@ -148,15 +166,35 @@ export const useStore = create<Store>((set) => ({
   },
 }));
 
-let toastTimer: ReturnType<typeof setTimeout> | null = null;
+let toastSeq = 0;
 
-export function toast(msg: string) {
-  // reset the timer on every call so rapid toasts each get their full 3s
-  // instead of an earlier toast's timer cutting them short
-  useStore.getState().setToast(msg);
-  if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => {
-    toastTimer = null;
-    useStore.getState().setToast(null);
-  }, 3000);
+/** Severity-aware toast: `toast(msg)` is informational, `toast.error(msg)` /
+ *  `toast.success(msg)` are the explicit variants. Toasts queue (never
+ *  overwrite), each dismisses on its own timer — errors stay twice as long —
+ *  and any of them can be dismissed by hand from the shell. */
+type ToastFn = {
+  (message: string, severity?: ToastSeverity): void;
+  info: (message: string) => void;
+  success: (message: string) => void;
+  error: (message: string) => void;
+};
+
+function pushToast(message: string, severity: ToastSeverity) {
+  const id = ++toastSeq;
+  useStore.getState().addToast({ id, message, severity });
+  // Ids are never reused, so the timer needs no bookkeeping: dismissing an id
+  // that already left the queue is a no-op filter.
+  setTimeout(
+    () => useStore.getState().dismissToast(id),
+    severity === "error" ? TOAST_TTL_ERROR_MS : TOAST_TTL_MS
+  );
 }
+
+export const toast: ToastFn = Object.assign(
+  (message: string, severity: ToastSeverity = "info") => pushToast(message, severity),
+  {
+    info: (message: string) => pushToast(message, "info"),
+    success: (message: string) => pushToast(message, "success"),
+    error: (message: string) => pushToast(message, "error"),
+  }
+);

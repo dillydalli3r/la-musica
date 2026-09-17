@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CloudDownload, PenLine, Play, Square, Plus, Trash2, Undo2, Sparkles, Keyboard, Eraser, Upload } from "lucide-react";
+import { CloudDownload, PenLine, Play, Square, Plus, Trash2, Undo2, Keyboard, Upload } from "lucide-react";
 import { api } from "../api";
 import { toast, useStore } from "../store";
 import LrclibPublishPanel from "./LrclibPublish";
@@ -224,8 +224,8 @@ export default function LyricsViewer({
   album?: string;
   duration?: number;
   decimals?: number;
-  /** Opens the full-screen enhanced editor (syllable tap-sync, AI acoustic
-   * alignment, romanization) when provided. */
+  /** Opens the full-screen enhanced editor (syllable tap-sync, playback
+   * speed) when provided. */
   onEnhancedEditor?: () => void;
 }) {
   const [lines, setLines] = useState<LrcLine[]>(() => parseLrc(initialLyrics));
@@ -238,8 +238,6 @@ export default function LyricsViewer({
   const [dur, setDur] = useState(duration ?? 0);
   const [selIdx, setSelIdx] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [aiBusy, setAiBusy] = useState<string | null>(null);
-  const [aiMenu, setAiMenu] = useState(false);
   const [keysMenu, setKeysMenu] = useState(false);
   const [pubOpen, setPubOpen] = useState(false);
   const [capturing, setCapturing] = useState<LyricsAction | null>(null);
@@ -533,59 +531,7 @@ export default function LyricsViewer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing, selIdx, lines, activeLine, playTime, keys, capturing, onSave, speed]);
 
-  // ---- AI-assisted actions ------------------------------------------------
-  const runAi = async (mode: "clean" | "repair") => {
-    setAiMenu(false);
-    setAiBusy(mode);
-    try {
-      if (mode === "clean") {
-        const source = rawMode ? raw : lines.length ? lines.map((l) => l.text).join("\n") : raw;
-        if (!source.trim()) {
-          toast("Nothing to clean — paste lyrics first");
-          return;
-        }
-        const res = await api.lyricsAi("clean", source);
-        const parsed = parseLrc(res.result);
-        if (parsed.length) {
-          commit(parsed);
-        } else {
-          // plain text without timestamps: put into the first line slot
-          commit([{ ts: "[00:00.00]", time: 0, text: res.result.split("\n")[0] ?? "" }]);
-          setRaw(res.result);
-        }
-        toast("Lyrics cleaned with AI");
-      } else if (mode === "repair") {
-        if (!artist || !track) {
-          toast("Track needs ARTIST and TITLE tags for candidate lookup");
-          return;
-        }
-        toast("Fetching lyrics candidates…");
-        let candidates: string[] = [];
-        try {
-          const hits = await api.lyricsSearch(artist, track, album, duration);
-          candidates = (Array.isArray(hits) ? hits : [])
-            .flatMap((h: any) => [h?.plainLyrics, h?.syncedLyrics])
-            .filter((s: any): s is string => typeof s === "string" && s.length > 0)
-            .flatMap((s: string) => s.split(/\r?\n/))
-            .map((s: string) => s.replace(/^\[[^\]]*\]/, "").replace(/<[^>]*>/g, "").trim())
-            .filter(Boolean);
-        } catch {
-          /* no candidates is fine — the LLM still gets the raw text */
-        }
-        const source = rawMode ? raw : serializeLrc(lines, dec);
-        const res = await api.lyricsAi("repair", source, { artist, track, candidates: candidates.slice(0, 400) });
-        const parsed = parseLrc(res.result);
-        if (parsed.length) commit(parsed);
-        setRaw(res.result);
-        toast(parsed.length ? `Repaired — ${parsed.length} lines` : "AI repair returned no timed lines (see raw)");
-      }
-    } catch (e) {
-      toast(String(e));
-    } finally {
-      setAiBusy(null);
-    }
-  };
-
+  // ---- provider import -----------------------------------------------------
   const importFromProviders = async () => {
     if (!artist || !track) {
       toast("Track needs ARTIST and TITLE tags first");
@@ -609,7 +555,7 @@ export default function LyricsViewer({
       const from = res?.provider_label ? `Imported from ${res.provider_label}` : "Imported";
       applyImport(lrc, from);
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setLoading(false);
     }
@@ -643,7 +589,7 @@ export default function LyricsViewer({
       }
       applyImport(lrc, `Imported "${hit.artist} — ${hit.track}"`);
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setLoading(false);
     }
@@ -671,7 +617,7 @@ export default function LyricsViewer({
             <button
               className="btn-ghost !py-1 text-xs"
               onClick={onEnhancedEditor}
-              title="Full-screen enhanced editor — syllable tap-sync along the vocals, AI acoustic alignment, romanization, playback speed"
+              title="Full-screen enhanced editor — syllable tap-sync along the vocals, playback speed"
             >
               <PenLine className="h-3.5 w-3.5" /> Enhanced
             </button>
@@ -712,27 +658,6 @@ export default function LyricsViewer({
             <option value={2}>2 dec</option>
             <option value={3}>3 dec</option>
           </select>
-          <div className="relative">
-            <button className="btn-ghost !py-1 text-xs" onClick={() => setAiMenu(!aiMenu)} disabled={!!aiBusy}>
-              <Sparkles className="h-3.5 w-3.5" />
-              {aiBusy ? `${aiBusy}…` : "AI"}
-            </button>
-            {aiMenu && (
-              <>
-              <div className="fixed inset-0 z-20" onClick={() => setAiMenu(false)} />
-              <div className="absolute right-0 top-full mt-1 z-30 bg-zinc-950 border border-border rounded-lg shadow-2xl p-1.5 w-64">
-                <button className="w-full text-left text-xs px-2 py-1.5 rounded-md hover:bg-white/10 flex items-center gap-2" onClick={() => runAi("clean")}>
-                  <Sparkles className="h-3.5 w-3.5 text-accent" />
-                  <span>Clean raw lyrics<span className="block text-zinc-500 text-[10px]">strip ads / watermarks (LLM)</span></span>
-                </button>
-                <button className="w-full text-left text-xs px-2 py-1.5 rounded-md hover:bg-white/10 flex items-center gap-2" onClick={() => runAi("repair")}>
-                  <Eraser className="h-3.5 w-3.5 text-accent" />
-                  <span>Repair from lyrics candidates<span className="block text-zinc-500 text-[10px]">fill missing lines (LLM)</span></span>
-                </button>
-              </div>
-              </>
-            )}
-          </div>
           <div className="relative">
             <button className="btn-ghost !py-1 text-xs" onClick={() => setKeysMenu(!keysMenu)} title="Keyboard shortcuts">
               <Keyboard className="h-3.5 w-3.5" />
@@ -840,7 +765,7 @@ export default function LyricsViewer({
         <div className="text-sm text-zinc-500 py-10 text-center">
           No lyrics yet. Press <kbd className="chip bg-raise border border-border">Play</kbd>, then select a line and
           press <kbd className="chip bg-raise border border-border">{keys.stampLine}</kbd> on each line to stamp its
-          timestamp — or auto-import lyrics / use the AI menu.
+          timestamp — or auto-import lyrics from a provider.
         </div>
       ) : (
         <div
@@ -925,7 +850,7 @@ export default function LyricsViewer({
                   ) : null}
                 </div>
               )}
-              <div className="opacity-0 group-hover:opacity-100 flex gap-1 transition-opacity shrink-0">
+              <div className="opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 flex gap-1 transition-opacity shrink-0">
                 <button className="text-zinc-500 hover:text-accent-soft" onClick={(e) => { e.stopPropagation(); addLine(i); }} title="Add line after">
                   <Plus className="h-3.5 w-3.5" />
                 </button>

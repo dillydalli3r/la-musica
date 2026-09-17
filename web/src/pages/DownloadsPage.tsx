@@ -5,6 +5,8 @@ import {
 } from "lucide-react";
 import { api } from "../api";
 import { toast } from "../store";
+import { EmptyState } from "../components/Badges";
+import PageHeader from "../components/PageHeader";
 import type { DownloadEntry, ImportBulkJob } from "../types";
 
 /** Human byte size. Local deliberately: the player bar's formatter is tuned for
@@ -106,7 +108,7 @@ export default function DownloadsPage() {
         toast(`Queue import: ${job.error ?? "could not start"}`);
       }
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -125,7 +127,7 @@ export default function DownloadsPage() {
           : `Deleted ${res.deleted.length} entr${res.deleted.length === 1 ? "y" : "ies"} — freed ${fmtSize(res.freed)}`
       );
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -134,25 +136,28 @@ export default function DownloadsPage() {
   const allSelected = entries.length > 0 && liveSelection.length === entries.length;
 
   return (
-    <div className="p-6 max-w-5xl mx-auto space-y-4">
-      <div className="flex items-center gap-3 flex-wrap">
-        <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-          <ArrowDownToLine className="h-6 w-6 text-accent" /> Downloads
-        </h1>
-        <span className="text-xs text-zinc-500">
-          {data?.count ?? 0} entr{(data?.count ?? 0) === 1 ? "y" : "ies"} · {fmtSize(data?.bytes ?? 0)}
-          {totals.albums > 0 && ` · ${totals.albums} look like albums`}
-          {totals.partial > 0 && ` · ${totals.partial} in-flight`}
-        </span>
-        <button
-          className="btn-ghost !py-1 text-xs ml-auto"
-          onClick={() => refetch()}
-          disabled={isFetching}
-          title="Re-read the downloads folder"
-        >
-          <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} /> Refresh
-        </button>
-      </div>
+    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+      <PageHeader
+        icon={ArrowDownToLine}
+        title="Downloads"
+        subtitle={
+          <>
+            {data?.count ?? 0} entr{(data?.count ?? 0) === 1 ? "y" : "ies"} · {fmtSize(data?.bytes ?? 0)}
+            {totals.albums > 0 && ` · ${totals.albums} look like albums`}
+            {totals.partial > 0 && ` · ${totals.partial} in-flight`}
+          </>
+        }
+        actions={
+          <button
+            className="btn-ghost !py-1 text-xs"
+            onClick={() => refetch()}
+            disabled={isFetching}
+            title="Re-read the downloads folder"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} /> Refresh
+          </button>
+        }
+      />
 
       {data?.folder && (
         <div className="text-[11px] text-zinc-600 font-mono truncate" title={data.folder}>
@@ -162,9 +167,8 @@ export default function DownloadsPage() {
 
       {/* Bulk import (2+ entries): per-album progress of the queue. */}
       {bulkJob?.status === "running" && (
-        <div className="bg-card rounded-lg border border-border px-3 py-2 space-y-1.5">
+        <div className="panel space-y-1.5">
           <div className="flex items-center gap-2 text-xs">
-            <span className="h-3 w-3 rounded-full border-2 border-zinc-700 border-t-accent-soft animate-spin shrink-0" />
             <span className="flex-1 truncate text-zinc-300" title={bulkJob.label}>
               {bulkJob.label || "Importing…"}
             </span>
@@ -187,7 +191,7 @@ export default function DownloadsPage() {
       )}
 
       {bulkFailed.length > 0 && (
-        <div className="bg-card rounded-lg border border-red-900/60 px-3 py-2 text-xs text-red-300 space-y-0.5">
+        <div className="panel border-red-900/60 text-xs text-red-300 space-y-0.5">
           {bulkFailed.map((r) => (
             <div key={r.path} className="truncate" title={`${r.path} — ${r.error}`}>
               {r.path.split(/[\\/]/).pop()} — {r.error}
@@ -199,15 +203,17 @@ export default function DownloadsPage() {
       {/* Nothing to work with: the folder is created by the app on first use,
           so an absent one is normal on a fresh install, not an error. */}
       {!isLoading && !data?.exists && (
-        <div className="bg-card rounded-lg border border-border p-6 text-center text-sm text-zinc-500">
-          No downloads folder yet — it is created the first time Soulseek saves something.
-        </div>
+        <EmptyState
+          title="No downloads folder yet"
+          hint="It is created the first time Soulseek saves something."
+        />
       )}
 
       {data?.exists && entries.length === 0 && (
-        <div className="bg-card rounded-lg border border-border p-6 text-center text-sm text-zinc-500">
-          Empty. Soulseek downloads land here, then you import or delete them from this page.
-        </div>
+        <EmptyState
+          title="Nothing downloaded"
+          hint="Soulseek downloads land here, then you import or delete them from this page."
+        />
       )}
 
       {entries.length > 0 && (

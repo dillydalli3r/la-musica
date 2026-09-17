@@ -9,13 +9,24 @@ from .paths import (CONFIG_FILE, DEFAULT_DIGITAL_SOURCE, app_data_dir, downloads
 from .naming import DEFAULT_NAMING_SCRIPT
 from .ui import c, Color
 
+# Shipped default naming scripts from BEFORE 2.4.0 (only ever one). A config
+# that saved the old default still pins the old layout — normalize_config
+# swaps a stored legacy default for the current one, so the new default takes
+# effect without ever touching a script the user actually edited.
+LEGACY_DEFAULT_NAMING_SCRIPTS = (
+    "%albumartist% [%musicbrainz_albumartistid%]/$if(%releasetype%,[%releasetype%] ,)"
+    "$if(%originaldate%,%originaldate% - ,)$if(%date%,%date% - ,)"
+    "%album% {$if(%releasecountry%,%releasecountry% - )%media%$if(%catalognumber%, - %catalognumber%)}/"
+    "%discnumber%-$num(%tracknumber%,2) %title%",
+)
+
 # Run All order — strict pipeline v1.7.0: 1 Lyrics → 2 CUEs → 8 Auto Tagging → 3 FLAC → 5 Images → 9 AccurateRip → 6 Audit → 4 Grade → 7 DR/ReplayGain → 10 Format All.
 # AccurateRip must run before Audit/Grade so the .accurip is present for real-time AUDIT; Grade after Audit so AUDIT tags are fresh; Format All at end does final canonical trims.
 # User's strict config default as of v1.6.0; reorder via Settings → Run All Order.
 # Run All pipeline: remux first, then beets tagging (MusicBrainz), then
 # formatting/tagging scripts, lyric fetching (before grade sees it), and
 # analysis/audit/grade at the end.
-DEFAULT_RUN_ALL_ORDER = [11, 14, 1, 2, 8, 13, 15, 12, 3, 5, 9, 6, 4, 7, 10]
+DEFAULT_RUN_ALL_ORDER = [11, 14, 1, 2, 8, 13, 12, 3, 5, 9, 6, 4, 7, 10]
 
 # Audio tag families that can be toggled per filetype.
 # Each family groups related TAG_MAP keys that are written together.
@@ -30,6 +41,7 @@ AUDIO_TAG_FAMILIES = [
     "LYRICS",         # embedded LYRICS tag (and .lrc sidecar)
     "BPM",            # BPM (Key & BPM analysis)
     "INITIALKEY",     # INITIALKEY (Key & BPM analysis)
+    "ENERGY",         # ENERGY (0-100, audio analysis, written with MOOD)
 ]
 AUDIO_TAG_TYPES = ["flac", "mp3", "mp4", "ogg", "opus", "aac"]
 
@@ -53,6 +65,7 @@ _TAG_TO_FAMILY = {
     "BPM": "BPM",
     "INITIALKEY": "INITIALKEY",
     "MOOD": "MOOD",
+    "ENERGY": "ENERGY",
     # integrity tags follow AUDIT family (written alongside audit when present)
     "AUDIO_MD5": "AUDIT",
     "INTEGRITY": "AUDIT",
@@ -220,7 +233,7 @@ DEFAULT_CONFIG = {
     "lrc_collapse_blank_lines": True,
     "lrc_enhanced_enabled": True,
     "lrc_enhanced_word_sync": True,
-    # Required (and AI-targeted) sync granularity of synced lyrics.
+    # Required (and targeted) sync granularity of synced lyrics.
     # LINE is the default: plain [mm:ss.xx] line timestamps.
     "lrc_sync_level": "LINE",
     "lrc_extended_enabled": True,
@@ -291,11 +304,14 @@ DEFAULT_CONFIG = {
     # Remuxed music videos (MKV sidecars from script 11) are allowed by default.
     "grade_include_video": True,
     # Configurable strict checks for grading (all on by default, per request)
-    # These make trailing/leading spaces, blank lines, cropping and zero timestamp
-    # count as failures for the relevant file types.
+    # These make trailing/leading spaces, blank lines, cover aspect ratio
+    # (squareness) and zero timestamps count as failures for the relevant
+    # file types.
     "grade_check_tag_spaces": True,
     "grade_check_lyrics_spaces": True,
     "grade_check_cue_spaces": True,
+    # Cover ASPECT RATIO (squareness) — |w/h - 1| <= cover_crop_threshold.
+    # NOT crop detection: there is no crop heuristic (kept key name).
     "grade_check_cover_crop": True,
     "grade_check_lyrics_zero": True,
     "grade_check_tag_blank_lines": True,
@@ -352,14 +368,8 @@ DEFAULT_CONFIG = {
     # Raw, un-remuxed video files (VOB/AVI/WMV/TS...) fail grading — run
     # script 11 to normalize them to MKV. Remuxed MKV/MP4 videos are fine.
     "grade_check_raw_video": True,
-    # Script 15 outputs, graded per track. These only fire when the matching
-    # feature is enabled below (and lyrics exist): a library owner who never
-    # turns on AI transforms is never penalized. Latin-script lyrics never
-    # require transliteration — the romanization would be identical.
     "grade_check_mb_links": True,   # MusicBrainz release (or group) link required
     "grade_check_rym_links": True,  # RateYourMusic release link required
-    "grade_check_xlit": True,
-    "grade_check_trans": True,
     # Lossless but uncompressed sources (WAV/AIFF/APE/WV/SHN) fail grading —
     # script 3 converts them to FLAC.
     "grade_check_lossless_source": True,
@@ -367,6 +377,7 @@ DEFAULT_CONFIG = {
     # track missing either fails grading — the whole point is that no track
     # ships without them.
     "grade_check_mood": True,
+    "grade_check_energy": True,   # ENERGY (0-100), written next to MOOD by script 8
     "grade_check_genre": True,
     # ReplayGain tags: opt-in like AcoustID — graded only when the file
     # already carries at least one of the four REPLAYGAIN_* tags, and then
@@ -477,6 +488,11 @@ DEFAULT_CONFIG = {
     "video_remove_original": True,
     "video_process_mp4": False,
 
+    # Music videos from YouTube (server/youtube.py, yt-dlp). 0 max height =
+    # whatever the source offers (best).
+    "youtube_enabled": True,
+    "youtube_max_height": 0,
+
     # Lossless source conversion (part of script 3): uncompressed WAV /
     # AIFF (and ffmpeg-decodable APE/WV/SHN/TTA, plus ALAC in MP4) are
     # re-encoded to the target lossless codec with tags copied over. The
@@ -505,28 +521,6 @@ DEFAULT_CONFIG = {
     "audiometa_key_notation": "musical",  # musical | camelot | openkey
     "force_audiometa": False,
 
-    # AI-assisted lyrics (any OpenAI-compatible /chat/completions endpoint).
-    "ai_base_url": "",
-    "ai_api_key": "",
-    # Reasoning effort for every AI call. HIGH is the default: maximum
-    # thinking budget for cleanup/repair/translate quality. MINIMAL
-    # disables thinking for speed.
-    "ai_effort": "high",
-    "ai_model": "",
-    "ai_translate_lang": "en",
-
-    # Script 15 — persistent lyric transforms. Enabled by default so Run All
-    # writes TRANSLITERATION / TRANSLATION tags (and sidecars) for every
-    # track with lyrics; results are cached per track, so re-runs are cheap.
-    "lyrics_xlit_enabled": True,
-    "lyrics_translate_enabled": True,
-    # Target languages for translation, comma separated ("en,de"). The first
-    # language goes into the TRANSLATION tag; each language also gets its
-    # own "<stem>.<lang>.lrc" sidecar.
-    "lyrics_translation_langs": "en",
-    # Also write "<stem>.romaji.lrc" / "<stem>.<lang>.lrc" next to the audio.
-    "lyrics_xlit_sidecars": True,
-    "force_xlit": False,
     # Lyrics sources, tried in order until one has the song — each provider
     # falls back to the next, and MusicBrainz-independent providers are the
     # only ones that can serve lyrics. Empty = the built-in order
@@ -577,6 +571,16 @@ DEFAULT_CONFIG = {
     "soulseek_web_port": 5030,
     "soulseek_up_limit": 0,
     "soulseek_down_limit": 0,
+    # slskd transfer slots (concurrent transfers) and speed limits in KiB/s
+    # (0 = unlimited, emitted as slskd's int.MaxValue default).
+    "soulseek_download_slots": 3,
+    "soulseek_upload_slots": 2,
+    "soulseek_upload_limit_kib": 0,
+    "soulseek_download_limit_kib": 0,
+    # slskd's HTTPS listener binds an extra port (5031) with a self-signed
+    # cert by default. The app talks plain HTTP to the loopback port, so the
+    # second listener is disabled unless explicitly wanted.
+    "soulseek_web_https": False,
     "soulseek_download_dir": "",
     # ON by default: the Soulseek client should be up whenever the app is.
     "soulseek_autostart": True,
@@ -609,6 +613,13 @@ DEFAULT_CONFIG = {
     # worker keeps searching with the queries the job already used. The
     # background path itself never asks (a wish must not be turned into a wish).
     "soulseek_auto_wish_prompt": True,
+    # Release-choice policy for auto-import (single release, release group or
+    # an artist's whole catalogue): prefer status=Official, never auto-pick a
+    # Promotion / Bootleg / Pseudo-Release while avoid-promo is on, and order
+    # the remaining editions by medium (MusicBrainz format), earliest date
+    # breaking ties.
+    "auto_import_avoid_promo": True,
+    "auto_import_medium_order": ["CD", "Digital Media", "Vinyl", "Cassette", "Other"],
     # Explicit shared folders (empty = share the whole music folder).
     "soulseek_share_dirs": [],
     # Extra share filters — substrings/paths slskd must NOT share.
@@ -622,8 +633,42 @@ DEFAULT_CONFIG = {
     "wishes_max_attempts": 0,       # 0 = retry forever
     "wishes_auto_import": True,
 
-    # Genres imported from MusicBrainz per release/track (top voted first).
-    "mb_genre_count": 1,
+    # Genres imported per release/track (top voted first). Sources are tried
+    # in this order and merged; see mlo/genres.py.
+    "mb_genre_count": 3,
+    "genre_sources": [
+        "rateyourmusic", "soulseek", "discogs", "lastfm", "theaudiodb",
+        "musicbrainz", "deezer", "itunes",
+    ],
+    # Optional keys for the genre sources that need one. Left empty the source
+    # is skipped instead of guessed (Discogs' search endpoint requires a
+    # token; Last.fm requires an API key). RYM answers only a real browser
+    # session: paste the Cookie header of a logged-in rateyourmusic.com tab
+    # (it carries Cloudflare's cf_clearance) — empty, RYM is skipped like any
+    # other unavailable source. Deezer/iTunes/TheAudioDB/MusicBrainz are
+    # keyless.
+    "discogs_token": "",
+    "lastfm_api_key": "",
+    "rym_cookie": "",
+    # Auto-resolve RateYourMusic album + artist links during import; off =
+    # links are only ever set by hand in the link editor.
+    "rym_links_auto": True,
+    # Advisory (ITUNESADVISORY) auto-fetch on import: asks Deezer by ISRC
+    # first, then Spotify (below), then Apple's album/song routes, and
+    # MusicBrainz supplies the ISRC when the file has none. Never writes a
+    # value when the providers do not state one — an absent advisory is
+    # 'unrated', not 'clean'.
+    "advisory_auto_fetch": True,
+    # Optional Spotify Web API credentials (client-credentials flow) used as
+    # the second advisory source. Empty = the source is skipped entirely; it
+    # is never required and its absence can never fail an import.
+    "spotify_client_id": "",
+    "spotify_client_secret": "",
+    # Artist image / artist description / album description auto-fetch on
+    # import. With metadata_review on, candidates are staged and only written
+    # when the user applies one.
+    "metadata_auto_fetch": True,
+    "metadata_review": False,
     # Mood & genre tagging (script 8, Auto tagging). MOOD is derived from the
     # track's audio (librosa features: tempo, energy, brightness, dynamics)
     # and, in hybrid mode, cross-checked against provider metadata; GENRE is
@@ -685,6 +730,11 @@ _INT_RANGES = {
     "soulseek_web_port": (1024, 65535),
     "soulseek_up_limit": (0, 100000),
     "soulseek_down_limit": (0, 100000),
+    "soulseek_download_slots": (1, 20),
+    "soulseek_upload_slots": (0, 20),
+    "soulseek_upload_limit_kib": (0, 1000000),
+    "soulseek_download_limit_kib": (0, 1000000),
+    "youtube_max_height": (0, 4320),
     "video_flac_level": (0, 8),
     "jpegxl_effort": (1, 10),
     "lrc_timestamp_precision": (2, 3),
@@ -726,11 +776,6 @@ _CHOICES = {
     # SYLLABLE = glued per-syllable ELRC tags, WORD = per-word ELRC tags,
     # LINE = plain [mm:ss.xx] line timestamps only.
     "lrc_sync_level": {"SYLLABLE", "WORD", "LINE"},
-    # AI reasoning effort (thinking budget) for every AI-assisted feature.
-    # Lowercase is canonical (matches the Settings dropdown); the
-    # canonicalization below is case-insensitive, so a stored "HIGH" from an
-    # older version normalizes to "high" instead of being rejected.
-    "ai_effort": {"minimal", "low", "medium", "high"},
     "cue_file_type": {"WAVE", "MP3"},
     "audiometa_key_notation": {"musical", "camelot", "openkey"},
     "video_preset": {"ultrafast", "superfast", "veryfast", "faster", "fast",
@@ -856,6 +901,27 @@ def normalize_config(user=None) -> dict:
         clean = [str(t).strip()[:120] for t in v if str(t).strip()]
         cfg[k] = clean[:6] or list(DEFAULT_CONFIG[k])
 
+    # Release-choice medium order: unknown labels are kept (slskd/MB may add
+    # formats), an empty list falls back to the default.
+    v = cfg.get("auto_import_medium_order")
+    if isinstance(v, str):
+        v = [t for t in v.replace("\n", ";").split(";") if t.strip()]
+    if not isinstance(v, (list, tuple)):
+        v = []
+    cfg["auto_import_medium_order"] = (
+        [str(t).strip() for t in v if str(t).strip()][:12]
+        or list(DEFAULT_CONFIG["auto_import_medium_order"])
+    )
+    v = cfg.get("genre_sources")
+    if isinstance(v, str):
+        v = [t for t in v.replace("\n", ";").split(";") if t.strip()]
+    if not isinstance(v, (list, tuple)):
+        v = []
+    cfg["genre_sources"] = (
+        [str(t).strip().lower() for t in v if str(t).strip()][:16]
+        or list(DEFAULT_CONFIG["genre_sources"])
+    )
+
     # Shared-folder lists (Settings → Soulseek, Soulseek → Sharing). Accept a
     # ";"/newline separated string from hand-edited config files.
     for k in ("soulseek_share_dirs", "soulseek_share_exclude"):
@@ -898,7 +964,11 @@ def normalize_config(user=None) -> dict:
     if not isinstance(script, str) or not script.strip():
         cfg["naming_script"] = DEFAULT_NAMING_SCRIPT
     else:
-        cfg["naming_script"] = script.strip()[:2000]
+        script = script.strip()[:2000]
+        # migration: a stored PRE-2.4.0 shipped default is not a custom script
+        if script in LEGACY_DEFAULT_NAMING_SCRIPTS:
+            script = DEFAULT_NAMING_SCRIPT
+        cfg["naming_script"] = script
 
     default_tags = DEFAULT_CONFIG["encoder_tags"]
     user_tags = cfg.get("encoder_tags") if isinstance(cfg.get("encoder_tags"), dict) else {}
@@ -940,7 +1010,9 @@ def normalize_config(user=None) -> dict:
                 script_id = int(value)
             except (TypeError, ValueError):
                 continue
-            if 1 <= script_id <= 15 and script_id not in clean_order:
+            # ids run 1..14: script 15 (lyrics xlit/translate) was removed, so
+            # a saved order still naming it sheds it right here
+            if 1 <= script_id <= 14 and script_id not in clean_order:
                 clean_order.append(script_id)
     # Migrate legacy sequential default [1..8] to systematic pipeline
     if clean_order == [1, 2, 3, 4, 5, 6, 7, 8] and clean_order != list(DEFAULT_RUN_ALL_ORDER):
@@ -958,7 +1030,6 @@ def normalize_config(user=None) -> dict:
     # Scripts added later join existing pipelines at sensible positions:
     #   14 beets tagging   — right after the remux (writes tags, places files)
     #   13 lyric fetching  — after autotag (needs final ARTIST/TITLE), before grade
-    #   15 xlit/translate  — right after the fetch (same lyrics pipeline)
     #   12 Key & BPM       — after 13 (grading wants its tags)
     def _insert_script(order, sid, anchors):
         if sid in order:
@@ -972,7 +1043,6 @@ def normalize_config(user=None) -> dict:
     if clean_order:
         _insert_script(clean_order, 14, [11])
         _insert_script(clean_order, 13, [8, 14, 11])
-        _insert_script(clean_order, 15, [13, 8])
         _insert_script(clean_order, 12, [13, 8])
     cfg["run_all_order"] = clean_order or list(DEFAULT_RUN_ALL_ORDER)
     return cfg
@@ -995,8 +1065,9 @@ _MIGRATED = False
 def _migrate_to_data_dir():
     """One-time move of ALL app state into the new layout:
     <music folder>/.mlo/data (config.json plus everything from the legacy
-    state dirs: beets library + config, playlists/likes database, slskd.yaml,
-    the lyrics-AI cache) and the transient dirs into <music folder>/.mlo —
+    state dirs: beets library + config, playlists/likes database, slskd.yaml
+    and any other app-written state) and the transient dirs into
+    <music folder>/.mlo —
     .mlo_downloads -> .mlo/downloads (incl. .incomplete/) and .mlo_trash ->
     .mlo/trash (incl. .mlo_manifest.json). The old top-level .mlo_data is one
     of the legacy sources and is removed once drained. Existing files are

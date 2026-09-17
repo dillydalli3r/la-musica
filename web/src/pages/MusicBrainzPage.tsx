@@ -5,9 +5,10 @@ import {
 } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, ArrowUpDown, ArrowUpRight, BookmarkPlus, Check, Loader2, Search, X, Zap } from "lucide-react";
 import { api } from "../api";
-import type { DiscoveryAlbumDetail, DiscoveryRow } from "../types";
-import { EmptyState } from "../components/Badges";
+import type { DiscoveryAlbumDetail, DiscoveryRow, MBRelease } from "../types";
+import { EmptyState, PageLoading } from "../components/Badges";
 import { MbIcon } from "../components/Links";
+import PageHeader from "../components/PageHeader";
 import Segmented from "../components/Segmented";
 import { toast } from "../store";
 
@@ -80,6 +81,33 @@ interface MBTrackRow {
   disc: number; position: number; title: string; length?: number | null;
   recording_mbid?: string | null; artist_credit?: string;
 }
+/** The shared, entity-agnostic fields a search row can carry (each entity
+ *  adds its own: artist tags, release formats, release-group types …). */
+interface MBSearchRow {
+  id: string;
+  score?: number;
+  title?: string;
+  disambiguation?: string;
+  artist?: string;
+  artist_mbid?: string;
+  artists?: { name?: string; mbid?: string }[];
+  status?: string;
+  formats?: string;
+  primary_type?: string;
+  secondary_types?: string[];
+  release_type?: string;
+  catalog_number?: string;
+  track_count?: number;
+  country?: string;
+  date?: string;
+  first_release_date?: string;
+  type?: string;
+  life?: string;
+  tags?: string;
+  len?: string;
+  typeLabel?: string;
+}
+
 interface RelRow {
   id: string; title: string; date?: string; country?: string; status?: string;
   formats?: string; disc_count?: number; track_count?: number;
@@ -119,12 +147,93 @@ function ExtLink({ href, title }: { href: string; title: string }) {
   );
 }
 
-function Spinner() {
+/** Anything MusicBrainz marks beyond a normal commercial pressing is worth
+ *  flagging before a download: Promotion → "Promo" (amber), the rest
+ *  (Bootleg / Pseudo-Release / Withdrawn / …) red. The format string rides
+ *  along as a neutral chip, so a row reads "2×CD Promo" at a glance. */
+function StatusBadge({ status, formats }: { status?: string | null; formats?: string | null }) {
+  const s = (status || "").trim();
+  const flagged = !!s && s.toLowerCase() !== "official";
   return (
-    <div className="flex items-center justify-center gap-2 py-24 text-sm text-zinc-500">
-      <Loader2 className="h-4 w-4 animate-spin" /> Asking MusicBrainz…
-    </div>
+    <>
+      {formats ? (
+        <span className="chip bg-raise border border-border text-zinc-400">{formats}</span>
+      ) : null}
+      {flagged ? (
+        <span
+          className={`chip border ${
+            /promo/i.test(s)
+              ? "bg-amber-500/15 text-amber-300 border-amber-600/40"
+              : "bg-red-500/15 text-red-300 border-red-800/60"
+          }`}
+          title={`MusicBrainz release status: ${s}`}
+        >
+          {/^promotion$/i.test(s) ? "Promo" : s}
+        </span>
+      ) : null}
+    </>
   );
+}
+
+/** "best" = the one edition the auto-import policy prefers per release group
+ *  (default); "all" = every eligible edition. Sent to /api/mb/auto-import. */
+const IMPORT_MODES = [
+  { id: "best", label: "Best edition" },
+  { id: "all", label: "All editions" },
+] as const;
+type ImportMode = (typeof IMPORT_MODES)[number]["id"];
+
+/** The two actions every entity header carries: the MusicBrainz link and the
+ *  Soulseek handoff (which searches the artist + title). */
+function MbHeaderActions({ href, query }: { href?: string; query: string }) {
+  const nav = useNavigate();
+  return (
+    <>
+      {href ? <ExtLink href={href} title="Open on MusicBrainz" /> : null}
+      <button
+        className="btn-ghost !py-1.5 text-xs"
+        title="Search Soulseek for this"
+        onClick={() => nav(`/soulseek?q=${encodeURIComponent(query)}`)}
+      >
+        <Search className="h-3.5 w-3.5" /> Soulseek
+      </button>
+    </>
+  );
+}
+
+/** Bulk auto-import with a busy flag: queues one server-side job per id and
+ *  reports what the server actually queued (`queued` / `skipped`), never what
+ *  was asked for. `missing` is ids that had nothing to send (already counted
+ *  as skipped). */
+function useAutoImport() {
+  const [busy, setBusy] = useState(false);
+  const run = async (
+    ids: string[],
+    kind: "release" | "release_group" | "artist",
+    mode: ImportMode,
+    missing = 0
+  ) => {
+    setBusy(true);
+    let queued = 0;
+    let skipped = missing;
+    try {
+      for (const mbid of ids) {
+        try {
+          const res = await api.mbAutoImport({ mbid, kind, mode });
+          queued += res.queued;
+          skipped += res.skipped.length;
+        } catch {
+          skipped += 1; // one bad id must not abandon the rest of the batch
+        }
+      }
+    } finally {
+      setBusy(false);
+    }
+    const msg = `${queued} queued${skipped ? ` · ${skipped} skipped` : ""}`;
+    if (queued) toast.success(msg);
+    else toast.error(`Nothing queued${skipped ? ` · ${skipped} skipped` : ""}`);
+  };
+  return { busy, run };
 }
 
 function LoadError({ e }: { e: unknown }) {
@@ -226,64 +335,6 @@ function useMbPrefetch() {
       });
     }
   };
-}
-
-/** Page header shared by the detail views: title, meta line, chips + actions. */
-function PageHeader({
-  overline,
-  title,
-  meta,
-  chips,
-  mbHref,
-  soulseekQuery,
-  children,
-}: {
-  overline: string;
-  title: string;
-  meta?: string;
-  chips?: string[];
-  mbHref?: string;
-  /** what the Soulseek handoff button searches (defaults to the title) */
-  soulseekQuery?: string;
-  children?: React.ReactNode;
-}) {
-  const nav = useNavigate();
-  return (
-    <div className="p-6 pb-4 max-w-4xl mx-auto">
-      <Link to="/mb/search" className="text-[11px] text-zinc-500 hover:text-zinc-300">
-        ← MusicBrainz search
-      </Link>
-      <div className="flex items-start justify-between gap-4 mt-2">
-        <div className="min-w-0">
-          <div className="text-[10px] uppercase tracking-widest text-zinc-500">{overline}</div>
-          <h1 className="text-2xl font-bold text-white truncate" title={title}>
-            {title}
-          </h1>
-          {meta && <div className="text-sm text-zinc-400 mt-1">{meta}</div>}
-          {chips && chips.length > 0 && (
-            <div className="flex flex-wrap gap-1.5 mt-2">
-              {chips.map((c) => (
-                <span key={c} className="chip bg-raise border border-border text-zinc-300">
-                  {c}
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-        <div className="flex items-center gap-1.5 shrink-0">
-          {children}
-          {mbHref && <ExtLink href={mbHref} title="Open on MusicBrainz" />}
-          <button
-            className="btn-ghost !py-1.5 text-xs"
-            title="Search Soulseek for this"
-            onClick={() => nav(`/soulseek?q=${encodeURIComponent(soulseekQuery ?? title)}`)}
-          >
-            <Search className="h-3.5 w-3.5" /> Soulseek
-          </button>
-        </div>
-      </div>
-    </div>
-  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -647,7 +698,7 @@ export function MBSearchPage() {
     mutationFn: (value: SearchMode) =>
       api.saveConfig({ ...(config ?? {}), mb_search_source: value }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["config"] }),
-    onError: (e) => toast(String(e)),
+    onError: (e) => toast.error(String(e)),
   });
 
   // The discovery chain answers the album ("release-group") and artist tabs;
@@ -691,9 +742,9 @@ export function MBSearchPage() {
     onSuccess: (res) => {
       setWished(true);
       setResolvedMbid(res.resolved?.mbid ?? null);
-      toast("Added to wishes");
+      toast.success("Added to wishes");
     },
-    onError: (e) => toast(String(e)),
+    onError: (e) => toast.error(String(e)),
   });
 
   // Catalog numbers and barcodes ("SRCS 8757") often don't rank in a free
@@ -758,7 +809,43 @@ export function MBSearchPage() {
   );
   const { sort, onSort, sorted } = useSort(shaped, null);
 
-  const renderCells = (r: any) => {
+  // Bulk auto-import works off release-group ids, so selection only exists on
+  // that tab; it resets whenever the tab or the query changes.
+  const [sel, setSel] = useState<string[]>([]);
+  const [wishBatchBusy, setWishBatchBusy] = useState(false);
+  const { busy: importBusy, run: runImport } = useAutoImport();
+  useEffect(() => setSel([]), [type, q]);
+  const selectable = type === "release-group";
+  const toggleSel = (id: string) =>
+    setSel((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
+  // a row the payload could not identify still counts as selected, so the
+  // batch reports it as skipped instead of queueing `undefined`
+  const selIds = sel.filter((x) => x && x !== "undefined");
+
+  /** The credited artist, linked to its MusicBrainz page when the row carries
+   *  an id — search rows usually do not, so plain text is the common case. */
+  const artistCell = (r: MBSearchRow) => {
+    const mbid = r.artists?.[0]?.mbid || r.artist_mbid || "";
+    const name = r.artist || "—";
+    if (!mbid) return <td className="td text-zinc-400 truncate">{name}</td>;
+    return (
+      <td className="td text-zinc-400 truncate">
+        <button
+          className="truncate text-left hover:text-accent-soft"
+          title="Open the artist on MusicBrainz"
+          onClick={(e) => {
+            e.stopPropagation(); // the row itself opens the entity page
+            nav(`/mb/artist/${mbid}`);
+          }}
+        >
+          {name}
+        </button>
+      </td>
+    );
+  };
+
+  const renderCells = (r: MBSearchRow) => {
+    const artist = artistCell(r);
     switch (type) {
       case "artist":
         return (
@@ -781,7 +868,7 @@ export function MBSearchPage() {
               <span className="font-medium text-zinc-100">{r.title}</span>
               {r.disambiguation ? <span className="text-zinc-500"> ({r.disambiguation})</span> : null}
             </td>
-            <td className="td text-zinc-400 truncate">{r.artist || "—"}</td>
+            {artist}
             <td className="td text-zinc-500">{r.typeLabel || "—"}</td>
             <td className="td text-zinc-500">{r.first_release_date || "—"}</td>
             <td className="td text-right font-mono text-[10px] text-zinc-600">{r.score ?? ""}</td>
@@ -794,10 +881,14 @@ export function MBSearchPage() {
               <span className="font-medium text-zinc-100">{r.title}</span>
               {r.disambiguation ? <span className="text-zinc-500"> ({r.disambiguation})</span> : null}
             </td>
-            <td className="td text-zinc-400 truncate">{r.artist || "—"}</td>
+            {artist}
             <td className="td text-zinc-500 truncate">{r.typeLabel || "—"}</td>
             <td className="td text-zinc-500">{r.date || "—"}</td>
-            <td className="td text-zinc-500">{r.formats || "—"}</td>
+            <td className="td text-zinc-500">
+              <span className="inline-flex flex-wrap items-center gap-1">
+                <StatusBadge status={r.status} formats={r.formats} />
+              </span>
+            </td>
             <td className="td text-zinc-500 text-right">{r.track_count || "—"}</td>
             <td className="td text-zinc-500">{r.country || "—"}</td>
             <td className="td text-zinc-500 truncate">{r.catalog_number || "—"}</td>
@@ -811,7 +902,7 @@ export function MBSearchPage() {
               <span className="font-medium text-zinc-100">{r.title}</span>
               {r.disambiguation ? <span className="text-zinc-500"> ({r.disambiguation})</span> : null}
             </td>
-            <td className="td text-zinc-400 truncate">{r.artist || "—"}</td>
+            {artist}
             <td className="td text-zinc-500 font-mono">{r.len || "—"}</td>
             <td className="td text-zinc-500">{r.first_release_date || "—"}</td>
             <td className="td text-right font-mono text-[10px] text-zinc-600">{r.score ?? ""}</td>
@@ -821,13 +912,11 @@ export function MBSearchPage() {
   };
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
-      {/* The search header sticks: results scroll under it, and the mode /
-          tab controls stay reachable while reading a long result list. */}
-      <div className="sticky top-0 z-20 -mt-2 pt-2 pb-3 bg-bg/95 backdrop-blur space-y-3">
-        <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-          <Zap className="h-6 w-6 text-accent" /> MusicBrainz
-        </h1>
+    <div className="p-6 space-y-5 max-w-6xl mx-auto">
+      {/* Sticky, but through the shared primitive: its `top-12` clears the
+          floating top bar (a `top-0` header hides underneath it and loses its
+          clicks to the bar's search input). */}
+      <PageHeader sticky icon={Zap} title="MusicBrainz">
         <div className="relative">
           <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-500" />
           <input
@@ -902,11 +991,11 @@ export function MBSearchPage() {
             )}
           </div>
         )}
-      </div>
+      </PageHeader>
 
-      <div className="mt-1">
+      <div>
         {urlMatch ? (
-          <Spinner />
+          <PageLoading label="Asking MusicBrainz…" />
         ) : bareId ? (
           detect.isLoading ? (
             <div className="flex items-center justify-center gap-2 py-24 text-sm text-zinc-500">
@@ -958,7 +1047,7 @@ export function MBSearchPage() {
             </>
           )
         ) : search.isLoading || (search.isPlaceholderData && !rows.length) ? (
-          <Spinner />
+          <PageLoading label="Asking MusicBrainz…" />
         ) : search.error ? (
           <LoadError e={search.error} />
         ) : rows.length === 0 ? (
@@ -969,32 +1058,124 @@ export function MBSearchPage() {
               <span>{rows.length} of {total} result{total === 1 ? "" : "s"} loaded</span>
               <span title={`How this search was answered (config mb_search_source: ${srcMode})`}>{answered}</span>
             </div>
+            {selectable && sel.length > 0 && (
+              <div className="panel mb-3 flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-medium text-accent-soft">
+                  {sel.length} release group{sel.length === 1 ? "" : "s"} selected
+                </span>
+                <div className="ml-auto flex gap-1.5 flex-wrap">
+                  <button
+                    className="btn-primary !py-1 text-xs"
+                    disabled={importBusy}
+                    onClick={() => runImport(selIds, "release_group", "best", sel.length - selIds.length)}
+                    title="Queue one release per group — the edition the auto-import policy prefers"
+                  >
+                    <Zap className="h-3.5 w-3.5" /> Auto-import (best per group)
+                  </button>
+                  <button
+                    className="btn-ghost !py-1 text-xs"
+                    disabled={importBusy}
+                    onClick={() => runImport(selIds, "release_group", "all", sel.length - selIds.length)}
+                    title="Queue every eligible edition of each selected group"
+                  >
+                    Auto-import (all)
+                  </button>
+                  <button
+                    className="btn-ghost !py-1 text-xs"
+                    disabled={wishBatchBusy}
+                    onClick={async () => {
+                      setWishBatchBusy(true);
+                      let added = 0;
+                      try {
+                        for (const release_mbid of selIds) {
+                          try {
+                            await api.wishAdd({ release_mbid });
+                            added += 1;
+                          } catch {
+                            /* one refused wish must not abandon the batch */
+                          }
+                        }
+                      } finally {
+                        setWishBatchBusy(false);
+                      }
+                      const missed = sel.length - added;
+                      toast.success(`Added ${added} to wishes${missed ? ` · ${missed} skipped` : ""}`);
+                      setSel([]);
+                    }}
+                  >
+                    <BookmarkPlus className="h-3.5 w-3.5" /> Add to wishes
+                  </button>
+                  <button className="btn-ghost !py-1 text-xs" onClick={() => setSel([])}>
+                    Clear
+                  </button>
+                </div>
+              </div>
+            )}
             <div className={`rounded-lg border border-border overflow-hidden transition-opacity ${search.isPlaceholderData ? "opacity-50" : ""}`}>
-              <table className="w-full text-sm">
-                <thead className="border-b border-border">
-                  <tr>
-                    {COLUMNS[type].map((c) => (
-                      <SortTh key={c.k} label={c.label} k={c.k} sort={sort} onSort={onSort} className={c.className} />
-                    ))}
-                    <th className="th w-10"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {sorted.map((r: any) => (
-                    <tr
-                      key={String(r.id)}
-                      className="table-row !cursor-pointer"
-                      onClick={() => nav(`/mb/${routeFor(type)}/${r.id}`)}
-                      onMouseEnter={() => prefetch(type, String(r.id))}
-                    >
-                      {renderCells(r)}
-                      <td className="td w-10 pr-2">
-                        <ExtLink href={mbUrl(type, String(r.id))} title="Open on MusicBrainz" />
-                      </td>
+              <div className="table-scroll">
+                <table className="w-full text-sm">
+                  <thead className="border-b border-border">
+                    <tr>
+                      {selectable && (
+                        <th className="th w-8">
+                          <input
+                            type="checkbox"
+                            title="Select every loaded result"
+                            checked={sorted.length > 0 && sel.length === sorted.length}
+                            onChange={() =>
+                              setSel(
+                                sel.length === sorted.length
+                                  ? []
+                                  : sorted.map((r: MBSearchRow) => String(r.id)).filter(Boolean)
+                              )
+                            }
+                          />
+                        </th>
+                      )}
+                      {COLUMNS[type].map((c) => (
+                        <SortTh key={c.k} label={c.label} k={c.k} sort={sort} onSort={onSort} className={c.className} />
+                      ))}
+                      <th className="th w-16"></th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {sorted.map((r: MBSearchRow) => (
+                      <tr
+                        key={String(r.id)}
+                        className={`table-row !cursor-pointer ${sel.includes(String(r.id)) ? "bg-accent/15" : ""}`}
+                        onClick={() => nav(`/mb/${routeFor(type)}/${r.id}`)}
+                        onMouseEnter={() => prefetch(type, String(r.id))}
+                      >
+                        {selectable && (
+                          <td className="td w-8 pr-0" onClick={(e) => e.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              checked={sel.includes(String(r.id))}
+                              onChange={() => toggleSel(String(r.id))}
+                            />
+                          </td>
+                        )}
+                        {renderCells(r)}
+                        <td className="td w-16 pr-2 whitespace-nowrap">
+                          {type === "artist" && (
+                            <button
+                              className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-raise transition-colors"
+                              title="Auto-import this artist's discography (one release per release group)"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                runImport([String(r.id)], "artist", "best");
+                              }}
+                            >
+                              <Zap className="h-4 w-4" />
+                            </button>
+                          )}
+                          <ExtLink href={mbUrl(type, String(r.id))} title="Open on MusicBrainz" />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
               <LoadMore
                 loaded={rows.length}
                 total={total}
@@ -1047,6 +1228,8 @@ export function MBArtistPage() {
   });
   const { isLoading, error } = discography;
   const [typeFilter, setTypeFilter] = useState<string>("All");
+  const [mode, setMode] = useState<ImportMode>("best");
+  const { busy, run } = useAutoImport();
   useEffect(() => setTypeFilter("All"), [id]);
 
   const groups: RGRow[] = (discography.data?.pages ?? []).flatMap((p: any) => p.release_groups ?? []);
@@ -1073,22 +1256,49 @@ export function MBArtistPage() {
   for (const rg of shown) (byCat[catOf(rg)] ??= []).push(rg);
 
   if (!id) return null;
-  if (isLoading) return <Spinner />;
+  if (isLoading) return <PageLoading label="Asking MusicBrainz…" />;
   if (error) return <div className="p-6"><LoadError e={error} /></div>;
   const a = discography.data?.pages[0];
   if (!a) return null;
   const life = (a.life_span ?? []).filter(Boolean).join(" – ");
 
   return (
-    <div>
+    <div className="p-6 space-y-5 mx-auto max-w-6xl">
       <PageHeader
+        back={{ to: "/mb/search", label: "MusicBrainz search" }}
         overline="MusicBrainz artist"
         title={a.name}
-        meta={[a.disambiguation, a.type, a.country, life].filter(Boolean).join(" · ")}
+        subtitle={[a.disambiguation, a.type, a.country, life].filter(Boolean).join(" · ")}
         chips={[...(a.genres ?? []), ...(a.tags ?? []).slice(0, 5)].slice(0, 8)}
-        mbHref={mbUrl("artist", a.id)}
+        actions={
+          <>
+            {/* Wishes are per release, so an artist offers only the discography
+                import. The server fans an artist out to its release groups by
+                itself — best edition each, capped at 50 groups per call — so
+                `mode` rides along for the API's shared shape, and "all" still
+                means one release per group here. */}
+            <Segmented
+              value={mode}
+              onChange={setMode}
+              options={IMPORT_MODES}
+              className={busy ? "opacity-60" : ""}
+            />
+            <button
+              className="btn-primary !py-1.5 text-xs"
+              disabled={busy}
+              title="Find → verify → download → import this artist's release groups from Soulseek (one job at a time)"
+              onClick={() => run([String(a.id)], "artist", mode)}
+            >
+              <Zap className="h-3.5 w-3.5" /> Auto-import
+            </button>
+            <MbHeaderActions
+              href={mbUrl("artist", a.id)}
+              query={a.name}
+            />
+          </>
+        }
       />
-      <div className="px-6 pb-8 max-w-4xl mx-auto">
+      <div>
         {groups.length === 0 ? (
           <EmptyState title="No release groups on MusicBrainz" />
         ) : (
@@ -1119,28 +1329,30 @@ export function MBArtistPage() {
                 <div className="text-[11px] uppercase tracking-widest text-zinc-500 mb-1.5">
                   {cat} · {list.length}
                 </div>
-                <div className="rounded-lg border border-border overflow-hidden">
-                  {list.map((rg) => (
-                    <div
-                      key={rg.id}
-                      className="table-row !cursor-pointer"
-                      onClick={() => nav(`/mb/rg/${rg.id}`)}
-                      onMouseEnter={() => prefetch("release-group", rg.id)}
-                    >
-                      <div className="px-3 py-2 flex items-center gap-3 min-w-0">
-                        <span className="text-xs font-mono text-zinc-500 w-10 shrink-0">
-                          {(rg.first_release_date || "—").slice(0, 4)}
-                        </span>
-                        <span className="text-sm text-zinc-200 truncate flex-1">
-                          {rg.title}
-                          {rg.secondary_types?.length ? (
-                            <span className="text-zinc-500 text-xs"> ({rg.secondary_types.join(" + ")})</span>
-                          ) : null}
-                        </span>
-                        <ExtLink href={mbUrl("release-group", rg.id)} title="Open on MusicBrainz" />
+                <div className="rounded-lg border border-border overflow-hidden table-scroll">
+                  <div className="stagger">
+                    {list.map((rg) => (
+                      <div
+                        key={rg.id}
+                        className="table-row !cursor-pointer"
+                        onClick={() => nav(`/mb/rg/${rg.id}`)}
+                        onMouseEnter={() => prefetch("release-group", rg.id)}
+                      >
+                        <div className="px-3 py-2 flex items-center gap-3 min-w-0">
+                          <span className="text-xs font-mono text-zinc-500 w-10 shrink-0">
+                            {(rg.first_release_date || "—").slice(0, 4)}
+                          </span>
+                          <span className="text-sm text-zinc-200 truncate flex-1">
+                            {rg.title}
+                            {rg.secondary_types?.length ? (
+                              <span className="text-zinc-500 text-xs"> ({rg.secondary_types.join(" + ")})</span>
+                            ) : null}
+                          </span>
+                          <ExtLink href={mbUrl("release-group", rg.id)} title="Open on MusicBrainz" />
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </div>
               </div>
             ))}
@@ -1180,20 +1392,54 @@ export function MBReleaseGroupPage() {
   const releasesAll: RelRow[] = (editions.data?.pages ?? []).flatMap((p: any) => p.releases ?? []);
   const relTotal: number = editions.data?.pages.at(-1)?.total ?? releasesAll.length;
   const { sort, onSort, sorted } = useSort(releasesAll, "date");
+  // Bulk auto-import is the whole point of this page, so its editions table
+  // carries the library's select-mode: checkbox column, selected rows tinted
+  // and a batch bar above the table.
+  const [sel, setSel] = useState<string[]>([]);
+  const [wished, setWished] = useState(false);
+  const [wishBusy, setWishBusy] = useState(false);
+  const [mode, setMode] = useState<ImportMode>("best");
+  const { busy, run } = useAutoImport();
+  const toggleSel = (rid: string) =>
+    setSel((s) => (s.includes(rid) ? s.filter((x) => x !== rid) : [...s, rid]));
+  // rows the payload could not identify still count as selected, so the batch
+  // reports them as skipped instead of queueing `undefined`
+  const selIds = sel.filter((x) => x && x !== "undefined");
 
   if (!id) return null;
-  if (isLoading) return <Spinner />;
+  if (isLoading) return <PageLoading label="Asking MusicBrainz…" />;
   if (error) return <div className="p-6"><LoadError e={error} /></div>;
   const rg = editions.data?.pages[0];
   if (!rg) return null;
   const typeLabel = [rg.primary_type, ...(rg.secondary_types ?? [])].filter(Boolean).join(" + ");
 
+  const wishHere = async (mbids: string[]) => {
+    setWishBusy(true);
+    let added = 0;
+    try {
+      for (const release_mbid of mbids) {
+        try {
+          await api.wishAdd({ release_mbid, title: rg.title, artist: rg.artist });
+          added += 1;
+        } catch {
+          /* one refused wish must not abandon the batch */
+        }
+      }
+    } finally {
+      setWishBusy(false);
+    }
+    const missed = mbids.length - added;
+    toast.success(`Added ${added} to wishes${missed ? ` · ${missed} skipped` : ""}`);
+    return added;
+  };
+
   return (
-    <div>
+    <div className="p-6 space-y-5 mx-auto max-w-6xl">
       <PageHeader
+        back={{ to: "/mb/search", label: "MusicBrainz search" }}
         overline="MusicBrainz release group"
         title={rg.title}
-        meta={[
+        subtitle={[
           rg.artist,
           typeLabel,
           rg.first_release_date,
@@ -1202,72 +1448,168 @@ export function MBReleaseGroupPage() {
           .filter(Boolean)
           .join(" · ")}
         chips={rg.genres ?? []}
-        mbHref={mbUrl("release-group", rg.id)}
-      >
-        {rg.artist_mbid && (
-          <Link className="btn-ghost !py-1.5 text-xs" to={`/mb/artist/${rg.artist_mbid}`}>
-            Artist page
-          </Link>
-        )}
-      </PageHeader>
-      <div className="px-6 pb-8 max-w-5xl mx-auto">
+        actions={
+          <>
+            {rg.artist_mbid && (
+              <Link className="btn-ghost !py-1.5 text-xs" to={`/mb/artist/${rg.artist_mbid}`}>
+                Artist page
+              </Link>
+            )}
+            <Segmented
+              value={mode}
+              onChange={setMode}
+              options={IMPORT_MODES}
+              className={busy ? "opacity-60" : ""}
+            />
+            <button
+              className="btn-primary !py-1.5 text-xs"
+              disabled={busy}
+              title={
+                mode === "best"
+                  ? "Queue the one edition the auto-import policy prefers for this group"
+                  : "Queue every eligible edition of this group (one job at a time)"
+              }
+              onClick={() => run([String(rg.id)], "release_group", mode)}
+            >
+              <Zap className="h-3.5 w-3.5" /> Auto-import
+            </button>
+            <button
+              className="btn-ghost !py-1.5 text-xs"
+              title="Save this release group to the wishlist — it is auto-imported from Soulseek when a verified copy appears"
+              disabled={wishBusy || wished}
+              onClick={async () => {
+                if (await wishHere([String(rg.id)])) setWished(true);
+              }}
+            >
+              {wished ? <Check className="h-3.5 w-3.5" /> : <BookmarkPlus className="h-3.5 w-3.5" />}
+              {wished ? "Wished" : "Add to wishes"}
+            </button>
+            <MbHeaderActions
+              href={mbUrl("release-group", rg.id)}
+              query={[rg.artist, rg.title].filter(Boolean).join(" ")}
+            />
+          </>
+        }
+      />
+      <div>
         <div className="text-[11px] uppercase tracking-widest text-zinc-500 mb-1.5">
           Releases{releasesAll.length < relTotal ? ` · ${releasesAll.length} of ${relTotal}` : ` · ${relTotal}`}
         </div>
+        {sel.length > 0 && (
+          <div className="panel mb-3 flex items-center gap-2 flex-wrap">
+            <span className="text-xs font-medium text-accent-soft">
+              {sel.length} edition{sel.length === 1 ? "" : "s"} selected
+            </span>
+            <div className="ml-auto flex gap-1.5 flex-wrap">
+              <button
+                className="btn-primary !py-1 text-xs"
+                disabled={busy}
+                onClick={() => run(selIds, "release_group", "best", sel.length - selIds.length)}
+                title="Queue one release per selected group — the edition the auto-import policy prefers"
+              >
+                <Zap className="h-3.5 w-3.5" /> Auto-import (best per group)
+              </button>
+              <button
+                className="btn-ghost !py-1 text-xs"
+                disabled={busy}
+                onClick={() => run(selIds, "release_group", "all", sel.length - selIds.length)}
+                title="Queue every eligible edition of each selected group"
+              >
+                Auto-import (all)
+              </button>
+              <button
+                className="btn-ghost !py-1 text-xs"
+                disabled={wishBusy}
+                onClick={async () => {
+                  await wishHere(selIds);
+                  setSel([]);
+                }}
+              >
+                <BookmarkPlus className="h-3.5 w-3.5" /> Add to wishes
+              </button>
+              <button className="btn-ghost !py-1 text-xs" onClick={() => setSel([])}>
+                Clear
+              </button>
+            </div>
+          </div>
+        )}
         <div className={`rounded-lg border border-border overflow-hidden transition-opacity ${editions.isPlaceholderData ? "opacity-50" : ""}`}>
-          <table className="w-full text-sm">
-            <thead className="border-b border-border">
-              <tr>
-                <SortTh label="Date" k="date" sort={sort} onSort={onSort} className="w-24 cell-nowrap" />
-                <SortTh label="Title" k="title" sort={sort} onSort={onSort} />
-                <th className="th w-[11%]">Format</th>
-                <SortTh label="Discs" k="disc_count" sort={sort} onSort={onSort} className="w-[8%] cell-nowrap text-right" />
-                <SortTh label="Tracks" k="track_count" sort={sort} onSort={onSort} className="w-[12%] text-right" />
-                <th className="th w-[7%]">Country</th>
-                <th className="th w-[9%]">Status</th>
-                <th className="th w-[14%]">Barcode</th>
-                <th className="th w-10"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {sorted.map((r) => (
-                <tr
-                  key={r.id}
-                  className="table-row !cursor-pointer"
-                  onClick={() => nav(`/mb/release/${r.id}`)}
-                  onMouseEnter={() => prefetch("release", r.id)}
-                  title="Open this release"
-                >
-                  <td className="td text-zinc-500 cell-nowrap">{r.date || "—"}</td>
-                  <td className="td text-zinc-200">
-                    <span className="truncate">{r.title}</span>
-                    {r.disambiguation ? <span className="text-zinc-500"> ({r.disambiguation})</span> : null}
-                  </td>
-                  <td className="td text-zinc-500">{r.formats || "—"}</td>
-                  <td className="td text-zinc-500 text-right">{r.disc_count || "—"}</td>
-                  <td
-                    className="td text-zinc-500 text-right tabular-nums cell-nowrap"
-                    title={(r.disc_count ?? 1) > 1 ? `${r.track_count} tracks across ${r.disc_count} discs` : undefined}
-                  >
-                    {tracksLabel(r) || "—"}
-                  </td>
-                  <td className="td text-zinc-500">{r.country || "—"}</td>
-                  <td className="td text-zinc-500">{r.status || "—"}</td>
-                  <td className="td text-zinc-600 font-mono text-[11px] truncate">{r.barcode || ""}</td>
-                  <td className="td w-10 pr-2">
-                    <ExtLink href={mbUrl("release", r.id)} title="Open on MusicBrainz" />
-                  </td>
-                </tr>
-              ))}
-              {!releasesAll.length && (
+          <div className="table-scroll">
+            <table className="w-full text-sm">
+              <thead className="border-b border-border">
                 <tr>
-                  <td colSpan={9} className="p-0">
-                    <EmptyState title="No releases in this group" />
-                  </td>
+                  <th className="th w-8">
+                    <input
+                      type="checkbox"
+                      title="Select every loaded edition"
+                      checked={sorted.length > 0 && sel.length === sorted.length}
+                      onChange={() =>
+                        setSel(
+                          sel.length === sorted.length ? [] : sorted.map((r) => String(r.id)).filter(Boolean)
+                        )
+                      }
+                    />
+                  </th>
+                  <SortTh label="Date" k="date" sort={sort} onSort={onSort} className="w-24 cell-nowrap" />
+                  <SortTh label="Title" k="title" sort={sort} onSort={onSort} />
+                  <th className="th w-[13%]">Format</th>
+                  <SortTh label="Discs" k="disc_count" sort={sort} onSort={onSort} className="w-[8%] cell-nowrap text-right" />
+                  <SortTh label="Tracks" k="track_count" sort={sort} onSort={onSort} className="w-[12%] text-right" />
+                  <th className="th w-[7%]">Country</th>
+                  <th className="th w-[14%]">Barcode</th>
+                  <th className="th w-10"></th>
                 </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="stagger">
+                {sorted.map((r) => (
+                  <tr
+                    key={r.id}
+                    className={`table-row !cursor-pointer ${sel.includes(String(r.id)) ? "bg-accent/15" : ""}`}
+                    onClick={() => nav(`/mb/release/${r.id}`)}
+                    onMouseEnter={() => prefetch("release", r.id)}
+                    title="Open this release"
+                  >
+                    <td className="td w-8 pr-0" onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={sel.includes(String(r.id))}
+                        onChange={() => toggleSel(String(r.id))}
+                      />
+                    </td>
+                    <td className="td text-zinc-500 cell-nowrap">{r.date || "—"}</td>
+                    <td className="td text-zinc-200">
+                      <span className="truncate">{r.title}</span>
+                      {r.disambiguation ? <span className="text-zinc-500"> ({r.disambiguation})</span> : null}
+                    </td>
+                    <td className="td text-zinc-500">
+                      <span className="inline-flex flex-wrap items-center gap-1">
+                        <StatusBadge status={r.status} formats={r.formats} />
+                      </span>
+                    </td>
+                    <td className="td text-zinc-500 text-right">{r.disc_count || "—"}</td>
+                    <td
+                      className="td text-zinc-500 text-right tabular-nums cell-nowrap"
+                      title={(r.disc_count ?? 1) > 1 ? `${r.track_count} tracks across ${r.disc_count} discs` : undefined}
+                    >
+                      {tracksLabel(r) || "—"}
+                    </td>
+                    <td className="td text-zinc-500">{r.country || "—"}</td>
+                    <td className="td text-zinc-600 font-mono text-[11px] truncate">{r.barcode || ""}</td>
+                    <td className="td w-10 pr-2">
+                      <ExtLink href={mbUrl("release", r.id)} title="Open on MusicBrainz" />
+                    </td>
+                  </tr>
+                ))}
+                {!releasesAll.length && (
+                  <tr>
+                    <td colSpan={9} className="p-0">
+                      <EmptyState title="No releases in this group" />
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
           <LoadMore
             loaded={releasesAll.length}
             total={relTotal}
@@ -1294,87 +1636,130 @@ export function MBReleasePage() {
   });
   const [wished, setWished] = useState(false);
   const [wishBusy, setWishBusy] = useState(false);
-  if (isLoading) return <Spinner />;
+  const [mode, setMode] = useState<ImportMode>("best");
+  const { busy, run } = useAutoImport();
+  if (isLoading) return <PageLoading label="Asking MusicBrainz…" />;
   if (error) return <div className="p-6"><LoadError e={error} /></div>;
   if (!r) return null;
 
   const cover = `https://coverartarchive.org/release/${r.id}/front-500`;
   const artist = r.artists?.map((a) => a.name).join(", ") || "";
+  // The release lookup also answers `status`, `medium` and (sometimes)
+  // `artist_mbid`; MBRelease has not caught up with those three yet.
+  const extra = r as MBRelease & { status?: string; medium?: string; artist_mbid?: string };
+  const artistMbid = r.artists?.[0]?.mbid || extra.artist_mbid || "";
+  const meta = [
+    typeLabel(r.primary_type, r.secondary_types) || r.release_type,
+    r.date,
+    [r.label, r.catalog_number].filter(Boolean).join(" · "),
+    r.country,
+    r.barcode,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  // "best" queues this exact pressing; "all" queues every eligible edition of
+  // the release group it belongs to (the backend ignores `mode` for a single
+  // release, so the wider scope has to be asked for explicitly).
+  const importTarget =
+    mode === "all" && r.release_group_id
+      ? { mbid: r.release_group_id, kind: "release_group" as const }
+      : { mbid: r.id, kind: "release" as const };
   const discs: Record<number, MBTrackRow[]> = {};
   for (const t of (r.media ?? []) as MBTrackRow[]) {
     (discs[t.disc] ??= []).push(t);
   }
 
   return (
-    <div>
+    <div className="p-6 space-y-5 mx-auto max-w-6xl">
       <PageHeader
+        back={{ to: "/mb/search", label: "MusicBrainz search" }}
         overline="MusicBrainz release"
         title={r.title}
-        soulseekQuery={[r.artists?.[0]?.name, r.title].filter(Boolean).join(" ")}
-        meta={[
-          artist,
-          typeLabel(r.primary_type, r.secondary_types) || r.release_type,
-          r.date,
-          [r.label, r.catalog_number].filter(Boolean).join(" · "),
-          r.country,
-          r.barcode,
-        ]
-          .filter(Boolean)
-          .join(" · ")}
+        subtitle={
+          <>
+            {artistMbid ? (
+              <Link
+                to={`/mb/artist/${artistMbid}`}
+                className="hover:text-accent-soft"
+                title="Open the credited artist on MusicBrainz"
+              >
+                {artist}
+              </Link>
+            ) : (
+              artist
+            )}
+            {meta ? <> · {meta}</> : null}
+            <span className="ml-1.5 inline-flex flex-wrap items-center gap-1 align-middle">
+              <StatusBadge status={extra.status} formats={extra.medium} />
+            </span>
+          </>
+        }
         chips={r.genres ?? []}
-        mbHref={mbUrl("release", r.id)}
-      >
-        <button
-          className="btn-ghost !py-1.5 text-xs"
-          title="Save this release to the wishlist — it is auto-imported from Soulseek when a verified copy appears"
-          disabled={wishBusy || wished}
-          onClick={async () => {
-            setWishBusy(true);
-            try {
-              await api.wishAdd({
-                release_mbid: r.id,
-                title: r.title,
-                artist,
-                year: (r.date || "").slice(0, 4),
-              });
-              setWished(true);
-              toast("Added to wishes");
-            } catch (e) {
-              toast(String(e));
-            } finally {
-              setWishBusy(false);
-            }
-          }}
-        >
-          {wished ? <Check className="h-3.5 w-3.5" /> : <BookmarkPlus className="h-3.5 w-3.5" />}
-          {wished ? "Wished" : "Add to wishes"}
-        </button>
-        <button
-          className="btn-primary !py-1.5 text-xs"
-          title="Find → verify → download → audit → import this exact release from Soulseek"
-          onClick={async () => {
-            try {
-              await api.soulseekAutoStart({ release_mbid: r.id });
-              toast("Auto-import started");
-              nav(`/soulseek?release=${encodeURIComponent(r.id)}`);
-            } catch (e) {
-              toast(String(e));
-            }
-          }}
-        >
-          <Zap className="h-3.5 w-3.5" /> Auto-import
-        </button>
-        {r.release_group_id && (
-          <Link className="btn-ghost !py-1.5 text-xs" to={`/mb/rg/${r.release_group_id}`}>
-            Release group
-          </Link>
-        )}
-        <a className="btn-ghost !py-1.5 text-xs" href={cover} target="_blank" rel="noreferrer" title="Cover Art Archive">
-          Cover art
-        </a>
-      </PageHeader>
+        actions={
+          <>
+            <Segmented
+              value={mode}
+              onChange={setMode}
+              options={IMPORT_MODES}
+              className={busy ? "opacity-60" : ""}
+            />
+            <button
+              className="btn-primary !py-1.5 text-xs"
+              disabled={busy}
+              title={
+                importTarget.kind === "release_group"
+                  ? "Find → verify → download → audit → import every eligible edition of this release group from Soulseek"
+                  : "Find → verify → download → audit → import this exact release from Soulseek"
+              }
+              onClick={async () => {
+                await run([importTarget.mbid], importTarget.kind, mode);
+                nav(`/soulseek?release=${encodeURIComponent(r.id)}`);
+              }}
+            >
+              <Zap className="h-3.5 w-3.5" /> Auto-import
+            </button>
+            <button
+              className="btn-ghost !py-1.5 text-xs"
+              title="Save this release to the wishlist — it is auto-imported from Soulseek when a verified copy appears"
+              disabled={wishBusy || wished}
+              onClick={async () => {
+                setWishBusy(true);
+                try {
+                  await api.wishAdd({
+                    release_mbid: r.id,
+                    title: r.title,
+                    artist,
+                    year: (r.date || "").slice(0, 4),
+                  });
+                  setWished(true);
+                  toast.success("Added to wishes");
+                } catch (e) {
+                  toast.error(String(e));
+                } finally {
+                  setWishBusy(false);
+                }
+              }}
+            >
+              {wished ? <Check className="h-3.5 w-3.5" /> : <BookmarkPlus className="h-3.5 w-3.5" />}
+              {wished ? "Wished" : "Add to wishes"}
+            </button>
+            {r.release_group_id && (
+              <Link className="btn-ghost !py-1.5 text-xs" to={`/mb/rg/${r.release_group_id}`}>
+                Release group
+              </Link>
+            )}
+            <a className="btn-ghost !py-1.5 text-xs" href={cover} target="_blank" rel="noreferrer" title="Cover Art Archive">
+              Cover art
+            </a>
+            <MbHeaderActions
+              href={mbUrl("release", r.id)}
+              query={[r.artists?.[0]?.name, r.title].filter(Boolean).join(" ")}
+            />
+          </>
+        }
+      />
 
-      <div className="px-6 pb-8 max-w-4xl mx-auto grid grid-cols-1 lg:grid-cols-[240px_1fr] gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-[240px_1fr] gap-6">
         <div>
           <img
             src={cover}
@@ -1452,18 +1837,18 @@ export function MBRecordingPage() {
   const { sort, onSort, sorted } = useSort(releasesAll, "date");
 
   if (!id) return null;
-  if (isLoading) return <Spinner />;
+  if (isLoading) return <PageLoading label="Asking MusicBrainz…" />;
   if (error) return <div className="p-6"><LoadError e={error} /></div>;
   const r = appearances.data?.pages[0];
   if (!r) return null;
 
   return (
-    <div>
+    <div className="p-6 space-y-5 mx-auto max-w-6xl">
       <PageHeader
+        back={{ to: "/mb/search", label: "MusicBrainz search" }}
         overline="MusicBrainz recording"
         title={r.title}
-        soulseekQuery={[r.artist, r.title].filter(Boolean).join(" ")}
-        meta={[
+        subtitle={[
           r.artist,
           r.length ? fmtLen(r.length) : "",
           r.disambiguation,
@@ -1472,63 +1857,75 @@ export function MBRecordingPage() {
           .filter(Boolean)
           .join(" · ")}
         chips={r.genres ?? []}
-        mbHref={mbUrl("recording", r.id)}
-      >
-        {r.artist_mbid && (
-          <Link className="btn-ghost !py-1.5 text-xs" to={`/mb/artist/${r.artist_mbid}`}>
-            Artist page
-          </Link>
-        )}
-      </PageHeader>
-      <div className="px-6 pb-8 max-w-5xl mx-auto">
+        actions={
+          <>
+            {r.artist_mbid && (
+              <Link className="btn-ghost !py-1.5 text-xs" to={`/mb/artist/${r.artist_mbid}`}>
+                Artist page
+              </Link>
+            )}
+            <MbHeaderActions
+              href={mbUrl("recording", r.id)}
+              query={[r.artist, r.title].filter(Boolean).join(" ")}
+            />
+          </>
+        }
+      />
+      <div>
         <div className="text-[11px] uppercase tracking-widest text-zinc-500 mb-1.5">
           Appears on{releasesAll.length < relTotal ? ` · ${releasesAll.length} of ${relTotal} releases` : ` · ${relTotal} releases`}
         </div>
         <div className={`rounded-lg border border-border overflow-hidden transition-opacity ${appearances.isPlaceholderData ? "opacity-50" : ""}`}>
-          <table className="w-full text-sm">
-            <thead className="border-b border-border">
-              <tr>
-                <SortTh label="Date" k="date" sort={sort} onSort={onSort} className="w-24 cell-nowrap" />
-                <SortTh label="Title" k="title" sort={sort} onSort={onSort} />
-                <th className="th w-[10%]">Format</th>
-                <th className="th w-[10%]">Type</th>
-                <SortTh label="Tracks" k="track_count" sort={sort} onSort={onSort} className="w-[11%] text-right" />
-                <th className="th w-[8%]">Country</th>
-                <th className="th w-10"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {sorted.map((rel) => (
-                <tr
-                  key={rel.id}
-                  className="table-row !cursor-pointer"
-                  onClick={() => nav(`/mb/release/${rel.id}`)}
-                  onMouseEnter={() => prefetch("release", rel.id)}
-                >
-                  <td className="td text-zinc-500 cell-nowrap">{rel.date || "—"}</td>
-                  <td className="td text-zinc-200">
-                    <span className="truncate">{rel.title}</span>
-                  </td>
-                  <td className="td text-zinc-500">{rel.formats || "—"}</td>
-                  <td className="td text-zinc-500 truncate">
-                    {typeLabel(rel.primary_type, rel.secondary_types) || "—"}
-                  </td>
-                  <td className="td text-zinc-500 text-right tabular-nums cell-nowrap">{tracksLabel(rel) || "—"}</td>
-                  <td className="td text-zinc-500">{rel.country || "—"}</td>
-                  <td className="td w-10 pr-2">
-                    <ExtLink href={mbUrl("release", rel.id)} title="Open on MusicBrainz" />
-                  </td>
-                </tr>
-              ))}
-              {!releasesAll.length && (
+          <div className="table-scroll">
+            <table className="w-full text-sm">
+              <thead className="border-b border-border">
                 <tr>
-                  <td colSpan={7} className="p-0">
-                    <EmptyState title="No releases carry this recording" />
-                  </td>
+                  <SortTh label="Date" k="date" sort={sort} onSort={onSort} className="w-24 cell-nowrap" />
+                  <SortTh label="Title" k="title" sort={sort} onSort={onSort} />
+                  <th className="th w-[13%]">Format</th>
+                  <th className="th w-[10%]">Type</th>
+                  <SortTh label="Tracks" k="track_count" sort={sort} onSort={onSort} className="w-[11%] text-right" />
+                  <th className="th w-[8%]">Country</th>
+                  <th className="th w-10"></th>
                 </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="stagger">
+                {sorted.map((rel) => (
+                  <tr
+                    key={rel.id}
+                    className="table-row !cursor-pointer"
+                    onClick={() => nav(`/mb/release/${rel.id}`)}
+                    onMouseEnter={() => prefetch("release", rel.id)}
+                  >
+                    <td className="td text-zinc-500 cell-nowrap">{rel.date || "—"}</td>
+                    <td className="td text-zinc-200">
+                      <span className="truncate">{rel.title}</span>
+                    </td>
+                    <td className="td text-zinc-500">
+                      <span className="inline-flex flex-wrap items-center gap-1">
+                        <StatusBadge status={rel.status} formats={rel.formats} />
+                      </span>
+                    </td>
+                    <td className="td text-zinc-500 truncate">
+                      {typeLabel(rel.primary_type, rel.secondary_types) || "—"}
+                    </td>
+                    <td className="td text-zinc-500 text-right tabular-nums cell-nowrap">{tracksLabel(rel) || "—"}</td>
+                    <td className="td text-zinc-500">{rel.country || "—"}</td>
+                    <td className="td w-10 pr-2">
+                      <ExtLink href={mbUrl("release", rel.id)} title="Open on MusicBrainz" />
+                    </td>
+                  </tr>
+                ))}
+                {!releasesAll.length && (
+                  <tr>
+                    <td colSpan={7} className="p-0">
+                      <EmptyState title="No releases carry this recording" />
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
           <LoadMore
             loaded={releasesAll.length}
             total={relTotal}

@@ -5,6 +5,7 @@ import { ListMusic, Play, Plus, Upload } from "lucide-react";
 import { api } from "../api";
 import { toast, useStore } from "../store";
 import { EmptyState, PageLoading } from "../components/Badges";
+import PageHeader from "../components/PageHeader";
 import { TrackCover } from "../components/CoverImg";
 import FavHeart from "../components/FavHeart";
 import { fmtDuration, GRID_SIZE_MIN } from "../lib/fmt";
@@ -59,7 +60,7 @@ export default function PlaylistsPage() {
       refresh();
       toast("Playlist imported");
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       if (fileRef.current) fileRef.current.value = "";
     }
@@ -86,7 +87,7 @@ export default function PlaylistsPage() {
 
   const cardGrid = (list: Playlist[]) => (
     <div
-      className="grid gap-x-4 gap-y-5"
+      className="grid gap-x-4 gap-y-5 stagger"
       style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${GRID_SIZE_MIN[gridSize]}px, 1fr))` }}
     >
       {list.map((p) => (
@@ -101,32 +102,35 @@ export default function PlaylistsPage() {
   );
 
   return (
-    <div className="p-6 space-y-5">
-      <div className="flex items-center gap-3 flex-wrap">
-        <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-          <ListMusic className="h-6 w-6 text-accent" /> Playlists
-        </h1>
-        <input
-          className="input max-w-xs ml-auto"
-          placeholder="New playlist name…"
-          value={newName}
-          onChange={(e) => setNewName(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && create.mutate()}
-        />
-        <button className="btn-primary" onClick={() => create.mutate()} disabled={!newName.trim()}>
-          <Plus className="h-4 w-4" /> Create
-        </button>
-        <input
-          ref={fileRef}
-          type="file"
-          accept=".m3u8,.m3u"
-          className="hidden"
-          onChange={(e) => e.target.files?.[0] && importM3u8(e.target.files[0])}
-        />
-        <button className="btn-ghost" onClick={() => fileRef.current?.click()}>
-          <Upload className="h-4 w-4" /> Import .m3u8
-        </button>
-      </div>
+    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+      <PageHeader
+        icon={ListMusic}
+        title="Playlists"
+        actions={
+          <>
+            <input
+              className="input max-w-xs"
+              placeholder="New playlist name…"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && create.mutate()}
+            />
+            <button className="btn-primary" onClick={() => create.mutate()} disabled={!newName.trim()}>
+              <Plus className="h-4 w-4" /> Create
+            </button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".m3u8,.m3u"
+              className="hidden"
+              onChange={(e) => e.target.files?.[0] && importM3u8(e.target.files[0])}
+            />
+            <button className="btn-ghost" onClick={() => fileRef.current?.click()}>
+              <Upload className="h-4 w-4" /> Import .m3u8
+            </button>
+          </>
+        }
+      />
 
       {manual.length === 0 && smart.length === 0 && (
         <EmptyState title="No playlists yet" hint="Create a manual playlist, or import an .m3u8 file." />

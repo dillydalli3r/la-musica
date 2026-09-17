@@ -6,6 +6,7 @@ import { toast } from "../store";
 import ConfirmButton from "../components/ConfirmButton";
 import Segmented from "../components/Segmented";
 import { PageLoading } from "../components/Badges";
+import PageHeader from "../components/PageHeader";
 
 /** In-depth grading configuration: every check that can count for or
  * against grading, grouped the way they apply — track/album checks,
@@ -17,8 +18,6 @@ interface CheckDef {
   k: string;
   label: string;
   desc: string;
-  /** check fires only when AI tooling is configured */
-  needsAi?: boolean;
 }
 
 interface Group {
@@ -38,6 +37,7 @@ const GROUPS: Group[] = [
       { k: "grade_check_missing_tags", label: "Required tags", desc: "Every required per-track tag (title, artist, date, …) must exist and be non-empty." },
       { k: "grade_check_album_tags", label: "Album-level tags", desc: "Album-wide tags (album, album artist, catalog number, …) must be present on the tracks." },
       { k: "grade_check_mood", label: "Mood tag present", desc: "Every track needs a MOOD tag — script 8 fills it, so no track should ship without one (issue code MOOD_MISSING)." },
+      { k: "grade_check_energy", label: "Energy tag present", desc: "Every track needs an ENERGY tag (0-100, written with MOOD by script 8; issue code ENERGY_MISSING)." },
       { k: "grade_check_genre", label: "Genre tag present", desc: "Every track needs a GENRE tag. Graded on its own, independent of the required-tags sweep (issue code GENRE_MISSING)." },
       { k: "grade_check_replaygain", label: "ReplayGain tags present", desc: "All four ReplayGain tags — REPLAYGAIN_TRACK_GAIN/_PEAK and _ALBUM_GAIN/_PEAK — must be written (run the Loudness pass; the player can also analyse on demand)." },
       { k: "grade_check_encoder", label: "Encoder identity", desc: "ENCODER_PROGRAM / QUALITY / VERSION must be present." },
@@ -97,7 +97,7 @@ const GROUPS: Group[] = [
     desc: "Cover art presence and the size / square rules from Settings → Images.",
     items: [
       { k: "grade_check_cover", label: "Cover art", desc: "The album must have cover art meeting the configured size, squareness and crop rules." },
-      { k: "grade_check_cover_crop", label: "Cropped cover detection", desc: "Covers that look cropped from a larger source fail (when size enforcement is on)." },
+      { k: "grade_check_cover_crop", label: "Cover aspect ratio (squareness)", desc: "The cover's width/height must be square within cover_crop_threshold — an aspect-ratio test, not crop detection (issue: 'Cover aspect ratio WxH not square')." },
       { k: "grade_check_sidecar_cover", label: "Per-track sidecar covers", desc: "Sidecar covers (01 - Song.jpg) must meet the same cover rules." },
     ],
   },
@@ -120,12 +120,10 @@ const GROUPS: Group[] = [
   {
     id: "lyrics",
     title: "Lyrics & translations",
-    desc: "Presence checks for lyrics and the script 15 transforms. The transliteration/translation checks only fire when AI tooling is configured and the lyrics actually need them (cross-script rules).",
+    desc: "Presence checks for lyrics and the translation/transliteration tags stored beside them (TRANSLATION-EN, TRANSLITERATION-JA-LATN, sidecars).",
     items: [
       { k: "grade_check_lyrics", label: "Lyrics present", desc: "Every non-instrumental track needs lyrics (embedded and/or .lrc sidecar, per the lyrics format)." },
       { k: "grade_check_lyrics_lang_tags", label: "Transform language tags", desc: "Transform tags must carry their language (TRANSLATION-EN, TRANSLITERATION-JA-LATN — never the bare legacy names)." },
-      { k: "grade_check_xlit", label: "Transliteration present", desc: "Lyrics in a script you don't read need romanization (.romaji.lrc or the TRANSLITERATION tag).", needsAi: true },
-      { k: "grade_check_trans", label: "Translation present", desc: "Lyrics in another script need a translation (.<lang>.lrc or the TRANSLATION tag).", needsAi: true },
     ],
   },
   {
@@ -193,9 +191,9 @@ export default function GradingPage() {
       // refresh the base truth so the dirty flag clears against what the
       // server now holds
       await qc.invalidateQueries({ queryKey: ["config"] });
-      toast("Grading settings saved");
+      toast.success("Grading settings saved");
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setSaving(false);
     }
@@ -218,7 +216,6 @@ export default function GradingPage() {
   };
 
   const val = (k: string) => !!local?.[k];
-  const aiReady = !!String(local?.ai_base_url ?? "").trim() && !!String(local?.ai_model ?? "").trim();
 
   const [q, setQ] = useState("");
   const needle = q.trim().toLowerCase();
@@ -246,7 +243,7 @@ export default function GradingPage() {
       "grade_check_cover_crop", "grade_check_lyrics_zero", "grade_check_tag_blank_lines",
       "grade_check_lyrics_blank_lines", "grade_check_cue_blank_lines",
       "grade_check_filename_case", "grade_check_ext_case", "grade_check_excess_tags",
-      "grade_check_mb_links", "grade_check_rym_links", "grade_check_xlit", "grade_check_trans",
+      "grade_check_mb_links", "grade_check_rym_links",
       // content checks — nothing breaks if the library ships without them
       "grade_check_replaygain", "grade_check_album_description",
       "grade_check_artist_image", "grade_check_artist_description",
@@ -268,59 +265,56 @@ export default function GradingPage() {
   ];
 
   return (
-    <div className="p-6 space-y-5">
-      <div className="flex items-start justify-between gap-4 sticky top-0 z-20 bg-bg/95 backdrop-blur py-2 -mt-2">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-            <ClipboardCheck className="h-6 w-6 text-accent" /> Grading
-          </h1>
-          <p className="text-xs text-zinc-500 mt-0.5 max-w-2xl">
-            Everything that can count for or against a grade, checked per track, album, artist folder and file.
-            Toggles take effect the next time the grader runs (any grade view or the Grade script).
-          </p>
-        </div>
-        <div className="flex items-center gap-2 shrink-0">
-          {dirty && <span className="text-[10px] font-mono text-amber-400/80">unsaved changes</span>}
-          <ConfirmButton
-            onConfirm={resetDefaults}
-            confirmLabel="Reset checks"
-            disabled={!defaults || saving}
-            title="Restore factory defaults for every grading check"
-          >
-            <RotateCcw className="h-3.5 w-3.5" /> Reset to defaults
-          </ConfirmButton>
-          <button className="btn-ghost !py-1.5 text-xs" onClick={discard} disabled={!dirty || saving}>
-            <RotateCcw className="h-3.5 w-3.5" /> Discard
-          </button>
-          <button className="btn-primary !py-1.5 text-xs" onClick={save} disabled={!dirty || saving}>
-            <Save className="h-3.5 w-3.5" /> {saving ? "Saving…" : "Save"}
-          </button>
-        </div>
-      </div>
-
-      {local && (
-        <div className="flex items-center gap-2 flex-wrap">
-          <input
-            className="input !py-1.5 text-xs max-w-xs"
-            placeholder="Filter checks… (tags, lyrics, cover…)"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-          />
-          <Segmented
-            value={preset}
-            onChange={applyPreset}
-            options={PRESETS}
-          />
-          <button className="btn-ghost !py-1 text-xs" onClick={() => setBulk(true)}>Enable all</button>
-          <button className="btn-ghost !py-1 text-xs" onClick={() => setBulk(false)}>Disable all</button>
-          <span
-            className="chip font-mono bg-white/5 border border-border text-zinc-400"
-            title="Enabled grading checks — the file-category permissions are counted per group instead"
-          >
-            {CHECK_KEYS.filter(val).length}/{CHECK_KEYS.length} checks on
-          </span>
-        </div>
-      )}
+    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+      <PageHeader
+        sticky
+        icon={ClipboardCheck}
+        title="Grading"
+        subtitle="Everything that can count for or against a grade, checked per track, album, artist folder and file. Toggles take effect the next time the grader runs (any grade view or the Grade script)."
+        actions={
+          <>
+            {dirty && <span className="text-[10px] font-mono text-amber-400/80">unsaved changes</span>}
+            <ConfirmButton
+              onConfirm={resetDefaults}
+              confirmLabel="Reset checks"
+              disabled={!defaults || saving}
+              title="Restore factory defaults for every grading check"
+            >
+              <RotateCcw className="h-3.5 w-3.5" /> Reset to defaults
+            </ConfirmButton>
+            <button className="btn-ghost !py-1.5 text-xs" onClick={discard} disabled={!dirty || saving}>
+              <RotateCcw className="h-3.5 w-3.5" /> Discard
+            </button>
+            <button className="btn-primary !py-1.5 text-xs" onClick={save} disabled={!dirty || saving}>
+              <Save className="h-3.5 w-3.5" /> {saving ? "Saving…" : "Save"}
+            </button>
+          </>
+        }
+      >
+        {local && (
+          <div className="flex items-center gap-2 flex-wrap">
+            <input
+              className="input !py-1.5 text-xs max-w-xs"
+              placeholder="Filter checks… (tags, lyrics, cover…)"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+            <Segmented
+              value={preset}
+              onChange={applyPreset}
+              options={PRESETS}
+            />
+            <button className="btn-ghost !py-1 text-xs" onClick={() => setBulk(true)}>Enable all</button>
+            <button className="btn-ghost !py-1 text-xs" onClick={() => setBulk(false)}>Disable all</button>
+            <span
+              className="chip font-mono bg-white/5 border border-border text-zinc-400"
+              title="Enabled grading checks — the file-category permissions are counted per group instead"
+            >
+              {CHECK_KEYS.filter(val).length}/{CHECK_KEYS.length} checks on
+            </span>
+          </div>
+        )}
+      </PageHeader>
 
       {!local ? (
         <PageLoading label="Loading grading settings…" />
@@ -360,30 +354,24 @@ export default function GradingPage() {
                   </div>
                 </div>
               )}
-              <div className="divide-y divide-border/40 rounded-lg border border-border/60 bg-panel/40">
-                {rows.map((it) => {
-                  const off = it.needsAi && !aiReady;
-                  return (
-                    <label
-                      key={it.k}
-                      className="flex items-start gap-3 px-3.5 py-2.5 cursor-pointer select-none hover:bg-raise/40 transition-colors"
-                    >
-                      <input
-                        type="checkbox"
-                        className="mt-0.5"
-                        checked={val(it.k)}
-                        onChange={(e) => set(it.k, e.target.checked)}
-                      />
-                      <span className="min-w-0">
-                        <span className="text-sm text-zinc-200 block">
-                          {it.label}
-                          {off && <span className="ml-2 text-[10px] font-mono text-zinc-600">needs AI configured</span>}
-                        </span>
-                        <span className="text-[11px] text-zinc-500 block leading-snug">{it.desc}</span>
-                      </span>
-                    </label>
-                  );
-                })}
+              <div className="stagger divide-y divide-border/40 rounded-lg border border-border/60 bg-panel/40">
+                {rows.map((it) => (
+                  <label
+                    key={it.k}
+                    className="flex items-start gap-3 px-3.5 py-2.5 cursor-pointer select-none hover:bg-raise/40 transition-colors"
+                  >
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={val(it.k)}
+                      onChange={(e) => set(it.k, e.target.checked)}
+                    />
+                    <span className="min-w-0">
+                      <span className="text-sm text-zinc-200 block">{it.label}</span>
+                      <span className="text-[11px] text-zinc-500 block leading-snug">{it.desc}</span>
+                    </span>
+                  </label>
+                ))}
                 {rows.length === 0 && (
                   <div className="px-3.5 py-3 text-xs text-zinc-500">
                     No checks in this group match “{q.trim()}”.
@@ -411,7 +399,6 @@ export default function GradingPage() {
           );
         })
       )}
-      <div className="h-4" />
     </div>
   );
 }

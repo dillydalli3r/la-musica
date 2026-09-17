@@ -173,7 +173,7 @@ export default function MoreLikeThis({
       // the wish list is its own query (shared with the home shelves)
       qc.invalidateQueries({ queryKey: ["wishes"] });
     },
-    onError: (e) => toast(String(e)),
+    onError: (e) => toast.error(String(e)),
   });
   if (!artistName) return null;
 

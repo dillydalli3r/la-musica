@@ -44,6 +44,15 @@ measured. In ``hybrid`` mood_source a genre prior only overrides the audio
 verdict when that confidence is below ``AUDIO_LOW_CONF`` (the audio wins
 whenever it is sure of itself).
 
+AROUSAL is written out as the ENERGY tag too (integer 0-100) whenever MOOD
+is — the same number the quadrant rules were scored from, so a player or a
+grade can use the continuous value without re-deriving the label. Both are
+gated per filetype by ``audio_tag_writes`` (MOOD / ENERGY).
+
+Music videos (MKV/VOB/AVI/… — first-class library tracks, graded like any
+other) are analysed as well: no librosa decoder opens a video container, so
+the audio stream is extracted with ffmpeg first (see ``_load_signal``).
+
 Performance: ONE file is decoded at a time, capped at
 ``ANALYSIS_MAX_SECONDS`` of audio — an album is never loaded into memory.
 
@@ -55,7 +64,7 @@ import math
 import os
 import warnings
 
-from .audiometa import _detect_bpm, _detect_key, _ensure_librosa
+from .audiometa import _detect_bpm, _detect_key, _ensure_librosa, _load_signal
 from .config import should_write_audio_tag
 
 MOODS = ["happy", "energetic", "aggressive", "sad", "calm", "dreamy", "dark", "party"]
@@ -275,14 +284,11 @@ def classify(path, cfg=None):
     if _ensure_librosa() is None:
         return None
     try:
-        import librosa
-
         with warnings.catch_warnings():
             # librosa warns loudly on decode fallbacks and on degenerate
             # chroma (near-silent/synthetic audio); both are handled here.
             warnings.simplefilter("ignore")
-            y, sr = librosa.load(path, sr=ANALYSIS_SR, mono=True,
-                                 duration=ANALYSIS_MAX_SECONDS)
+            y, sr = _load_signal(path, ANALYSIS_SR, ANALYSIS_MAX_SECONDS)
             if y is None or y.size < sr * MIN_SECONDS:
                 return None
             return _verdict(_features(y, sr))
@@ -323,7 +329,9 @@ def apply_mood_tags(audio, path, cfg, genre=None):
     ``cfg["mood_enabled"]`` and
     ``mlo.config.should_write_audio_tag(cfg, "MOOD", path)``, and the tag
     is only written when it differs from the value already present.
-    Returns True when a tag was actually written.
+    ENERGY (the arousal the verdict was scored from, as an integer 0-100)
+    rides along, gated by ``audio_tag_writes['ENERGY']``. Returns True when
+    a tag was actually written.
     """
     if audio is None or not (cfg or {}).get("mood_enabled", True):
         return False
@@ -331,10 +339,24 @@ def apply_mood_tags(audio, path, cfg, genre=None):
         result = mood_for_track(path, cfg, genre)
         if not result:
             return False
-        if not should_write_audio_tag(cfg, "MOOD", filepath=path):
+        pending = {}
+        if (should_write_audio_tag(cfg, "MOOD", filepath=path)
+                and str(audio.get_tag("MOOD") or "").strip().lower()
+                != result["mood"]):
+            pending["MOOD"] = result["mood"]
+        if should_write_audio_tag(cfg, "ENERGY", filepath=path):
+            energy = str(int(round(float(result["energy"]) * 100)))
+            if str(audio.get_tag("ENERGY") or "").strip() != energy:
+                pending["ENERGY"] = energy
+        if not pending:
             return False
-        if str(audio.get_tag("MOOD") or "").strip().lower() == result["mood"]:
-            return False
-        return bool(audio.set_tag("MOOD", result["mood"]))
+        if getattr(audio, "is_video", False):
+            # A video container is rewritten whole on every tag write (see
+            # mlo.audio), so both tags go in ONE ffmpeg pass.
+            return bool(audio.set_video_tags(pending))
+        wrote = False
+        for name, value in pending.items():
+            wrote = bool(audio.set_tag(name, value)) or wrote
+        return wrote
     except Exception:
         return False

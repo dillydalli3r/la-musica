@@ -60,7 +60,10 @@ os.makedirs(MF)
 LIB = os.path.join(MF, "Artists")
 # chain off: these albums must be moved and reported, not processed
 CFG = {"music_folder": MF, "import_auto_scripts": False, "import_scripts": [],
-       "import_bulk_concurrency": 2}
+       "import_bulk_concurrency": 2, "advisory_auto_fetch": True,
+       # the RateYourMusic link step is a network lookup: this suite runs
+       # offline (tools/test_rym_links.py covers it with stubbed HTTP)
+       "rym_links_auto": False}
 
 # --------------------------------------------------------------------------- #
 # The chain a config describes
@@ -80,7 +83,7 @@ assert imports.chain_for({"import_auto_scripts": False}) == []
 # --------------------------------------------------------------------------- #
 # Registry + one script
 # --------------------------------------------------------------------------- #
-assert sorted(script_runners.RUNNERS) == list(range(1, 16)), sorted(script_runners.RUNNERS)
+assert sorted(script_runners.RUNNERS) == list(range(1, 15)), sorted(script_runners.RUNNERS)
 assert script_runners.RUNNERS[2][0] == "Format CUEs", script_runners.RUNNERS[2]
 assert script_runners.RUNNERS[2][1].__name__ == "run_format_cues", script_runners.RUNNERS[2]
 assert all(label for label, _ in script_runners.RUNNERS.values())
@@ -398,6 +401,7 @@ class _FakeAudio:
 
 
 _real_audiofile, _real_cascade = _audio.AudioFile, _intg.genre_cascade
+_real_resolve_advisory = _intg.resolve_advisory_route
 _audio.AudioFile = _FakeAudio
 _intg.genre_cascade = lambda release, limit=None: {
     "per_track": [{"disc": 1, "position": 1, "title": "One", "genres": ["Shoegaze", "Noise Pop"]},
@@ -412,21 +416,46 @@ try:
                     "media": [{"disc": 1, "position": 1, "title": "One", "recording_mbid": "rec-1"},
                               {"disc": 1, "position": 2, "title": "Two", "recording_mbid": "rec-2"}]},
     }], CFG)
+
+    assert stamped["ok"] == 1, stamped
+    assert sorted(_written) == ["01 - track.wav", "02 - track.wav"], _written
+    for name, tags in _written.items():
+        assert tags["MUSICBRAINZ_ALBUMID"] == "rel-1", tags
+        assert tags["MUSICBRAINZ_RELEASEGROUPID"] == "rg-1", tags
+        assert tags["MUSICBRAINZ_ARTISTID"] == "art-1", tags
+        # the release payload's own "advisory" is NOT echoed into the tag: a
+        # rating only comes from a lookup that actually states one
+        assert "ITUNESADVISORY" not in tags, tags
+        assert tags["GENRE"], tags
+    assert _written["01 - track.wav"]["MUSICBRAINZ_TRACKID"] == "rec-1", _written["01 - track.wav"]
+    assert _written["02 - track.wav"]["MUSICBRAINZ_TRACKID"] == "rec-2", _written["02 - track.wav"]
+    assert _written["01 - track.wav"]["GENRE"] == "Shoegaze; Noise Pop", _written["01 - track.wav"]
+
+    # A stated rating IS written, for every track — and the provider that
+    # stated it is reported back per track.
+    _stamp_lib = stamped["items"][0]["album_path"]
+    _intg.resolve_advisory_route = lambda **kw: {
+        "value": 1, "source": "deezer-isrc", "checked": ["deezer-isrc"]}
+    adv = imports.fetch_advisories([_stamp_lib], CFG)
+    assert adv["updated"] == 2, adv
+    assert set(adv["sources"].values()) == {"deezer-isrc"}, adv
+    for tags in _written.values():
+        assert tags["ITUNESADVISORY"] == "1", tags
+
+    # Nobody states a rating -> the tag stays ABSENT. A missing advisory means
+    # "unrated"; writing 0 would claim the audio is clean.
+    for tags in _written.values():
+        tags.pop("ITUNESADVISORY")
+    _intg.resolve_advisory_route = lambda **kw: {
+        "value": None, "source": None, "checked": ["deezer-isrc", "apple-album"]}
+    adv = imports.fetch_advisories([_stamp_lib], CFG)
+    assert adv["updated"] == 0 and adv["values"] == {} and adv["sources"] == {}, adv
+    for tags in _written.values():
+        assert "ITUNESADVISORY" not in tags, tags
 finally:
     _audio.AudioFile = _real_audiofile
     _intg.genre_cascade = _real_cascade
-
-assert stamped["ok"] == 1, stamped
-assert sorted(_written) == ["01 - track.wav", "02 - track.wav"], _written
-for name, tags in _written.items():
-    assert tags["MUSICBRAINZ_ALBUMID"] == "rel-1", tags
-    assert tags["MUSICBRAINZ_RELEASEGROUPID"] == "rg-1", tags
-    assert tags["MUSICBRAINZ_ARTISTID"] == "art-1", tags
-    assert tags["ITUNESADVISORY"] == "1", tags
-    assert tags["GENRE"], tags
-assert _written["01 - track.wav"]["MUSICBRAINZ_TRACKID"] == "rec-1", _written["01 - track.wav"]
-assert _written["02 - track.wav"]["MUSICBRAINZ_TRACKID"] == "rec-2", _written["02 - track.wav"]
-assert _written["01 - track.wav"]["GENRE"] == "Shoegaze; Noise Pop", _written["01 - track.wav"]
+    _intg.resolve_advisory_route = _real_resolve_advisory
 
 # --------------------------------------------------------------------------- #
 # soulseek.import_completed(finish=...): the chain is opt-in per album
@@ -450,7 +479,8 @@ def put_flac(rel):
 
 put_flac(os.path.join("Peer Album", "01 - a.flac"))
 SL_CFG = {"music_folder": SL_MF, "soulseek_download_dir": SL_DD,
-          "import_auto_scripts": False, "import_scripts": []}
+          "import_auto_scripts": False, "import_scripts": [],
+          "rym_links_auto": False}      # no network in this suite
 _real_downloads_state = _slsk.downloads_state
 _slsk.downloads_state = lambda cfg=None: []
 try:

@@ -38,11 +38,19 @@ def _prompt_close():
 
 
 def _backend_ours():
-    """True when something on PORT answers like our API (not a stray app)."""
+    """True when something on PORT answers like our API (not a stray app).
+
+    Same probe as tray.backend_ours(): a bare HTTP 200 is not enough - any
+    server on :8000 can answer that, and start_app would then declare the
+    backend "up" and open a browser onto someone else's app.
+    """
+    import json
     import urllib.request
     try:
         with urllib.request.urlopen(URL + "/api/health", timeout=2) as r:
-            return r.status == 200
+            if r.status != 200:
+                return False
+            return (json.loads(r.read()) or {}).get("status") == "ok"
     except Exception:
         return False
 
@@ -57,7 +65,7 @@ def main():
         _prompt_close()
         sys.exit(1)
 
-    if port_open(PORT) and _backend_ours():
+    if _backend_ours():
         print(f"Backend already running — opening {URL}")
     elif port_open(PORT):
         print(f"Port {PORT} is busy (not our backend) — "
@@ -85,7 +93,10 @@ def main():
             sys.exit(1)
         for _ in range(30):
             time.sleep(1)
-            if port_open(PORT):
+            # Only OUR backend counts as up: a foreign app that grabbed :8000
+            # during the spawn window would otherwise be reported as ours and
+            # opened in the browser.
+            if _backend_ours():
                 print("Backend is up.")
                 break
         else:

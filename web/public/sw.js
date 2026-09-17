@@ -44,6 +44,12 @@ async function sliceCached(resp, range) {
   return new Response(buf.slice(start, end + 1), { status: 206, statusText: "Partial Content", headers });
 }
 
+/** Artwork and lyrics: plain GETs whose payload is small and immutable enough
+ *  to keep. Network-first (so a changed cover shows immediately when online)
+ *  with the cache as the offline fallback, and every successful response is
+ *  stored on the way through — browsing online is what fills the cache. */
+const ART_PATHS = new Set(["/api/cover", "/api/artist/image", "/api/lyrics/get"]);
+
 self.addEventListener("fetch", (event) => {
   const req = event.request;
   if (req.method !== "GET") return;
@@ -53,7 +59,25 @@ self.addEventListener("fetch", (event) => {
   const sameOrigin = url.origin === self.location.origin;
   const backendOrigin = /^(http:\/\/127\.0\.0\.1:8000|http:\/\/localhost:8000)$/.test(url.origin);
   if (!(sameOrigin || backendOrigin)) return;
-  // Only media streams are served from the cache; API/UI requests are
+
+  if (ART_PATHS.has(url.pathname)) {
+    event.respondWith(
+      (async () => {
+        const cache = await caches.open(CACHE_NAME);
+        try {
+          const resp = await fetch(req);
+          if (resp.ok) await cache.put(req, resp.clone());
+          return resp;
+        } catch {
+          const hit = await cache.match(req);
+          return hit ?? new Response("offline and not cached", { status: 504 });
+        }
+      })()
+    );
+    return;
+  }
+
+  // Media streams are served from the cache; every other API/UI request is
   // never intercepted.
   if (!(url.pathname === "/api/stream" || url.pathname === "/api/videos/stream")) return;
 

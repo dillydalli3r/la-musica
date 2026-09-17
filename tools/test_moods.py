@@ -135,9 +135,13 @@ try:
     # rewrite when the tag already carries the verdict.
     # ------------------------------------------------------------------
     class FakeAudio:
-        def __init__(self, current=None):
+        def __init__(self, current=None, energy=None, is_video=False):
             self.tags = {} if current is None else {"MOOD": current}
+            if energy is not None:
+                self.tags["ENERGY"] = energy
+            self.is_video = is_video
             self.writes = []
+            self.video_writes = []
 
         def get_tag(self, name):
             return self.tags.get(name.upper())
@@ -145,6 +149,10 @@ try:
         def set_tag(self, name, value):
             self.tags[name.upper()] = value
             self.writes.append((name, value))
+            return True
+
+        def set_video_tags(self, mapping):
+            self.video_writes.append(dict(mapping))
             return True
 
     flac = os.path.join(root, "track.flac")
@@ -205,11 +213,29 @@ try:
         # Provider mode trusts the genre outright.
         assert moods.mood_for_track(bright, {"mood_source": "provider"}, "Shoegaze")["mood"] == "dreamy"
 
+        energy = str(int(round(rb["energy"] * 100)))
         handle = FakeAudio()
         assert moods.apply_mood_tags(handle, flac, cfg) is True, handle.writes
-        assert handle.writes == [("MOOD", rb["mood"])], handle.writes
-        # Same value already present -> no write.
-        assert moods.apply_mood_tags(FakeAudio(current=rb["mood"]), flac, cfg) is False
+        assert handle.writes == [("MOOD", rb["mood"]), ("ENERGY", energy)], handle.writes
+        # Same values already present -> no write.
+        assert moods.apply_mood_tags(FakeAudio(rb["mood"], energy), flac, cfg) is False
+        # The two tags are backfilled independently: a track tagged before
+        # ENERGY existed gets the missing half, without rewriting MOOD.
+        backfill = FakeAudio(rb["mood"])
+        assert moods.apply_mood_tags(backfill, flac, cfg) is True
+        assert backfill.writes == [("ENERGY", energy)], backfill.writes
+        # ENERGY disabled for this filetype -> MOOD only.
+        off = FakeAudio()
+        off_cfg = {"mood_enabled": True, "mood_source": "audio",
+                   "audio_tag_writes": {"flac": {"ENERGY": False}}}
+        assert moods.apply_mood_tags(off, flac, off_cfg) is True
+        assert off.writes == [("MOOD", rb["mood"])], off.writes
+        # Video containers are rewritten whole per write, so both tags go in
+        # ONE batched call (two set_tag calls would remux the file twice).
+        video = FakeAudio(is_video=True)
+        assert moods.apply_mood_tags(video, flac, cfg) is True
+        assert video.writes == [], video.writes
+        assert video.video_writes == [{"MOOD": rb["mood"], "ENERGY": energy}], video.video_writes
         # Different value -> rewritten.
         assert moods.apply_mood_tags(FakeAudio(current="dark"), flac, cfg) is True
         # Gates.

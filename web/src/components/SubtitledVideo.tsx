@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
+
 /** <track> elements for every subtitle source of a video: muxed streams and
  * external .srt/.vtt sidecars, all served as WebVTT by the backend. */
 export default function useSubtitleTracks(videoPath: string | null | undefined) {

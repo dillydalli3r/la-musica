@@ -24,6 +24,7 @@ import type {
   Wish,
   WishesPayload,
 } from "./types";
+import { toast } from "./store";
 
 // In the Tauri desktop shell the frontend is served from tauri://localhost,
 // so relative /api paths cannot reach the Python backend — use absolute.
@@ -61,6 +62,29 @@ async function json<T>(url: string, init?: RequestInit, timeoutMs = 20000): Prom
     throw new Error(detail);
   }
   return r.json() as Promise<T>;
+}
+
+/** Fields a tag-writing endpoint adds when the write re-emitted the file in
+ *  another container (.vob/.avi/.webm/.mp4 -> .mkv, streams copied). */
+type ContainerSwap = {
+  container_changed?: boolean;
+  /** Single-file writers: the file that now holds the data. */
+  output_path?: string | null;
+  /** Multi-file writers: only the files re-emitted as .mkv. */
+  output_paths?: string[];
+};
+
+/** Surface a container swap on the response it arrives with. Every tag-writing
+ *  call funnels through here, so the user is told which file now holds the
+ *  data no matter which surface triggered the write. */
+function noteContainerSwap<T extends ContainerSwap>(r: T): T {
+  const swapped = r.output_paths?.length ? r.output_paths : r.container_changed && r.output_path ? [r.output_path] : [];
+  if (swapped.length === 1) {
+    toast(`Container changed — the file is now ${swapped[0]} (streams copied, nothing re-encoded)`);
+  } else if (swapped.length > 1) {
+    toast(`Container changed — ${swapped.length} files re-emitted as MKV: ${swapped.join(", ")}`);
+  }
+  return r;
 }
 
 /** One item in <music folder>/.mlo/trash. `cover` is false when the cover
@@ -232,6 +256,27 @@ export interface SlskMessage {
   replayed?: boolean;
 }
 
+/** One candidate artist image from the metadata review flow. */
+export interface MetadataImageCandidate {
+  url: string;
+  source: string;
+  width?: number | null;
+  height?: number | null;
+}
+
+/** A description candidate with its provenance (which provider, fetched when). */
+export interface MetadataText {
+  text: string;
+  source: string;
+  fetched?: string | null;
+}
+
+export interface MetadataCandidates {
+  images: MetadataImageCandidate[];
+  artist_description: MetadataText | null;
+  album_description: MetadataText | null;
+}
+
 export const api = {
   health: () => json<{ status: string; version: string }>(`${API}/health`),
   config: () => json<Record<string, unknown>>(`${API}/config`),
@@ -242,21 +287,6 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(cfg),
     }),
-  /** Server-side directory browser — lets the web UI pick a custom music
-   * directory without the desktop shell's native folder picker. */
-  fsList: (path?: string) =>
-    json<{ path: string; parent: string | null; dirs: string[] }>(
-      `${API}/fs/list${path ? `?path=${encodeURIComponent(path)}` : ""}`
-    ),
-  /** Opens the OS folder dialog on the backend's machine (Windows dialog in
-   * the browser version). `supported:false` means fall back to fsList. */
-  fsPickFolder: (initial?: string) =>
-    json<{ path: string | null; supported: boolean }>(
-      `${API}/fs/pick${initial ? `?initial=${encodeURIComponent(initial)}` : ""}`,
-      undefined,
-      300000
-    ),
-
   library: () => json<import("./types").Library>(`${API}/library`),
   album: (path: string) => json<import("./types").Album>(`${API}/album?path=${encodeURIComponent(path)}`),
   artist: (path: string) => json<import("./types").Artist>(`${API}/artist?path=${encodeURIComponent(path)}`),
@@ -346,11 +376,11 @@ export const api = {
   // Tag a music video (TITLE/ARTIST/DISCNUMBER/...). Non-MKV containers are
   // remuxed losslessly to MKV — the response path is the final file.
   videoTag: (path: string, tags: Record<string, string>) =>
-    json<{ ok: boolean; path: string; renamed: boolean; tech: Record<string, number | string> }>(`${API}/videos/tag`, {
+    json<{ ok: boolean; path: string; renamed: boolean; tech: Record<string, number | string> } & ContainerSwap>(`${API}/videos/tag`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path, tags }),
-    }, 600000),
+    }, 600000).then(noteContainerSwap),
   /** Dimensions etc. of an album's cover — or, with `coverFile`, of any image
    *  in the album folder, which is how a track's own art is measured. */
   coverInfo: (albumPath: string, coverFile?: string | null) =>
@@ -463,11 +493,11 @@ export const api = {
       }
     ),
   mbAssign: (tracks: Record<string, Record<string, string | null>>) =>
-    json<{ ok: boolean; changed: number }>(`${API}/mb/assign`, {
+    json<{ ok: boolean; changed: number } & ContainerSwap>(`${API}/mb/assign`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ tracks }),
-    }),
+    }).then(noteContainerSwap),
 
   lyricsSearch: (artist: string, track: string, album?: string, duration?: number) =>
     json<any[]>(`${API}/lyrics/search?artist=${encodeURIComponent(artist)}&track=${encodeURIComponent(track)}${album ? `&album=${encodeURIComponent(album)}` : ""}${duration ? `&duration=${duration}` : ""}`),
@@ -488,43 +518,34 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }, 60000),
-  lyricsAi: (
-    mode: "clean" | "repair" | "wordsync",
-    text: string,
-    opts?: { artist?: string; track?: string; candidates?: string[] }
-  ) =>
-    json<{ mode: string; result: string }>(`${API}/lyrics/ai`, {
+  /** Distribute word/syllable times inside each line's slot, weighted by
+   *  length (deterministic, no network). `text` defaults to the stored
+   *  lyrics; the reply is the full LRC. */
+  lyricsWordsync: (path: string, text?: string) =>
+    json<{ lrc: string }>(`${API}/lyrics/wordsync`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        mode,
-        text,
-        artist: opts?.artist ?? "",
-        track: opts?.track ?? "",
-        candidates: opts?.candidates,
-      }),
+      body: JSON.stringify(text === undefined ? { path } : { path, text }),
     }, 180000),
-
-  // Transliterate one track and store it like the Lyrics Translate script
-  // (TRANSLITERATION-<lang>-LATN tag + sidecar per settings). The LYRICS
-  // field keeps the original language.
-  lyricsXlitStore: (path: string) =>
-    json<{ ok?: boolean; skipped?: string; xlit: string }>(`${API}/lyrics/xlit/store`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path }),
-    }, 300000),
 
   // Bulk tag surgery: delete `remove` tags and set `set` {tag: value}
   // (empty value = delete) across the given tracks.
   tagsBulk: (body: { paths: string[]; remove: string[]; set: Record<string, string> }) =>
-    json<{ ok: boolean; removed: number; added: number; failed: number; errors?: string[] }>(`${API}/tags/bulk`, {
+    json<{ ok: boolean; removed: number; added: number; failed: number; errors?: string[] } & ContainerSwap>(`${API}/tags/bulk`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }, 300000),
+    }, 300000).then(noteContainerSwap),
 
   rymValidate: (url: string) => json<{ valid: boolean }>(`${API}/rym/validate?url=${encodeURIComponent(url)}`),
+
+  /** Verified RateYourMusic links for the link editor's auto-find. Each one is
+   *  null when RYM itself did not confirm that page and `note` says why — a
+   *  miss is a normal 200, never an error. */
+  rymResolve: (artist: string, album = "") =>
+    json<{ album: string | null; artist: string | null; note: string }>(
+      `${API}/rym/resolve?artist=${encodeURIComponent(artist)}&album=${encodeURIComponent(album)}`,
+    ),
 
   coverUrl: (albumPath: string, coverFile?: string | null) =>
     `${API}/cover?album=${encodeURIComponent(albumPath)}${coverFile ? `&file=${encodeURIComponent(coverFile)}` : ""}`,
@@ -847,12 +868,6 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ kind, key, mbid: mbid ?? null }),
     }),
-  lyricsAiLines: (mode: "translate" | "transliterate", lines: string[]) =>
-    json<{ mode: string; lines: string[]; skipped?: string }>(`${API}/lyrics/ai/lines`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ mode, lines }),
-    }, 180000),
   // export to device
   exportDrives: () => json<{ drives: { letter: string; root: string; type: string; free: number | null; total: number | null }[] }>(`${API}/export/drives`),
   exportCodecs: () => json<{ codecs: Record<string, string> }>(`${API}/export/codecs`),
@@ -1074,4 +1089,97 @@ export const api = {
         body: JSON.stringify({ paths }),
       }
     ),
+
+  // ----------------------------------------------------------------- //
+  // Bulk acquisition, genre facets, metadata review, video matching.   //
+  // ----------------------------------------------------------------- //
+  /** Queue a release / release group / whole artist into the auto-import
+   *  pipeline. `mode: "best"` takes one release per release group (the
+   *  preferred format), `"all"` every release. */
+  mbAutoImport: (body: { mbid: string; kind?: "release" | "release_group" | "artist" | "auto"; mode?: "best" | "all" }) =>
+    json<{ queued: number; items: { mbid: string; title: string; status: string }[]; skipped: { mbid: string; reason: string }[] }>(
+      `${API}/mb/auto-import`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
+      180000
+    ),
+  /** Fetch the advisory rating (ITUNESADVISORY) for one release or a set of
+   *  tracks — the values land in `values` and are written to `paths`. */
+  mbAdvisoryFetch: (body: { paths?: string[]; release_mbid?: string }) =>
+    json<{ updated: number; values: Record<string, string> }>(`${API}/mb/advisory/fetch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, 120000),
+
+  soulseekDownloadBulk: (username: string, files: { filename: string; size?: number }[]) =>
+    json<{ queued: number }>(`${API}/soulseek/download-bulk`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, files }),
+    }, 120000),
+  /** Queue everything a peer shares (or one folder of it). */
+  soulseekDownloadUser: (username: string, folder?: string) =>
+    json<{ queued: number; scanned: number; skipped: number }>(`${API}/soulseek/download-user`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, folder }),
+    }, 180000),
+  soulseekSearchCancel: (id: string) =>
+    json<{ ok: boolean }>(`${API}/soulseek/search/cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    }, 30000),
+
+  /** Import genres for a set of album/track paths from the configured
+   *  sources; `per_source` reports how many values each source contributed. */
+  genresImport: (paths: string[], limit?: number) =>
+    json<{ updated: number; per_source: Record<string, number> }>(`${API}/genres/import`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths, limit }),
+    }, 300000),
+  /** Genre browsing surface: every genre with its track count, plus the
+   *  category cards that group them. */
+  genresFacets: () =>
+    json<{ genres: { name: string; count: number }[]; categories: { name: string; genres: string[] }[] }>(
+      `${API}/genres/facets`
+    ),
+
+  /** Candidate artist images + descriptions for the metadata review modal. */
+  metadataCandidates: (artist: string, albumPath?: string) => {
+    const p = new URLSearchParams({ artist });
+    if (albumPath) p.set("album_path", albumPath);
+    return json<MetadataCandidates>(`${API}/metadata/candidates?${p}`, undefined, 90000);
+  },
+  /** Apply one reviewed candidate: an artist image URL, or the artist/album
+   *  description text picked in the modal. */
+  metadataApply: (body: {
+    kind: "artist_image" | "artist_description" | "album_description";
+    artist?: string;
+    album_path?: string;
+    image_url?: string;
+    description?: string;
+  }) =>
+    json<{ ok: boolean; saved: string }>(`${API}/metadata/apply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, 120000),
+
+  /** Download a music video from YouTube for one track (web/digital media). */
+  videosDownloadYoutube: (body: { path?: string; artist: string; title: string; duration?: number }) =>
+    json<{ ok: boolean; file?: string; candidate?: Record<string, unknown> }>(`${API}/videos/download-youtube`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, 900000),
+  /** Write TITLE/TRACKNUMBER/DISCNUMBER onto video files from the match-assist
+   *  panel (one assignment per video file). */
+  videosMatch: (albumPath: string, assignments: { path: string; title: string; tracknumber?: number; discnumber?: number }[]) =>
+    json<{ updated: number } & ContainerSwap>(`${API}/videos/match`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ album_path: albumPath, assignments }),
+    }, 600000).then(noteContainerSwap),
 };

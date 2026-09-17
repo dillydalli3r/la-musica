@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import asyncio
+import glob
 import json
 import threading
 import time
@@ -312,95 +313,6 @@ def set_config(cfg: dict):
 def get_config_defaults():
     """Factory defaults — powers the settings UI's reset-to-defaults actions."""
     return DEFAULT_CONFIG
-
-
-def _native_picker_available():
-    """Whether the OS folder dialog can be shown by this process."""
-    if os.name == "nt" or sys.platform == "darwin":
-        pass
-    elif not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
-        return False
-    try:
-        import tkinter  # noqa: F401
-        return True
-    except Exception:
-        return False
-
-
-def _pick_folder_native(initial=""):
-    """Open the OS folder picker on the machine running the backend.
-
-    Browsers never return an absolute path from showDirectoryPicker(), so the
-    backend (which runs on the user's own machine) shows the dialog itself and
-    hands back the chosen path. Returns None when cancelled or unavailable."""
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-    except Exception:
-        return None
-    root = None
-    try:
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        kwargs = {}
-        if initial and os.path.isdir(initial):
-            kwargs["initialdir"] = initial
-        path = filedialog.askdirectory(title="Choose your music folder",
-                                       mustexist=True, **kwargs)
-        return path.replace("\\", "/") or None
-    except Exception:
-        return None
-    finally:
-        try:
-            if root is not None:
-                root.destroy()
-        except Exception:
-            pass
-
-
-@app.get("/api/fs/pick")
-def fs_pick(initial: str = Query("")):
-    """Show the native folder dialog; `supported=false` lets the UI fall back
-    to the in-app browser when there is no GUI to attach to (e.g. Docker)."""
-    supported = _native_picker_available()
-    return {"path": _pick_folder_native(initial) if supported else None,
-            "supported": supported}
-
-
-@app.get("/api/fs/list")
-def fs_list(path: str = Query("")):
-    """List sub-directories so the browser UI can pick a music folder.
-
-    The native folder picker only exists in the desktop shell, and browsers
-    never reveal the absolute path chosen with showDirectoryPicker(), so the
-    backend (which runs on the user's own machine) browses instead. Only
-    directory names are returned — never file contents."""
-    import string
-
-    p = str(path or "").strip()
-    if not p:
-        dirs = ([f"{d}:\\" for d in string.ascii_uppercase if os.path.isdir(f"{d}:\\")]
-                if os.name == "nt" else ["/", os.path.expanduser("~")])
-        return {"path": "", "parent": None, "dirs": dirs}
-
-    p = os.path.abspath(os.path.normpath(p))
-    if not os.path.isdir(p):
-        raise HTTPException(404, "not a folder")
-    try:
-        with os.scandir(p) as it:
-            dirs = sorted((e.path for e in it if e.is_dir()
-                           and e.name.lower() not in _skip_names()
-                           and not e.name.startswith(".")),
-                          key=lambda s: os.path.basename(s).lower())
-    except OSError as e:
-        raise HTTPException(400, f"cannot read folder: {e}")
-
-    parent = os.path.dirname(p.rstrip("\\/")) or ""
-    if os.path.normcase(parent) == os.path.normcase(p):
-        parent = ""
-    norm = lambda s: (s or "").replace("\\", "/") or None
-    return {"path": norm(p), "parent": norm(parent), "dirs": [norm(d) for d in dirs]}
 
 
 # --------------------------------------------------------------------------- #
@@ -907,42 +819,43 @@ def get_tags(path: str = Query(...)):
             except Exception:
                 pass
 
-    # Persistent AI transforms (script 15): embedded TRANSLITERATION /
-    # TRANSLATION tags first, then the .romaji.lrc / .<lang>.lrc sidecars.
-    # The player renders these directly instead of re-requesting the AI.
-    def _sidecar_text(suffix):
-        sp = os.path.splitext(p)[0] + suffix
-        if os.path.isfile(sp):
-            try:
-                with open(sp, "r", encoding="utf-8", errors="replace") as fh:
-                    return fh.read()
-            except Exception:
-                return None
+    # Stored lyric transforms: embedded TRANSLITERATION / TRANSLATION tags
+    # first, then the .romaji.lrc / .<lang>.lrc sidecars. Stored data only —
+    # the player renders these directly.
+    from mlo.lyrics import XLIT_SIDECAR, _same_essence, needs_transliteration
+
+    def _read_text(sp):
+        if not os.path.isfile(sp):
+            return None
+        try:
+            with open(sp, "r", encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        except Exception:
+            return None
+
+    def _translation_sidecar():
+        """First "<stem>.<lang>.lrc" next to the track. "<stem>.lrc" is the
+        main lyrics file and "<stem>.romaji.lrc" the romanization, neither of
+        which is a translation."""
+        stem = os.path.splitext(p)[0]
+        for cand in sorted(glob.glob(glob.escape(stem) + ".*.lrc")):
+            if not cand.lower().endswith(XLIT_SIDECAR):
+                return _read_text(cand)
         return None
 
-    from mlo.lyrics_xlit import (
-        _same_essence, needs_transliteration, needs_translation,
-        primary_translation_lang,
-    )
     # Language-specific transform tags (TRANSLITERATION-JA-LATN,
     # TRANSLATION-EN, …) read first; the bare legacy names still read.
-    xlit = str(af.get_lyrics_transform("TRANSLITERATION") or "").strip() or None
-    if xlit is None:
-        xlit = _sidecar_text(".romaji.lrc")
-    trans = str(af.get_lyrics_transform("TRANSLATION", primary_translation_lang(load_config())) or "").strip() or None
-    if trans is None:
-        trans = _sidecar_text(f".{primary_translation_lang(load_config())}.lrc")
+    xlit = str(af.get_lyrics_transform("TRANSLITERATION") or "").strip() \
+        or _read_text(os.path.splitext(p)[0] + XLIT_SIDECAR) or None
+    trans = str(af.get_lyrics_transform("TRANSLATION") or "").strip() \
+        or _translation_sidecar() or None
     # Suppress REDUNDANT transforms — romanizing lyrics that are already in
-    # Latin script (or already in the reader's own script) and "translating"
-    # lyrics whose script already matches the target language produce the
+    # Latin script and "translating" lyrics into themselves produce the
     # useless sub-lines the sidebar used to render under e.g. English songs.
-    # Same rules script 15 and the grader apply.
-    _cfg = load_config()
     _lyr_text = str(lyr or "")
-    if xlit is not None and not needs_transliteration(_lyr_text, _cfg):
+    if xlit is not None and not needs_transliteration(_lyr_text):
         xlit = None
-    if trans is not None and (not needs_translation(_lyr_text, _cfg)
-                              or _same_essence(trans, _lyr_text)):
+    if trans is not None and _same_essence(trans, _lyr_text):
         trans = None
     cover = None
     try:
@@ -1503,11 +1416,13 @@ class VideoTagRequest(BaseModel):
 def videos_tag(req: VideoTagRequest):
     """Write tags into a music video (TITLE/ARTIST/ALBUM/DISCNUMBER/...).
 
-    Works for every library video container: MP4/M4V are edited with
-    mutagen, everything else is remuxed losslessly by ffmpeg into
-    Matroska with the new metadata — never re-encoded, captions and
-    every audio stream preserved. This is the endpoint behind the
-    downloads review flow ("tag this VOB as a music video")."""
+    Works for every library video container: MKV is rewritten in place,
+    every other container (MP4/M4V included) is remuxed losslessly by
+    ffmpeg into a same-stem Matroska with the new metadata — never
+    re-encoded, captions and every audio stream preserved — so the
+    response carries `container_changed`/`output_path`. This is the
+    endpoint behind the downloads review flow ("tag this VOB as a music
+    video")."""
     from mlo.audio import AudioFile
     from mlo.paths import LIB_VIDEO_EXTS
 
@@ -1529,8 +1444,157 @@ def videos_tag(req: VideoTagRequest):
     tagcache.invalidate_path(p)
     mbresolve.invalidate()
     tech = getattr(af, "tech", {}) or {}
+    # A tag write can re-emit the file in another container (a raw VOB/AVI/…
+    # becomes a same-stem MKV) — the UI tells the user, so say which file now
+    # holds the data and whether the container changed.
     return {"ok": True, "path": final, "renamed": os.path.normcase(final) != os.path.normcase(p),
-            "tech": tech}
+            "container_changed": bool(af.container_changed),
+            "output_path": final, "tech": tech}
+
+
+class YoutubeDownloadRequest(BaseModel):
+    """Grab a music video from YouTube for an album.
+
+    `path` is the album folder to drop it into (or a track path whose folder
+    is used); without it the file lands in the app's downloads dir for
+    review. `duration` is the expected length in seconds — the candidate
+    search uses it to reject live/tribute/cover uploads."""
+    path: Optional[str] = None
+    artist: str
+    title: str
+    duration: Optional[int] = None
+
+
+@app.post("/api/videos/download-youtube")
+def videos_download_youtube(req: YoutubeDownloadRequest):
+    """Search YouTube for this artist+title and download the best match.
+
+    The candidate is picked by server/youtube.py (duration window, lyric /
+    cover / tribute filtering); with youtube_enabled off, yt-dlp missing or
+    no acceptable candidate, the answer is {ok: false, candidate: null} with
+    a reason rather than a half-download. Returns {ok, file, candidate}."""
+    from server import youtube
+
+    cfg = load_config()
+    artist = str(req.artist or "").strip()
+    title = str(req.title or "").strip()
+    if not artist or not title:
+        raise HTTPException(400, "artist and title are required")
+    if not youtube.ytdlp_available(cfg):
+        return {"ok": False, "candidate": None,
+                "error": "yt-dlp is not available — install it under Dependencies"}
+
+    dest = ""
+    if req.path:
+        p = os.path.normpath(req.path)
+        dest = p if os.path.isdir(p) else os.path.dirname(p)
+        if not os.path.isdir(dest):
+            raise HTTPException(404, "destination folder not found")
+        if not _in_music_folder(dest, _music_folder(cfg)):
+            raise HTTPException(400, "destination outside music folder")
+    else:
+        from mlo.paths import downloads_dir
+        dest = downloads_dir(str(cfg.get("music_folder") or "") or None) or ""
+        if not dest:
+            raise HTTPException(400, "music folder is not configured")
+        os.makedirs(dest, exist_ok=True)
+
+    candidate = youtube.best_candidate(artist, title, want_seconds=req.duration,
+                                       config=cfg)
+    if not candidate:
+        return {"ok": False, "candidate": None,
+                "error": "no acceptable YouTube match found"}
+    try:
+        got = youtube.download(candidate["url"], dest, cfg)
+    except Exception as e:
+        raise HTTPException(502, f"YouTube download failed: {e}")
+    tagcache.invalidate_all()
+    return {"ok": True, "file": str(got.get("path") or "").replace("\\", "/"),
+            "candidate": candidate, "container": got.get("container"),
+            "height": got.get("height"), "abr": got.get("abr")}
+
+
+class VideoMatchAssignment(BaseModel):
+    """One video -> track assignment (the MusicBrainz matching step)."""
+    path: str
+    title: str
+    tracknumber: Optional[int] = None
+    discnumber: Optional[int] = None
+
+
+class VideoMatchRequest(BaseModel):
+    """Assign MusicBrainz track identities to an album's music videos."""
+    album_path: str
+    assignments: List[VideoMatchAssignment]
+
+
+@app.post("/api/videos/match")
+def videos_match(req: VideoMatchRequest):
+    """Write TITLE/DISCNUMBER/TRACKNUMBER onto an album's music videos.
+
+    The reverse of /api/mb/match: the user (or the import flow) pairs each
+    video file with a release track, and this writes those identities so the
+    video sorts and grades with the album. Only tags that would actually
+    change are written — every video write is a full lossless remux, so a
+    no-op assignment must not rewrite the file. Returns {updated}; a video
+    re-emitted in another container is named in `output_paths`."""
+    from mlo.audio import AudioFile
+    from mlo.paths import LIB_VIDEO_EXTS
+
+    album = os.path.normpath(req.album_path)
+    if not os.path.isdir(album):
+        raise HTTPException(404, "album not found")
+    if not _in_music_folder(album, _music_folder()):
+        raise HTTPException(400, "album outside music folder")
+    if not req.assignments:
+        raise HTTPException(400, "assignments are required")
+
+    folder = _music_folder()
+    updated = 0
+    errors = []
+    # Video writes are full lossless rewrites, so a raw container (VOB/AVI/…)
+    # comes back as a same-stem MKV: report the files that were re-emitted.
+    swapped = []
+    for a in req.assignments:
+        p = os.path.normpath(a.path)
+        if not os.path.isfile(p):
+            errors.append(f"{a.path}: not found")
+            continue
+        if os.path.splitext(p)[1].lower() not in LIB_VIDEO_EXTS:
+            errors.append(f"{os.path.basename(p)}: not a video file")
+            continue
+        if not _in_music_folder(p, folder):
+            errors.append(f"{os.path.basename(p)}: outside music folder")
+            continue
+        af = AudioFile(p)
+        if af.audio is None:
+            errors.append(f"{os.path.basename(p)}: {af.error or 'unreadable'}")
+            continue
+        want = {"TITLE": str(a.title or "").strip()}
+        if a.tracknumber is not None:
+            want["TRACKNUMBER"] = str(a.tracknumber)
+        if a.discnumber is not None:
+            want["DISCNUMBER"] = str(a.discnumber)
+        tags = {k: v for k, v in want.items()
+                if v and str(af.get_tag(k) or "").strip() != v}
+        if not tags:
+            continue
+        if not af.set_video_tags(tags):
+            errors.append(f"{os.path.basename(p)}: {af.error or 'tag write failed'}")
+            continue
+        updated += 1
+        final = (af.tag_output_path or p).replace("\\", "/")
+        if af.container_changed:
+            swapped.append(final)
+        tagcache.invalidate_path(os.path.normpath(final))
+        tagcache.invalidate_path(p)
+    if updated:
+        tagcache.invalidate_all()
+        mbresolve.invalidate()
+    if errors and not updated:
+        raise HTTPException(500, "; ".join(errors))
+    return {"updated": updated, "errors": errors,
+            "container_changed": bool(swapped), "output_paths": swapped}
 
 
 @app.get("/api/cover/info")
@@ -1606,74 +1670,6 @@ def lyrics_embed(req: LyricsEmbedRequest):
     return {"ok": True}
 
 
-class LyricsAiLinesRequest(BaseModel):
-    mode: str  # "translate" | "transliterate"
-    lines: List[str] = []
-
-
-@app.post("/api/lyrics/ai/lines")
-async def lyrics_ai_lines(req: LyricsAiLinesRequest):
-    """Line-aligned translate / transliterate for the fullscreen player.
-    Applies the same need-based gating as script 15 so the AI is never
-    asked for transforms that would come back empty or duplicated:
-    Latin-script lyrics are never romanized, a strongly-English song with
-    an English target isn't "translated", blank lines pass through for
-    free, and self-identical translations are reported as skipped instead
-    of rendered as duplicate lines. Results are cached on disk per
-    (mode, language, content)."""
-    cfg = load_config()
-    from mlo.lyrics_xlit import (
-        _same_essence, looks_english, needs_transliteration,
-        primary_translation_lang,
-    )
-    from server import ai as ai_mod
-
-    lines = list(req.lines or [])
-    if req.mode == "transliterate" and not needs_transliteration(
-            "\n".join(lines), cfg):
-        return {"mode": req.mode, "lines": [], "skipped": "script"}
-
-    # blank lines never reach the AI — they pass through, alignment kept
-    idx_map: list = []
-    bodies: list = []
-    for i, ln in enumerate(lines):
-        if str(ln).strip():
-            idx_map.append(i)
-            bodies.append(ln)
-    if not bodies:
-        return {"mode": req.mode, "lines": [""] * len(lines), "skipped": "blank"}
-
-    lang = primary_translation_lang(cfg)
-    if req.mode == "translate" and looks_english("\n".join(bodies)):
-        return {"mode": req.mode, "lines": [], "skipped": "same-language"}
-
-    try:
-        result = await asyncio.to_thread(
-            ai_mod.transform_lines, cfg, bodies, req.mode, lang)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    except Exception as e:
-        raise HTTPException(502, f"AI transform failed: {e}")
-
-    out = [""] * len(lines)
-    for pos, i in enumerate(idx_map):
-        out[i] = result[pos] if pos < len(result) else lines[i]
-
-    if req.mode == "translate":
-        # a line whose "translation" equals its source would render as a
-        # duplicate — blank it; if EVERY line came back identical the whole
-        # request is reported skipped.
-        kept = 0
-        for pos, i in enumerate(idx_map):
-            if _same_essence(out[i], lines[i]):
-                out[i] = ""
-            else:
-                kept += 1
-        if not kept:
-            return {"mode": req.mode, "lines": [], "skipped": "identity"}
-    return {"mode": req.mode, "lines": out}
-
-
 class LikeToggleRequest(BaseModel):
     path: str
     mbid: Optional[str] = None  # MusicBrainz recording ID — keeps the like alive across moves
@@ -1731,46 +1727,47 @@ def favorites_toggle(req: FavoriteToggleRequest):
     return {"ok": True, "fav": fav}
 
 
-class LyricsAiRequest(BaseModel):
-    mode: str  # "clean" | "repair" | "wordsync"
+class LyricsWordsyncRequest(BaseModel):
+    path: str = ""
     text: str = ""
-    artist: str = ""
-    track: str = ""
-    candidates: Optional[List[str]] = None
 
 
-@app.post("/api/lyrics/ai")
-async def lyrics_ai(req: LyricsAiRequest):
-    """AI-assisted lyrics tooling.
+@app.post("/api/lyrics/wordsync")
+def lyrics_wordsync(req: LyricsWordsyncRequest):
+    """Deterministic line→word ELRC for one track.
 
-    * wordsync - deterministic line→word sync (ELRC), no AI needed.
-    * clean   - strip ads/watermarks/garbage from raw lyrics via LLM.
-    * repair  - fill/fix lyric lines using LRCLIB candidate lines as
-                evidence via LLM.
+    Reads the stored lyrics — the LYRICS tag first, then the .lrc sidecar —
+    unless the caller already has the text, then spreads each line's timings
+    across its words at `lrc_sync_level`. Pure text arithmetic: the same
+    builder script 1 uses, no model involved.
     """
-    cfg = load_config()
-    text = req.text or ""
-    if req.mode == "wordsync":
-        if not text.strip():
-            raise HTTPException(400, "no lyrics text provided")
-        from server.ai import wordsync_lrc
-        level = str(cfg.get("lrc_sync_level") or "LINE").lower()
-        return {"mode": "wordsync", "result": wordsync_lrc(text, level=level)}
-
-    from server import ai as ai_mod
-    if not ai_mod.ai_configured(cfg):
-        raise HTTPException(400, "AI is not configured — set base URL and model in Settings → AI")
-    if req.mode == "clean":
-        if not text.strip():
-            raise HTTPException(400, "no lyrics text provided")
-        result = await asyncio.to_thread(ai_mod.lyrics_clean, cfg, text)
-    elif req.mode == "repair":
-        if not text.strip() and not req.candidates:
-            raise HTTPException(400, "repair needs lyrics text and/or candidates")
-        result = await asyncio.to_thread(ai_mod.lyrics_repair, cfg, text, req.candidates or [], req.artist, req.track)
-    else:
-        raise HTTPException(400, f"unknown mode: {req.mode}")
-    return {"mode": req.mode, "result": result}
+    from mlo.lyrics import elrc_word_sync
+    text = str(req.text or "").strip()
+    if not text:
+        if not str(req.path or "").strip():
+            raise HTTPException(400, "no path or lyrics text provided")
+        from mlo.audio import AudioFile
+        p = os.path.normpath(mbresolve.resolve_track(req.path) or req.path)
+        if not os.path.isfile(p):
+            raise HTTPException(404, "file not found")
+        if not _in_music_folder(p, _music_folder()):
+            raise HTTPException(400, "file outside music folder")
+        af = AudioFile(p)
+        if af.audio is None:
+            raise HTTPException(500, af.error or "unreadable")
+        text = (af.get_lyrics() or "").strip()
+        if not text:
+            lrc_path = os.path.splitext(p)[0] + ".lrc"
+            if os.path.isfile(lrc_path):
+                try:
+                    with open(lrc_path, "r", encoding="utf-8", errors="replace") as fh:
+                        text = fh.read().strip()
+                except Exception:
+                    text = ""
+    if not text:
+        raise HTTPException(400, "track has no lyrics to sync")
+    level = str(load_config().get("lrc_sync_level") or "LINE").lower()
+    return {"lrc": elrc_word_sync(text, level=level)}
 
 
 class BulkTagsRequest(BaseModel):
@@ -1827,58 +1824,6 @@ def tags_bulk(req: BulkTagsRequest):
             errors.append(f"{os.path.basename(rp)}: {e}")
     return {"ok": failed == 0, "removed": removed, "added": added,
             "failed": failed, "errors": errors[:20]}
-
-
-class TrackPathRequest(BaseModel):
-    path: str
-
-
-@app.post("/api/lyrics/xlit/store")
-def lyrics_xlit_store(req: TrackPathRequest):
-    """Transliterate one track's lyrics and STORE them the way script 15
-    does — TRANSLITERATION-<lang>-LATN tag (+ .romaji.lrc sidecar when the
-    lyrics format keeps sidecars). The LYRICS field keeps the original
-    language/script; this only adds the romanized reading."""
-    from mlo.audio import AudioFile
-    from mlo.lyrics_xlit import (
-        XLIT_SIDECAR, _apply, needs_transliteration, xlit_tag_suffix,
-    )
-    p = os.path.normpath(mbresolve.resolve_track(req.path) or req.path)
-    if not os.path.isfile(p):
-        raise HTTPException(404, "file not found")
-    if not _in_music_folder(p, _music_folder()):
-        raise HTTPException(400, "file outside music folder")
-    cfg = load_config()
-    af = AudioFile(p)
-    if af.audio is None:
-        raise HTTPException(500, af.error or "unreadable")
-    text = (af.get_lyrics() or "").strip()
-    if not text:
-        lrc_path = os.path.splitext(p)[0] + ".lrc"
-        if os.path.isfile(lrc_path):
-            try:
-                with open(lrc_path, "r", encoding="utf-8", errors="replace") as fh:
-                    text = fh.read().strip()
-            except Exception:
-                text = ""
-    if not text:
-        raise HTTPException(400, "track has no lyrics to transliterate")
-    if not needs_transliteration(text, cfg):
-        return {"skipped": "script", "xlit": ""}
-    xlit, ok = _apply(cfg, text, "transliterate")
-    if not ok or not xlit.strip():
-        return {"skipped": "identity", "xlit": ""}
-    sidecars = (bool(cfg.get("lyrics_xlit_sidecars", True))
-                and str(cfg.get("lyrics_format", "EMBEDDED")).upper() in ("LRC", "BOTH"))
-    if str(cfg.get("lyrics_format", "EMBEDDED")).upper() in ("EMBEDDED", "BOTH"):
-        af.set_tag(f"TRANSLITERATION-{xlit_tag_suffix(cfg, text, af)}".upper(), xlit)
-        if str(af.get_tag("TRANSLITERATION") or "").strip():
-            af.delete_tag("TRANSLITERATION")
-    if sidecars:
-        from mlo.lyrics import _atomic_write_text
-        _atomic_write_text(os.path.splitext(p)[0] + XLIT_SIDECAR, xlit)
-    tagcache.invalidate_path(p)
-    return {"ok": True, "xlit": xlit}
 
 
 # --------------------------------------------------------------------------- #
@@ -2287,11 +2232,17 @@ def mb_match(req: MatchRequest):
 
 @app.post("/api/mb/assign")
 def mb_assign(req: AssignTagsRequest):
-    """Write per-track MB/RYM link tags. tracks: {path: {TAG: value}}."""
+    """Write per-track MB/RYM link tags. tracks: {path: {TAG: value}}.
+
+    Videos are re-emitted losslessly, so a raw container comes back as a
+    same-stem MKV: `container_changed`/`output_paths` name those files."""
     from mlo.audio import AudioFile
     errors = []
     changed = 0
     folder = _music_folder()
+    # Video writes are full lossless rewrites, so a raw container (VOB/AVI/…)
+    # comes back as a same-stem MKV: report the files that were re-emitted.
+    swapped = []
     for p, tag_map in req.tracks.items():
         fp = os.path.normpath(p)
         if not os.path.isfile(fp):
@@ -2304,6 +2255,15 @@ def mb_assign(req: AssignTagsRequest):
         if af.audio is None:
             errors.append(f"{p}: {af.error or 'unreadable'}")
             continue
+        # Advisory values: only 0/1/2 exist (0 clean, 1 clean/explicit-clean,
+        # 2 explicit) and a blank means "delete the tag" — an invalid value
+        # written here would only surface as a grading failure later.
+        bad = [k for k, v in tag_map.items()
+               if k.upper() in ("ITUNESADVISORY", "ALBUMITUNESADVISORY")
+               and str(v or "").strip() not in ("", "0", "1", "2")]
+        if bad:
+            errors.append(f"{p}: {', '.join(sorted(bad))} must be 0, 1, 2 or empty")
+            continue
         if getattr(af, "is_video", False):
             # Video containers: batch all tags into ONE lossless ffmpeg
             # rewrite (a per-tag rewrite remuxes the whole file each time).
@@ -2315,6 +2275,8 @@ def mb_assign(req: AssignTagsRequest):
             if clean and not af.set_video_tags(clean):
                 errors.append(f"{p}: {af.error or 'tag write failed'}")
                 continue
+            if af.container_changed:
+                swapped.append((af.tag_output_path or fp).replace("\\", "/"))
             changed += 1
             tagcache.invalidate_path(fp)
             continue
@@ -2333,7 +2295,8 @@ def mb_assign(req: AssignTagsRequest):
         tagcache.invalidate_path(fp)
     if errors:
         raise HTTPException(500, "; ".join(errors))
-    return {"ok": True, "changed": changed}
+    return {"ok": True, "changed": changed,
+            "container_changed": bool(swapped), "output_paths": swapped}
 
 
 def _lyrics_record(hit, artist="", track="", album=None, duration=None):
@@ -2504,6 +2467,18 @@ async def lyrics_publish(req: LyricsPublishRequest):
 @app.get("/api/rym/validate")
 def rym_validate(url: str = Query(...)):
     return {"valid": intg.parse_rym_album_url(url) is not None}
+
+
+@app.get("/api/rym/resolve")
+def rym_resolve(artist: str = Query(""), album: str = Query("")):
+    """Verified RateYourMusic links for an album, for the link editor.
+
+    Same resolution the import uses (rym_links_auto gates it): each link is
+    None unless RYM itself confirmed that page, and `note` says why nothing
+    was found — "could not resolve" is the normal "paste the URL yourself"
+    answer, so it is a 200 here, never an error.
+    """
+    return intg.rym_links(artist, album, cfg=load_config())
 
 
 # --------------------------------------------------------------------------- #
@@ -3139,6 +3114,29 @@ def soulseek_search_results(search_id: str):
     return soulseek.search_results(search_id)
 
 
+class SoulseekSearchCancelRequest(BaseModel):
+    id: str
+
+
+@app.post("/api/soulseek/search/cancel")
+def soulseek_search_cancel(req: SoulseekSearchCancelRequest):
+    """Cancel a running search (slskd DELETE /searches/{id}).
+
+    Without this the app is committed to the whole search window plus the
+    grace tail; the UI's "stop" only stopped polling."""
+    from server import soulseek
+    if not (soulseek.is_running() or soulseek.web_up(load_config())):
+        raise HTTPException(503, "slskd is not running")
+    sid = str(req.id or "").strip()
+    if not sid:
+        raise HTTPException(400, "search id is required")
+    try:
+        soulseek.cancel_search(sid)
+    except Exception as e:
+        raise HTTPException(502, f"search cancel failed: {e}")
+    return {"ok": True}
+
+
 @app.post("/api/soulseek/download")
 def soulseek_download(req: SoulseekDownloadRequest):
     """Queue files from a user for download into the download dir."""
@@ -3153,11 +3151,99 @@ def soulseek_download(req: SoulseekDownloadRequest):
 
 @app.get("/api/soulseek/downloads")
 def soulseek_downloads():
-    """Download transfer tree (per user / directory / file with state)."""
+    """Download transfer tree (per user / directory / file with state).
+
+    503 when slskd is down: an empty list would read as "nothing queued"
+    while the queue is really unreachable."""
     from server import soulseek
     if not (soulseek.is_running() or soulseek.web_up(load_config())):
-        return {"downloads": []}
+        raise HTTPException(503, "slskd is not running — start it first")
     return {"downloads": soulseek.downloads_state()}
+
+
+class SoulseekBulkDownloadRequest(BaseModel):
+    """Queue an arbitrary file list from ONE user (multi-folder / whole-share)."""
+    username: str
+    files: List[dict]  # [{filename, size}]
+
+
+class SoulseekUserDownloadRequest(BaseModel):
+    """Queue every shared file of ONE user (optionally under one folder)."""
+    username: str
+    folder: Optional[str] = None
+
+
+@app.post("/api/soulseek/download-bulk")
+def soulseek_download_bulk(req: SoulseekBulkDownloadRequest):
+    """Queue a list of files from one user in a single POST.
+
+    slskd's enqueue route is per-user, so several folders (or a whole share)
+    are one call — the UI sends what the user selected. Returns {queued}."""
+    from server import soulseek
+    if not (soulseek.is_running() or soulseek.web_up()):
+        raise HTTPException(503, "slskd is not running — start it first")
+    files = [{"filename": str(f.get("filename") or ""), "size": int(f.get("size") or 0)}
+             for f in (req.files or []) if str(f.get("filename") or "").strip()]
+    if not str(req.username or "").strip() or not files:
+        raise HTTPException(400, "username and a non-empty files list are required")
+    soulseek.enqueue_download(req.username, files)
+    return {"queued": len(files)}
+
+
+@app.post("/api/soulseek/download-user")
+def soulseek_download_user(req: SoulseekUserDownloadRequest):
+    """Queue a remote user's whole share, or one folder of it.
+
+    The share tree is browsed first (that is where the file list comes from),
+    then every file is queued in ONE per-user call. Returns
+    {queued, scanned, skipped} — `scanned` is every file the share listed,
+    `skipped` those left out because a transfer for them is already queued
+    or downloading, so pressing the button twice does not double-queue."""
+    from server import soulseek
+    if not (soulseek.is_running() or soulseek.web_up()):
+        raise HTTPException(503, "slskd is not running — start it first")
+    username = str(req.username or "").strip()
+    if not username:
+        raise HTTPException(400, "username is required")
+    try:
+        dirs = soulseek.browse(username, use_cache=False) or []
+    except Exception as e:
+        raise HTTPException(502, f"browse failed: {e}")
+
+    folder = str(req.folder or "").strip().replace("\\", "/").rstrip("/")
+    wanted = []
+    scanned = 0
+    for d in dirs:
+        dpath = str(d.get("directory") or "")
+        if folder and not (dpath.replace("\\", "/").rstrip("/").lower() == folder.lower()
+                           or dpath.replace("\\", "/").rstrip("/").lower().startswith(folder.lower() + "/")):
+            continue
+        for f in d.get("files") or []:
+            name = str(f.get("filename") or "").strip()
+            if not name:
+                continue
+            scanned += 1
+            wanted.append({"filename": name, "size": int(f.get("size") or 0)})
+    if not wanted:
+        raise HTTPException(404, "no files to queue (folder not found in the share?)")
+
+    active = set()
+    try:
+        for entry in soulseek.downloads_state() or []:
+            if str(entry.get("username") or "").lower() != username.lower():
+                continue
+            for d in entry.get("directories") or []:
+                for f in d.get("files") or []:
+                    if not soulseek.finished_transfer(f.get("state")):
+                        active.add(str(f.get("filename") or ""))
+    except Exception:
+        active = set()
+
+    queue = [f for f in wanted if f["filename"] not in active]
+    if queue:
+        soulseek.enqueue_download(username, queue)
+    return {"queued": len(queue), "scanned": scanned,
+            "skipped": len(wanted) - len(queue)}
 
 
 class SoulseekCancelRequest(BaseModel):
@@ -3237,10 +3323,12 @@ def soulseek_downloads_clear(req: SoulseekClearRequest):
 
 @app.get("/api/soulseek/uploads")
 def soulseek_uploads():
-    """Upload transfer tree — the shared-history view (per user / file)."""
+    """Upload transfer tree — the shared-history view (per user / file).
+
+    503 when slskd is down (an empty list would read as "nothing shared yet")."""
     from server import soulseek
     if not (soulseek.is_running() or soulseek.web_up(load_config())):
-        return {"uploads": []}
+        raise HTTPException(503, "slskd is not running — start it first")
     return {"uploads": soulseek.uploads_state()}
 
 
@@ -3486,6 +3574,45 @@ def _tag_media_for_albums(album_dirs):
     return tagged
 
 
+def _stamp_import_identity(album_dirs):
+    """Canonicalize the MusicBrainz identity of hand-downloaded albums.
+
+    The auto-import path stamps the release it verified; a folder downloaded
+    by hand carries whatever the uploader tagged — often another pressing's
+    IDs, and never RELEASECOUNTRY/RELEASESTATUS/RELEASETYPE (the naming
+    script's $releasecountry reads RELEASECOUNTRY). When such an album names
+    a MusicBrainz release, resolve it and reuse the auto-import stamping.
+    Best effort: a MusicBrainz outage never fails the import."""
+    from mlo.audio import AudioFile
+    from server import integrations as intg
+    from server import soulseek_auto
+
+    stamped = 0
+    for d in album_dirs:
+        mbid = ""
+        for root, _dirs, files in os.walk(d):
+            for f in sorted(files):
+                if not is_audio_file(f):
+                    continue
+                try:
+                    mbid = str(AudioFile(os.path.join(root, f)
+                                         ).get_tag("MUSICBRAINZ_ALBUMID") or "").strip()
+                except Exception:
+                    mbid = ""
+                break
+            if mbid:
+                break
+        if not mbid:
+            continue
+        try:
+            release = intg.release_lookup(mbid)
+            stamped += soulseek_auto._stamp_mb_tags(d, release)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+    return stamped
+
+
 @app.post("/api/soulseek/import")
 def soulseek_import():
     """Move completed downloads from the download dir into the library,
@@ -3510,6 +3637,7 @@ def soulseek_import():
     failed = soulseek.last_import_failed()
     media_tagged = 0
     converted = 0
+    identity_stamped = 0
     if moved:
         # Lossless sources (WAV/APE/ALAC...) become the configured lossless
         # codec before anything is tagged or named, so the naming script and
@@ -3529,6 +3657,13 @@ def soulseek_import():
         except Exception:
             import traceback
             traceback.print_exc()
+        # Then canonicalize the MusicBrainz identity (RELEASECOUNTRY etc.)
+        # BEFORE the naming script runs, or $releasecountry comes out empty.
+        try:
+            identity_stamped = _stamp_import_identity(moved)
+        except Exception:
+            import traceback
+            traceback.print_exc()
         try:
             # Best-effort: organize failures must not lose the imported files
             # (they stay in their import folders and can be organized later).
@@ -3542,7 +3677,8 @@ def soulseek_import():
                     "failed": failed,
                     "organized": False,
                     "organize_error": str(e), "media_tagged": media_tagged,
-                    "converted": converted, "tagging_started": False}
+                    "converted": converted, "tagging_started": False,
+                    "identity_stamped": identity_stamped}
         # Fire-and-forget: the configured import script chain per album
         # (CUEs → FLACs → videos → lyrics → mood/genre → images → audit →
         # DR & ReplayGain → AccurateRip → key & BPM → beets → format all →
@@ -3560,6 +3696,7 @@ def soulseek_import():
             "failed": failed,
             "organized": bool(moved),
             "media_tagged": media_tagged, "converted": converted,
+            "identity_stamped": identity_stamped,
             "tagging_started": bool(moved)}
 
 
@@ -3576,19 +3713,21 @@ def soulseek_user(username: str):
 
 
 @app.get("/api/soulseek/browse/{username}")
-def soulseek_browse(username: str):
+def soulseek_browse(username: str, refresh: int = Query(0)):
     """Every shared folder of a remote user — the manual-pick view: what else
     does this uploader have before queueing individual files?
 
     We only normalize slskd's payload to {username, directories:[…]}; slskd
     does the browsing over the peer network, so an offline user (slskd 404)
     or our OWN username (slskd cannot connect to itself) answers 5xx. That is
-    an upstream failure carrying slskd's own explanation, hence 502."""
+    an upstream failure carrying slskd's own explanation, hence 502.
+    `refresh=1` bypasses the 120 s in-process cache (the modal's Refresh
+    button used to re-issue the same cached answer)."""
     from server import soulseek
     if not (soulseek.is_running() or soulseek.web_up(load_config())):
         raise HTTPException(404, "slskd is not running")
     try:
-        dirs = soulseek.browse(username) or []
+        dirs = soulseek.browse(username, use_cache=not refresh) or []
     except Exception as e:
         raise HTTPException(502, f"browse failed: {e}")
     return {"username": username,
@@ -3846,44 +3985,39 @@ def soulseek_auto_confirm(req: SoulseekAutoConfirmRequest):
     return {"ok": True, "accepted": bool(req.accept)}
 
 
-def _release_from_group(mbid):
-    """The earliest release id of a MusicBrainz release GROUP, or None.
+def _resolve_release(mbid):
+    """(release, release_id) for a release OR release-group MBID/URL.
 
-    Auto-import needs a *release* (a concrete pressing with a track list),
-    but MusicBrainz hands out release-group links just as often — a pasted
-    group link previously failed with a raw 404 from the release endpoint."""
+    One resolution path for every caller in this file: the edition is picked
+    by the auto-import policy (Official first, CD → Digital Media → … by
+    medium, earliest date breaking ties, promotional/bootleg editions never
+    while auto_import_avoid_promo is on). Raises 502 when MusicBrainz cannot
+    resolve the id at all."""
     try:
-        rg = intg.release_group_browse(mbid, limit=100, offset=0)
-    except Exception:
-        return None
-    if not rg.get("id"):
-        return None
-    releases = rg.get("releases") or []
-    return releases[0].get("id") if releases else None
+        return intg.resolve_release(mbid)
+    except Exception as e:
+        raise HTTPException(502, f"MusicBrainz release lookup failed: {e}")
 
 
 @app.post("/api/soulseek/auto")
 def soulseek_auto_start(req: SoulseekAutoRequest):
     """Find → verify → download → audit → import a specific MusicBrainz
-    release from Soulseek (see server/soulseek_auto.py for the pipeline)."""
+    release from Soulseek (see server/soulseek_auto.py for the pipeline).
+
+    Accepts a release OR release-group MBID (a group resolves to its best
+    edition by the release-choice policy)."""
     from server import soulseek_auto
     if not req.release_mbid and not (req.username and req.target_dir):
         raise HTTPException(400, "release_mbid or username+target_dir required")
     release = None
     release_mbid = req.release_mbid
     if release_mbid:
-        try:
-            release = intg.release_lookup(release_mbid)
-        except Exception as e:
-            # a release-group id (or link) is not a release id — import its
-            # earliest release instead of failing the request
-            release_mbid = _release_from_group(release_mbid) or release_mbid
-            if release_mbid == req.release_mbid:
-                raise HTTPException(502, f"MusicBrainz release lookup failed: {e}")
-            try:
-                release = intg.release_lookup(release_mbid)
-            except Exception as e2:
-                raise HTTPException(502, f"MusicBrainz release lookup failed: {e2}")
+        release, release_mbid = _resolve_release(release_mbid)
+        if not release_mbid:
+            raise HTTPException(
+                502, "MusicBrainz release not found, or it has no edition "
+                     "eligible for auto-import (promotional/bootleg editions "
+                     "are skipped while auto_import_avoid_promo is on)")
     r = soulseek_auto.start_job(release_mbid=release_mbid, release=release,
                                 queries=req.queries, username=req.username,
                                 target_dir=req.target_dir,
@@ -3893,6 +4027,125 @@ def soulseek_auto_start(req: SoulseekAutoRequest):
     if not r.get("ok"):
         raise HTTPException(409, r.get("error", "job refused"))
     return r
+
+
+class MBAutoImportRequest(BaseModel):
+    """Bulk auto-import: a release, a release group, or a whole artist.
+
+    kind "auto" detects the entity from the ID; mode "best" queues one release
+    per release group (the edition chosen by the auto-import policy), "all"
+    queues every edition of a release group."""
+    mbid: str
+    kind: Optional[str] = None   # auto | release | release_group | artist
+    mode: Optional[str] = None   # best | all
+
+
+# Release groups handled per bulk call. Each group costs a MusicBrainz
+# browse (1 req/s etiquette), so an artist with hundreds of groups would hold
+# the request open for minutes — the remainder is reported in `skipped`
+# instead of being silently dropped or wedging the UI.
+_MB_BULK_MAX_GROUPS = 50
+
+
+def _group_releases(rg_mbid, mode):
+    """([{mbid,title}], error) — the release ids of a release group to queue.
+
+    Ordered by the auto-import policy (Official, then medium preference, then
+    earliest date); `mode` "best" keeps only the best edition, "all" keeps
+    every eligible edition. Promotional/bootleg editions are never eligible
+    while auto_import_avoid_promo is on."""
+    try:
+        rg = intg.release_group_browse(rg_mbid, limit=100, offset=0)
+    except Exception as e:
+        return [], f"MusicBrainz release-group lookup failed: {e}"
+    if not rg.get("id"):
+        return [], "not a MusicBrainz release group"
+    rows = intg.pick_releases(rg.get("releases") or [])
+    if not rows:
+        return [], ("no eligible edition (only promotional/bootleg releases, "
+                    "skipped by auto_import_avoid_promo)")
+    if mode != "all":
+        rows = rows[:1]
+    return [{"mbid": r.get("id"), "title": r.get("title") or ""} for r in rows], None
+
+
+@app.post("/api/mb/auto-import")
+def mb_auto_import(req: MBAutoImportRequest):
+    """Queue Soulseek auto-import jobs for a release, a release group, or an
+    artist's whole discography (one job at a time; the rest wait in the
+    pipeline's queue). Groups already in the library are skipped.
+
+    mode "all" only widens a RELEASE GROUP (every edition instead of the best
+    one); for an artist it stays one release per release group, because
+    downloading every pressing of a discography is never what "download the
+    artist" means."""
+    from server import soulseek_auto, wishes
+
+    mbid = intg._mbid(req.mbid)
+    if not mbid:
+        raise HTTPException(400, "a MusicBrainz ID or URL is required")
+    mode = (req.mode or "best").strip().lower()
+    if mode not in ("best", "all"):
+        raise HTTPException(400, "mode must be 'best' or 'all'")
+    kind = (req.kind or "auto").strip().lower()
+    if kind == "auto":
+        try:
+            kind = (intg.detect_mbid(mbid) or {}).get("type") or ""
+        except Exception as e:
+            raise HTTPException(502, f"MusicBrainz lookup failed: {e}")
+        kind = {"release-group": "release_group"}.get(kind, kind)
+    if kind not in ("release", "release_group", "artist"):
+        raise HTTPException(400, "kind must be release, release_group or artist")
+
+    targets, skipped = [], []
+    if kind == "release":
+        # resolving here (not in the job) both validates the ID and gives the
+        # response a title; an id that is not a release is refused outright
+        rel, rid = intg.resolve_release(mbid)
+        if not rid:
+            raise HTTPException(502, "MusicBrainz release not found")
+        targets.append({"mbid": rid, "title": (rel or {}).get("title") or ""})
+    elif kind == "release_group":
+        rows, err = _group_releases(mbid, mode)
+        if err:
+            raise HTTPException(502, err)
+        targets = rows
+    else:
+        cfg = load_config()
+        try:
+            artist = intg.artist_browse(mbid, limit=500, offset=0)
+        except Exception as e:
+            raise HTTPException(502, f"MusicBrainz artist lookup failed: {e}")
+        groups = artist.get("release_groups") or []
+        if not groups:
+            raise HTTPException(404, "this artist has no release groups on MusicBrainz")
+        owned = wishes.owned_mbids(cfg)
+        done_groups = 0
+        for g in groups:
+            gid = str(g.get("id") or "")
+            if not gid:
+                continue
+            if str(gid).lower() in owned:
+                skipped.append({"mbid": gid, "reason": "already in the library"})
+                continue
+            if done_groups >= _MB_BULK_MAX_GROUPS:
+                skipped.append({"mbid": gid,
+                                "reason": f"per-call limit of {_MB_BULK_MAX_GROUPS} "
+                                          "release groups reached — call again"})
+                continue
+            rows, err = _group_releases(gid, "best")
+            if err:
+                skipped.append({"mbid": gid, "reason": err})
+                continue
+            done_groups += 1
+            targets.extend(rows)
+
+    items = []
+    for t in targets:
+        depth = soulseek_auto.enqueue(release_mbid=t["mbid"])
+        items.append({"mbid": t["mbid"], "title": t.get("title") or "",
+                      "status": "queued" if depth else "running"})
+    return {"queued": len(items), "items": items, "skipped": skipped}
 
 
 @app.post("/api/soulseek/test-log")
@@ -4132,30 +4385,11 @@ class GenreImportRequest(BaseModel):
     count: Optional[int] = None  # defaults to mb_genre_count from settings
 
 
-@app.post("/api/mb/genres")
-def mb_genres_import(req: GenreImportRequest):
-    """Import genres from MusicBrainz onto the given tracks.
-
-    The release (MUSICBRAINZ_ALBUMID) or release group (RELEASEGROUPID) on
-    the first track identifies the entity; its top-voted genres are written
-    to GENRE — per-track genres when MusicBrainz has them for the recording,
-    otherwise the release's genre list shared by every track. The number of
-    genres written follows Settings → Import (default 1)."""
-    from mlo.audio import AudioFile
-
-    cfg = load_config()
-    n = max(1, min(10, int(req.count or cfg.get("mb_genre_count", 1) or 1)))
-
-    # Same containment guard as /api/tags/bulk and /api/mb/assign: this route
-    # writes GENRE tags, so paths outside the music folder are refused.
-    folder = _music_folder()
-    for p in req.paths:
-        if not _in_music_folder(p, folder):
-            raise HTTPException(400, f"path outside music folder: {p}")
-
-    # collect audio files (allow passing one album folder)
+def _genre_files(paths):
+    """Audio files under the given paths (each may be a file or an album
+    folder). Raises 400 when the paths hold no audio."""
     files = []
-    for p in req.paths:
+    for p in paths:
         if os.path.isdir(p):
             for root, _dirs, fs in os.walk(p):
                 files += [os.path.join(root, f) for f in sorted(fs)
@@ -4164,6 +4398,64 @@ def mb_genres_import(req: GenreImportRequest):
             files.append(p)
     if not files:
         raise HTTPException(400, "no audio files found")
+    return files
+
+
+def _tag_paths_guard(paths):
+    """Containment guard (same as /api/tags/bulk and /api/mb/assign): genre
+    routes write tags, so paths outside the music folder are refused."""
+    folder = _music_folder()
+    for p in paths:
+        if not _in_music_folder(p, folder):
+            raise HTTPException(400, f"path outside music folder: {p}")
+
+
+def _write_album_genres(files, names, per_track=None, limit=None):
+    """Write GENRE per track: the track's own genres first (MusicBrainz
+    recording genres, when the release has them), then the album-level merged
+    list, deduped Title-Case and capped. Returns the files written."""
+    from mlo.audio import AudioFile
+    from server import soulseek_auto
+
+    per_track = per_track or {}
+    updated = 0
+    for p in files:
+        try:
+            af = AudioFile(p)
+            if af.audio is None:
+                continue
+            merged = []
+            for name in list(per_track.get(soulseek_auto._parse_trackno(p)) or []) + list(names):
+                text = str(name).strip().title()
+                if text and text.lower() not in {g.lower() for g in merged}:
+                    merged.append(text)
+            if limit:
+                merged = merged[:limit]
+            if merged and af.set_tag("GENRE", "; ".join(merged)):
+                updated += 1
+        except Exception:
+            continue
+    if updated:
+        tagcache.invalidate_all()
+        mbresolve.invalidate()
+    return updated
+
+
+@app.post("/api/mb/genres")
+def mb_genres_import(req: GenreImportRequest):
+    """Import genres from MUSICBRAINZ onto the given tracks.
+
+    The release (MUSICBRAINZ_ALBUMID) or release group (RELEASEGROUPID) on the
+    first track identifies the entity; per-track recording genres win over the
+    release's list, and the count follows Settings → Import (`mb_genre_count`,
+    default 3). Other sources are deliberately not consulted here — use
+    /api/genres/import for the full chain."""
+    from mlo.audio import AudioFile
+
+    cfg = load_config()
+    n = max(1, min(10, int(req.count or cfg.get("mb_genre_count", 3) or 3)))
+    _tag_paths_guard(req.paths)
+    files = _genre_files(req.paths)
 
     probe = AudioFile(files[0])
     mbid = str(probe.get_tag("MUSICBRAINZ_ALBUMID") or "").strip()
@@ -4171,67 +4463,321 @@ def mb_genres_import(req: GenreImportRequest):
     if not mbid and not rgid:
         raise HTTPException(400, "no MusicBrainz album/release-group ID on the track — import & link first")
 
-    try:
-        if mbid:
-            data = intg.mb_get_cached(f"release/{mbid}", {"inc": "genres", "fmt": "json"})
-        else:
-            data = intg.mb_get_cached(f"release-group/{rgid}", {"inc": "genres", "fmt": "json"})
-    except Exception as e:
-        raise HTTPException(502, f"MusicBrainz lookup failed: {e}")
+    release = None
+    if mbid:
+        try:
+            release = intg.release_lookup(mbid)
+        except Exception as e:
+            raise HTTPException(502, f"MusicBrainz lookup failed: {e}")
 
-    def _top(genre_list):
-        pairs = sorted(((g.get("name") or "", int(g.get("count") or 0))
-                        for g in genre_list or []), key=lambda x: -x[1])
-        return [name for name, _c in pairs if name][:n]
-
-    release_genres = _top(data.get("genres"))
-
-    # per-recording genres need the full release (recordings included)
+    artist = str(probe.get_tag("ALBUMARTIST") or probe.get_tag("ARTIST") or "").strip()
+    album = str(probe.get_tag("ALBUM") or "").strip()
+    chain = intg.genre_chain(
+        artist=artist, album=album, limit=n, cfg=cfg, sources=["musicbrainz"],
+        release=release or {"id": "", "release_group_id": rgid, "genres": [],
+                            "artists": [], "media": []},
+    )
+    names = chain.get("genres") or []
     track_genres = {}
-    if mbid and release_genres:
-        try:
-            full = intg.release_lookup(mbid)
-            for t in full.get("media") or []:
-                g = _top(t.get("genres"))
-                if g:
-                    try:
-                        disc = int(str(t.get("disc") or 1).split("/")[0])
-                    except (TypeError, ValueError):
-                        disc = 1
-                    try:
-                        pos = int(str(t.get("position") or 0).split("/")[0])
-                    except (TypeError, ValueError):
-                        continue
-                    track_genres[(disc, pos)] = g
-        except Exception:
-            track_genres = {}
+    for t in (release or {}).get("media") or []:
+        g = t.get("genres") or []
+        if g:
+            track_genres[(int(t.get("disc") or 1), int(t.get("position") or 0))] = g
 
-    def _match_trackno(path):
-        base = os.path.basename(path)
-        m = re.match(r"^(\d{1,2})[-._ )]+(\d{1,3})", base)
-        if m:
-            return int(m.group(1)), int(m.group(2))
-        m = re.match(r"^(\d{1,3})[-._ )]+", base)
-        return (1, int(m.group(1))) if m else (1, 0)
-
-    updated = 0
-    for p in files:
-        try:
-            af = AudioFile(p)
-            if af.audio is None:
-                continue
-            per = track_genres.get(_match_trackno(p)) or release_genres
-            if not per:
-                continue
-            if af.set_tag("GENRE", "; ".join(per)):
-                updated += 1
-        except Exception:
-            continue
-    if updated:
-        tagcache.invalidate_all()
-        mbresolve.invalidate()
-    return {"ok": True, "updated": updated, "genres": release_genres,
+    updated = _write_album_genres(files, names, track_genres, limit=n)
+    return {"ok": True, "updated": updated, "genres": names,
+            "per_source": chain.get("per_source") or {},
             "per_track": bool(track_genres)}
+
+
+class GenreChainImportRequest(BaseModel):
+    paths: List[str]  # audio files (or one album dir)
+    limit: Optional[int] = None  # defaults to mb_genre_count from settings
+
+
+@app.post("/api/genres/import")
+def genres_import(req: GenreChainImportRequest):
+    """Import GENRE from EVERY configured genre source, per track.
+
+    The chain runs in the order of `genre_sources` (RateYourMusic → Soulseek
+    signals → Discogs/Last.fm/TheAudioDB → Deezer/iTunes → MusicBrainz),
+    merges what each source answers, dedupes case-insensitively, Title-Cases
+    the names and caps them at `limit`/`mb_genre_count` (default 3). Sources
+    that cannot answer are reported in `notes` (a blocked RYM, a Discogs or
+    Last.fm source without its token/key) — nothing is filled in from a guess.
+    MusicBrainz recording genres refine each track when the album names a
+    release. Returns {updated, per_source, notes, genres}."""
+    from mlo.audio import AudioFile
+
+    cfg = load_config()
+    _tag_paths_guard(req.paths)
+    files = _genre_files(req.paths)
+
+    probe = AudioFile(files[0])
+    mbid = str(probe.get_tag("MUSICBRAINZ_ALBUMID") or "").strip()
+    artist = str(probe.get_tag("ALBUMARTIST") or probe.get_tag("ARTIST") or "").strip()
+    album = str(probe.get_tag("ALBUM") or "").strip()
+    release = None
+    if mbid:
+        try:
+            release = intg.release_lookup(mbid)
+        except Exception:
+            release = None
+
+    try:
+        limit = int(req.limit) if req.limit else None
+    except (TypeError, ValueError):
+        raise HTTPException(400, "limit must be a number")
+    chain = intg.genre_chain(artist=artist, album=album, release=release,
+                             limit=limit, cfg=cfg)
+    names = chain.get("genres") or []
+    per_track = {}
+    for t in (release or {}).get("media") or []:
+        g = t.get("genres") or []
+        if g:
+            per_track[(int(t.get("disc") or 1), int(t.get("position") or 0))] = g
+
+    cap = limit or int(cfg.get("mb_genre_count") or 3)
+    updated = _write_album_genres(files, names, per_track, limit=cap)
+    return {"updated": updated, "genres": names,
+            "per_source": chain.get("per_source") or {},
+            "notes": chain.get("notes") or {},
+            "per_track": bool(per_track)}
+
+
+@app.get("/api/genres/facets")
+def genres_facets():
+    """GENRE tags across the library, counted and bucketed.
+
+    `genres` is every distinct genre with the number of tracks carrying it
+    (descending), which is the "all genres" list; `categories` groups those
+    names into the fixed buckets the UI filters by (Metal, Rock, Electronic,
+    Hip-Hop, Jazz, Classical, Folk, Soul & Funk, Pop, Other) — a genre lands in
+    exactly one bucket, so the counts stay honest."""
+    from server import library as lib_mod
+
+    cfg = load_config()
+    try:
+        lib = lib_mod.build_library(cfg)
+    except Exception as e:
+        raise HTTPException(502, f"library scan failed: {e}")
+    counts = {}
+    for artist in lib.get("artists", []):
+        for alb in artist.get("albums", []):
+            for tr in alb.get("tracks", []):
+                raw = str((tr.get("tags") or {}).get("GENRE") or "")
+                for name in re.split(r"[;,]", raw):
+                    text = name.strip().title()
+                    if text:
+                        counts[text] = counts.get(text, 0) + 1
+    genres = [{"name": n, "count": c}
+              for n, c in sorted(counts.items(), key=lambda x: (-x[1], x[0].lower()))]
+    buckets = {}
+    for row in genres:
+        buckets.setdefault(intg.genre_category(row["name"]), []).append(row["name"])
+    order = [c for c, _keys in intg.GENRE_CATEGORIES] + [intg.OTHER_CATEGORY]
+    categories = [{"name": name, "genres": buckets[name]}
+                  for name in order if buckets.get(name)]
+    return {"genres": genres, "categories": categories}
+
+
+class AdvisoryFetchRequest(BaseModel):
+    paths: Optional[List[str]] = None           # audio files or album folders
+    release_mbid: Optional[str] = None          # a MusicBrainz release id/URL
+
+@app.post("/api/mb/advisory/fetch")
+def mb_advisory_fetch(req: AdvisoryFetchRequest):
+    """Resolve ITUNESADVISORY (0/1/2) for an album or a MusicBrainz release.
+
+    Tracks are identified by their ISRC tag — or by the MusicBrainz recording
+    ID an import already stamped, whose ISRCs MusicBrainz supplies — and rated
+    by the first provider that actually states a rating: Deezer's ISRC lookup,
+    Spotify (only when configured), Apple's album route, Apple's song search.
+    Only a stated value is written: an unknown track keeps NO advisory, because
+    a missing advisory means "unrated" and 0 would claim the audio is clean, a
+    `cleaned` Apple entry states nothing and is never written, and an existing
+    valid 0/1/2 is never overwritten.
+
+    Returns {updated, values, sources}: `values` maps the file path (paths
+    mode) or "disc:position" (release mode) to the rating that was found, and
+    `sources` maps the same keys to the provider that stated it."""
+    from server import imports as imports_mod
+
+    if not req.paths and not req.release_mbid:
+        raise HTTPException(400, "paths or release_mbid required")
+    values = {}
+    sources = {}
+    updated = 0
+    if req.release_mbid:
+        rid = intg._mbid(req.release_mbid)
+        if not rid:
+            raise HTTPException(400, "invalid MusicBrainz release ID")
+        try:
+            values.update(intg.release_advisories(rid, sources=sources))
+        except Exception as e:
+            raise HTTPException(502, f"MusicBrainz release lookup failed: {e}")
+    if req.paths:
+        _tag_paths_guard(req.paths)
+        result = imports_mod.fetch_advisories(req.paths, load_config())
+        updated = int(result.get("updated") or 0)
+        values.update(result.get("values") or {})
+        sources.update(result.get("sources") or {})
+    return {"updated": updated, "values": values, "sources": sources}
+
+
+def _metadata_album_identity(album_dir, artist=""):
+    """(artist, album) for a metadata request, from the folder's own tags."""
+    tracks = _scan_album_tracks(album_dir) or []
+    tags = (tracks[0].get("tags") if tracks else None) or {}
+    album = str(tags.get("ALBUM") or os.path.basename(os.path.normpath(album_dir))).strip()
+    return (artist or str(tags.get("ALBUMARTIST") or tags.get("ARTIST") or "").strip(),
+            album)
+
+
+@app.get("/api/metadata/candidates")
+def metadata_candidates_route(artist: str = Query(""), album_path: str = Query("")):
+    """Image / description candidates for an artist or an album folder.
+
+    Read-only: nothing is written. The list is composed by
+    `server.discovery.metadata_candidates` from the reliable providers (Deezer
+    photo, TheAudioDB, Apple artwork, Wikipedia) plus the configured image
+    chain's own pick, and the first description each configured description
+    source can give. With `metadata_review` on, an album also carries the
+    candidates the import chain STAGED for it (`staged`). The UI's pick is
+    written through POST /api/metadata/apply."""
+    from server import discovery, imports as imports_mod
+
+    cfg = load_config()
+    if not artist and not album_path:
+        raise HTTPException(400, "artist or album_path required")
+    album_dir = ""
+    album = ""
+    if album_path:
+        album_dir = os.path.normpath(album_path)
+        if not os.path.isdir(album_dir):
+            raise HTTPException(404, "album not found")
+        if not _in_music_folder(album_dir, _music_folder(cfg)):
+            raise HTTPException(400, "album outside music folder")
+        artist, album = _metadata_album_identity(album_dir, artist)
+    try:
+        candidates = discovery.metadata_candidates(artist, album, cfg=cfg)
+    except Exception as e:
+        raise HTTPException(502, f"metadata lookup failed: {e}")
+    candidates["artist"] = artist
+    candidates["album"] = album
+    candidates["staged"] = imports_mod.staged_metadata(album_dir, cfg) if album_dir else {}
+    return candidates
+
+
+class MetadataApplyRequest(BaseModel):
+    """Apply one metadata choice (the user's pick, or an automatic one)."""
+    kind: str                                   # artist_image | artist_description | album_description
+    artist: Optional[str] = None                # artist name or folder path
+    album_path: Optional[str] = None            # album folder (album_description)
+    image_url: Optional[str] = None             # artist_image source
+    description: Optional[str] = None           # artist_description / album_description text
+
+
+@app.post("/api/metadata/apply")
+def metadata_apply(req: MetadataApplyRequest):
+    """Save one metadata choice: artist image (from a candidate URL), artist
+    description or album description (supplied text, or the best candidate
+    when the body carries none). Clears the album's staged review entry so a
+    reviewed album leaves the queue."""
+    from mlo import artistdata
+    from server import discovery, imports as imports_mod
+
+    cfg = load_config()
+    kind = (req.kind or "").strip().lower()
+    album_dir = ""
+    if req.album_path:
+        album_dir = os.path.normpath(req.album_path)
+        if not os.path.isdir(album_dir):
+            raise HTTPException(404, "album not found")
+        if not _in_music_folder(album_dir, _music_folder(cfg)):
+            raise HTTPException(400, "album outside music folder")
+
+    if kind == "artist_image":
+        artist = (req.artist or "").strip()
+        if not artist:
+            raise HTTPException(400, "artist is required")
+        folder = _metadata_artist_folder(artist, cfg)
+        url = (req.image_url or "").strip()
+        source = "manual"
+        label = None
+        if not url:
+            hit = discovery.artist_image(_metadata_artist_name(folder, artist), cfg=cfg)
+            if not hit or not hit.get("url"):
+                raise HTTPException(404, "no artist image found in any configured source")
+            url, source, label = hit["url"], hit.get("source") or "auto", hit.get("label")
+        try:
+            data, _ctype = intg.fetch_image_bytes(url)
+        except Exception as e:
+            raise HTTPException(502, f"image download failed: {e}")
+        path = artistdata.save_image(folder, data, cfg, source=source,
+                                     source_url=url, kind="artist", label=label)
+        if not path:
+            raise HTTPException(400, "not a usable image")
+        saved = path
+
+    elif kind in ("artist_description", "album_description"):
+        text = str(req.description or "").strip()
+        source = source_url = title = None
+        if kind == "artist_description":
+            artist = (req.artist or "").strip()
+            if not artist:
+                raise HTTPException(400, "artist is required")
+            folder = _metadata_artist_folder(artist, cfg)
+            name = _metadata_artist_name(folder, artist)
+            if not text:
+                found = discovery.artist_description(name, cfg=cfg)
+                if not found:
+                    raise HTTPException(404, "no description found in any configured source")
+                text, source = found["text"], found.get("source")
+                source_url, title = found.get("source_url"), found.get("title")
+            saved = artistdata.write_description(folder, text, cfg=cfg, source=source,
+                                                 source_url=source_url, kind="artist")
+        else:
+            if not album_dir:
+                raise HTTPException(400, "album_path is required")
+            artist, album = _metadata_album_identity(album_dir, (req.artist or "").strip())
+            if not text:
+                found = discovery.album_description(artist, album, cfg=cfg)
+                if not found:
+                    raise HTTPException(404, "no description found in any configured source")
+                text, source = found["text"], found.get("source")
+                source_url, title = found.get("source_url"), found.get("title")
+            saved = artistdata.write_description(album_dir, text, cfg=cfg, source=source,
+                                                 source_url=source_url, kind="album")
+        if not saved:
+            raise HTTPException(400, "description is empty")
+        if source:
+            target = folder if kind == "artist_description" else album_dir
+            artistdata.write_provenance(target, {
+                "description_source": source,
+                "description_source_url": source_url,
+                "description_title": title}, kind="artist" if kind == "artist_description" else "album",
+                cfg=cfg)
+    else:
+        raise HTTPException(400, "kind must be artist_image, artist_description or album_description")
+
+    if album_dir:
+        imports_mod.stage_metadata(album_dir, None, cfg)
+    tagcache.invalidate_all()
+    return {"ok": True, "saved": str(saved).replace("\\", "/")}
+
+
+def _metadata_artist_folder(artist, cfg):
+    """An artist folder from a path (inside the music folder) or a name —
+    the same resolution the artist-page routes use."""
+    from server.api_discovery import _artist_folder
+    return _artist_folder(artist, cfg)
+
+
+def _metadata_artist_name(folder, artist=""):
+    """The artist's *name* for provider lookups, given a library folder."""
+    from server.api_discovery import _artist_name
+    return _artist_name(folder, artist)
 
 
 def _rewrite_track_covers(old_root, new_root, renames):
@@ -4553,10 +5099,11 @@ def _write_upload_bytes(dest: str, data: bytes) -> None:
 
 @app.post("/api/import/scan")
 def import_scan(path: str = Query(...)):
-    """Recursively list a folder's files with relative paths (native picks).
+    """Recursively list a folder's files with relative paths (drag-drop or a
+    typed/known folder path — there is no in-app folder picker).
 
-    The picked folder may live anywhere — the follow-up ingest step moves
-    it into the library.
+    The folder may live anywhere — the follow-up ingest step moves it into
+    the library.
     """
     p = os.path.normpath(path)
     if not os.path.isdir(p):
@@ -5235,7 +5782,7 @@ if WEB_DIST.is_dir():
             raise HTTPException(404)
         # full_path is attacker-controlled: a ".." segment would otherwise read
         # any file on disk (e.g. /../../server/tagcache.py, or the config file
-        # holding the Soulseek/AI credentials).
+        # holding the Soulseek credentials).
         if ".." in full_path.replace("\\", "/").split("/"):
             raise HTTPException(404)
         file = WEB_DIST / full_path

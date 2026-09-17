@@ -101,8 +101,21 @@ def _run_one(wish, cfg):
     wishes.mark_searching(wid)
     _set(current=label)
     wishes.log("info", f"Wish search: {label}")
+    # A wish normally stores the release GROUP id (that is what discovery,
+    # MoreLikeThis and Home hand out), and the release endpoint 404s on a
+    # group — resolve it exactly like the HTTP route does, so no wish is
+    # permanently unfillable.
+    from server import integrations as intg
+    release, release_mbid = intg.resolve_release(wish["release_mbid"])
+    if not release_mbid:
+        err = ("MusicBrainz release could not be resolved "
+               f"({wish['release_mbid']})")
+        wishes.mark_wanted(wid, error=err,
+                           attempts=int(wish.get("attempts") or 0) + 1)
+        return "pending"
     r = soulseek_auto.start_job(
-        release_mbid=wish["release_mbid"],
+        release_mbid=release_mbid,
+        release=release,
         queries=(wish.get("queries") or None),
     )
     if not r.get("ok"):

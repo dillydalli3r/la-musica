@@ -1,12 +1,15 @@
-import { Suspense, lazy, useEffect, useRef, useState } from "react";
-import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
+import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  ArrowDownToLine, ArrowDownUp, ChevronLeft, ChevronRight, ClipboardCheck, Gauge, HardDriveDownload, Heart, Home, Import,
-  Library, ListMusic, Menu, Music4, PanelLeftClose, Search, Trash2, X,
+  ArrowDownToLine, ArrowDownUp, ChevronLeft, ChevronRight, ClipboardCheck, Disc3, Gauge, HardDriveDownload, Heart, Home, Import,
+  Library, ListMusic, Menu, Music2, Music4, PanelLeftClose, Search, Tags, Trash2, User, X,
   Settings as SettingsIcon, Wrench,
 } from "lucide-react";
 import { api } from "./api";
+import type { Library as LibraryData } from "./types";
+import type { LucideIcon } from "lucide-react";
+import { albumRef, artistRef, trackRef } from "./lib/refs";
 import { useStore } from "./store";
 
 // Route-level code splitting: only the landing page ships in the initial
@@ -29,6 +32,7 @@ const ExportPage = lazy(() => import("./pages/ExportPage"));
 const GradingPage = lazy(() => import("./pages/GradingPage"));
 const OptimizationPage = lazy(() => import("./pages/OptimizationPage"));
 const DependenciesPage = lazy(() => import("./pages/DependenciesPage"));
+const GenrePage = lazy(() => import("./pages/GenrePage"));
 const ImportWizard = lazy(() => import("./pages/ImportWizard"));
 const MBSearchPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBSearchPage })));
 const MBArtistPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBArtistPage })));
@@ -49,6 +53,7 @@ const NAV_GROUPS = [
     items: [
       { to: "/", label: "Home", icon: Home, end: true },
       { to: "/library", label: "Library", icon: Library, end: false },
+      { to: "/genres", label: "Genres", icon: Tags, end: true },
       { to: "/downloads", label: "Downloads", icon: ArrowDownToLine, end: true },
       { to: "/trash", label: "Trash", icon: Trash2, end: true },
       { to: "/playlists", label: "Playlists", icon: ListMusic, end: false },
@@ -152,8 +157,30 @@ function PageLoading() {
   );
 }
 
+/** One typed row in the top-bar search dropdown: a direct in-app link to the
+ *  entity, with its kind on the right. */
+function SearchHit({ to, icon: Icon, label, hint, onGo }: {
+  to: string;
+  icon: LucideIcon;
+  label: string;
+  hint: string;
+  onGo: () => void;
+}) {
+  return (
+    <Link
+      to={to}
+      onClick={onGo}
+      className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-zinc-200 hover:bg-raise transition-colors"
+    >
+      <Icon className="h-4 w-4 text-accent-soft shrink-0" />
+      <span className="flex-1 min-w-0 truncate">{label}</span>
+      <span className="text-[10px] uppercase tracking-wider text-zinc-600 shrink-0">{hint}</span>
+    </Link>
+  );
+}
+
 export default function App() {
-  const { progress, setProgress, toast: toastMsg, query, setQuery } = useStore();
+  const { progress, setProgress, toasts, dismissToast, query, setQuery } = useStore();
   const progressClear = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   const slskDot = useSlskDot();
@@ -217,6 +244,42 @@ export default function App() {
   const mbLink = /^(?:https?:\/\/)?(?:www\.)?musicbrainz\.org\/(artist|release-group|release|recording)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(
     query.trim()
   );
+
+  // Typed local results for the top-bar dropdown: artists, albums and tracks
+  // with direct links, instead of only handing the query to MusicBrainz. The
+  // library payload is fetched ONLY while the dropdown is open — same query
+  // key as the library page, so an already-loaded library costs nothing.
+  const q = query.trim().toLowerCase();
+  const { data: lib } = useQuery<LibraryData>({
+    queryKey: ["library"],
+    queryFn: api.library,
+    enabled: searchOpen && q.length >= 2,
+    staleTime: 30000,
+  });
+  const hits = useMemo(() => {
+    if (!lib || q.length < 2) return { artists: [], albums: [], tracks: [] };
+    const has = (v: string | null | undefined) => (v ?? "").toLowerCase().includes(q);
+    const albums = lib.artists.flatMap((a) => a.albums);
+    return {
+      artists: lib.artists.filter((a) => has(a.display_name) || has(a.name)).slice(0, 4),
+      albums: albums.filter((al) => has(al.meta?.ALBUM)).slice(0, 4),
+      tracks: albums
+        .flatMap((al) => al.tracks.map((t) => ({ al, t })))
+        .filter(({ t }) => has(t.tags?.TITLE))
+        .slice(0, 5),
+    };
+  }, [lib, q]);
+
+  /** Enter opens the artist page when the query IS an artist (exact match, or
+   *  the one artist the query narrows to) — otherwise it leaves the already
+   *  applied library filter alone and the dropdown's MusicBrainz row is the
+   *  explicit jump. */
+  const openOnEnter = () => {
+    const exact = hits.artists.find((a) => (a.display_name || a.name).trim().toLowerCase() === q);
+    const target = exact ?? (hits.artists.length === 1 ? hits.artists[0] : null);
+    if (target) return artistRef(target);
+    return null;
+  };
 
   // ---- collapsible sidebar (icons-only rail) ------------------------------
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSE_KEY) === "1");
@@ -394,8 +457,8 @@ export default function App() {
           the header hamburger; every link closes it */}
       {navOpen && (
         <>
-          <div className="fixed inset-0 z-40 bg-black/50 md:hidden" onClick={() => setNavOpen(false)} />
-          <aside className="fixed left-0 top-0 bottom-0 z-50 w-52 bg-panel border-r border-border p-2 flex flex-col gap-1 overflow-y-auto md:hidden shadow-2xl">
+          <div className="anim-fade fixed inset-0 z-40 bg-black/50 md:hidden" onClick={() => setNavOpen(false)} />
+          <aside className="anim-pop fixed left-0 top-0 bottom-0 z-50 w-52 bg-panel border-r border-border p-2 flex flex-col gap-1 overflow-y-auto md:hidden shadow-2xl">
             <div className="flex items-center gap-2 border-b border-border pb-2 mb-1 px-1">
               <img src="/icon.png" alt="la musica" className="h-7 w-7 rounded-md object-cover ring-1 ring-border shadow-sm" />
               <span className="flex-1 overflow-hidden whitespace-nowrap font-bold tracking-tight text-sm">la musica</span>
@@ -480,20 +543,22 @@ export default function App() {
               onFocus={() => setSearchOpen(true)}
               onBlur={() => setTimeout(() => setSearchOpen(false), 150)}
               onKeyDown={(e) => {
-                // Enter hands the query straight to the MusicBrainz browser
-                // (a pasted musicbrainz.org link opens that entity instead)
+                // Enter prefers the artist the query names (a direct open),
+                // then a pasted musicbrainz.org link; otherwise it leaves the
+                // library filter that typing already applied.
                 if (e.key !== "Enter" || !query.trim()) return;
                 e.preventDefault();
                 setSearchOpen(false);
-                if (mbLink) {
+                const artistTo = openOnEnter();
+                if (artistTo) {
+                  navigate(artistTo);
+                } else if (mbLink) {
                   navigate(`/mb/${mbLink[1] === "release-group" ? "rg" : mbLink[1]}/${mbLink[2]}`);
-                } else {
-                  goMbSearch();
                 }
               }}
             />
             {searchOpen && query.trim() && (
-              <div className="absolute left-0 right-0 top-full mt-1 z-40 rounded-lg border border-border bg-zinc-950/95 backdrop-blur shadow-xl overflow-hidden">
+              <div className="anim-fade absolute left-0 right-0 top-full mt-1 z-40 rounded-lg border border-border bg-zinc-950/95 backdrop-blur shadow-xl overflow-hidden max-h-[70vh] overflow-y-auto">
                 {mbLink ? (
                   <button
                     className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-zinc-200 hover:bg-raise transition-colors text-left"
@@ -506,13 +571,45 @@ export default function App() {
                     Open this MusicBrainz {mbLink[1].replace("-", " ")} in the browser
                   </button>
                 ) : (
-                  <button
-                    className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-zinc-200 hover:bg-raise transition-colors text-left"
-                    onClick={goMbSearch}
-                  >
-                    <Music4 className="h-4 w-4 text-accent-soft shrink-0" />
-                    Search MusicBrainz for “{query.trim()}”
-                  </button>
+                  <>
+                    {hits.artists.map((a) => (
+                      <SearchHit
+                        key={a.path}
+                        to={artistRef(a)}
+                        icon={User}
+                        label={a.display_name || a.name}
+                        hint="Artist"
+                        onGo={() => setSearchOpen(false)}
+                      />
+                    ))}
+                    {hits.albums.map((al) => (
+                      <SearchHit
+                        key={al.path}
+                        to={albumRef(al)}
+                        icon={Disc3}
+                        label={al.meta?.ALBUM ?? al.path}
+                        hint="Album"
+                        onGo={() => setSearchOpen(false)}
+                      />
+                    ))}
+                    {hits.tracks.map(({ al, t }) => (
+                      <SearchHit
+                        key={t.path}
+                        to={trackRef(t)}
+                        icon={Music2}
+                        label={t.tags?.TITLE ?? t.file}
+                        hint={al.album_artist || "Track"}
+                        onGo={() => setSearchOpen(false)}
+                      />
+                    ))}
+                    <button
+                      className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-zinc-200 hover:bg-raise transition-colors text-left border-t border-border/60"
+                      onClick={goMbSearch}
+                    >
+                      <Music4 className="h-4 w-4 text-accent-soft shrink-0" />
+                      Search MusicBrainz for “{query.trim()}”
+                    </button>
+                  </>
                 )}
               </div>
             )}
@@ -534,6 +631,7 @@ export default function App() {
             <Routes>
             <Route path="/" element={<HomePage />} />
             <Route path="/library" element={<LibraryPage />} />
+            <Route path="/genres" element={<GenrePage />} />
             <Route path="/downloads" element={<DownloadsPage />} />
             <Route path="/trash" element={<TrashPage />} />
             <Route path="/artist/:path" element={<ArtistPage />} />
@@ -577,11 +675,36 @@ export default function App() {
         <PlayerBar />
       </div>
 
-      {toastMsg && (
-        <div className="toast-in fixed bottom-20 left-1/2 -translate-x-1/2 z-50 rounded-lg border border-accent/40 bg-panel px-4 py-2 text-sm shadow-xl">
-          {toastMsg}
-        </div>
-      )}
+      {/* Toasts stack instead of overwriting each other; errors are red and
+          announce as alerts, confirmations are green and polite. */}
+      <div
+        className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-2 w-[min(92vw,30rem)] pointer-events-none"
+        aria-live="polite"
+      >
+        {toasts.map((t) => (
+          <div
+            key={t.id}
+            role={t.severity === "error" ? "alert" : "status"}
+            className={`toast-in pointer-events-auto flex items-start gap-2 w-full rounded-lg border px-3.5 py-2 text-sm shadow-xl backdrop-blur ${
+              t.severity === "error"
+                ? "border-red-900/70 bg-red-950/85 text-red-100"
+                : t.severity === "success"
+                ? "border-emerald-900/70 bg-emerald-950/85 text-emerald-100"
+                : "border-accent/40 bg-panel/95 text-zinc-200"
+            }`}
+          >
+            <span className="flex-1 min-w-0 break-words">{t.message}</span>
+            <button
+              className="shrink-0 -mr-1 p-0.5 rounded opacity-70 hover:opacity-100"
+              onClick={() => dismissToast(t.id)}
+              title="Dismiss"
+              aria-label="Dismiss notification"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

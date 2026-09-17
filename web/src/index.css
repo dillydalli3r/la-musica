@@ -189,6 +189,24 @@ body {
   .td {
     @apply px-3 py-2.5 text-sm text-zinc-300;
   }
+  /* The two panel recipes every page uses: `.panel` is the normal data block
+     (description, settings card, list container), `.panel-hero` the page
+     hero / identity block. Nothing else should spell out a card by hand. */
+  .panel {
+    @apply rounded-xl border border-border bg-card p-4;
+  }
+  .panel-hero {
+    @apply rounded-2xl border border-border bg-card p-5;
+  }
+  /* Horizontal-scroll wrapper for the wide MusicBrainz tables: the table is
+     laid out at an honest minimum width and the wrapper scrolls, instead of
+     nine fixed-layout columns wrapping into unreadable ribbons on a phone. */
+  .table-scroll {
+    @apply overflow-x-auto;
+  }
+  .table-scroll > table {
+    min-width: 46rem;
+  }
 }
 
 /* Back-and-forth marquee for overflowing titles (player bar): drifts to the
@@ -403,9 +421,11 @@ table td {
 }
 .anim-fade { animation: fade-in 0.2s ease; }
 
+/* Toasts stack in a centered column (the container does the horizontal
+   centering), so each one only animates vertically. */
 @keyframes toast-in {
-  from { opacity: 0; transform: translate(-50%, 12px) scale(0.97); }
-  to   { opacity: 1; transform: translate(-50%, 0) scale(1); }
+  from { opacity: 0; transform: translateY(12px) scale(0.97); }
+  to   { opacity: 1; transform: none; }
 }
 .toast-in { animation: toast-in 0.22s cubic-bezier(0.22, 1, 0.36, 1); }
 

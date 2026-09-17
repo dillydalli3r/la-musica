@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2, X } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import { api } from "../api";
 import { toast } from "../store";
 import { invalidateLibrary } from "../lib/invalidate";
+import Modal from "./Modal";
 
 // Common tags worth offering as one-click removals — everything else can
 // be typed. Deliberately EXCLUDES identity tags (TITLE/ARTIST/ALBUM/
@@ -62,75 +63,13 @@ export default function BulkTagsDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-[60] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4" onClick={onClose}>
-      <div className="rounded-2xl w-full max-w-xl max-h-[85vh] flex flex-col shadow-2xl bg-card border border-border" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center gap-3 px-5 py-3.5 border-b border-white/10">
-          <div className="flex-1 min-w-0">
-            <div className="text-sm font-semibold text-white">Bulk tag editor</div>
-            <div className="text-[11px] text-zinc-500 mt-0.5">{paths.length} track{paths.length === 1 ? "" : "s"} selected</div>
-          </div>
-          <button className="p-1.5 rounded-lg hover:bg-white/10 text-zinc-400 hover:text-white" onClick={onClose} title="Close">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-
-        <div className="flex-1 min-h-0 overflow-auto px-5 py-4 space-y-5">
-          <div>
-            <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500 pb-2">Remove tags</div>
-            <div className="flex flex-wrap gap-1.5">
-              {COMMON_REMOVABLE.map((tag) => (
-                <button
-                  key={tag}
-                  className={`chip text-[10px] border ${removals.includes(tag) ? "bg-red-950/60 border-red-700/60 text-red-200" : "bg-white/5 border-white/15 text-zinc-400 hover:text-white"}`}
-                  onClick={() => toggleRemove(tag)}
-                >
-                  {tag}
-                </button>
-              ))}
-            </div>
-            <input
-              className="input !py-1.5 text-xs mt-2.5 w-full"
-              placeholder="More tags to remove, comma separated (e.g. CUSTOM_TAG, TXXX_NOTE)"
-              value={customRemove}
-              onChange={(e) => setCustomRemove(e.target.value)}
-            />
-          </div>
-
-          <div>
-            <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500 pb-2">Set / add tags</div>
-            <div className="space-y-1.5">
-              {setRows.map((row, i) => (
-                <div key={i} className="flex items-center gap-1.5">
-                  <input
-                    className="input !py-1.5 text-xs w-40 shrink-0 font-mono uppercase"
-                    placeholder="TAGNAME"
-                    value={row.name}
-                    onChange={(e) => setSetRows((rows) => rows.map((r, j) => (j === i ? { ...r, name: e.target.value } : r)))}
-                  />
-                  <input
-                    className="input !py-1.5 text-xs flex-1 min-w-0"
-                    placeholder="Value (empty = remove this tag)"
-                    value={row.value}
-                    onChange={(e) => setSetRows((rows) => rows.map((r, j) => (j === i ? { ...r, value: e.target.value } : r)))}
-                  />
-                  <button
-                    className="p-1.5 rounded text-zinc-500 hover:text-red-400 hover:bg-white/5 shrink-0"
-                    onClick={() => setSetRows((rows) => rows.filter((_, j) => j !== i))}
-                    disabled={setRows.length === 1}
-                    title="Remove this row"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              ))}
-              <button className="btn-ghost !py-1 text-xs flex items-center gap-1.5" onClick={() => setSetRows((rows) => [...rows, { name: "", value: "" }])}>
-                <Plus className="h-3.5 w-3.5" /> Add another tag
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div className="px-5 py-3.5 border-t border-white/10 flex items-center gap-2">
+    <Modal
+      onClose={onClose}
+      title="Bulk tag editor"
+      subtitle={`${paths.length} track${paths.length === 1 ? "" : "s"} selected`}
+      bodyClass="px-5 py-4 space-y-5"
+      footer={
+        <div className="flex items-center gap-2">
           <div className="text-[10px] text-zinc-600 flex-1 leading-snug">
             Applied directly to the selected files. Structural tags (TITLE, ARTIST, TRACKNUMBER…) are
             best left to the scripts.
@@ -148,7 +87,61 @@ export default function BulkTagsDialog({
             Cancel
           </button>
         </div>
+      }
+    >
+      <div>
+        <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500 pb-2">Remove tags</div>
+        <div className="flex flex-wrap gap-1.5">
+          {COMMON_REMOVABLE.map((tag) => (
+            <button
+              key={tag}
+              className={`chip text-[10px] border ${removals.includes(tag) ? "bg-red-950/60 border-red-700/60 text-red-200" : "bg-white/5 border-white/15 text-zinc-400 hover:text-white"}`}
+              onClick={() => toggleRemove(tag)}
+            >
+              {tag}
+            </button>
+          ))}
+        </div>
+        <input
+          className="input !py-1.5 text-xs mt-2.5 w-full"
+          placeholder="More tags to remove, comma separated (e.g. CUSTOM_TAG, TXXX_NOTE)"
+          value={customRemove}
+          onChange={(e) => setCustomRemove(e.target.value)}
+        />
       </div>
-    </div>
+
+      <div>
+        <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500 pb-2">Set / add tags</div>
+        <div className="space-y-1.5">
+          {setRows.map((row, i) => (
+            <div key={i} className="flex items-center gap-1.5">
+              <input
+                className="input !py-1.5 text-xs w-40 shrink-0 font-mono uppercase"
+                placeholder="TAGNAME"
+                value={row.name}
+                onChange={(e) => setSetRows((rows) => rows.map((r, j) => (j === i ? { ...r, name: e.target.value } : r)))}
+              />
+              <input
+                className="input !py-1.5 text-xs flex-1 min-w-0"
+                placeholder="Value (empty = remove this tag)"
+                value={row.value}
+                onChange={(e) => setSetRows((rows) => rows.map((r, j) => (j === i ? { ...r, value: e.target.value } : r)))}
+              />
+              <button
+                className="p-1.5 rounded text-zinc-500 hover:text-red-400 hover:bg-white/5 shrink-0"
+                onClick={() => setSetRows((rows) => rows.filter((_, j) => j !== i))}
+                disabled={setRows.length === 1}
+                title="Remove this row"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ))}
+          <button className="btn-ghost !py-1 text-xs flex items-center gap-1.5" onClick={() => setSetRows((rows) => [...rows, { name: "", value: "" }])}>
+            <Plus className="h-3.5 w-3.5" /> Add another tag
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }

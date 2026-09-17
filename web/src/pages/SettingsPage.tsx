@@ -1,15 +1,17 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { FolderOpen, Save, RotateCcw, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, X } from "lucide-react";
+import { Save, RotateCcw, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, X } from "lucide-react";
 import { api } from "../api";
 import ConfirmButton from "../components/ConfirmButton";
-import FolderPicker from "../components/FolderPicker";
+import PageHeader from "../components/PageHeader";
 import { toast } from "../store";
 import { applyAccent } from "../App";
 import { DEFAULT_RUN_ALL, SCRIPT_LABEL, isScriptId } from "../lib/scripts";
 
+/** The shipped default (mlo/naming.py DEFAULT_NAMING_SCRIPT) — used until a
+ *  config arrives and by the "Reset to default" button. Keep the two in sync. */
 const DEFAULT_NAMING_SCRIPT =
-  "%albumartist% [%musicbrainz_albumartistid%]/$if(%releasetype%,[%releasetype%] ,)$if(%originaldate%,%originaldate% - ,)$if(%date%,%date% - ,)%album% {$if(%releasecountry%,%releasecountry% - )%media%$if(%catalognumber%, - %catalognumber%)}/%discnumber%-$num(%tracknumber%,2) %title%";
+  "%albumartist% [%musicbrainz_albumartistid%]/%album%$if(%releasetype%,$if(%year%, (%releasetype%, %year%), (%releasetype%)),$if(%year%, (%year%),))$if(%label%, [%label%])$if(%releasecountry%, [%releasecountry%])/%discnumber%-$num(%tracknumber%,2) %title%";
 
 const ACCENT_OPTIONS: { id: string; name: string; color: string }[] = [
   { id: "violet", name: "Violet", color: "#8b5cf6" },
@@ -24,7 +26,27 @@ const ACCENT_OPTIONS: { id: string; name: string; color: string }[] = [
 const ENCODER_FORMATS = ["flac", "jpeg", "png", "jxl"] as const;
 const ENCODER_FIELDS = ["ENCODER_PROGRAM", "ENCODER_QUALITY", "ENCODER_VERSION"] as const;
 const AUDIO_TYPES = ["flac", "mp3", "mp4", "ogg", "opus", "aac"] as const;
-const TAG_FAMILIES = ["AUDIT", "LOG_GRADE", "REPLAYGAIN", "DYNAMIC_RANGE", "MEDIA_SOURCE", "INSTRUMENTAL", "ADVISORY", "LYRICS", "BPM", "INITIALKEY"] as const;
+const TAG_FAMILIES = ["AUDIT", "LOG_GRADE", "REPLAYGAIN", "DYNAMIC_RANGE", "MEDIA_SOURCE", "INSTRUMENTAL", "ADVISORY", "LYRICS", "BPM", "INITIALKEY", "ENERGY"] as const;
+
+/** Wave-2 keys an older config file predates. The form reads them through
+ *  this map so a fresh install shows the real default (the backend fills in
+ *  the same values when it loads the file) instead of an empty field. */
+const CFG_DEFAULTS: Record<string, unknown> = {
+  mb_genre_count: 3,
+  genre_sources: ["rateyourmusic", "soulseek", "discogs", "lastfm", "theaudiodb", "musicbrainz", "deezer", "itunes"],
+  advisory_auto_fetch: true,
+  metadata_auto_fetch: true,
+  metadata_review: false,
+  soulseek_download_slots: 3,
+  soulseek_upload_slots: 2,
+  soulseek_upload_limit_kib: 0,
+  soulseek_download_limit_kib: 0,
+  soulseek_web_https: false,
+  youtube_enabled: true,
+  youtube_max_height: 0,
+  auto_import_avoid_promo: true,
+  auto_import_medium_order: ["CD", "Digital Media", "Vinyl", "Cassette", "Other"],
+};
 
 type ProviderOption = { id: string; label: string; notes?: string };
 
@@ -157,18 +179,21 @@ export default function SettingsPage() {
 
   // ---- script options (persisted to config; /api/run uses them as defaults) ----
   type CfgField =
-    | { k: string; label: string; type: "bool" }
+    | { k: string; label: string; type: "bool"; help?: string }
     | { k: string; label: string; type: "number"; min?: number; max?: number; step?: number }
     | { k: string; label: string; type: "select"; options: [string, string][] }
-    | { k: string; label: string; type: "text" }
-    | { k: string; label: string; type: "password" }
+    | { k: string; label: string; type: "text"; help?: string }
+    | { k: string; label: string; type: "password"; help?: string }
     /** Ordered provider preference list; an empty list means the built-in order. */
-    | { k: string; label: string; type: "list"; catalog: "discovery" | "lyrics"; help?: string };
+    | { k: string; label: string; type: "list"; catalog: "discovery" | "lyrics"; help?: string }
+    /** Unordered set of values (a string list in config) shown as checkboxes. */
+    | { k: string; label: string; type: "multi"; options: [string, string][]; help?: string }
+    /** Comma-separated list in one text input; kept in config as a string list. */
+    | { k: string; label: string; type: "csv"; help?: string };
   interface CfgGroup {
     title: string;
     blurb?: string;
     fields: CfgField[];
-    presets?: { name: string; values: Record<string, string> }[];
   }
   const CFG_GROUPS: CfgGroup[] = [
     {
@@ -308,7 +333,7 @@ export default function SettingsPage() {
         { k: "audit_clipping", label: "Detect clipping", type: "bool" },
         { k: "audit_scaled_clipping", label: "Detect scaled clipping", type: "bool" },
         { k: "audit_mqa", label: "Detect MQA", type: "bool" },
-        { k: "audit_ai", label: "Detect AI-upscaled audio", type: "bool" },
+        { k: "audit_ai", label: "Detect upscaled audio", type: "bool" },
         { k: "audit_fake_stereo", label: "Detect fake stereo", type: "bool" },
         { k: "audit_silence", label: "Detect silence", type: "bool" },
         { k: "audit_dynamic_range", label: "Measure dynamic range", type: "bool" },
@@ -323,6 +348,7 @@ export default function SettingsPage() {
       title: "AutoTag (script 8)",
       fields: [
         { k: "auto_advisory", label: "Set advisory automatically", type: "bool" },
+        { k: "advisory_auto_fetch", label: "Fetch the advisory rating automatically (import + advisory fetch)", type: "bool" },
         { k: "mood_enabled", label: "Write mood tags", type: "bool" },
         { k: "genre_autofill", label: "Fill in missing genres", type: "bool" },
         {
@@ -399,37 +425,14 @@ export default function SettingsPage() {
       title: "Videos (script 11)",
       blurb: "Lossless remux: any video container → MKV with the video copied bit-exact and every audio stream re-encoded to FLAC (lossless, level below). Captions/subtitles are always kept and verified — never removed. If the muxer refuses the video codec, H.264 is a last-resort fallback. The original (e.g. the .VOB) is removed after a verified remux.",
       fields: [
+        { k: "youtube_enabled", label: "Fetch missing music videos from YouTube", type: "bool" },
+        { k: "youtube_max_height", label: "Maximum video height (px, 0 = best available)", type: "number", min: 0, max: 4320 },
         { k: "video_reencode_incompatible", label: "Allow H.264 video fallback (last resort)", type: "bool" },
         { k: "video_crf", label: "H.264 CRF (lower = better)", type: "number", min: 0, max: 51 },
         { k: "video_preset", label: "H.264 preset", type: "select", options: [["ultrafast","ultrafast"],["superfast","superfast"],["veryfast","veryfast"],["faster","faster"],["fast","fast"],["medium","medium"],["slow","slow"],["slower","slower"],["veryslow","veryslow"]] },
         { k: "video_flac_level", label: "FLAC compression (0-8)", type: "number", min: 0, max: 8 },
         { k: "video_remove_original", label: "Remove original after verified remux", type: "bool" },
         { k: "video_process_mp4", label: "Also re-mux MP4s into MKV", type: "bool" },
-      ],
-    },
-    {
-      title: "AI-assisted lyrics",
-      blurb: "Any OpenAI-compatible chat endpoint — Google Gemini (OpenAI-compatible endpoint, key from AI Studio), OpenAI, OpenRouter, LM Studio, llama.cpp. Powers AI lyrics clean/repair and the fullscreen player's translation + transliteration.",
-      presets: [
-        { name: "Google Gemini", values: { ai_base_url: "https://generativelanguage.googleapis.com/v1beta/openai", ai_model: "gemini-3.5-flash-lite" } },
-        { name: "OpenAI", values: { ai_base_url: "https://api.openai.com/v1", ai_model: "gpt-4o-mini" } },
-        { name: "OpenRouter", values: { ai_base_url: "https://openrouter.ai/api/v1", ai_model: "openai/gpt-4o-mini" } },
-        { name: "Ollama (local)", values: { ai_base_url: "http://localhost:11434/v1", ai_model: "llama3.2" } },
-        { name: "LM Studio (local)", values: { ai_base_url: "http://localhost:1234/v1", ai_model: "local-model" } },
-      ],
-      fields: [
-        { k: "ai_base_url", label: "Base URL", type: "text" },
-        { k: "ai_api_key", label: "API key", type: "text" },
-        { k: "ai_model", label: "Model (e.g. gemini-3.5-flash-lite)", type: "text" },
-        {
-          k: "ai_effort", label: "Reasoning effort (all AI features)", type: "select",
-          options: [["high", "High — maximum thinking (default)"], ["medium", "Medium"], ["low", "Low"], ["minimal", "Minimal — fastest, no thinking"]],
-        },
-        { k: "lyrics_xlit_enabled", label: "Transliteration enabled (script 15)", type: "bool" },
-        { k: "lyrics_translate_enabled", label: "Translation enabled (script 15)", type: "bool" },
-        { k: "lyrics_translation_langs", label: "Translation languages (comma separated, e.g. en,de)", type: "text" },
-        { k: "lyrics_xlit_sidecars", label: "Write .romaji.lrc / .<lang>.lrc sidecars", type: "bool" },
-        { k: "ai_translate_lang", label: "Fullscreen player translation language (e.g. en, de)", type: "text" },
       ],
     },
     {
@@ -454,6 +457,13 @@ export default function SettingsPage() {
         { k: "soulseek_web_port", label: "Web/API port", type: "number", min: 1024, max: 65535 },
         { k: "soulseek_up_limit", label: "Upload speed limit (kB/s, 0 = unlimited)", type: "number", min: 0, max: 100000 },
         { k: "soulseek_down_limit", label: "Download speed limit (kB/s, 0 = unlimited)", type: "number", min: 0, max: 100000 },
+        { k: "soulseek_download_slots", label: "Concurrent download slots", type: "number", min: 1, max: 20 },
+        { k: "soulseek_upload_slots", label: "Concurrent upload slots (0 = unlimited)", type: "number", min: 0, max: 20 },
+        { k: "soulseek_upload_limit_kib", label: "Per-transfer upload limit (KiB/s, 0 = unlimited)", type: "number", min: 0, max: 1000000 },
+        { k: "soulseek_download_limit_kib", label: "Per-transfer download limit (KiB/s, 0 = unlimited)", type: "number", min: 0, max: 1000000 },
+        {
+          k: "soulseek_web_https", label: "Serve the slskd web UI over HTTPS (extra listener, self-signed)", type: "bool",
+        },
         { k: "soulseek_download_dir", label: "Download dir (blank = <music folder>/.mlo/downloads)", type: "text" },
         { k: "soulseek_autostart", label: "Start slskd with the app backend", type: "bool" },
         { k: "soulseek_share_library", label: "Share the music folder on the network", type: "bool" },
@@ -470,6 +480,11 @@ export default function SettingsPage() {
         { k: "soulseek_auto_log_min_score", label: "Min .log score (0–100)", type: "number", min: 0, max: 100 },
         { k: "soulseek_auto_complete_ratio", label: "Required track completeness (0.5–1)", type: "number", min: 0.5, max: 1, step: 0.05 },
         { k: "soulseek_auto_search_wait", label: "Search window (seconds of quiet before slskd ends a query)", type: "number", min: 5, max: 300 },
+        { k: "auto_import_avoid_promo", label: "Never auto-import promotional / bootleg editions", type: "bool" },
+        {
+          k: "auto_import_medium_order", label: "Medium preference (comma-separated, best first)", type: "csv",
+          help: "Editions are chosen by this media order first, then by earliest release date. Blank = the built-in order (CD, Digital Media, Vinyl, Cassette, Other).",
+        },
       ],
     },
     {
@@ -525,6 +540,22 @@ export default function SettingsPage() {
           options: [["discovery", "Discovery providers"], ["listenbrainz", "ListenBrainz"], ["musicbrainz", "MusicBrainz"]],
         },
         { k: "home_popular_count", label: "Popular albums shown on Home", type: "number", min: 4, max: 60 },
+        {
+          k: "rym_cookie", label: "RateYourMusic cookie", type: "password",
+          help: "Only needed when RYM answers with a challenge — the Cookie header of a signed-in rateyourmusic.com tab (dev tools → Network → any rym request → Request Headers → Cookie). Blank = RYM is skipped like any other unavailable source.",
+        },
+        {
+          k: "rym_links_auto", label: "Auto-find RateYourMusic links", type: "bool",
+          help: "Asks rateyourmusic.com for the album and artist pages during an import (and from the link editor's Auto-find button). An existing link is never overwritten, and when RYM refuses the request the import carries on untouched — the link is then left for you to paste by hand.",
+        },
+        {
+          k: "spotify_client_id", label: "Spotify client ID (optional)", type: "text",
+          help: "Optional second advisory source (Spotify's ISRC lookup) behind Deezer and ahead of Apple. Empty = Spotify is skipped; an import never fails without it.",
+        },
+        {
+          k: "spotify_client_secret", label: "Spotify client secret (optional)", type: "password",
+          help: "Pairs with the client ID above — both are needed before the Spotify lookup runs.",
+        },
       ],
     },
     {
@@ -532,6 +563,8 @@ export default function SettingsPage() {
       blurb:
         "Artwork and text that live next to the audio: artist photos stored with the artist, and descriptions stored in non-destructive tags. Grading can require them (see the Grading tab).",
       fields: [
+        { k: "metadata_auto_fetch", label: "Fetch artist image / descriptions on import", type: "bool" },
+        { k: "metadata_review", label: "Review metadata candidates before writing them", type: "bool" },
         { k: "artist_image_enabled", label: "Fetch artist images", type: "bool" },
         { k: "artist_image_crop", label: "Crop artist images to a square", type: "bool" },
         { k: "artist_image_target_size", label: "Artist image max size (px, 0 = keep native size)", type: "number", min: 0, max: 4000 },
@@ -560,6 +593,14 @@ export default function SettingsPage() {
       blurb: "Genre importing from MusicBrainz and tag hygiene applied while optimizing.",
       fields: [
         { k: "mb_genre_count", label: "Genres imported per release (MusicBrainz)", type: "number", min: 1, max: 10 },
+        {
+          k: "genre_sources", label: "Genre sources — every ticked source is asked; unticked ones are never used", type: "multi",
+          options: [
+            ["rateyourmusic", "RateYourMusic"], ["soulseek", "Soulseek"], ["discogs", "Discogs"], ["lastfm", "Last.fm"],
+            ["theaudiodb", "TheAudioDB"], ["musicbrainz", "MusicBrainz"], ["deezer", "Deezer"], ["itunes", "iTunes"],
+          ],
+          help: "The genres the sources answer with are merged, deduped and capped at the count above; MusicBrainz is the app's own identity anchor, so leave it on in most setups.",
+        },
         { k: "strip_unknown_tags", label: "Remove non-canonical tags on optimize (script 10)", type: "bool" },
       ],
     },
@@ -579,7 +620,7 @@ export default function SettingsPage() {
     { k: "grade_check_tag_spaces", label: "Tag spaces", type: "bool" },
     { k: "grade_check_lyrics_spaces", label: "Lyrics spaces", type: "bool" },
     { k: "grade_check_cue_spaces", label: "CUE spaces", type: "bool" },
-    { k: "grade_check_cover_crop", label: "Cover crop", type: "bool" },
+    { k: "grade_check_cover_crop", label: "Cover aspect ratio (squareness)", type: "bool" },
     { k: "grade_check_lyrics_zero", label: "Lyrics zero timestamp", type: "bool" },
     { k: "grade_check_tag_blank_lines", label: "Tag blank lines", type: "bool" },
     { k: "grade_check_lyrics_blank_lines", label: "Lyrics blank lines", type: "bool" },
@@ -607,8 +648,6 @@ export default function SettingsPage() {
     { k: "grade_check_cue_format", label: "CUE format", type: "bool" },
     { k: "grade_check_disallowed", label: "Disallowed files", type: "bool" },
     { k: "grade_check_extra_images", label: "Extra artwork (images not tied to a track)", type: "bool" },
-    { k: "grade_check_xlit", label: "Transliteration (script 15)", type: "bool" },
-    { k: "grade_check_trans", label: "Translation (script 15)", type: "bool" },
     { k: "grade_check_naming", label: "Naming script paths", type: "bool" },
     { k: "grade_check_filename_case", label: "Filename capitalization (exact case)", type: "bool" },
     { k: "grade_check_ext_case", label: "Lowercase file extensions", type: "bool" },
@@ -652,10 +691,10 @@ export default function SettingsPage() {
     setBeetsBusy(true);
     try {
       const r = await api.beetsInstall();
-      toast(`beets v${r.version} installed`);
+      toast.success(`beets v${r.version} installed`);
       refetchBeets();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBeetsBusy(false);
     }
@@ -691,7 +730,6 @@ export default function SettingsPage() {
     { k: "force_auto_tag", label: "8 · AutoTag re-run" },
     { k: "force_accurip", label: "9 · AccurateRip re-generate" },
     { k: "force_audiometa", label: "12 · Key & BPM re-analysis" },
-    { k: "force_xlit", label: "15 · Lyrics xlit/translate re-run" },
   ];
 
   const NAV: { id: string; label: string; section?: string }[] = [
@@ -701,7 +739,6 @@ export default function SettingsPage() {
     { id: "naming", label: "Naming" },
     { id: "tagwrites", label: "Tagging" },
     { id: "grading", label: "Grading" },
-    { id: "ai", label: "AI", section: "Integrations" },
     { id: "beets", label: "Beets", section: "Integrations" },
     { id: "soulseek", label: "Soulseek", section: "Integrations" },
     { id: "autoimport", label: "Auto-import", section: "Integrations" },
@@ -750,7 +787,7 @@ export default function SettingsPage() {
     setWorkerLimit(Number(config.worker_limit ?? 0));
     setNamingScript(String(config.naming_script ?? "") || DEFAULT_NAMING_SCRIPT);
     setShortFolderNames(!!config.short_folder_names);
-    setScriptCfg(Object.fromEntries(ALL_CFG_KEYS.map((k) => [k, config[k]])));
+    setScriptCfg(Object.fromEntries(ALL_CFG_KEYS.map((k) => [k, config[k] ?? CFG_DEFAULTS[k]])));
     const enc = (config.encoder_tags ?? {}) as Record<string, Record<string, boolean>>;
     const aw = (config.audio_tag_writes ?? {}) as Record<string, Record<string, boolean>>;
     setEncoderTags(
@@ -779,32 +816,21 @@ export default function SettingsPage() {
     localStorage.setItem("mlo.defaultView.v2", v);
   };
 
-  const [showFolderPicker, setShowFolderPicker] = useState(false);
-  const pickMusicFolder = async () => {
-    try {
-      const r = await api.fsPickFolder(musicFolder.trim());
-      if (!r.supported) setShowFolderPicker(true); // headless/remote → in-app browser
-      else if (r.path) setMusicFolder(r.path);
-    } catch {
-      setShowFolderPicker(true);
-    }
-  };
-
   const { data: configDefaults } = useQuery({
     queryKey: ["configDefaults"],
     queryFn: api.configDefaults,
   });
 
   /** Restore factory defaults for everything the settings form edits.
-   * Identity-critical values the user configured are kept: music folder,
-   * first-run flag and the whole AI connection (endpoint, model, key).
+   * Identity-critical values the user configured are kept: music folder
+   * and first-run flag.
    * Persisted via the normal Save. */
   const resetAllDefaults = () => {
     const d = configDefaults as Record<string, unknown> | undefined;
     if (!d) return;
     const cur = scriptCfg as Record<string, unknown>;
     const next: Record<string, unknown> = { ...d };
-    for (const k of ["music_folder", "first_run_done", "ai_api_key", "ai_base_url", "ai_model"]) {
+    for (const k of ["music_folder", "first_run_done"]) {
       if (cur[k] !== undefined) next[k] = cur[k];
     }
     setScriptCfg(next);
@@ -832,12 +858,12 @@ export default function SettingsPage() {
         short_folder_names: shortFolderNames,
         run_all_order: runAll,
       });
-      toast("Config saved");
+      toast.success("Config saved");
       qc.invalidateQueries({ queryKey: ["config"] });
       qc.invalidateQueries({ queryKey: ["library"] });
       qc.invalidateQueries({ queryKey: ["importScriptsPreview"] });
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -847,7 +873,7 @@ export default function SettingsPage() {
       if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("expected an object");
       const enc = (parsed.encoder_tags ?? {}) as Record<string, Record<string, boolean>>;
       const aw = (parsed.audio_tag_writes ?? {}) as Record<string, Record<string, boolean>>;
-      setScriptCfg(Object.fromEntries(ALL_CFG_KEYS.map((k) => [k, parsed[k]])));
+      setScriptCfg(Object.fromEntries(ALL_CFG_KEYS.map((k) => [k, parsed[k] ?? CFG_DEFAULTS[k]])));
       setEncoderTags(
         Object.fromEntries(
           ENCODER_FORMATS.map((fmt) => [fmt, Object.fromEntries(ENCODER_FIELDS.map((f) => [f, !!enc[fmt]?.[f]]))])
@@ -866,7 +892,7 @@ export default function SettingsPage() {
       setRunAll(Array.isArray(parsed.run_all_order) ? parsed.run_all_order.map(Number).filter(isScriptId) : runAll);
       toast("Raw config applied — click Save all settings to persist");
     } catch (e) {
-      toast("Invalid JSON: " + String(e));
+      toast.error("Invalid JSON: " + String(e));
     }
   };
 
@@ -877,7 +903,7 @@ export default function SettingsPage() {
       ["dr", "DR / ReplayGain"], ["audit", "Audit"], ["autotag", "AutoTag"],
       ["accurip", "AccurateRip"], ["tagwrites", "Tag writes"],
       ["grading", "Grading"], ["cdrips", "CD Rips"], ["videos", "Videos"],
-      ["ai", "AI-assisted"], ["audiometa", "Key & BPM"], ["beets", "Beets tagging"],
+      ["audiometa", "Key & BPM"], ["beets", "Beets tagging"],
       ["soulseek", "Soulseek (managed slskd)"], ["autoimport", "Auto-import"],
       ["wishes", "Wishes"], ["home", "Home"],
       ["discovery", "Discovery"], ["artistimages", "Artist images"], ["import", "Import pipeline"],
@@ -935,10 +961,11 @@ export default function SettingsPage() {
     try {
       const r = await api.installDependencies(keys);
       const failed = r.results.filter((x) => !x.ok);
-      toast(failed.length ? "Install finished with " + failed.length + " failure(s)" : "Dependencies installed / updated");
+      if (failed.length) toast.error("Install finished with " + failed.length + " failure(s)");
+      else toast.success("Dependencies installed / updated");
       refetchDeps();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setDepsBusy(false);
     }
@@ -959,7 +986,7 @@ export default function SettingsPage() {
   };
 
   const renderFields = (fields: CfgField[]) => (
-    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-x-6 gap-y-2.5 mt-2">
+    <div className="stagger grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-x-6 gap-y-2.5 mt-2">
       {fields.map((f) => {
         if (f.type === "list") {
           const raw = scriptCfg[f.k];
@@ -981,13 +1008,53 @@ export default function SettingsPage() {
             </div>
           );
         }
+        if (f.type === "multi") {
+          const on = Array.isArray(scriptCfg[f.k]) ? (scriptCfg[f.k] as unknown[]).map(String) : [];
+          return (
+            <div key={f.k} className="md:col-span-2 xl:col-span-3">
+              <div className="text-[11px] text-zinc-400 mb-1">{f.label}</div>
+              <div className="flex flex-wrap gap-x-4 gap-y-1">
+                {f.options.map(([v, l]) => (
+                  <label key={v} className="flex items-center gap-2 text-[13px] text-zinc-300 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={on.includes(v)}
+                      onChange={(e) => setCfg(f.k, e.target.checked ? [...on, v] : on.filter((x) => x !== v))}
+                    />
+                    {l}
+                  </label>
+                ))}
+              </div>
+              {f.help && <div className="text-[10px] text-zinc-600 mt-1">{f.help}</div>}
+            </div>
+          );
+        }
+        if (f.type === "csv") {
+          // Edited as text, stored as the string list the config expects;
+          // blank entries are dropped by the backend's own normalization.
+          const parts = Array.isArray(scriptCfg[f.k]) ? (scriptCfg[f.k] as unknown[]).map(String) : [];
+          return (
+            <div key={f.k} className="md:col-span-2 xl:col-span-3">
+              <div className="text-[11px] text-zinc-400 mb-1">{f.label}</div>
+              <input
+                className="input !py-1 text-xs w-full"
+                value={parts.join(", ")}
+                onChange={(e) => setCfg(f.k, e.target.value.split(",").map((s) => s.trim()))}
+              />
+              {f.help && <div className="text-[10px] text-zinc-600 mt-1">{f.help}</div>}
+            </div>
+          );
+        }
         return (
         <label key={f.k} className="flex items-center gap-2 text-[13px] text-zinc-300 cursor-pointer select-none">
           {f.type === "bool" ? (
-            <>
-              <input type="checkbox" checked={!!scriptCfg[f.k]} onChange={(e) => setCfg(f.k, e.target.checked)} />
-              {f.label}
-            </>
+            <div className="w-full">
+              <span className="flex items-center gap-2 w-full">
+                <input type="checkbox" checked={!!scriptCfg[f.k]} onChange={(e) => setCfg(f.k, e.target.checked)} />
+                {f.label}
+              </span>
+              {f.help && <div className="text-[10px] text-zinc-600 mt-0.5">{f.help}</div>}
+            </div>
           ) : f.type === "select" ? (
             <div className="flex items-center gap-2 w-full">
               <span className="flex-1 min-w-0 truncate">{f.label}</span>
@@ -1002,44 +1069,50 @@ export default function SettingsPage() {
               </select>
             </div>
           ) : f.type === "text" ? (
-            <div className="flex items-center gap-2 w-full">
-              <span className="flex-1 min-w-0 truncate">{f.label}</span>
-              <input
-                className="input !w-32 !py-0.5 text-[11px] shrink-0"
-                value={
-                  Array.isArray(scriptCfg[f.k])
-                    ? (scriptCfg[f.k] as unknown[]).join("; ")
-                    : String(scriptCfg[f.k] ?? "")
-                }
-                onChange={(e) => setCfg(f.k, e.target.value)}
-              />
-            </div>
-          ) : f.type === "password" ? (
-            <div className="flex items-center gap-2 w-full">
-              <span className="flex-1 min-w-0 truncate">{f.label}</span>
-              <div className="relative shrink-0">
+            <div className="w-full">
+              <div className="flex items-center gap-2 w-full">
+                <span className="flex-1 min-w-0 truncate">{f.label}</span>
                 <input
-                  className="input !w-32 !py-0.5 !pr-7 text-[11px]"
-                  type={showPasswords.has(f.k) ? "text" : "password"}
-                  value={String(scriptCfg[f.k] ?? "")}
+                  className="input !w-32 !py-0.5 text-[11px] shrink-0"
+                  value={
+                    Array.isArray(scriptCfg[f.k])
+                      ? (scriptCfg[f.k] as unknown[]).join("; ")
+                      : String(scriptCfg[f.k] ?? "")
+                  }
                   onChange={(e) => setCfg(f.k, e.target.value)}
                 />
-                <button
-                  type="button"
-                  className="absolute right-1.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-200"
-                  title={showPasswords.has(f.k) ? "Hide password" : "Show password"}
-                  onClick={() =>
-                    setShowPasswords((prev) => {
-                      const next = new Set(prev);
-                      if (next.has(f.k)) next.delete(f.k);
-                      else next.add(f.k);
-                      return next;
-                    })
-                  }
-                >
-                  {showPasswords.has(f.k) ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                </button>
               </div>
+              {f.help && <div className="text-[10px] text-zinc-600 mt-0.5">{f.help}</div>}
+            </div>
+          ) : f.type === "password" ? (
+            <div className="w-full">
+              <div className="flex items-center gap-2 w-full">
+                <span className="flex-1 min-w-0 truncate">{f.label}</span>
+                <div className="relative shrink-0">
+                  <input
+                    className="input !w-32 !py-0.5 !pr-7 text-[11px]"
+                    type={showPasswords.has(f.k) ? "text" : "password"}
+                    value={String(scriptCfg[f.k] ?? "")}
+                    onChange={(e) => setCfg(f.k, e.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-200"
+                    title={showPasswords.has(f.k) ? "Hide password" : "Show password"}
+                    onClick={() =>
+                      setShowPasswords((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(f.k)) next.delete(f.k);
+                        else next.add(f.k);
+                        return next;
+                      })
+                    }
+                  >
+                    {showPasswords.has(f.k) ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                  </button>
+                </div>
+              </div>
+              {f.help && <div className="text-[10px] text-zinc-600 mt-0.5">{f.help}</div>}
             </div>
           ) : (
             <div className="flex items-center gap-2 w-full">
@@ -1062,11 +1135,8 @@ export default function SettingsPage() {
   );
 
   return (
-    <div className="p-6">
-      <div className="flex items-end justify-between gap-4 flex-wrap">
-        <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-          <SettingsIcon className="h-6 w-6 text-accent" /> Settings
-        </h1>
+    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+      <PageHeader icon={SettingsIcon} title="Settings">
         <div className="relative w-full max-w-md">
           <input
             className="input !py-1.5 text-sm w-full"
@@ -1095,9 +1165,9 @@ export default function SettingsPage() {
             </div>
           )}
         </div>
-      </div>
+      </PageHeader>
 
-      <div className="flex gap-6 mt-4">
+      <div className="flex gap-6">
         <nav className="w-44 shrink-0 space-y-0.5 sticky top-20 self-start max-h-[calc(100vh-120px)] overflow-auto pr-1">
           {NAV.map((n, i) => (
             <div key={n.id}>
@@ -1118,24 +1188,18 @@ export default function SettingsPage() {
 
         <div className="flex-1 min-w-0 space-y-5 pb-10">
           {tab === "general" && (
-            <div className="bg-card rounded-lg border border-border p-4 space-y-3">
+            <div className="panel space-y-3">
               <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Library</div>
-              <label className="block">
-                <span className="text-xs text-zinc-500 uppercase">Music folder</span>
-                <div className="flex gap-2 mt-1">
-                  <input className="input" value={musicFolder} onChange={(e) => setMusicFolder(e.target.value)} placeholder="F:\Music" />
-                  <button className="btn-ghost" onClick={pickMusicFolder} title="Browse for a folder">
-                    <FolderOpen className="h-4 w-4" />
-                  </button>
+              <div className="rounded-md border border-border bg-zinc-950/40 px-3 py-2">
+                <div className="text-xs text-zinc-500 uppercase">Music folder</div>
+                <div className="font-mono text-xs text-zinc-200 break-all mt-1">
+                  {musicFolder.trim() || "not configured yet"}
                 </div>
-              </label>
-              {showFolderPicker && (
-                <FolderPicker
-                  initial={musicFolder.trim()}
-                  onPick={setMusicFolder}
-                  onClose={() => setShowFolderPicker(false)}
-                />
-              )}
+                <div className="text-[11px] text-zinc-600 mt-1 leading-relaxed">
+                  Decided at startup and read-only here: <code>MLO_MUSIC_FOLDER</code> (Docker / compose) or{" "}
+                  <code>music_folder</code> in config.json (the Raw config box below). Restart the app after changing it.
+                </div>
+              </div>
               <label className="block">
                 <span className="text-xs text-zinc-500 uppercase">Lyrics format</span>
                 <select className="input mt-1" value={lyricsFormat} onChange={(e) => setLyricsFormat(e.target.value)}>
@@ -1213,7 +1277,7 @@ export default function SettingsPage() {
           )}
 
           {tab === "appearance" && (
-            <div className="bg-card rounded-lg border border-border p-4 space-y-3">
+            <div className="panel space-y-3">
               <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Appearance</div>
               <div>
                 <span className="text-xs text-zinc-500 uppercase">Accent color</span>
@@ -1295,7 +1359,7 @@ export default function SettingsPage() {
           )}
 
           {tab === "naming" && (
-            <div className="bg-card rounded-lg border border-border p-4 space-y-3">
+            <div className="panel space-y-3">
               <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">File naming (Picard-style script)</div>
               <textarea
                 className="input font-mono text-xs min-h-[110px]"
@@ -1304,7 +1368,7 @@ export default function SettingsPage() {
                 spellCheck={false}
               />
               <div className="text-[11px] text-zinc-600 leading-relaxed">
-                Variables: <code>%albumartist% %musicbrainz_albumartistid% %releasetype% %originaldate% %date% %album% %releasecountry% %media% %catalognumber% %discnumber% %tracknumber% %title%</code> ·
+                Variables: <code>%albumartist% %musicbrainz_albumartistid% %releasetype% %year% %originaldate% %date% %album% %label% %releasecountry% %media% %catalognumber% %discnumber% %tracknumber% %title%</code> ·
                 Functions: <code>$if(a,b,c) $left(s,n) $num(s,n) $lower $upper $replace $ne $right</code> · <code>/</code> creates folders.
                 Applied from the album page or the bulk selection toolbar.
               </div>
@@ -1335,7 +1399,7 @@ export default function SettingsPage() {
           )}
 
           {tab === "deps" && (
-            <div className="bg-card rounded-lg border border-border p-4 space-y-3">
+            <div className="panel space-y-3">
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <div>
                   <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Dependencies</div>
@@ -1359,7 +1423,7 @@ export default function SettingsPage() {
                   </button>
                 </div>
               </div>
-              <div className="rounded-md border border-border overflow-hidden">
+              <div className="rounded-md border border-border overflow-hidden table-scroll">
                 <table className="w-full text-sm">
                   <thead className="bg-panel/60">
                     <tr>
@@ -1394,24 +1458,9 @@ export default function SettingsPage() {
           )}
 
           {GROUP_BY_TAB[tab] && (
-            <div className="bg-card rounded-lg border border-border p-4 space-y-3">
+            <div className="panel space-y-3">
               <div className="text-xs font-bold text-zinc-300">{GROUP_BY_TAB[tab].title}</div>
               {GROUP_BY_TAB[tab].blurb && <div className="text-[10px] text-zinc-600">{GROUP_BY_TAB[tab].blurb}</div>}
-              {!!GROUP_BY_TAB[tab].presets?.length && (
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <span className="text-[10px] text-zinc-600">Presets:</span>
-                  {GROUP_BY_TAB[tab].presets!.map((pr) => (
-                    <button
-                      key={pr.name}
-                      className="chip text-[10px] border border-white/15 bg-white/5 text-zinc-400 hover:text-white"
-                      title={`Fill base URL + model for ${pr.name} (your API key is kept)`}
-                      onClick={() => Object.entries(pr.values).forEach(([k, v]) => setCfg(k, v))}
-                    >
-                      {pr.name}
-                    </button>
-                  ))}
-                </div>
-              )}
               {renderFields(GROUP_BY_TAB[tab].fields)}
               {tab === "beets" && (
                 <div className="pt-2 border-t border-border space-y-2">
@@ -1532,7 +1581,7 @@ export default function SettingsPage() {
           )}
 
           {tab === "grading" && (
-            <details className="bg-card rounded-lg border border-border p-4" open>
+            <details className="panel" open>
               <summary className="text-sm font-semibold cursor-pointer">Individual grading checks ({GRADE_CHECK_KEYS.length})</summary>
               <div className="mt-2">{renderFields(GRADE_CHECK_KEYS)}</div>
             </details>
@@ -1543,7 +1592,7 @@ export default function SettingsPage() {
               onConfirm={resetAllDefaults}
               confirmLabel="Reset all"
               disabled={!configDefaults}
-              title="Restore factory defaults for every setting (music folder, first-run flag and AI connection are kept)"
+              title="Restore factory defaults for every setting (music folder and first-run flag are kept)"
             >
               <RotateCcw className="h-4 w-4" /> Reset to defaults
             </ConfirmButton>
@@ -1552,7 +1601,7 @@ export default function SettingsPage() {
             </button>
           </div>
 
-          <details className="bg-card rounded-lg border border-border p-4">
+          <details className="panel">
             <summary className="text-sm font-semibold cursor-pointer">Credits & open-source licenses</summary>
             <p className="text-[11px] text-zinc-500 mt-2">
               la musica is MIT-licensed (see LICENSE) and stands on the shoulders
@@ -1583,7 +1632,7 @@ export default function SettingsPage() {
             </div>
           </details>
 
-          <details className="bg-card rounded-lg border border-border p-4">
+          <details className="panel">
             <summary className="text-sm font-semibold cursor-pointer">Raw config (advanced)</summary>
             <textarea
               className="input font-mono text-[11px] min-h-[220px] mt-2"

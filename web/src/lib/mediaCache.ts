@@ -42,8 +42,35 @@ function cacheUrls(path: string): string[] {
   return [absolute(api.videoStreamUrl(path)), absolute(api.videoStreamUrl(path, true))];
 }
 
+/** The folder holding `path` — the album directory of a track file, and (one
+ *  level further up) its artist directory. Server-side paths use "/"; a
+ *  backslash is tolerated so a Windows-shaped path still resolves. */
+function parentDir(path: string): string {
+  const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  return cut > 0 ? path.slice(0, cut) : path;
+}
+
+/** The artwork a downloaded album needs offline: its cover and the artist
+ *  image. Both are plain GETs on the same origin as the streams, so the
+ *  service worker serves them from this same cache. */
+function artworkUrls(trackPath: string): string[] {
+  const album = parentDir(trackPath);
+  return [absolute(api.coverUrl(album)), absolute(api.artistImageUrl(parentDir(album)))];
+}
+
 async function cache(): Promise<Cache> {
   return caches.open(CACHE_NAME);
+}
+
+/** Warm one URL into the cache, best-effort: a missing cover or artist image
+ *  must never fail the download that asked for it. */
+async function warm(c: Cache, url: string): Promise<void> {
+  try {
+    const resp = await fetch(url);
+    if (resp.ok) await c.put(url, resp);
+  } catch {
+    /* offline or absent — the audio cache is what matters */
+  }
 }
 
 export async function cacheTrack(path: string): Promise<void> {
@@ -54,6 +81,9 @@ export async function cacheTrack(path: string): Promise<void> {
   const resp = await fetch(url);
   if (!resp.ok) throw new Error(`server responded ${resp.status}`);
   await c.put(url, resp);
+  // Covers and the artist image ride along, so offline playback is not left
+  // with a placeholder where the artwork should be.
+  await Promise.all(artworkUrls(path).map((u) => warm(c, u)));
 }
 
 export async function uncacheTrack(path: string): Promise<void> {

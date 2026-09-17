@@ -117,6 +117,28 @@ def gen_fixtures(base):
     return fix
 
 
+def gen_chapter_fixture(base):
+    """h264/aac MKV carrying two TITLED chapters, the way a disc rip that
+    still has its chapter atoms arrives. Returns the source path."""
+    src = os.path.join(base, "chap_in")
+    os.makedirs(src, exist_ok=True)
+    plain = make_fixture(base, "chap_plain", ["-c:v", "libx264", "-preset", "ultrafast",
+                                              "-c:a", "aac", "-b:a", "64k", ".mkv"])
+    meta = os.path.join(src, "chapters.txt")
+    with open(meta, "w", encoding="utf-8") as f:
+        f.write(";FFMETADATA1\n"
+                "[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=1000\ntitle=Chapter One\n"
+                "[CHAPTER]\nTIMEBASE=1/1000\nSTART=1000\nEND=2000\ntitle=Chapter Two\n")
+    out = os.path.join(src, "sample_chapters.mkv")
+    r = subprocess.run([FF, "-y", "-v", "error", "-i", plain, "-i", meta,
+                        "-map_metadata", "1", "-c", "copy", out],
+                       capture_output=True, text=True)
+    os.remove(plain)
+    if r.returncode != 0:
+        raise RuntimeError("chapter fixture gen failed: " + r.stderr[-300:])
+    return out
+
+
 def main():
     base = tempfile.mkdtemp(prefix="mlo_remux_test_")
     print(f"workspace: {base}")
@@ -201,6 +223,44 @@ def main():
     check("mp4 -> flac audio", a == ["flac"], a)
     check("stray mp4 gone", not os.path.isfile(os.path.join(outdir, "sample_aac.mp4")))
 
+    print("\n== chapters survive the remux ==")
+    chap = gen_chapter_fixture(base)
+    src_chapters = remux.probe_chapters(chap, FP)
+    check("fixture carries 2 titled chapters",
+          [c["title"] for c in src_chapters] == ["Chapter One", "Chapter Two"], src_chapters)
+    chap_out = os.path.join(base, "chap_out.mkv")
+    ok, msg = remux.remux_video(chap, chap_out, FF, FP, cfg)
+    check("chaptered source remuxes", ok, msg)
+    check("chapters kept, titles intact",
+          [c["title"] for c in remux.probe_chapters(chap_out, FP)]
+          == ["Chapter One", "Chapter Two"], remux.probe_chapters(chap_out, FP))
+    check("chaptered output still decodes", decodable(chap_out)[0])
+
+    print("\n== remove failure is an error, not a skip ==")
+    # The message "already remuxed (same-stem MKV exists); remove failed: …"
+    # starts with the skip wording, so it used to land in errors[] without
+    # ever incrementing error_count — the run reported "0 errors".
+    acct = os.path.join(base, "acct")
+    os.makedirs(acct, exist_ok=True)
+    shutil.copy2(chap, os.path.join(acct, "dup.mkv"))
+    shutil.copy2(chap, os.path.join(acct, "dup.avi"))
+    real_remove = os.remove
+
+    def _locked(path, *args, **kwargs):
+        if os.path.basename(str(path)).lower() == "dup.avi":
+            raise OSError("locked for test")
+        return real_remove(path, *args, **kwargs)
+
+    os.remove = _locked
+    try:
+        stats4 = remux.run_remux_videos(dict(cfg, music_folder=acct, targets=[acct],
+                                             video_remove_original=True))
+    finally:
+        os.remove = real_remove
+    check("failed removal counted as an error", stats4["error_count"] == 1, stats4["error_count"])
+    check("failed removal reported", any("remove failed" in e for e in stats4["errors"]),
+          stats4["errors"])
+
     print("\n== classification: videos are their own category ==")
     from mlo.grader import _classify_file
     # Music-video containers are first-class tracks but their own file
@@ -210,6 +270,17 @@ def main():
     check("vob classified video", _classify_file("x.vob") == "video")
     check("mp4 classified video", _classify_file("x.mp4") == "video")
     check("m4a classified music", _classify_file("x.m4a") == "music")
+
+    print("\n== input set ==")
+    # /api/videos/scan lists exactly this set, so an MP4 music video shows the
+    # album-page remux action; script 11 still leaves MP4 alone unless asked.
+    check("scan set covers the library's video containers",
+          ".mp4" in remux.VIDEO_EXTS and ".m4v" in remux.VIDEO_EXTS, remux.VIDEO_EXTS)
+    check("mp4/m4v gated behind video_process_mp4",
+          ".mp4" not in remux.remux_input_exts({})
+          and ".mp4" in remux.remux_input_exts({"video_process_mp4": True}))
+    check("other containers always remuxed",
+          ".vob" in remux.remux_input_exts({}) and ".avi" in remux.remux_input_exts({}))
 
     shutil.rmtree(base, ignore_errors=True)
     print(f"\n{PASS} passed, {FAIL} failed")

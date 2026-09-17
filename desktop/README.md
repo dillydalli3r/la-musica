@@ -14,8 +14,10 @@ Tauri v2 (Rust) wrapper around the React UI and Python backend.
      checkout actually contains `server/main.py`
   Without either, the shell shows a "backend not found" dialog instead of
   spawning a `python` that has nothing to run.
-- **Native folder picker**: `pick_folder` Tauri command, exposed to the
-  Settings page via `invoke`.
+- **Native folder picker**: `pick_folder` Tauri command, used by the import
+  wizard via `invoke` to pick a source folder. The music folder itself is
+  decided at startup (`MLO_MUSIC_FOLDER`, or `music_folder` in
+  `config.json`) and is read-only in Settings — Settings has no picker.
 
 ## Development
 

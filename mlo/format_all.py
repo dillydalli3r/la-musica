@@ -328,18 +328,21 @@ def _format_audio_tags(path, cfg, force=False):
                     af.defer_save(False)
                     return (path, False, af.error or "set_tag failed")
         # Optimization leaves only tags this app (and its graders) understand:
-        # anything outside TAG_MAP plus the encoder identity tags is removed.
+        # anything outside the shared vocabulary — TAG_MAP, the encoder
+        # identity tags, beets/Picard's own spellings and the app's
+        # AUDIOAUDITOR_OVERRIDE — is removed. The predicate comes from the
+        # grader (mlo.grader.tag_key_allowed) so the strip pass and the
+        # excess-tag grade can never disagree about what "excess" means.
         if cfg.get("strip_unknown_tags", False):
-            from .audio import TAG_MAP
-            allowed = {k.upper() for k in TAG_MAP} | {
-                "ENCODER_PROGRAM", "ENCODER_QUALITY", "ENCODER_VERSION"}
+            from .grader import tag_key_allowed
             for key in list(af.all_tags().keys()):
-                if str(key).upper() not in allowed:
-                    try:
-                        if af.delete_tag(key):
-                            changed = True
-                    except Exception:
-                        pass
+                if tag_key_allowed(key):
+                    continue
+                try:
+                    if af.delete_tag(key):
+                        changed = True
+                except Exception:
+                    pass
         af.defer_save(False)
         if changed:
             return (path, True, None)

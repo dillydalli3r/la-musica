@@ -2,17 +2,33 @@
 
 Two sources are handled and both are served to the browser as WebVTT (the
 only subtitle format <track> accepts):
-  * subtitles muxed into the container (mp4 mov_text / mkv subrip / ass …),
-    extracted on demand with ffmpeg;
+  * subtitles muxed into the container and stored as TEXT cues (mov_text,
+    subrip, ass/ssa, webvtt …) — extracted on demand with ffmpeg;
   * external sidecar files next to the video ("Video.en.srt",
     "Video.vtt", …) — .vtt is passed through, .srt is converted.
+
+Bitmap captions (DVD VobSub, PGS, DVB) are NOT listed and NOT extractable:
+they are pictures, so the webvtt muxer either fails or emits a cue-less
+document — a track the player can never display.
 """
 import os
 import re
 import threading
 
 from mlo.tools import detect_all_tools
-from mlo.remux import _ffprobe_json, _stream_info
+from mlo.remux import _stream_info
+
+# Subtitle codecs whose payload is images, not text. Everything else ffmpeg
+# can convert to WebVTT cues.
+BITMAP_SUB_CODECS = frozenset({
+    "dvd_subtitle", "dvdsub", "dvb_subtitle", "hdmv_pgs_subtitle", "pgs",
+    "xsub", "dvb_teletext", "teletext",
+})
+
+
+def is_text_subtitle(codec):
+    """Whether *codec* can become WebVTT, i.e. is not a bitmap caption."""
+    return str(codec or "").lower() not in BITMAP_SUB_CODECS
 
 _lock = threading.Lock()
 _cache = {}  # _stat_key(video) -> muxed stream list
@@ -65,7 +81,12 @@ def _sidecars(path):
 
 
 def list_subtitles(path):
-    """Muxed subtitle streams + external sidecars for a video file."""
+    """Muxed TEXT subtitle streams + external sidecars for a video file.
+
+    Each muxed entry carries the ffmpeg subtitle-stream index (`n`), which is
+    the index used by ``0:s:n`` extraction — bitmap captions are skipped, not
+    renumbered, so the indices stay valid.
+    """
     key = _stat_key(path)
     with _lock:
         muxed = _cache.get(key)
@@ -78,6 +99,8 @@ def list_subtitles(path):
                 subs = info[2] or []
                 # re-probe for titles/languages only when there are subs to name
                 for n, codec in enumerate(subs):
+                    if not is_text_subtitle(codec):
+                        continue  # bitmap captions cannot be served as WebVTT
                     muxed.append({"n": n, "codec": codec, "title": f"Track {n + 1} ({codec})"})
         with _lock:
             _cache[key] = muxed
@@ -106,6 +129,19 @@ def _srt_to_vtt(text):
     return "\n".join(out)
 
 
+def _muxed_codec(path, muxed_n):
+    """Codec name of muxed subtitle stream *muxed_n*, or None when unknown."""
+    ffprobe = _ffprobe_exe()
+    if not ffprobe:
+        return None
+    info = _stream_info(path, ffprobe)
+    subs = (info[2] if info else None) or []
+    try:
+        return subs[muxed_n]
+    except (IndexError, TypeError):
+        return None
+
+
 def vtt_for(path, muxed_n=None, sidecar=None):
     """WebVTT bytes for the given muxed stream index or sidecar filename."""
     if sidecar:
@@ -121,6 +157,14 @@ def vtt_for(path, muxed_n=None, sidecar=None):
 
     if muxed_n is None:
         raise ValueError("muxed_n or sidecar required")
+    # Guard the extraction path itself: a bitmap caption (VobSub/PGS/DVB)
+    # either fails in the webvtt muxer or yields a cue-less "WEBVTT" that the
+    # player shows as nothing, so refuse it here as well as in list_subtitles.
+    codec = _muxed_codec(path, muxed_n)
+    if codec is not None and not is_text_subtitle(codec):
+        raise ValueError(
+            f"subtitle stream {muxed_n} is a bitmap caption ({codec}) - "
+            "it cannot be served as WebVTT")
     ffmpeg = _ffmpeg_exe()
     if not ffmpeg:
         raise RuntimeError("ffmpeg not available")
@@ -132,4 +176,8 @@ def vtt_for(path, muxed_n=None, sidecar=None):
     )
     if proc.returncode != 0 or not proc.stdout:
         raise RuntimeError((proc.stderr or b"").decode("utf-8", "replace")[:300] or "no subtitle output")
+    if b"-->" not in proc.stdout:
+        # A header-only WebVTT (what a caption the muxer cannot read produces)
+        # would load as an empty track — treat it as a failure instead.
+        raise RuntimeError("this subtitle track carries no WebVTT cues")
     return proc.stdout

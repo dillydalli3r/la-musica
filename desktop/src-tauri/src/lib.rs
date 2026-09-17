@@ -91,8 +91,42 @@ fn backend_port_open() -> bool {
     std::net::TcpStream::connect(("127.0.0.1", 8000)).is_ok()
 }
 
+/// True only when the listener on the backend port answers like OUR backend.
+///
+/// A TCP connect is not ownership — any other app can hold :8000, and the
+/// quit path force-kills whatever is listening there. The probe therefore
+/// requires the API's own `/api/health` reply, JSON `{"status":"ok"}`, which
+/// is exactly the check `start_app.py` and `tray.py` make before they adopt,
+/// shut down or kill a backend. A foreign listener is left completely alone.
+fn backend_is_ours() -> bool {
+    use std::io::{Read, Write};
+    let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", 8000)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    let req = "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:8000\r\n\
+               Connection: close\r\n\r\n";
+    if stream.write_all(req.as_bytes()).is_err() {
+        return false;
+    }
+    // A non-UTF-8 body is not our API's JSON; failing the probe is the safe
+    // direction (nothing gets adopted or killed over a guess).
+    let mut buf = String::new();
+    if stream.read_to_string(&mut buf).is_err() {
+        return false;
+    }
+    if !buf.starts_with("HTTP/1.1 200") && !buf.starts_with("HTTP/1.0 200") {
+        return false;
+    }
+    buf.contains("\"status\":\"ok\"") || buf.contains("\"status\": \"ok\"")
+}
+
 /// Ask a running backend to exit via the env-gated shutdown endpoint
 /// (works for backends this shell didn't spawn, e.g. after a restart).
+///
+/// Only ever called after `backend_is_ours()` said the listener is ours — a
+/// foreign app on the port never receives this POST.
 fn request_backend_shutdown() {
     use std::io::{Read, Write};
     if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", 8000)) {
@@ -107,8 +141,15 @@ fn request_backend_shutdown() {
 
 /// Force-kill whatever process is LISTENING on the backend port (last
 /// resort for backends spawned without MLO_ALLOW_SHUTDOWN=1). Windows only.
+///
+/// Refuses unless the port answers /api/health as ours: a foreign app on
+/// :8000 must never be force-killed.
 #[cfg(windows)]
 fn kill_port_listener() {
+    if !backend_is_ours() {
+        eprintln!("[mlo-desktop] :8000 is not our backend — left alone");
+        return;
+    }
     use std::os::windows::process::CommandExt;
     let out = Command::new("netstat")
         .arg("-aon")
@@ -136,8 +177,22 @@ fn kill_port_listener() {
 fn spawn_backend(app: &tauri::AppHandle) {
     // Adopt an already-running backend (tray app, previous run) instead of
     // spawning a duplicate that fails to bind and leaves confusion behind.
-    if backend_port_open() {
+    if backend_is_ours() {
         println!("[mlo-desktop] adopting already-running backend");
+        return;
+    }
+    // Something else holds the port: it is not ours, so it is neither adopted
+    // nor (on quit) killed — say so instead of spawning a doomed backend.
+    if backend_port_open() {
+        let msg = format!(
+            "Port {PORT} is in use by another app (not la musica) — stop that \
+             app or free the port. Nothing was started or stopped."
+        );
+        eprintln!("[la musica] {msg}");
+        app.dialog()
+            .message(msg)
+            .title("la musica — port busy")
+            .blocking_show();
         return;
     }
     let (exe, args, cwd) = match find_backend(app) {
@@ -186,15 +241,14 @@ fn stop_backend(app: &tauri::AppHandle) {
         }
     }
     // Also stop any backend on the port that we didn't spawn (adopted or
-    // orphaned from an earlier run) so Quit really clears the background.
-    if backend_port_open() {
+    // orphaned from an earlier run) so Quit really clears the background —
+    // but only when the listener is ours: a foreign app is left running.
+    if backend_is_ours() {
         request_backend_shutdown();
         std::thread::sleep(Duration::from_millis(700));
     }
     #[cfg(windows)]
-    if backend_port_open() {
-        kill_port_listener();
-    }
+    kill_port_listener();
 }
 
 /// Native folder picker (also reachable from the web UI via invoke when

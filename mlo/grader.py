@@ -4,18 +4,14 @@ import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from .audio import AudioFile
+from .audio import AudioFile, TAG_MAP
 from .config import should_write_audio_tag
 from .lyrics import (
-    _lrc_for, _canonical_lyrics, format_lyrics_text,
-    sync_level_of, text_meets_sync_level,
-)
-from .lyrics_xlit import (
-    XLIT_SIDECAR, ai_ready, needs_translation, needs_transliteration,
-    primary_translation_lang,
+    _lrc_for, _canonical_lyrics, format_lyrics_text, text_meets_sync_level,
 )
 from .cue import canonical_cue_text
-from .naming import DEFAULT_NAMING_SCRIPT
+from .naming import (DEFAULT_NAMING_SCRIPT, UNKNOWN_RELEASE_TYPE,
+                     lookup_style_release_type, mb_style_release_type)
 from .paths import (ALBUM_SIDECAR_NAMES, AUDIO_EXTS, IMAGE_EXTS,
                     LIB_AUDIO_EXTS, LIB_VIDEO_EXTS, get_track_cover,
                     library_root, load_track_covers)
@@ -105,8 +101,20 @@ def _get_cover_dimensions(cover_path):
             return (None, None)
 
 PER_TRACK_TAGS = [
+    # Identity: the tags that make a file a usable library track at all.
+    # Absence of any of these fails grade_check_missing_tags (the naming
+    # script's path check only covers them indirectly, and not at all when
+    # grade_check_naming is off or no music_folder is set).
+    "TITLE",
+    "ARTIST",
+    "ALBUM",
+    "ALBUMARTIST",
+    "DATE",
+    "TRACKNUMBER",
+    "DISCNUMBER",     # only when the album really has several discs
     "GENRE",
     "MOOD",
+    "ENERGY",
     "ITUNESADVISORY",
     "REPLAYGAIN_TRACK_GAIN",
     "REPLAYGAIN_TRACK_PEAK",
@@ -118,13 +126,16 @@ PER_TRACK_TAGS = [
 
 # Tags whose PRESENCE is graded by a toggle of its own instead of the
 # generic grade_check_missing_tags sweep, so one feature can be required
-# without the whole sweep: mood/genre are auto-filled by script 8 (and the
-# grader is what says a track may not ship without them), ReplayGain is the
-# opt-in loudness family (see REPLAYGAIN_TAGS). Value: (config key, per-track
-# issue code). Every entry defaults ON.
+# without the whole sweep: mood/genre/energy are auto-filled by script 8
+# (and the grader is what says a track may not ship without them),
+# ReplayGain is the opt-in loudness family (see REPLAYGAIN_TAGS).
+# Value: (config key, per-track issue code). Every entry defaults ON.
 TAG_PRESENCE_CHECKS = {
     "GENRE": ("grade_check_genre", "GENRE_MISSING"),
     "MOOD": ("grade_check_mood", "MOOD_MISSING"),
+    # ENERGY (0-100, written next to MOOD by script 8). Readable/writable on
+    # every graded container including video, which the mood writer covers.
+    "ENERGY": ("grade_check_energy", "ENERGY_MISSING"),
     "REPLAYGAIN_TRACK_GAIN": ("grade_check_replaygain", "REPLAYGAIN_TRACK_GAIN"),
     "REPLAYGAIN_TRACK_PEAK": ("grade_check_replaygain", "REPLAYGAIN_TRACK_PEAK"),
     "REPLAYGAIN_ALBUM_GAIN": ("grade_check_replaygain", "REPLAYGAIN_ALBUM_GAIN"),
@@ -191,6 +202,15 @@ BEETS_TAGS = {
     # beets plugins / third-party tooling it ships
     "ACOUSTID_ID", "ACOUSTID_FINGERPRINT",
     "REPLAYGAIN_REFERENCE_LOUDNESS",
+    # Picard's own spellings of the same release metadata (TXXX:MusicBrainz
+    # Album Type / Album Status / Disc Id / Album Release Country and their
+    # MP4 freeform equivalents, plus the "use sort names" fields). Picard is
+    # the documented interchange partner, so its standard output must never
+    # count as an excess tag.
+    "MUSICBRAINZ_ALBUMTYPE", "MUSICBRAINZ_ALBUMSTATUS",
+    "MUSICBRAINZ_DISCID", "MUSICBRAINZ_ALBUMRELEASECOUNTRY",
+    "MUSICBRAINZ_RELEASECOUNTRY", "MUSICBRAINZ_ALBUMARTISTSORT",
+    "ARTISTSORT", "ALBUMARTISTSORT", "TITLESORT",
 }
 
 # ID3 frames beets or the encoder write that have no TAG_MAP entry: TCMP =
@@ -204,6 +224,55 @@ def _tag_key_norm(key):
     spellings of a name ("MusicBrainz Album Id", MUSICBRAINZ_ALBUM_ID,
     musicbrainz_albumid) all compare equal to the allowlist entry."""
     return re.sub(r"[\s_]+", "", str(key)).upper()
+
+
+# Every tag name this app (TAG_MAP), its encoder markers, and beets/Picard
+# (BEETS_TAGS) may write — normalized with _tag_key_norm. THE single source
+# of truth: the excess-tag grade below and the Optimize/Format All strip pass
+# (mlo.format_all, which imports tag_key_allowed) must agree, or a strip
+# leaves a tag the grader flags, or deletes one it requires.
+TAG_ALLOWLIST = frozenset(
+    _tag_key_norm(k) for k in (
+        *TAG_MAP, "ENCODER_PROGRAM", "ENCODER_QUALITY", "ENCODER_VERSION",
+        *BEETS_TAGS))
+
+
+def tag_key_allowed(key):
+    """Whether *key* — in any file-side spelling the tag API emits (vorbis
+    name, "TXXX:desc", "----:com.apple.iTunes:desc", a raw ID3 frame id such
+    as "PRIV:owner", or a language-suffixed lyrics transform) — is part of
+    the vocabulary this app and beets write. Anything else is junk a vendor
+    or ripper left behind."""
+    k = str(key)
+    ku = k.upper()
+    if _tag_key_norm(k) in TAG_ALLOWLIST:
+        return True
+    if ku.startswith(("TRANSLATION-", "TRANSLITERATION-")):
+        return True
+    if ku.startswith("TXXX:"):
+        # ID3 freeform frames: allowed when the frame's description names a
+        # tag the script or beets writes.
+        return _tag_key_norm(k.split(":", 1)[1]) in TAG_ALLOWLIST
+    if ku.startswith("----:"):
+        # MP4 freeform atoms ("----:com.apple.iTunes:Name"): same rule on
+        # the sub-name.
+        return _tag_key_norm(k.rsplit(":", 1)[-1]) in TAG_ALLOWLIST
+    return ku.split(":", 1)[0] in BEETS_ID3_FRAMES
+
+
+def _tag_value(af, name):
+    """Value of *name* through the tag API, falling back to a normalized
+    scan of every tag (a file may store a spelling TAG_MAP does not name —
+    e.g. an MP4 freeform atom written by another tagger — and the app's own
+    tags must never be lost to a spelling difference alone)."""
+    val = af.get_tag(name)
+    if val not in (None, ""):
+        return val
+    want = _tag_key_norm(name)
+    for k, v in (af.all_tags() or {}).items():
+        if _tag_key_norm(k).endswith(want):
+            return v
+    return val
 
 
 COVER_NAMES = {"cover.jpg", "cover.jpeg", "cover.png", "cover.jxl"}
@@ -712,14 +781,15 @@ def _get_cover_target_size(ext, config):
 
 
 def _cover_image_ok(path, config):
-    """Validate a cover image against size/square enforcement.
+    """Validate a cover image against size + ASPECT-RATIO checks.
 
     Checks:
     * file exists and >0 bytes (always)
     * if cover_enforce_size and cover_resize_enabled and target_size>0,
       dimensions must be exactly target_size x target_size (1px tolerance)
-    * if cover_enforce_square, aspect ratio must be within threshold
-      (abs(width/height -1) <= threshold)
+    * if cover_enforce_square and grade_check_cover_crop, the ASPECT RATIO
+      must be within threshold (abs(width/height -1) <= threshold) — this is
+      a squareness test, not crop detection (see the album-cover check)
 
     Handles per-format target sizes. When Pillow is unavailable or the
     file can't be opened, falls back to existence/size check to avoid
@@ -747,6 +817,14 @@ def _cover_image_ok(path, config):
         # Force exact implies both size and square must be enforced
         enforce_size = True
         enforce_square = True
+    if not force_exact:
+        # grade_check_cover_crop is the toggle for the ASPECT-RATIO part of
+        # the check (see the album-cover check below) — a sidecar cover must
+        # not be graded for squareness when that check is switched off.
+        # force_exact_size is an explicit "exactly target×target" request and
+        # keeps implying it.
+        enforce_square = enforce_square and bool(
+            config.get("grade_check_cover_crop", True))
     if not enforce_size and not enforce_square:
         return True
     # Need Pillow to inspect dimensions; without it we cannot verify but should not silently pass stringent checks.
@@ -911,7 +989,8 @@ def _grade_sidecars(album_dir, all_files, cfg):
                     ext = os.path.splitext(full)[1].lower()
                     tgt = _get_cover_target_size(ext, cfg)
                     enforce_size = bool(cfg.get("cover_enforce_size", False)) and bool(cfg.get("cover_resize_enabled", False)) and tgt > 0
-                    enforce_square = bool(cfg.get("cover_enforce_square", False))
+                    enforce_square = (bool(cfg.get("cover_enforce_square", False))
+                                      and bool(cfg.get("grade_check_cover_crop", True)))
                     # Try to inspect image for specific reason
                     try:
                         if HAS_PIL:
@@ -924,15 +1003,15 @@ def _grade_sidecars(album_dir, all_files, cfg):
                                     thr = max(0.0, min(0.5, thr))
                                     ratio = _w / _h if _h else 1.0
                                     if abs(ratio - 1.0) > thr:
-                                        detail = f"not square {_w}x{_h}"
+                                        detail = f"aspect ratio {_w}x{_h} not square"
                                     else:
-                                        detail = "needs resize/crop"
+                                        detail = "needs resize"
                                 else:
-                                    detail = "needs resize/crop"
+                                    detail = "needs resize"
                         else:
-                            detail = "needs resize/crop"
+                            detail = "needs resize"
                     except Exception:
-                        detail = "needs resize/crop"
+                        detail = "needs resize"
         else:
             ok = _category_allowed(cfg, category)
             detail = "allowed" if ok else "disallowed type"
@@ -1000,23 +1079,60 @@ def _fs_cased_dir(path, base):
 
 
 def _mb_release_type(mbid):
-    """Release type MusicBrainz reports for *mbid*, or None.
+    """Release type MusicBrainz already knows for *mbid* — never a new call.
 
-    The organizer resolves a missing RELEASETYPE from the MusicBrainz
-    release before running the naming script (server.main organize), and the
-    default script writes it into the folder — so grading a folder the app
-    organized must resolve it from the same source, or every organized album
-    grades as "expected '[album] …'" forever. Lazy import (the pattern the
-    CLI already uses for server.beetscfg) keeps the plain CLI importable;
-    any failure — offline, rate-limited, unknown ID — falls back to today's
-    tag-only behaviour.
+    The organizer resolves a missing RELEASETYPE live (server.main organize)
+    and writes the value into the folder; grading must reproduce that path
+    WITHOUT depending on the network. So only the ALREADY-WARM in-process
+    MusicBrainz cache (server.integrations._BROWSE_CACHE, filled by the
+    app's own MB traffic) is consulted: a warm hit returns the same
+    lowercase "+"-joined spelling release_lookup produces, a miss returns
+    None and the caller grades the missing RELEASETYPE tag instead of
+    silently re-fetching. Lazy import keeps the plain CLI importable.
     """
     try:
-        from server.integrations import release_lookup
-
-        return str(release_lookup(mbid).get("release_type") or "").strip() or None
+        from server.integrations import _BROWSE_CACHE, _BROWSE_LOCK
     except Exception:
         return None
+    endpoint = f"release/{mbid}"
+    data = None
+    try:
+        with _BROWSE_LOCK:
+            for (ep, _params), hit in _BROWSE_CACHE.items():
+                if ep == endpoint and isinstance(hit, tuple) and hit[1]:
+                    data = hit[1]
+                    break
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    rg = data.get("release-group") or {}
+    primary = str(rg.get("primary-type") or "").strip().lower()
+    if not primary:
+        return None
+    secondary = [str(s).strip().lower() for s in (rg.get("secondary-types") or [])]
+    return "+".join([primary] + [s for s in secondary if s]) or None
+
+
+def _release_type_candidates(value):
+    """Spellings the naming script may have been evaluated with.
+
+    The organizer passes the RELEASETYPE tag VERBATIM and only falls back to
+    release_lookup's lowercase "+" form when the tag is absent, so the raw
+    value comes first and decides. The other spellings of the SAME type keep
+    a folder laid out by a differently-spelled tagger (beets' capped
+    "Album; Live" vs the wizard's "album+live") from failing the path check.
+    An UNKNOWN type also tries the no-type layout, so an album organized
+    before the tag existed still matches.
+    """
+    if value == UNKNOWN_RELEASE_TYPE:
+        return [UNKNOWN_RELEASE_TYPE, ""]
+    out = []
+    for v in (value, mb_style_release_type(value),
+              lookup_style_release_type(value)):
+        if v and v not in out:
+            out.append(v)
+    return out or [""]
 
 
 def _naming_mismatch(ap, folder, script, release_type, tags):
@@ -1035,27 +1151,99 @@ def _naming_mismatch(ap, folder, script, release_type, tags):
     graded by grade_check_naming). Both full and 8-char-truncated
     MusicBrainz IDs are accepted so the short_folder_names setting can't
     produce false failures.
+
+    Every equivalent spelling of the release type is tried (see
+    _release_type_candidates) and the BEST verdict wins: an exact match
+    beats a case-only match beats a mismatch, so a differently-spelled tag
+    can never turn a passing path into a failure. When *release_type* is
+    UNKNOWN_RELEASE_TYPE the type token is matched as a wildcard — the tag
+    is gone and MusicBrainz was never consulted, so the folder is checked on
+    everything the tags DO say; the missing tag is reported separately, so
+    this stays a visible defect rather than a silent pass.
     """
     from mlo.naming import eval_script, track_variables
 
     base = library_root(folder) if folder else folder
     actual = os.path.relpath(ap, base)
-    variables = track_variables(tags or {}, release_type=release_type)
     ext = os.path.splitext(ap)[1]
-    expected_full = eval_script(script, variables, shorter_ids=False) + ext
-    expected_short = eval_script(script, variables, shorter_ids=True) + ext
+    actual_slash = str(actual).replace(os.sep, "/").replace("\\", "/")
 
     def _seps(p):
         # separator-normalized but CASE-SENSITIVE (exact compare)
         return str(p).replace("/", os.sep).replace("\\", os.sep)
 
-    for exp in (expected_full, expected_short):
-        if exp and _seps(exp) == _seps(actual):
-            return ("ok", None)
-    for exp in (expected_full, expected_short):
-        if exp and _norm_path_case(exp) == _norm_path_case(actual):
-            return ("case", expected_full or expected_short)
-    return ("path", expected_full or expected_short)
+    def _match(value):
+        variables = track_variables(tags or {}, release_type=value)
+        full = eval_script(script, variables, shorter_ids=False) + ext
+        short = eval_script(script, variables, shorter_ids=True) + ext
+        shown = (full or short).replace(UNKNOWN_RELEASE_TYPE, "?")
+        if value == UNKNOWN_RELEASE_TYPE:
+            patterns = [_wildcard_re(e) for e in (full, short) if e]
+            if any(re.fullmatch(p, actual_slash) for p in patterns):
+                return ("ok", None)
+            if any(re.fullmatch(p, actual_slash, re.IGNORECASE) for p in patterns):
+                return ("case", shown)
+            return ("path", shown)
+        for e in (full, short):
+            if e and _seps(e) == _seps(actual):
+                return ("ok", None)
+        for e in (full, short):
+            if e and _norm_path_case(e) == _norm_path_case(actual):
+                return ("case", full or short)
+        return ("path", full or short)
+
+    best_kind, best_expected = "path", ""
+    for value in _release_type_candidates(release_type):
+        kind, expected = _match(value)
+        if kind == "ok":
+            return (kind, None)
+        if not best_expected:
+            best_expected = expected
+        if kind == "case" and best_kind != "case":
+            best_kind, best_expected = kind, expected
+    return (best_kind, best_expected)
+
+
+def _wildcard_re(expected):
+    """Regex for an expected path carrying UNKNOWN_RELEASE_TYPE: the sentinel
+    stands for whatever token the folder currently spells there (empty
+    included, so an album organized before the tag existed still matches)."""
+    return "[^/\\\\]*".join(re.escape(p) for p in str(expected).split(UNKNOWN_RELEASE_TYPE))
+
+
+def _multi_disc_album(album_dir, all_files):
+    """Evidence that the album folder really holds more than one disc.
+
+    DISCNUMBER is a multi-disc tag: beets writes it only for multi-disc
+    releases and the naming script defaults the variable to 1, so requiring
+    the tag on every album would fail every single-disc release. Evidence is
+    the D-TT (disc-track) filename convention or a DISCTOTAL/TOTALDISCS
+    above 1 — both are album-wide properties, so one track settles it.
+    """
+    try:
+        from .discs import album_discs, disc_of_filename
+
+        if len(album_discs(album_dir) or {}) > 1:
+            return True
+        if any((disc_of_filename(f) or 1) > 1 for f in all_files):
+            return True
+    except Exception:
+        pass
+    for f in all_files:
+        if not is_audio_file(f):
+            continue
+        try:
+            af = AudioFile(os.path.join(album_dir, f))
+        except Exception:
+            continue
+        if af.audio is None:
+            continue
+        for k in ("DISCTOTAL", "TOTALDISCS"):
+            v = str(_tag_value(af, k) or "").strip()
+            if v.isdigit() and int(v) > 1:
+                return True
+        break
+    return False
 
 
 def _audio_format_info(af):
@@ -1136,6 +1324,20 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
     def add_issue(field, where="album"):
         issues.setdefault(field, set()).add(where)
 
+    def unavailable(check, exc, where="album"):
+        """Record a check that could not run — count it AND fail it.
+
+        A bare `except Exception: pass` silently REMOVED a check from the
+        grade (and, when the counter sat inside the try, from the
+        denominator too), so an album could grade PASS without the check
+        ever applying. An exception now costs the check like any other
+        failure and names itself in the issue list.
+        """
+        nonlocal total_checks, failed_checks
+        total_checks += 1
+        failed_checks += 1
+        add_issue(f"{check} could not be evaluated: {exc}", where)
+
     cover_file = None
     for f in all_files:
         if f.lower() in COVER_NAMES:
@@ -1144,6 +1346,14 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
 
     has_log = any(f.lower().endswith(".log") for f in all_files)
     has_cue = any(f.lower().endswith(".cue") for f in all_files)
+    # A .log only counts as a rip log when it actually holds text — an empty
+    # file left by an aborted run must not satisfy grade_check_cd_log.
+    usable_logs = [f for f in all_files if f.lower().endswith(".log")
+                   and _log_file_ok(os.path.join(album_dir, f))]
+    # DISCNUMBER is only required of multi-disc albums (see _multi_disc_album),
+    # and only the missing-tag sweep grades it — skip the probe otherwise.
+    multi_disc = (_multi_disc_album(album_dir, all_files)
+                  if cfg.get("grade_check_missing_tags", True) else False)
 
     for ap in audio_paths:
         af = AudioFile(ap)
@@ -1167,12 +1377,25 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 track["issues"].append("UNREADABLE")
                 total_checks += 1
                 failed_checks += 1
-            if cfg.get("grade_check_missing_tags", True):
-                for t in PER_TRACK_TAGS:
-                    if not should_write_audio_tag(cfg, t, filepath=ap):
-                        continue
-                    total_checks += 1
-                    failed_checks += 1
+            # Same gates as the graded loop below: an unreadable track fails
+            # exactly the checks that would have been graded on a readable
+            # one, so disabling a check also stops counting it here.
+            for t in PER_TRACK_TAGS:
+                if not should_write_audio_tag(cfg, t, filepath=ap):
+                    continue
+                if t in REPLAYGAIN_TAGS:
+                    # Opt-in family: an unreadable file carries no RG tag, so
+                    # the family is not graded at all (see REPLAYGAIN_TAGS).
+                    continue
+                gate, _code = TAG_PRESENCE_CHECKS.get(
+                    t, ("grade_check_missing_tags", t))
+                if not cfg.get(gate, True):
+                    continue
+                if t == "DISCNUMBER" and not multi_disc:
+                    continue
+                total_checks += 1
+                failed_checks += 1
+                add_issue(f"Missing {t} (unreadable file)", basename)
 
             tracks.append(track)
             continue
@@ -1211,9 +1434,13 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 # defect — nothing auto-fills 0 anymore, so a missing tag
                 # must not fail the check (a PRESENT value is still validated
                 # as 0/1/2 below).
-                # GENRE / MOOD / ReplayGain answer to their own toggle (see
-                # TAG_PRESENCE_CHECKS), everything else to missing_tags.
-                if t != "ITUNESADVISORY":
+                # GENRE / MOOD / ENERGY / ReplayGain answer to their own
+                # toggle (see TAG_PRESENCE_CHECKS), everything else to
+                # missing_tags.
+                if t == "DISCNUMBER" and not multi_disc:
+                    # Single-disc releases legitimately carry no DISCNUMBER.
+                    pass
+                elif t != "ITUNESADVISORY":
                     gate, code = TAG_PRESENCE_CHECKS.get(
                         t, ("grade_check_missing_tags", t))
                     if cfg.get(gate, True):
@@ -1265,41 +1492,15 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         # key outside the shared vocabulary. Their presence counts against
         # grading so unoptimized files surface.
         if cfg.get("grade_check_excess_tags", True) and not is_video_track:
-            from .audio import TAG_MAP as _TAG_MAP
-            # Script vocabulary: TAG_MAP keys (compared with spaces/
-            # underscores normalized away, so "DYNAMIC RANGE" and file-side
-            # spellings like "DYNAMIC_RANGE" match), the encoder identity
-            # tags, and beets/mediafile's own spellings (MUSICBRAINZ_* ids,
-            # TRACK/DISC/CATALOGNUM, …) — beets-tagged files are first-class
-            # citizens, only junk like vendor tags counts as excess.
-            _allowed = {_tag_key_norm(k) for k in _TAG_MAP} | {_tag_key_norm(k) for k in (
-                "ENCODER_PROGRAM", "ENCODER_QUALITY", "ENCODER_VERSION",
-                *BEETS_TAGS)}
-            # Language-specific lyrics transforms (TRANSLATION-EN,
-            # TRANSLITERATION-JA-LATN, …) are first-class tags, not excess.
-            _allowed_prefixes = ("TRANSLATION-", "TRANSLITERATION-")
-            _extra = []
-            for _k in af.all_tags().keys():
-                _k = str(_k)
-                _ku = _k.upper()
-                if _tag_key_norm(_k) in _allowed:
-                    continue
-                if _ku.startswith(_allowed_prefixes):
-                    continue
-                if _ku.startswith("TXXX:"):
-                    # ID3 freeform frames: allowed when the frame's
-                    # description names a tag the script or beets writes.
-                    if _tag_key_norm(_k.split(":", 1)[1]) in _allowed:
-                        continue
-                if _ku.startswith("----:"):
-                    # MP4 freeform atoms ("----:com.apple.iTunes:Name"):
-                    # same rule on the sub-name.
-                    if _tag_key_norm(_k.rsplit(":", 1)[-1]) in _allowed:
-                        continue
-                if _ku in BEETS_ID3_FRAMES:
-                    continue
-                _extra.append(_k)
-            _extra = sorted(set(_extra))
+            # Script vocabulary: TAG_MAP keys, the encoder identity tags,
+            # beets/mediafile's own spellings and Picard's — the SAME
+            # predicate the Optimize strip pass applies (mlo.format_all), so
+            # a strip can never leave a tag that is then flagged, or delete
+            # one the grader requires. Language-specific lyrics transforms
+            # (TRANSLATION-EN, TRANSLITERATION-JA-LATN, …) and the app's own
+            # AUDIOAUDITOR_OVERRIDE are first-class, not excess.
+            _extra = sorted({str(_k) for _k in af.all_tags().keys()
+                             if not tag_key_allowed(_k)})
             if _extra:
                 total_checks += 1
                 failed_checks += 1
@@ -1374,21 +1575,26 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             except Exception:
                 tags_map = {}
             if album_release_type is None:
-                # Tags first; the organizer's MusicBrainz fallback only when
-                # the tag is absent and an album MBID is there to resolve.
+                # Tags first; MusicBrainz only from an already-warm client.
                 # Resolved once per album — the value is sticky (the release
-                # medium is an album property, not a per-track one).
+                # type is an album property, not a per-track one).
                 album_release_type = str(tags_map.get("RELEASETYPE") or "").strip()
                 if not album_release_type and tags_map.get("MUSICBRAINZ_ALBUMID"):
                     album_release_type = _mb_release_type(
                         tags_map["MUSICBRAINZ_ALBUMID"]) or ""
+                if not album_release_type and "releasetype" in naming_script.lower():
+                    # Genuinely absent (no tag, nothing warm): grade the
+                    # missing TAG, not a path that depends on the network.
+                    # The type token is matched as a wildcard so the rest of
+                    # the layout is still verified.
+                    album_release_type = UNKNOWN_RELEASE_TYPE
+                    total_checks += 1
+                    failed_checks += 1
+                    add_issue("Missing RELEASETYPE tag (the naming script "
+                              "writes it into the path)", basename)
             kind, expected = _naming_mismatch(
                 os.path.join(naming_dir, basename),
-                music_folder, naming_script,
-                str(tags_map.get("RELEASETYPE") or "").strip()
-                or album_release_type or None,
-                tags_map,
-            )
+                music_folder, naming_script, album_release_type, tags_map)
             if kind == "path" and cfg.get("grade_check_naming", True):
                 total_checks += 1
                 failed_checks += 1
@@ -1431,26 +1637,20 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                             failed_checks += 1
                             add_issue(f"{tag_key} has blank lines", basename)
                             track["issues"].append(tag_key)
-            except Exception:
-                pass
+            except Exception as e:
+                unavailable("Tag hygiene sweep (spaces/blank lines)", e, basename)
 
         # ENCODER marker tags — per-format, only when that field is enabled.
         # For FLAC (the only audio type the app re-encodes), check PROGRAM/QUALITY/VERSION.
         # PROGRAM is off by default since v1.4.2, but when turned on per format grading must require it.
         if cfg.get("grade_check_encoder", True):
             try:
-                ext_enc = os.path.splitext(ap)[1].lower()
-                enc_key = None
-                if ext_enc == ".flac":
-                    enc_key = "flac"
-                elif ext_enc in (".jpg", ".jpeg"):
-                    enc_key = "jpeg"
-                elif ext_enc == ".png":
-                    enc_key = "png"
-                elif ext_enc == ".jxl":
-                    enc_key = "jxl"
-                if enc_key:
-                    enc_cfg = (cfg.get("encoder_tags") or {}).get(enc_key, {}) if cfg else {}
+                # FLAC is the only audio container the app re-encodes, and
+                # this loop only ever sees audio_paths — the image branches
+                # that used to live here were unreachable (cover encoder
+                # markers are graded separately, below).
+                if os.path.splitext(ap)[1].lower() == ".flac":
+                    enc_cfg = (cfg.get("encoder_tags") or {}).get("flac", {}) if cfg else {}
                     for field in ("ENCODER_PROGRAM", "ENCODER_QUALITY", "ENCODER_VERSION"):
                         # Default: PROGRAM off, QUALITY/VERSION on
                         default_on = False if field == "ENCODER_PROGRAM" else True
@@ -1485,8 +1685,8 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                             failed_checks += 1
                             add_issue(f"Missing {field} (re-optimize)", basename)
                             track["issues"].append(field)
-            except Exception:
-                pass
+            except Exception as e:
+                unavailable("Encoder identity check", e, basename)
 
         # Artist for the library view (first track that has one). Keys are
         # matched case-insensitively: Picard writes lowercase Vorbis
@@ -1609,7 +1809,10 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         # Manual AudioAuditor override. Read here (where the file's tags are
         # already open) so it rides the track payload; it is APPLIED much
         # later, after every derived REAL/FAKE verdict, so it wins over them.
-        _ov = str(af.get_tag("AUDIOAUDITOR_OVERRIDE") or "").strip().upper()
+        # Read through the tag API with a normalized fallback: the tag is the
+        # app's own (TAG_MAP + the allowlist below), and a file that stores
+        # it under another spelling must not silently lose its override.
+        _ov = str(_tag_value(af, "AUDIOAUDITOR_OVERRIDE") or "").strip().upper()
         track["values"]["AUDIOAUDITOR_OVERRIDE"] = _ov if _ov in ("REAL", "FAKE") else None
 
         if inst_val == "1":
@@ -1710,85 +1913,6 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                               "(run Lyrics script)", basename)
                     track["issues"].append("LYRICS")
 
-        # Script 15 outputs: transliteration + translation, graded per track.
-        # Gated on the features being enabled AND AI being configured in
-        # Settings → AI, so a library without lyric transforms configured is
-        # never penalized. Latin-script lyrics are their own transliteration
-        # (romanizing Spanish would be a no-op) and always pass the xlit check.
-        # Transliteration / translation compliance — graded only when the
-        # transforms are actually NEEDED for the configured reader locale
-        # (script 15's own rule): non-Latin lyrics in a script the reader
-        # doesn't read need romanization; lyrics whose script differs from
-        # the locale's script need a translation. Same-script pairs (French
-        # → en) can't be told apart from the target language offline, so
-        # they are never demanded here.
-        _xlit_src = None
-        if (embedded or lrc) and ai_ready(cfg):
-            _xlit_src = str(lyr) if embedded else None
-            if _xlit_src is None and lrc:
-                try:
-                    with open(_lrc_for(ap), "r", encoding="utf-8",
-                              errors="replace") as _f:
-                        _xlit_src = _f.read()
-                except OSError:
-                    _xlit_src = None
-        if _xlit_src and cfg.get("grade_check_xlit", True) \
-                and cfg.get("lyrics_xlit_enabled", True) \
-                and needs_transliteration(_xlit_src, cfg):
-            total_checks += 1
-            xlit_text = str(af.get_lyrics_transform("TRANSLITERATION") or "").strip()
-            if not xlit_text:
-                _xlit_side = os.path.splitext(ap)[0] + XLIT_SIDECAR
-                if os.path.isfile(_xlit_side):
-                    try:
-                        with open(_xlit_side, "r", encoding="utf-8", errors="replace") as _f:
-                            xlit_text = _f.read().strip()
-                    except OSError:
-                        xlit_text = ""
-            if not xlit_text:
-                failed_checks += 1
-                add_issue("No transliteration for non-Latin lyrics "
-                          "(run Lyrics Translate script)", basename)
-                track["issues"].append("LYRICS")
-            elif cfg.get("lrc_enhanced_enabled", True) \
-                    and cfg.get("lrc_enhanced_word_sync", True) \
-                    and (sync_level_of(xlit_text) < sync_level_of(_xlit_src)
-                         or not text_meets_sync_level(xlit_text, cfg.get("lrc_sync_level", "LINE"))):
-                # the source lyrics are syllable/word-synced — the
-                # romanization must be too, at least as fine-grained, or
-                # karaoke dies at the romanized line
-                failed_checks += 1
-                add_issue("Transliteration not syllable-synced "
-                          "(force re-run Lyrics Translate script)", basename)
-                track["issues"].append("LYRICS")
-        if _xlit_src and cfg.get("grade_check_trans", True) \
-                and cfg.get("lyrics_translate_enabled", True) \
-                and needs_translation(_xlit_src, cfg):
-            lang = primary_translation_lang(cfg)
-            total_checks += 1
-            trans_text = str(af.get_lyrics_transform("TRANSLATION", lang, exact=True) or "").strip()
-            if not trans_text:
-                _trans_side = os.path.splitext(ap)[0] + f".{lang}.lrc"
-                if os.path.isfile(_trans_side):
-                    try:
-                        with open(_trans_side, "r", encoding="utf-8", errors="replace") as _f:
-                            trans_text = _f.read().strip()
-                    except OSError:
-                        trans_text = ""
-            if not trans_text:
-                failed_checks += 1
-                add_issue(f"No {lang} translation (run Lyrics Translate script)",
-                          basename)
-                track["issues"].append("LYRICS")
-            elif cfg.get("lrc_enhanced_enabled", True) \
-                    and cfg.get("lrc_enhanced_word_sync", True) \
-                    and (sync_level_of(trans_text) < sync_level_of(_xlit_src)
-                         or not text_meets_sync_level(trans_text, cfg.get("lrc_sync_level", "LINE"))):
-                failed_checks += 1
-                add_issue(f"{lang} translation not syllable-synced "
-                          "(force re-run Lyrics Translate script)", basename)
-                track["issues"].append("LYRICS")
-
         # Transform tags must carry their language — TRANSLATION-EN,
         # TRANSLITERATION-JA-LATN — never the bare legacy names, so the
         # stored language is auditable (and gradeable) per file.
@@ -1800,10 +1924,9 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             if _bare_transforms:
                 total_checks += 1
                 failed_checks += 1
-                _want = primary_translation_lang(cfg).upper()
                 add_issue(
                     f"{', '.join(_bare_transforms)} tag lacks language detail "
-                    f"(expected e.g. TRANSLATION-{_want}, TRANSLITERATION-JA-LATN)",
+                    "(expected e.g. TRANSLATION-EN, TRANSLITERATION-JA-LATN)",
                     basename)
                 track["issues"].append("LYRICS")
 
@@ -1833,7 +1956,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                         ext_sc = os.path.splitext(sidecar)[1].lower()
                         tgt_sc = _get_cover_target_size(ext_sc, cfg)
                         enforce_size_sc = bool(cfg.get("cover_enforce_size", False)) and bool(cfg.get("cover_resize_enabled", False)) and tgt_sc > 0
-                        enforce_square_sc = bool(cfg.get("cover_enforce_square", False))
+                        enforce_square_sc = bool(cfg.get("cover_enforce_square", False)) and bool(cfg.get("grade_check_cover_crop", True))
                         try:
                             if HAS_PIL:
                                 with Image.open(sidecar) as _im_sc:
@@ -1845,15 +1968,15 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                                         thr_sc = max(0.0, min(0.5, thr_sc))
                                         ratio_sc = _w_sc / _h_sc if _h_sc else 1.0
                                         if abs(ratio_sc - 1.0) > thr_sc:
-                                            detail = f"not square {_w_sc}x{_h_sc}"
+                                            detail = f"aspect ratio {_w_sc}x{_h_sc} not square"
                                         else:
-                                            detail = "needs resize/crop"
+                                            detail = "needs resize"
                                     else:
-                                        detail = "needs resize/crop"
+                                        detail = "needs resize"
                             else:
-                                detail = "needs resize/crop"
+                                detail = "needs resize"
                         except Exception:
-                            detail = "needs resize/crop"
+                            detail = "needs resize"
                     add_issue(f"Sidecar cover {os.path.basename(sidecar)} {detail}", basename)
                     track["issues"].append("COVER")
         except Exception:
@@ -1969,6 +2092,12 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             if not has_log:
                 failed_checks += 1
                 add_issue("Missing .log file", "album")
+            elif not usable_logs:
+                # A file that merely ENDS in .log (empty, or whitespace only)
+                # is not a rip log: it cannot carry a CRC or a LOG_GRADE.
+                failed_checks += 1
+                add_issue("Rip .log is empty/unreadable — not a usable rip log",
+                          "album")
 
         if cfg.get("grade_check_cd_cue", True):
             total_checks += 1
@@ -1991,6 +2120,9 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 bad_cues = [f for f in all_files
                             if f.lower().endswith(".cue")
                             and not _is_exp(f, pat, ".cue")]
+                # Counted at the end: a check that throws is counted by
+                # unavailable() instead, so it is counted exactly once either
+                # way and can never vanish from the grade.
                 total_checks += 1
                 if bad_logs or bad_cues:
                     failed_checks += 1
@@ -1998,8 +2130,8 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     add_issue(f"CD rip sheets not named {pat} (found: {detail}) — "
                               f"enable Settings → CD Rips → Auto-Rename or "
                               f"rename manually to {pat.replace('{n}', '1')}.log", "album")
-            except Exception:
-                pass
+            except Exception as e:
+                unavailable("CD rip sheet naming check", e)
 
         # CD releases must carry the rip-log score on every track (skipped if
         # LOG_GRADE disabled for this filetype). Digital Media has no log.
@@ -2047,17 +2179,50 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 log_paths = [os.path.join(album_dir, f)
                              for f in all_files
                              if f.lower().endswith(".log")]
-                crc_map = {}
+                # Per-DISC checksum maps, keyed by the log each checksum came
+                # from: a multi-disc rip has one .log per disc, and merging
+                # them into one flat map (then guessing the disc back from
+                # the RENAME pattern) reported every track as uncovered as
+                # soon as auto-rename was off or the logs were named
+                # differently. The disc is now read from the log's own file
+                # name, never from a required naming scheme.
+                disc_pattern = _pat2(cfg)
+                per_disc_crc = {}
+                unmapped_crc = {}
+
+                def _disc_for_log(name):
+                    low = os.path.basename(name).lower()
+                    for n in range(1, 100):
+                        try:
+                            if low == _exp_name(disc_pattern, n, ".log").lower():
+                                return n
+                        except Exception:
+                            break
+                    try:
+                        from .discs import _log_name_disc
+                        return _log_name_disc(name)
+                    except Exception:
+                        return None
+
                 for lp in sorted(log_paths):
-                    crc_map.update(parse_log_checksums(read_log_text(lp)))
-                if not crc_map:
+                    got = parse_log_checksums(read_log_text(lp))
+                    if not got:
+                        continue
+                    d = _disc_for_log(lp)
+                    if d:
+                        per_disc_crc.setdefault(d, {}).update(got)
+                    else:
+                        unmapped_crc.update(got)
+                if not per_disc_crc and not unmapped_crc:
                     total_checks += 1
                     failed_checks += 1
                     add_issue("Rip .log has no per-track CRC checksums "
                               "(cannot verify CD integrity)", "album")
                 else:
                     discs_map = _album_discs(album_dir)
-                    multi = bool(discs_map)
+                    disc_by_path = {p: d for d, paths in (discs_map or {}).items()
+                                    for p in paths}
+                    single_log = len(log_paths) <= 1
                     for ap in audio_paths:
                         tr_track = track_by_path.get(ap)
                         if tr_track is None or tr_track.get("unreadable"):
@@ -2072,20 +2237,23 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                                 tn = _file_track_number(ap)
                         except Exception:
                             tn = _file_track_number(ap)
-                        covered = tn is not None and tn in crc_map
-                        if multi:
-                            d = disc_of_filename(os.path.basename(ap)) or 1
-                            dlog = os.path.join(album_dir, _exp_name(_pat2(cfg), d, ".log"))
-                            if not os.path.isfile(dlog):
-                                covered = False
+                        d = (disc_by_path.get(ap)
+                             or disc_of_filename(os.path.basename(ap)) or 1)
+                        crcs = per_disc_crc.get(d)
+                        if crcs is None and (single_log or unmapped_crc):
+                            # One log (or a log whose disc could not be told
+                            # from its name) covers the album's tracks.
+                            crcs = unmapped_crc or next(
+                                iter(per_disc_crc.values()), {})
+                        covered = tn is not None and tn in (crcs or {})
                         total_checks += 1
                         if not covered:
                             failed_checks += 1
                             add_issue("Track not covered by .log CRC "
                                       "(unverifiable CD rip)", tr_track["file"])
                             tr_track["issues"].append("CRC")
-            except Exception:
-                pass
+            except Exception as e:
+                unavailable("CD rip-log CRC coverage check", e)
 
         # CD format: must be 16-bit 44.1 kHz (CD-DA) — helps detect fake rips from hi-res upsampled sources
         if cfg.get("grade_check_cd_format", True) and _is_cd(media_summary):
@@ -2117,8 +2285,8 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                         failed_checks += 1
                         add_issue(f"CD must be 16-bit 44.1 kHz (found {detail or 'unknown format'})", tr_track["file"])
                         tr_track["issues"].append("CD_FORMAT")
-            except Exception:
-                pass
+            except Exception as e:
+                unavailable("CD 16-bit/44.1 kHz format check", e)
 
         # Viewer columns for CD log checksum / AccurateRip — REAL/NONE/FAKE
         # CHECKSUM: derived from rip .log's SHA256 (EAC), AccurateRip is ONLY via .accurip (CUETools)
@@ -2497,9 +2665,11 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 size_failed = True
                 cover_ok = False
                 add_issue(f"Cover image unreadable/corrupt (need {target_cov}x{target_cov})", "album")
-        # Square enforcement: aspect within threshold (force_exact uses strict threshold from config)
+        # Aspect-ratio (squareness) enforcement — NOT crop detection: there
+        # is no crop heuristic here, only |w/h - 1| <= threshold, so the
+        # issue text says so. grade_check_cover_crop keeps gating it.
+        # (force_exact uses the strict threshold from config)
         if enforce_square and cfg.get("grade_check_cover", True) and cfg.get("grade_check_cover_crop", True):
-            total_checks += 1
             if force_exact:
                 try:
                     thr_cov = float(cfg.get("grader_strict_square_threshold", 0.0) or 0.0)
@@ -2519,16 +2689,21 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                         failed_checks += 1
                         square_failed = True
                         cover_ok = False
-                        add_issue(f"Cover image not square {w}x{h} (threshold {thr_cov:.0%})", "album")
+                        add_issue(f"Cover aspect ratio {w}x{h} not square "
+                                  f"(threshold {thr_cov:.0%})", "album")
                         if not size_info:
                             size_info = f"{w}x{h} not square"
                 elif cover_read_error:
                     failed_checks += 1
                     square_failed = True
                     cover_ok = False
-                    add_issue("Cover image unreadable/corrupt (not square)", "album")
-            except Exception:
-                pass
+                    add_issue("Cover image unreadable/corrupt (aspect ratio "
+                              "unverifiable)", "album")
+                # Counted once, at the end: an exception is counted by
+                # unavailable() instead (never silently dropped, never double).
+                total_checks += 1
+            except Exception as e:
+                unavailable("Cover aspect-ratio check", e)
         if size_failed or square_failed:
             if size_failed and square_failed:
                 cover_detail = f"{cover_file} (wrong size, not square {size_info})"
@@ -2537,7 +2712,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             elif square_failed:
                 cover_detail = f"{cover_file} (not square {size_info})"
             else:
-                cover_detail = f"{cover_file} (needs resize/crop)"
+                cover_detail = f"{cover_file} (needs resize)"
         else:
             cover_detail = cover_file
         # ENCODER for cover image per-format (only when that field is enabled)
@@ -2701,12 +2876,15 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             add_issue(f"File extension not lowercase: {shown}", "album")
 
     # Raw, un-remuxed video files (VOB/AVI/WMV/TS/...) fail grading — script
-    # 11 normalizes them to MKV with every stream copied bit-exact. The
-    # remuxed containers themselves (MKV/MP4) are not flagged here.
+    # 11 normalizes them to MKV with every stream copied bit-exact. MKV is
+    # the remux TARGET and MP4/M4V play and tag natively (script 11 leaves
+    # them alone unless video_process_mp4 is on), so neither is flagged.
     if cfg.get("grade_check_raw_video", True):
         try:
-            from .remux import VIDEO_EXTS as _ALL_VIDEO_EXTS
-            _RAW_VIDEO_EXTS = tuple(e for e in _ALL_VIDEO_EXTS if e != ".mkv")
+            from .remux import REMUX_GATED_EXTS, VIDEO_EXTS as _ALL_VIDEO_EXTS
+            _RAW_VIDEO_EXTS = tuple(
+                e for e in _ALL_VIDEO_EXTS
+                if e != ".mkv" and e not in REMUX_GATED_EXTS)
         except Exception:
             _RAW_VIDEO_EXTS = ()
         raw_videos = [f for f in sorted(all_files)

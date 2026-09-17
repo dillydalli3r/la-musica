@@ -83,12 +83,8 @@ class Backend:
         if state == "foreign":
             return "foreign"  # never spawn into, adopt or kill someone else's port
         flags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
-        exe = sys.executable
-        if os.name == "nt" and exe.lower().endswith("python.exe"):
-            # never give the backend a console of its own
-            pythonw = os.path.join(os.path.dirname(exe), "pythonw.exe")
-            if os.path.isfile(pythonw):
-                exe = pythonw
+        # never give the backend a console of its own
+        exe = _pythonw() or sys.executable
         env = dict(os.environ)
         env["MLO_ALLOW_SHUTDOWN"] = "1"  # lets any launcher stop this backend
         self.proc = subprocess.Popen(
@@ -232,8 +228,26 @@ def migrate_legacy_autostart():
         pass
 
 
+def _pythonw():
+    """pythonw.exe for this interpreter (falls back to PATH), or None."""
+    exe = sys.executable
+    if exe.lower().endswith("python.exe"):
+        sibling = os.path.join(os.path.dirname(exe), "pythonw.exe")
+        if os.path.isfile(sibling):
+            return sibling
+    return shutil.which("pythonw")
+
+
 def _autostart_command():
-    exe = shutil.which("pythonw") or sys.executable
+    """Login command for tray.py, or None when pythonw is unavailable.
+
+    It MUST be pythonw: sys.executable would put a console window on screen at
+    every login (and the tray would then detach into yet another one), so a
+    machine without pythonw gets no entry instead of a visible terminal.
+    """
+    exe = _pythonw()
+    if not exe:
+        return None
     return f'"{exe}" "{os.path.join(ROOT, "tray.py")}"'
 
 
@@ -257,7 +271,12 @@ def set_autostart(enabled):
     key = r"Software\Microsoft\Windows\CurrentVersion\Run"
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key) as k:
         if enabled:
-            winreg.SetValueEx(k, AUTOSTART_NAME, 0, winreg.REG_SZ, _autostart_command())
+            command = _autostart_command()
+            if command is None:
+                _alert("pythonw.exe not found - refusing to register an "
+                       "auto-start entry that would open a console window.")
+                return False
+            winreg.SetValueEx(k, AUTOSTART_NAME, 0, winreg.REG_SZ, command)
         else:
             try:
                 winreg.DeleteValue(k, AUTOSTART_NAME)
@@ -458,8 +477,8 @@ def _relaunch_detached():
     via pythonw so no terminal window stays open while the tray runs."""
     if os.name != "nt" or not sys.executable.lower().endswith("python.exe"):
         return False
-    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-    if not os.path.isfile(pythonw):
+    pythonw = _pythonw()
+    if not pythonw:
         return False
     subprocess.Popen(
         [pythonw, os.path.abspath(__file__)],

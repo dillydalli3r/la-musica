@@ -20,9 +20,10 @@ import { gradeSliver, statusFor, auditFails } from "../lib/status";
 import { invalidateLibrary } from "../lib/invalidate";
 import { albumRef, trackRef, artistRef, entityLinkClick } from "../lib/refs";
 import { fmtTech, fmtDuration, fmtDateCell, originalYear, GRID_SIZE_MIN } from "../lib/fmt";
-import { EmptyState, GradeBadge, MediaChip, AdvisoryMark } from "../components/Badges";
+import { EmptyState, GradeBadge, MediaChip, AdvisoryMark, PageLoading } from "../components/Badges";
 import { forceDict, loadForceSel } from "../lib/force";
 import Segmented from "../components/Segmented";
+import PageHeader from "../components/PageHeader";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import FavHeart from "../components/FavHeart";
 import AlbumCard from "../components/AlbumCard";
@@ -227,7 +228,6 @@ export default function LibraryPage() {
   // Per-slice selectors: a bare useStore() subscribes this page to every
   // store write (progress ticks, volume, queue) and re-renders the tables.
   const query = useStore((s) => s.query);
-  const setToast = useStore((s) => s.setToast);
   const selection = useStore((s) => s.selection);
   const setSelection = useStore((s) => s.setSelection);
   const toggleTrack = useStore((s) => s.toggleTrack);
@@ -407,7 +407,7 @@ export default function LibraryPage() {
     } else {
       await api.playlistAdd(manual.id, paths);
     }
-    setToast(`Added ${paths.length} track(s) to playlist`);
+    toast(`Added ${paths.length} track(s) to playlist`);
   };
 
   const removeAlbums = async (paths: string[]) => {
@@ -417,11 +417,11 @@ export default function LibraryPage() {
     setRemoving("batch");
     try {
       for (const d of paths) await api.removeAlbum(d);
-      setToast(`Moved ${paths.length} album(s) to trash`);
+      toast(`Moved ${paths.length} album(s) to trash`);
       clearSelection();
       invalidateLibrary(qc);
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setRemoving(null);
     }
@@ -487,7 +487,7 @@ export default function LibraryPage() {
         invalidateLibrary(qc);
       }
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setLyricsBusy(false);
     }
@@ -513,7 +513,7 @@ export default function LibraryPage() {
       clearSelection();
       invalidateLibrary(qc);
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -549,10 +549,10 @@ export default function LibraryPage() {
       // force toggles keep working independently as saved defaults).
       const forceOpts = force ? forceDict(loadForceSel()) : undefined;
       await api.run(ids, selectionAlbumDirs, forceOpts);
-      setToast(`Scripts run on ${selectionAlbumDirs.length} album(s)${force ? " (forced)" : ""}`);
+      toast(`Scripts run on ${selectionAlbumDirs.length} album(s)${force ? " (forced)" : ""}`);
       invalidateLibrary(qc);
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -606,24 +606,7 @@ export default function LibraryPage() {
   };
 
   if (error) return <EmptyState title="Backend unreachable" hint={String(error)} />;
-  if (isLoading || !lib)
-    return (
-      <div className="p-6 space-y-4">
-        <div className="flex items-center gap-2 text-xs text-zinc-500">
-          <span className="h-3.5 w-3.5 rounded-full border-2 border-zinc-700 border-t-zinc-400 animate-spin inline-block" />
-          Scanning library…
-        </div>
-        <div className="grid gap-x-4 gap-y-5" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(164px, 1fr))" }}>
-          {Array.from({ length: 12 }).map((_, i) => (
-            <div key={i} className="p-2 animate-pulse">
-              <div className="aspect-square w-full rounded-xl bg-zinc-800/60" />
-              <div className="h-3 w-3/4 rounded bg-zinc-800/60 mt-2.5" />
-              <div className="h-2.5 w-1/2 rounded bg-zinc-800/40 mt-1.5" />
-            </div>
-          ))}
-        </div>
-      </div>
-    );
+  if (isLoading || !lib) return <PageLoading label="Scanning library…" />;
 
   const albumRows: ({ kind: "header"; artist: string } | { kind: "album"; album: FlatAlbum })[] = [];
   if (groupByArtist) {
@@ -644,10 +627,9 @@ export default function LibraryPage() {
   const allTracksSelected = sortedTracks.length > 0 && sortedTracks.every((t) => selection.tracks.includes(t.path));
 
   return (
-    <div className="p-6 space-y-3">
-      <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-        <Library className="h-6 w-6 text-accent" /> Library
-      </h1>
+    <div className="p-6 space-y-5">
+      {/* toolbar rides in the header: controls left, stats/select/counts right */}
+      <PageHeader icon={Library} title="Library">
       {/* toolbar — every control on ONE line (wrapped as a unit when the
           window is narrow): view tabs, sort, grid size, group-by, columns,
           quick filter — then stats/select and the counts on the right. */}
@@ -789,6 +771,7 @@ export default function LibraryPage() {
           </span>
         </div>
       </div>
+      </PageHeader>
 
       {/* selection toolbar */}
       {selectionCount > 0 && (
@@ -880,7 +863,7 @@ export default function LibraryPage() {
       {view === "grid" && (
         <div>
           <div
-            className="grid gap-x-4 gap-y-5"
+            className="grid gap-x-4 gap-y-5 stagger"
             style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${GRID_SIZE_MIN[gridSize]}px, 1fr))` }}
           >
             {gridSections.map((sec) => (
@@ -969,7 +952,7 @@ export default function LibraryPage() {
                     {st.key === "fail" ? gradeSliver(!!al.pass, al.audit_summary) : ""}
                   </span>
                   <span className="text-[10px] text-zinc-600 shrink-0 w-8 text-right">{al.track_count}t</span>
-                  <div className="opacity-0 group-hover:opacity-100 flex gap-1 shrink-0 transition-opacity" onClick={(e) => e.stopPropagation()}>
+                  <div className="opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 flex gap-1 shrink-0 transition-opacity" onClick={(e) => e.stopPropagation()}>
                     <button className="btn-ghost !px-1.5 !py-0.5" title={isExp ? "Collapse" : "Show tracks"}>
                       {isExp ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
                     </button>
@@ -1066,7 +1049,7 @@ export default function LibraryPage() {
                   <th className="th w-24 text-right">Actions</th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="stagger">
                 {(groupByArtist ? albumRows : sortedAlbums.map((al) => ({ kind: "album" as const, album: al }))).map((row) =>
                   row.kind === "header" ? (
                     <tr key={`h-${row.artist}`} className="bg-panel/70">
@@ -1128,7 +1111,7 @@ export default function LibraryPage() {
                   ))}
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="stagger">
                 {sortedArtists.map((a) => {
                   const sel = selection.artists.includes(a.path);
                   return (
@@ -1188,7 +1171,7 @@ export default function LibraryPage() {
                   ))}
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="stagger">
                 {sortedTracks.map((tr) => {
                   const sel = selection.tracks.includes(tr.path);
                   return (

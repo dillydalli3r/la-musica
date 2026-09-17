@@ -1,15 +1,28 @@
 """Console output helpers shared by every module."""
 import os
+import sys
 from datetime import datetime
 
-# Per-file console lines are used by front-ends that suppress the tqdm
-# progress bars (the GUI). The CLI keeps the bars and skips these lines.
-_file_lines = False
+# Windows gives a redirected stdout the locale codec (cp1252), which cannot
+# encode the box/arrow glyphs the reports use: force UTF-8 so `python -m mlo >
+# out.txt` writes a log instead of dying with UnicodeEncodeError.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 
-def set_file_lines(enabled):
-    global _file_lines
-    _file_lines = bool(enabled)
+def _is_console():
+    try:
+        return bool(sys.stdout.isatty())
+    except Exception:
+        return False
+
+
+# ANSI colours are for an interactive console: NO_COLOR, or a pipe/redirect,
+# keeps escape codes out of log files.
+_COLOR = not os.environ.get("NO_COLOR") and _is_console()
 
 class Color:
     RESET = "\033[0m"
@@ -24,11 +37,14 @@ class Color:
 
 
 def c(text, color_code):
-    return f"{color_code}{text}{Color.RESET}"
+    return f"{color_code}{text}{Color.RESET}" if _COLOR else str(text)
 
 
 def clear_screen():
-    os.system("cls" if os.name == "nt" else "clear")
+    """Clear an attached console; a redirect is left untouched."""
+    if not _is_console():
+        return
+    print("\033[2J\033[H", end="", flush=True)
 
 
 def log(msg, color=None):
@@ -58,45 +74,19 @@ def fmt_short_bytes(b):
     return f"{b:,} B"
 
 
-def log_file_result(name, status, b_rem=0, b_add=0, info=None):
-    """One compact line per processed file. status: ok | skip | fail.
-
-    Byte deltas are rendered prominently (bold, colored) so savings and
-    removals stand out at a glance. No-op unless set_file_lines(True).
-    """
-    if not _file_lines:
-        return
-    base = os.path.basename(str(name))
-    if status == "ok":
-        net = int(b_rem) - int(b_add)
-        if net > 0:
-            delta = f"  {c('▼ ' + fmt_short_bytes(net) + ' saved', Color.GREEN)}"
-        elif net < 0:
-            delta = f"  {c('▲ ' + fmt_short_bytes(-net) + ' added', Color.RED)}"
-        else:
-            delta = f"  {c('0 B', Color.GREY)}"
-        log(f"{c('✓ ', Color.GREEN)}{base}{delta}")
-    elif status == "skip":
-        note = f" ({info})" if info else ""
-        log(f"{c('– ', Color.GREY)}{base}{c(note, Color.GREY)}")
-    else:
-        log(f"{c('✕ ', Color.RED)}{base}  {c(str(info or 'failed'), Color.RED)}")
-
-
 def print_separator():
     print(c("-" * 60, Color.GREY), flush=True)
 
 
 def print_header(title):
-    print(c(f"── {title} ", Color.CYAN) + c("─" * max(2, 58 - len(title)), Color.GREY),
+    """Banner line, exactly 60 columns wide like print_separator()."""
+    print(c(f"── {title} ", Color.CYAN) + c("─" * max(2, 56 - len(title)), Color.GREY),
           flush=True)
 
 
 def pause_for_input():
-    try:
-        input(c("\nPress Enter to continue...", Color.GREY))
-    except (EOFError, KeyboardInterrupt):
-        pass
+    """Wait for Enter; Ctrl+C and EOF propagate so the caller can abort."""
+    input(c("\nPress Enter to continue...", Color.GREY))
 
 
 def _short_val(v, n=28):

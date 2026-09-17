@@ -357,6 +357,13 @@ export interface MBRelease {
   country?: string;
   catalog_number?: string;
   label?: string;
+  /** MusicBrainz release status ("Official", "Promotion", "Bootleg", …) — the
+   *  value the promo/format badges read. */
+  status?: string;
+  /** The release's carrier description ("CD", "Digital Media", …). */
+  medium?: string;
+  /** The credited artist's MBID, when release_lookup supplies one. */
+  artist_mbid?: string;
   artists: MBPerson[];
   genres: string[];
   media: MBTrack[];

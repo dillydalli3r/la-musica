@@ -4,6 +4,9 @@ import re
 
 from .paths import DEPS_DIR
 
+# Vendored pip packages whose import name differs from the pip name.
+PIP_IMPORT_NAMES = {"yt-dlp": "yt_dlp"}
+
 def _parse_version(s):
     if not s:
         return None
@@ -135,6 +138,30 @@ def _detect_system_tools():
     if ffmpeg and ffprobe:
         tools["ffmpeg"] = {"version": None, "ffmpeg_exe": ffmpeg, "ffprobe_exe": ffprobe}
 
+    rsgain = shutil.which("rsgain")
+    if rsgain:
+        tools["rsgain"] = {"version": None, "rsgain_exe": rsgain}
+
+    # chromaprint's fpcalc: the Linux counterpart of the Windows download
+    # (Debian/Ubuntu: libchromaprint-tools) - mlo/acoustid.py resolves it from
+    # PATH on its own, this is only so Dependencies shows it.
+    fpcalc = shutil.which("fpcalc")
+    if fpcalc:
+        tools["chromaprint"] = {"version": None, "fpcalc_exe": fpcalc}
+
+    # yt-dlp: on Linux the vendored pip package (fetchdeps installs it with
+    # `pip --target`, see PIP_ON_LINUX) or a distro/pip install on PATH. There
+    # is no Linux binary to point at, so ytdlp_exe stays None for the vendored
+    # package - server/youtube.py imports the module instead.
+    vendored_ytdlp = python_pkg_path("yt-dlp")
+    if vendored_ytdlp:
+        tools["yt-dlp"] = {"version": None, "ytdlp_exe": None,
+                           "python_path": vendored_ytdlp}
+    else:
+        ytdlp = shutil.which("yt-dlp")
+        if ytdlp:
+            tools["yt-dlp"] = {"version": None, "ytdlp_exe": ytdlp}
+
     return tools
 
 
@@ -143,6 +170,15 @@ def detect_all_tools():
     with _CACHE_LOCK:
         if _TOOLS_CACHE is not None:
             return _TOOLS_CACHE
+
+    # .dependencies only ever holds Windows binaries (fetchdeps refuses to
+    # install anything else off-Windows), so on Linux/macOS the distro
+    # packages on PATH ARE the tools - never select an unrunnable .exe folder.
+    if os.name != "nt":
+        tools = _detect_system_tools()
+        with _CACHE_LOCK:
+            _TOOLS_CACHE = tools
+        return tools
 
     tools = {}
 
@@ -236,6 +272,15 @@ def detect_all_tools():
                 "php_exe": os.path.join(d, "php.exe"),
             }
 
+    yv, yf = _detect_tool("yt-dlp", DEPS_DIR)
+    if yf:
+        d = os.path.join(DEPS_DIR, yf)
+        if os.path.isfile(os.path.join(d, "yt-dlp.exe")):
+            tools["yt-dlp"] = {
+                "version": yv,
+                "ytdlp_exe": os.path.join(d, "yt-dlp.exe"),
+            }
+
     lc_v, lc_f = _detect_tool("logchecker", DEPS_DIR)
     if lc_f:
         d = os.path.join(DEPS_DIR, lc_f)
@@ -290,7 +335,8 @@ def detect_all_tools():
     # Fill gaps from system packages (Linux/macOS/Docker) so each tool
     # category resolves even without the .dependencies downloader.
     system = _detect_system_tools()
-    for key in ("flac", "libjxl", "libjpeg_turbo", "oxipng", "ffmpeg"):
+    for key in ("flac", "libjxl", "libjpeg_turbo", "oxipng", "ffmpeg",
+                "rsgain", "chromaprint", "yt-dlp"):
         if key not in tools and key in system:
             tools[key] = system[key]
 
@@ -309,17 +355,20 @@ def simple_dr_meter_path():
 
 
 def python_pkg_path(pkg):
-    """Vendored pip-package dir for *pkg* ('librosa', 'beets'), or None.
+    """Vendored pip-package dir for *pkg* ('librosa', 'beets', 'yt-dlp').
 
-    Layout is '.dependencies/<pkg> vX.Y' (see fetchdeps.PIP_PACKAGES).
+    Layout is '.dependencies/<pkg> vX.Y' (see fetchdeps.PIP_PACKAGES); the
+    import name can differ from the pip name (yt-dlp -> yt_dlp), hence
+    PIP_IMPORT_NAMES.
     """
     if not os.path.isdir(DEPS_DIR):
         return None
+    top = PIP_IMPORT_NAMES.get(pkg, pkg)
     try:
         for entry in sorted(os.listdir(DEPS_DIR)):
             full = os.path.join(DEPS_DIR, entry)
             if (os.path.isdir(full) and entry.lower().startswith(pkg.lower())
-                    and os.path.isfile(os.path.join(full, pkg, "__init__.py"))):
+                    and os.path.isfile(os.path.join(full, top, "__init__.py"))):
                 return full
     except OSError:
         pass

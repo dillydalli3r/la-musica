@@ -18,8 +18,11 @@ filled in by hand:
 
 3) MOOD from the track's own audio (``mlo.moods``: tempo, energy, brightness,
    dynamics → valence/arousal quadrant), refined by the track's GENRE in
-   hybrid mode. Grading requires the tag, so every track gets one unless the
-   file cannot be decoded or librosa is unavailable.
+   hybrid mode, plus ENERGY — the 0-100 arousal the verdict was scored from.
+   Grading requires the tags, so every track gets them unless the file cannot
+   be decoded or librosa is unavailable; video containers are analysed too
+   (mlo.moods extracts their audio through ffmpeg), and the GENRE they carry
+   is written through the same video tag writer.
 
 4) GENRE autofill when the tags carry none, through a caller-supplied
    provider hook (``set_genre_lookup``). The engine deliberately does not
@@ -292,8 +295,13 @@ def run_auto_tagging(config):
                     # track), so an already-correct tag short-circuits exactly
                     # like the GENRE branch above: re-running Auto tagging, or
                     # importing the same album again, must not re-analyse the
-                    # library for nothing.
-                    if not force and str(af.get_tag("MOOD") or "").strip():
+                    # library for nothing. A track tagged before ENERGY
+                    # existed is analysed once more to backfill it.
+                    has_mood = bool(str(af.get_tag("MOOD") or "").strip())
+                    wants_energy = should_write_audio_tag(
+                        config, "ENERGY", filepath=path)
+                    has_energy = bool(str(af.get_tag("ENERGY") or "").strip())
+                    if not force and has_mood and (not wants_energy or has_energy):
                         continue
                     genre = af.get_tag("GENRE") or ""
                     if moods.apply_mood_tags(af, path, config, genre=genre):

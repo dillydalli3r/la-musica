@@ -15,7 +15,7 @@ from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _diff_bytes, _walk_files,
     _collect_targets, worker_count,
 )
-from .ui import print_header, log, c, Color, log_file_result
+from .ui import print_header, log, c, Color
 
 # Lossless but uncompressed (or externally compressed) sources that script 3
 # converts to FLAC so the whole library is losslessly compressed. ffmpeg
@@ -641,7 +641,6 @@ def run_optimize_flacs(config):
                 # useful for byte metrics, so treat it as skipped.
                 if info.startswith("removed seektable") and b_rem == 0 and b_add == 0:
                     stats["skipped_count"] += 1
-                    log_file_result(filename, "skip", info="seektable removed")
                     _pbar_skip(pbar, counts)
                     continue
 
@@ -649,19 +648,15 @@ def run_optimize_flacs(config):
                 stats["modified_count"] += 1
                 stats["total_bytes_removed"] += b_rem
                 stats["total_bytes_added"] += b_add
-                log_file_result(filename, "ok", b_rem, b_add)
                 _pbar_update(pbar, counts, kind="ok")
             else:
                 if info.startswith("skipped"):
                     stats["skipped_count"] += 1
-                    log_file_result(filename, "skip",
-                                    info=info[len("skipped"):].strip(" ()"))
                     _pbar_skip(pbar, counts)
                 else:
                     stats["total_scanned"] += 1
                     stats["error_count"] += 1
                     stats["errors"].append((filename, info))
-                    log_file_result(filename, "fail", info=info)
                     _pbar_update(pbar, counts, kind="fail")
 
         if pbar:
@@ -716,12 +711,9 @@ def run_optimize_flacs(config):
                             stats["modified_count"] += 1
                             stats["total_bytes_removed"] += b_rem
                             stats["total_bytes_added"] += b_add
-                            log_file_result(filename, "ok", b_rem, b_add)
                             _pbar_update(pbar2, conv_counts, kind="ok")
                         else:
                             stats["skipped_count"] += 1
-                            log_file_result(filename, "skip",
-                                            info=info.replace("skipped", "").strip(" ()"))
                             _pbar_skip(pbar2, conv_counts)
                     if pbar2:
                         pbar2.close()

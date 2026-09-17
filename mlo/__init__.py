@@ -15,7 +15,6 @@ Modules:
     naming      Picard-style naming-script evaluator
     lyrics      lyrics formatting + MEDIA/SOURCE normalization
     lyrics_fetch LRCLIB lyrics download (script 13)
-    lyrics_xlit transliteration / translation tags (script 15)
     cue         CUE sheet formatter
     discs       multi-CD mapping, CD-N naming and per-disc log scoring
     flac        lossless FLAC re-encoding
@@ -44,21 +43,17 @@ from .loudness import run_calc_dr_replaygain
 from .lyrics import run_format_lyrics
 from .audit import run_audit_library
 try:
-    from .accurip import run_generate_accurip
-except ImportError:
-    run_generate_accurip = None
-try:
     from .format_all import run_format_all
 except ImportError:
     run_format_all = None
 
-__version__ = "2.4.0"
+__version__ = "2.5.0"
 __all__ = [
     "load_config", "save_config", "DEFAULT_CONFIG",
     "run_auto_tagging",
     "run_format_lyrics", "run_format_cues", "run_optimize_flacs",
     "run_grade_library", "run_process_images", "run_audit_library",
-    "run_calc_dr_replaygain", "run_generate_accurip", "run_format_all",
+    "run_calc_dr_replaygain", "run_format_all",
 ]
 
 

@@ -16,6 +16,7 @@ import LyricsSidebar from "./LyricsSidebar";
 import TrackDownloadExport from "./TrackDownloadExport";
 import { trackRef } from "../lib/refs";
 import useSubtitleTracks from "./SubtitledVideo";
+import { ASPECT_FIT, readAspect, writeAspect, type VideoAspect } from "../lib/video";
 
 /** Mirrors the `/api/replaygain` payload (see `api.replaygain`): `gain` is the
  * dB the player applies (null = unity), `analyzed` says the backend had to
@@ -160,6 +161,14 @@ export default function PlayerBar() {
   const isVideo = !!current && (isVideoFile(current.file) || isVideoFile(current.path));
   const videoRef = useRef<HTMLVideoElement>(null);
   const media = () => (isVideo ? videoRef.current : audio()) as HTMLMediaElement | null;
+  // Music-video presentation, owned here because this is where the single
+  // <video> decoder lives: how the fullscreen picture fills the screen, and
+  // which caption track is showing (null = as tagged). The fullscreen overlay
+  // draws the pickers and drives these through props.
+  const [videoAspect, setVideoAspect] = useState<VideoAspect>(readAspect);
+  const [captions, setCaptions] = useState<number | null>(null);
+  // A new video starts from its own tagged caption track again.
+  useEffect(() => setCaptions(null), [current?.path]);
   // The rAF lyric clock (fullscreen + sidebar) keys its effect on this
   // callback's identity; a fresh closure per render (PlayerBar re-renders
   // several times a second) tore down and rebuilt the 60 fps loop, so the
@@ -282,7 +291,7 @@ export default function PlayerBar() {
         qc.invalidateQueries({ queryKey: ["likes"] });
         toast(`${r.liked ? "Liked" : "Unliked"} — ${displayTitle}`);
       })
-      .catch((e) => toast(String(e)));
+      .catch((e) => toast.error(String(e)));
   };
 
   // Reload + play whenever the queue identity or index changes (keyed on
@@ -464,7 +473,7 @@ export default function PlayerBar() {
     api
       .saveConfig({ ...cfg, ...patch })
       .then(() => qc.invalidateQueries({ queryKey: ["config"] }))
-      .catch((e) => toast(String(e)));
+      .catch((e) => toast.error(String(e)));
   };
   // The bar's gain readout: a number whenever a gain actually applies (tags or
   // measured on demand), and NOTHING at unity — a "0 dB" chip would claim the
@@ -533,11 +542,11 @@ export default function PlayerBar() {
     if (!current) return;
     try {
       await api.playlistAdd(pid, [current.path]);
-      toast(`Added “${displayTitle}” to ${name}`);
+      toast.success(`Added “${displayTitle}” to ${name}`);
       setPlOpen(false);
       qc.invalidateQueries({ queryKey: ["playlists"] });
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
   const newPlaylistAndAdd = async () => {
@@ -547,11 +556,11 @@ export default function PlayerBar() {
     try {
       const pl = await api.createPlaylist(name.trim(), "manual");
       await api.playlistAdd(pl.id, [current.path]);
-      toast(`Added “${displayTitle}” to ${name.trim()}`);
+      toast.success(`Added “${displayTitle}” to ${name.trim()}`);
       setPlOpen(false);
       qc.invalidateQueries({ queryKey: ["playlists"] });
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -994,7 +1003,7 @@ export default function PlayerBar() {
                               </div>
                             </button>
                             <button
-                              className="p-1 rounded text-zinc-600 hover:text-red-300 hover:bg-white/5 opacity-0 group-hover/qr:opacity-100 transition-opacity shrink-0"
+                              className="p-1 rounded text-zinc-600 hover:text-red-300 hover:bg-white/5 opacity-0 group-hover/qr:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity shrink-0"
                               onClick={() => queueRemoveAt(i)}
                               title="Remove from queue"
                             >
@@ -1258,6 +1267,8 @@ export default function PlayerBar() {
               videoRef={videoRef}
               fill={fullscreen}
               preferTranscode={preferTranscode}
+              aspect={videoAspect}
+              captions={captions}
               onTime={onVideoTime}
               onMeta={(e) => {
                 // A transcode-fallback remount creates a fresh element with
@@ -1302,6 +1313,15 @@ export default function PlayerBar() {
               getAudioTime={getAudioTime}
               speed={speed}
               onSpeedChange={setSpeed}
+              video={{
+                aspect: videoAspect,
+                captions,
+                onAspect: (a) => {
+                  setVideoAspect(a);
+                  writeAspect(a);
+                },
+                onCaptions: setCaptions,
+              }}
               rg={{
                 mode: rgMode,
                 preamp: rgPreamp,
@@ -1344,6 +1364,8 @@ function VideoPopout({
   videoRef,
   fill = false,
   preferTranscode = false,
+  aspect = "contain",
+  captions = null,
   onTime,
   onMeta,
   onEnded,
@@ -1355,17 +1377,36 @@ function VideoPopout({
    * its own transport over the picture. */
   fill?: boolean;
   preferTranscode?: boolean;
+  /** object-fit for the fullscreen picture (contain / cover / stretch). */
+  aspect?: VideoAspect;
+  /** Caption track to show: null = as tagged (the `default` track), -1 = off,
+   * >= 0 = that entry of `tracks`. */
+  captions?: number | null;
   onTime: (e: SyntheticEvent<HTMLVideoElement>) => void;
   onMeta: (e: SyntheticEvent<HTMLVideoElement>) => void;
   onEnded: (e?: SyntheticEvent<HTMLVideoElement>) => void;
 }) {
   const tracks = useSubtitleTracks(path);
+  const trackKey = tracks.map((t) => t.key).join("|");
   const [failed, setFailed] = useState(false);
   const [errorFallback, setErrorFallback] = useState(false);
   useEffect(() => {
     setFailed(false);
     setErrorFallback(false);
   }, [path]);
+  // `<track default>` only decides the track's INITIAL mode, so the choice is
+  // driven explicitly: one track `showing`, every other `disabled`. Runs on
+  // remount too (a track change, a transcode fallback) — re-applying
+  // `currentTime`-safe modes is the whole point.
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el) return;
+    const want = captions === null ? tracks.findIndex((t) => t.default) : captions;
+    for (let i = 0; i < el.textTracks.length; i++) {
+      el.textTracks[i].mode = i === want ? "showing" : "disabled";
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [captions, trackKey, path, errorFallback, preferTranscode]);
   // The probe decision and the onError fallback both force the live stream;
   // derived, so a late-arriving probe result needs no state syncing.
   const live = errorFallback || preferTranscode;
@@ -1393,7 +1434,7 @@ function VideoPopout({
         if (!live) setErrorFallback(true);
         else setFailed(true);
       }}
-      className={fill ? "h-full w-full object-contain bg-black" : "w-full aspect-video bg-black"}
+      className={fill ? `h-full w-full ${ASPECT_FIT[aspect]} bg-black` : "w-full aspect-video bg-black"}
     >
       {tracks.map((t) => (
         <track key={t.key} kind="subtitles" src={t.src} label={t.label} default={t.default} />

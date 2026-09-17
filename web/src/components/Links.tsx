@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { ExternalLink, Link2, Loader2 } from "lucide-react";
+import { ExternalLink, Link2, Loader2, Search } from "lucide-react";
 import { api } from "../api";
 import { toast } from "../store";
 import mbLogo from "../assets/musicbrainz.png";
@@ -11,7 +11,9 @@ import rymLogo from "../assets/rym.png";
  * LinkChips renders the open-in-database icon row from a tags object;
  * LinkEditorButton opens the paste-a-URL editor that maps a pasted
  * musicbrainz.org / rateyourmusic.com link (or bare MBID) onto the right
- * tags and writes them to every given path via /api/mb/assign. */
+ * tags and writes them to every given path via /api/mb/assign. Its
+ * RateYourMusic fields also offer Auto-find: /api/rym/resolve fills the
+ * field for review, or shows why it could not. */
 
 const MBID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -46,6 +48,13 @@ const FIELDS: Record<"artist" | "album" | "track", FieldDef[]> = {
     { key: "MUSICBRAINZ_TRACKID", label: "MusicBrainz recording", placeholder: "musicbrainz.org/recording/… or MBID", kind: "mb" },
     { key: "RATEYOURMUSIC_TRACK", label: "RYM track", placeholder: "rateyourmusic.com/song/…", kind: "rym" },
   ],
+};
+
+/** RYM link the server can look up for a field: it resolves album and artist
+ * pages (a track page has no lookup), and only fills an empty field. */
+const RYM_FIELD: Record<string, "album" | "artist"> = {
+  RATEYOURMUSIC_ALBUM: "album",
+  RATEYOURMUSIC_ARTIST: "artist",
 };
 
 const MB_URL: Record<string, (v: string) => string> = {
@@ -148,19 +157,51 @@ export function LinkEditorButton({
   mode,
   paths,
   current,
+  artist,
   iconOnly,
   onSaved,
 }: {
   mode: "artist" | "album" | "track";
   paths: string[];
   current?: Record<string, unknown>;
+  /** Artist name for the RYM auto-find, when the page knows one the tags do
+   *  not carry (an artist page has no artist tag to read). */
+  artist?: string;
   iconOnly?: boolean;
   onSaved?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [values, setValues] = useState<Record<string, string>>({});
+  const [notes, setNotes] = useState<Record<string, string>>({});
+  const [finding, setFinding] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const qc = useQueryClient();
+
+  // What the RYM lookup asks about: the names the page passed, else the tags
+  // already loaded for this editor.
+  const artistName =
+    (artist ?? "").trim() ||
+    (typeof current?.ALBUMARTIST === "string" ? current.ALBUMARTIST.trim() : "") ||
+    (typeof current?.ARTIST === "string" ? current.ARTIST.trim() : "");
+  const albumName = typeof current?.ALBUM === "string" ? current.ALBUM.trim() : "";
+
+  /** Fill an empty RYM field from rateyourmusic.com — never saves, so the
+   *  result stays editable; a miss shows the server's note instead. */
+  const autoFind = async (f: FieldDef) => {
+    const kind = RYM_FIELD[f.key];
+    setFinding(f.key);
+    try {
+      const r = await api.rymResolve(artistName, kind === "album" ? albumName : "");
+      const found = r[kind];
+      setValues((v) => ({ ...v, [f.key]: found ?? "" }));
+      setNotes((n) => ({ ...n, [f.key]: found ? "" : r.note || "could not resolve on RateYourMusic" }));
+    } catch (e) {
+      setNotes((n) => ({ ...n, [f.key]: "lookup failed — paste the URL instead" }));
+      toast.error(String(e));
+    } finally {
+      setFinding(null);
+    }
+  };
 
   const save = async () => {
     const writes: Record<string, Record<string, string>> = {};
@@ -197,7 +238,7 @@ export function LinkEditorButton({
       qc.invalidateQueries({ queryKey: ["artist"] });
       onSaved?.();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -223,6 +264,9 @@ export function LinkEditorButton({
             </div>
             {FIELDS[mode].map((f) => {
               const cur = current?.[f.key];
+              const kind = RYM_FIELD[f.key];
+              const lookup = kind === "album" ? artistName && albumName : kind === "artist" ? artistName : "";
+              const canFind = !!lookup && !(values[f.key] ?? "").trim() && finding !== f.key;
               return (
                 <div key={f.key}>
                   <label className="text-[11px] text-zinc-400 flex items-center gap-1.5">
@@ -238,13 +282,28 @@ export function LinkEditorButton({
                         set <ExternalLink className="h-2.5 w-2.5" />
                       </a>
                     )}
+                    {kind && (finding === f.key || canFind) && (
+                      <button
+                        className="ml-auto text-[10px] text-accent-soft hover:underline disabled:opacity-60 inline-flex items-center gap-0.5"
+                        onClick={() => autoFind(f)}
+                        disabled={finding === f.key}
+                        title={`Ask rateyourmusic.com for this ${kind} page and fill the field for review`}
+                      >
+                        {finding === f.key ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <Search className="h-2.5 w-2.5" />} Auto-find
+                      </button>
+                    )}
                   </label>
                   <input
                     className="input !py-1 !px-2 text-xs mt-0.5"
                     placeholder={f.placeholder}
                     value={values[f.key] ?? ""}
-                    onChange={(e) => setValues((v) => ({ ...v, [f.key]: e.target.value }))}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setValues((s) => ({ ...s, [f.key]: v }));
+                      setNotes((n) => (n[f.key] ? { ...n, [f.key]: "" } : n));
+                    }}
                   />
+                  {notes[f.key] && <div className="text-[10px] text-amber-300/80 mt-0.5">{notes[f.key]}</div>}
                 </div>
               );
             })}

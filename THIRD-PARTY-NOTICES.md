@@ -5,6 +5,12 @@ following projects. This file credits them and their licenses, as their
 licenses require. Each entry lists the project, what la musica uses it for,
 and its license.
 
+None of these are shipped in this repository: the app downloads them on demand
+into `.dependencies/`, and `mlo/fetchdeps.py` copies each archive's
+`LICENSE` / `COPYING` / `NOTICE` / `README` next to the installed binaries, so
+the licence text travels with the tool (GPL-2.0 §1 and LGPL-2.1 §1 ask for
+exactly that).
+
 - **slskd** — <https://github.com/slskd/slskd> — the Soulseek™ client daemon
   (searching, downloading, sharing). **AGPL-3.0**.
 - **beets** — <https://beets.io> — MusicBrainz-tagged imports with
@@ -17,7 +23,18 @@ and its license.
   encode/decode/verify. **BSD-3-Clause** (libFLAC), **GPL-2.0-or-later**
   (command-line tools).
 - **CUETools** — <https://github.com/gchudov/cuetools.net> — CUE handling
-  and verification helpers. **LGPL-2.1** (some components GPL).
+  and verification helpers. **GPL-2.0-or-later** (the GPL v2-or-later program
+  header in the bundled `License.txt`). It bundles further components, whose
+  licences that same file reproduces: **hdcd.dll** (MIT-style, HDCD is a
+  registered trademark of Microsoft), **unrar.dll** (freeware, © Alexander
+  Roshal — may be used freely to handle RAR archives), **unrar.cs** wrapper
+  (Schematrix / Michael A. McCloskey), **ALACDotNet.cs** (MIT-style, © David
+  Hammerton), **libFLAC** (BSD-3-Clause), **MAC_SDK** (Monkey's Audio SDK
+  licence agreement, © Matthew T. Ashland), **libwavpack** (BSD-3-Clause),
+  **FFmpeg.AutoGen** (**LGPL-3.0**). The release also ships **TagLibSharp.dll**
+  (**LGPL-2.1**) and **Newtonsoft.Json.dll** (**MIT**), and the project's own
+  `DeviceId.dll`, `Freedb.dll` and `ProgressODoom.dll`, which carry no separate
+  notice and are covered by the CUETools licence above.
 - **Logchecker** — <https://github.com/OPSnet/Logchecker> — rip log grading
   (EAC/XLD checksums and scores). **MIT**.
 - **AudioAuditor** — <https://github.com/Angel2mp3/AudioAuditor> — audio
@@ -25,7 +42,10 @@ and its license.
 - **rsgain** — <https://github.com/complexlogic/rsgain> — ReplayGain 2.0
   tagging. **BSD-2-Clause**.
 - **simple-dr-meter** — <https://github.com/magicgoose/simple-dr-meter> —
-  dynamic range analysis. See the project repository for licensing.
+  dynamic range analysis. **GPL-3.0** (the bundled `LICENSE`). la musica runs
+  it unmodified in intent — only three crash fixes for silent/very short tracks
+  (`mlo/fetchdeps.py:_patch_simple_dr_meter`), which stay under the same
+  licence.
 - **PHP** — <https://www.php.net> — runs the Logchecker phar. **PHP License
   v3.01**.
 - **libjxl (JPEG XL)** — <https://github.com/libjxl/libjxl> — JPEG XL cover
@@ -47,13 +67,29 @@ and its license.
 | [FastAPI](https://github.com/fastapi/fastapi) | MIT | HTTP API |
 | [Uvicorn](https://github.com/encode/uvicorn) | BSD-3-Clause | HTTP server |
 | [httpx](https://github.com/encode/httpx) | BSD-3-Clause | HTTP client |
-| [mutagen](https://github.com/quodlibet/mutagen) | GPL-2.0-or-later | audio tag read/write |
+| [mutagen](https://github.com/quodlibet/mutagen) | GPL-2.0-or-later | audio tag read/write (imported in-process — see below) |
 | [Pillow](https://github.com/python-pillow/Pillow) | HPND (MIT-CMU) | image processing |
 | [websockets](https://github.com/python-websockets/websockets) | BSD-3-Clause | progress relay |
 | [python-multipart](https://github.com/kludex/python-multipart) | Apache-2.0 | uploads |
 | [aiofiles](https://github.com/Tinche/aiofiles) | Apache-2.0 | async file IO |
 | [pystray](https://github.com/moses-palmer/pystray) | LGPL-3.0 | system tray |
 | [librosa](https://github.com/librosa/librosa) (+ numpy/scipy) | ISC | BPM/key analysis |
+
+### In-process copyleft: mutagen and Unidecode
+
+**mutagen (GPL-2.0-or-later)** is imported *in-process* by la musica — `mlo/deps.py`
+reads and writes the tags of every processed file — and is additionally vendored
+inside the beets tree. la musica itself is MIT, but GPL-2.0-or-later code linked into
+a program makes the distributed bundle a combined work: shipping it requires the
+GPL-2.0 text and a written offer for the corresponding source, and that code (and
+the work it is part of) has to stay under the GPL when redistributed. The GPL text
+ships in the installed mutagen package (`COPYING`/`LICENSE`, copied into
+`.dependencies/` by the installer); anyone redistributing a bundle containing it
+has to pass that on. A bundle that cannot be GPL must replace mutagen with a
+permissive tag library.
+
+**Unidecode (GPL-2.0-or-later)**, pulled in by the vendored beets tree, carries
+the same requirement for the beets bundle.
 
 ## Frontend packages
 
@@ -68,6 +104,79 @@ and its license.
 | [Vite](https://github.com/vitejs/vite) | MIT | build tool |
 | [TypeScript](https://github.com/microsoft/TypeScript) | Apache-2.0 | language |
 | [Tauri API](https://github.com/tauri-apps/tauri) | MIT / Apache-2.0 | desktop shell |
+
+## Bundled dependency trees
+
+beets and librosa are installed with `pip install --target`, so their whole
+dependency tree lands in `.dependencies/`. Those transitive packages are listed
+here with the licence each one declares (`License-Expression` in its
+`.dist-info/METADATA`):
+
+### beets tree
+
+| Project | License |
+| --- | --- |
+| beets | MIT |
+| colorama | BSD-3-Clause |
+| confuse, filetype, jellyfish, mediafile, platformdirs, PyYAML | MIT |
+| lap, musicbrainzngs | BSD-2-Clause |
+| numpy | BSD-3-Clause (bundles 0BSD, MIT, Zlib and CC0-1.0 parts) |
+| mutagen | **GPL-2.0-or-later** |
+| Unidecode | **GPL-2.0-or-later** |
+| typing_extensions | PSF-2.0 |
+
+### librosa tree
+
+| Project | License |
+| --- | --- |
+| librosa | ISC |
+| audioread, charset-normalizer, narwhals, urllib3 | MIT |
+| cffi | MIT-0 |
+| cloudpickle, idna, joblib, lazy-loader, pooch, pycparser, scikit-learn, scipy, soundfile, threadpoolctl | BSD-3-Clause |
+| decorator, llvmlite, numba | BSD-2-Clause (llvmlite also Apache-2.0 WITH LLVM-exception) |
+| numpy | BSD-3-Clause (bundles 0BSD, MIT, Zlib and CC0-1.0 parts) |
+| msgpack, requests | Apache-2.0 |
+| packaging | Apache-2.0 OR BSD-2-Clause |
+| certifi | MPL-2.0 |
+| **soxr** | **LGPL-2.1-or-later** — the native libsoxr resampler it ships |
+| typing_extensions, standard-aifc, standard-chunk, standard-sunau, audioop-lts | PSF-2.0 |
+
+## Desktop shell (Rust crates)
+
+The Tauri shell in `desktop/src-tauri` compiles a locked crate graph
+(`desktop/src-tauri/Cargo.lock`, 453 crates). Direct dependencies:
+
+| Crate | License |
+| --- | --- |
+| tauri, tauri-build, tauri-codegen, tauri-plugin-dialog, tauri-plugin-autostart | MIT OR Apache-2.0 |
+| serde, serde_json, dirs | MIT OR Apache-2.0 |
+| auto-launch | MIT |
+
+The rest of the graph was read from the licence each crate declares in its
+registry manifest. The 305 locked crates present in this checkout's cargo cache
+(453 entries total) resolve to:
+
+| License(s) | Crates |
+| --- | --- |
+| MIT OR Apache-2.0 (and the equivalent spellings) | 193 |
+| MIT | 51 |
+| Unicode-3.0 | 19 |
+| Zlib OR Apache-2.0 OR MIT | 13 |
+| Unlicense OR MIT | 11 |
+| BSD-2-Clause / BSD-3-Clause | 6 |
+| **MPL-2.0** (file-level copyleft, unmodified) | 5 — cssparser, cssparser-macros, dtoa-short, option-ext, selectors |
+| 0BSD or CC0-1.0 OR MIT-0 OR Apache-2.0 | 2 |
+| Apache-2.0 WITH LLVM-exception OR MIT/Apache-2.0 | 2 |
+| ISC | 1 |
+| MIT OR Apache-2.0 OR LGPL-2.1-or-later | 1 — r-efi (used under MIT/Apache) |
+| Apache-2.0 | 1 |
+
+No GPL or AGPL crate is anywhere in the graph. The remaining lock entries are
+the platform bindings for targets this build does not use (gtk/atk/cairo/dbus
+on Linux, core-*/objc2 on macOS, older duplicate versions, build-only crates);
+they are not part of the shipped Windows shell, and each publishes its own
+licence inside its crate archive — `cargo metadata` over `Cargo.lock` lists
+them exactly.
 
 ## Fonts
 

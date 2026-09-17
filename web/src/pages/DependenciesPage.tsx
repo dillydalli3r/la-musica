@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { FolderOpen, RotateCcw, Wrench } from "lucide-react";
 import { api } from "../api";
 import { toast } from "../store";
+import PageHeader from "../components/PageHeader";
 
 type DepTool = {
   key: string;
@@ -46,14 +47,11 @@ export default function DependenciesPage() {
     try {
       const r = await api.installDependencies(keys);
       const failed = r.results.filter((x) => !x.ok);
-      toast(
-        failed.length
-          ? `Install finished with ${failed.length} failure(s): ${failed.map((f) => f.name).join(", ")}`
-          : "Dependencies installed / updated"
-      );
+      if (failed.length) toast.error(`Install finished with ${failed.length} failure(s): ${failed.map((f) => f.name).join(", ")}`);
+      else toast.success("Dependencies installed / updated");
       refetch();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -64,40 +62,36 @@ export default function DependenciesPage() {
     try {
       await api.openFolder(deps.deps_dir);
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
   return (
-    <div className="p-6 max-w-6xl mx-auto space-y-4">
-      <div className="flex items-start justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-            <Wrench className="h-6 w-6 text-accent" /> Dependencies
-          </h1>
-          <p className="text-xs text-zinc-400 mt-1 max-w-lg">
-            External tools the scripts rely on. Missing ones are downloaded into the app's dependencies
-            folder — nothing is installed system-wide.
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <button className="btn-ghost !py-1 text-xs" onClick={() => refetch()} disabled={busy || isLoading}>
-            <RotateCcw className="h-3 w-3" /> Refresh
-          </button>
-          {(missing.length > 0 || updates.length > 0) && (
-            <button
-              className="btn-ghost !py-1 text-xs"
-              onClick={() => install([...missing, ...updates].map((t) => t.key))}
-              disabled={busy}
-            >
-              Install {missing.length + updates.length} ({missing.length} missing · {updates.length} updates)
+    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+      <PageHeader
+        icon={Wrench}
+        title="Dependencies"
+        subtitle="External tools the scripts rely on. Missing ones are downloaded into the app's dependencies folder — nothing is installed system-wide."
+        actions={
+          <>
+            <button className="btn-ghost !py-1 text-xs" onClick={() => refetch()} disabled={busy || isLoading}>
+              <RotateCcw className="h-3 w-3" /> Refresh
             </button>
-          )}
-          <button className="btn-primary !py-1 text-xs" onClick={() => install()} disabled={busy}>
-            {busy ? "Installing…" : "Install / update all"}
-          </button>
-        </div>
-      </div>
+            {(missing.length > 0 || updates.length > 0) && (
+              <button
+                className="btn-ghost !py-1 text-xs"
+                onClick={() => install([...missing, ...updates].map((t) => t.key))}
+                disabled={busy}
+              >
+                Install {missing.length + updates.length} ({missing.length} missing · {updates.length} updates)
+              </button>
+            )}
+            <button className="btn-primary !py-1 text-xs" onClick={() => install()} disabled={busy}>
+              {busy ? "Installing…" : "Install / update all"}
+            </button>
+          </>
+        }
+      />
 
       <div className="flex items-center gap-4 text-[11px] text-zinc-500">
         <span>
@@ -117,7 +111,7 @@ export default function DependenciesPage() {
         )}
       </div>
 
-      <div className="rounded-lg border border-border overflow-hidden">
+      <div className="rounded-lg border border-border overflow-hidden table-scroll">
         <table className="w-full text-sm">
           <thead className="bg-panel/60">
             <tr>
@@ -127,7 +121,7 @@ export default function DependenciesPage() {
               <th className="th">Location</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className="stagger">
             {tools.map((t) => (
               <tr key={t.key} className="table-row cursor-default">
                 <td className="td font-medium">{t.name}</td>

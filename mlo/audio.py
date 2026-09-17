@@ -1,4 +1,4 @@
-"""Unified tag abstraction over FLAC / OGG / Opus / MP3 / MP4 audio files."""
+"""Unified tag abstraction over FLAC / OGG / Opus / MP3 / AAC / MP4 files."""
 import os
 
 from .deps import (
@@ -116,6 +116,13 @@ TAG_MAP = {
         "mp3": ("TXXX", "MOOD"),
         "mp4": ("freeform", "com.apple.iTunes", "MOOD"),
     },
+    # Arousal the MOOD verdict was scored from, written next to it by
+    # mlo.moods as an integer 0-100 (same freeform/TXXX shape as MOOD).
+    "ENERGY": {
+        "flac": "ENERGY",
+        "mp3": ("TXXX", "ENERGY"),
+        "mp4": ("freeform", "com.apple.iTunes", "ENERGY"),
+    },
     # AcoustID identity (Picard-compatible). Written during import when a
     # fingerprint match is accepted; graded only when a file already carries
     # one of the two, so a library that never fingerprinted anything is never
@@ -230,6 +237,16 @@ TAG_MAP = {
         "mp3": ("TXXX", "AUDIT"),
         "mp4": ("freeform", "com.apple.iTunes", "AUDIT"),
     },
+    # Manual REAL/FAKE override written from the track details editor. It is
+    # documented as authoritative (it wins over every derived verdict), the
+    # grader reads it by this name, and without an entry here get_tag()
+    # returned None for it — so the override never reached the grader and the
+    # app's own tag showed up as an EXCESS tag instead.
+    "AUDIOAUDITOR_OVERRIDE": {
+        "flac": "AUDIOAUDITOR_OVERRIDE",
+        "mp3": ("TXXX", "AUDIOAUDITOR_OVERRIDE"),
+        "mp4": ("freeform", "com.apple.iTunes", "AUDIOAUDITOR_OVERRIDE"),
+    },
     # Rip-log score (0-100) from AudioAuditor's cambia grading, written
     # to the tracks of MEDIA=CD releases only.
     "LOG_GRADE": {
@@ -305,6 +322,14 @@ TAG_MAP = {
     },
 }
 
+# Containers whose tags are ID3v2 frames — mutagen's MP3 and ID3 objects share
+# one frame API, so every ID3 branch below serves both. Raw ADTS .aac is the
+# second one: mutagen's AAC reader cannot carry tags at all ("Tagging is not
+# supported. Use the ID3/APEv2 classes directly instead"), so its tags live in
+# a leading ID3v2 chunk — what Picard and foobar2000 write for .aac, and what
+# ffmpeg/ffprobe skip past when decoding the stream.
+_ID3_KINDS = ("mp3", "aac")
+
 # Video containers routed through ffprobe/ffmpeg (MP4/M4V stay on mutagen).
 VIDEO_FFMPEG_EXTS = (
     ".mkv", ".webm", ".mov", ".vob", ".mpg", ".mpeg", ".m2v",
@@ -329,6 +354,11 @@ _VIDEO_TAG_ALIASES = {
     "DATE_RELEASE": "DATE",
     "YEAR": "DATE",
     "RETAILDATE": "DATE",
+    # Matroska tag names may not contain spaces: ffmpeg rewrites them with
+    # underscores, so the DR pair is stored as DYNAMIC_RANGE — without these
+    # the video tag writer was write-only for the two DR tags.
+    "DYNAMIC_RANGE": "DYNAMIC RANGE",
+    "ALBUM_DYNAMIC_RANGE": "ALBUM DYNAMIC RANGE",
 }
 
 # MKV muxers expose the track number as PART_NUMBER and the disc as DISC;
@@ -356,6 +386,47 @@ def _ffprobe_exe():
     return _FFPROBE_CACHE["exe"]
 
 
+class AacHandle:
+    """Tag + tech handle for a raw ADTS .aac stream.
+
+    mutagen's AAC file type is read-only ("Tagging is not supported. Use the
+    ID3/APEv2 classes directly instead"), so the tags live in a leading ID3v2
+    chunk — what Picard and foobar2000 write for .aac, and what ffmpeg skips
+    past when decoding the stream. This exposes the same surface the rest of
+    this module uses on a mutagen FileType: `.info` for tech, `.tags` (an ID3
+    object, so every ID3 frame branch works unchanged) and `.save()`.
+    """
+
+    def __init__(self, path, info, tag):
+        self.path = path
+        self.info = info
+        self.tags = tag
+
+    def save(self):
+        # Nothing loaded and nothing added: never prepend an empty chunk.
+        if not self.tags and not self.tags.size:
+            return
+        self.tags.save(self.path)
+
+
+def _load_aac(path):
+    """AacHandle for one .aac file, or None when mutagen cannot read it."""
+    from mutagen.aac import AAC
+    from mutagen.id3 import ID3, ID3NoHeaderError
+
+    try:
+        info = AAC(path).info
+    except Exception:
+        return None
+    try:
+        tag = ID3(path)  # an existing leading ID3v2 chunk
+    except ID3NoHeaderError:
+        tag = ID3()  # none yet: the first save() writes one (Picard does too)
+    except Exception:
+        return None
+    return AacHandle(path, info, tag)
+
+
 class VideoHandle:
     """Lightweight stand-in for the mutagen object on video files so the
     rest of the codebase can treat `af.audio is not None` as "readable"."""
@@ -367,8 +438,8 @@ class VideoHandle:
 
 
 class AudioFile:
-    """Unified abstraction over FLAC / OGG / Opus / MP3 / MP4 (and, read via
-    ffprobe, every music-video container in paths.LIB_VIDEO_EXTS)."""
+    """Unified abstraction over FLAC / OGG / Opus / MP3 / AAC / MP4 (and,
+    read via ffprobe, every music-video container in paths.LIB_VIDEO_EXTS)."""
 
     def __init__(self, path):
         self.path = path
@@ -383,6 +454,11 @@ class AudioFile:
         # remuxes it into a same-stem MKV, so the file name can change).
         self.is_video = self.kind == "video"
         self.tag_output_path = None
+        # True when a tag write replaced the file with another container
+        # (.vob/.avi/.webm/... -> .mkv, and an .mp4 reached through
+        # set_video_tags -> .mkv). Callers report the swap to the user;
+        # tag_output_path names the file that now holds the data.
+        self.container_changed = False
         self._video_tags = {}
         # Tag writers save on every call by default. Bulk callers flip this
         # on so a 30-tag edit rewrites the container once, not 30 times.
@@ -458,15 +534,9 @@ class AudioFile:
             elif self.kind == "video":
                 self._load_video()
             elif self.kind == "aac":
-                try:
-                    from mutagen.aac import AAC
-                    self.audio = AAC(self.path)
-                except ImportError:
-                    self.audio = None
-                    self.error = "mutagen.aac is not available"
-                except Exception as e:
-                    self.audio = None
-                    self.error = f"{type(e).__name__}: {e}"
+                self.audio = _load_aac(self.path)
+                if self.audio is None:
+                    self.error = "mutagen cannot read this .aac stream"
         except Exception as e:
             self.audio = None
             self.error = f"{type(e).__name__}: {e}"
@@ -561,29 +631,21 @@ class AudioFile:
 
     def set_video_tags(self, mapping):
         """Write several tags into a video container in ONE ffmpeg pass
-        (each individual write would be a full stream-copy rewrite)."""
+        (each individual write would be a full stream-copy rewrite).
+
+        LYRICS round-trips like every other tag here: it is stored as the
+        container metadata key that get_lyrics() reads back (music videos are
+        graded tracks and the lyrics scripts walk them too, so a video lyric
+        write has to work rather than be rejected).
+        """
         clean = {}
-        dropped = []
         for k, v in (mapping or {}).items():
             if v is None:
                 continue
             v = str(v).strip()
             if not v:
                 continue
-            key = str(k).upper()
-            if key in ("LYRICS", "UNSYNCEDLYRICS"):
-                # Nothing reads lyrics back out of a video container
-                # (get_lyrics only knows embedded audio lyrics), so a video
-                # lyric write cannot be honoured: fail loudly instead of
-                # reporting a write that never happened.
-                dropped.append(key)
-                continue
-            clean[key] = v
-        if dropped:
-            self.error = ("video containers cannot store "
-                          + "/".join(sorted(set(dropped)))
-                          + " — no lyrics were written")
-            return False
+            clean[str(k).upper()] = v
         if not clean:
             return True
         return self._set_video_tags_batch(_to_mkv_meta(clean))
@@ -697,8 +759,14 @@ class AudioFile:
         self.path = final
         self.ext = os.path.splitext(final)[1].lower()
         self.tag_output_path = final
+        # The output container can differ from the input one (.vob/.avi/...
+        # -> .mkv). Recompute BOTH kind and is_video: a stale kind made every
+        # later set_tag/delete_tag take the branch of the container the file
+        # no longer is.
+        self.kind = self._kind() or self.kind
+        self.is_video = self.kind == "video"
+        self.container_changed = self.ext != os.path.splitext(src)[1].lower()
         self._load_video()
-        self.is_video = True
         return True
 
     def _set_video_tag(self, name, value):
@@ -717,6 +785,43 @@ class AudioFile:
         if isinstance(value, list):
             return "; ".join(str(item) for item in value)
         return str(value) if value is not None else None
+
+    # Attributes that identify an ID3 frame carrying no .text, in probe
+    # order: the first one present names the frame in all_tags()
+    # (PRIV:owner, POPM:email, GEOB:desc, WXXX:desc, CHAP:element_id, ...).
+    _ID3_ID_ATTRS = ("owner", "email", "desc", "element_id", "seller")
+    # Attributes shown as the frame's value preview (bytes as a size, so a
+    # multi-megabyte GEOB payload never turns into a megabyte of text).
+    _ID3_PREVIEW_ATTRS = ("owner", "email", "desc", "url", "mime", "filename",
+                          "count", "rating", "gain", "peak", "format", "lang",
+                          "data", "start_time", "end_time",
+                          "child_element_ids")
+
+    @classmethod
+    def _id3_frame_key(cls, frame):
+        """(name, value preview) for an ID3 frame with no semantic mapping.
+
+        Used by all_tags() so frames such as PRIV / POPM / WXXX / GEOB /
+        RVA2 / PCNT / UFID / CHAP are visible to the tag editor and the
+        excess-tag check instead of being silently dropped: the name is the
+        frame ID plus its identifying field, the preview a short one-liner.
+        """
+        fid = str(getattr(frame, "FrameID", "") or "")
+        sub = next((str(getattr(frame, attr)) for attr in cls._ID3_ID_ATTRS
+                    if getattr(frame, attr, None)), "")
+        name = f"{fid}:{sub}" if sub else fid
+        parts = []
+        for attr in cls._ID3_PREVIEW_ATTRS:
+            val = getattr(frame, attr, None)
+            if val in (None, "", b""):
+                continue
+            if isinstance(val, bytes):
+                parts.append(f"{attr}={len(val)} bytes")
+            else:
+                parts.append(f"{attr}={str(val)[:60]}".replace("\n", " "))
+        # Frames with none of those fields (SYLT, SYTC, ETCO…): the frame's
+        # own repr, which stays short for payload-less types.
+        return name, ", ".join(parts) or str(frame).replace("\n", " ")[:120]
 
     @staticmethod
     def _mp4_text(value):
@@ -789,7 +894,7 @@ class AudioFile:
                     }
                 return self._tag_cache.get(spec["flac"].lower())
 
-            elif kind == "mp3":
+            elif kind in _ID3_KINDS:
                 frame_type, desc = spec["mp3"]
                 if self.audio.tags is None:
                     return None
@@ -854,6 +959,11 @@ class AudioFile:
         try:
             for key, val in (self.all_tags() or {}).items():
                 k = str(key).upper()
+                # Taggers spell the same tag with a container prefix
+                # (TXXX:TRANSLATION-EN, ----:com.apple.iTunes:TRANSLATION-EN);
+                # the suffix after the prefix carries the language either way,
+                # so strip it before matching.
+                k = k.rsplit(":", 1)[-1]
                 if k == want:
                     found.setdefault("", val)
                 elif k.startswith(want + "-") and len(k) > len(want) + 1:
@@ -907,7 +1017,7 @@ class AudioFile:
                     )
                     out[canonical] = str(val)
 
-            elif self.kind == "mp3":
+            elif self.kind in _ID3_KINDS:
                 for frame in self.audio.tags.values():
                     fid = getattr(frame, "FrameID", None)
                     if not fid:
@@ -935,6 +1045,13 @@ class AudioFile:
                             fid,
                         )
                         out[canonical] = self._id3_text(frame) or ""
+                    else:
+                        # Every OTHER ID3 frame (PRIV, POPM, WXXX, GEOB,
+                        # RVA2, PCNT, UFID, CHAP, SYLT…). They used to be
+                        # invisible here, so vendor/ripper junk survived both
+                        # the tag editor and the grader's excess-tag check.
+                        key, preview = self._id3_frame_key(frame)
+                        out.setdefault(key, preview)
 
             elif self.kind == "mp4":
                 for k, v in self.audio.tags.items():
@@ -995,7 +1112,7 @@ class AudioFile:
                 self._save()
                 return True
 
-            elif self.kind == "mp3":
+            elif self.kind in _ID3_KINDS:
                 if self.audio.tags is None:
                     self.audio.add_tags()
                 if str(key).startswith("TXXX:"):
@@ -1068,13 +1185,25 @@ class AudioFile:
                     self._save()
                 return True
 
-            elif self.kind == "mp3":
+            elif self.kind in _ID3_KINDS:
                 if self.audio.tags is None:
                     return True
                 if str(key).startswith("TXXX:"):
                     desc = str(key)[5:]
                     for frame in list(self.audio.tags.getall("TXXX")):
                         if frame.desc.upper() == desc.upper():
+                            try:
+                                del self.audio.tags[frame.HashKey]
+                            except Exception:
+                                pass
+                elif ":" in str(key):
+                    # Enumerated non-text frames (all_tags emits PRIV:owner,
+                    # POPM:email, GEOB:desc, CHAP:element_id, …): drop the
+                    # frames whose enumerated name matches, so the tag editor
+                    # can delete what it lists.
+                    target = str(key).lower()
+                    for frame in list(self.audio.tags.values()):
+                        if self._id3_frame_key(frame)[0].lower() == target:
                             try:
                                 del self.audio.tags[frame.HashKey]
                             except Exception:
@@ -1140,7 +1269,7 @@ class AudioFile:
                 self._save()
                 return True
 
-            elif kind == "mp3":
+            elif kind in _ID3_KINDS:
                 frame_type, desc = spec["mp3"]
                 if self.audio.tags is None:
                     self.audio.add_tags()
@@ -1273,7 +1402,7 @@ class AudioFile:
 
                 return True
 
-            elif kind == "mp3":
+            elif kind in _ID3_KINDS:
                 frame_type, desc = spec["mp3"]
                 if self.audio.tags is None:
                     return True
@@ -1342,6 +1471,17 @@ class AudioFile:
     # ------------------------------------------------------------------
     def get_lyrics(self):
         try:
+            if self.kind == "video":
+                # Stored in the container metadata block by set_lyrics /
+                # set_video_tags, read back by ffprobe (_video_tags). Without
+                # this branch a video lyric write was write-only: the tag
+                # existed in the file but every reader saw None.
+                for key in ("LYRICS", "UNSYNCEDLYRICS"):
+                    val = self._video_tags.get(key)
+                    if val and str(val).strip():
+                        return str(val)
+                return None
+
             if self.kind in ("flac", "ogg", "opus"):
                 if self.audio.tags is None:
                     return None
@@ -1364,7 +1504,7 @@ class AudioFile:
                     return str(uns)
                 return None
 
-            elif self.kind == "mp3":
+            elif self.kind in _ID3_KINDS:
                 for f in self.audio.tags.getall("USLT"):
                     if isinstance(f.text, list):
                         return "\n".join(f.text) if f.text else None
@@ -1387,6 +1527,13 @@ class AudioFile:
     def set_lyrics(self, text):
         self._invalidate_cache()
         try:
+            if self.kind == "video":
+                # One metadata-block rewrite; empty text clears the stored
+                # lyrics (see delete_lyrics) instead of leaving the old text.
+                if not str(text).strip():
+                    return self.delete_lyrics()
+                return bool(self.set_video_tags({"LYRICS": text}))
+
             if self.kind in ("flac", "ogg", "opus"):
                 if self.audio.tags is None:
                     if hasattr(self.audio, "add_tags"):
@@ -1401,7 +1548,7 @@ class AudioFile:
                 self._save()
                 return True
 
-            elif self.kind == "mp3":
+            elif self.kind in _ID3_KINDS:
                 self.audio.tags.delall("USLT")
                 self.audio.tags.add(
                     USLT(encoding=Encoding.UTF8, lang="eng", desc="", text=text)
@@ -1423,6 +1570,18 @@ class AudioFile:
     def delete_lyrics(self):
         self._invalidate_cache()
         try:
+            if self.kind == "video":
+                # Both lyric keys go in ONE ffmpeg rewrite (a video container
+                # has no per-key delete): the metadata block is rebuilt from
+                # what stays. Nothing stored -> nothing to rewrite.
+                current = self._video_tags or {}
+                remaining = {k: v for k, v in current.items()
+                             if k not in ("LYRICS", "UNSYNCEDLYRICS")}
+                if len(remaining) == len(current):
+                    return True
+                return bool(self._set_video_tags_batch(
+                    _to_mkv_meta(remaining), drop_existing=True))
+
             if self.kind in ("flac", "ogg", "opus"):
                 if self.audio.tags is None:
                     return True  # nothing to delete
@@ -1432,7 +1591,7 @@ class AudioFile:
                 self._save()
                 return True
 
-            elif self.kind == "mp3":
+            elif self.kind in _ID3_KINDS:
                 self.audio.tags.delall("USLT")
                 self._save()
                 return True
@@ -1450,9 +1609,10 @@ class AudioFile:
         return False
 
     # ------------------------------------------------------------------
-    # Embedded cover art — FLAC pictures, MP3 APIC, MP4 covr and the OGG/
-    # Opus METADATA_BLOCK_PICTURE base64 form. Videos (attachments) and
-    # raw AAC are not supported and return empty results.
+    # Embedded cover art — FLAC pictures, ID3 APIC (MP3 and the leading
+    # ID3v2 chunk of raw .aac), MP4 covr and the OGG/Opus
+    # METADATA_BLOCK_PICTURE base64 form. Video containers store cover art
+    # as attachments, which this abstraction does not touch: empty results.
     # ------------------------------------------------------------------
     def embedded_pictures(self):
         """[(mime, bytes)] of the embedded cover art currently in the file."""
@@ -1460,7 +1620,7 @@ class AudioFile:
             if self.kind == "flac" and self.audio is not None:
                 return [(p.mime, bytes(p.data)) for p in self.audio.pictures]
 
-            if self.kind == "mp3" and self.audio is not None and self.audio.tags:
+            if self.kind in _ID3_KINDS and self.audio is not None and self.audio.tags:
                 return [
                     ((f.mime or "image/jpeg"), bytes(f.data))
                     for f in self.audio.tags.getall("APIC")
@@ -1505,7 +1665,7 @@ class AudioFile:
                 self.audio.save()
                 return True
 
-            if self.kind == "mp3" and self.audio is not None and self.audio.tags:
+            if self.kind in _ID3_KINDS and self.audio is not None and self.audio.tags:
                 if not self.audio.tags.getall("APIC"):
                     return False
                 self.audio.tags.delall("APIC")
@@ -1546,7 +1706,7 @@ class AudioFile:
                 self.audio.save()
                 return True
 
-            if self.kind == "mp3" and self.audio is not None:
+            if self.kind in _ID3_KINDS and self.audio is not None:
                 if self.audio.tags is None:
                     self.audio.add_tags()
                 self.audio.tags.delall("APIC")

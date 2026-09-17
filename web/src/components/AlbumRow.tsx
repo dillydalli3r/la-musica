@@ -122,7 +122,7 @@ export default function AlbumRow({
         ))}
         <td className="td text-right">
           <div
-            className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity"
+            className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity"
             onClick={(e) => e.stopPropagation()}
           >
             {actions}

@@ -24,7 +24,7 @@ from .stats import (
     _existing_size, _safe_remove, _walk_files, _collect_targets, worker_count,
 )
 from .tools import detect_all_tools, _version_is_older
-from .ui import log, fmt_size, print_header, c, Color, log_file_result
+from .ui import log, fmt_size, print_header, c, Color
 
 def _exif_transposed(img):
     """*img* with its EXIF orientation applied, or *img* unchanged.
@@ -2562,7 +2562,6 @@ def run_process_images(config):
 
                 if status in ("unchanged", "skipped"):
                     stats["skipped_count"] += 1
-                    log_file_result(src, "skip", info=info or "unchanged")
                     _pbar_skip(pbar, counts)
                     continue
 
@@ -2572,12 +2571,10 @@ def run_process_images(config):
                     stats["modified_count"] += 1
                     stats["total_bytes_removed"] += b_rem
                     stats["total_bytes_added"] += b_add
-                    log_file_result(src_path, "ok", b_rem, b_add)
                     _pbar_update(pbar, counts, kind="ok")
                 else:
                     stats["error_count"] += 1
                     stats["errors"].append((src_path, info))
-                    log_file_result(src_path, "fail", info=info)
                     _pbar_update(pbar, counts, kind="fail")
 
             if pbar:
@@ -2632,7 +2629,6 @@ def run_process_images(config):
                 stats["total_scanned"] += 1
                 stats["modified_count"] += 1
                 renamed += 1
-                log_file_result(candidate, "ok", info=f"renamed to cover{cand_ext}")
             except OSError as e:
                 stats["error_count"] += 1
                 stats["errors"].append((candidate, f"cover rename failed: {e}"))

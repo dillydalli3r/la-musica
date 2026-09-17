@@ -13,8 +13,8 @@ const VIZ_KEY = "mlo.np.viz";
  * current track's lyrics with the same synced-line treatment as the
  * fullscreen player (active line highlighted, click a line to seek,
  * stored translations/transliterations as sub-lines) in a compact,
- * display-only pane. AI generation stays the fullscreen player's job —
- * this view shows whatever is stored.
+ * display-only pane. It generates nothing — this view shows whatever is
+ * stored in the tags/sidecars.
  *
  * Lives above the player bar (bottom anchored) so transport controls
  * stay visible while lyrics are open. */

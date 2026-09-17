@@ -20,7 +20,16 @@ Asset sources:
 The libjpeg-turbo release only ships NSIS installers for Windows; those are
 unpacked with 7-Zip when available, otherwise installed silently into a
 temporary folder (which needs a space-free path, hence GetShortPathName) and
-the required binaries are copied out. Standard-library only - no requests.
+the required binaries are copied out.
+
+Only the vendored pip packages (librosa, beets) and simple-dr-meter are
+platform-independent: every other tool above is a Windows binary, so on
+Linux/macOS install_dependency() refuses with the distro package that already
+provides it (LINUX_PACKAGES) rather than downloading something that cannot run.
+Each archive's LICENSE/COPYING/README is copied next to the installed binaries
+(_copy_licence_files).
+
+Standard-library only - no requests.
 """
 
 import ctypes
@@ -36,7 +45,7 @@ import urllib.request
 
 from .paths import DEPS_DIR
 from .subproc import run_tool
-from .tools import detect_all_tools
+from .tools import detect_all_tools, python_pkg_path
 
 DISPLAY_NAMES = {
     "flac": "FLAC",
@@ -54,6 +63,7 @@ DISPLAY_NAMES = {
     "beets": "beets",
     "slskd": "slskd",
     "chromaprint": "Chromaprint (fpcalc)",
+    "yt-dlp": "yt-dlp",
 }
 
 REPOS = {
@@ -68,6 +78,7 @@ REPOS = {
     "logchecker": "OPSnet/Logchecker",
     "cuetools": "gchudov/cuetools.net",
     "chromaprint": "acoustid/chromaprint",
+    "yt-dlp": "yt-dlp/yt-dlp",
 }
 
 # Ordered asset-name preferences (regex, matched case-insensitively).
@@ -86,6 +97,9 @@ ASSET_PATTERNS = {
     "logchecker": [r"^logchecker\.phar$"],
     "cuetools": [r"^CUETools\.zip$", r"^cuetools.*\.zip$"],
     "chromaprint": [r"^chromaprint-fpcalc-[\d.]+-windows-x86_64\.zip$"],
+    # The release also ships extensionless POSIX builds and a tarball; the
+    # Windows binary is the bare .exe (SINGLE_EXE_TOOLS).
+    "yt-dlp": [r"^yt-dlp\.exe$"],
 }
 
 INSTALL_PREFIX = {
@@ -103,6 +117,29 @@ INSTALL_PREFIX = {
     "beets": "beets",
     "slskd": "slskd",
     "chromaprint": "chromaprint",
+    "yt-dlp": "yt-dlp",
+}
+
+# Tools whose upstream releases only ship Windows builds, mapped to the Linux
+# package providing the same tool (None = no packaged equivalent). Every asset
+# below is a .exe/win-zip, and MARKER_EXES can only check that files with the
+# right NAMES landed - so on Linux a download would "succeed" with a folder of
+# unrunnable .exe files. install_dependency()/pick_asset() refuse via
+# _require_windows() instead, naming the distro package to use (the Docker
+# image installs them; see Dockerfile).
+LINUX_PACKAGES = {
+    "flac": "flac",
+    "libjxl": "libjxl-tools",
+    "libjpeg_turbo": "libjpeg-progs",
+    "oxipng": "oxipng",
+    "ffmpeg": "ffmpeg",
+    "rsgain": "rsgain",
+    "chromaprint": "libchromaprint-tools",
+    "slskd": None,
+    "audioauditor": None,
+    "logchecker": None,
+    "php": None,
+    "cuetools": None,
 }
 
 # Vendored pure-Python tools: installed with `pip install --target` into a
@@ -111,7 +148,15 @@ INSTALL_PREFIX = {
 PIP_PACKAGES = {
     "librosa": "librosa==0.11.0",
     "beets": "beets==2.4.0",
+    "yt-dlp": "yt-dlp==2026.8.19",
 }
+
+# Tools of which only the Windows build is vendored as a binary: on Linux the
+# same program is installed as the pip package above (yt-dlp has no Linux
+# release asset at all, and its pip package is the upstream-supported install).
+# They are deliberately NOT in LINUX_PACKAGES - _require_windows() would refuse
+# the download instead of using pip.
+PIP_ON_LINUX = {"yt-dlp"}
 
 TOOL_DIRS = INSTALL_PREFIX  # backward compat for app.py (use installed_path() for versioned folder)
 
@@ -145,10 +190,11 @@ MARKER_EXES = {
     "cuetools": ("CUETools.exe",),
     "slskd": ("slskd.exe",),
     "chromaprint": ("fpcalc.exe",),
+    "yt-dlp": ("yt-dlp.exe",),
 }
 
 # Tools whose release asset is a single bare exe - no archive to extract.
-SINGLE_EXE_TOOLS = {"audioauditor", "logchecker"}
+SINGLE_EXE_TOOLS = {"audioauditor", "logchecker", "yt-dlp"}
 
 # Exact, pinned dependency versions. Every tool is downloaded from a specific
 # GitHub release tag (never "latest") so installs and CI builds are fully
@@ -229,6 +275,11 @@ PINNED = {
         "tag": "v1.6.1",
         "asset": "chromaprint-fpcalc-1.6.1-windows-x86_64.zip",
         "version": "1.6.1",
+    },
+    "yt-dlp": {
+        "tag": "2026.08.19",
+        "asset": "yt-dlp.exe",
+        "version": "2026.8.19",
     },
 }
 
@@ -324,13 +375,7 @@ def installed_versions():
 def pip_package_path(key):
     """Folder of a vendored pip package (e.g. '.dependencies/librosa v0.11.0')
     when its top-level package dir is present, else None."""
-    root = installed_path(key)
-    if not root or not os.path.isdir(root):
-        return None
-    top = key  # package name matches the tool key (librosa, beets)
-    if os.path.isfile(os.path.join(root, top, "__init__.py")):
-        return root
-    return None
+    return python_pkg_path(key)
 
 
 def tools_mod_simple_dr_meter():
@@ -338,8 +383,32 @@ def tools_mod_simple_dr_meter():
     return simple_dr_meter_path() is not None
 
 
+def _require_windows(key):
+    """Refuse Windows-only downloads on a non-Windows host.
+
+    Nothing else in the install path knows the platform: the archive unpacks
+    fine and the marker check passes, so a Linux install used to report
+    success for tools it can never run.
+    """
+    if os.name == "nt" or key not in LINUX_PACKAGES:
+        return
+    display = DISPLAY_NAMES.get(key, key)
+    pkg = LINUX_PACKAGES[key]
+    if pkg:
+        raise RuntimeError(
+            f"{display} is distributed as a Windows binary only - install the "
+            f"system package instead (Debian/Ubuntu: apt-get install {pkg}; "
+            f"the Docker image already ships it)."
+        )
+    raise RuntimeError(
+        f"{display} is a Windows binary only and has no Linux build - it is "
+        f"unsupported on this platform."
+    )
+
+
 def pick_asset(key):
     """Return the exact pinned asset name for a tool, if it exists."""
+    _require_windows(key)
     pin = PINNED.get(key) or {}
     if pin.get("asset"):
         rel = get_latest_release(key)
@@ -506,10 +575,69 @@ def _locate_binaries(root, key):
 # ----------------------------------------------------------------------
 # Installation
 # ----------------------------------------------------------------------
+_LICENCE_RX = re.compile(
+    r"^(licen[cs]e|copying|copyright|notice|readme)(\.[a-z0-9._-]+)?$", re.IGNORECASE)
+
+
+def _copy_licence_files(root, dest_dir, log=print):
+    """Carry an archive's LICENSE/COPYING/NOTICE/README into dest_dir.
+
+    These tools are downloaded from upstream on the user's behalf, so the
+    licence text has to arrive with them (GPL-2.0 §1, LGPL-2.1 §1 ask for the
+    licence and a source offer alongside the binary). The files sit anywhere
+    in the archive - rarely beside the executable - so walk the whole extract.
+    """
+    copied = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for fname in filenames:
+            if fname in copied or not _LICENCE_RX.match(fname):
+                continue
+            try:
+                shutil.copy2(os.path.join(dirpath, fname),
+                             os.path.join(dest_dir, fname))
+                copied.append(fname)
+            except OSError:
+                pass
+    if copied:
+        log(f"  licence files: {', '.join(sorted(copied))}")
+    return copied
+
+
+def _existing_install(prefix, markers):
+    """Folder name of an existing WORKING install of *prefix*, or None.
+
+    A fresh install must land in the folder that is already there — the
+    shipped layout of a rolling-release tool is `ffmpeg vlatest`, while a
+    pinned install would otherwise create `ffmpeg v2026.8.19` beside it and
+    leave the detector two folders to choose from.
+
+    Only a folder carrying every marker executable counts: a half-written or
+    manually emptied folder is never treated as the install to reuse.
+    """
+    if not os.path.isdir(DEPS_DIR):
+        return None
+    rx = re.compile(rf"^{re.escape(prefix)}\s+v", re.IGNORECASE)
+    found = [
+        entry for entry in os.listdir(DEPS_DIR)
+        if rx.match(entry)
+        and os.path.isdir(os.path.join(DEPS_DIR, entry))
+        and all(os.path.isfile(os.path.join(DEPS_DIR, entry, m)) for m in markers)
+    ]
+    # A `vlatest` folder is the shipped layout for rolling releases: keep it
+    # rather than renaming the install to the pinned version label.
+    found.sort(key=lambda entry: (not entry.lower().endswith("vlatest"), entry.lower()))
+    return found[0] if found else None
+
+
 def _remove_older_versions(prefix, keep_dir):
     if not os.path.isdir(DEPS_DIR):
         return
-    rx = re.compile(rf"^{re.escape(prefix)}\s+v?\d", re.IGNORECASE)
+    # Versioned folders, `vlatest` included: a folder the installer can name
+    # must also be one the stale-version pruner can reconcile, or every new
+    # install leaves a second ffmpeg folder behind that is never cleaned up.
+    # keep_dir (the install just verified to carry its marker executables) is
+    # never touched.
+    rx = re.compile(rf"^{re.escape(prefix)}\s+v(?:\d|latest$)", re.IGNORECASE)
     for entry in os.listdir(DEPS_DIR):
         full = os.path.join(DEPS_DIR, entry)
         if os.path.isdir(full) and rx.match(entry) and entry != keep_dir:
@@ -637,6 +765,7 @@ def _install_php(log=print, progress=None):
         names = {f.lower() for f in os.listdir(dest_dir)}
         if "php.exe" not in names:
             raise RuntimeError("Installed folder is missing: php.exe")
+        _copy_licence_files(workdir, dest_dir, log)
         _remove_older_versions("php", os.path.basename(dest_dir))
         log(f"Installed {display} v{version} -> {dest_dir}")
         return version
@@ -682,13 +811,16 @@ def install_dependency(key, log=print, progress=None):
 
     Returns the installed version string. Raises on any failure.
     """
+    _require_windows(key)
     if key == "simpledrmeter":
         version = _install_simple_dr_meter(log=log, progress=progress)
         _patch_simple_dr_meter(os.path.join(DEPS_DIR, "simple-dr-meter"))
         return version
     if key == "php":
         return _install_php(log=log, progress=progress)
-    if key in PIP_PACKAGES:
+    # Vendored pip packages — plus the tools whose Linux install IS the pip
+    # package (PIP_ON_LINUX): on Windows those take the pinned .exe below.
+    if key in PIP_PACKAGES and (key not in PIP_ON_LINUX or os.name != "nt"):
         return _install_pip_package(key, log=log, progress=progress)
 
     rel = get_latest_release(key)
@@ -700,7 +832,11 @@ def install_dependency(key, log=print, progress=None):
 
     display = DISPLAY_NAMES[key]
     prefix = INSTALL_PREFIX[key]
-    dest_dir = os.path.join(DEPS_DIR, f"{prefix} v{version}")
+    # Install into the folder a working copy already lives in (the shipped
+    # `ffmpeg vlatest`, or this tool's pinned folder) so a fresh install can
+    # never end up as a second folder beside it — see _existing_install.
+    existing = _existing_install(prefix, MARKER_EXES[key])
+    dest_dir = os.path.join(DEPS_DIR, existing or f"{prefix} v{version}")
 
     tmp_archived_fd, tmp_archived = tempfile.mkstemp(
         suffix=os.path.splitext(asset)[1])
@@ -749,6 +885,7 @@ def install_dependency(key, log=print, progress=None):
                 s = os.path.join(src, fname)
                 if os.path.isfile(s):
                     shutil.copy2(s, os.path.join(dest_dir, fname))
+            _copy_licence_files(workdir, dest_dir, log)
 
         names = {f.lower() for f in os.listdir(dest_dir)}
         missing = [m for m in MARKER_EXES[key] if m.lower() not in names]

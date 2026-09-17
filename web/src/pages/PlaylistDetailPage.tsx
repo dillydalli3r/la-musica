@@ -7,6 +7,7 @@ import {
 import { api } from "../api";
 import { toast, useStore } from "../store";
 import { EmptyState, PageLoading } from "../components/Badges";
+import PageHeader from "../components/PageHeader";
 import { TrackCover } from "../components/CoverImg";
 import FavHeart from "../components/FavHeart";
 import OverflowMenu from "../components/OverflowMenu";
@@ -140,7 +141,7 @@ export default function PlaylistDetailPage() {
       invalidate();
       qc.invalidateQueries({ queryKey: ["library"] });
     },
-    onError: (e) => toast(String(e)),
+    onError: (e) => toast.error(String(e)),
   });
 
   const del = useMutation({
@@ -149,7 +150,7 @@ export default function PlaylistDetailPage() {
       invalidate();
       navigate("/playlists");
     },
-    onError: (e) => toast(String(e)),
+    onError: (e) => toast.error(String(e)),
   });
 
   const move = async (i: number, dir: -1 | 1) => {
@@ -161,7 +162,7 @@ export default function PlaylistDetailPage() {
       await api.playlistOrder(pid, next);
       invalidate();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -174,7 +175,7 @@ export default function PlaylistDetailPage() {
       await api.playlistOrder(pid, next);
       invalidate();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -183,7 +184,7 @@ export default function PlaylistDetailPage() {
       await api.playlistRemove(pid, [path]);
       invalidate();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -222,7 +223,7 @@ export default function PlaylistDetailPage() {
       invalidate();
       toast("Smart playlist updated");
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -240,9 +241,9 @@ export default function PlaylistDetailPage() {
         <div className="w-full h-full blur-[90px] opacity-25 scale-125" style={{ background: coverGradient(playlist) }} />
         <div className="absolute inset-0 bg-bg/50" />
       </div>
-      <div className="relative z-10 p-6 space-y-6">
+      <div className="relative z-10 p-6 space-y-5 mx-auto max-w-6xl">
         <div
-          className="rounded-xl p-5 relative"
+          className="panel-hero relative"
           style={{ background: `linear-gradient(135deg, hsl(${Math.round((pid * 137.5) % 360)} 42% 32% / 0.15) 0%, transparent 60%)` }}
         >
           <div className="flex items-start gap-5">
@@ -265,9 +266,11 @@ export default function PlaylistDetailPage() {
               </div>
             </div>
             <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-2.5 min-w-0">
-                {renaming ? (
-                  <>
+              <PageHeader
+                icon={ListMusic}
+                overline={playlist.kind === "smart" ? "Smart playlist" : "Manual playlist"}
+                title={
+                  renaming ? (
                     <input
                       className="input max-w-md"
                       value={name}
@@ -275,76 +278,63 @@ export default function PlaylistDetailPage() {
                       onChange={(e) => setName(e.target.value)}
                       onKeyDown={(e) => e.key === "Enter" && rename()}
                     />
-                    <button className="btn-primary text-xs" onClick={rename}>Save</button>
+                  ) : (
+                    playlist.name
+                  )
+                }
+                chips={playlist.kind === "smart" ? ["SMART"] : undefined}
+                subtitle={`${tracks.length} track${tracks.length === 1 ? "" : "s"} · ${totalDur > 0 ? fmtDuration(totalDur) : "—"}`}
+                actions={
+                  <>
+                    {renaming && (
+                      <button className="btn-primary text-xs" onClick={rename}>Save</button>
+                    )}
+                    <button
+                      className="btn-primary !p-2.5 !rounded-md"
+                      onClick={() => queueTracks.length && playNow(queueTracks)}
+                      title="Play the playlist from the top"
+                      aria-label="Play playlist"
+                    >
+                      <Play className="h-4 w-4 fill-current" />
+                    </button>
+                    <FavHeart
+                      kind="playlist"
+                      id={String(pid)}
+                      className="!p-2 !rounded-md border border-border bg-panel/60 hover:!bg-raise"
+                      iconClass="h-4 w-4"
+                    />
+                    {playlist.kind === "smart" && (
+                      <button className={iconBtn} onClick={openFilterEditor} title="Edit smart filter">
+                        <Pencil className="h-4 w-4" />
+                      </button>
+                    )}
+                    <OverflowMenu
+                      buttonClass={iconBtn}
+                      buttonTitle="All playlist actions"
+                      sections={[
+                        {
+                          items: [
+                            { label: "Play next", icon: ListStart, onClick: () => enqueue("next") },
+                            { label: "Add to queue", icon: ListPlus, onClick: () => enqueue("end") },
+                          ],
+                        },
+                        {
+                          title: "Playlist",
+                          items: [
+                            { label: "Rename", icon: Pencil, onClick: () => { setName(playlist.name); setRenaming(true); } },
+                            { label: "Download .m3u8", icon: Download, onClick: () => { window.location.href = api.playlistExportUrl(pid); } },
+                          ],
+                        },
+                        {
+                          items: [
+                            { label: "Delete playlist", icon: Trash2, danger: true, onClick: () => { if (window.confirm(`Delete "${playlist.name}"?`)) del.mutate(); } },
+                          ],
+                        },
+                      ]}
+                    />
                   </>
-                ) : (
-                  <h1 className="text-3xl font-bold tracking-tight truncate" title={playlist.name}>{playlist.name}</h1>
-                )}
-                {playlist.kind === "smart" && (
-                  <span className="chip bg-accent/10 text-accent-soft border border-accent/25 text-[10px] shrink-0">SMART</span>
-                )}
-              </div>
-              <div className="text-zinc-400 mt-1 flex items-center gap-2">
-                <ListMusic className="h-3.5 w-3.5 text-zinc-500" />
-                <span>{playlist.kind === "smart" ? "Smart playlist" : "Manual playlist"}</span>
-              </div>
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 mt-1.5 text-xs">
-                <span className="text-zinc-500">
-                  <span className="text-zinc-600 uppercase tracking-wider text-[10px] mr-1.5">Tracks</span>
-                  {tracks.length}
-                </span>
-                <span className="text-zinc-500">
-                  <span className="text-zinc-600 uppercase tracking-wider text-[10px] mr-1.5">Duration</span>
-                  {totalDur > 0 ? fmtDuration(totalDur) : "—"}
-                </span>
-              </div>
-              {/* action row: play + heart + everything else, same boxed
-                  icon-button language as the album header */}
-              <div className="mt-4 flex flex-wrap items-center gap-2">
-                <button
-                  className="btn-primary !p-2.5 !rounded-md"
-                  onClick={() => queueTracks.length && playNow(queueTracks)}
-                  title="Play the playlist from the top"
-                  aria-label="Play playlist"
-                >
-                  <Play className="h-4 w-4 fill-current" />
-                </button>
-                <FavHeart
-                  kind="playlist"
-                  id={String(pid)}
-                  className="!p-2 !rounded-md border border-border bg-panel/60 hover:!bg-raise"
-                  iconClass="h-4 w-4"
-                />
-                {playlist.kind === "smart" && (
-                  <button className={iconBtn} onClick={openFilterEditor} title="Edit smart filter">
-                    <Pencil className="h-4 w-4" />
-                  </button>
-                )}
-                <OverflowMenu
-                  buttonClass={iconBtn}
-                  buttonTitle="All playlist actions"
-                  sections={[
-                    {
-                      items: [
-                        { label: "Play next", icon: ListStart, onClick: () => enqueue("next") },
-                        { label: "Add to queue", icon: ListPlus, onClick: () => enqueue("end") },
-                      ],
-                    },
-                    {
-                      title: "Playlist",
-                      items: [
-                        { label: "Rename", icon: Pencil, onClick: () => { setName(playlist.name); setRenaming(true); } },
-                        { label: "Download .m3u8", icon: Download, onClick: () => { window.location.href = api.playlistExportUrl(pid); } },
-                      ],
-                    },
-                    {
-                      items: [
-                        { label: "Delete playlist", icon: Trash2, danger: true, onClick: () => { if (window.confirm(`Delete "${playlist.name}"?`)) del.mutate(); } },
-                      ],
-                    },
-                  ]}
-                />
-              </div>
+                }
+              />
             </div>
           </div>
         </div>
@@ -453,7 +443,7 @@ export default function PlaylistDetailPage() {
 
       {filterOpen && (
         <div className="fixed inset-0 z-[60] bg-black/70 flex items-center justify-center p-6" onClick={() => setFilterOpen(false)}>
-          <div className="bg-card border border-border rounded-xl p-5 w-[560px] max-h-[80vh] overflow-auto shadow-2xl" onClick={(e) => e.stopPropagation()}>
+          <div className="bg-card border border-border rounded-xl p-5 w-full max-w-[560px] max-h-[80vh] overflow-auto shadow-2xl" onClick={(e) => e.stopPropagation()}>
             <h3 className="font-semibold mb-3">Smart playlist: {playlist.name}</h3>
             <label className="flex items-center gap-2 text-sm text-zinc-400 mb-3">
               <input type="checkbox" checked={matchAll} onChange={(e) => setMatchAll(e.target.checked)} />

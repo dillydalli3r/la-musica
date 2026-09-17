@@ -83,8 +83,9 @@ machines.
   artists through the discovery chain (covers, years, popularity) with a
   source toggle — *auto* (discovery first, MusicBrainz fallback),
   *discovery*, or *MusicBrainz only*. Rows that MusicBrainz knows drill into
-  the release-group / release views and can be added to *Wishes* or matched
-  against the library; rows that only Deezer/iTunes know open an in-page
+  the release-group / release views and can be added to *Wishes*,
+  auto-imported (one best edition per group, or every eligible edition), or
+  matched against the library; rows that only Deezer/iTunes know open an in-page
   detail panel (cover, label, genres, track list) whose *Add to wishes*
   button resolves the release group on MusicBrainz first — so **search is
   discovery, download is still MusicBrainz**. Pasting a musicbrainz.org link
@@ -93,14 +94,33 @@ machines.
   Downloads/Soulseek paths: MusicBrainz release matching, **AcoustID
   fingerprint matching** (it tells you which release the audio actually is,
   not just which one the tags claim), cascading genre import, lyrics,
-  advisory ratings, organize into the naming-script layout — and then the
-  **import script chain** runs automatically (CUEs → FLACs → videos →
-  lyrics format → lyrics fetch → auto tagging incl. mood/genre → images →
-  audit → DR & ReplayGain → AccurateRip → key & BPM → beets → format all →
-  grade), so an imported album lands complete instead of half-tagged. The
-  chain is configurable (Settings → *Import*) and can run over several
-  albums at once: **bulk import** queues them, imports with a configurable
-  concurrency and reports per-album and per-script results.
+  **ITUNESADVISORY resolved per track by ISRC** (the file's own ISRC, or
+  MusicBrainz's when it has none — asked in order: Deezer, then Spotify when
+  `spotify_client_id`/`spotify_client_secret` are set, then Apple's album
+  route and its exact-title song search. Only a 0/1/2 a source actually
+  states is written: an unknown or ambiguous track stays absent, a `cleaned`
+  Apple edition is never reported as clean, and an existing valid value is
+  never overwritten), organize into the
+  naming-script layout — and then the **import script chain** runs
+  automatically (CUEs → FLACs → videos → lyrics format → lyrics fetch → auto
+  tagging incl. mood/genre → images → audit → DR & ReplayGain → AccurateRip →
+  key & BPM → beets → format all → grade), so an imported album lands complete
+  instead of half-tagged. The chain is configurable (Settings → *Import*) and
+  can run over several albums at once: **bulk import** queues them, imports
+  with a configurable concurrency and reports per-album and per-script
+  results.
+  The artist image, artist description and album description are fetched by
+  the same chain (`metadata_auto_fetch`) — with `metadata_review` on, the
+  candidates are staged instead of written and you apply the one you want
+  (see *Artist pages*).
+- **MusicBrainz auto-import** — a release, a release group or an artist can
+  be downloaded without picking an edition by hand: *best* takes one release
+  per release group, *all* takes every eligible edition of that group (an
+  artist page keeps one per group either way, and skips groups you already
+  own). The pick is the auto-import policy below: Official first,
+  promotional/bootleg editions dropped while `auto_import_avoid_promo` is on,
+  then the medium order `CD → Digital Media → Vinyl → Cassette → Other`
+  (`auto_import_medium_order`), earliest date breaking ties.
 - **Soulseek** — managed slskd instance (autostart, shares = music folder),
   search & download UI with a live status dot in the sidebar, and an
   **auto-importer** that searches releases by catalog number / artist +
@@ -147,9 +167,27 @@ machines.
   isn't logged in (tooltip carries the daemon's own error, e.g.
   `INVALIDPASS`), red when another app's slskd holds the web port, and
   hidden when slskd isn't running.
+  **Bulk and whole-user downloads** — tick any number of files in a result
+  group and queue them in one request, or take everything a peer shares with
+  *All from <user>* (it re-browses the share first and skips transfers that
+  are already queued); a running search can be cancelled instead of waited
+  out. slskd's own transfer settings are editable in Settings → *Soulseek*:
+  download/upload slots (`soulseek_download_slots`, default 3;
+  `soulseek_upload_slots`, default 2) and optional speed limits in KiB/s,
+  written into the generated slskd yaml — a limit of 0 means "no limit", so
+  the key is omitted rather than sent as zero.
+  **Music videos** for a release whose medium is digital/web are downloaded
+  from **YouTube** on the album page (yt-dlp, `youtube_enabled`): the best
+  video-only + best audio-only streams merged into MKV, ranked by **highest
+  video bitrate, then audio bitrate, then resolution** — `youtube_max_height`
+  (0 = best) is the only way to cap it. The candidate must pass the lyric /
+  cover / tribute filter and the track's own length (±5 s). A CD or vinyl
+  release stays Soulseek-only, and a video download never touches the
+  album's audio tracks.
 - **Grading** — a configurable battery of ~50 checks per album (tags,
   encoder identity, naming + capitalization, lowercase extensions, links,
-  covers, CUE/log/AccurateRip, lyrics formatting, **mood & genre presence**,
+  covers, CUE/log/AccurateRip, lyrics formatting,
+  **mood, energy & genre presence**,
   **album descriptions**, file categories…). Every check can be toggled on
   the Grading page; the verdict shows as a red/green dot on every album and
   track with the failed checks itemized. Artists are graded too — on the
@@ -159,7 +197,7 @@ machines.
 - **Desktop + Web** — served by FastAPI (browser or Docker); a Tauri v2
   desktop shell lives in `desktop/`.
 
-## Optimization: the 15 scripts
+## Optimization: the 14 scripts
 
 Run All executes a configurable order (default shown in parentheses where
 it differs). Every script can run individually, on selected albums, or be
@@ -174,14 +212,13 @@ forced to redo work.
 | 5 | Process images | Covers resized/cropped (default 1200×1200 JPEG q90; per-format size targets for JPEG/PNG/JXL, configurable), JPEG/PNG/JXL optimization, optional JPEG XL conversion |
 | 6 | Audit library | AudioAuditor detectors (silence, DR, peaks, LUFS, BPM, MQA, fake stereo…) + CD .log CRC verification → AUDIT tag |
 | 7 | DR & ReplayGain | rsgain + simple-dr-meter (album gain, FLAC and MP4 alike) |
-| 8 | Auto tagging | ITUNESADVISORY normalization, INSTRUMENTAL-from-lyrics, **MOOD** from the track's audio (valence/arousal quadrant, refined by the genre), and a missing **GENRE** filled from the provider chain |
+| 8 | Auto tagging | **ITUNESADVISORY** normalization + auto-fetch by ISRC (Deezer, then Spotify when its credentials are set, then Apple — only a stated 0/1/2 is written, an unknown or ambiguous track stays absent, 0 is *clean*), INSTRUMENTAL-from-lyrics, **MOOD** and **ENERGY** (0-100) from the track's own audio (valence/arousal quadrant, refined by the genre), and a missing **GENRE** filled from the genre chain |
 | 9 | AccurateRip | .accurip generation via CUETools, checksum verification |
 | 10 | Format All | Final canonical pass: accurip/cue/lrc/tag trim + **embedded cover policy** |
-| 11 | Remux videos | Any video container (VOB/AVI/WMV/TS/MOV/FLV…) → MKV, video copied bit-exact when possible, every audio stream re-encoded to FLAC, subtitles copied |
+| 11 | Remux videos | Any video container (VOB/AVI/WMV/TS/MOV/FLV…) → MKV, video copied bit-exact when possible, every audio stream re-encoded to FLAC, subtitles copied, chapters preserved (MP4/M4V are scanned but only remuxed while `video_process_mp4` is on — they already play natively) |
 | 12 | Key & BPM | librosa-backed INITIALKEY + BPM (musical/camelot/openkey notation) |
-| 13 | Fetch lyrics | LRCLIB download into the configured format (embedded / .lrc / both) |
+| 13 | Fetch lyrics | The configurable lyrics chain (default LRCLIB → NetEase → lyrics.ovh → Kugou) into the configured format (embedded / .lrc / both); a provider's synced lyrics win over plain text |
 | 14 | Beets tagging | Managed beets (Picard parity) with the naming script, genre import, work/movement tags |
-| 15 | Lyrics xlit / translate (AI) | Any OpenAI-compatible endpoint: romanization (TRANSLITERATION-*) and translation (TRANSLATION-*) tags + `<lang>.lrc` sidecars, cached per track |
 
 ### Embedded covers (new in 2.1.0)
 
@@ -230,6 +267,30 @@ The app now enforces canonical file naming in all three ways:
   and lowercases every extension it touches (audio files, same-stem
   sidecars, and leftover files like covers/logs). Case-only renames work on
   case-insensitive filesystems too.
+
+#### The default naming script (new in 2.4.0)
+
+```
+%albumartist% [%musicbrainz_albumartistid%]/%album%$if(%releasetype%,$if(%year%, (%releasetype%, %year%), (%releasetype%)),$if(%year%, (%year%),))$if(%label%, [%label%])$if(%releasecountry%, [%releasecountry%])/%discnumber%-$num(%tracknumber%,2) %title%
+```
+
+It produces `Artist [mbid]/Album (Album, 2020) [Label] [US]/1-01 Song.flac`,
+and degrades cleanly: an album with nothing but album/date came out as
+`Artist/Album (2020)/1-01 Song.flac`, because every optional segment is an
+`$if` — no dangling `[]`.
+
+- **Multi-value tags keep the first value** (new in 2.4.0) —
+  `%releasecountry%` (or its `%country%` fallback) and `%label%` may hold a
+  list (`; `, ` / ` or `+`); the first non-empty entry wins and the rest are
+  dropped, so one album always yields exactly one deterministic path. The
+  organizer, the beets plugin and the grader share that one implementation,
+  so they cannot disagree about where a file belongs.
+- **Release type** — `%releasetype%` is evaluated with the tag's own spelling
+  (`Album; Live`), and MusicBrainz's `album+live` and the lookup's
+  `Album (Live)` are equally accepted. A tag that is missing while the
+  in-process MusicBrainz cache is cold is matched as a wildcard and reported
+  as *Missing RELEASETYPE tag* — never as an invented path, and never with a
+  network call.
 
 ## Home & recommendations (rewritten in 2.4.0)
 
@@ -304,6 +365,16 @@ album page; the rest offer *Wish* and a MusicBrainz link.
 - **Description** — Wikipedia's lead paragraph, TheAudioDB's biography, or a
   MusicBrainz annotation, saved as `description.txt` in the artist folder,
   with the source shown and a Fetch / Edit / Clear flow.
+- **Fetched on import too** (new in 2.4.0) — the import chain's metadata step
+  runs the same providers for the artist image, the artist description and the
+  album description (`metadata_auto_fetch`, on by default) and saves the best
+  candidate, never overwriting something you already stored.
+  **Manual review mode** (`metadata_review`, off by default) stops the
+  writing: the candidates are staged in
+  `<music>/.mlo/data/metadata_review.json`, the album/artist page shows them
+  with their source and fetch time, and only *Apply* writes the file you
+  picked. The tag actions menu re-runs the step on demand, so a batch that
+  landed with the wrong artist photo is one click from being fixed.
 - **Its own grade** — the artist page badge grades exactly two things:
   *Artist image stored* and *Artist description stored*. Album checks stay
   album-level; the page shows the album aggregate next to it so the two are
@@ -331,9 +402,10 @@ the song:
 - The lyrics manager's search box can query the chain without writing
   anything (`GET /api/lyrics/find`).
 
-## Mood & genre (new in 2.4.0)
+## Mood, energy & genre (rewritten in 2.4.0)
 
-Script 8 (Auto tagging) now writes two more tags, and grading requires them:
+Script 8 (Auto tagging) writes three audio-derived tags now, and grading
+requires them:
 
 - **MOOD** — computed from the track's own audio: RMS energy, onset rate,
   tempo, spectral centroid (brightness), dynamic range and the detected
@@ -343,14 +415,39 @@ Script 8 (Auto tagging) now writes two more tags, and grading requires them:
   ambiguous verdict (a low-confidence reading of an *Ambient* track becomes
   `calm`); `audio` mode ignores the genre entirely. Thresholds are named
   constants in `mlo/moods.py` and documented there.
-- **GENRE** — filled only when the tags carry none, from the MusicBrainz
-  genre cascade first, then the discovery providers (Deezer's album genres,
-  iTunes' primary genre), capped at `mb_genre_count` exactly like the import
-  cascade.
-- **Graded.** *Mood tag present* and *Genre tag present* are per-track checks
-  (on by default, `MOOD_MISSING` / `GENRE_MISSING`), so a library that never
-  ran script 8 fails them until it does — which is the point: no track ships
-  without a mood.
+- **ENERGY** — the same arousal value as an integer 0-100, written in the
+  same pass as MOOD (`mood_enabled` gates the stage, the per-filetype
+  `audio_tag_writes[<filetype>]["ENERGY"]` switch gates the tag alone), so
+  switching ENERGY on for one format backfills exactly that format and
+  leaves its MOOD untouched. Music videos get both tags too — the mood
+  writer covers video containers, in one write per file.
+- **GENRE** — filled only when the tags carry none, from the configurable
+  **genre chain** (`genre_sources`), merged in one place: the source order,
+  then each source's names, then a case-insensitive de-duplication, Title
+  Case, and a cap of `mb_genre_count` (default 3). The default order is
+  **RateYourMusic → Soulseek → Discogs → Last.fm → TheAudioDB →
+  MusicBrainz → Deezer → iTunes**:
+  - **RateYourMusic** is a real scrape of the release page (with a `/search`
+    fallback): browser-like headers (it sits behind Cloudflare), **1 request
+    per second under a lock**, and a **30-day on-disk cache**
+    (`<music>/.mlo/data/rym_cache`) so repeat work is paid for once. The
+    optional `rym_cookie` setting carries your own Cloudflare cookie; without
+    it RYM contributes nothing (Cloudflare answers the scrape instead) and the
+    chain falls through to the next source (a datacenter IP is blocked
+    regardless). Charts are *not* scraped — nothing in the app consumes them.
+  - RateYourMusic behind Cloudflare without a working `rym_cookie`, a missing
+    Discogs token, a missing Last.fm key, or any provider without an answer is
+    simply **no data**: the source is recorded in the import's `notes`, and the
+    chain moves on. No genre is ever invented.
+  - Soulseek has no peer genre signal to read — it stays in the order (a no-op)
+    so older saved source lists keep working.
+  - MusicBrainz is queried through the release + release group + artist
+    cascade, with a per-recording refinement on tracks.
+- **Graded.** *Mood tag present*, *Energy tag present* and *Genre tag
+  present* are per-track checks (on by default, `MOOD_MISSING` /
+  `ENERGY_MISSING` / `GENRE_MISSING`), so a library that never ran script 8
+  fails them until it does — which is the point: no track ships without a
+  mood.
 
 ## Import (new in 2.4.0)
 
@@ -369,9 +466,15 @@ The import paths share one pipeline now (`server/imports.py`):
 2. **The script chain** — every import path (wizard, downloads, Soulseek
    manual and auto) runs the same configurable chain afterwards:
    **2 CUEs → 3 FLACs → 11 videos → 1 lyrics format → 13 fetch lyrics →
-   8 auto tagging (mood/genre/advisory) → 5 images → 6 audit →
+   8 auto tagging (mood/energy/genre/advisory) → 5 images → 6 audit →
    7 DR & ReplayGain → 9 AccurateRip → 12 key & BPM → 14 beets →
-   10 format all → 4 grade**. Settings → *Import* replaces that list
+   10 format all → 4 grade**. Before the chain runs, the advisory step resolves
+   each track's `ITUNESADVISORY` by ISRC — Deezer, then Spotify when its
+   optional credentials are set, then Apple's album/song route, with
+   MusicBrainz supplying a missing ISRC (`advisory_auto_fetch`) — and the
+   metadata step fetches the artist image / artist description / album
+   description (`metadata_auto_fetch`); both never
+   overwrite a value you already have. Settings → *Import* replaces that list
    (`import_scripts`), or turns it off entirely (`import_auto_scripts`). A
    script that fails is reported and the chain carries on — one bad script
    never costs the rest of the pipeline.
@@ -449,10 +552,28 @@ enable-all / disable-all bulk actions.
   lowercase extensions, INITIALKEY + BPM, excess tags, media/source tags and
   their consistency, instrumental/lyrics consistency, disallowed file types,
   stray images, un-remuxed videos, disc folder naming, CD requirements
-  (.log exact match, .cue, FLAC lossless, CRC checksums).
-- **Mood & genre** (new in 2.4.0) — every track must carry `MOOD` and
-  `GENRE` (`MOOD_MISSING` / `GENRE_MISSING`); script 8 writes both, so the
-  fix for a failure is one click on the Optimization page.
+  (.log exact match, .cue, FLAC lossless, CRC checksums — per disc).
+- **Identity tags** (new in 2.4.0) — the required-tag sweep now covers TITLE,
+  ARTIST, ALBUM, ALBUMARTIST, DATE and TRACKNUMBER, plus DISCNUMBER on albums
+  that really have several discs (a `D-TT` filename, or DISCTOTAL/TOTALDISCS
+  above 1). A missing identity tag fails that track by name, whether or not
+  the naming check is enabled.
+- **Excess tags are Picard-safe** (new in 2.4.0) — what counts as an
+  unexpected tag comes from one shared vocabulary: the app's own tags
+  (`ENERGY` included), the encoder markers, beets' `mediafile` spellings and
+  **Picard's standard output** (its `TXXX:` / MP4-freeform spellings of the
+  release metadata, the per-track credit tags, the `MUSICBRAINZ_*` ids, and
+  enumerated non-text ID3 frames such as `PRIV:owner`). The Optimize/Format
+  All strip pass imports that same predicate, so a strip can never leave a tag
+  the grader flags, or delete one it requires.
+- **A check that throws fails, loudly** (new in 2.4.0) — an internal error is
+  reported as *could not be evaluated*, counted and failed instead of dropping
+  the check from the total, so the percentage always covers every enabled
+  check.
+- **Mood, energy & genre** (new in 2.4.0) — every track must carry `MOOD`,
+  `ENERGY` and `GENRE` (`MOOD_MISSING` / `ENERGY_MISSING` / `GENRE_MISSING`,
+  each with its own toggle); script 8 writes all three, so the fix for a
+  failure is one click on the Optimization page.
 - **Descriptions & artwork** (new in 2.4.0) — the album folder must hold a
   `description.txt` (album page → *Fetch description*), and the artist
   folder its own `artist.jpg`/`artist.png` + `description.txt`. The
@@ -466,16 +587,20 @@ enable-all / disable-all bulk actions.
   ran script 7 or fingerprinted anything is never failed for their absence;
   a half-written set is.
 - **Auditing** — AUDIT tag presence, log checksum validity, AccurateRip
-  verification, log grade within a configurable threshold.
+  verification, log grade within a configurable threshold. A CD's `.log` must
+  be *usable* (a real log with content) — an empty or truncated file no longer
+  counts as one.
 - **Identity links** — the MusicBrainz release (or release group) and the
   RateYourMusic release page must be tagged. Artist/recording-level links
   remain optional.
-- **Covers** — presence, size/square/crop rules (tolerances configurable),
-  per-track sidecar covers under the same rules.
+- **Covers** — presence, size, and squareness: the check is an **aspect
+  ratio** test (issue text says "not square", tolerances configurable, gated by
+  `grade_check_cover_crop`), applied to the album cover and to per-track
+  sidecar covers under the same rules.
 - **Strict formatting** — tag padding/blank lines, lyrics canonical form,
   CUE canonical form.
-- **Lyrics** — presence, transliteration/translation (only when AI is
-  configured and the script needs it).
+- **Lyrics** — presence, canonical form, and transform tags (TRANSLATION-* /
+  TRANSLITERATION-*) carrying their language when a track stores any.
 - **File categories** — which file types participate in grading at all
   (music, covers, CUE, log, LRC, accurip, videos, descriptions, other).
 
@@ -553,26 +678,85 @@ python -m uvicorn server.main:app --host 127.0.0.1 --port 8000
 # open http://127.0.0.1:8000
 ```
 
-Set your music folder in **Settings** (or point `MLO_MUSIC_FOLDER` at it).
+The music folder is chosen at startup, never from the UI: point
+`MLO_MUSIC_FOLDER` at your library (that is what the Docker image and the
+compose template do), or set `music_folder` in the app's own
+`<music>/.mlo/data/config.json`. There is no music-folder picker — Settings
+shows the folder it resolved and the raw config is editable in the app (the
+import wizard's own "pick the folder to import" dialog is a different thing).
+Everything else (playlists, favourites, the beets library, the Soulseek
+config) lives in the same `.mlo` folder.
+
 Install the external toolchain from Settings → Dependencies (ffmpeg, flac,
 libjxl, oxipng, rsgain, AudioAuditor, Logchecker, CUETools, librosa, beets,
-slskd — and optionally chromaprint/`fpcalc` for AcoustID matching). The UI
-walks you through the first-run setup.
+slskd, yt-dlp — and optionally chromaprint/`fpcalc` for AcoustID matching).
+The UI walks you through the first-run setup.
+
+### Terminal entry point
+
+```bash
+python -m mlo
+```
+
+That is the classic console menu (scripts 1–14, Run All, config editor), and
+it is **not** stdlib-only: `mlo` imports `mutagen` for every tag operation, so
+run it from the same environment that has `server/requirements.txt` installed
+(script 14 additionally needs `server/beetscfg` plus a vendored beets, and
+scripts 9/10 their optional modules). A missing module makes its script
+unavailable and fail loudly instead of reporting a clean "0 processed" run.
 
 ## Docker
 
 ```bash
-docker compose up --build
-# open http://localhost:8000 — mount your music under ./music
+docker compose up -d --build     # build from source and start
+docker compose logs -f           # follow the backend log
+docker compose pull              # fetch the prebuilt GHCR image instead
+docker compose down              # stop and remove
+# open http://localhost:8000 — mount your music at /music
 ```
 
-The image bundles the React build and the audio/image toolchain
-(`ffmpeg`, `flac`, `libjxl`, `jpegtran`). `oxipng` is installed when the
-base image provides it and otherwise fetched at runtime from Settings →
-Dependencies (a silent `|| true` in the Dockerfile keeps the build alive).
-`Chromaprint (fpcalc)` — needed for AcoustID fingerprint matching — is
-installed from Settings → Dependencies on demand and is optional: without it
-(and without an AcoustID key) the import falls back to title/artist matching.
+`docker-compose.yml` is the copy-paste template: it mounts your library at
+`/music` (the same path `MLO_MUSIC_FOLDER` names inside the container), keeps
+app state in `/music/.mlo`, and pins `ghcr.io/dillydalli3r/la-musica:latest`
+so `docker compose pull` and watchtower have something to compare against.
+
+- **Unprivileged.** The image runs as `mlo`, uid/gid **1000**, with
+  `HOME=/home/mlo` (numba/librosa caches would otherwise try to write to `/`).
+  Your bind-mounted music folder must be writable by uid 1000 — a host folder
+  owned by another user shows up as "cannot write `/music/.mlo`". chown it, or
+  rebuild the image with a matching uid.
+- **Volumes.** `/music` holds the library *and* all app state
+  (`/music/.mlo/data`, `…/downloads`, `…/trash`). `/app/.dependencies` is a
+  named volume for tools installed at runtime from Settings → Dependencies, so
+  replacing the image does not throw them away.
+- **Healthcheck.** The image probes `http://127.0.0.1:8000/api/health` with its
+  own Python (`python -c "import urllib.request…"`, `2>/dev/null`) — the slim
+  base has no curl. 30 s interval, 5 s timeout, 30 s start period, 3 retries;
+  compose declares the same check so `docker compose ps` and watchtower see
+  readiness.
+- **Toolchain in the image.** `ffmpeg`, `flac`, `libjxl`, `jpegtran`
+  (`libjpeg-progs`) and `libchromaprint-tools` (`fpcalc`) are installed from
+  apt and a failure there fails the build — these are the Linux counterparts
+  of `mlo/fetchdeps.py`'s Windows downloads, which the in-app installer refuses
+  to fetch on Linux and points at the distro package instead. `oxipng` and
+  `rsgain` are best-effort: Debian bookworm does not ship them, the image
+  installs them inside a `|| true` sub-shell, and the pipeline degrades
+  without them.
+- **yt-dlp** is not baked in: Settings → Dependencies installs it with
+  `pip --target` into `/app/.dependencies`, exactly like beets and librosa. A
+  pinned copy in the image would only save that first-run download — the
+  YouTube acquisition works the same either way.
+- **Windows-only tools.** `slskd`, `CUETools`, `AudioAuditor` and
+  `Logchecker`+`php` have no Linux build; the installer reports them as
+  unsupported inside the container, so AccurateRip generation, the logchecker
+  grade, the AudioAuditor audit and the managed Soulseek daemon are not
+  available in Docker.
+- **Automatic updates (optional).** Uncomment the `watchtower` service at the
+  bottom of `docker-compose.yml` and set `WATCHTOWER_LABEL_ENABLE=true`: the
+  label on the la musica service (`com.centurylinklabs.watchtower.enable=true`)
+  plus that flag means watchtower touches this container and nothing else on
+  the host. It needs the `image:` line, and the example ships
+  `WATCHTOWER_CLEANUP=true` and a daily `WATCHTOWER_SCHEDULE`.
 
 ## Architecture
 
@@ -584,11 +768,14 @@ server/      FastAPI backend: library payload, playlists, integrations,
              MusicBrainz), artist artwork and descriptions, streaming
              (direct + on-the-fly transcode), export, organize,
              WebSocket progress
-mlo/         core engine (stdlib-only so the CLI needs no server deps):
-             grader, audit, flac, images, lyrics (+ the multi-provider
-             lyrics chain), moods, artistdata, acoustid, cue, accurip,
-             loudness (batch rsgain + on-demand EBU R128), autotag, remux,
-             naming, discs, stats
+mlo/         core engine (imports mutagen for every tag operation — the CLI
+             needs the same environment as the server, it is NOT stdlib-only):
+             grader, audit, flac, images, lyrics (deterministic
+             word-sync + the multi-provider lyrics chain), moods (incl.
+             ENERGY), artistdata, acoustid, cue, accurip,
+             loudness (batch rsgain + on-demand EBU R128), autotag, remux
+             (chapters + text-subtitle filtering), fetchdeps (external
+             toolchain installer), naming, discs, stats
 desktop/     Tauri v2 desktop shell
 tools/       test-library generator and test suites
 ```
@@ -600,6 +787,8 @@ Where the app stores what it fetches:
 | `<music>/.mlo/data/config.json` | all settings |
 | `<music>/.mlo/data/artwork.json` | provenance for artist images and album/artist descriptions (provider, source URL, fetch time) |
 | `<music>/.mlo/data/replaygain.json` | on-demand ReplayGain measurements (invalidated on size/mtime change) |
+| `<music>/.mlo/data/metadata_review.json` | artist/album metadata candidates staged by `metadata_review` until you apply one |
+| `<music>/.mlo/data/rym_cache/` | RateYourMusic genre pages, cached for 30 days (1 request/second) |
 | `<music>/.mlo/data/wishes.db` | the wishlist |
 | `Artists/<Artist>/artist.jpg` | the artist image (normalized to the configured cover aspect + JPEG quality) |
 | `Artists/<Artist>/description.txt` | the artist description |
@@ -618,12 +807,18 @@ Where the app stores what it fetches:
 | `GET /api/tags` | per-track tag/lyrics/cover read view |
 | `POST /api/tags/bulk` `POST /api/videos/tag` | bulk tag surgery; music-video tag writes |
 | `POST /api/lyrics/embed` `POST /api/lyrics/write` | embedded LYRICS / .lrc sidecar writes |
-| `POST /api/run` | run any of scripts 1–15 on targets |
+| `POST /api/run` | run any of scripts 1–14 on targets |
 | `POST /api/organize` | apply the naming script (dry-run supported) |
 | `POST /api/export` | multi-format export with codec/bitrate config |
 | `GET/POST /api/playlists…` | manual + smart playlists, .m3u8 |
 | `GET /api/mb/release?mbid=…` `GET /api/mb/release-genres?mbid=…` | MusicBrainz release + genre cascade |
-| `POST /api/mb/match` `POST /api/mb/assign` | track/disc matching, MB/RYM/genre/advisory writes |
+| `POST /api/mb/match` `POST /api/mb/assign` | track/disc matching, MB/RYM/genre/advisory writes (ITUNESADVISORY is accepted only as 0/1/2 or empty) |
+| `POST /api/mb/auto-import` | queue a release / release group / artist for download: `mode=best` (one edition per group) or `all` (every eligible edition); returns `queued`, per-item status and `skipped` reasons |
+| `POST /api/mb/advisory/fetch` | resolve `ITUNESADVISORY` for tracks (or a release) by ISRC — Deezer, then Spotify when configured, then Apple — and return `sources` (which provider answered each path); a rating no source states is left absent |
+| `POST /api/genres/import` `GET /api/genres/facets` | import genres for paths through the genre chain (per-source counts + notes); facet list with category cards for the Genres page |
+| `GET /api/metadata/candidates` `POST /api/metadata/apply` | artist image / artist description / album description candidates (staged when `metadata_review` is on) and the write of the chosen one |
+| `POST /api/videos/download-youtube` `POST /api/videos/match` | download a music video from YouTube for an artist+title (best candidate by duration); assign downloaded video files to tracks |
+| `POST /api/soulseek/download-bulk` `…/download-user` `…/search/cancel` | queue the selected search files, take everything a user shares through a fresh browse (already-queued transfers skipped), or cancel a running search |
 | `GET /api/discovery/sources` | discovery providers + the per-feature source orders (Settings → Discovery) |
 | `GET /api/discovery/search` | catalogue search (albums/artists) through the provider chain; `source=musicbrainz` keeps the old search |
 | `GET /api/discovery/album` | provider album detail (genres, label, track list); `?resolve=1` also resolves the MusicBrainz release group |
@@ -647,7 +842,7 @@ Where the app stores what it fetches:
 | `POST /api/import/finish` | run the configured import script chain over already-imported albums |
 | `POST /api/import/bulk` `GET /api/import/bulk/status` | bulk import queue: start a multi-album import, poll its per-item progress |
 | `POST /api/import/scripts/preview` | exactly which scripts will run after an import |
-| `POST /api/lyrics/ai` `POST /api/lyrics/ai/lines` | AI lyric transforms (cleanup, repair, translate, transliterate; line-aligned for the player) |
+| `POST /api/lyrics/wordsync` | deterministic line→word/syllable ELRC for a track's stored lyrics |
 | `WS /ws/progress` | live progress |
 
 ## Tests
@@ -667,20 +862,25 @@ route renders with no page errors) needs a running backend and Playwright
 (`npm i -D playwright`).
 
 The other `tools/test_*.py` suites cover config migration, CUE disc renaming,
-grading paths (including the mood/genre, opt-in ReplayGain/AcoustID and
-album-description checks), artist grading (`test_artist_grading.py`), the
-artist/album artwork store (`test_artistdata.py`), mood classification
-(`test_moods.py`), the lyrics provider chain (`test_lyrics_providers.py`),
-AcoustID fingerprint parsing and quorum (`test_acoustid.py`), on-demand
-ReplayGain (`test_replaygain.py`), the import pipeline and bulk queue
-(`test_import_pipeline.py`), Home shelves, lyrics merge/repair, the Soulseek
+grading paths (mood/energy/genre, the identity-tag sweep, the Picard-safe
+excess allowlist, the release-type / multi-country naming rules, the opt-in
+ReplayGain/AcoustID checks and album descriptions), artist grading
+(`test_artist_grading.py`), the artist/album artwork store
+(`test_artistdata.py`), mood classification (`test_moods.py`), the lyrics
+provider chain (`test_lyrics_providers.py`), AcoustID fingerprint parsing and
+quorum (`test_acoustid.py`), on-demand ReplayGain (`test_replaygain.py`), the
+import pipeline and bulk queue (`test_import_pipeline.py`), YouTube
+acquisition + the remux/subtitle pipeline (`test_video_pipeline.py`), the
+platform guards that keep the Windows-only downloads off Linux
+(`test_platform_guards.py`), Home shelves, lyrics merge/repair, the Soulseek
 client and the layout scanner's capitalization reporting
 (`test_layout_case.py`). Most of them run offline by design — network
 providers are stubbed, and the tests that need a toolchain (ffmpeg, fpcalc)
 skip that section when it is not installed.
 Run them all before a release. The frontend gate is `cd web && npx tsc -b &&
 npx oxlint && npm run build`. CI (`.github/workflows/ci.yml`) runs the Python
-suites and that frontend gate on every push and pull request; the suites that
+suites, that frontend gate and `cargo check` for the Tauri shell on every push
+and pull request; the suites that
 need a live backend (the browser check and `smoke_api.py`) are manual.
 
 ---

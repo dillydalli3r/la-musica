@@ -484,10 +484,37 @@ def t_library_enrich_uses_manifest():
     assert bare["cover_file"] is None and "cover_file" in bare, bare
 
 
+def t_cover_check_is_aspect_ratio_not_crop():
+    """grade_check_cover_crop gates an ASPECT-RATIO (squareness) test — there
+    is no crop detection in the grader, and the issue text says so. The
+    toggle must switch it off for the album cover and for sidecar covers."""
+    from mlo.grader import _cover_image_ok
+
+    ratio_cfg = dict(GRADE_CFG, cover_enforce_size=False,
+                     cover_resize_enabled=False, cover_force_exact_size=False,
+                     cover_enforce_square=True)
+    wide = image(os.path.join(G, "wide.png"), (1200, 900))
+    assert not _cover_image_ok(wide, ratio_cfg), "a non-square image fails"
+    assert _cover_image_ok(wide, dict(ratio_cfg, grade_check_cover_crop=False)), \
+        "grade_check_cover_crop=False stops grading the aspect ratio (sidecar path)"
+
+    ratio_dir = os.path.join(MUSIC, "Artists", "Cover Artist", "Ratio Album")
+    make_flac(os.path.join(ratio_dir, "01 - A.flac"), "Song A", 1)
+    image(os.path.join(ratio_dir, "cover.jpg"), (1200, 900))
+    issues = _issues(_grade_album(ratio_dir, "EMBEDDED", ratio_cfg))
+    assert any("aspect ratio" in i and "not square" in i for i in issues), issues
+    assert not any("crop" in i for i in issues), issues
+    issues = _issues(_grade_album(ratio_dir, "EMBEDDED",
+                                  dict(ratio_cfg, grade_check_cover_crop=False)))
+    assert not any("aspect ratio" in i for i in issues), issues
+
+
 check("grading accepts one image shared by two tracks", t_grader_accepts_shared_image)
 check("without the manifest the same image is stray artwork",
       t_grader_without_manifest_sees_a_stray)
 check("library _enrich_track resolves through the manifest", t_library_enrich_uses_manifest)
+check("the cover check grades the ASPECT RATIO, not a crop heuristic",
+      t_cover_check_is_aspect_ratio_not_crop)
 
 # --------------------------------------------------------------------------- #
 # 6. organize(): the manifest follows the album, stale entries are dropped

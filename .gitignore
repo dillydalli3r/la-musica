@@ -72,3 +72,6 @@ tools/shot.py
 .pi/
 # Dev-only screenshot output
 tools/shots/
+
+# Subagent/local scratch output (never shipped)
+local/

@@ -146,7 +146,7 @@ def _log_issue_summary(stats, indent="  ", limit=5):
 
 
 def print_grader_details(name, stats):
-    """Detailed Grade Library block shown alongside the combined table."""
+    """Detailed grading block shown alongside the combined table."""
     gd = stats.get("grade_dist", {})
     total_checks = stats.get("summary_total", 0)
     if total_checks:
@@ -247,7 +247,9 @@ def print_combined_results(per_script, title="COMBINED RESULTS"):
         aligns=["left", "right", "right", "right", "right", "right",
                 "right", "right"],
     ):
-        log(line)
+        # Printed directly, not through log(): the "[HH:MM:SS] " prefix would
+        # hang off the box and break every border row.
+        print(line, flush=True)
 
     for name, s in grader_runs:
         print_grader_details(name, s)

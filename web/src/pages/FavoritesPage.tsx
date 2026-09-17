@@ -3,8 +3,10 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Disc3, FileVideo, Heart, ListMusic, Mic2, Play } from "lucide-react";import { api } from "../api";
 import { useStore } from "../store";
+import { toast } from "../store";
 import { useFavorites, useTrackLikes } from "../lib/favs";
 import { AdvisoryMark, EmptyState, PageLoading } from "../components/Badges";
+import PageHeader from "../components/PageHeader";
 import { TrackCover } from "../components/CoverImg";
 import AlbumCard from "../components/AlbumCard";
 import FavHeart from "../components/FavHeart";
@@ -28,18 +30,18 @@ export default function FavoritesPage() {
   const kind: Kind = (TABS.some((t) => t.id === raw) ? raw : "tracks") as Kind;
 
   return (
-    <div className="p-6 space-y-5">
-      <div className="flex items-center gap-3 flex-wrap">
-        <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-          <Heart className="h-6 w-6 text-accent fill-current" /> Favorites
-        </h1>
-        <Segmented
-          className="ml-2"
-          value={kind}
-          onChange={(k) => navigate(`/favorites/${k}`)}
-          options={TABS.map((t) => ({ id: t.id, label: t.label, icon: t.icon }))}
-        />
-      </div>
+    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+      <PageHeader
+        icon={Heart}
+        title="Favorites"
+        actions={
+          <Segmented
+            value={kind}
+            onChange={(k) => navigate(`/favorites/${k}`)}
+            options={TABS.map((t) => ({ id: t.id, label: t.label, icon: t.icon }))}
+          />
+        }
+      />
       {kind === "tracks" && <LikedTracks />}
       {kind === "albums" && <FavAlbums />}
       {kind === "artists" && <FavArtists />}
@@ -171,7 +173,7 @@ function LikedTracks() {
               <th className="th w-[7%]">Duration</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className="stagger">
             {rows.map((r, i) => (
               <tr
                 key={r.path}
@@ -246,7 +248,7 @@ function FavAlbums() {
   const gridSize = (localStorage.getItem("mlo.gridSize") as "s" | "m" | "l" | null) ?? "m";
   return (
     <div
-      className="grid gap-x-4 gap-y-5"
+      className="grid gap-x-4 gap-y-5 stagger"
       style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${GRID_SIZE_MIN[gridSize] ?? 164}px, 1fr))` }}
     >
       {rows.map(({ album: al, artist: a }) => (
@@ -288,7 +290,7 @@ function FavArtists() {
             <th className="th w-[12%]">Tracks</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody className="stagger">
           {rows.map((a) => {
             const displayName =
               a.display_name ||
@@ -368,7 +370,7 @@ function FavPlaylists() {
       });
       if (q.length) playNow(q);
     } catch (e) {
-      useStore.getState().setToast(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -385,7 +387,7 @@ function FavPlaylists() {
             <th className="th w-[12%]">Tracks</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody className="stagger">
           {rows.map((p) => (
             <tr key={p.id} className="table-row group">
               <td className="td">

@@ -9,6 +9,7 @@ import { ColumnsMenu, useColumnPrefs, type Col } from "../lib/columns";
 import { GRID_SIZE_MIN } from "../lib/fmt";
 import { EmptyState, PageLoading } from "../components/Badges";
 import Segmented from "../components/Segmented";
+import PageHeader from "../components/PageHeader";
 import AlbumCard from "../components/AlbumCard";
 import AlbumRow, { type AlbumRowCell } from "../components/AlbumRow";
 import type { Album } from "../types";
@@ -182,10 +183,10 @@ export default function TrashPage() {
             .join("; ")}`
         );
       } else {
-        toast(`Deleted ${r.deleted.length} item(s), freed ${fmtSize(r.freed)}`);
+        toast.success(`Deleted ${r.deleted.length} item(s), freed ${fmtSize(r.freed)}`);
       }
     },
-    onError: (e) => toast(String(e)),
+    onError: (e) => toast.error(String(e)),
     // A partial failure still changes the disk — never leave a stale list.
     onSettled: () => {
       setSelected([]);
@@ -199,9 +200,9 @@ export default function TrashPage() {
     onSuccess: (r) => {
       const done = r.restored ?? [];
       if (done.length === 1) {
-        toast(`Restored "${done[0].name}" to ${done[0].to}`);
+        toast.success(`Restored "${done[0].name}" to ${done[0].to}`);
       } else if (done.length) {
-        toast(`Restored ${done.length} item(s) — ${done.map((d) => `"${d.name}" → ${d.to}`).join("; ")}`);
+        toast.success(`Restored ${done.length} item(s) — ${done.map((d) => `"${d.name}" → ${d.to}`).join("; ")}`);
       }
       const failed = r.failed ?? [];
       if (failed.length) {
@@ -212,7 +213,7 @@ export default function TrashPage() {
         );
       }
     },
-    onError: (e) => toast(String(e)),
+    onError: (e) => toast.error(String(e)),
     // The library gained (or lost) albums — refresh both sides of the move,
     // even after a partial failure.
     onSettled: () => {
@@ -414,10 +415,8 @@ export default function TrashPage() {
   };
 
   return (
-    <div className="p-6 space-y-3">
-      <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-        <Trash2 className="h-6 w-6 text-accent" /> Trash
-      </h1>
+    <div className="p-6 space-y-5">
+      <PageHeader icon={Trash2} title="Trash">
       {/* toolbar — the library's line-up: view tabs, sort, columns, filter —
           then Empty trash, the trash folder, select mode and the counts on
           the right, all on ONE line. */}
@@ -504,6 +503,7 @@ export default function TrashPage() {
           </span>
         </div>
       </div>
+      </PageHeader>
 
       {/* selection toolbar */}
       {selected.length > 0 && (
@@ -557,7 +557,7 @@ export default function TrashPage() {
       ) : view === "grid" ? (
         /* ---------------- Grid ---------------- */
         <div
-          className="grid gap-x-4 gap-y-5"
+          className="grid gap-x-4 gap-y-5 stagger"
           style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${GRID_SIZE_MIN.m}px, 1fr))` }}
         >
           {rows.map((e) => {
@@ -619,7 +619,7 @@ export default function TrashPage() {
                 <th className="th w-[15rem] text-right">Actions</th>
               </tr>
             </thead>
-            <tbody>
+            <tbody className="stagger">
               {rows.map((e) => (
                 <AlbumRow
                   key={e.name}

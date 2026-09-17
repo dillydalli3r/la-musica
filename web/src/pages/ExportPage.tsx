@@ -2,10 +2,11 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, HardDriveDownload, Library, Search } from "lucide-react";
 import { api } from "../api";
-import { toast, useStore } from "../store";
+import { toast } from "../store";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import { fmtDuration } from "../lib/fmt";
 import Segmented from "../components/Segmented";
+import PageHeader from "../components/PageHeader";
 
 /** Quality presets per codec — mirrors server/exporter.py CODECS tables.
  * Every transcode codec additionally offers "custom" (raw kbps / Vorbis q),
@@ -118,7 +119,6 @@ function estimateKbps(codec: string, quality: string, custom: string): number | 
  * configurator and folder-structure choices. The "put music on my MP3
  * player" feature. */
 export default function ExportPage() {
-  const { setToast } = useStore();
   const { data: lib } = useQuery({ queryKey: ["library"], queryFn: api.library });
   const { data: playlists } = useQuery({ queryKey: ["playlists"], queryFn: api.playlists });
   const { data: drivesData } = useQuery({ queryKey: ["exportDrives"], queryFn: api.exportDrives });
@@ -230,7 +230,7 @@ export default function ExportPage() {
     const destRoot = drivesData?.drives.find((d) => d.root === drive)?.root;
     if (!destRoot) return toast("Choose a destination drive");
     setBusy(true);
-    setToast(`Exporting ${paths.length} track(s)…`);
+    toast(`Exporting ${paths.length} track(s)…`);
     try {
       const r = await api.exportRun({
         paths, dest: destRoot, subfolder, codec,
@@ -238,13 +238,10 @@ export default function ExportPage() {
         structure,
       });
       const gb = (r.bytes / 1024 ** 3).toFixed(2);
-      setToast(
-        r.failed
-          ? `Export finished with ${r.failed} failure(s): ${r.errors[0] ?? ""}`
-          : `Exported ${r.exported} track(s)${r.skipped ? ` (${r.skipped} already there)` : ""} · ${gb} GB`
-      );
+      if (r.failed) toast.error(`Export finished with ${r.failed} failure(s): ${r.errors[0] ?? ""}`);
+      else toast.success(`Exported ${r.exported} track(s)${r.skipped ? ` (${r.skipped} already there)` : ""} · ${gb} GB`);
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -253,19 +250,16 @@ export default function ExportPage() {
   const codecLabel = codecLabels?.codecs?.[codec] ?? FALLBACK_CODEC_LABELS[codec] ?? codec;
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
-      <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-        <HardDriveDownload className="h-6 w-6" /> Export
-      </h1>
-      <p className="text-xs text-zinc-500 mt-1">
-        Copy or convert any part of the library — playlists, albums, artists, single tracks or
-        everything — onto a drive. Tags and artwork ride along; already-exported tracks are skipped
-        on re-runs.
-      </p>
+    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+      <PageHeader
+        icon={HardDriveDownload}
+        title="Export"
+        subtitle="Copy or convert any part of the library — playlists, albums, artists, single tracks or everything — onto a drive. Tags and artwork ride along; already-exported tracks are skipped on re-runs."
+      />
 
-      <div className="grid lg:grid-cols-2 gap-4 mt-5">
+      <div className="grid lg:grid-cols-2 gap-4">
         {/* ---- source -------------------------------------------------- */}
-        <div className="bg-card rounded-lg border border-border p-4">
+        <div className="panel">
           <div className="text-xs font-bold text-zinc-300 mb-2">Source</div>
           <Segmented value={sourceKind} onChange={setSourceKind} options={SOURCE_KINDS} className="mb-3" />
 
@@ -309,7 +303,7 @@ export default function ExportPage() {
                   onChange={(e) => setFilter(e.target.value)}
                 />
               </div>
-              <div className="max-h-64 overflow-y-auto border border-border rounded-md divide-y divide-border/60">
+              <div className="stagger max-h-64 overflow-y-auto border border-border rounded-md divide-y divide-border/60">
                 {sourceKind === "albums" && filteredAlbums.map((a: any) => (
                   <label
                     key={a.path}
@@ -374,9 +368,9 @@ export default function ExportPage() {
 
           {/* track preview — same table language as the library views */}
           {paths.length > 0 && (
-            <div className="mt-2 max-h-64 overflow-y-auto border border-border rounded-md">
+            <div className="mt-2 max-h-64 overflow-y-auto border border-border rounded-md table-scroll">
               <table className="w-full text-xs">
-                <thead className="border-b border-border sticky top-0 bg-card">
+                <thead className="border-b border-border sticky top-12 bg-card">
                   <tr>
                     <th className="th !py-1 w-8">#</th>
                     <th className="th !py-1 w-10"><span className="sr-only">Cover</span></th>
@@ -419,7 +413,7 @@ export default function ExportPage() {
         </div>
 
         {/* ---- destination + format ------------------------------------ */}
-        <div className="bg-card rounded-lg border border-border p-4">
+        <div className="panel">
           <div className="text-xs font-bold text-zinc-300 mb-2">Destination</div>
           <select
             className="input !py-1 text-xs w-full"

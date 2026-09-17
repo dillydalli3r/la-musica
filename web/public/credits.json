@@ -7,12 +7,12 @@
         { "name": "beets", "license": "MIT", "url": "https://beets.io", "use": "MusicBrainz imports with Picard-parity tagging" },
         { "name": "FFmpeg", "license": "LGPL-2.1+ / GPL-2.0+ (GPL build bundled)", "url": "https://ffmpeg.org", "use": "remuxing, transcoding, decode verification" },
         { "name": "flac", "license": "BSD-3 (libFLAC) / GPL-2+ (tools)", "url": "https://github.com/xiph/flac", "use": "FLAC encode / decode / verify" },
-        { "name": "CUETools", "license": "LGPL-2.1 (components GPL)", "url": "https://github.com/gchudov/cuetools.net", "use": "CUE handling & verification" },
+        { "name": "CUETools", "license": "GPL-2.0-or-later (bundles TagLibSharp LGPL-2.1, Newtonsoft.Json MIT, FFmpeg.AutoGen LGPL-3.0, hdcd/unrar/ALAC/libFLAC/wavpack/Monkey's Audio)", "url": "https://github.com/gchudov/cuetools.net", "use": "CUE handling & verification" },
         { "name": "Logchecker", "license": "MIT", "url": "https://github.com/OPSnet/Logchecker", "use": "rip log grading (EAC / XLD)" },
         { "name": "PHP", "license": "PHP-3.01", "url": "https://www.php.net", "use": "runs the Logchecker phar" },
         { "name": "AudioAuditor", "license": "GPL-3.0", "url": "https://github.com/Angel2mp3/AudioAuditor", "use": "audio authenticity auditing" },
         { "name": "rsgain", "license": "BSD-2-Clause", "url": "https://github.com/complexlogic/rsgain", "use": "ReplayGain 2.0 tagging" },
-        { "name": "simple-dr-meter", "license": "see project", "url": "https://github.com/magicgoose/simple-dr-meter", "use": "dynamic range analysis" },
+        { "name": "simple-dr-meter", "license": "GPL-3.0", "url": "https://github.com/magicgoose/simple-dr-meter", "use": "dynamic range analysis" },
         { "name": "libjxl", "license": "BSD-3-Clause", "url": "https://github.com/libjxl/libjxl", "use": "JPEG XL cover art" },
         { "name": "libjpeg-turbo", "license": "BSD-3 / IJG / zlib", "url": "https://github.com/libjpeg-turbo/libjpeg-turbo", "use": "JPEG processing" },
         { "name": "oxipng", "license": "MIT", "url": "https://github.com/oxipng/oxipng", "use": "lossless PNG optimization" },
@@ -25,12 +25,36 @@
         { "name": "FastAPI", "license": "MIT", "url": "https://github.com/fastapi/fastapi" },
         { "name": "Uvicorn", "license": "BSD-3-Clause", "url": "https://github.com/encode/uvicorn" },
         { "name": "httpx", "license": "BSD-3-Clause", "url": "https://github.com/encode/httpx" },
-        { "name": "mutagen", "license": "GPL-2.0-or-later", "url": "https://github.com/quodlibet/mutagen" },
+        { "name": "mutagen", "license": "GPL-2.0-or-later", "url": "https://github.com/quodlibet/mutagen", "use": "audio tag read/write (imported in-process)" },
         { "name": "Pillow", "license": "HPND (MIT-CMU)", "url": "https://github.com/python-pillow/Pillow" },
         { "name": "websockets", "license": "BSD-3-Clause", "url": "https://github.com/python-websockets/websockets" },
         { "name": "python-multipart", "license": "Apache-2.0", "url": "https://github.com/kludex/python-multipart" },
         { "name": "aiofiles", "license": "Apache-2.0", "url": "https://github.com/Tinche/aiofiles" },
         { "name": "pystray", "license": "LGPL-3.0", "url": "https://github.com/moses-palmer/pystray" }
+      ]
+    },
+    {
+      "title": "Bundled Python dependencies",
+      "items": [
+        { "name": "numpy, scipy, scikit-learn, joblib, pooch, soundfile, threadpoolctl, cloudpickle, idna, pycparser, audioread, lazy-loader", "license": "BSD-3-Clause / MIT (numpy bundles 0BSD, Zlib, CC0-1.0 parts)", "url": "https://numpy.org", "use": "installed with librosa" },
+        { "name": "numba, llvmlite, decorator, lap, musicbrainzngs", "license": "BSD-2-Clause (llvmlite also Apache-2.0 WITH LLVM-exception)", "url": "https://numba.pydata.org", "use": "installed with librosa / beets" },
+        { "name": "beets, confuse, mediafile, filetype, jellyfish, platformdirs, PyYAML, narwhals, urllib3, charset-normalizer, cffi", "license": "MIT (cffi MIT-0)", "url": "https://beets.io", "use": "installed with beets / librosa" },
+        { "name": "requests, msgpack", "license": "Apache-2.0", "url": "https://requests.readthedocs.io", "use": "installed with librosa" },
+        { "name": "packaging", "license": "Apache-2.0 OR BSD-2-Clause", "url": "https://github.com/pypa/packaging", "use": "installed with librosa" },
+        { "name": "colorama", "license": "BSD-3-Clause", "url": "https://github.com/tartley/colorama", "use": "installed with beets" },
+        { "name": "typing_extensions, standard-aifc, standard-chunk, standard-sunau, audioop-lts", "license": "PSF-2.0", "url": "https://pypi.org/project/typing-extensions/", "use": "runtime shims" },
+        { "name": "certifi", "license": "MPL-2.0", "url": "https://github.com/certifi/python-certifi", "use": "installed with librosa" },
+        { "name": "soxr (native libsoxr)", "license": "LGPL-2.1-or-later", "url": "https://github.com/dofuuz/python-soxr", "use": "resampling, installed with librosa" },
+        { "name": "Unidecode", "license": "GPL-2.0-or-later", "url": "https://github.com/avian2/unidecode", "use": "transliteration in the beets tree" }
+      ]
+    },
+    {
+      "title": "Desktop shell (Rust)",
+      "items": [
+        { "name": "tauri, tauri-build, tauri-plugin-dialog, tauri-plugin-autostart", "license": "MIT / Apache-2.0", "url": "https://tauri.app", "use": "desktop shell" },
+        { "name": "serde, serde_json, dirs, windows-rs", "license": "MIT / Apache-2.0", "url": "https://serde.rs", "use": "serialization, paths" },
+        { "name": "auto-launch", "license": "MIT", "url": "https://github.com/zzzgydi/auto-launch", "use": "start on login" },
+        { "name": "Cargo.lock crate graph (453 crates)", "license": "permissive; MPL-2.0 file-level (5 crates); no GPL/AGPL", "url": "https://github.com/dillydalli3r/la-musica/blob/main/desktop/src-tauri/Cargo.lock", "use": "full crate list + licences" }
       ]
     },
     {

@@ -1,7 +1,7 @@
 // Client-side mirror of mlo.lyrics._syllabify_token / _elrc_split_words
 // (mlo/lyrics.py). The lyric editor's tap-along syllable chips must split
 // words the same way the deterministic backend builder would, so
-// hand-stamped syllable ELRC matches the AI/deterministic output byte for
+// hand-stamped syllable ELRC matches the backend output byte for
 // byte. Keep the two in sync.
 
 const CJK_RE = /[\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/;

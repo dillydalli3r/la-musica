@@ -11,6 +11,8 @@ import { toast } from "../store";
 import LyricsViewer, { parseLrc } from "../components/LyricsViewer";
 import CoverSearchModal from "../components/CoverSearchModal";
 import CoverImg, { TrackCover } from "../components/CoverImg";
+import PageHeader from "../components/PageHeader";
+import MetadataReviewModal from "../components/MetadataReviewModal";
 import type {
   AcoustidAlbumMatch, AcoustidMatch, ImportBulkJob, ImportScriptsPreview,
   LyricsAutoResult, MBRelease, MatchSuggestion, Track,
@@ -244,6 +246,11 @@ export default function ImportWizard() {
 
   const { data: lib } = useQuery({ queryKey: ["library"], queryFn: api.library });
 
+  // Metadata review is off unless the config explicitly turns it on.
+  const { data: cfg } = useQuery({ queryKey: ["config"], queryFn: api.config });
+  /** Album folder whose metadata review modal is open (metadata_review only). */
+  const [reviewPath, setReviewPath] = useState<string | null>(null);
+
   // Real dimensions of the album cover, re-read whenever a cover changes.
   const { data: coverInfo } = useQuery({
     queryKey: ["coverInfo", albumPath],
@@ -338,7 +345,7 @@ export default function ImportWizard() {
       pickRelease(id);
     } catch (e) {
       setDetectStatus("none");
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -543,7 +550,7 @@ export default function ImportWizard() {
         return;
       }
     } catch (e) {
-      if ((e as Error).name !== "AbortError") toast(String(e));
+      if ((e as Error).name !== "AbortError") toast.error(String(e));
       return;
     }
     // Fallback: webkitdirectory input (Chrome/Edge/Firefox/WebView2).
@@ -569,7 +576,7 @@ export default function ImportWizard() {
         .map((f) => ({ file: null, relPath: f.relPath }));
       adoptImports(list, picked.split(/[\\/]/).pop() ?? "");
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -650,6 +657,10 @@ export default function ImportWizard() {
       setAlbumPath(results[0].path);
       setStep(1);
       qc.invalidateQueries({ queryKey: ["library"] });
+      // Committed. With metadata_review on (Settings → Metadata) the review is
+      // offered right here, while the album is fresh, instead of on a later
+      // visit to its page.
+      if (cfg?.metadata_review === true) setReviewPath(results[0].path);
       // Several albums: hand the staged queue to the bulk job, which moves
       // whatever is still outside the library and runs the import chain per
       // album. The queue panel polls api.importBulkStatus for progress.
@@ -668,7 +679,7 @@ export default function ImportWizard() {
           : `Imported ${results.length} album${results.length > 1 ? "s" : ""}`
       );
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setUploading(false);
     }
@@ -683,7 +694,7 @@ export default function ImportWizard() {
     try {
       setSearchHits(await api.mbSearchReleases(query.trim(), searchMode));
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -698,7 +709,7 @@ export default function ImportWizard() {
       const hits = await api.mbSearchArtists(artistQuery.trim());
       setArtistHits(Array.isArray(hits) ? hits : []);
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -729,7 +740,7 @@ export default function ImportWizard() {
         toast(`Matched ${matched.suggestions.filter((s) => s.matched).length}/${matched.suggestions.length} tracks`);
       }
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
       setFetchStatus(null);
@@ -761,7 +772,7 @@ export default function ImportWizard() {
       setGenreSource(src ?? "MusicBrainz");
       toast("Genres imported — review and edit below");
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
       setFetchStatus(null);
@@ -780,7 +791,7 @@ export default function ImportWizard() {
       toast("Links saved to album");
       setStep(2);
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -802,7 +813,7 @@ export default function ImportWizard() {
       setAcoustid(res);
       if (!res.available) toast(`Fingerprinting unavailable — ${res.note}`);
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setAcoustidBusy(false);
     }
@@ -855,7 +866,7 @@ export default function ImportWizard() {
         toast(`Matched, but the AcoustID identity tags failed: ${e}`);
       }
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setAcoustidBusy(false);
       setFetchStatus(null);
@@ -981,7 +992,7 @@ export default function ImportWizard() {
       toast("MusicBrainz metadata written to files (titles, artists, album, dates, MBIDs)");
       setStep(3);
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
       setFetchStatus(null);
@@ -1048,7 +1059,7 @@ export default function ImportWizard() {
       reportCover(res, tracks?.length ? `Cover assigned to ${tracks.length} track(s)` : "Album cover");
       refreshCovers();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -1065,7 +1076,7 @@ export default function ImportWizard() {
       reportCover(res, tracks?.length ? `Cover assigned to ${tracks.length} track(s)` : "Album cover");
       refreshCovers();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -1079,7 +1090,7 @@ export default function ImportWizard() {
       toast(`Per-track cover cleared for ${coverSel.size} track(s)`);
       refreshCovers();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -1196,7 +1207,7 @@ export default function ImportWizard() {
       toast("Genres saved");
       setStep(5);
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -1311,7 +1322,7 @@ export default function ImportWizard() {
       );
       qc.invalidateQueries({ queryKey: ["library"] });
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -1353,7 +1364,7 @@ export default function ImportWizard() {
       toast(`lyrics_format=${fmt}: ${embedded} embedded, ${sidecars} .lrc — INSTRUMENTAL saved`);
       setStep(6);
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -1389,7 +1400,7 @@ export default function ImportWizard() {
       toast("Advisory ratings saved");
       setStep(7);
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -1398,8 +1409,8 @@ export default function ImportWizard() {
   // The post-import chain comes from lib/scripts.ts — the single source of
   // truth every other script menu in the app already uses. This was an
   // 8-entry list hardcoded here, and it silently drifted: AccurateRip, Format
-  // all, Remux videos, Key & BPM, Fetch lyrics, Beets and Lyrics xlit were all
-  // missing, so "Run all scripts" ran 8 of the 15 that exist.
+  // all, Remux videos, Key & BPM, Fetch lyrics and Beets were all
+  // missing, so "Run all scripts" ran 8 of the 14 that exist.
   const POST_IMPORT_DEFAULT_ON = new Set([1, 2, 5, 7, 4]);
   const POST_IMPORT_SCRIPTS = SCRIPTS.map((s) => ({
     id: s.ids[0],
@@ -1433,7 +1444,7 @@ const runAllScripts = async () => {
     );
     qc.invalidateQueries({ queryKey: ["library"] });
   } catch (e) {
-    toast(String(e));
+    toast.error(String(e));
   } finally {
     setScriptsRunning(false);
   }
@@ -1445,7 +1456,7 @@ const finish = async () => {
       await api.run(runAfterImport, uploaded.map((a) => a.path));
     }
   } catch (e) {
-    toast(String(e));
+    toast.error(String(e));
   }
   qc.invalidateQueries({ queryKey: ["library"] });
   setParams({});
@@ -1507,25 +1518,30 @@ const finish = async () => {
 
   return (
     <div className="p-6 max-w-6xl mx-auto space-y-5">
-      <div className="flex items-center gap-3 flex-wrap">
-        <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-          <UploadCloud className="h-6 w-6 text-accent" /> Import
-        </h1>
-        {uploaded.length > 1 && (
-          <select className="input !w-auto text-sm" value={albumIndex} onChange={(e) => switchAlbum(Number(e.target.value))}>
-            {uploaded.map((a, i) => (
-              <option key={a.path} value={i}>{a.name}</option>
-            ))}
-          </select>
-        )}
-        {albumPath && (
-          <span className="text-xs text-zinc-500 truncate">
-            <Link to={`/album/${encodeURIComponent(albumPath)}`} className="hover:text-accent-soft">
-              {albumPath.split("/").pop()}
-            </Link>
-          </span>
-        )}
-      </div>
+      <PageHeader
+        icon={UploadCloud}
+        title="Import"
+        subtitle={
+          uploaded.length > 1 || albumPath ? (
+            <>
+              {uploaded.length > 1 && (
+                <select className="input !w-auto text-sm" value={albumIndex} onChange={(e) => switchAlbum(Number(e.target.value))}>
+                  {uploaded.map((a, i) => (
+                    <option key={a.path} value={i}>{a.name}</option>
+                  ))}
+                </select>
+              )}
+              {albumPath && (
+                <span className="truncate">
+                  <Link to={`/album/${encodeURIComponent(albumPath)}`} className="hover:text-accent-soft">
+                    {albumPath.split("/").pop()}
+                  </Link>
+                </span>
+              )}
+            </>
+          ) : undefined
+        }
+      />
 
       {/* step indicator */}
       <div className="flex items-center gap-1.5 overflow-x-auto">
@@ -1551,7 +1567,7 @@ const finish = async () => {
 
       {/* ---------------- Queue mode: several albums at once ---------------- */}
       {queueMode && (
-        <div className="bg-card rounded-lg border border-border p-3 space-y-2">
+        <div className="panel p-3 space-y-2">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-semibold text-zinc-200 flex items-center gap-1.5">
               <Disc3 className="h-4 w-4 text-accent" /> Queue mode — {queueItems.length} album(s)
@@ -1645,7 +1661,7 @@ const finish = async () => {
       {step === 0 && (
         <div className="space-y-4">
           <div
-            className="rounded-xl border-2 border-dashed border-border bg-card p-10 text-center hover:border-accent/60 transition-colors cursor-pointer"
+            className="panel-hero border-2 border-dashed p-10 text-center hover:border-accent/60 transition-colors cursor-pointer"
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => {
               e.preventDefault();
@@ -1736,7 +1752,7 @@ const finish = async () => {
                 </button>
               </div>
               {albums.map((g, gi) => (
-                <div key={gi} className="bg-card rounded-lg border border-border p-3">
+                <div key={gi} className="panel p-3">
                   <div className="flex items-center gap-2 mb-2">
                     <Disc3 className="h-4 w-4 text-zinc-500 shrink-0" />
                     <input
@@ -1817,7 +1833,7 @@ const finish = async () => {
               onMatchAll={matchQueueToRelease}
             />
           )}
-          <div className="bg-card rounded-lg border border-border p-4 space-y-3">
+          <div className="panel p-4 space-y-3">
             <div className="text-sm font-semibold text-zinc-300">
               MusicBrainz release <span className="text-zinc-500 font-normal">— {currentAlbumName}</span>
             </div>
@@ -1970,7 +1986,7 @@ const finish = async () => {
             >
               {g.rows.map((s) => {
                 return (
-                  <div key={s.local} className="flex items-center gap-3 bg-card rounded-lg border border-border px-3 py-2">
+                  <div key={s.local} className="flex items-center gap-3 panel px-3 py-2">
                     <TrackNoBadge disc={discNoOf(s.local)} track={trackNoOf(s.local)} />
                     <span className="flex-1 truncate text-sm">{displayTitle(s.local)}</span>
                     <span className="text-xs text-zinc-500">
@@ -2014,7 +2030,7 @@ const finish = async () => {
           )}
 
           <div className="grid md:grid-cols-2 gap-3">
-            <div className="bg-card rounded-lg border border-border p-4 space-y-2">
+            <div className="panel p-4 space-y-2">
               <div className="text-sm font-semibold text-zinc-300">Current album cover</div>
               <CoverImg
                 albumPath={albumPath}
@@ -2036,7 +2052,7 @@ const finish = async () => {
               </div>
             </div>
 
-            <div className="bg-card rounded-lg border border-border p-4 space-y-2">
+            <div className="panel p-4 space-y-2">
               <div className="text-sm font-semibold text-zinc-300">MusicBrainz release cover</div>
               <div className="text-xs text-zinc-500">
                 The release's own cover — compare it with musichoarders before you accept it.
@@ -2075,7 +2091,7 @@ const finish = async () => {
             </div>
           </div>
 
-          <div className="bg-card rounded-lg border border-border p-3 space-y-2">
+          <div className="panel p-3 space-y-2">
             <div className="text-xs text-zinc-400">
               MusicBrainz cover wrong? Find the correct one on{" "}
               <a
@@ -2106,7 +2122,7 @@ const finish = async () => {
             </div>
           </div>
 
-          <div className="bg-card rounded-lg border border-border p-3 space-y-2">
+          <div className="panel p-3 space-y-2">
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-sm font-semibold text-zinc-300">Per-track covers</span>
               <span className="text-xs text-zinc-500">
@@ -2190,7 +2206,7 @@ const finish = async () => {
                   return (
                     <label
                       key={t.path}
-                      className={`flex items-center gap-3 bg-card rounded-lg border px-3 py-2 cursor-pointer ${
+                      className={`flex items-center gap-3 panel px-3 py-2 cursor-pointer ${
                         coverSel.has(t.path) ? "border-accent/60" : "border-border"
                       }`}
                     >
@@ -2296,7 +2312,7 @@ const finish = async () => {
               everywhere is the common correction — and until now it could only
               be done one track at a time. */}
           {allGenres.length > 0 && (
-            <div className="bg-card rounded-lg border border-border px-3 py-2 flex items-center gap-1.5 flex-wrap">
+            <div className="panel px-3 py-2 flex items-center gap-1.5 flex-wrap">
               <span className="text-xs font-semibold text-zinc-400 shrink-0">Remove a genre everywhere:</span>
               {allGenres.map(([gen, n]) => (
                 <button
@@ -2349,7 +2365,7 @@ const finish = async () => {
               }
             >
               {g.rows.map((t) => (
-                <div key={t.path} className="flex items-center gap-3 bg-card rounded-lg border border-border px-3 py-2">
+                <div key={t.path} className="flex items-center gap-3 panel px-3 py-2">
                   <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
                   <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
                   <div className="flex items-center gap-1.5 flex-wrap justify-end">
@@ -2406,7 +2422,7 @@ const finish = async () => {
             </span>
           </div>
           {Object.keys(lyrResults).length > 0 && (
-            <div className="bg-card rounded-lg border border-border px-3 py-2 text-xs space-y-0.5">
+            <div className="panel px-3 py-2 text-xs space-y-0.5">
               <div className="flex items-center gap-3 text-zinc-400 flex-wrap">
                 {(["ok", "skipped", "failed"] as const).map((status) => {
                   const rows = Object.values(lyrResults).filter((r) => r.status === status);
@@ -2429,7 +2445,7 @@ const finish = async () => {
             const inst = instrumental[t.path] ?? t.tags.INSTRUMENTAL;
             const hasDraft = hasLyrics(t);
             return (
-              <details key={t.path} className="bg-card rounded-lg border border-border open:pb-3">
+              <details key={t.path} className="panel open:pb-3">
                 <summary className="px-3 py-2 text-sm font-medium cursor-pointer flex items-center gap-2">
                   <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
                   <span className="flex-1 truncate">{displayTitle(t.path)}</span>
@@ -2498,7 +2514,7 @@ const finish = async () => {
       {step === 6 && (
         <div className="space-y-3">
           <div className="text-sm text-zinc-400">Set iTunes advisory per track: <b className="text-zinc-200">0</b> unrated/clean, <b className="text-zinc-200">1</b> explicit, <b className="text-zinc-200">2</b> safe edited version.</div>
-          <div className="flex items-center gap-2 bg-card rounded-lg border border-border px-3 py-2 flex-wrap">
+          <div className="flex items-center gap-2 panel px-3 py-2 flex-wrap">
             <span className="text-xs font-semibold text-zinc-400">Apply to all tracks:</span>
             {["0", "1", "2"].map((v) => (
               <button
@@ -2512,7 +2528,7 @@ const finish = async () => {
             ))}
           </div>
           {stepTracks.map((t) => (
-            <div key={t.path} className="flex items-center gap-3 bg-card rounded-lg border border-border px-3 py-2">
+            <div key={t.path} className="flex items-center gap-3 panel px-3 py-2">
               <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
               <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
               {!!t.tags.ITUNESADVISORY && !["0", "1", "2"].includes(t.tags.ITUNESADVISORY.trim()) && (
@@ -2548,7 +2564,7 @@ const finish = async () => {
 
       {/* ---------------- Step 7: finish ---------------- */}
       {step === 7 && (
-        <div className="bg-card rounded-lg border border-border p-6">
+        <div className="panel p-6">
           <div className="text-center">
             <Check className="h-10 w-10 text-emerald-400 mx-auto mb-3" />
             <div className="font-semibold text-lg">Import complete</div>
@@ -2638,6 +2654,17 @@ const finish = async () => {
           </div>
         </div>
       )}
+
+      {/* Metadata review for the album just committed. The artist is its
+          parent folder — the images and descriptions the modal edits live
+          there. Dismissing it never touches the wizard's own step state. */}
+      {reviewPath && (
+        <MetadataReviewModal
+          artist={baseName(reviewPath.split("/").slice(0, -1).join("/"))}
+          albumPath={reviewPath}
+          onClose={() => setReviewPath(null)}
+        />
+      )}
     </div>
   );
 }
@@ -2685,7 +2712,7 @@ function AcoustidBlock({
   onMatchAll: () => void;
 }) {
   return (
-    <div className="bg-card rounded-lg border border-border p-4 space-y-2">
+    <div className="panel p-4 space-y-2">
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-sm font-semibold text-zinc-300">AcoustID fingerprint</span>
         <span className="text-xs text-zinc-500">

@@ -6,6 +6,7 @@ import {
 import { api } from "../api";
 import { toast, useStore } from "../store";
 import { ProgressInline } from "../components/ProgressBar";
+import PageHeader from "../components/PageHeader";
 import { FORCE_SCRIPTS, forceDict, loadForceSel, saveForceSel } from "../lib/force";
 import { SCRIPTS, DEFAULT_RUN_ALL, isScriptId } from "../lib/scripts";
 import type { LayoutIssue, LayoutReport } from "../types";
@@ -46,7 +47,7 @@ function useForceRun() {
  * refresh — everything that used to live in the top bar, in one place. */
 export default function OptimizationPage() {
   const qc = useQueryClient();
-  const { setToast, progress } = useStore();
+  const { progress } = useStore();
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   const { forceRun, toggle: toggleForce, forceSel, setSel } = useForceRun();
   const [forceMenu, setForceMenu] = useState(false);
@@ -54,7 +55,7 @@ export default function OptimizationPage() {
 
   const runAll = async () => {
     setBusy(true);
-    setToast(forceRun
+    toast(forceRun
       ? `Running all scripts (forced: ${FORCE_SCRIPTS.filter((f) => forceSel[f.key]).length}/${FORCE_SCRIPTS.length})…`
       : "Running all scripts…");
     try {
@@ -64,9 +65,10 @@ export default function OptimizationPage() {
       const force = forceRun ? forceDict(forceSel) : undefined;
       const res = await api.run(order, undefined, force);
       const failed = (res.results ?? []).filter((r) => r.error);
-      setToast(failed.length ? `${failed.length} script(s) failed — see console` : "Run All finished");
+      if (failed.length) toast.error(`${failed.length} script(s) failed — see console`);
+      else toast.success("Run All finished");
     } catch (e) {
-      setToast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
       qc.invalidateQueries({ queryKey: ["library"] });
@@ -101,13 +103,14 @@ export default function OptimizationPage() {
 
   const runScripts = async (ids: number[], label: string, force?: boolean) => {
     setBusy(true);
-    setToast(`Running ${label}${force ? " (forced)" : ""}…`);
+    toast(`Running ${label}${force ? " (forced)" : ""}…`);
     try {
       const res = await api.run(ids, undefined, force ? forceDict(forceSel) : undefined);
       const failed = (res.results ?? []).filter((r) => r.error);
-      setToast(failed.length ? `${label} failed: ${failed[0].error}` : `${label} finished`);
+      if (failed.length) toast.error(`${label} failed: ${failed[0].error}`);
+      else toast.success(`${label} finished`);
     } catch (e) {
-      setToast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
       qc.invalidateQueries({ queryKey: ["library"] });
@@ -115,18 +118,15 @@ export default function OptimizationPage() {
   };
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
-      <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-        <Gauge className="h-6 w-6" /> Optimization
-      </h1>
-      <p className="text-xs text-zinc-500 mt-1">
-        Run the library maintenance scripts — individually, as a custom selection, or all together in
-        the order that is best for file optimization. Force re-runs scripts that would normally skip
-        because they are already done.
-      </p>
+    <div className="p-6 space-y-5 mx-auto max-w-6xl">
+      <PageHeader
+        icon={Gauge}
+        title="Optimization"
+        subtitle="Run the library maintenance scripts — individually, as a custom selection, or all together in the order that is best for file optimization. Force re-runs scripts that would normally skip because they are already done."
+      />
 
       {/* ---- Run All + Force ------------------------------------------ */}
-      <div className="bg-card rounded-lg border border-border p-4 mt-5">
+      <div className="panel">
         <div className="flex items-center gap-2 flex-wrap">
           <button
             className="btn-primary text-xs"
@@ -208,7 +208,7 @@ export default function OptimizationPage() {
       </div>
 
       {/* ---- individual scripts + custom multi-select run ------------- */}
-      <div className="bg-card rounded-lg border border-border p-4 mt-4">
+      <div className="panel">
         <div className="flex items-center gap-2 mb-2 flex-wrap">
           <div className="text-xs font-bold text-zinc-300 flex items-center gap-1.5 flex-1 min-w-0">
             <Wand2 className="h-3.5 w-3.5" /> Individual scripts
@@ -230,7 +230,7 @@ export default function OptimizationPage() {
             <Play className="h-3.5 w-3.5" /> Run selected{sel.length ? ` (${sel.length})` : ""}
           </button>
         </div>
-        <div className="grid sm:grid-cols-2 gap-1.5">
+        <div className="stagger grid sm:grid-cols-2 gap-1.5">
           {SCRIPTS.map((s) => {
             const id = s.ids[0];
             const on = sel.includes(id);
@@ -275,7 +275,7 @@ export default function OptimizationPage() {
         {sel.length > 1 && (
           <div className="mt-3 pt-3 border-t border-border">
             <div className="text-[10px] uppercase tracking-wider text-zinc-500 mb-1.5">Custom run order</div>
-            <div className="flex flex-col gap-1">
+            <div className="stagger flex flex-col gap-1">
               {sel.map((id, i) => (
                 <div key={id} className="flex items-center gap-2 text-xs text-zinc-300 bg-panel rounded-lg px-2 py-1">
                   <span className="font-mono text-[10px] text-zinc-500 w-4 text-right">{i + 1}</span>
@@ -341,7 +341,7 @@ function LayoutPanel() {
       // Open the kinds that actually have rows, so a scan lands on its findings.
       setOpen(new Set(LAYOUT_KINDS.filter((k) => r.counts[k.kind]).map((k) => k.kind)));
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -369,7 +369,7 @@ function LayoutPanel() {
     (report?.issues ?? []).filter((i) => i.kind === kind);
 
   return (
-    <div className="bg-card rounded-lg border border-border p-4 mt-4">
+    <div className="panel">
       <div className="flex items-center gap-2 flex-wrap">
         <div className="text-xs font-bold text-zinc-300 flex items-center gap-1.5 flex-1 min-w-0">
           <FolderTree className="h-3.5 w-3.5" /> Library layout
@@ -424,7 +424,7 @@ function LayoutPanel() {
                   <span className="chip bg-raise border border-border text-zinc-400 shrink-0">{rows.length}</span>
                 </button>
                 {isOpen && (
-                  <div className="divide-y divide-border/60">
+                  <div className="stagger divide-y divide-border/60">
                     {rows.map((i) => (
                       <div key={i.abs} className="px-2.5 py-1.5 text-[11px] space-y-0.5">
                         <div className="flex items-center gap-2">

@@ -14,8 +14,10 @@ import wave
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mlo.grader import REPLAYGAIN_TAGS, _grade_album, _naming_mismatch
-from mlo.naming import DEFAULT_NAMING_SCRIPT
+from mlo.grader import (REPLAYGAIN_TAGS, _grade_album, _naming_mismatch,
+                        _release_type_candidates, tag_key_allowed)
+from mlo.naming import (DEFAULT_NAMING_SCRIPT, UNKNOWN_RELEASE_TYPE,
+                        eval_script, track_variables)
 from server.beetscfg import generate_config
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -107,6 +109,7 @@ ISO_CFG = {
     # no MOOD / ReplayGain tags and no description.txt) and switched on in
     # the dedicated cases below.
     "grade_check_mood": False,
+    "grade_check_energy": False,
     "grade_check_replaygain": False,
     "grade_check_acoustid": False,
     "grade_check_album_description": False,
@@ -120,33 +123,52 @@ tmp = tempfile.mkdtemp(prefix="mlo_naming_test_")
 print("== _naming_mismatch ==")
 folder = tempfile.mkdtemp(prefix="mlo_naming_pure_")
 lib = os.path.join(folder, "Artists")
-os.makedirs(os.path.join(lib, "Artist", "2020 - Album"), exist_ok=True)
-good = os.path.join(lib, "Artist", "2020 - Album", "1-01 Song.flac")
+os.makedirs(os.path.join(lib, "Artist", "Album (2020)"), exist_ok=True)
+good = os.path.join(lib, "Artist", "Album (2020)", "1-01 Song.flac")
 ok(_naming_mismatch(good, folder, DEFAULT_NAMING_SCRIPT, "", BASE_TAGS) == ("ok", None),
    "exact match below <music>/Artists returns ('ok', None)")
 ok(_naming_mismatch(os.path.join(lib, "Wrong", "1-01 Song.flac"), folder,
                     DEFAULT_NAMING_SCRIPT, "", BASE_TAGS)
-   == ("path", "Artist/2020 - Album/1-01 Song.flac"), "wrong folder returns expected path")
+   == ("path", "Artist/Album (2020)/1-01 Song.flac"),
+   "wrong folder returns expected path")
 # the SAME relative layout one level up (music folder root) is not a match
-ok(_naming_mismatch(os.path.join(folder, "Artist", "2020 - Album", "1-01 Song.flac"),
+ok(_naming_mismatch(os.path.join(folder, "Artist", "Album (2020)", "1-01 Song.flac"),
                     folder, DEFAULT_NAMING_SCRIPT, "", BASE_TAGS)[0] == "path",
    "library layout in the music folder root fails (base is Artists/)")
+# label / country / release type land in the folder segment exactly as the
+# script spells them, and a missing one drops its segment (no dangling [])
+rich = dict(BASE_TAGS, RELEASETYPE="Album", LABEL="Label", RELEASECOUNTRY="US")
+rich_path = os.path.join(lib, "Artist", "Album (Album, 2020) [Label] [US]",
+                         "1-01 Song.flac")
+ok(_naming_mismatch(rich_path, folder, DEFAULT_NAMING_SCRIPT, "", rich) == ("ok", None),
+   "release type, label and country join the folder segment")
+ok(_naming_mismatch(good, folder, DEFAULT_NAMING_SCRIPT, "", rich)[0] == "path",
+   "dropping them from the folder fails (script defines the path)")
+ok(eval_script(DEFAULT_NAMING_SCRIPT, track_variables(BASE_TAGS)).count("[") == 0
+   and "/Album (2020)/" in eval_script(DEFAULT_NAMING_SCRIPT, track_variables(BASE_TAGS)),
+   "missing label/country/type leave NO dangling brackets")
 
 tags_m = dict(BASE_TAGS, MUSICBRAINZ_ALBUMARTISTID="12345678-1234-1234-1234-123456789abc")
 # the default script folds the MBID into ONE folder segment: "Artist [uuid]"
-full = os.path.join(lib, "Artist [12345678-1234-1234-1234-123456789abc]", "2020 - Album", "1-01 Song.flac")
-short = os.path.join(lib, "Artist [12345678]", "2020 - Album", "1-01 Song.flac")
+full = os.path.join(lib, "Artist [12345678-1234-1234-1234-123456789abc]",
+                    "Album (2020)", "1-01 Song.flac")
+short = os.path.join(lib, "Artist [12345678]", "Album (2020)", "1-01 Song.flac")
 ok(_naming_mismatch(full, folder, DEFAULT_NAMING_SCRIPT, "", tags_m) == ("ok", None),
    "full MBID path matches")
 ok(_naming_mismatch(short, folder, DEFAULT_NAMING_SCRIPT, "", tags_m) == ("ok", None),
    "short MBID accepted too (ID length can't cause false fails)")
 ok(_naming_mismatch(full, folder, DEFAULT_NAMING_SCRIPT, "", BASE_TAGS)[0] == "path",
    "MBID folder mismatches when the tag is absent")
-# RELEASETYPE feeds the script like the organizer does: "[album] 2020 - Album"
-with_type = os.path.join(lib, "Artist [12345678-1234-1234-1234-123456789abc]", "[album] 2020 - Album", "1-01 Song.flac")
+# RELEASETYPE feeds the script like the organizer does — "[album] 2020 - Album"
+# became "Album (album, 2020)" in the shipped default
+with_type = os.path.join(lib, "Artist [12345678-1234-1234-1234-123456789abc]",
+                         "Album (album, 2020)", "1-01 Song.flac")
 ok(_naming_mismatch(with_type, folder, DEFAULT_NAMING_SCRIPT, "album", tags_m) == ("ok", None),
-   "release type joins the album folder segment")
-ok(_naming_mismatch(good.replace("2020 - Album", "2020 - ALBUM"), folder,
+   "a lowercase release type joins the album folder segment")
+ok(_naming_mismatch(with_type.replace("(album,", "(Album; Live,"), folder,
+                    DEFAULT_NAMING_SCRIPT, "album+live", tags_m) == ("ok", None),
+   "the same type in MusicBrainz casing matches too (no false fail)")
+ok(_naming_mismatch(good.replace("Album (2020)", "ALBUM (2020)"), folder,
                     DEFAULT_NAMING_SCRIPT, "", BASE_TAGS)[0] == "case",
    "case-only difference reports 'case' (PATH_CASE check)")
 shutil.rmtree(folder, ignore_errors=True)
@@ -156,7 +178,12 @@ shutil.rmtree(folder, ignore_errors=True)
 # ----------------------------------------------------------------------
 print("== _grade_album naming + key/bpm ==")
 music = os.path.join(tmp, "Music")
-album = os.path.join(music, "Artists", "Artist", "2020 - Album")
+# The folder is spelled the way the shipped script lays it out when the
+# RELEASETYPE tag is present ("%album% (%releasetype%, %year%)"), so the
+# sections that assert a CLEAN album (no failed check at all) satisfy the
+# grader's identity-tag check too. Anything graded with the tag absent still
+# matches through the wildcard.
+album = os.path.join(music, "Artists", "Artist", "Album (Album, 2020)")
 os.makedirs(album, exist_ok=True)
 flac = os.path.join(album, "1-01 Song.flac")
 make_flac(flac)
@@ -177,15 +204,24 @@ ok("INITIALKEY" in tr["issues"], "missing INITIALKEY fails")
 ok("PATH" not in tr["issues"], "naming still passes")
 
 # wrong folder -> PATH issue with expected path
-wrong_dir = os.path.join(music, "Wrong Place", "2020 - Album")
+wrong_dir = os.path.join(music, "Wrong Place", "Album (2020)")
 os.makedirs(wrong_dir, exist_ok=True)
 wrong = os.path.join(wrong_dir, "1-01 Song.flac")
 shutil.copy(flac, wrong)
 res = _grade_album(wrong_dir, "EMBEDDED", cfg)
 tr = res["tracks"][0]
 ok("PATH" in tr["issues"], "misplaced file fails naming check")
-ok(any(i.startswith("PATH: expected 'Artist/2020 - Album/1-01 Song.flac'") for i in res["issues"]),
-   f"issue names the expected path (got {res['issues']})")
+# The expected path is what the SHIPPED script makes of these tags — the same
+# evaluation the grader runs — never a hand-typed literal (the default layout
+# is free to change). No RELEASETYPE tag is present, so the grader wildcards
+# that token as '?' and reports the missing tag separately.
+_mis_kind, _mis_expected = _naming_mismatch(
+    wrong, music, DEFAULT_NAMING_SCRIPT, UNKNOWN_RELEASE_TYPE,
+    dict(BASE_TAGS, BPM="120"))
+ok(_mis_kind == "path", f"misplaced file is a real mismatch (got {_mis_kind})")
+ok([i for i in res["issues"] if i.startswith("PATH")] ==
+   [f"PATH: expected '{_mis_expected}'"],
+   f"the PATH issue names the script's expected path (got {res['issues']})")
 
 # check disabled -> no PATH issue
 cfg_off = dict(cfg, grade_check_naming=False)
@@ -195,7 +231,7 @@ ok("PATH" not in res["tracks"][0]["issues"],
 
 # the naming-script layout one level up (music folder ROOT) must fail: the
 # library root is <music>/Artists, the same base organize() moves into
-root_dir = os.path.join(music, "Artist", "2020 - Album")
+root_dir = os.path.join(music, "Artist", "Album (2020)")
 os.makedirs(root_dir, exist_ok=True)
 shutil.copy(flac, os.path.join(root_dir, "1-01 Song.flac"))
 res = _grade_album(root_dir, "EMBEDDED", cfg)
@@ -216,12 +252,18 @@ ok("PATH" not in res["tracks"][0]["issues"],
 # ----------------------------------------------------------------------
 print("== case-only naming (PATH_CASE) ==")
 # Every scenario gets its OWN music root: on a case-insensitive filesystem
-# (Windows) "2020 - ALBUM" and "2020 - Album" are THE SAME directory, so a
-# shared tree would silently reuse the correctly-cased folder (makedirs on an
-# existing path is a no-op, and writing "1-01 song.flac" next to
-# "1-01 Song.flac" reuses the existing file) — the check under test would
-# never see a case difference at all.
-EXPECTED_REL = "Artist/2020 - Album/1-01 Song.flac"
+# (Windows) the two spellings are THE SAME directory, so a shared tree would
+# silently reuse the correctly-cased folder (makedirs on an existing path is a
+# no-op, and writing "1-01 song.flac" next to "1-01 Song.flac" reuses the
+# existing file) — the check under test would never see a case difference at
+# all.
+#
+# The folder carries the release type, exactly as the shipped script spells it
+# ("%album% (%releasetype%, %year%)") with the RELEASETYPE tag present — the
+# grader's identity-tag check demands that tag, so a clean album states it.
+ALBUM_DIR = "Album (Album, 2020)"
+BAD_ALBUM_DIR = "ALBUM (ALBUM, 2020)"
+EXPECTED_REL = f"Artist/{ALBUM_DIR}/1-01 Song.flac"
 
 
 def case_scenario(tag, album_name, file_name):
@@ -231,11 +273,12 @@ def case_scenario(tag, album_name, file_name):
     os.makedirs(d, exist_ok=True)
     p = os.path.join(d, file_name)
     make_flac(p)
-    set_tags(p, dict(BASE_TAGS, INITIALKEY="B♭ min", BPM="120"))
+    set_tags(p, dict(BASE_TAGS, RELEASETYPE="Album",
+                     INITIALKEY="B♭ min", BPM="120"))
     return root, d, dict(ISO_CFG, music_folder=root, grade_check_filename_case=True)
 
 
-good_root, good_dir, good_cfg = case_scenario("exact", "2020 - Album", "1-01 Song.flac")
+good_root, good_dir, good_cfg = case_scenario("exact", ALBUM_DIR, "1-01 Song.flac")
 good = _grade_album(good_dir, "EMBEDDED", good_cfg)
 ok("PATH" not in good["tracks"][0]["issues"] and "PATH_CASE" not in good["tracks"][0]["issues"],
    "exact-case album passes both naming checks")
@@ -243,7 +286,7 @@ ok(good["total_checks"] - good["pass_count"] == 0,
    f"exact-case album fails no check ({good['pass_count']}/{good['total_checks']})")
 
 # album DIRECTORY differs only in case
-_bad_root, bad_dir, bad_cfg = case_scenario("dir", "2020 - ALBUM", "1-01 Song.flac")
+_bad_root, bad_dir, bad_cfg = case_scenario("dir", BAD_ALBUM_DIR, "1-01 Song.flac")
 res = _grade_album(bad_dir, "EMBEDDED", bad_cfg)
 ok("PATH_CASE" in res["tracks"][0]["issues"],
    "wrong-case album folder fails the track (PATH_CASE)")
@@ -254,7 +297,7 @@ ok(res["total_checks"] == good["total_checks"] + 1
    f"wrong-case folder costs exactly one grade point ({res['pass_count']}/{res['total_checks']})")
 
 # file NAME differs only in case
-_fdir_root, fdir, fcfg = case_scenario("file", "2020 - Album", "1-01 song.flac")
+_fdir_root, fdir, fcfg = case_scenario("file", ALBUM_DIR, "1-01 song.flac")
 res = _grade_album(fdir, "EMBEDDED", fcfg)
 ok("PATH_CASE" in res["tracks"][0]["issues"],
    "wrong-case file name fails the track (PATH_CASE)")
@@ -265,17 +308,17 @@ ok(res["total_checks"] == good["total_checks"] + 1
    f"wrong-case file name costs exactly one grade point ({res['pass_count']}/{res['total_checks']})")
 
 # The grade follows the case the DISK stores, never the caller's spelling:
-# Windows resolves "2020 - Album" to a folder stored as "2020 - ALBUM", so a
+# Windows resolves the correct spelling to a folder stored in caps, so a
 # caller-supplied path used to decide the case verdict on its own. Only a
 # case-INSENSITIVE filesystem reaches that code path at all — on Linux the
 # other spelling is not a directory, so there is no caller spelling for the
 # grader to be fooled by and nothing here to assert.
-if os.path.exists(os.path.join(_bad_root, "Artists", "Artist", "2020 - Album")):
-    res = _grade_album(os.path.join(_bad_root, "Artists", "Artist", "2020 - Album"),
+if os.path.exists(os.path.join(_bad_root, "Artists", "Artist", ALBUM_DIR)):
+    res = _grade_album(os.path.join(_bad_root, "Artists", "Artist", ALBUM_DIR),
                        "EMBEDDED", bad_cfg)
     ok("PATH_CASE" in res["tracks"][0]["issues"],
        "canonically-spelled caller path still reports the folder's real case")
-    res = _grade_album(os.path.join(good_root, "Artists", "Artist", "2020 - album"),
+    res = _grade_album(os.path.join(good_root, "Artists", "Artist", BAD_ALBUM_DIR),
                        "EMBEDDED", good_cfg)
     ok("PATH_CASE" not in res["tracks"][0]["issues"]
        and res["pass_count"] == res["total_checks"],
@@ -300,7 +343,7 @@ ok("PATH" not in res["tracks"][0]["issues"]
 print("== mood / genre presence ==")
 # Clean fixture in the album graded above: everything ISO_CFG isolates is
 # satisfied, MOOD deliberately absent.
-NO_MOOD = dict(BASE_TAGS, INITIALKEY="B♭ min", BPM="120")
+NO_MOOD = dict(BASE_TAGS, RELEASETYPE="Album", INITIALKEY="B♭ min", BPM="120")
 set_tags(flac, NO_MOOD)
 del_tags(flac, ["MOOD"])
 mood_cfg = dict(cfg, grade_check_mood=True, grade_check_genre=True)
@@ -454,6 +497,293 @@ ok(not any("Extra artwork" in i for i in res["issues"]),
    f"and not stray artwork either (got {res['issues']})")
 ok(res["pass_count"] == res["total_checks"],
    f"description.txt costs no grade points ({res['pass_count']}/{res['total_checks']})")
+
+# ----------------------------------------------------------------------
+# Release type: absent tag, spelling variants (no live MusicBrainz call)
+# ----------------------------------------------------------------------
+print("== release type ==")
+ok(_release_type_candidates("") == [""], "an absent release type has one candidate")
+ok(_release_type_candidates("album+live") == ["album+live", "Album; Live"],
+   f"the lowercase form also tries MusicBrainz casing "
+   f"({_release_type_candidates('album+live')})")
+ok(_release_type_candidates("Album; Live") == ["Album; Live", "album+live"],
+   f"and the capped form tries the lookup spelling "
+   f"({_release_type_candidates('Album; Live')})")
+ok(_release_type_candidates("ep") == ["ep", "EP"], "EP keeps its MusicBrainz casing")
+ok(_release_type_candidates(UNKNOWN_RELEASE_TYPE)[0] == UNKNOWN_RELEASE_TYPE
+   and "" in _release_type_candidates(UNKNOWN_RELEASE_TYPE),
+   "an unknown type also tries the no-type layout")
+
+# an album the organizer laid out ONLINE, graded with no tag and no network:
+# the folder is still accepted (the type token is a wildcard) and the missing
+# tag is REPORTED instead of turning into a bogus PATH failure.
+rt_dir = os.path.join(music, "Artists", "Artist", "Album (album, 2020)")
+os.makedirs(rt_dir, exist_ok=True)
+rt_flac = os.path.join(rt_dir, "1-01 Song.flac")
+make_flac(rt_flac)
+set_tags(rt_flac, dict(BASE_TAGS, INITIALKEY="B♭ min", BPM="120"))
+res = _grade_album(rt_dir, "EMBEDDED", cfg)
+ok("PATH" not in res["tracks"][0]["issues"],
+   f"no RELEASETYPE tag + no MusicBrainz call is not a path failure "
+   f"({res['tracks'][0]['issues']})")
+ok(any("Missing RELEASETYPE" in i for i in res["issues"]),
+   f"the missing tag is graded instead (got {res['issues']})")
+ok(res["total_checks"] - res["pass_count"] == 1,
+   f"and costs exactly one grade point ({res['pass_count']}/{res['total_checks']})")
+# ... but the rest of the layout is still verified: a wrong album name fails
+rt_wrong = os.path.join(music, "Artists", "Artist", "Amnesiac (2020)")
+os.makedirs(rt_wrong, exist_ok=True)
+shutil.copy(rt_flac, os.path.join(rt_wrong, "1-01 Song.flac"))
+res = _grade_album(rt_wrong, "EMBEDDED", cfg)
+ok("PATH" in res["tracks"][0]["issues"],
+   "an unknown type does not excuse a wrong album name")
+# an album organized under the OTHER spelling of the same type also matches
+rt_capped = os.path.join(music, "Artists", "Artist", "Album (Album; Live, 2020)")
+os.makedirs(rt_capped, exist_ok=True)
+shutil.copy(rt_flac, os.path.join(rt_capped, "1-01 Song.flac"))
+set_tags(os.path.join(rt_capped, "1-01 Song.flac"),
+         dict(BASE_TAGS, INITIALKEY="B♭ min", BPM="120", RELEASETYPE="album+live"))
+res = _grade_album(rt_capped, "EMBEDDED", cfg)
+ok("PATH" not in res["tracks"][0]["issues"],
+   f"a capped folder matches a lookup-spelled tag ({res['tracks'][0]['issues']})")
+
+# ----------------------------------------------------------------------
+# Multi-country / multi-label naming: FIRST value wins, deterministically
+# ----------------------------------------------------------------------
+print("== multi-country naming ==")
+ok(track_variables(dict(BASE_TAGS, RELEASECOUNTRY="US; GB"))["releasecountry"] == "US",
+   "'; ' keeps the first country")
+ok(track_variables(dict(BASE_TAGS, RELEASECOUNTRY="US+GB"))["releasecountry"] == "US",
+   "'+' keeps the first country")
+ok(track_variables(dict(BASE_TAGS, RELEASECOUNTRY="EU / UK"))["releasecountry"] == "EU",
+   "' / ' keeps the first country")
+ok(track_variables(dict(BASE_TAGS, COUNTRY="JP"))["releasecountry"] == "JP",
+   "beets' COUNTRY spelling feeds %releasecountry%")
+ok(track_variables(dict(BASE_TAGS, LABEL="Label A + Label B"))["label"] == "Label A",
+   "a multi-label release keeps the first label")
+mc_vars = track_variables(dict(BASE_TAGS, RELEASECOUNTRY="US; GB",
+                               LABEL="Label A + Label B"))
+ok(eval_script(DEFAULT_NAMING_SCRIPT, mc_vars)
+   == eval_script(DEFAULT_NAMING_SCRIPT,
+                  track_variables(dict(BASE_TAGS, RELEASECOUNTRY="US",
+                                       LABEL="Label A"))),
+   "a multi-value album produces the SINGLE-value path (stable, not arbitrary)")
+
+mc_dir = os.path.join(music, "Artists", "Artist", "Album (Album, 2020) [Label A] [US]")
+os.makedirs(mc_dir, exist_ok=True)
+mc_flac = os.path.join(mc_dir, "1-01 Song.flac")
+make_flac(mc_flac)
+for sep in ("; ", " / ", "+"):
+    # every separator spelling of the SAME countries yields the SAME path
+    set_tags(mc_flac, dict(BASE_TAGS, INITIALKEY="B♭ min", BPM="120",
+                           RELEASETYPE="Album",
+                           RELEASECOUNTRY="US" + sep + "GB",
+                           LABEL="Label A" + sep + "Label B"))
+    res = _grade_album(mc_dir, "EMBEDDED", cfg)
+    ok("PATH" not in res["tracks"][0]["issues"],
+       f"multi-value tags joined with {sep!r} still produce this path")
+    ok(res["pass_count"] == res["total_checks"],
+       f"and cost no grade point ({res['pass_count']}/{res['total_checks']})")
+set_tags(mc_flac, dict(BASE_TAGS, INITIALKEY="B♭ min", BPM="120",
+                       RELEASETYPE="Album",
+                       RELEASECOUNTRY="GB; US", LABEL="Label A + Label B"))
+res = _grade_album(mc_dir, "EMBEDDED", cfg)
+ok("PATH" in res["tracks"][0]["issues"],
+   "swapping the country order CHANGES the path — the rule is first-wins, "
+   "not 'any of them'")
+
+# ----------------------------------------------------------------------
+# Identity tags + ENERGY presence (grade_check_missing_tags / _energy)
+# ----------------------------------------------------------------------
+print("== identity tags + energy ==")
+
+
+def fresh_album(name, tags):
+    """A one-track album under the shared music root, named as given."""
+    d = os.path.join(music, "Artists", "Artist", name)
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, "1-01 Song.flac")
+    make_flac(p)
+    set_tags(p, tags)
+    return d, p
+
+
+FULL = dict(BASE_TAGS, INITIALKEY="B♭ min", BPM="120", MOOD="melancholic",
+            ENERGY="50", **{"DYNAMIC RANGE": "8"})
+# No naming check here: every presence case is graded on the tags alone, so a
+# deleted TITLE cannot also fail the path %title% feeds.
+pres_cfg = dict(ISO_CFG, music_folder="", grade_check_naming=False,
+                grade_check_missing_tags=True,
+                grade_check_genre=True, grade_check_mood=True,
+                grade_check_energy=True, grade_check_key_bpm=False)
+pres_dir, pres_flac = fresh_album("Album (2020)", FULL)
+res = _grade_album(pres_dir, "EMBEDDED", pres_cfg)
+ok(res["pass_count"] == res["total_checks"],
+   f"a fully tagged track passes every presence check "
+   f"({res['pass_count']}/{res['total_checks']}, {res['tracks'][0]['issues']})")
+
+del_tags(pres_flac, ["ENERGY"])
+res = _grade_album(pres_dir, "EMBEDDED", pres_cfg)
+ok(res["tracks"][0]["issues"] == ["ENERGY_MISSING"],
+   f"a missing ENERGY fails its own check (got {res['tracks'][0]['issues']})")
+ok(res["total_checks"] - res["pass_count"] == 1,
+   f"and costs exactly one grade point ({res['pass_count']}/{res['total_checks']})")
+res = _grade_album(pres_dir, "EMBEDDED", dict(pres_cfg, grade_check_energy=False))
+ok("ENERGY_MISSING" not in res["tracks"][0]["issues"]
+   and res["pass_count"] == res["total_checks"],
+   "grade_check_energy=False stops grading ENERGY (check not counted)")
+
+for _tag in ("TITLE", "ARTIST", "ALBUM", "ALBUMARTIST", "DATE", "TRACKNUMBER"):
+    set_tags(pres_flac, FULL)
+    del_tags(pres_flac, [_tag])
+    res = _grade_album(pres_dir, "EMBEDDED", pres_cfg)
+    ok(res["tracks"][0]["issues"] == [_tag]
+       and res["total_checks"] - res["pass_count"] == 1,
+       f"a missing {_tag} is graded by the missing-tag sweep "
+       f"({res['tracks'][0]['issues']})")
+    res = _grade_album(pres_dir, "EMBEDDED",
+                       dict(pres_cfg, grade_check_missing_tags=False))
+    ok(_tag not in res["tracks"][0]["issues"],
+       f"grade_check_missing_tags=False stops grading {_tag}")
+
+# DISCNUMBER only matters when the album really has more than one disc
+set_tags(pres_flac, FULL)
+del_tags(pres_flac, ["DISCNUMBER"])
+res = _grade_album(pres_dir, "EMBEDDED", pres_cfg)
+ok("DISCNUMBER" not in res["tracks"][0]["issues"],
+   "a single-disc album is not required to carry DISCNUMBER")
+set_tags(pres_flac, dict(FULL, DISCTOTAL="2"))
+del_tags(pres_flac, ["DISCNUMBER"])
+res = _grade_album(pres_dir, "EMBEDDED", pres_cfg)
+ok("DISCNUMBER" in res["tracks"][0]["issues"],
+   "but a multi-disc album is")
+set_tags(pres_flac, FULL)
+
+# ----------------------------------------------------------------------
+# Excess tags: the app's own tags and Picard's spellings are never excess
+# ----------------------------------------------------------------------
+print("== excess tags ==")
+for _key in ("TXXX:MusicBrainz Album Type", "TXXX:MusicBrainz Album Status",
+             "TXXX:MusicBrainz Disc Id", "TXXX:MusicBrainz Album Artist Id",
+             "----:com.apple.iTunes:MusicBrainz Album Type",
+             "----:com.apple.iTunes:MusicBrainz Album Status",
+             "AUDIOAUDITOR_OVERRIDE", "TXXX:AUDIOAUDITOR_OVERRIDE",
+             "ENERGY", "MOOD", "TSSE", "TRANSLATION-EN"):
+    ok(tag_key_allowed(_key), f"{_key} is part of the shared vocabulary")
+for _key in ("PRIV:com.apple.iTunes", "POPM:user@example.com",
+             "GEOB:mo3.tag", "MusicBrainz Junk Field", "FooBarJunk"):
+    ok(not tag_key_allowed(_key), f"{_key} is excess")
+
+ex_dir, ex_flac = fresh_album("Excess (2020)", FULL)
+ex_cfg = dict(ISO_CFG, music_folder="", grade_check_naming=False,
+              grade_check_excess_tags=True)
+set_tags(ex_flac, {"MusicBrainz Album Type": "Album",
+                   "MusicBrainz Album Status": "Official",
+                   "AUDIOAUDITOR_OVERRIDE": "REAL",
+                   "TRANSLATION-EN": "translated"})
+res = _grade_album(ex_dir, "EMBEDDED", ex_cfg)
+ok("TAGS" not in res["tracks"][0]["issues"],
+   f"a Picard-tagged FLAC passes the excess check ({res['issues']})")
+ok(res["tracks"][0]["values"].get("AUDIOAUDITOR_OVERRIDE") == "REAL",
+   "and the override is actually READ out of the file "
+   f"({res['tracks'][0]['values'].get('AUDIOAUDITOR_OVERRIDE')!r})")
+del_tags(ex_flac, ["AUDIOAUDITOR_OVERRIDE", "audioauditor_override"])
+set_tags(ex_flac, {"audioauditor_override": "fake"})
+res = _grade_album(ex_dir, "EMBEDDED", ex_cfg)
+ok(res["tracks"][0]["values"].get("AUDIOAUDITOR_OVERRIDE") == "FAKE",
+   "a lowercase spelling of the override still counts "
+   f"({res['tracks'][0]['values'].get('AUDIOAUDITOR_OVERRIDE')!r})")
+ok("TAGS" not in res["tracks"][0]["issues"],
+   "and is not flagged as an excess tag")
+set_tags(ex_flac, {"FooBarJunk": "1"})
+res = _grade_album(ex_dir, "EMBEDDED", ex_cfg)
+ok("TAGS" in res["tracks"][0]["issues"],
+   f"vendor junk is still excess ({res['issues']})")
+
+# ----------------------------------------------------------------------
+# A failing inner check is RECORDED, never silently dropped
+# ----------------------------------------------------------------------
+print("== no silently dropped checks ==")
+import mlo.discs as _discs  # noqa: E402
+
+cd_dir, cd_flac = fresh_album("Ripped (2020)",
+                             dict(FULL, MEDIA="CD"))
+cd_cfg = dict(ISO_CFG, music_folder="", grade_check_naming=False,
+              grade_check_log_grade=False,
+              grade_check_cd_log=False, grade_check_cd_cue=False,
+              grade_check_crc=False, grade_check_cd_format=False,
+              grade_check_disc_naming=True)
+base_cd = _grade_album(cd_dir, "EMBEDDED", cd_cfg)
+_orig_pat_fn = _discs._disc_pattern_for
+try:
+    _discs._disc_pattern_for = lambda cfg: (_ for _ in ()).throw(
+        RuntimeError("boom"))
+    res = _grade_album(cd_dir, "EMBEDDED", cd_cfg)
+finally:
+    _discs._disc_pattern_for = _orig_pat_fn
+ok(base_cd["pass_count"] == base_cd["total_checks"],
+   f"the disc-naming check passes on a clean CD album "
+   f"({base_cd['pass_count']}/{base_cd['total_checks']})")
+ok(res["total_checks"] == base_cd["total_checks"],
+   "a check that throws is still COUNTED (not dropped from the denominator)")
+ok(res["total_checks"] - res["pass_count"] == 1,
+   "and it fails instead of silently disappearing")
+ok(any("could not be evaluated" in i for i in res["issues"]),
+   f"the failure names itself (got {res['issues']})")
+
+# ----------------------------------------------------------------------
+# CD .log must be USABLE, and CRC coverage is per DISC
+# ----------------------------------------------------------------------
+print("== CD log quality + multi-disc CRC ==")
+log_cfg = dict(ISO_CFG, music_folder="", grade_check_naming=False,
+               grade_check_log_grade=False,
+               grade_check_cd_cue=False, grade_check_disc_naming=False,
+               grade_check_cd_format=False, grade_check_crc=False,
+               grade_check_cd_log=True)
+log_path = os.path.join(cd_dir, "CD-1.log")
+with open(log_path, "w", encoding="utf-8") as fh:
+    fh.write("")
+res = _grade_album(cd_dir, "EMBEDDED", log_cfg)
+ok(any("not a usable rip log" in i for i in res["issues"]),
+   f"an empty .log does not satisfy grade_check_cd_log (got {res['issues']})")
+with open(log_path, "w", encoding="utf-8") as fh:
+    fh.write("Exact Audio Copy v1.6\n\nTrack  1\n     Copy CRC 12345678\n")
+res = _grade_album(cd_dir, "EMBEDDED", log_cfg)
+ok(res["pass_count"] == res["total_checks"],
+   f"a real rip log does ({res['pass_count']}/{res['total_checks']})")
+os.remove(log_path)
+
+md_dir = os.path.join(music, "Artists", "Artist", "Two Discs (2020)")
+os.makedirs(md_dir, exist_ok=True)
+for _name in ("1-01 Song A.flac", "1-02 Song B.flac", "2-01 Song C.flac"):
+    _p = os.path.join(md_dir, _name)
+    make_flac(_p)
+    set_tags(_p, dict(FULL, MEDIA="CD", DISCNUMBER=_name[0], DISCTOTAL="2"))
+for _n in (1, 2):
+    with open(os.path.join(md_dir, f"CD-{_n}.log"), "w", encoding="utf-8") as fh:
+        fh.write(f"disc {_n}\n")
+crc_cfg = dict(ISO_CFG, music_folder="", grade_check_naming=False,
+               grade_check_crc=True,
+               grade_check_log_grade=False, grade_check_cd_log=False,
+               grade_check_cd_cue=False, grade_check_disc_naming=False,
+               grade_check_cd_format=False)
+_orig_read = _discs.read_log_text
+_orig_parse = _discs.parse_log_checksums
+try:
+    _discs.read_log_text = lambda p: os.path.basename(p)
+    # parse_log_checksums keys are track NUMBERS (ints)
+    _discs.parse_log_checksums = lambda text: (
+        {1: "AAAAAAAA"} if "CD-1" in text
+        else {1: "BBBBBBBB", 2: "CCCCCCCC"})
+    res = _grade_album(md_dir, "EMBEDDED", crc_cfg)
+finally:
+    _discs.read_log_text = _orig_read
+    _discs.parse_log_checksums = _orig_parse
+_crc_keys = [k for k in res["issues"] if "not covered by .log CRC" in k]
+ok(len(_crc_keys) == 1 and "1-02 Song B.flac" in res["issues"][_crc_keys[0]] and
+   "2-01 Song C.flac" not in res["issues"][_crc_keys[0]],
+   f"each disc is covered by ITS OWN log — disc 2's track 2 CRC cannot "
+   f"cover disc 1's track 2 ({res['issues']})")
 
 # ----------------------------------------------------------------------
 # beets config: directory: is the library root, not the music folder

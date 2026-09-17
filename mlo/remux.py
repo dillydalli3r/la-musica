@@ -15,12 +15,21 @@ normalizes every video file while keeping quality fully intact:
 * Captions are NEVER removed: every subtitle stream is mapped in every
   pass, and the output is verified to carry the same subtitle stream count
   as the source (a remux that would drop captions fails instead).
-* Chapters survive. Output is verified with ffprobe (video present, audio
-  and subtitle stream counts match, duration within 0.5%) before anything
-  replaces the source. The original file is deleted after a verified remux
+* Chapters are preserved: ffmpeg copies input 0's chapters (-map_chapters 0)
+  and the output is verified to still carry them (probe_chapters, ffprobe
+  -show_chapters). Per-chapter titles survive where the container carries them
+  — a raw .vob/.m2ts rip has its chapter marks in the disc's IFO/playlist, not
+  in the stream, so such rips report none and none are invented.
+* Output is verified with ffprobe (video present, audio and subtitle stream
+  counts match, chapters kept, duration within 0.5%) before anything replaces
+  the source. The original file is deleted after a verified remux
   (``video_remove_original``, on by default) — a stray VOB whose same-stem
   MKV already exists from an earlier run is verified by duration match and
   then removed too.
+
+* Inputs are every video container the library knows (VIDEO_EXTS, the same
+  set /api/videos/scan lists) — including .mp4/.m4v, which are only rewritten
+  when ``video_process_mp4`` is on because they already play and tag natively.
 
 Config keys: video_reencode_incompatible, video_crf, video_preset,
 video_flac_level, video_remove_original, video_process_mp4.
@@ -43,14 +52,29 @@ from .subproc import run_tool
 from .tools import detect_all_tools
 from .ui import Color, c, log, print_header
 
-# Every container this script accepts as input.
+# Every container this script (and /api/videos/scan, which lists the same set)
+# accepts as a video. .mp4/.m4v are listed here because the library treats them
+# as music videos (mlo.paths.LIB_VIDEO_EXTS) — but they already play and tag
+# natively, so run_remux_videos() only rewrites them when video_process_mp4 is
+# on (REMUX_GATED_EXTS).
 VIDEO_EXTS = (
-    ".vob", ".mpg", ".mpeg", ".m2v", ".vro", ".mod", ".tod",
+    ".vob", ".mpg", ".mpeg", ".m2v", ".mp4", ".m4v", ".vro", ".mod", ".tod",
     ".ts", ".m2ts", ".mts", ".m2t",
     ".mkv", ".avi", ".divx", ".wmv", ".asf", ".mov", ".flv", ".f4v",
     ".webm", ".ogv", ".3gp", ".3g2", ".rm", ".rmvb", ".dv", ".amv", ".nsv",
     ".evo", ".ogm", ".tp", ".trp", ".mxf", ".gxf",
 )
+
+# Containers the remux script leaves alone unless video_process_mp4 is on.
+REMUX_GATED_EXTS = (".mp4", ".m4v")
+
+
+def remux_input_exts(config):
+    """Extensions script 11 walks: everything except the containers already
+    playable/taggable as-is, unless the user opted into processing MP4."""
+    if config.get("video_process_mp4", False):
+        return VIDEO_EXTS
+    return tuple(e for e in VIDEO_EXTS if e not in REMUX_GATED_EXTS)
 
 X264_PRESETS = (
     "ultrafast", "superfast", "veryfast", "faster", "fast",
@@ -59,11 +83,11 @@ X264_PRESETS = (
 
 
 def _ffprobe_json(ffprobe_exe, path, timeout=60):
-    """Probe a media file, returning parsed JSON or None."""
+    """Probe a media file (format, streams and chapters), parsed JSON or None."""
     try:
         proc = run_tool(
             [ffprobe_exe, "-v", "error", "-print_format", "json",
-             "-show_format", "-show_streams", path],
+             "-show_format", "-show_streams", "-show_chapters", path],
             capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=timeout,
         )
@@ -102,6 +126,38 @@ def _stream_info(path, ffprobe_exe):
     except (TypeError, ValueError):
         duration = None
     return video, audio, subs, duration
+
+
+def probe_chapters(path, ffprobe_exe=None):
+    """[{title, start, end}] for a video's chapters, [] when it has none.
+
+    DVD-Video/Blu-ray chapter marks live in the disc's IFO/playlist, not in
+    the streams of a raw .vob/.m2ts, so rips without chapter atoms report
+    nothing here. Containers that do carry them (MKV/MP4/some TS) keep their
+    per-chapter titles through the remux — ffmpeg copies input 0's chapters
+    (-map_chapters 0). Untitled chapters are named "Chapter N" so the discs
+    that put the *song* in each chapter are addressable by the matching UI.
+    """
+    if ffprobe_exe is None:
+        ffprobe_exe = (detect_all_tools().get("ffmpeg") or {}).get("ffprobe_exe")
+    if not ffprobe_exe:
+        return []
+    data = _ffprobe_json(ffprobe_exe, path)
+    if not data:
+        return []
+    out = []
+    for n, ch in enumerate(data.get("chapters") or [], start=1):
+        def _secs(key):
+            try:
+                return float(ch.get(key))
+            except (TypeError, ValueError):
+                return None
+        out.append({
+            "title": (ch.get("tags") or {}).get("title") or f"Chapter {n}",
+            "start": _secs("start_time"),
+            "end": _secs("end_time"),
+        })
+    return out
 
 
 def _unique_dest(src, out_ext=".mkv"):
@@ -192,11 +248,14 @@ def remux_video(src, dest, ffmpeg_exe, ffprobe_exe, cfg):
     stream_maps = ["-map", "0:v", "-map", "0:a?", "-map", "0:s?"]
 
     last_err = ""
+    src_chapters = probe_chapters(src, ffprobe_exe)
     for mode in ("2", "2s", "3") if allow_reencode else ("2", "2s"):
         cmd = ([ffmpeg_exe, "-y", "-v", "error", "-nostdin"]
                + input_flags + ["-i", src] + stream_maps)
         cmd += _ffmpeg_args(mode, cfg)
-        cmd += ["-f", "matroska", dest]
+        # Chapters are copied from the source explicitly (ffmpeg's default,
+        # spelled out so a future option change can't silently drop them).
+        cmd += ["-map_chapters", "0", "-f", "matroska", dest]
         try:
             proc = run_tool(cmd, capture_output=True, text=True,
                             encoding="utf-8", errors="replace", timeout=60 * 120)
@@ -226,6 +285,12 @@ def remux_video(src, dest, ffmpeg_exe, ffprobe_exe, cfg):
         if len(osubs) != len(scodecs):
             last_err = f"subtitle streams dropped ({len(scodecs)} -> {len(osubs)}) — refusing to lose captions"
             continue
+        if src_chapters:
+            out_chapters = probe_chapters(dest, ffprobe_exe)
+            if len(out_chapters) < len(src_chapters):
+                last_err = (f"chapters dropped ({len(src_chapters)} -> "
+                            f"{len(out_chapters)})")
+                continue
         if duration and odur and abs(duration - odur) > max(1.0, 0.005 * duration):
             last_err = f"duration changed ({duration:.2f}s -> {odur:.2f}s)"
             continue
@@ -271,17 +336,20 @@ def run_remux_videos(config):
     print_header("Video Remux (MKV)")
     reenc = bool(config.get("video_reencode_incompatible", True))
     remove_original = bool(config.get("video_remove_original", True))
-    process_mp4 = bool(config.get("video_process_mp4", False))
     log(
         f"ffmpeg: {ffmpeg}\n"
         f"streams: video copied · audio -> FLAC (lossless, level {config.get('video_flac_level', 8)}) · "
-        f"captions always kept · h264 fallback {'on' if reenc else 'off'} · "
+        f"captions always kept · chapters kept · h264 fallback {'on' if reenc else 'off'} · "
         f"originals: {'removed after verified remux' if remove_original else 'kept'}"
     )
 
-    exts = VIDEO_EXTS + (".mp4",) if process_mp4 else VIDEO_EXTS
     folder = os.path.abspath(config["music_folder"] or os.getcwd())
     targets = config.get("targets")
+    # An explicit target list IS the user's request ("remux THESE files", the
+    # album page's Remux button), so it may name MP4/M4V even when a
+    # library-wide pass is gated off by video_process_mp4 — that switch only
+    # scopes what an unattended script 11 walk picks up by itself.
+    exts = VIDEO_EXTS if targets else remux_input_exts(config)
     if targets:
         files = _collect_targets(targets, exts)
     else:
@@ -305,10 +373,16 @@ def run_remux_videos(config):
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def _job(path):
+        """(path, dest, message, bytes_added, skipped).
+
+        ``skipped`` is explicit: "already remuxed … remove failed" is a real
+        failure that happens to start with the same words as the skip case,
+        so it must never be classified by its message text.
+        """
         ext = os.path.splitext(path)[1].lower()
         if ext == ".mkv":
             # Already the target container — nothing to normalize.
-            return path, None, "already MKV", 0
+            return path, None, "already MKV", 0, True
         if os.path.exists(os.path.splitext(path)[0] + ".mkv"):
             # A verified remux from an earlier run is already in place —
             # keep re-runs idempotent instead of piling up "(2).mkv" copies.
@@ -322,10 +396,12 @@ def run_remux_videos(config):
                         os.remove(path)
                     stats["removed_originals"] += 1
                     stats["total_bytes_removed"] += before
-                    return path, None, "already remuxed — stray original removed", 0
+                    return path, None, "already remuxed — stray original removed", 0, True
                 except OSError as e:
-                    return path, None, f"already remuxed (same-stem MKV exists); remove failed: {e}", 0
-            return path, None, "already remuxed (same-stem MKV exists)", 0
+                    return path, None, (
+                        f"already remuxed (same-stem MKV exists); remove failed: {e}"
+                    ), 0, False
+            return path, None, "already remuxed (same-stem MKV exists)", 0, True
         # Unique temp file in the same directory (same volume => the final
         # os.replace is atomic). mkstemp guarantees no two jobs share one.
         fd, tmp = tempfile.mkstemp(
@@ -334,7 +410,7 @@ def run_remux_videos(config):
         try:
             ok, msg = remux_video(path, tmp, ffmpeg, ffprobe, config)
             if not ok:
-                return path, None, msg, 0
+                return path, None, msg, 0, False
             with _DEST_LOCK:
                 dest = _unique_dest(path)
                 os.replace(tmp, dest)
@@ -342,7 +418,7 @@ def run_remux_videos(config):
                 added = os.path.getsize(dest)
             except OSError:
                 added = 0
-            return path, dest, msg, added
+            return path, dest, msg, added, False
         finally:
             try:
                 if os.path.exists(tmp):
@@ -354,30 +430,25 @@ def run_remux_videos(config):
         futures = [pool.submit(_job, f) for f in files]
         for fut in as_completed(futures):
             try:
-                path, dest, msg, added = fut.result()
+                path, dest, msg, added, skipped = fut.result()
             except Exception as e:
                 stats["error_count"] += 1
                 stats["errors"].append(str(e))
                 pbar.update(1)
                 continue
-            if dest is None:
-                # dest is None for skips (already MKV / already remuxed) AND for
-                # real failures, so tell them apart by the message: everything
-                # other than the "already …" cases is a failure to report.
-                is_skip = msg == "already MKV" or msg.startswith("already remuxed")
-                if is_skip:
-                    stats["skipped_count"] += 1
-                    if msg == "already remuxed — stray original removed":
-                        log(f"  - {os.path.basename(path)}: stray original removed (same-stem MKV verified)")
-                    elif msg in ("already MKV", "already remuxed (same-stem MKV exists)"):
-                        log(c(f"  = {os.path.basename(path)}: {msg}", Color.YELLOW))
-                    else:
-                        stats["errors"].append(f"{os.path.basename(path)}: {msg}")
-                        log(c(f"  ! {os.path.basename(path)}: {msg}", Color.YELLOW))
+            name = os.path.basename(path)
+            if skipped:
+                stats["skipped_count"] += 1
+                if msg == "already remuxed — stray original removed":
+                    log(f"  - {name}: stray original removed (same-stem MKV verified)")
                 else:
-                    stats["error_count"] += 1
-                    stats["errors"].append(f"{os.path.basename(path)}: {msg}")
-                    log(c(f"  ! {os.path.basename(path)}: {msg}", Color.YELLOW))
+                    log(c(f"  = {name}: {msg}", Color.YELLOW))
+            elif dest is None:
+                # A remux that produced nothing — including the "already
+                # remuxed … remove failed" case, which is a failure, not a skip.
+                stats["error_count"] += 1
+                stats["errors"].append(f"{name}: {msg}")
+                log(c(f"  ! {name}: {msg}", Color.YELLOW))
             else:
                 stats["converted"] += 1
                 stats["modified_count"] += 1
@@ -389,11 +460,14 @@ def run_remux_videos(config):
                             os.remove(path)
                         stats["removed_originals"] += 1
                         stats["total_bytes_removed"] += before
-                        log(f"  + {os.path.basename(path)} -> {os.path.basename(dest)} ({msg}; original removed)")
+                        log(f"  + {name} -> {os.path.basename(dest)} ({msg}; original removed)")
                     except OSError as e:
-                        stats["errors"].append(f"{os.path.basename(path)}: remove failed: {e}")
+                        stats["error_count"] += 1
+                        stats["errors"].append(f"{name}: remove failed: {e}")
+                        log(c(f"  ! {name}: remuxed but the original could not be removed: {e}",
+                              Color.YELLOW))
                 else:
-                    log(f"  + {os.path.basename(path)} -> {os.path.basename(dest)} ({msg})")
+                    log(f"  + {name} -> {os.path.basename(dest)} ({msg})")
             pbar.update(1)
 
     pbar.close()

@@ -209,49 +209,19 @@ def _target_relpath(path, af, structure, music_folder, ext):
 
 
 def _copy_artwork(src_af, dst_path):
-    """Best-effort embedded artwork copy after a transcode. Handles the
-    common pairs: FLAC pictures, MP3 APIC and MP4 covr on either side."""
+    """Best-effort embedded artwork copy after a transcode: the source cover
+    is read through AudioFile — FLAC pictures, ID3 APIC (MP3 *and* raw AAC),
+    MP4 covr, OGG/Opus METADATA_BLOCK_PICTURE — and embedded in the target
+    through the same abstraction, so every container that can carry one gets
+    it (WAV and video containers simply cannot)."""
     try:
-        pics = []
-        kind = src_af.kind
-        if kind == "flac":
-            pics = [(p.mime_type, p.data) for p in getattr(src_af.audio, "pictures", [])]
-        elif kind == "mp3":
-            for f in src_af.audio.tags.getall("APIC") or []:
-                pics.append((f.mime, f.data))
-        elif kind == "mp4":
-            from mutagen.mp4 import MP4Cover
-            # MP4Tags is dict-like (no getall); covr holds MP4Cover objects
-            # (a bytes subclass) — the MIME lives in .imageformat.
-            covr = (getattr(src_af.audio, "tags", None) or {}).get("covr") or []
-            for f in covr:
-                mime = "image/png" if getattr(f, "imageformat", None) == MP4Cover.FORMAT_PNG \
-                    else "image/jpeg"
-                pics.append((mime, bytes(f)))
+        pics = src_af.embedded_pictures()
         if not pics:
             return
         mime, data = pics[0]
-        dst_ext = os.path.splitext(dst_path)[1].lower()
-        if dst_ext == ".flac":
-            from mutagen.flac import Picture, FLAC
-            pic = Picture()
-            pic.type, pic.mime, pic.data = 3, mime, data
-            f = FLAC(dst_path)
-            f.clear_pictures()
-            f.add_picture(pic)
-            f.save()
-        elif dst_ext == ".mp3":
-            from mutagen.id3 import APIC, ID3
-            tags = ID3(dst_path)
-            tags.delall("APIC")
-            tags.add(APIC(encoding=3, mime=mime, type=3, data=data))
-            tags.save()
-        elif dst_ext == ".m4a":
-            from mutagen.mp4 import MP4, MP4Cover
-            f = MP4(dst_path)
-            fmt = MP4Cover.FORMAT_PNG if mime == "image/png" else MP4Cover.FORMAT_JPEG
-            f["covr"] = [MP4Cover(data, imageformat=fmt)]
-            f.save()
+        dst_af = AudioFile(dst_path)
+        if dst_af.audio is not None:
+            dst_af.add_embedded_picture(data, mime)
     except Exception:
         pass  # artwork is cosmetic — never fail the export for it
 
@@ -275,11 +245,101 @@ def _write_tags(dst_path, src_af):
         dst.defer_save(False)
 
 
+def _copy_once(src, dst, seen):
+    """Copy src -> dst unless it was already handled (idempotent).
+
+    A destination that already has the source's size is left alone, so
+    re-exporting the same album neither duplicates work nor rewrites files."""
+    if not src or not os.path.isfile(src):
+        return False
+    key = (os.path.normcase(os.path.abspath(src)), os.path.normcase(os.path.abspath(dst)))
+    if key in seen:
+        return False
+    seen.add(key)
+    try:
+        if os.path.isfile(dst) and os.path.getsize(dst) == os.path.getsize(src):
+            return False
+    except OSError:
+        pass
+    try:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst)
+        return True
+    except OSError:
+        return False
+
+
+# Text sidecars that belong to a track and travel with it.
+_TRACK_SIDECAR_EXTS = (".lrc", ".cue", ".log")
+
+
+def _mirror_sidecars(cfg, src_track, dst_track, seen):
+    """Mirror an exported track's sidecars into the exported album folder.
+
+    An exported copy is meant to carry what grading expects: the album cover
+    (cover.*), the album description (description.txt) and the track's own
+    .lrc/.cue/.log go next to the exported tracks, and the artist image
+    (artist.jpg, which lives one level ABOVE the album folder in the library)
+    is mirrored one level above the exported album folder. Embedded artwork
+    already travels inside the audio file on the transcode path; this covers
+    the `copy` path too, where the bytes are untouched.
+
+    Returns the number of files copied."""
+    from mlo.grader import COVER_NAMES
+    from mlo.paths import ALBUM_SIDECAR_NAMES, library_root
+
+    src_dir = os.path.dirname(src_track)
+    dst_dir = os.path.dirname(dst_track)
+    stem = os.path.splitext(os.path.basename(src_track))[0]
+    copied = 0
+
+    try:
+        lowered = {e.lower(): e for e in os.listdir(src_dir)}
+    except OSError:
+        lowered = {}
+
+    # Track-level sidecar ("01 - Song.lrc"), then the album-level artifacts:
+    # the rip's .cue/.log are normally named after the ALBUM, not the track,
+    # and grading wants them next to the exported tracks either way.
+    for ext in _TRACK_SIDECAR_EXTS:
+        name = stem + ext
+        if _copy_once(os.path.join(src_dir, name), os.path.join(dst_dir, name), seen):
+            copied += 1
+    for real in sorted(lowered.values()):
+        if os.path.splitext(real)[1].lower() in (".cue", ".log"):
+            if _copy_once(os.path.join(src_dir, real),
+                          os.path.join(dst_dir, real), seen):
+                copied += 1
+
+    for name in tuple(COVER_NAMES) + tuple(ALBUM_SIDECAR_NAMES):
+        real = lowered.get(name)
+        if real and _copy_once(os.path.join(src_dir, real),
+                               os.path.join(dst_dir, real), seen):
+            copied += 1
+
+    # Artist image, one level above the album. Skipped when the album sits
+    # directly in the library root (no artist folder to mirror).
+    parent = os.path.dirname(os.path.abspath(src_dir))
+    root = library_root(cfg.get("music_folder"))
+    if root and os.path.normcase(parent) != os.path.normcase(os.path.abspath(root)):
+        try:
+            from mlo import artistdata
+            image = artistdata.image_path(parent)
+        except Exception:
+            image = None
+        if image:
+            if _copy_once(image,
+                          os.path.join(os.path.dirname(dst_dir), os.path.basename(image)),
+                          seen):
+                copied += 1
+    return copied
+
+
 def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                   quality="", structure="artist_album"):
     """Run the export; returns a stats dict for the API response."""
     out = {"total": len(paths), "exported": 0, "skipped": 0, "failed": 0,
-           "bytes": 0, "errors": []}
+           "bytes": 0, "sidecars": 0, "errors": []}
     if not paths:
         return out
     if not dest or not os.path.isdir(dest):
@@ -294,6 +354,7 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
     ffmpeg = _ffmpeg_for_codec(codec)
     args = _codec_args(codec, quality)
     written = {}  # dst -> source path, catches collisions within one run
+    seen_sidecars = set()
 
     for i, path in enumerate(paths):
         if callable(progress_hook):
@@ -326,6 +387,13 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                 # would be silently lost, so fail loudly instead
                 raise RuntimeError(
                     f"target name collision with {os.path.basename(written[dst])!r}")
+            # Sidecars BEFORE the skip check: re-exporting an album whose
+            # tracks are already there must still complete its cover / lyrics
+            # / cue / log / description / artist image.
+            try:
+                out["sidecars"] += _mirror_sidecars(cfg, path, dst, seen_sidecars)
+            except Exception:
+                pass  # sidecars are not worth failing an export for
             if os.path.exists(dst):
                 size = os.path.getsize(dst)
                 if size <= 0:

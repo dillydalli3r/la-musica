@@ -83,7 +83,7 @@ export default function LrclibPublishPanel({
         onDone?.();
       }
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }

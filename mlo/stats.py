@@ -124,9 +124,9 @@ def _pbar_skip(pbar, counts):
     if pbar is not None:
         try:
             with _write_lock:
-                if getattr(pbar, "total", None) is not None:
-                    pbar.total = max(0, pbar.total - 1)
-                pbar.refresh()
+                # A skipped file is still one scanned file: advance the bar so
+                # the denominator cannot shrink and x/y keeps matching the run.
+                pbar.update(1)
                 pbar.set_postfix(ok=counts["ok"], skip=counts["skip"], fail=counts["fail"])
         except Exception:
             pass

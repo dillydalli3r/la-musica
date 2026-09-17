@@ -244,6 +244,29 @@ def mark_wanted(wid, error="", attempts=None):
 # --------------------------------------------------------------------------- #
 # Reconciliation — a wish may be filled out-of-band (manual download/import)
 # --------------------------------------------------------------------------- #
+def owned_mbids(cfg=None):
+    """{mbid: album path} for every MusicBrainz release/release-group the
+    library already holds (matched on the album's MBID tags). Used by wish
+    reconciliation and by artist-level bulk import to skip what is owned."""
+    from mlo.config import load_config
+
+    cfg = cfg or load_config()
+    try:
+        from server import library as lib_mod
+        lib = lib_mod.build_library(cfg)
+    except Exception:
+        return {}
+    owned = {}
+    for artist in lib.get("artists", []):
+        for alb in artist.get("albums", []):
+            meta = alb.get("meta") or {}
+            for key in ("MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEGROUPID"):
+                val = str(meta.get(key) or "").strip().lower()
+                if val:
+                    owned.setdefault(val, alb.get("path"))
+    return owned
+
+
 def reconcile_with_library(cfg=None):
     """Mark open wishes whose MusicBrainz release is already in the library as
     imported. Returns the count of freshly resolved wishes.
@@ -252,22 +275,7 @@ def reconcile_with_library(cfg=None):
     (or its release-group id) so a wish saved from a release-group page still
     resolves. Cheap enough to run at the end of every worker cycle.
     """
-    from mlo.config import load_config
-    from server import library as lib_mod
-
-    cfg = cfg or load_config()
-    try:
-        lib = lib_mod.build_library(cfg)
-    except Exception:
-        return 0
-    owned = {}  # mbid -> album path
-    for artist in lib.get("artists", []):
-        for alb in artist.get("albums", []):
-            meta = alb.get("meta") or {}
-            for key in ("MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEGROUPID"):
-                val = str(meta.get(key) or "").strip().lower()
-                if val:
-                    owned.setdefault(val, alb.get("path"))
+    owned = owned_mbids(cfg)
     resolved = 0
     for w in list_wishes():
         if w["status"] in ("imported",):

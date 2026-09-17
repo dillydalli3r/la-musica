@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useParams, Link } from "react-router-dom";
+import { useParams, useNavigate, Link } from "react-router-dom";
 import { Save, Play, Disc3, ListPlus, ListStart, ListMusic, ShieldCheck, ImageUp, Clapperboard, Search, FolderOpen } from "lucide-react";
 import { api } from "../api";
 import { fmtTech, fmtDuration, isVideoFile } from "../lib/fmt";
@@ -15,6 +15,8 @@ import LyricsManagerModal from "../components/LyricsManagerModal";
 import LyricsEditorModal from "../components/LyricsEditorModal";
 import MoreLikeThis from "../components/MoreLikeThis";
 import OverflowMenu from "../components/OverflowMenu";
+import PageHeader from "../components/PageHeader";
+import TagActionsMenu from "../components/TagActionsMenu";
 
 export default function TrackPage() {
   const { path = "" } = useParams();
@@ -106,7 +108,7 @@ export default function TrackPage() {
       qc.invalidateQueries({ queryKey: ["track-tags", decoded] });
       qc.invalidateQueries({ queryKey: ["album", albumDir] });
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -147,13 +149,13 @@ export default function TrackPage() {
     } else {
       await api.playlistAdd(manual.id, [decoded]);
     }
-    toast("Added to playlist");
+    toast.success("Added to playlist");
   };
   const openFolder = async () => {
     try {
       await api.openFolder(albumDir);
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -165,7 +167,7 @@ export default function TrackPage() {
       qc.invalidateQueries({ queryKey: ["album", albumDir] });
       qc.invalidateQueries({ queryKey: ["library"] });
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setCoverBusy(false);
       if (coverInput.current) coverInput.current.value = "";
@@ -202,69 +204,81 @@ export default function TrackPage() {
         </div>
       )}
 
-      <div className="flex items-center justify-between gap-4">
-        <div className="min-w-0">
-          <div className="text-xs text-zinc-500">
+      <PageHeader
+        title={tags.TITLE ?? fileName}
+        subtitle={
+          <>
             <Link to={tags.MUSICBRAINZ_ALBUMID ? `/album/mb:${tags.MUSICBRAINZ_ALBUMID}` : `/album/${encodeURIComponent(albumDir)}`} className="hover:text-accent-soft">
               {tags.ALBUM || albumDir.split("/").pop()}
             </Link>
             {" · "}
             <span className="inline-flex items-center gap-1"><Disc3 className="h-3 w-3" /> {fileName}</span>
-          </div>
-          <h1 className="text-2xl font-bold tracking-tight truncate">{tags.TITLE ?? fileName}</h1>
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            {graded ? (
-              <>
-                <GradeBadge pass={!issues.length} score={issues.length ? 0 : 100} />
-                <AuditBadge audit={audit} />
-                <IssueList issues={issues} />
-              </>
-            ) : (
-              <span
-                className="text-xs text-zinc-600"
-                title={albumError ? String(albumError) : "This track's album payload has not loaded yet"}
-              >
-                {albumError ? "Grading data unavailable" : "Grading —"}
-              </span>
-            )}
-          </div>
+          </>
+        }
+        actions={
+          <>
+            <button className="btn-ghost" onClick={() => playNow([queueTrack])} title="Play this track">
+              <Play className="h-4 w-4 fill-current" /> Play
+            </button>
+            <LinkEditorButton mode="track" paths={[decoded]} current={tags} />
+            {/* cover search for this track = the per-track cover upload below */}
+            <TagActionsMenu
+              paths={[track?.path ?? realPath]}
+              artist={tags.ALBUMARTIST ?? tags.ARTIST}
+              albumPath={albumDir}
+              releaseMbid={tags.MUSICBRAINZ_ALBUMID}
+              covers={() => coverInput.current?.click()}
+              onDone={refreshAfterEditor}
+            />
+            <button className="btn-primary" onClick={saveLyrics} disabled={!dirty} title="Save lyrics per the chosen save target">
+              <Save className="h-4 w-4" /> Save lyrics
+            </button>
+            <OverflowMenu
+              buttonTitle="All track actions"
+              sections={[
+                {
+                  items: [
+                    { label: "Find lyrics", icon: Search, onClick: () => setManagerOpen(true) },
+                    { label: "Add to playlist", icon: ListPlus, onClick: addToPlaylist },
+                    { label: "Play next", icon: ListStart, onClick: () => enqueue("next") },
+                    { label: "Add to queue", icon: ListMusic, onClick: () => enqueue("end") },
+                  ],
+                },
+                {
+                  title: "Track",
+                  items: [
+                    { label: "Watch video", icon: Clapperboard, hidden: !isVideo, onClick: () => setVideoOpen(true) },
+                    { label: "Open album folder", icon: FolderOpen, onClick: openFolder },
+                  ],
+                },
+              ]}
+            />
+          </>
+        }
+      >
+        <div className="flex flex-wrap items-center gap-2">
+          {graded ? (
+            <>
+              <GradeBadge pass={!issues.length} score={issues.length ? 0 : 100} />
+              <AuditBadge audit={audit} />
+              <IssueList issues={issues} />
+            </>
+          ) : (
+            <span
+              className="text-xs text-zinc-600"
+              title={albumError ? String(albumError) : "This track's album payload has not loaded yet"}
+            >
+              {albumError ? "Grading data unavailable" : "Grading —"}
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-2 shrink-0">
-          <button className="btn-ghost" onClick={() => playNow([queueTrack])} title="Play this track">
-            <Play className="h-4 w-4 fill-current" /> Play
-          </button>
-          <LinkEditorButton mode="track" paths={[decoded]} current={tags} />
-          <button className="btn-primary" onClick={saveLyrics} disabled={!dirty} title="Save lyrics per the chosen save target">
-            <Save className="h-4 w-4" /> Save lyrics
-          </button>
-          <OverflowMenu
-            buttonTitle="All track actions"
-            sections={[
-              {
-                items: [
-                  { label: "Find lyrics", icon: Search, onClick: () => setManagerOpen(true) },
-                  { label: "Add to playlist", icon: ListPlus, onClick: addToPlaylist },
-                  { label: "Play next", icon: ListStart, onClick: () => enqueue("next") },
-                  { label: "Add to queue", icon: ListMusic, onClick: () => enqueue("end") },
-                ],
-              },
-              {
-                title: "Track",
-                items: [
-                  { label: "Watch video", icon: Clapperboard, hidden: !isVideo, onClick: () => setVideoOpen(true) },
-                  { label: "Open album folder", icon: FolderOpen, onClick: openFolder },
-                ],
-              },
-            ]}
-          />
-        </div>
-      </div>
+      </PageHeader>
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
         <div className="space-y-4">
-          <div className="bg-card rounded-lg border border-border p-4 space-y-2.5">
+          <div className="panel space-y-2.5">
             <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Metadata (read-only)</div>
-            <div className="grid grid-cols-2 gap-2.5">
+            <div className="stagger grid grid-cols-2 gap-2.5">
               {mainFields.map((k) =>
                 tags[k] ? (
                   <div key={k} className="min-w-0">
@@ -297,7 +311,7 @@ export default function TrackPage() {
             {extraFields.length > 0 && (
               <>
                 <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500 pt-2">Other tags</div>
-                <div className="grid grid-cols-1 gap-1.5 max-h-56 overflow-auto">
+                <div className="stagger grid grid-cols-1 gap-1.5 max-h-56 overflow-auto">
                   {extraFields.map((k) => (
                     <div key={k} className="flex gap-2 items-baseline min-w-0">
                       <span className="text-[10px] text-zinc-500 uppercase w-44 shrink-0 truncate" title={k}>{k}</span>
@@ -326,7 +340,7 @@ export default function TrackPage() {
             </div>
           </div>
 
-          <div className="bg-card rounded-lg border border-border p-4">
+          <div className="panel">
             <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-2">Audio</div>
             <div className="grid grid-cols-2 gap-2 text-sm text-zinc-400">
               <div>Duration <span className="text-zinc-200">{fmtDuration(tech.length)}</span></div>
@@ -352,7 +366,7 @@ export default function TrackPage() {
             />
           )}
 
-          <div className="bg-card rounded-lg border border-border p-4">
+          <div className="panel">
             <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-2">
               <ShieldCheck className="h-3.5 w-3.5" /> Grading & AUDIT details
             </div>
@@ -371,7 +385,7 @@ export default function TrackPage() {
             {issues.length > 0 && (
               <>
                 <div className="text-[10px] text-zinc-500 uppercase tracking-wider mt-3 mb-1">Failed checks</div>
-                <ul className="space-y-1">
+                <ul className="stagger space-y-1">
                   {issues.map((iss, i) => (
                     <li key={i} className="text-xs text-red-300/90 bg-red-950/30 border border-red-900/40 rounded px-2 py-1">{iss}</li>
                   ))}
@@ -382,7 +396,7 @@ export default function TrackPage() {
         </div>
 
         <div className="space-y-4">
-          <div className="bg-card rounded-lg border border-border p-4 space-y-2">
+          <div className="panel space-y-2">
             <div className="flex items-center gap-3">
               {track?.cover_file && (
                 <CoverImg albumPath={albumDir} coverFile={track.cover_file} wrapperClass="h-16 w-16 rounded-lg bg-raise border border-border overflow-hidden shrink-0" />
@@ -471,6 +485,7 @@ function VideoTagCard({
   const [form, setForm] = useState<Record<string, string>>({});
   const [advisory, setAdvisory] = useState("0");
   const [busy, setBusy] = useState(false);
+  const navigate = useNavigate();
 
   useEffect(() => {
     setForm(Object.fromEntries(VIDEO_TAG_FIELDS.map((k) => [k, tags[k] ?? ""])));
@@ -488,22 +503,23 @@ function VideoTagCard({
       const r = await api.videoTag(path, clean);
       if (r.renamed) {
         // the file moved (remux rename) — the old stream URL's offline cache
-        // entry would serve the stale file forever
+        // entry would serve the stale file forever, and this page's own tags
+        // query would 404 on the path that no longer exists. The new path
+        // itself is announced by api.videoTag's container-swap toast.
         await uncacheTrack(path);
+        navigate(`/track/${encodeURIComponent(r.path)}`, { replace: true });
       }
-      toast(r.renamed
-        ? `Tags written — remuxed to MKV: ${String(r.path).split(/[\/]/).pop()}`
-        : "Tags written");
+      toast("Tags written");
       onSaved();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="bg-card rounded-lg border border-border p-4 space-y-2.5">
+    <div className="panel space-y-2.5">
       <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500 flex items-center gap-1.5">
         <Clapperboard className="h-3.5 w-3.5" /> Tag this music video
       </div>

@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Image, Loader2, RefreshCw, ExternalLink, Check, X } from "lucide-react";
+import { Image, Loader2, RefreshCw, ExternalLink, Check } from "lucide-react";
 import { api } from "../api";
 import { toast } from "../store";
 import type { CoverResult, CoverSourceCatalog } from "../types";
+import Modal from "./Modal";
 
 const SOURCE_NAMES: Record<string, string> = {
   qobuz: "Qobuz",
@@ -129,14 +130,6 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
       .catch(() => {});
   }, []);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   const apply = async (r: CoverResult) => {
     if (!r.big && !r.small) return;
     setApplying(true);
@@ -156,227 +149,27 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
   };
 
   return (
-    <div
-      className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6"
-      onClick={(e) => e.target === e.currentTarget && onClose()}
-    >
-      <div className="bg-card border border-border rounded-xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl">
-        <div className="flex items-center justify-between gap-3 p-4 border-b border-border">
-          <h2 className="font-semibold flex items-center gap-2">
-            <Image className="h-4 w-4 text-accent" /> Find cover
-            <a
-              href="https://covers.musichoarders.xyz"
-              target="_blank"
-              rel="noreferrer"
-              className="text-xs text-zinc-500 font-normal hover:text-accent-soft hover:underline inline-flex items-center gap-1"
-            >
-              covers.musichoarders.xyz <ExternalLink className="h-3 w-3" />
-            </a>
-          </h2>
-          <button className="btn-ghost !p-1.5" onClick={onClose} title="Close">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-
-        <div className="px-4 py-2 border-b border-border text-[11px] text-zinc-500">
-          The MusicBrainz cover shown on the album may be wrong — open covers.musichoarders.xyz
-          above and pick the correct one there. Covers below {target}px are flagged.
-        </div>
-
-        <div className="p-4 flex flex-wrap gap-2 items-center border-b border-border">
-          <input
-            className="input !w-52"
-            placeholder="Artist"
-            value={qArtist}
-            onChange={(e) => setQArtist(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && search()}
-          />
-          <input
-            className="input !w-52"
-            placeholder="Album"
-            value={qAlbum}
-            onChange={(e) => setQAlbum(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && search()}
-          />
-          <button className="btn-primary !py-1.5" onClick={() => search()} disabled={loading}>
-            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-            Search
-          </button>
-          {cat && (
-            <button
-              className={`btn-ghost !py-1.5 text-xs ml-auto ${pickerOpen ? "!text-accent" : ""}`}
-              onClick={() => setPickerOpen((v) => !v)}
-              title="Choose which cover sources and which region to search"
-            >
-              {srcSel.length}/{cat.active_source_limit} sources · {country.toUpperCase()}
-            </button>
-          )}
-        </div>
-
-        {/* Per-search overrides. The saved defaults come from Settings; this
-            picker changes ONE search without touching them. */}
-        {pickerOpen && cat && (
-          <div className="px-4 py-3 border-b border-border bg-panel/50 space-y-2">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-[11px] font-semibold text-zinc-400">Region</span>
-              <select
-                className="input !w-auto !py-1 text-xs"
-                value={country}
-                onChange={(e) => setCountry(e.target.value)}
-              >
-                {cat.countries.map((c) => (
-                  <option key={c} value={c}>{c.toUpperCase()}</option>
-                ))}
-              </select>
-              <span className="text-[10px] text-zinc-600">
-                The storefront the sources are asked about — it decides which
-                releases and artwork exist for a region.
-              </span>
-            </div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-[11px] font-semibold text-zinc-400">Sources</span>
-              <button
-                className="btn-ghost !py-0.5 !px-1.5 text-[10px]"
-                onClick={() => setSrcSel(cat.default_sources)}
-              >
-                Defaults
-              </button>
-              <button
-                className="btn-ghost !py-0.5 !px-1.5 text-[10px]"
-                onClick={() => setSrcSel(cat.sources.filter((s) => s.enabled).map((s) => s.id))}
-              >
-                All
-              </button>
-              <button className="btn-ghost !py-0.5 !px-1.5 text-[10px]" onClick={() => setSrcSel([])}>
-                None
-              </button>
-              <span className="text-[10px] text-zinc-500">
-                at most {cat.active_source_limit} per search
-              </span>
-            </div>
-            <div className="flex flex-wrap gap-x-3 gap-y-1">
-              {cat.sources.map((s) => {
-                const on = srcSel.includes(s.id);
-                const full = !on && srcSel.length >= cat.active_source_limit;
-                return (
-                  <label
-                    key={s.id}
-                    className={`flex items-center gap-1.5 text-[11px] select-none ${
-                      full ? "text-zinc-600" : "text-zinc-300 cursor-pointer"
-                    }`}
-                    title={full ? `Already at the ${cat.active_source_limit}-source limit` : s.name}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={on}
-                      disabled={full}
-                      onChange={() =>
-                        setSrcSel((cur) =>
-                          cur.includes(s.id) ? cur.filter((x) => x !== s.id) : [...cur, s.id]
-                        )
-                      }
-                    />
-                    {s.color && (
-                      <span className="h-2 w-2 rounded-full shrink-0" style={{ background: s.color }} />
-                    )}
-                    {SOURCE_NAMES[s.id] ?? s.name}
-                    {!s.enabled && <span className="text-[9px] text-amber-400/80">off</span>}
-                  </label>
-                );
-              })}
-            </div>
-            <div className="flex items-center gap-2 text-[10px] text-zinc-600 flex-wrap">
-              <span>Changing these applies to the next search.</span>
-              <button
-                className="btn-ghost !py-0.5 !px-1.5 text-[10px]"
-                onClick={async () => {
-                  try {
-                    await api.saveConfig({ cover_sources: srcSel, cover_country: country });
-                    toast(`Saved as the default cover search: ${srcSel.length} source(s), ${country.toUpperCase()}`);
-                    setCat((c) => (c ? { ...c, saved_sources: srcSel, saved_country: country } : c));
-                  } catch (e) {
-                    toast(String(e));
-                  }
-                }}
-                title="Make this source list + region the default for every future cover search"
-              >
-                <Check className="h-3 w-3" /> Save as default
-              </button>
-            </div>
-          </div>
-        )}
-
-        <div className="flex-1 overflow-y-auto p-4">
-          {error && <div className="text-red-400 text-sm p-3 bg-red-950/40 rounded-lg border border-red-900">{error}</div>}
-          {loading && (
-            <div className="text-zinc-500 text-sm flex items-center gap-2 p-3">
-              <Loader2 className="h-4 w-4 animate-spin" /> Searching cover sources…
-            </div>
-          )}
-          {!loading && results && results.length === 0 && !error && (
-            <div className="text-zinc-500 text-sm p-3">No covers found for this query.</div>
-          )}
-          {results && results.length > 0 && (
-            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-              {results.map((r, i) => {
-                // Real measured size wins; the CDN URL's own hint is a
-                // fallback for an image that has not loaded yet (and is absent
-                // entirely on sources like Apple, whose URL carries no size —
-                // which is why those results showed no resolution at all).
-                const big = r.big || r.small;
-                const dim = big ? sizes[big] : undefined;
-                const px = dim?.w ?? urlWidth(big);
-                const low = px != null && px < target;
-                return (
-                  <button
-                    key={`${r.source}-${i}`}
-                    className={`group text-left rounded-lg overflow-hidden border transition-colors ${
-                      selected === r
-                        ? "border-accent ring-1 ring-accent"
-                        : "border-border hover:border-zinc-600"
-                    } bg-raise`}
-                    onClick={() => setSelected(r)}
-                    title={r.title ?? undefined}
-                  >
-                    <div className="aspect-square bg-zinc-950 overflow-hidden">
-                      {r.small && (
-                        <img
-                          src={r.small}
-                          alt={r.title ?? "cover"}
-                          className="w-full h-full object-cover group-hover:scale-105 transition-transform"
-                          loading="lazy"
-                          referrerPolicy="no-referrer"
-                        />
-                      )}
-                    </div>
-                    <div className="p-2 space-y-0.5">
-                      <div className="flex items-center justify-between gap-1">
-                        <span className="text-[10px] font-semibold uppercase tracking-wider text-accent-soft bg-accent/10 border border-accent/25 rounded px-1 py-px">
-                          {SOURCE_NAMES[r.source] ?? r.source}
-                        </span>
-                        <span
-                          className={`text-[10px] tabular-nums ${low ? "text-amber-400" : "text-zinc-500"}`}
-                          title={dim ? "Measured from the full-size image" : "From the image URL — still loading"}
-                        >
-                          {dim ? `${dim.w}×${dim.h}` : px != null ? `${px}px` : "…"}
-                          {low ? " · low" : ""}
-                        </span>
-                      </div>
-                      <div className="text-xs font-medium truncate">{r.title ?? "—"}</div>
-                      <div className="text-[11px] text-zinc-500 truncate">
-                        {r.artist ?? "—"}
-                        {r.tracks ? ` · ${r.tracks} tracks` : ""}
-                      </div>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        {selected && (
-          <div className="border-t border-border p-4 flex items-center gap-4 bg-zinc-950/50">
+    <Modal
+      onClose={onClose}
+      icon={Image}
+      title={
+        <>
+          Find cover{" "}
+          <a
+            href="https://covers.musichoarders.xyz"
+            target="_blank"
+            rel="noreferrer"
+            className="text-xs text-zinc-500 font-normal hover:text-accent-soft hover:underline inline-flex items-center gap-1"
+          >
+            covers.musichoarders.xyz <ExternalLink className="h-3 w-3" />
+          </a>
+        </>
+      }
+      width="max-w-4xl"
+      bodyClass="!px-0 !py-0"
+      footer={
+        selected && (
+          <div className="flex items-center gap-4">
             <img
               key={selected.big || selected.small || ""}
               src={selected.big || selected.small || ""}
@@ -431,8 +224,206 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
               Use this cover
             </button>
           </div>
+        )
+      }
+    >
+
+      <div className="px-4 py-2 border-b border-border text-[11px] text-zinc-500">
+        The MusicBrainz cover shown on the album may be wrong — open covers.musichoarders.xyz
+        above and pick the correct one there. Covers below {target}px are flagged.
+      </div>
+
+      <div className="p-4 flex flex-wrap gap-2 items-center border-b border-border">
+        <input
+          className="input !w-52"
+          placeholder="Artist"
+          value={qArtist}
+          onChange={(e) => setQArtist(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && search()}
+        />
+        <input
+          className="input !w-52"
+          placeholder="Album"
+          value={qAlbum}
+          onChange={(e) => setQAlbum(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && search()}
+        />
+        <button className="btn-primary !py-1.5" onClick={() => search()} disabled={loading}>
+          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+          Search
+        </button>
+        {cat && (
+          <button
+            className={`btn-ghost !py-1.5 text-xs ml-auto ${pickerOpen ? "!text-accent" : ""}`}
+            onClick={() => setPickerOpen((v) => !v)}
+            title="Choose which cover sources and which region to search"
+          >
+            {srcSel.length}/{cat.active_source_limit} sources · {country.toUpperCase()}
+          </button>
         )}
       </div>
-    </div>
+
+      {/* Per-search overrides. The saved defaults come from Settings; this
+          picker changes ONE search without touching them. */}
+      {pickerOpen && cat && (
+        <div className="px-4 py-3 border-b border-border bg-panel/50 space-y-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[11px] font-semibold text-zinc-400">Region</span>
+            <select
+              className="input !w-auto !py-1 text-xs"
+              value={country}
+              onChange={(e) => setCountry(e.target.value)}
+            >
+              {cat.countries.map((c) => (
+                <option key={c} value={c}>{c.toUpperCase()}</option>
+              ))}
+            </select>
+            <span className="text-[10px] text-zinc-600">
+              The storefront the sources are asked about — it decides which
+              releases and artwork exist for a region.
+            </span>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-[11px] font-semibold text-zinc-400">Sources</span>
+            <button
+              className="btn-ghost !py-0.5 !px-1.5 text-[10px]"
+              onClick={() => setSrcSel(cat.default_sources)}
+            >
+              Defaults
+            </button>
+            <button
+              className="btn-ghost !py-0.5 !px-1.5 text-[10px]"
+              onClick={() => setSrcSel(cat.sources.filter((s) => s.enabled).map((s) => s.id))}
+            >
+              All
+            </button>
+            <button className="btn-ghost !py-0.5 !px-1.5 text-[10px]" onClick={() => setSrcSel([])}>
+              None
+            </button>
+            <span className="text-[10px] text-zinc-500">
+              at most {cat.active_source_limit} per search
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-x-3 gap-y-1">
+            {cat.sources.map((s) => {
+              const on = srcSel.includes(s.id);
+              const full = !on && srcSel.length >= cat.active_source_limit;
+              return (
+                <label
+                  key={s.id}
+                  className={`flex items-center gap-1.5 text-[11px] select-none ${
+                    full ? "text-zinc-600" : "text-zinc-300 cursor-pointer"
+                  }`}
+                  title={full ? `Already at the ${cat.active_source_limit}-source limit` : s.name}
+                >
+                  <input
+                    type="checkbox"
+                    checked={on}
+                    disabled={full}
+                    onChange={() =>
+                      setSrcSel((cur) =>
+                        cur.includes(s.id) ? cur.filter((x) => x !== s.id) : [...cur, s.id]
+                      )
+                    }
+                  />
+                  {s.color && (
+                    <span className="h-2 w-2 rounded-full shrink-0" style={{ background: s.color }} />
+                  )}
+                  {SOURCE_NAMES[s.id] ?? s.name}
+                  {!s.enabled && <span className="text-[9px] text-amber-400/80">off</span>}
+                </label>
+              );
+            })}
+          </div>
+          <div className="flex items-center gap-2 text-[10px] text-zinc-600 flex-wrap">
+            <span>Changing these applies to the next search.</span>
+            <button
+              className="btn-ghost !py-0.5 !px-1.5 text-[10px]"
+              onClick={async () => {
+                try {
+                  await api.saveConfig({ cover_sources: srcSel, cover_country: country });
+                  toast.success(`Saved as the default cover search: ${srcSel.length} source(s), ${country.toUpperCase()}`);
+                  setCat((c) => (c ? { ...c, saved_sources: srcSel, saved_country: country } : c));
+                } catch (e) {
+                  toast.error(String(e));
+                }
+              }}
+              title="Make this source list + region the default for every future cover search"
+            >
+              <Check className="h-3 w-3" /> Save as default
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="p-4">
+        {error && <div className="text-red-400 text-sm p-3 bg-red-950/40 rounded-lg border border-red-900">{error}</div>}
+        {loading && (
+          <div className="text-zinc-500 text-sm flex items-center gap-2 p-3">
+            <Loader2 className="h-4 w-4 animate-spin" /> Searching cover sources…
+          </div>
+        )}
+        {!loading && results && results.length === 0 && !error && (
+          <div className="text-zinc-500 text-sm p-3">No covers found for this query.</div>
+        )}
+        {results && results.length > 0 && (
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+            {results.map((r, i) => {
+              // Real measured size wins; the CDN URL's own hint is a
+              // fallback for an image that has not loaded yet (and is absent
+              // entirely on sources like Apple, whose URL carries no size —
+              // which is why those results showed no resolution at all).
+              const big = r.big || r.small;
+              const dim = big ? sizes[big] : undefined;
+              const px = dim?.w ?? urlWidth(big);
+              const low = px != null && px < target;
+              return (
+                <button
+                  key={`${r.source}-${i}`}
+                  className={`group text-left rounded-lg overflow-hidden border transition-colors ${
+                    selected === r
+                      ? "border-accent ring-1 ring-accent"
+                      : "border-border hover:border-zinc-600"
+                  } bg-raise`}
+                  onClick={() => setSelected(r)}
+                  title={r.title ?? undefined}
+                >
+                  <div className="aspect-square bg-zinc-950 overflow-hidden">
+                    {r.small && (
+                      <img
+                        src={r.small}
+                        alt={r.title ?? "cover"}
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                        loading="lazy"
+                        referrerPolicy="no-referrer"
+                      />
+                    )}
+                  </div>
+                  <div className="p-2 space-y-0.5">
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-accent-soft bg-accent/10 border border-accent/25 rounded px-1 py-px">
+                        {SOURCE_NAMES[r.source] ?? r.source}
+                      </span>
+                      <span
+                        className={`text-[10px] tabular-nums ${low ? "text-amber-400" : "text-zinc-500"}`}
+                        title={dim ? "Measured from the full-size image" : "From the image URL — still loading"}
+                      >
+                        {dim ? `${dim.w}×${dim.h}` : px != null ? `${px}px` : "…"}
+                        {low ? " · low" : ""}
+                      </span>
+                    </div>
+                    <div className="text-xs font-medium truncate">{r.title ?? "—"}</div>
+                    <div className="text-[11px] text-zinc-500 truncate">
+                      {r.artist ?? "—"}
+                      {r.tracks ? ` · ${r.tracks} tracks` : ""}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </Modal>
   );
 }

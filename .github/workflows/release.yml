@@ -1,8 +1,9 @@
 name: Release
 
-# Creating a v* tag builds the web frontend, publishes a GitHub release with
-# the packaged source zip (la-musica-<version>-windows-x64.zip: mlo/, server/,
-# tools/, web/dist, start_app.py, tray.py), and pushes a Docker image to GHCR.
+# Creating a v* tag runs CI first and only then builds the web frontend,
+# publishes a GitHub release with the packaged source zip
+# (la-musica-<version>-windows-x64.zip: mlo/, server/, tools/, web/dist,
+# start_app.py, tray.py), and pushes a Docker image to GHCR.
 # There is no in-app updater (desktop/src-tauri/tauri.conf.json configures no
 # updater plugin/endpoints/pubkey), so a release is consumed by downloading
 # the zip or pulling the image; the draft/prerelease flags below are just the
@@ -18,7 +19,13 @@ permissions:
   packages: write
 
 jobs:
+  # ci.yml is reusable (workflow_call), so the release can depend on the whole
+  # suite: a tag that does not pass CI publishes nothing.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   release:
+    needs: ci
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,8 +54,14 @@ jobs:
           mkdir -p "${STAGE}/web"
           cp -r mlo server tools "${STAGE}/"
           cp -r web/dist "${STAGE}/web/dist"
-          cp start_app.py tray.py README.md LICENSE THIRD-PARTY-NOTICES.md "${STAGE}/" 2>/dev/null || true
-          [ -f "Start la musica.bat" ] && cp "Start la musica.bat" "${STAGE}/"
+          cp start_app.py tray.py README.md LICENSE THIRD-PARTY-NOTICES.md "${STAGE}"/
+          # The Windows entry point is not optional: a renamed/missing launcher
+          # must fail the release, not silently ship a zip you cannot start.
+          test -f "Start la musica.bat" || {
+            echo "::error::Start la musica.bat is missing - the release zip would have no Windows entry point"
+            exit 1
+          }
+          cp "Start la musica.bat" "${STAGE}/"
           echo "${VERSION}" > "${STAGE}/.version"
           zip -qr "la-musica-${VERSION}-windows-x64.zip" "${STAGE}"
           rm -rf "${STAGE}"

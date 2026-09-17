@@ -1,11 +1,11 @@
-﻿import { Fragment, useEffect, useRef, useState } from "react";
+﻿import { Fragment, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync, FolderOpen, BarChart3, ImageUp, Image as ImageIcon, FileVideo, Disc3, CloudDownload, Sparkles, ListPlus, ListStart, ShieldCheck, FileMusic, ListChecks, Info as InfoIcon, X, Loader2, Pencil, RefreshCw } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync, FolderOpen, BarChart3, ImageUp, Image as ImageIcon, FileVideo, Film, Disc3, CloudDownload, Sparkles, ListPlus, ListStart, ShieldCheck, FileMusic, ListChecks, Info as InfoIcon, Loader2, Pencil, RefreshCw } from "lucide-react";
 import { api } from "../api";
 import { LinkChips, LinkEditorButton } from "../components/Links";
 import { SubtitledVideo } from "../components/SubtitledVideo";
-import { EmptyState, MediaChip, AdvisoryMark, GradeBadge, PageLoading } from "../components/Badges";
+import { EmptyState, AdvisoryMark, GradeBadge, PageLoading } from "../components/Badges";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import CoverSearchModal from "../components/CoverSearchModal";
 import FavHeart from "../components/FavHeart";
@@ -15,7 +15,10 @@ import { auditFails } from "../lib/status";
 import { isVideoFile } from "../lib/fmt";
 import BulkTagsDialog from "../components/BulkTagsDialog";
 import MoreLikeThis from "../components/MoreLikeThis";
+import Modal from "../components/Modal";
 import OverflowMenu from "../components/OverflowMenu";
+import PageHeader from "../components/PageHeader";
+import TagActionsMenu from "../components/TagActionsMenu";
 import StatsPanel from "../components/StatsPanel";
 import TrackDetails from "../components/TrackDetails";
 import { SortHeader, sortRows, toggleSort, groupByDisc, type SortState } from "../lib/sort.tsx";
@@ -75,6 +78,10 @@ export default function AlbumPage() {
   // track checkboxes (and the selection toolbar) only exist in select mode
   const [selectMode, setSelectMode] = useState(false);
   const [tagsDialogOpen, setTagsDialogOpen] = useState(false);
+  // Music-video matching (see the "Video matching" panel): video file path →
+  // the track index the user assigned it to, plus the in-flight save flag.
+  const [videoAssigned, setVideoAssigned] = useState<Record<string, number>>({});
+  const [videoSaving, setVideoSaving] = useState(false);
   // album description (description.txt in the album folder): the edit buffer
   // and one busy flag for the fetch/save/clear trio
   const [descEditing, setDescEditing] = useState(false);
@@ -112,7 +119,7 @@ export default function AlbumPage() {
       qc.invalidateQueries({ queryKey: ["album", decoded] });
       refetchVideos();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setRemuxing(false);
     }
@@ -126,7 +133,7 @@ export default function AlbumPage() {
       qc.invalidateQueries({ queryKey: ["coverColor", decoded] });
       qc.invalidateQueries({ queryKey: ["album", decoded] });
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       if (coverInput.current) coverInput.current.value = "";
     }
@@ -159,6 +166,80 @@ export default function AlbumPage() {
   const issueEntries = Object.entries(data.issues ?? {});
   const verdictTrack = (tr: Track) => !!tr.grade_pass && !auditFails(tr.audit);
 
+  // Web/digital releases hand out a YouTube music video per track; the medium
+  // (album-level tag, then the API's own field) decides whether that is
+  // offered at all.
+  const digitalMedia = /digital|web|download/i.test(`${data.media ?? ""} ${data.meta?.MEDIA ?? ""}`);
+
+  /** The track a video row defaults to: the one whose length is closest (an
+   *  untagged duration leaves the select empty rather than guessing). */
+  const suggestedTrack = (duration: number | null) => {
+    if (duration == null) return -1;
+    let best = -1;
+    let bestDelta = Infinity;
+    data.tracks.forEach((t, i) => {
+      const len = t.tech.length;
+      if (!len) return;
+      const delta = Math.abs(len - duration);
+      if (delta < bestDelta) {
+        bestDelta = delta;
+        best = i;
+      }
+    });
+    return best;
+  };
+
+  /** Post every assignment the user recorded in ONE call. */
+  const saveVideoAssignments = async () => {
+    const entries = Object.entries(videoAssigned).filter(([, i]) => i >= 0);
+    if (!entries.length) return;
+    setVideoSaving(true);
+    try {
+      const r = await api.videosMatch(
+        data.path,
+        entries.map(([vpath, i]) => {
+          const t = data.tracks[i];
+          return {
+            path: vpath,
+            title: t.tags.TITLE ?? t.file,
+            tracknumber: t.tracknumber ?? undefined,
+            discnumber: t.discnumber ?? undefined,
+          };
+        })
+      );
+      toast(`${r.updated} video(s) matched`);
+      qc.invalidateQueries({ queryKey: ["album", decoded] });
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setVideoSaving(false);
+    }
+  };
+
+  /** Download the music video for one track from YouTube (web/digital
+   *  releases only — see `digitalMedia`). */
+  const downloadVideo = async (tr: Track) => {
+    const title = tr.tags.TITLE;
+    if (!title) return;
+    try {
+      const r = await api.videosDownloadYoutube({
+        path: tr.path,
+        artist: tr.tags.ARTIST || albumArtist,
+        title,
+        duration: tr.tech.length || undefined,
+      });
+      toast(
+        r.ok
+          ? `Music video saved${r.file ? `: ${r.file.split(/[\\/]/).pop()}` : ""}`
+          : "No matching music video found"
+      );
+      qc.invalidateQueries({ queryKey: ["videos", decoded] });
+      qc.invalidateQueries({ queryKey: ["album", decoded] });
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
+
   const runScripts = async (ids: number[]) => {
     await api.run(ids, [data.path]);
     // scripts rewrite tags in place — the album payload (tags, grading,
@@ -179,6 +260,8 @@ export default function AlbumPage() {
 
   // Tracks of THIS album that are ticked in the global selection.
   const selectedHere = data.tracks.filter((t) => selection.tracks.includes(t.path));
+  // The track behind the open video overlay — one of the album's own files.
+  const openVideoTrack = videoOpen ? data.tracks.find((t) => t.path === videoOpen) : undefined;
 
   // Quick-select (select mode): everything on the album, or one disc's
   // tracks at a time. Selection is global, so merge / subtract by path.
@@ -228,7 +311,7 @@ export default function AlbumPage() {
     const manual = pls.find((p) => p.kind === "manual");
     const target = manual ?? (await api.createPlaylist("Library selection", "manual"));
     await api.playlistAdd(target.id, selectedHere.map((t) => t.path));
-    toast(`Added ${selectedHere.length} track(s) to playlist`);
+    toast.success(`Added ${selectedHere.length} track(s) to playlist`);
   };
 
   /** Pull the top-voted MusicBrainz genres (count from Settings → Import)
@@ -241,7 +324,7 @@ export default function AlbumPage() {
         : "No genres found on the linked MusicBrainz release");
       invalidateLibrary(qc);
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -256,7 +339,7 @@ export default function AlbumPage() {
       qc.invalidateQueries({ queryKey: ["library"] });
       navigate("/");
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -273,7 +356,7 @@ export default function AlbumPage() {
       qc.invalidateQueries({ queryKey: ["library"] });
       navigate("/");
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -286,7 +369,7 @@ export default function AlbumPage() {
       invalidateLibrary(qc);
       qc.invalidateQueries({ queryKey: ["coverColor", decoded] });
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setBeetsBusy(false);
     }
@@ -326,7 +409,7 @@ export default function AlbumPage() {
       invalidateLibrary(qc);
       qc.invalidateQueries({ queryKey: ["album", decoded] });
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setLyricsBusy(false);
     }
@@ -346,7 +429,7 @@ export default function AlbumPage() {
       toast("Description fetched");
       refreshDescription();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setDescBusy(null);
     }
@@ -360,7 +443,7 @@ export default function AlbumPage() {
       setDescEditing(false);
       refreshDescription();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setDescBusy(null);
     }
@@ -374,7 +457,7 @@ export default function AlbumPage() {
       toast("Description removed");
       refreshDescription();
     } catch (e) {
-      toast(String(e));
+      toast.error(String(e));
     } finally {
       setDescBusy(null);
     }
@@ -391,181 +474,125 @@ export default function AlbumPage() {
         />
         <div className="absolute inset-0 bg-bg/50" />
       </div>
-      <div className="relative z-10 p-6 space-y-6">
-      <div
-        className="rounded-xl p-5 relative"
-        style={
-          coverColor
-            ? { background: `linear-gradient(135deg, ${coverColor}22 0%, transparent 60%)` }
-            : undefined
-        }
-      >
-        <div className="flex items-start gap-5">
-          <div className="shrink-0 relative group/cover">
-            <CoverImg
-              albumPath={data.path}
-              coverFile={data.cover_file}
-              wrapperClass="h-56 w-56 rounded-xl bg-raise overflow-hidden shadow-2xl ring-1 ring-black/40"
-            />
-            <input
-              ref={coverInput}
-              type="file"
-              accept="image/*"
-              className="hidden"
-              onChange={(e) => e.target.files?.[0] && uploadCover(e.target.files[0])}
-            />
-            {/* small square menu over the cover: upload / find online / info.
-                The button and panel keep an opaque backdrop so they stay
-                readable on any cover. */}
-            <div className="absolute top-1.5 right-1.5 opacity-0 group-hover/cover:opacity-100 transition-opacity">
-              <OverflowMenu
-                buttonClass="!p-1.5 bg-black/80 hover:bg-black border border-white/20 text-zinc-100"
-                buttonTitle="Cover art actions"
-                sections={[
-                  {
-                    items: [
-                      { label: "Cover info", icon: InfoIcon, onClick: () => setCoverInfoOpen(true) },
-                      { label: "Upload cover…", icon: ImageUp, onClick: () => coverInput.current?.click() },
-                      { label: "Find cover online", icon: ImageIcon, onClick: () => setCoverSearchOpen(true) },
-                    ],
-                  },
-                ]}
+      <div className="relative z-10 p-6 space-y-5">
+        {/* hero: the cover plus the album identity. `.panel-hero` carries the
+            card; the cover's own colour tints it. */}
+        <div
+          className="panel-hero relative"
+          style={
+            coverColor
+              ? { background: `linear-gradient(135deg, ${coverColor}22 0%, transparent 60%)` }
+              : undefined
+          }
+        >
+          <div className="flex flex-col sm:flex-row items-start gap-5">
+            <div className="shrink-0 relative group/cover mx-auto sm:mx-0">
+              <CoverImg
+                albumPath={data.path}
+                coverFile={data.cover_file}
+                wrapperClass="h-40 w-40 sm:h-56 sm:w-56 rounded-xl bg-raise overflow-hidden shadow-2xl ring-1 ring-black/40"
               />
+              <input
+                ref={coverInput}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => e.target.files?.[0] && uploadCover(e.target.files[0])}
+              />
+              {/* small square menu over the cover: upload / find online / info.
+                  The button and panel keep an opaque backdrop so they stay
+                  readable on any cover. */}
+              <div className="absolute top-1.5 right-1.5 opacity-0 group-hover/cover:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity">
+                <OverflowMenu
+                  buttonClass="!p-1.5 bg-black/80 hover:bg-black border border-white/20 text-zinc-100"
+                  buttonTitle="Cover art actions"
+                  sections={[
+                    {
+                      items: [
+                        { label: "Cover info", icon: InfoIcon, onClick: () => setCoverInfoOpen(true) },
+                        { label: "Upload cover…", icon: ImageUp, onClick: () => coverInput.current?.click() },
+                        { label: "Find cover online", icon: ImageIcon, onClick: () => setCoverSearchOpen(true) },
+                      ],
+                    },
+                  ]}
+                />
+              </div>
             </div>
-          </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <h1 className="text-3xl font-bold tracking-tight truncate">{data.meta?.ALBUM ?? data.path.split("/").pop()}</h1>
-            <AdvisoryMark value={data.meta?.ITUNESADVISORY ?? data.meta?.ALBUMITUNESADVISORY} size="md" />
-            {/* verdict sits right of the title — click for the problems */}
-            <button
-              className={`h-2 w-2 rounded-full shrink-0 transition-opacity ${verdictPass ? "bg-emerald-500/70" : "bg-red-500/80"}`}
-              title={verdictPass ? `Pass — ${data.grade_pct ?? "?"}% of checks` : `Fail — ${data.grade_pct ?? "?"}% · ${issueEntries.length} problem type(s)`}
-              onClick={() => setIssuesOpen(!issuesOpen)}
-            />
-            {/* MusicBrainz / RateYourMusic identity links, right of the title:
-                exactly one of each — prefer the release over its group */}
-            <LinkChips
-              tags={(data.meta ?? {}) as Record<string, unknown>}
-              only={[
-                ...(data.meta?.MUSICBRAINZ_ALBUMID ? [] : ["MUSICBRAINZ_RELEASEGROUPID"]),
-                "MUSICBRAINZ_ALBUMID",
-                "RATEYOURMUSIC_ALBUM",
-              ]}
-            />
-          </div>
-          {/* artist opens the library's artist page */}
-          <Link
-            to={artistHref}
-            className="text-zinc-400 mt-1 hover:text-accent-soft transition-colors w-fit"
-            title="Open the artist page"
-          >
-            {data.meta?.ALBUMARTIST ?? data.meta?.ARTIST ?? "—"}
-          </Link>
-          {/* release dates under the title: original and release shown
-              separately whenever they differ */}
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 mt-1.5 text-xs">
-            <span className="text-zinc-500" title={data.meta?.ORIGINALDATE ?? undefined}>
-              <span className="text-zinc-600 uppercase tracking-wider text-[10px] mr-1.5">Original</span>
-              {data.meta?.ORIGINALDATE ?? "—"}
-            </span>
-            <span className="text-zinc-500" title={data.meta?.DATE ?? undefined}>
-              <span className="text-zinc-600 uppercase tracking-wider text-[10px] mr-1.5">Released</span>
-              {data.meta?.DATE ?? "—"}
-            </span>
-          </div>
-          {(data.meta?.LABEL || data.meta?.CATALOGNUMBER) && (
-            <div className="text-xs text-zinc-500 mt-0.5 truncate">
-              {[data.meta?.LABEL, data.meta?.CATALOGNUMBER].filter(Boolean).join(" · ")}
-            </div>
-          )}
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <MediaChip media={data.media} />
-            {/* aggregated codec / bitrate / depth-rate across the album's tracks */}
-            {albumTech(data.tracks) && (
-              <span
-                className="chip bg-zinc-800/70 text-zinc-300 border border-border font-mono"
-                title="Codec · bitrate · bit depth/sample rate across this album's tracks"
-              >
-                {albumTech(data.tracks)}
-              </span>
-            )}
-            {/* album-level dynamic range, labeled ADR (vs the per-track
-                DR column) — read from the ALBUM DYNAMIC RANGE tag the
-                DR script writes on every track of the album */}
-            {data.meta?.["ALBUM DYNAMIC RANGE"] && (
-              <span
-                className="chip bg-zinc-800/70 text-zinc-300 border border-border font-mono"
-                title="Album dynamic range (DR meter)"
-              >
-                ADR {data.meta["ALBUM DYNAMIC RANGE"]}
-              </span>
-            )}
-            {/* disc count lives in the header too, so multi-disc albums
-                announce themselves before the tracklist */}
-            {maxDisc > 1 && (
-              <span className="text-xs text-zinc-500">
-                {maxDisc} disc{maxDisc === 1 ? "" : "s"}
-              </span>
-            )}
-          </div>
-          {issueEntries.length > 0 && (
-            <div className="mt-2.5">
-              <button
-                className="inline-flex items-center gap-1.5 text-xs text-red-400/80 hover:text-red-300"
-                onClick={() => setIssuesOpen(!issuesOpen)}
-              >
-                <CircleAlert className="h-3.5 w-3.5" />
-                {issueEntries.length} problem{issueEntries.length === 1 ? "" : "s"} to fix
-                {issuesOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-              </button>
-              {issuesOpen && (
-                <div className="mt-1.5 max-w-3xl rounded-lg border border-red-900/40 bg-red-950/20 p-1.5 space-y-0.5">
-                  {issueEntries.map(([text, files]) => (
-                    <div key={text} className="rounded-md px-2 py-1.5 hover:bg-red-950/40">
-                      <div className="text-xs text-red-200 flex items-start gap-1.5">
-                        <CircleAlert className="h-3 w-3 mt-0.5 shrink-0 text-red-400" />
-                        <span>{text}</span>
-                        <span className="ml-auto text-[10px] text-zinc-500 shrink-0">{files.length === 1 && files[0] === "album" ? "whole album" : `${files.length} file(s)`}</span>
-                      </div>
-                      {files[0] !== "album" && (
-                        <div className="text-[10px] text-zinc-500 mt-0.5 pl-[18px]">
-                          {files.length > 6 ? `${files.slice(0, 6).join(" · ")} · +${files.length - 6} more` : files.join(" · ")}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-          {/* bottom action row: play + every primary button (identity links
-              live next to the album title now) */}
-          <div className="mt-4 flex flex-wrap items-center gap-2">
-            <button
-              className="btn-primary !p-2.5 !rounded-md"
-              onClick={() => playNow(queueTracks)}
-              title="Play the album from the top"
-              aria-label="Play album"
-            >
-              <Play className="h-4 w-4 fill-current" />
-            </button>
-            <LinkEditorButton
-              mode="album"
-              paths={data.tracks.map((t) => t.path)}
-              current={(data.meta ?? {}) as Record<string, unknown>}
-              iconOnly
-            />
-            <FavHeart
-              kind="album"
-              id={data.path}
-              mbid={data.meta?.MUSICBRAINZ_ALBUMID}
-              className="!p-2 !rounded-md border border-border bg-panel/60 hover:!bg-raise"
-              iconClass="h-4 w-4"
-            />
-            <OverflowMenu
+            <div className="flex-1 min-w-0 w-full">
+              <PageHeader
+                overline="Album"
+                title={data.meta?.ALBUM ?? data.path.split("/").pop() ?? ""}
+                subtitle={
+                  /* the album's meta line: the artist (opens the artist page),
+                     then both release dates and label · catalogue */
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+                    <Link
+                      to={artistHref}
+                      className="text-zinc-400 hover:text-accent-soft transition-colors w-fit"
+                      title="Open the artist page"
+                    >
+                      {data.meta?.ALBUMARTIST ?? data.meta?.ARTIST ?? "—"}
+                    </Link>
+                    <span className="text-zinc-500" title={data.meta?.ORIGINALDATE ?? undefined}>
+                      <span className="text-zinc-600 uppercase tracking-wider text-[10px] mr-1.5">Original</span>
+                      {data.meta?.ORIGINALDATE ?? "—"}
+                    </span>
+                    <span className="text-zinc-500" title={data.meta?.DATE ?? undefined}>
+                      <span className="text-zinc-600 uppercase tracking-wider text-[10px] mr-1.5">Released</span>
+                      {data.meta?.DATE ?? "—"}
+                    </span>
+                    {(data.meta?.LABEL || data.meta?.CATALOGNUMBER) && (
+                      <span className="text-zinc-500 min-w-0 truncate">
+                        {[data.meta?.LABEL, data.meta?.CATALOGNUMBER].filter(Boolean).join(" · ")}
+                      </span>
+                    )}
+                  </div>
+                }
+                chips={[
+                  // media / tech / album DR / disc count, where the identity
+                  // block already showed them
+                  data.media,
+                  albumTech(data.tracks),
+                  data.meta?.["ALBUM DYNAMIC RANGE"] ? `ADR ${data.meta["ALBUM DYNAMIC RANGE"]}` : null,
+                  maxDisc > 1 ? `${maxDisc} disc${maxDisc === 1 ? "" : "s"}` : null,
+                ].filter((c): c is string => !!c)}
+                actions={
+                  <>
+                    <button
+                      className="btn-primary !p-2.5 !rounded-md"
+                      onClick={() => playNow(queueTracks)}
+                      title="Play the album from the top"
+                      aria-label="Play album"
+                    >
+                      <Play className="h-4 w-4 fill-current" />
+                    </button>
+                    <LinkEditorButton
+                      mode="album"
+                      paths={data.tracks.map((t) => t.path)}
+                      current={(data.meta ?? {}) as Record<string, unknown>}
+                      iconOnly
+                    />
+                    <FavHeart
+                      kind="album"
+                      id={data.path}
+                      mbid={data.meta?.MUSICBRAINZ_ALBUMID}
+                      className="!p-2 !rounded-md border border-border bg-panel/60 hover:!bg-raise"
+                      iconClass="h-4 w-4"
+                    />
+                    <TagActionsMenu
+                      paths={data.tracks.map((t) => t.path)}
+                      albumPath={data.path}
+                      artist={data.album_artist ?? undefined}
+                      releaseMbid={data.meta?.MUSICBRAINZ_ALBUMID ?? undefined}
+                      covers={() => setCoverSearchOpen(true)}
+                      buttonClass={iconBtn}
+                      buttonTitle="Tag actions"
+                      onDone={() => invalidateLibrary(qc)}
+                    />
+                    <OverflowMenu
               buttonClass={iconBtn}
-              buttonTitle="All album actions"              sections={[
+              buttonTitle="All album actions"
+              sections={[
                 {
                   items: [
                     { label: "Play next", icon: ListStart, onClick: () => enqueue("next") },
@@ -577,7 +604,7 @@ export default function AlbumPage() {
                   items: [
                     { label: "Import & link", icon: Wand2, onClick: () => navigate(`/import?album=${encodeURIComponent(data.path)}`) },
                     { label: "Organize (naming script)", icon: FolderSync, onClick: organizeAlbum },
-                    { label: "Open folder", icon: FolderOpen, onClick: async () => { try { await api.openFolder(data.path); } catch (e) { toast(String(e)); } } },
+                    { label: "Open folder", icon: FolderOpen, onClick: async () => { try { await api.openFolder(data.path); } catch (e) { toast.error(String(e)); } } },
                     { label: "Stats", icon: BarChart3, onClick: () => setStatsOpen(true) },
                   ],
                 },
@@ -610,15 +637,69 @@ export default function AlbumPage() {
                 },
               ]}
             />
+                  </>
+                }
+              >
+                {/* identity strip: the grade verdict, the advisory mark and the
+                    MB / RYM links — deliberately outside the truncating title */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    className={`h-2 w-2 rounded-full shrink-0 transition-opacity ${verdictPass ? "bg-emerald-500/70" : "bg-red-500/80"}`}
+                    title={verdictPass ? `Pass — ${data.grade_pct ?? "?"}% of checks` : `Fail — ${data.grade_pct ?? "?"}% · ${issueEntries.length} problem type(s)`}
+                    onClick={() => setIssuesOpen(!issuesOpen)}
+                    aria-label="Grading verdict"
+                  />
+                  <AdvisoryMark value={data.meta?.ITUNESADVISORY ?? data.meta?.ALBUMITUNESADVISORY} size="md" />
+                  {/* MusicBrainz / RateYourMusic identity links: exactly one
+                      of each — prefer the release over its group */}
+                  <LinkChips
+                    tags={(data.meta ?? {}) as Record<string, unknown>}
+                    only={[
+                      ...(data.meta?.MUSICBRAINZ_ALBUMID ? [] : ["MUSICBRAINZ_RELEASEGROUPID"]),
+                      "MUSICBRAINZ_ALBUMID",
+                      "RATEYOURMUSIC_ALBUM",
+                    ]}
+                  />
+                </div>
+                {issueEntries.length > 0 && (
+                  <div>
+                    <button
+                      className="inline-flex items-center gap-1.5 text-xs text-red-400/80 hover:text-red-300"
+                      onClick={() => setIssuesOpen(!issuesOpen)}
+                    >
+                      <CircleAlert className="h-3.5 w-3.5" />
+                      {issueEntries.length} problem{issueEntries.length === 1 ? "" : "s"} to fix
+                      {issuesOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                    </button>
+                    {issuesOpen && (
+                      <div className="mt-1.5 max-w-3xl rounded-lg border border-red-900/40 bg-red-950/20 p-1.5 space-y-0.5">
+                        {issueEntries.map(([text, files]) => (
+                          <div key={text} className="rounded-md px-2 py-1.5 hover:bg-red-950/40">
+                            <div className="text-xs text-red-200 flex items-start gap-1.5">
+                              <CircleAlert className="h-3 w-3 mt-0.5 shrink-0 text-red-400" />
+                              <span>{text}</span>
+                              <span className="ml-auto text-[10px] text-zinc-500 shrink-0">{files.length === 1 && files[0] === "album" ? "whole album" : `${files.length} file(s)`}</span>
+                            </div>
+                            {files[0] !== "album" && (
+                              <div className="text-[10px] text-zinc-500 mt-0.5 pl-[18px]">
+                                {files.length > 6 ? `${files.slice(0, 6).join(" · ")} · +${files.length - 6} more` : files.join(" · ")}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </PageHeader>
+            </div>
           </div>
         </div>
-        </div>
-      </div>
 
       {/* the folder's description.txt — fetch a Wikipedia summary or write
           your own; it is one of the grading checks, so its absence is called
           out here rather than only in the issue list */}
-      <div className="bg-card rounded-lg border border-border p-4">
+      <div className="panel">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Description</span>
           {desc?.description_source && (
@@ -748,7 +829,16 @@ export default function AlbumPage() {
         <div className="fixed inset-0 z-50 bg-black/85 flex items-center justify-center p-6" onClick={() => setVideoOpen(null)}>
           <div className="w-full max-w-4xl" onClick={(e) => e.stopPropagation()}>
             <SubtitledVideo path={videoOpen} className="w-full max-h-[80vh] rounded-lg border border-border bg-black" />
-            <div className="flex justify-end mt-2">
+            <div className="flex justify-end items-center gap-2 mt-2">
+              {digitalMedia && openVideoTrack?.tags.TITLE && (
+                <button
+                  className="btn-ghost !py-1"
+                  onClick={() => downloadVideo(openVideoTrack)}
+                  title={`Download ${openVideoTrack.tags.TITLE} from YouTube`}
+                >
+                  <Film className="h-3.5 w-3.5" /> Download music video
+                </button>
+              )}
               <button className="btn-ghost !py-1" onClick={() => setVideoOpen(null)}>Close</button>
             </div>
           </div>
@@ -810,9 +900,73 @@ export default function AlbumPage() {
         />
       )}
 
+      {/* Music-video matching: one row per video file in this folder. The
+          album's own tracklist is what a video gets tagged with, so the
+          picker lists those tracks; assignments post in ONE call. */}
+      {rawVideos.length > 0 && (
+        <div className="panel space-y-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <FileVideo className="h-4 w-4 text-accent shrink-0" />
+            <h2 className="text-sm font-semibold">Video matching</h2>
+            <span className="text-xs text-zinc-500">
+              {rawVideos.length} video file{rawVideos.length === 1 ? "" : "s"} in this folder
+            </span>
+            <button
+              className="btn-primary !py-1 text-xs ml-auto"
+              onClick={saveVideoAssignments}
+              disabled={videoSaving || !Object.values(videoAssigned).some((i) => i >= 0)}
+            >
+              {videoSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null} Save assignments
+            </button>
+          </div>
+          <div className="space-y-1.5">
+            {rawVideos.map((v) => {
+              // closest-length track: a suggestion that pre-fills the select,
+              // not an assignment until the user records one
+              const picked = videoAssigned[v.path] ?? suggestedTrack(v.duration);
+              return (
+                <div key={v.path} className="flex items-center gap-2 flex-wrap">
+                  <span className="min-w-0 flex-1 basis-full sm:basis-auto truncate text-xs text-zinc-300" title={v.path}>
+                    {v.file}
+                  </span>
+                  <span className="text-xs text-zinc-500 tabular-nums shrink-0 w-12 text-right">
+                    {fmtDuration(v.duration ?? undefined)}
+                  </span>
+                  <select
+                    className="input !py-1 text-xs min-w-0 flex-1 sm:flex-none sm:w-56"
+                    value={picked < 0 ? "" : String(picked)}
+                    onChange={(e) =>
+                      setVideoAssigned({ ...videoAssigned, [v.path]: e.target.value === "" ? -1 : Number(e.target.value) })
+                    }
+                    title="The track this video belongs to"
+                  >
+                    <option value="">— not matched —</option>
+                    {data.tracks.map((t, i) => (
+                      <option key={t.path} value={i}>
+                        {`${t.tracknumber ?? t.tags.TRACKNUMBER ?? "?"} · ${t.tags.TITLE ?? t.file}`}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className="btn-ghost !py-1 text-xs shrink-0"
+                    onClick={() => setVideoAssigned({ ...videoAssigned, [v.path]: picked })}
+                    disabled={picked < 0 || videoAssigned[v.path] === picked}
+                    title="Record this assignment — Save posts them all"
+                  >
+                    Assign
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       <div>
         <table className="w-full text-sm">
-          <thead className="border-b border-border sticky top-0 z-10 bg-bg/95 backdrop-blur">
+          {/* top-12 clears the 48px floating top bar — at top-0 the header
+              pins underneath it */}
+          <thead className="border-b border-border sticky top-12 z-10 bg-bg/95 backdrop-blur">
             <tr>
               {selectMode && <th className="th w-10"></th>}
               {ALBUM_TRACK_COLS.filter((c) => trackCols.includes(c.id)).map((c) =>
@@ -860,7 +1014,7 @@ export default function AlbumPage() {
               </th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className="stagger">
             {(() => {
               const groups = groupByDisc(tracks);
               const multiDisc = groups.length > 1;
@@ -967,6 +1121,27 @@ export default function AlbumPage() {
                           <FileVideo className="h-3.5 w-3.5" />
                         </button>
                       )}
+                      {digitalMedia && (
+                        <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
+                          <OverflowMenu
+                            buttonClass="!p-1 text-zinc-500 hover:text-white"
+                            buttonTitle="Track actions"
+                            sections={[
+                              {
+                                items: [
+                                  {
+                                    label: "Download music video",
+                                    icon: Film,
+                                    title: "Search YouTube for this track's music video and save it next to the album",
+                                    disabled: !tr.tags.TITLE,
+                                    onClick: () => downloadVideo(tr),
+                                  },
+                                ],
+                              },
+                            ]}
+                          />
+                        </span>
+                      )}
                       <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
                         <FavHeart kind="track" id={tr.path} mbid={tr.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" title={undefined} />
                       </span>
@@ -1060,11 +1235,6 @@ function CoverInfoModal({ albumPath, coverFile, onClose }: {
     queryKey: ["coverInfo", albumPath, coverFile],
     queryFn: () => api.coverInfo(albumPath, coverFile),
   });
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
   const rows: [string, string | null | undefined][] = data
     ? [
       ["File", data.file],
@@ -1076,21 +1246,15 @@ function CoverInfoModal({ albumPath, coverFile, onClose }: {
     ]
     : [];
   return (
-    <div className="fixed inset-0 z-[60] bg-black/70 flex items-center justify-center p-6" onClick={onClose}>
-      <div
-        className="bg-card border border-border rounded-xl p-5 w-[380px] shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-start justify-between gap-3 mb-3">
-          <div>
-            <div className="text-sm font-semibold">Cover info</div>
-            <div className="text-[11px] text-zinc-500 mt-0.5">Image details for this album's artwork</div>
-          </div>
-          <button className="p-1.5 rounded-lg hover:bg-raise text-zinc-400 hover:text-white" onClick={onClose} title="Close (Esc)">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        <div className="rounded-lg overflow-hidden border border-border mb-3">
+    <Modal
+      onClose={onClose}
+      title="Cover info"
+      subtitle="Image details for this album's artwork"
+      icon={InfoIcon}
+      width="max-w-sm"
+    >
+      <div className="flex flex-col gap-3">
+        <div className="rounded-lg overflow-hidden border border-border">
           <CoverImg albumPath={albumPath} coverFile={coverFile} wrapperClass="aspect-square w-full bg-raise" />
         </div>
         {isLoading ? (
@@ -1110,6 +1274,6 @@ function CoverInfoModal({ albumPath, coverFile, onClose }: {
           </div>
         )}
       </div>
-    </div>
+    </Modal>
   );
 }
