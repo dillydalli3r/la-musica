@@ -964,9 +964,9 @@ export default function AlbumPage() {
 
       <div className="section">
         <table className="w-full text-sm">
-          {/* top-12 clears the 48px floating top bar — at top-0 the header
-              pins underneath it */}
-          <thead className="border-b border-border/60">
+          {/* Borderless header: the only separator is this section's own
+              hairline above the table. */}
+          <thead>
             <tr>
               {selectMode && <th className="th w-10"></th>}
               {ALBUM_TRACK_COLS.filter((c) => trackCols.includes(c.id)).map((c) =>
