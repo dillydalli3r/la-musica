@@ -189,14 +189,24 @@ body {
   .td {
     @apply px-3 py-2.5 text-sm text-zinc-300;
   }
-  /* The two panel recipes every page uses: `.panel` is the normal data block
-     (description, settings card, list container), `.panel-hero` the page
-     hero / identity block. Nothing else should spell out a card by hand. */
+  /* The four page-level recipes every page uses. Carded: `.panel` is the
+     normal data block (settings card, list container) and `.panel-hero` the
+     identity block — for the surfaces that genuinely want a card. Flush: the
+     detail pages (album / artist / track / playlist) sit their hero and data
+     blocks straight on the page background, `.hero-flat` for the identity
+     block and `.section` for a data block, separated by a hairline. Nothing
+     else should spell out a card by hand. */
   .panel {
     @apply rounded-xl border border-border bg-card p-4;
   }
   .panel-hero {
     @apply rounded-2xl border border-border bg-card p-5;
+  }
+  .hero-flat {
+    @apply border-0 bg-transparent p-0;
+  }
+  .section {
+    @apply border-t border-border/60 pt-5;
   }
   /* Horizontal-scroll wrapper for the wide MusicBrainz tables: the table is
      laid out at an honest minimum width and the wrapper scrolls, instead of

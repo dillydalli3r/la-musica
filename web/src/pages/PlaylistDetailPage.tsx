@@ -243,7 +243,7 @@ export default function PlaylistDetailPage() {
       </div>
       <div className="relative z-10 p-6 space-y-5 mx-auto max-w-6xl">
         <div
-          className="panel-hero relative"
+          className="hero-flat relative"
           style={{ background: `linear-gradient(135deg, hsl(${Math.round((pid * 137.5) % 360)} 42% 32% / 0.15) 0%, transparent 60%)` }}
         >
           <div className="flex items-start gap-5">

@@ -413,6 +413,13 @@ function DiscoveryCard({ row, onDrill, onOpen }: {
 }) {
   const title = row.title || row.name || "";
   const cover = row.cover ?? row.image ?? null;
+  // Provider art, served by the app (see `api.artUrl`) — and the row's own
+  // identity is what the backend's fallback is asked about.
+  const art = api.artUrl(cover, {
+    artist: row.kind === "artist" ? row.name : row.artist,
+    album: row.kind === "artist" ? null : row.title,
+    rg: row.kind === "album" && row.mbid ? row.mbid : null,
+  });
   // Artist rows have no detail endpoint (only albums do), and their
   // `deezer_id` is an ARTIST id — never feed it to the album lookup.
   const subtitle = row.kind === "artist"
@@ -443,7 +450,7 @@ function DiscoveryCard({ row, onDrill, onOpen }: {
       <div className="aspect-square w-full bg-panel overflow-hidden">
         {cover ? (
           <img
-            src={cover}
+            src={art}
             alt=""
             loading="lazy"
             className="h-full w-full object-cover transition-transform duration-200 group-hover:scale-[1.03]"
@@ -541,7 +548,13 @@ function DiscoveryAlbumPanel({ row, album, loading, error, wished, busy, mbid, o
             <>
               <div className="flex gap-4">
                 <div className="w-36 h-36 shrink-0 rounded-lg overflow-hidden bg-panel border border-border">
-                  {cover ? <img src={cover} alt="" className="h-full w-full object-cover" /> : null}
+                  {cover ? (
+                    <img
+                      src={api.artUrl(cover, { artist, album: title, rg: mbid })}
+                      alt=""
+                      className="h-full w-full object-cover"
+                    />
+                  ) : null}
                 </div>
                 <div className="min-w-0 space-y-2">
                   <div className="flex flex-wrap items-center gap-1.5">
@@ -1762,7 +1775,7 @@ export function MBReleasePage() {
       <div className="grid grid-cols-1 lg:grid-cols-[240px_1fr] gap-6">
         <div>
           <img
-            src={cover}
+            src={api.artUrl(cover)}
             alt=""
             className="w-full rounded-lg border border-border bg-raise"
             onError={(e) => {

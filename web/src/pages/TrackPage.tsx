@@ -276,7 +276,7 @@ export default function TrackPage() {
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
         <div className="space-y-4">
-          <div className="panel space-y-2.5">
+          <div className="section space-y-2.5">
             <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Metadata (read-only)</div>
             <div className="stagger grid grid-cols-2 gap-2.5">
               {mainFields.map((k) =>
@@ -340,7 +340,7 @@ export default function TrackPage() {
             </div>
           </div>
 
-          <div className="panel">
+          <div className="section">
             <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-2">Audio</div>
             <div className="grid grid-cols-2 gap-2 text-sm text-zinc-400">
               <div>Duration <span className="text-zinc-200">{fmtDuration(tech.length)}</span></div>
@@ -366,7 +366,7 @@ export default function TrackPage() {
             />
           )}
 
-          <div className="panel">
+          <div className="section">
             <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-zinc-500 mb-2">
               <ShieldCheck className="h-3.5 w-3.5" /> Grading & AUDIT details
             </div>
@@ -396,7 +396,7 @@ export default function TrackPage() {
         </div>
 
         <div className="space-y-4">
-          <div className="panel space-y-2">
+          <div className="section space-y-2">
             <div className="flex items-center gap-3">
               {track?.cover_file && (
                 <CoverImg albumPath={albumDir} coverFile={track.cover_file} wrapperClass="h-16 w-16 rounded-lg bg-raise border border-border overflow-hidden shrink-0" />
@@ -519,7 +519,7 @@ function VideoTagCard({
   };
 
   return (
-    <div className="panel space-y-2.5">
+    <div className="section space-y-2.5">
       <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500 flex items-center gap-1.5">
         <Clapperboard className="h-3.5 w-3.5" /> Tag this music video
       </div>

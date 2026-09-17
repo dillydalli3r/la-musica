@@ -103,7 +103,15 @@ export default function ArtistImageModal({
               title={`Use this image (${r.source})`}
             >
               <div className="relative aspect-square rounded-md overflow-hidden bg-panel">
-                <img src={r.url} alt="" loading="lazy" className="h-full w-full object-cover" />
+                {/* Provider art, served by the app — see `api.artUrl`. The
+                    candidate's own label is the artist name the backend's
+                    fallback is asked about. */}
+                <img
+                  src={api.artUrl(r.url, { artist: r.label || artist })}
+                  alt=""
+                  loading="lazy"
+                  className="h-full w-full object-cover"
+                />
                 {busy === r.url && (
                   <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
                     <Loader2 className="h-5 w-5 animate-spin text-white" />

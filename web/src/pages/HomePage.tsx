@@ -52,11 +52,20 @@ function HomeCard({ a }: { a: HomeAlbum }) {
   });
 
   const to = a.owned && a.path ? `/album/${encodeURIComponent(a.path)}` : a.mbid ? mbUrl(a) : null;
-  // Provider artwork first, then the Cover Art Archive for MBID-native rows.
+  // Provider artwork first, then the Cover Art Archive for MBID-native rows —
+  // both served by the app (`api.artUrl`): the CDN behind `cover_url` refuses
+  // the browser on some networks, and the backend answers with a provider that
+  // does not.
   const candidates = a.owned
     ? []
     : [a.cover_url, a.mbid ? ccaUrl(a.mbid, a.mb_kind) : null].filter((u): u is string => !!u);
-  const src = candidates[fails] ?? null;
+  const raw = candidates[fails] ?? null;
+  const src = api.artUrl(raw, {
+    artist: a.artist,
+    album: a.album,
+    // `rg` takes a release-group MBID only.
+    rg: a.mb_kind === "release" ? null : a.mbid,
+  });
   const wishable = !a.owned && !a.mbid && !!a.album && !!a.artist;
 
   const art =

@@ -288,7 +288,7 @@ export default function ArtistPage() {
 
   return (
     <div className="p-6 space-y-5 mx-auto max-w-6xl">
-      <div className="panel-hero relative overflow-hidden">
+      <div className="hero-flat relative overflow-hidden">
         {/* the stored image doubles as the hero backdrop, blurred behind the
             identity block so the name stays readable */}
         {imageUrl && (
@@ -457,7 +457,7 @@ export default function ArtistPage() {
         />
       )}
 
-      <div className="panel">
+      <div className="section">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Description</span>
           {art?.description_source && (
@@ -577,9 +577,10 @@ export default function ArtistPage() {
         </div>
 
         {/* Batch bar: only while something is picked. Each button re-runs on the
-            CURRENT selection (the per-album TagActionsMenu lives on the albums). */}
+            CURRENT selection (the per-album TagActionsMenu lives on the albums).
+            Same accent bar the album page uses for its own selection. */}
         {selected.size > 0 && (
-          <div className="panel flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-2 flex-wrap bg-accent/15 border border-accent/40 rounded-lg px-3 py-2">
             <span className="text-xs text-zinc-300 inline-flex items-center gap-1.5">
               <ListChecks className="h-3.5 w-3.5 text-accent-soft" />
               {selected.size} album{selected.size === 1 ? "" : "s"} selected
@@ -633,7 +634,7 @@ export default function ArtistPage() {
           sections.map(({ type, albums }) => {
             const isCollapsed = collapsed.has(type);
             return (
-              <section key={type} className="panel space-y-1">
+              <section key={type} className="section space-y-1">
                 <button
                   type="button"
                   className="flex w-full items-center gap-1.5 pb-2 text-left text-xs font-bold uppercase tracking-wider text-zinc-400 select-none"

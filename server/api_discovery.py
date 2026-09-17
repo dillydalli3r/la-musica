@@ -13,6 +13,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 
 from mlo import artistdata, load_config
+from server import artcache
 from server import discovery
 from server import integrations as intg
 from server import library as lib_mod
@@ -433,7 +434,9 @@ def artist_image_save(req: ImageRequest):
             raise HTTPException(404, "no artist image found in any configured source")
         url, source, label = auto["url"], auto["source"], auto.get("label")
     try:
-        data, _ctype = intg.fetch_image_bytes(url)
+        data, _ctype, _src = artcache.fetch_art(url, cfg=cfg)
+        if not data:
+            raise RuntimeError("no source could provide the image")
     except Exception as e:
         raise HTTPException(502, f"image download failed: {e}")
     path = artistdata.save_image(folder, data, cfg, source=source or "manual",

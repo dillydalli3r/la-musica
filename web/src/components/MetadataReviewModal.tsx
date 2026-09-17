@@ -151,7 +151,12 @@ export default function MetadataReviewModal({
                         )
                       }
                     >
-                      <img src={img.url} alt="" className="h-28 w-full object-cover" loading="lazy" />
+                      <img
+                        src={api.artUrl(img.url, { artist })}
+                        alt=""
+                        className="h-28 w-full object-cover"
+                        loading="lazy"
+                      />
                       <span className="absolute inset-x-0 bottom-0 bg-black/70 px-1.5 py-1 text-[9px] text-zinc-300 truncate">
                         {SOURCE_NAMES[img.source] ?? img.source}
                       </span>

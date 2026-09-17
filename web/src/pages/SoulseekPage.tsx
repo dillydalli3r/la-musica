@@ -1647,7 +1647,7 @@ function WishRow({ w, onChanged }: { w: Wish; onChanged: () => void }) {
       <div className="flex items-center gap-3 p-2.5">
         {!failed && w.release_mbid ? (
           <img
-            src={`https://coverartarchive.org/release/${w.release_mbid}/front-250`}
+            src={api.artUrl(`https://coverartarchive.org/release/${w.release_mbid}/front-250`)}
             alt=""
             loading="lazy"
             onError={() => setFailed(true)}

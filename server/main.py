@@ -45,6 +45,7 @@ from server import api_discovery
 from server import api_imports
 from server import api_lyrics
 from server import discovery
+from server import artcache
 from mlo.paths import (SKIP_DIRS, clear_track_covers, downloads_dir,
                        is_video_file, library_root, load_track_covers, move_path,
                        save_track_covers, set_track_covers, trash_dir)
@@ -1018,6 +1019,50 @@ def get_cover(request: Request, album: str = Query(...), file: Optional[str] = Q
     return Response(content=data, media_type=ctype, headers=headers)
 
 
+@app.get("/api/art")
+async def proxy_art(url: str = Query(...), artist: str = Query(""),
+                    album: str = Query(""), rg: str = Query("")):
+    """Serve provider artwork through the app instead of hotlinking it.
+
+    The UI is handed CDN URLs (Deezer, iTunes, the Cover Art Archive, …) by
+    every recommendation row, cover-search result and artist-image candidate.
+    This route fetches one of those — cached for a month under
+    `<music>/.mlo/data/art_cache`, and fallen back to a provider that answers
+    when the CDN refuses us (`server/artcache.py`) — so a shelf renders the
+    same whether or not the network can reach the provider directly.
+
+    `artist`/`album`/`rg` (a release-group MBID) are the identity the fallback
+    is asked about; without them only the original URL is tried. Only
+    allowlisted provider hosts are accepted, and a total failure answers 404,
+    which is what keeps the UI's placeholder.
+    """
+    data, ctype, source = await asyncio.to_thread(
+        artcache.fetch_art, url, artist=artist.strip(), album=album.strip(),
+        release_group_mbid=rg.strip())
+    if not data:
+        raise HTTPException(404, "no artwork")
+    return Response(content=data, media_type=ctype or "image/jpeg",
+                    headers={"Cache-Control": "private, max-age=86400",
+                             "X-Art-Source": source or "url"})
+
+
+def _cover_url_bytes(url, artist="", album="", rg=""):
+    """Cover bytes for a caller-supplied URL.
+
+    A provider URL goes through the art cache — its per-host headers are what
+    gets past a CDN that refuses the app, and its fallback is what answers at
+    all when the CDN refuses everybody on this network. Any other public image
+    URL is fetched directly, the way it always was.
+    """
+    if artcache.allowed(url):
+        data, ctype, _source = artcache.fetch_art(
+            url, artist=artist, album=album, release_group_mbid=rg)
+        if not data:
+            raise ValueError("that image could not be fetched")
+        return data, ctype
+    return intg.fetch_image_bytes(url)
+
+
 @app.post("/api/cover")
 async def upload_cover(album: str = Query(...), file: UploadFile = File(...),
                        track: Optional[str] = Query(None),
@@ -1379,10 +1424,15 @@ def cover_sources():
 @app.post("/api/cover/fromurl")
 async def cover_from_url(album: str = Query(...), url: str = Query(...),
                          track: Optional[str] = Query(None),
-                         tracks: Optional[str] = Query(None)):
+                         tracks: Optional[str] = Query(None),
+                         artist: str = "", title: str = "", rg: str = ""):
     """Download a cover image from a URL (e.g. a COV search result) and
     store it like an uploaded cover (album cover.*, one per-track sidecar, or
-    one image mapped to a whole `tracks=` selection)."""
+    one image mapped to a whole `tracks=` selection).
+
+    `artist`/`title`/`rg` are only used for provider URLs, where they are what
+    the fallback is asked about when the CDN itself refuses us.
+    """
     alb = os.path.normpath(album)
     if not os.path.isdir(alb):
         raise HTTPException(404, "album not found")
@@ -1390,7 +1440,8 @@ async def cover_from_url(album: str = Query(...), url: str = Query(...),
         raise HTTPException(400, "album outside music folder")
     stem, selected = _cover_write_target(alb, track, tracks)
     try:
-        data, ctype = await asyncio.to_thread(intg.fetch_image_bytes, url)
+        data, ctype = await asyncio.to_thread(
+            _cover_url_bytes, url, artist.strip(), title.strip(), rg.strip())
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
@@ -4846,7 +4897,10 @@ def metadata_apply(req: MetadataApplyRequest):
                 raise HTTPException(404, "no artist image found in any configured source")
             url, source, label = hit["url"], hit.get("source") or "auto", hit.get("label")
         try:
-            data, _ctype = intg.fetch_image_bytes(url)
+            # A provider URL goes through the art cache: its per-host headers
+            # and its fallback are what make a CDN that refuses the app still
+            # yield the artist image (see `_cover_url_bytes`).
+            data, _ctype = _cover_url_bytes(url, artist)
         except Exception as e:
             raise HTTPException(502, f"image download failed: {e}")
         path = artistdata.save_image(folder, data, cfg, source=source,

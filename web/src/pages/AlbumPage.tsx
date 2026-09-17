@@ -476,10 +476,10 @@ export default function AlbumPage() {
         <div className="absolute inset-0 bg-bg/50" />
       </div>
       <div className="relative z-10 p-6 space-y-5">
-        {/* hero: the cover plus the album identity. `.panel-hero` carries the
-            card; the cover's own colour tints it. */}
+        {/* hero: the cover plus the album identity, flush on the page
+            background; the cover's own colour tints it. */}
         <div
-          className="panel-hero relative"
+          className="hero-flat relative"
           style={
             coverColor
               ? { background: `linear-gradient(135deg, ${coverColor}22 0%, transparent 60%)` }
@@ -700,7 +700,7 @@ export default function AlbumPage() {
       {/* the folder's description.txt — fetch a Wikipedia summary or write
           your own; it is one of the grading checks, so its absence is called
           out here rather than only in the issue list */}
-      <div className="panel">
+      <div className="section">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Description</span>
           {desc?.description_source && (
@@ -905,7 +905,7 @@ export default function AlbumPage() {
           album's own tracklist is what a video gets tagged with, so the
           picker lists those tracks; assignments post in ONE call. */}
       {rawVideos.length > 0 && (
-        <div className="panel space-y-3">
+        <div className="section space-y-3">
           <div className="flex items-center gap-2 flex-wrap">
             <FileVideo className="h-4 w-4 text-accent shrink-0" />
             <h2 className="text-sm font-semibold">Video matching</h2>
@@ -963,7 +963,7 @@ export default function AlbumPage() {
         </div>
       )}
 
-      <div>
+      <div className="section">
         <table className="w-full text-sm">
           {/* top-12 clears the 48px floating top bar — at top-0 the header
               pins underneath it */}

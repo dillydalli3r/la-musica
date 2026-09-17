@@ -2059,7 +2059,7 @@ const finish = async () => {
               </div>
               {mbCoverUrl ? (
                 <img
-                  src={mbCoverUrl}
+                  src={api.artUrl(mbCoverUrl)}
                   alt="MusicBrainz release cover"
                   referrerPolicy="no-referrer"
                   className="h-40 w-40 rounded-lg bg-raise border border-border object-cover"

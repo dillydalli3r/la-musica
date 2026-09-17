@@ -625,6 +625,27 @@ export const api = {
 
   coverUrl: (albumPath: string, coverFile?: string | null) =>
     `${API}/cover?album=${encodeURIComponent(albumPath)}${coverFile ? `&file=${encodeURIComponent(coverFile)}` : ""}`,
+  /** A remote provider image (`/api/art`), proxied and cached by the backend —
+   *  NEVER the provider URL itself. Several cover CDNs (Deezer's among them)
+   *  refuse the browser outright, and the app can both get past them and fall
+   *  back to a provider that answers when it cannot. `artist`/`album`/`rg`
+   *  (release-group MBID) are the identity that fallback is asked about.
+   *
+   *  Anything that is not an http(s) URL — a local `/api/cover` path, an
+   *  already-proxied URL — is handed back untouched, so the helper is safe to
+   *  slap on every image the app renders. */
+  artUrl: (
+    url: string | null | undefined,
+    opts?: { artist?: string | null; album?: string | null; rg?: string | null }
+  ) => {
+    const u = (url ?? "").trim();
+    if (!/^https?:\/\//i.test(u)) return u;
+    const q = new URLSearchParams({ url: u });
+    if (opts?.artist) q.set("artist", opts.artist);
+    if (opts?.album) q.set("album", opts.album);
+    if (opts?.rg) q.set("rg", opts.rg);
+    return `${API}/art?${q}`;
+  },
   coverColor: (albumPath: string) =>
     json<{ color: string; album: string }>(
       `${API}/cover?album=${encodeURIComponent(albumPath)}&color=1`,
@@ -745,10 +766,21 @@ export const api = {
   },
   /** Selectable cover sources + regions, plus the saved defaults. */
   coverSources: () => json<CoverSourceCatalog>(`${API}/cover/sources`),
-  /** Apply a cover image from a URL; same track/tracks targeting as `cover`. */
-  coverFromUrl: (albumPath: string, url: string, track?: string, tracks?: string[]) =>
+  /** Apply a cover image from a URL; same track/tracks targeting as `cover`.
+   *  For a provider URL, pass the identity the backend's fallback needs when
+   *  the CDN itself refuses us (see `artUrl`). */
+  coverFromUrl: (
+    albumPath: string,
+    url: string,
+    track?: string,
+    tracks?: string[],
+    identity?: { artist?: string | null; album?: string | null; rg?: string | null }
+  ) =>
     json<CoverWriteResult>(
-      `${API}/cover/fromurl?album=${encodeURIComponent(albumPath)}&url=${encodeURIComponent(url)}${coverQuery(track, tracks)}`,
+      `${API}/cover/fromurl?album=${encodeURIComponent(albumPath)}&url=${encodeURIComponent(url)}${coverQuery(track, tracks)}` +
+        (identity?.artist ? `&artist=${encodeURIComponent(identity.artist)}` : "") +
+        (identity?.album ? `&title=${encodeURIComponent(identity.album)}` : "") +
+        (identity?.rg ? `&rg=${encodeURIComponent(identity.rg)}` : ""),
       { method: "POST" },
       120000
     ),

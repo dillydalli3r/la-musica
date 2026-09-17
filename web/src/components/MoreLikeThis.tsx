@@ -65,13 +65,20 @@ function Card({
   const sub = row.name ? row.country ?? (row.tags ?? [])[0] ?? "" : row.artist ?? "";
   const owned = kind !== "artist" && !!row.owned_path;
   const href = owned ? `/album/${encodeURIComponent(row.owned_path as string)}` : mbHref(row, kind);
+  // Provider artwork, served by the app (see `api.artUrl`); the row's own
+  // artist/title/MBID is what the backend's fallback is asked about.
+  const art = api.artUrl(row.image ?? row.cover, {
+    artist: row.artist,
+    album: row.title,
+    rg: kind === "album" ? row.mbid : null,
+  });
   return (
     <div className="group w-[8.5rem] shrink-0" title={`${name}${sub ? ` — ${sub}` : ""}`}>
       <Link
         to={href}
         className="block relative h-[8.5rem] w-[8.5rem] rounded-lg overflow-hidden bg-raise border border-border hover:border-zinc-600 transition-colors"
       >
-        <Thumb url={row.image ?? row.cover} className="h-full w-full" />
+        <Thumb url={art} className="h-full w-full" />
         {(row.year || row.popularity_label) && (
           <span className="absolute bottom-1 left-1 chip !px-1.5 !py-0 text-[9px] bg-black/70 border border-white/10 text-zinc-300">
             {row.year || row.popularity_label}

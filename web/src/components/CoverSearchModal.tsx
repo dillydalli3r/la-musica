@@ -91,6 +91,18 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
   const [country, setCountry] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
 
+  /** Every provider image on this screen goes through the app (`api.artUrl`):
+   *  several cover CDNs — Deezer's above all — refuse the browser on some
+   *  networks, and the backend both gets past that and falls back to a
+   *  provider that answers. A result's OWN artist/title is the identity that
+   *  fallback is asked about (this album's, when a result states none). */
+  const artUrl = (u: string | null | undefined, own?: { artist?: string | null; album?: string | null }) =>
+    api.artUrl(u, {
+      artist: own?.artist || qArtist.trim() || artist,
+      album: own?.album || qAlbum.trim() || album,
+      rg: releaseGroupMbid,
+    });
+
   useEffect(() => {
     api
       .coverSources()
@@ -114,7 +126,7 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
         if (dead) return;
         setSizes((s) => (s[url] ? s : { ...s, [url]: { w: img.naturalWidth, h: img.naturalHeight } }));
       };
-      img.src = url;
+      img.src = artUrl(url, { artist: r.artist, album: r.title });
     }
     return () => {
       dead = true;
@@ -164,7 +176,11 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
     setError(null);
     try {
       const perTrack = tracks?.length ? tracks : undefined;
-      const res = await api.coverFromUrl(albumPath, r.big || r.small!, undefined, perTrack);
+      const res = await api.coverFromUrl(albumPath, r.big || r.small!, undefined, perTrack, {
+        artist: r.artist ?? qArtist,
+        album: r.title ?? qAlbum,
+        rg: releaseGroupMbid,
+      });
       const name = res.path.split("/").pop();
       toast(res.warning ? `Cover saved as ${name} — ${res.warning}` : `Cover saved as ${name}`);
       onApplied?.();
@@ -200,7 +216,7 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
           <div className="flex items-center gap-4">
             <img
               key={selected.big || selected.small || ""}
-              src={selected.big || selected.small || ""}
+              src={artUrl(selected.big || selected.small, { artist: selected.artist, album: selected.title })}
               alt="preview"
               className="h-24 w-24 rounded-lg border border-border object-cover"
               referrerPolicy="no-referrer"
@@ -423,7 +439,7 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
                   <div className="aspect-square bg-zinc-950 overflow-hidden">
                     {r.small && (
                       <img
-                        src={r.small}
+                        src={artUrl(r.small, { artist: r.artist, album: r.title })}
                         alt={r.title ?? "cover"}
                         className="w-full h-full object-cover group-hover:scale-105 transition-transform"
                         loading="lazy"
