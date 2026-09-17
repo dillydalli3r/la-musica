@@ -19,6 +19,7 @@ import re
 import subprocess
 import threading
 import time
+import traceback
 import uuid
 from urllib.parse import quote
 
@@ -1319,6 +1320,9 @@ _last_import_skipped: list = []
 _last_import_failed: list = []
 # Folders left alone because they carry rip evidence (.log/.cue) and no audio.
 _last_import_leftovers: list = []
+# finish_album() results of the last import_completed(finish=True): one entry
+# per moved album, so a caller can report which scripts ran and what failed.
+_last_import_scripts: list = []
 
 
 def last_import_skipped():
@@ -1340,12 +1344,28 @@ def last_import_leftovers():
     return list(_last_import_leftovers)
 
 
-def import_completed(cfg=None):
+def last_import_scripts():
+    """The import chain results of the last import_completed(finish=True):
+    [{"path", "scripts", "chain", "errors"}], one per moved album, [] when no
+    chain was run. A script failure lands in `errors` — the album is imported
+    either way."""
+    return [dict(x) for x in _last_import_scripts]
+
+
+def import_completed(cfg=None, finish=False, progress=None):
     """Move completed downloads into the library root, one album per folder.
 
     Every album lands in `<music folder>/Artists` — never the music folder
     root, which is shared to the network and must not publish an album the
     organizer has not renamed into place yet.
+
+    With *finish* true, each moved album then runs the configured import chain
+    (``server.imports.finish_album``) — the same chain every other import path
+    runs, reported per album by last_import_scripts(). It is failure-tolerant:
+    a failing script is reported, the album stays imported. Off by default
+    because the chain belongs AFTER the caller's own convert / MEDIA / organize
+    steps (the naming script renames the album folder, and grading an
+    unorganized album is a false verdict).
 
     slskd's completed layout is `<download dir>/<leaf of the remote folder>/
     <file>` — its default destination pattern is `${SOURCE_DIRECTORY}`, which
@@ -1375,9 +1395,11 @@ def import_completed(cfg=None):
         raise ValueError("music_folder not set or not found")
     ddir = download_dir(cfg)
     global _last_import_skipped, _last_import_failed, _last_import_leftovers
+    global _last_import_scripts
     _last_import_skipped = []
     _last_import_failed = []
     _last_import_leftovers = []
+    _last_import_scripts = []
     if not os.path.isdir(ddir):
         return []
 
@@ -1482,4 +1504,18 @@ def import_completed(cfg=None):
             pass  # an album-less child (scans/, a stray folder) keeps it alive
     # loose files directly in the download root -> one album folder
     gather(loose, ddir, "Soulseek")
+    if finish and moved:
+        # The configured chain, once per imported album. A failure is recorded
+        # (last_import_scripts) and never loses the import: the albums are in
+        # the library and are returned either way.
+        from server import imports
+        for album in moved:
+            try:
+                _last_import_scripts.append(
+                    imports.finish_album(album, cfg, progress=progress))
+            except Exception:
+                traceback.print_exc()
+                _last_import_scripts.append({"path": album, "scripts": [],
+                                             "chain": [], "errors":
+                                             ["import chain crashed"]})
     return moved

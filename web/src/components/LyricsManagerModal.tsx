@@ -7,6 +7,8 @@ import LyricsEditorModal from "./LyricsEditorModal";
 
 interface Candidate {
   id: number;
+  /** Which provider supplied this hit (LRCLIB, NetEase, lyrics.ovh, Kugou). */
+  provider?: string;
   artistName: string;
   trackName: string;
   albumName?: string;
@@ -107,6 +109,7 @@ export default function LyricsManagerModal({
                 albumName: h?.albumName ? String(h.albumName) : undefined,
                 duration: h?.duration ? Number(h.duration) : undefined,
                 instrumental: !!h?.instrumental,
+                provider: h?.provider_label ? String(h.provider_label) : undefined,
                 plain,
                 synced,
               });
@@ -223,12 +226,12 @@ export default function LyricsManagerModal({
         <div className="flex-1 min-h-0 overflow-y-auto px-5 pb-5 space-y-1.5">
           {loading && (
             <div className="flex items-center gap-2 text-xs text-zinc-500 py-8 justify-center">
-              <Loader2 className="h-4 w-4 animate-spin" /> Searching LRCLIB ({searchedVariants} query variants)…
+              <Loader2 className="h-4 w-4 animate-spin" /> Searching lyric providers ({searchedVariants} query variants)…
             </div>
           )}
           {!loading && candidates.length === 0 && (
             <div className="text-xs text-zinc-500 py-8 text-center">
-              No candidates on LRCLIB. Paste lyrics manually instead.
+              No candidates found. Paste lyrics manually instead.
             </div>
           )}
           {candidates.map((c) => {
@@ -268,7 +271,7 @@ export default function LyricsManagerModal({
                   </button>
                   <button
                     className="btn-primary !py-1 text-[11px] shrink-0"
-                    onClick={() => apply(c.synced || c.plain, `LRCLIB #${c.id}${c.synced ? " (synced)" : ""}`)}
+                    onClick={() => apply(c.synced || c.plain, `${c.provider ?? "Lyrics"}${c.synced ? " (synced)" : ""}`)}
                   >
                     Apply
                   </button>

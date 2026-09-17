@@ -135,6 +135,9 @@ export interface Album {
   expected_release_id?: string | null;
   /** True when at least one expected track is absent. */
   partial?: boolean;
+  /** The album folder's stored description (see mlo/artistdata). The library
+   *  payload only reports whether one exists; the album page carries the text. */
+  artwork?: AlbumArtwork;
 }
 
 /** One track of the MusicBrainz release an album was matched to. */
@@ -228,6 +231,10 @@ export interface Artist {
   display_name?: string | null;
   albums: Album[];
   aggregate: Aggregate;
+  /** Artist image + description stored in the artist folder. */
+  artwork?: ArtistArtworkFields;
+  /** Artist-level grading: only the checks that apply to an artist folder. */
+  grade?: ArtistGrade;
 }
 
 export interface CoverResult {
@@ -419,6 +426,10 @@ export interface HomeData {
   top_artists: HomeArtist[];
   wanted: HomeAlbum[];
   needs_attention: HomeAlbum[];
+  /** Sitewide popularity chart (ListenBrainz) — what people actually play. */
+  popular?: HomeAlbum[];
+  /** Which provider drove `recommended` (see home_rec_source). */
+  rec_source?: HomeRecSource;
 }
 
 export interface HomeArtist {
@@ -444,4 +455,306 @@ export interface HomeAlbum {
   mb_kind?: string;
   grade_pct?: number | null;
   owned?: boolean;
+  /** Which discovery provider produced the row ("deezer", "listenbrainz", …).
+   *  Absent for owned-library shelves. */
+  source?: string;
+  /** Provider popularity, already formatted ("82k fans", "287k listens"). */
+  popularity_label?: string | null;
+  /** Raw provider popularity, for sorting. */
+  popularity?: number | null;
+  /** Provider catalogue id, used to open the discovery detail view. */
+  deezer_id?: number | null;
+  /** Remote artwork URL (discovery rows) — `cover` is the local cover file. */
+  cover_url?: string | null;
+}
+
+/** Which provider set the recommendation shelf was built from. */
+export type HomeRecSource = "discovery" | "listenbrainz" | "musicbrainz";
+/* ---------------------------------------------------------------------- *
+ * Discovery — provider chain (server/discovery.py)                        *
+ * ---------------------------------------------------------------------- */
+
+/** One selectable provider, as reported by `/api/discovery/sources`. */
+export interface DiscoverySource {
+  id: string;
+  label: string;
+  notes: string;
+}
+
+/** Provider catalogue + the per-feature orders the settings page edits. */
+export interface DiscoveryCatalog {
+  sources: DiscoverySource[];
+  /** Built-in order per feature: discovery_rec_sources, discovery_search_sources,
+   *  artist_image_sources, description_sources. */
+  defaults: Record<string, string[]>;
+  enabled: boolean;
+  /** The user's saved orders (empty = built-in). */
+  saved: Record<string, string[]>;
+  mb_search_source: "auto" | "discovery" | "musicbrainz";
+}
+
+/** A row from any discovery provider. Album/artist/track rows share one shape
+ *  so the UI can render them in a single list; fields only apply to the kind
+ *  they belong to. */
+export interface DiscoveryRow {
+  kind: "album" | "artist" | "track";
+  /** Album/track title; `name` for artists. */
+  title?: string;
+  name?: string;
+  artist?: string;
+  album?: string;
+  year?: string | null;
+  release_date?: string;
+  /** Provider artwork URL (Deezer cover_xl / iTunes 3000px / CAA front-250). */
+  cover?: string | null;
+  image?: string | null;
+  /** MusicBrainz id — release group for albums, artist for artists. Absent
+   *  until the row has been resolved (see `discoveryWish`). */
+  mbid?: string | null;
+  source: string;
+  popularity?: number | null;
+  popularity_label?: string | null;
+  reason?: string | null;
+  record_type?: string;
+  secondary_types?: string[];
+  disambiguation?: string;
+  tracks?: number | null;
+  duration?: number | null;
+  link?: string | null;
+  deezer_id?: number | null;
+  artist_id?: number | null;
+  itunes_id?: number | null;
+  /** Library path when the album is already owned (""/undefined otherwise). */
+  owned_path?: string | null;
+  /** Artist this row is "similar to". */
+  similar_to?: string;
+  tags?: string[];
+  country?: string;
+  genre?: string;
+}
+
+export interface DiscoverySearch {
+  query: string;
+  type: "album" | "artist";
+  /** Which mode answered: auto | discovery | musicbrainz. */
+  mode: string;
+  rows: DiscoveryRow[];
+}
+
+/** Candidate artist image for the picker. */
+export interface DiscoveryImageRow {
+  url: string;
+  source: string;
+  label: string;
+  kind: "photo" | "wide" | "album_art";
+}
+
+/* ---------------------------------------------------------------------- *
+ * Artist artwork + descriptions (mlo/artistdata.py, /api/artist/artwork)  *
+ * ---------------------------------------------------------------------- */
+
+export interface ArtistArtworkImage {
+  present: boolean;
+  file: string | null;
+  /** `/api/artist/image?artist=…` — present only when an image exists. */
+  url: string | null;
+  source: string | null;
+  label: string | null;
+  source_url: string | null;
+  fetched: string | null;
+  updated: string | null;
+}
+
+export interface ArtistArtworkDescription {
+  present: boolean;
+  text: string | null;
+  source: string | null;
+  source_url: string | null;
+  fetched: string | null;
+}
+
+/** Artist payload's stored artwork (same shape minus the grade). */
+export interface ArtistArtworkFields {
+  image: boolean;
+  image_file: string | null;
+  image_url: string | null;
+  description: string | null;
+  description_source: string | null;
+  description_url: string | null;
+  provenance?: Record<string, string | null>;
+}
+
+export interface ArtistGradeIssue {
+  code: string;
+  label: string;
+  where?: string;
+}
+
+/** Artist-level grading: only what applies to an artist folder (image and
+ *  description), never the album checks. */
+export interface ArtistGrade {
+  path?: string;
+  checks?: number;
+  pass_count?: number;
+  failed_checks?: number;
+  pct?: number | null;
+  pass?: boolean;
+  issues?: ArtistGradeIssue[];
+  artwork?: { image: boolean; image_file: string | null; description: boolean };
+  error?: string;
+}
+
+export interface ArtistArtwork {
+  artist: string;
+  path: string;
+  image: ArtistArtworkImage;
+  description: ArtistArtworkDescription;
+  provenance: Record<string, string | null>;
+  grade: ArtistGrade;
+}
+
+/** Album folder description metadata (server/library.py → build_album). */
+export interface AlbumArtwork {
+  description: boolean;
+  /** Null in the library payload (presence only) — the album page has the text. */
+  description_text: string | null;
+  description_source: string | null;
+  description_url: string | null;
+}
+
+/* ---------------------------------------------------------------------- *
+ * Lyrics chain (/api/lyrics/providers, /api/lyrics/auto)                  *
+ * ---------------------------------------------------------------------- */
+
+export interface LyricsProvider {
+  id: string;
+  label: string;
+  notes: string;
+}
+
+export interface LyricsProviders {
+  sources: LyricsProvider[];
+  default_order: string[];
+  /** The order actually used (saved order, or the built-in one). */
+  order: string[];
+  saved: string[];
+  allow_plain: boolean;
+  labels: Record<string, string>;
+  notes: Record<string, string>;
+}
+
+export interface LyricsAutoResult {
+  path: string;
+  status: "ok" | "skipped" | "failed";
+  provider: string | null;
+  provider_label: string | null;
+  synced: boolean;
+  wrote: { embedded: boolean; lrc: string | null };
+  reason?: string;
+  error?: string;
+}
+
+/** A lyrics lookup that wrote nothing (`/api/lyrics/find`). */
+export interface LyricsHit {
+  found: boolean;
+  order: string[];
+  provider?: string;
+  provider_label?: string;
+  synced?: string | null;
+  plain?: string | null;
+  instrumental?: boolean;
+  duration?: number | null;
+  matched_artist?: string;
+  matched_title?: string;
+  matched_album?: string | null;
+}
+
+/* ---------------------------------------------------------------------- *
+ * Import — AcoustID, script chain, bulk queue (/api/import/*)              *
+ * ---------------------------------------------------------------------- */
+
+export interface AcoustidRecording {
+  path: string;
+  recording_id: string;
+  title: string;
+  score: number;
+}
+
+export interface AcoustidAlbumMatch {
+  path: string;
+  release_group_id?: string | null;
+  release_group_title?: string | null;
+  release_group_type?: string | null;
+  artists?: string[];
+  score?: number;
+  matched?: number;
+  total?: number;
+  /** Tracks whose ACOUSTID_ID / ACOUSTID_FINGERPRINT tags were written when
+   *  the request asked to apply the match. */
+  tagged?: number;
+  recordings?: AcoustidRecording[];
+}
+
+export interface AcoustidMatch {
+  /** False when no API key is configured or fpcalc is not installed. */
+  available: boolean;
+  /** Human reason when unavailable ("no API key", "fpcalc not installed"). */
+  note: string;
+  albums: AcoustidAlbumMatch[];
+}
+
+export interface ImportBulkItem {
+  path: string;
+  status: "imported" | "failed" | "skipped" | string;
+  album_path?: string;
+  error?: string;
+  /** Per-script results of the import chain for this item. */
+  scripts?: { id: number; name?: string; error?: string }[];
+}
+
+export interface ImportBulkJob {
+  id?: string;
+  kind?: string;
+  status?: "idle" | "running" | "done" | "failed" | string;
+  started?: number;
+  finished?: number;
+  total?: number;
+  done?: number;
+  label?: string;
+  items?: ImportBulkItem[];
+  error?: string;
+}
+
+export interface ImportBulkResult {
+  ok: boolean;
+  job?: ImportBulkJob;
+  error?: string;
+}
+
+export interface ImportScriptsPreview {
+  chain: number[];
+  labels: Record<string, string>;
+  count: number;
+}
+
+/** One entry of `/api/run`'s (and the import chain's) per-script report. */
+export interface ScriptRunResult {
+  id: number;
+  name?: string;
+  label?: string;
+  stats?: Record<string, unknown>;
+  /** The script was skipped because its feature is switched off. */
+  skipped?: boolean;
+  reason?: string;
+  error?: string;
+}
+
+/** Album detail from `/api/discovery/album`: a discovery row plus the
+ *  provider's own track list, genre names and (when resolved) the
+ *  MusicBrainz release group behind it. */
+export interface DiscoveryAlbumDetail extends DiscoveryRow {
+  genres?: string[];
+  label?: string;
+  track_list?: { title: string; duration: number | null; rank: number | null }[];
+  mb_release_group?: DiscoveryRow | null;
 }

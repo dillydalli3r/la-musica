@@ -37,17 +37,22 @@ const GROUPS: Group[] = [
       { k: "grade_check_unreadable", label: "Unreadable files", desc: "Files that can't be opened or decoded fail the album." },
       { k: "grade_check_missing_tags", label: "Required tags", desc: "Every required per-track tag (title, artist, date, …) must exist and be non-empty." },
       { k: "grade_check_album_tags", label: "Album-level tags", desc: "Album-wide tags (album, album artist, catalog number, …) must be present on the tracks." },
+      { k: "grade_check_mood", label: "Mood tag present", desc: "Every track needs a MOOD tag — script 8 fills it, so no track should ship without one (issue code MOOD_MISSING)." },
+      { k: "grade_check_genre", label: "Genre tag present", desc: "Every track needs a GENRE tag. Graded on its own, independent of the required-tags sweep (issue code GENRE_MISSING)." },
+      { k: "grade_check_replaygain", label: "ReplayGain tags present", desc: "All four ReplayGain tags — REPLAYGAIN_TRACK_GAIN/_PEAK and _ALBUM_GAIN/_PEAK — must be written (run the Loudness pass; the player can also analyse on demand)." },
       { k: "grade_check_encoder", label: "Encoder identity", desc: "ENCODER_PROGRAM / QUALITY / VERSION must be present." },
       { k: "grade_check_naming", label: "Naming script match", desc: "File paths must match the configured naming script (full or shortened MusicBrainz IDs both accepted)." },
       { k: "grade_check_filename_case", label: "Path capitalization", desc: "Filenames and folder names must match the naming script's letter case exactly — TOXICITY vs Toxicity fails. Organize applies the canonical casing." },
       { k: "grade_check_ext_case", label: "Lowercase extensions", desc: "File extensions must be lowercase (01 - Song.FLAC fails). Organize lowercases every extension it touches." },
       { k: "grade_check_key_bpm", label: "Key & BPM", desc: "INITIALKEY and BPM tags (written by script 12) are required." },
+      { k: "grade_check_acoustid", label: "AcoustID tags present", desc: "Files already carrying ACOUSTID_ID or ACOUSTID_FINGERPRINT must keep both — a library without them is never graded." },
       { k: "grade_check_excess_tags", label: "Excess tags", desc: "Any tag the optimizer would strip — outside the known tag set — fails the track. Run Optimization to remove them." },
       { k: "grade_check_media", label: "Media type", desc: "The MEDIA tag must be present and consistent with the release." },
       { k: "grade_check_source", label: "Source tag", desc: "The SOURCE tag must be present (with different rules for CD vs digital releases)." },
       { k: "grade_check_instrumental", label: "Instrumental consistency", desc: "INSTRUMENTAL=1 tracks must not carry lyrics; INSTRUMENTAL=0 tracks are graded for lyrics below." },
       { k: "grade_check_disallowed", label: "Disallowed file types", desc: "Unclassified files (.txt, .pdf, .m3u, …) fail the album unless their category is enabled under File categories." },
       { k: "grade_check_extra_images", label: "Stray images", desc: "Images that are neither cover.* nor per-track sidecars fail the album." },
+      { k: "grade_check_album_description", label: "Album description stored", desc: "The album folder needs a non-blank description.txt — fetch one on the album page (issue code ALBUM_DESCRIPTION_MISSING)." },
       { k: "grade_check_raw_video", label: "Raw videos", desc: "Un-remuxed videos (VOB/AVI/WMV/TS) fail — run script 11 to normalize them to MKV." },
       { k: "grade_check_lossless_source", label: "Lossless sources", desc: "Uncompressed lossless sources (WAV/AIFF/APE/WV/SHN) fail — script 3 converts them to FLAC." },
       { k: "grade_check_disc_naming", label: "Disc folder naming", desc: "Multi-disc albums must follow the disc naming pattern (Disc 1, …)." },
@@ -55,6 +60,15 @@ const GROUPS: Group[] = [
       { k: "grade_check_cd_cue", label: "CD — .cue present", desc: "Every CD disc needs a .cue sheet." },
       { k: "grade_check_cd_format", label: "CD — lossless format", desc: "CD tracks must be FLAC (lossless)." },
       { k: "grade_check_crc", label: "CRC checksums", desc: "CUE sheet CRCs / embedded checksums must match the audio." },
+    ],
+  },
+  {
+    id: "artist",
+    title: "Artist",
+    desc: "Graded once per ARTIST folder, not per album — the artist page shows the same two checks and its own badge.",
+    items: [
+      { k: "grade_check_artist_image", label: "Artist image stored", desc: "The artist folder must hold an artist.jpg / artist.png (issue code ARTIST_IMAGE_MISSING)." },
+      { k: "grade_check_artist_description", label: "Artist description stored", desc: "The artist folder must hold a non-blank description.txt (issue code ARTIST_DESCRIPTION_MISSING)." },
     ],
   },
   {
@@ -121,6 +135,7 @@ const GROUPS: Group[] = [
     items: [
       { k: "grade_include_music", label: "Audio tracks", desc: "The music files themselves." },
       { k: "grade_include_cover", label: "Cover art", desc: "cover.* images count toward the grade." },
+      { k: "grade_include_description", label: "Album description", desc: "description.txt (fetched on the album page) counts as the app's own file rather than a stray one." },
       { k: "grade_include_cue", label: "CUE sheets", desc: ".cue sidecars count toward the grade." },
       { k: "grade_include_log", label: "Log files", desc: ".log sidecars count toward the grade." },
       { k: "grade_include_lrc", label: "LRC lyrics", desc: ".lrc sidecars count toward the grade." },
@@ -232,6 +247,9 @@ export default function GradingPage() {
       "grade_check_lyrics_blank_lines", "grade_check_cue_blank_lines",
       "grade_check_filename_case", "grade_check_ext_case", "grade_check_excess_tags",
       "grade_check_mb_links", "grade_check_rym_links", "grade_check_xlit", "grade_check_trans",
+      // content checks — nothing breaks if the library ships without them
+      "grade_check_replaygain", "grade_check_album_description",
+      "grade_check_artist_image", "grade_check_artist_description",
     ];
     setLocal((c) => {
       const next = { ...(c ?? {}) };
@@ -257,7 +275,7 @@ export default function GradingPage() {
             <ClipboardCheck className="h-6 w-6 text-accent" /> Grading
           </h1>
           <p className="text-xs text-zinc-500 mt-0.5 max-w-2xl">
-            Everything that can count for or against a grade, checked per track, album and file.
+            Everything that can count for or against a grade, checked per track, album, artist folder and file.
             Toggles take effect the next time the grader runs (any grade view or the Grade script).
           </p>
         </div>
@@ -295,62 +313,103 @@ export default function GradingPage() {
           />
           <button className="btn-ghost !py-1 text-xs" onClick={() => setBulk(true)}>Enable all</button>
           <button className="btn-ghost !py-1 text-xs" onClick={() => setBulk(false)}>Disable all</button>
+          <span
+            className="chip font-mono bg-white/5 border border-border text-zinc-400"
+            title="Enabled grading checks — the file-category permissions are counted per group instead"
+          >
+            {CHECK_KEYS.filter(val).length}/{CHECK_KEYS.length} checks on
+          </span>
         </div>
       )}
 
       {!local ? (
         <PageLoading label="Loading grading settings…" />
       ) : (
-        GROUPS.map((g) => (
-          <section key={g.id} className="space-y-1.5">
-            <div className="px-1 pt-2">
-              <div className="text-sm font-semibold">{g.title}</div>
-              <div className="text-[11px] text-zinc-500">{g.desc}</div>
-            </div>
-            <div className="divide-y divide-border/40 rounded-lg border border-border/60 bg-panel/40">
-              {visible(g.items).map((it) => {
-                const off = it.needsAi && !aiReady;
-                return (
-                  <label
-                    key={it.k}
-                    className="flex items-start gap-3 px-3.5 py-2.5 cursor-pointer select-none hover:bg-raise/40 transition-colors"
-                  >
-                    <input
-                      type="checkbox"
-                      className="mt-0.5"
-                      checked={val(it.k)}
-                      onChange={(e) => set(it.k, e.target.checked)}
-                    />
-                    <span className="min-w-0">
-                      <span className="text-sm text-zinc-200 block">
-                        {it.label}
-                        {off && <span className="ml-2 text-[10px] font-mono text-zinc-600">needs AI configured</span>}
-                      </span>
-                      <span className="text-[11px] text-zinc-500 block leading-snug">{it.desc}</span>
-                    </span>
-                  </label>
-                );
-              })}
-              {g.id === "auditing" &&
-                NUMBERS.map((n) => (
-                  <div key={n.k} className="flex items-start gap-3 px-3.5 py-2.5">
-                    <span className="min-w-0 flex-1">
-                      <span className="text-sm text-zinc-200 block">{n.label}</span>
-                      <span className="text-[11px] text-zinc-500 block leading-snug">{n.desc}</span>
-                    </span>
-                    <input
-                      className="input !w-20 !py-1 text-sm shrink-0"
-                      type="number"
-                      min={n.min}
-                      max={n.max}
-                      value={Number(local[n.k] ?? 0)}
-                      onChange={(e) => set(n.k, Math.max(n.min, Math.min(n.max, Number(e.target.value) || 0)))}
-                    />
+        GROUPS.map((g) => {
+          const rows = visible(g.items);
+          const on = g.items.filter((it) => val(it.k)).length;
+          const tot = g.items.length;
+          return (
+            <section key={g.id} className="space-y-1.5">
+              <div className="px-1 pt-2 flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold">{g.title}</div>
+                  <div className="text-[11px] text-zinc-500">{g.desc}</div>
+                </div>
+                <span
+                  className={`chip font-mono shrink-0 mt-0.5 border ${
+                    tot > 0 && on === tot
+                      ? "bg-accent/10 border-accent/25 text-accent-soft"
+                      : on === 0
+                        ? "bg-white/5 border-border text-zinc-500"
+                        : "bg-white/5 border-border text-zinc-400"
+                  }`}
+                  title={`${on} of ${tot} checks enabled in this group`}
+                >
+                  {on}/{tot}
+                </span>
+              </div>
+              {g.id === "artist" && (
+                <div className="px-1">
+                  <div className="rounded-lg border border-accent/25 bg-accent/[0.06] px-3.5 py-2 text-[11px] leading-relaxed text-zinc-400">
+                    <span className="font-semibold text-accent-soft">Artist grading.</span>{" "}
+                    These checks run once per ARTIST folder and feed the artist page's own badge —
+                    only the artist image and the artist description apply there. Every other check
+                    on this page grades the albums inside the folder, so an artist can pass while one
+                    of its albums fails, and the other way round.
                   </div>
-                ))}
-            </div>
-          </section>
-        ))
+                </div>
+              )}
+              <div className="divide-y divide-border/40 rounded-lg border border-border/60 bg-panel/40">
+                {rows.map((it) => {
+                  const off = it.needsAi && !aiReady;
+                  return (
+                    <label
+                      key={it.k}
+                      className="flex items-start gap-3 px-3.5 py-2.5 cursor-pointer select-none hover:bg-raise/40 transition-colors"
+                    >
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={val(it.k)}
+                        onChange={(e) => set(it.k, e.target.checked)}
+                      />
+                      <span className="min-w-0">
+                        <span className="text-sm text-zinc-200 block">
+                          {it.label}
+                          {off && <span className="ml-2 text-[10px] font-mono text-zinc-600">needs AI configured</span>}
+                        </span>
+                        <span className="text-[11px] text-zinc-500 block leading-snug">{it.desc}</span>
+                      </span>
+                    </label>
+                  );
+                })}
+                {rows.length === 0 && (
+                  <div className="px-3.5 py-3 text-xs text-zinc-500">
+                    No checks in this group match “{q.trim()}”.
+                  </div>
+                )}
+                {g.id === "auditing" &&
+                  NUMBERS.map((n) => (
+                    <div key={n.k} className="flex items-start gap-3 px-3.5 py-2.5">
+                      <span className="min-w-0 flex-1">
+                        <span className="text-sm text-zinc-200 block">{n.label}</span>
+                        <span className="text-[11px] text-zinc-500 block leading-snug">{n.desc}</span>
+                      </span>
+                      <input
+                        className="input !w-20 !py-1 text-sm shrink-0"
+                        type="number"
+                        min={n.min}
+                        max={n.max}
+                        value={Number(local[n.k] ?? 0)}
+                        onChange={(e) => set(n.k, Math.max(n.min, Math.min(n.max, Number(e.target.value) || 0)))}
+                      />
+                    </div>
+                  ))}
+              </div>
+            </section>
+          );
+        })
       )}
       <div className="h-4" />
     </div>

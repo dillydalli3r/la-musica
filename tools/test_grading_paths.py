@@ -14,7 +14,7 @@ import wave
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mlo.grader import _grade_album, _naming_mismatch
+from mlo.grader import REPLAYGAIN_TAGS, _grade_album, _naming_mismatch
 from mlo.naming import DEFAULT_NAMING_SCRIPT
 from server.beetscfg import generate_config
 
@@ -103,6 +103,13 @@ ISO_CFG = {
     "grade_check_audit": False,
     "grade_check_mb_links": False,
     "grade_check_rym_links": False,
+    # Checks added after this file was written: off here (the fixtures carry
+    # no MOOD / ReplayGain tags and no description.txt) and switched on in
+    # the dedicated cases below.
+    "grade_check_mood": False,
+    "grade_check_replaygain": False,
+    "grade_check_acoustid": False,
+    "grade_check_album_description": False,
 }
 
 tmp = tempfile.mkdtemp(prefix="mlo_naming_test_")
@@ -286,6 +293,167 @@ ok("PATH" not in res["tracks"][0]["issues"]
    and res["pass_count"] == res["total_checks"],
    "grade_check_naming=False disables the whole naming block: no PATH, no "
    "PATH_CASE, check not counted")
+
+# ----------------------------------------------------------------------
+# Mood & genre presence (grade_check_mood / grade_check_genre)
+# ----------------------------------------------------------------------
+print("== mood / genre presence ==")
+# Clean fixture in the album graded above: everything ISO_CFG isolates is
+# satisfied, MOOD deliberately absent.
+NO_MOOD = dict(BASE_TAGS, INITIALKEY="B♭ min", BPM="120")
+set_tags(flac, NO_MOOD)
+del_tags(flac, ["MOOD"])
+mood_cfg = dict(cfg, grade_check_mood=True, grade_check_genre=True)
+res = _grade_album(album, "EMBEDDED", mood_cfg)
+tr = res["tracks"][0]
+ok(tr["issues"] == ["MOOD_MISSING"],
+   f"GENRE present + MOOD missing fails only the mood check (got {tr['issues']})")
+ok(res["total_checks"] - res["pass_count"] == 1,
+   f"the missing MOOD costs exactly one grade point "
+   f"({res['pass_count']}/{res['total_checks']})")
+ok("Missing MOOD" in res["issues"], f"album issue names the tag (got {res['issues']})")
+
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
+res = _grade_album(album, "EMBEDDED", mood_cfg)
+ok(res["pass_count"] == res["total_checks"],
+   f"a MOOD tag clears the check ({res['pass_count']}/{res['total_checks']})")
+
+del_tags(flac, ["GENRE"])
+res = _grade_album(album, "EMBEDDED", mood_cfg)
+ok(res["tracks"][0]["issues"] == ["GENRE_MISSING"],
+   f"missing GENRE fails with its own code (got {res['tracks'][0]['issues']})")
+ok("Missing GENRE" in res["issues"], f"album issue names GENRE (got {res['issues']})")
+
+res = _grade_album(album, "EMBEDDED", dict(mood_cfg, grade_check_genre=False))
+ok("GENRE_MISSING" not in res["tracks"][0]["issues"]
+   and res["pass_count"] == res["total_checks"],
+   "grade_check_genre=False stops grading the missing GENRE")
+res = _grade_album(album, "EMBEDDED", dict(mood_cfg, grade_check_mood=False))
+ok("GENRE_MISSING" in res["tracks"][0]["issues"]
+   and "MOOD_MISSING" not in res["tracks"][0]["issues"],
+   "the two toggles are independent (genre on, mood off)")
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
+
+# ----------------------------------------------------------------------
+# ReplayGain family (grade_check_replaygain) — opt-in like AcoustID
+# ----------------------------------------------------------------------
+print("== replaygain presence ==")
+# No RG tags at all: not graded, not counted — a library that never ran
+# script 7 (the player measures on the fly) must not be failed.
+del_tags(flac, list(REPLAYGAIN_TAGS))
+rg_base = _grade_album(album, "EMBEDDED", cfg)
+res = _grade_album(album, "EMBEDDED", dict(cfg, grade_check_replaygain=True))
+ok(res["total_checks"] == rg_base["total_checks"]
+   and res["pass_count"] == res["total_checks"],
+   f"a file with no ReplayGain tags is never graded for them "
+   f"({res['pass_count']}/{res['total_checks']})")
+
+# ... but a half-written set is: the missing three fail, the present one passes.
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic",
+                    REPLAYGAIN_TRACK_GAIN="-3.00 dB"))
+rg_cfg = dict(cfg, grade_check_replaygain=True)
+res = _grade_album(album, "EMBEDDED", rg_cfg)
+ok(sorted(res["tracks"][0]["issues"])
+   == ["REPLAYGAIN_ALBUM_GAIN", "REPLAYGAIN_ALBUM_PEAK",
+       "REPLAYGAIN_TRACK_PEAK"],
+   f"a lone REPLAYGAIN_TRACK_GAIN fails the other three "
+   f"(got {res['tracks'][0]['issues']})")
+ok(res["total_checks"] - res["pass_count"] == 3,
+   f"the incomplete set costs exactly three grade points "
+   f"({res['pass_count']}/{res['total_checks']})")
+# a complete set is graded and passes (proves the family IS counted once one
+# tag exists, i.e. the opt-in skip does not disable the check wholesale)
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic",
+                    REPLAYGAIN_TRACK_GAIN="-3.00 dB",
+                    REPLAYGAIN_TRACK_PEAK="0.98",
+                    REPLAYGAIN_ALBUM_GAIN="-2.50 dB",
+                    REPLAYGAIN_ALBUM_PEAK="1.00"))
+res = _grade_album(album, "EMBEDDED", rg_cfg)
+ok(res["total_checks"] == rg_base["total_checks"] + 4
+   and res["pass_count"] == res["total_checks"],
+   f"a complete ReplayGain set is graded and passes "
+   f"({res['pass_count']}/{res['total_checks']})")
+
+# toggle off: even a half-written set is not graded (nor counted)
+del_tags(flac, list(REPLAYGAIN_TAGS))
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic",
+                    REPLAYGAIN_TRACK_GAIN="-3.00 dB"))
+res = _grade_album(album, "EMBEDDED", cfg)
+ok(res["total_checks"] == rg_base["total_checks"]
+   and not any("REPLAYGAIN" in i for i in res["tracks"][0]["issues"]),
+   f"grade_check_replaygain=False does not grade them "
+   f"({res['pass_count']}/{res['total_checks']})")
+# both toggles on: exactly one penalty per missing RG tag (the generic sweep
+# still owns DYNAMIC RANGE, which this fixture does not carry either)
+res = _grade_album(album, "EMBEDDED",
+                   dict(cfg, grade_check_replaygain=True,
+                        grade_check_missing_tags=True))
+_rg_issues = [i for i in res["tracks"][0]["issues"]
+              if i.startswith("REPLAYGAIN")]
+ok(res["total_checks"] == rg_base["total_checks"] + 4
+   and _rg_issues == ["REPLAYGAIN_TRACK_PEAK", "REPLAYGAIN_ALBUM_GAIN",
+                      "REPLAYGAIN_ALBUM_PEAK"]
+   and res["tracks"][0]["issues"].count("DYNAMIC RANGE") == 1,
+   f"missing_tags cannot double-penalize the family "
+   f"({res['pass_count']}/{res['total_checks']}, "
+   f"{res['tracks'][0]['issues']})")
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
+del_tags(flac, list(REPLAYGAIN_TAGS))
+
+# ----------------------------------------------------------------------
+# AcoustID pair (opt-in: never graded when the file carries neither tag)
+# ----------------------------------------------------------------------
+print("== acoustid pair ==")
+base = _grade_album(album, "EMBEDDED", cfg)
+res = _grade_album(album, "EMBEDDED", dict(cfg, grade_check_acoustid=True))
+ok(res["total_checks"] == base["total_checks"]
+   and res["pass_count"] == res["total_checks"],
+   "a file with neither AcoustID tag is never graded (check not counted)")
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic", ACOUSTID_ID="9f4e1d2c"))
+res = _grade_album(album, "EMBEDDED", dict(cfg, grade_check_acoustid=True))
+ok(res["tracks"][0]["issues"] == ["ACOUSTID_FINGERPRINT"],
+   f"a lone ACOUSTID_ID fails the pair check (got {res['tracks'][0]['issues']})")
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic", ACOUSTID_ID="9f4e1d2c",
+                    ACOUSTID_FINGERPRINT="AQADtEmS"))
+res = _grade_album(album, "EMBEDDED", dict(cfg, grade_check_acoustid=True))
+ok(res["pass_count"] == res["total_checks"],
+   f"a complete AcoustID pair passes ({res['pass_count']}/{res['total_checks']})")
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
+
+# ----------------------------------------------------------------------
+# Album description (grade_check_album_description)
+# ----------------------------------------------------------------------
+print("== album description ==")
+desc_cfg = dict(cfg, grade_check_album_description=True)
+res = _grade_album(album, "EMBEDDED", desc_cfg)
+ok(any("Album description missing" in i for i in res["issues"]),
+   f"an album without description.txt fails the check (got {res['issues']})")
+ok(res["total_checks"] - res["pass_count"] == 1,
+   f"the missing description costs one grade point "
+   f"({res['pass_count']}/{res['total_checks']})")
+desc = os.path.join(album, "description.txt")
+with open(desc, "w", encoding="utf-8") as fh:
+    fh.write("Recorded in a shed, 1997.\n")
+res = _grade_album(album, "EMBEDDED", desc_cfg)
+ok(res["pass_count"] == res["total_checks"],
+   f"a non-blank description.txt passes ({res['pass_count']}/{res['total_checks']})")
+with open(desc, "w", encoding="utf-8") as fh:
+    fh.write("   \n\n")
+res = _grade_album(album, "EMBEDDED", desc_cfg)
+ok(res["total_checks"] - res["pass_count"] == 1,
+   "a blank description.txt does not count as a description")
+with open(desc, "w", encoding="utf-8") as fh:
+    fh.write("Recorded in a shed, 1997.\n")
+# ... and the file itself is legitimate library content, not a stray
+strict_cfg = dict(cfg, grade_check_album_description=True,
+                  grade_check_disallowed=True, grade_check_extra_images=True)
+res = _grade_album(album, "EMBEDDED", strict_cfg)
+ok(not any("Disallowed" in i for i in res["issues"]),
+   f"description.txt is not a disallowed file type (got {res['issues']})")
+ok(not any("Extra artwork" in i for i in res["issues"]),
+   f"and not stray artwork either (got {res['issues']})")
+ok(res["pass_count"] == res["total_checks"],
+   f"description.txt costs no grade points ({res['pass_count']}/{res['total_checks']})")
 
 # ----------------------------------------------------------------------
 # beets config: directory: is the library root, not the music folder

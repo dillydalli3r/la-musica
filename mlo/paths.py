@@ -262,6 +262,14 @@ CONVERTIBLE_EXTENSIONS = ALL_IMAGE_EXTS
 # tracks have their own art while the rest fall back to the album cover.*.
 SIDECAR_COVER_EXTS = IMAGE_EXTS
 
+# Text sidecars the app itself writes into the library: the album's
+# "<album>/description.txt" (album page → fetch album description) and the
+# artist's "<artist>/description.txt". Both are legitimate library files, so
+# grading and the layout scanner must never report them as strays. The
+# artist's "artist.jpg"/"artist.png" sit at artist level as well (see
+# mlo.artistdata); artwork.json is app state and lives under .mlo/data.
+ALBUM_SIDECAR_NAMES = ("description.txt",)
+
 
 def get_sidecar_cover_path(album_dir, track_filename):
     """Return the sidecar cover path for a track if it exists, else None.

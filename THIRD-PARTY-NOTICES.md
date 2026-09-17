@@ -34,7 +34,11 @@ and its license.
   JPEG image processing. **BSD-3-Clause / IJG / zlib**.
 - **oxipng** — <https://github.com/oxipng/oxipng> — lossless PNG
   optimization. **MIT**.
-- **librosa** — <https://librosa.org> — BPM / key analysis. **ISC**.
+- **librosa** — <https://librosa.org> — BPM / key analysis and mood
+  classification. **ISC**.
+- **Chromaprint / fpcalc** — <https://github.com/acoustid/chromaprint> —
+  audio fingerprinting for AcoustID release matching during import.
+  **LGPL-2.1-or-later**.
 
 ## Python packages
 
@@ -75,5 +79,26 @@ and its license.
   CC-BY-SA / CC0). **LRCLIB** — <https://lrclib.net> — synced lyrics.
   Soulseek™ is a trademark of Soulseek LLC; this project is not affiliated
   with it or with slskd.
+
+External services queried by the discovery provider layer (no SDK or code of
+theirs is bundled — results are fetched over their public HTTP APIs and cached
+locally):
+
+- **ListenBrainz** — <https://listenbrainz.org> (MetaBrainz) — sitewide
+  listening charts. Data **CC0 / CC-BY-SA**.
+- **Deezer** — <https://developers.deezer.com/api> — catalogue search,
+  similarity and artist imagery.
+- **iTunes Search API** — <https://performance-partners.apple.com/search-api> —
+  catalogue fallback and artwork. Apple and iTunes are trademarks of Apple Inc.
+- **TheAudioDB** — <https://www.theaudiodb.com> — artist biographies and
+  press images.
+- **Wikipedia / Wikidata** — <https://www.wikipedia.org> — artist and album
+  descriptions. Text is **CC BY-SA 4.0**; the app stores an extract plus a
+  link back to the source article.
+- **AcoustID** — <https://acoustid.org> — fingerprint lookups (requires your
+  own free application key; the service is non-commercial use only).
+- **NetEase Cloud Music**, **Kugou**, **lyrics.ovh** — additional lyrics
+  sources in the provider chain; lyrics remain the property of their
+  respective rights holders.
 
 If you believe a credit is missing or wrong, please open an issue.

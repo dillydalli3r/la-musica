@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
-  keepPreviousData, useInfiniteQuery, useQuery, useQueryClient,
+  keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient,
 } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, ArrowUpDown, ArrowUpRight, BookmarkPlus, Check, Loader2, Search, Zap } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, ArrowUpRight, BookmarkPlus, Check, Loader2, Search, X, Zap } from "lucide-react";
 import { api } from "../api";
+import type { DiscoveryAlbumDetail, DiscoveryRow } from "../types";
 import { EmptyState } from "../components/Badges";
 import { MbIcon } from "../components/Links";
 import Segmented from "../components/Segmented";
@@ -27,6 +28,23 @@ const TYPES = [
   { id: "recording", label: "Recordings" },
 ] as const;
 type MBType = (typeof TYPES)[number]["id"];
+
+/** Which chain answers the search box (config `mb_search_source`). */
+const SEARCH_MODES = [
+  { id: "auto", label: "Auto" },
+  { id: "discovery", label: "Discovery" },
+  { id: "musicbrainz", label: "MusicBrainz" },
+] as const;
+type SearchMode = (typeof SEARCH_MODES)[number]["id"];
+
+/** Provider id → short label for the "who answered" caption. Mirrors
+ *  mlo.discovery.SOURCE_LABELS for the providers a search can come from. */
+const PROVIDER_LABELS: Record<string, string> = {
+  deezer: "Deezer", itunes: "iTunes", listenbrainz: "ListenBrainz",
+  audiodb: "TheAudioDB", wikipedia: "Wikipedia", musicbrainz: "MusicBrainz",
+};
+
+const DISCOVERY_LIMIT = 50;
 
 /** MusicBrainz release types, split the way MusicBrainz splits them: a
  *  release group has ONE primary type (Album / Single / EP / Broadcast /
@@ -309,6 +327,257 @@ const COLUMNS: Record<MBType, { k: string; label: string; className?: string }[]
   ],
 };
 
+/* ------------------------------------------------------------------ */
+/* Discovery results — the provider catalogue chain behind the search  */
+/* ------------------------------------------------------------------ */
+
+/** Loading state in the shape of the result grid (same boxes the library
+ *  page uses while scanning), so nothing jumps when rows land. */
+function ResultSkeleton() {
+  return (
+    <div
+      className="grid gap-x-4 gap-y-5 animate-pulse"
+      style={{ gridTemplateColumns: "repeat(auto-fill, minmax(164px, 1fr))" }}
+      aria-busy="true"
+    >
+      {Array.from({ length: 8 }).map((_, i) => (
+        <div key={i} className="p-2">
+          <div className="aspect-square w-full rounded-xl bg-zinc-800/60" />
+          <div className="h-3 w-3/4 rounded bg-zinc-800/60 mt-2.5" />
+          <div className="h-2.5 w-1/2 rounded bg-zinc-800/40 mt-1.5" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** One discovery row: provider cover art, title/artist, year, type chips and
+ *  the provider's own popularity label. A row carrying an MBID drills into its
+ *  MusicBrainz entity (the download path); a Deezer row without one opens the
+ *  in-page panel, which resolves the MBID on demand. */
+function DiscoveryCard({ row, onDrill, onOpen }: {
+  row: DiscoveryRow;
+  onDrill: (path: string) => void;
+  onOpen: (row: DiscoveryRow) => void;
+}) {
+  const title = row.title || row.name || "";
+  const cover = row.cover ?? row.image ?? null;
+  // Artist rows have no detail endpoint (only albums do), and their
+  // `deezer_id` is an ARTIST id — never feed it to the album lookup.
+  const subtitle = row.kind === "artist"
+    ? [row.disambiguation, row.country, row.genre].filter(Boolean).join(" · ")
+    : row.artist || row.similar_to || "";
+  const mbPath = row.mbid
+    ? row.kind === "artist" ? `/mb/artist/${row.mbid}` : `/mb/rg/${row.mbid}`
+    : null;
+  const open = mbPath ? () => onDrill(mbPath)
+    : row.kind === "album" && row.deezer_id ? () => onOpen(row)
+    : null;
+  const kinds = [row.record_type, ...(row.secondary_types ?? []), row.genre].filter(Boolean) as string[];
+  return (
+    <div
+      role={open ? "button" : undefined}
+      tabIndex={open ? 0 : undefined}
+      onClick={open ?? undefined}
+      onKeyDown={open ? (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          open();
+        }
+      } : undefined}
+      className={`group flex flex-col rounded-lg border border-border bg-card overflow-hidden transition-colors ${
+        open ? "cursor-pointer hover:border-accent/60" : ""
+      }`}
+    >
+      <div className="aspect-square w-full bg-panel overflow-hidden">
+        {cover ? (
+          <img
+            src={cover}
+            alt=""
+            loading="lazy"
+            className="h-full w-full object-cover transition-transform duration-200 group-hover:scale-[1.03]"
+          />
+        ) : (
+          <div className="h-full w-full grid place-items-center text-[10px] text-zinc-600">no cover</div>
+        )}
+      </div>
+      <div className="p-2.5 flex flex-col gap-1.5">
+        <div className="text-sm font-medium text-zinc-100 truncate" title={title}>{title || "Untitled"}</div>
+        {subtitle ? <div className="text-xs text-zinc-400 truncate">{subtitle}</div> : null}
+        <div className="flex flex-wrap items-center gap-1">
+          {row.year ? <span className="chip bg-raise border border-border text-zinc-400">{row.year}</span> : null}
+          {kinds.slice(0, 2).map((k) => (
+            <span key={k} className="chip bg-raise border border-border text-zinc-400 capitalize">{k}</span>
+          ))}
+          {row.tracks ? <span className="chip bg-raise border border-border text-zinc-400">{row.tracks} tracks</span> : null}
+          {row.popularity_label ? (
+            <span className="chip bg-accent/10 text-accent-soft border border-accent/25">{row.popularity_label}</span>
+          ) : null}
+          {row.owned_path ? (
+            <span className="chip bg-emerald-900/50 text-emerald-300 border border-emerald-800">owned</span>
+          ) : null}
+        </div>
+        <div className="flex items-center gap-2 text-[10px] text-zinc-500">
+          <span>{PROVIDER_LABELS[row.source] ?? row.source}</span>
+          <span className={row.mbid ? "text-accent-soft" : "text-zinc-600"}>{row.mbid ? "MBID" : "no MBID"}</span>
+          {row.link ? (
+            <a
+              href={row.link}
+              target="_blank"
+              rel="noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="ml-auto hover:text-white"
+              title="Open on the provider"
+            >
+              <ArrowUpRight className="h-3 w-3" />
+            </a>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** In-page detail for a discovery album with no MBID yet: the provider's own
+ *  album payload (cover, label, genres, date) and its track list with per-track
+ *  popularity, plus the two ways onward — wish it (the backend resolves the
+ *  release group) or jump into the resolved MusicBrainz release group. */
+function DiscoveryAlbumPanel({ row, album, loading, error, wished, busy, mbid, onWish, onViewMb, onClose }: {
+  row: DiscoveryRow;
+  album?: DiscoveryAlbumDetail;
+  loading: boolean;
+  error: unknown;
+  wished: boolean;
+  busy: boolean;
+  mbid: string | null;
+  onWish: () => void;
+  onViewMb: () => void;
+  onClose: () => void;
+}) {
+  const title = album?.title || row.title || "";
+  const artist = album?.artist || row.artist || "";
+  const cover = album?.cover ?? row.cover ?? null;
+  const kinds = [
+    album?.record_type ?? row.record_type,
+    ...(album?.secondary_types ?? row.secondary_types ?? []),
+  ].filter(Boolean) as string[];
+  const tracks = album?.track_list ?? [];
+  return (
+    <div
+      className="fixed inset-0 z-40 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6"
+      onClick={onClose}
+    >
+      <div
+        className="bg-card border border-border rounded-xl w-full max-w-2xl max-h-[85vh] overflow-auto shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-2 px-5 py-3 border-b border-border sticky top-0 bg-card z-10">
+          <Zap className="h-4 w-4 text-accent" />
+          <span className="font-semibold text-sm truncate">{title}{artist ? ` — ${artist}` : ""}</span>
+          <button className="ml-auto p-1 text-zinc-500 hover:text-white" onClick={onClose} title="Close">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          {loading ? (
+            <div className="flex items-center justify-center gap-2 py-16 text-sm text-zinc-500">
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading the album from the provider…
+            </div>
+          ) : error ? (
+            <LoadError e={error} />
+          ) : (
+            <>
+              <div className="flex gap-4">
+                <div className="w-36 h-36 shrink-0 rounded-lg overflow-hidden bg-panel border border-border">
+                  {cover ? <img src={cover} alt="" className="h-full w-full object-cover" /> : null}
+                </div>
+                <div className="min-w-0 space-y-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {album?.year ? <span className="chip bg-raise border border-border text-zinc-300">{album.year}</span> : null}
+                    {album?.release_date ? (
+                      <span className="chip bg-raise border border-border text-zinc-400">{album.release_date}</span>
+                    ) : null}
+                    {kinds.map((k) => (
+                      <span key={k} className="chip bg-raise border border-border text-zinc-400 capitalize">{k}</span>
+                    ))}
+                    {album?.label ? (
+                      <span className="chip bg-raise border border-border text-zinc-400">{album.label}</span>
+                    ) : null}
+                    {album?.popularity_label ? (
+                      <span className="chip bg-accent/10 text-accent-soft border border-accent/25">{album.popularity_label}</span>
+                    ) : null}
+                  </div>
+                  {album?.genres?.length ? (
+                    <div className="flex flex-wrap gap-1.5">
+                      {album.genres.map((g) => (
+                        <span key={g} className="chip bg-white/5 border border-white/15 text-zinc-400">{g}</span>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="text-[11px] text-zinc-500">
+                    {album?.tracks ? `${album.tracks} tracks` : ""}
+                    {album?.duration ? ` · ${Math.round(album.duration / 60)} min` : ""}
+                    {" · "}
+                    {album?.mbid ? "MusicBrainz release group resolved" : "no MusicBrainz release group yet"}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  className="btn-primary !py-1.5 text-xs"
+                  disabled={busy || wished}
+                  onClick={onWish}
+                  title="Save this album to the wishlist — it is auto-imported from Soulseek when a verified copy appears"
+                >
+                  {wished ? <Check className="h-3.5 w-3.5" /> : <BookmarkPlus className="h-3.5 w-3.5" />}
+                  {busy ? "Adding…" : wished ? "Wished" : "Add to wishes"}
+                </button>
+                {mbid ? (
+                  <button className="btn-ghost !py-1.5 text-xs" onClick={onViewMb}>
+                    <MbIcon className="h-3.5 w-3.5" /> View in MusicBrainz
+                  </button>
+                ) : null}
+                {album?.link ? <ExtLink href={album.link} title="Open on the provider" /> : null}
+              </div>
+
+              {tracks.length > 0 && (
+                <div className="rounded-lg border border-border overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead className="border-b border-border">
+                      <tr>
+                        <th className="th w-8">#</th>
+                        <th className="th">Track</th>
+                        <th className="th w-16 text-right">Time</th>
+                        <th className="th w-24 text-right">Popularity</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {tracks.map((t, i) => (
+                        <tr key={`${i}-${t.title}`} className="border-b border-border/60 last:border-0">
+                          <td className="td font-mono text-[10px] text-zinc-600">{i + 1}</td>
+                          <td className="td text-zinc-200">{t.title || "—"}</td>
+                          <td className="td text-right font-mono text-[11px] text-zinc-500">
+                            {fmtLen((t.duration ?? 0) * 1000)}
+                          </td>
+                          <td className="td text-right font-mono text-[10px] text-zinc-500">
+                            {t.rank ? t.rank.toLocaleString() : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function MBSearchPage() {
   const [params, setParams] = useSearchParams();
   const q = params.get("q") ?? "";
@@ -362,13 +631,77 @@ export function MBSearchPage() {
     if (detect.data) nav(`/mb/${routeFor(detect.data.type)}/${detect.data.id}`);
   }, [detect.data]);
 
+  const idLike = !!urlMatch || !!bareId;
+
+  // Which chain answers the search box, persisted in the config
+  // (`mb_search_source`) so the settings page and the global search read the
+  // same value. The segmented control only WRITES — the refetched config is
+  // what keys the queries, so a search always runs against the mode the server
+  // actually applied.
+  const qc = useQueryClient();
+  const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
+  const rawSource = config?.mb_search_source;
+  const srcMode: SearchMode =
+    rawSource === "discovery" || rawSource === "musicbrainz" ? rawSource : "auto";
+  const saveSource = useMutation({
+    mutationFn: (value: SearchMode) =>
+      api.saveConfig({ ...(config ?? {}), mb_search_source: value }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["config"] }),
+    onError: (e) => toast(String(e)),
+  });
+
+  // The discovery chain answers the album ("release-group") and artist tabs;
+  // Releases/Recordings exist only on MusicBrainz.
+  const discoveryType: "album" | "artist" | null =
+    type === "artist" ? "artist" : type === "release-group" ? "album" : null;
+  const useDiscovery = !!discoveryType && srcMode !== "musicbrainz" && !idLike;
+  const disco = useQuery({
+    queryKey: ["discoverySearch", discoveryType, q, srcMode],
+    queryFn: () => api.discoverySearch(q, discoveryType!, DISCOVERY_LIMIT),
+    enabled: useDiscovery && q.trim().length >= 2,
+    placeholderData: keepPreviousData,
+  });
+
+  // In-page panel for a row the catalogue knows but MusicBrainz has not been
+  // asked about yet — `resolve` is what answers with the release-group MBID.
+  // The panel is modal, so the query behind it cannot change while it is open;
+  // opening a row resets the wish/resolve state instead of an effect.
+  const [detail, setDetail] = useState<DiscoveryRow | null>(null);
+  const [wished, setWished] = useState(false);
+  const [resolvedMbid, setResolvedMbid] = useState<string | null>(null);
+  const openDetail = (row: DiscoveryRow) => {
+    setDetail(row);
+    setWished(false);
+    setResolvedMbid(null);
+  };
+  const detailId = detail?.deezer_id ?? 0;
+  const album = useQuery({
+    queryKey: ["discoveryAlbum", detailId],
+    queryFn: () => api.discoveryAlbum(detailId, true),
+    enabled: detailId > 0,
+  });
+  const wish = useMutation({
+    mutationFn: (row: DiscoveryRow) =>
+      api.discoveryWish({
+        artist: row.artist ?? "",
+        title: row.title ?? "",
+        year: row.year ?? "",
+        mbid: row.mbid ?? "",
+      }),
+    onSuccess: (res) => {
+      setWished(true);
+      setResolvedMbid(res.resolved?.mbid ?? null);
+      toast("Added to wishes");
+    },
+    onError: (e) => toast(String(e)),
+  });
+
   // Catalog numbers and barcodes ("SRCS 8757") often don't rank in a free
   // text search — when the query looks like one, run the exact catno/barcode
   // search instead and fall back to free text only if it comes up empty.
   const looksCatno = /^[a-z0-9]{1,8}[\s-]?\d{3,8}([-]?\d{1,4})?$/i.test(q.trim());
   const looksBarcode = /^\d{8,14}$/.test(q.trim());
   const mode = type === "release" ? (looksBarcode ? "barcode" : looksCatno ? "catno" : "free") : "free";
-  const idLike = !!urlMatch || !!bareId;
   const search = useInfiniteQuery({
     queryKey: ["mbSearch", type, q, mode, ptype, stype],
     queryFn: async ({ pageParam }) => {
@@ -382,12 +715,29 @@ export function MBSearchPage() {
       const loaded = all.reduce((n, p) => n + p.rows.length, 0);
       return loaded < (last.total ?? 0) ? loaded : undefined;
     },
-    enabled: q.trim().length >= 2 && !idLike,
+    enabled: q.trim().length >= 2 && !idLike && !useDiscovery,
     placeholderData: keepPreviousData, // keep rows visible while re-querying
   });
 
   const rows = (search.data?.pages ?? []).flatMap((p) => p.rows);
   const total = search.data?.pages.at(-1)?.total ?? 0;
+
+  const dro = disco.data?.rows ?? [];
+  // Who answered: discovery rows name their providers, MusicBrainz rows (and
+  // the forced MusicBrainz mode) are what the chain falls back to. The
+  // discovery rows are only trusted while it is the chain answering — the
+  // query keeps its previous rows as a placeholder across mode changes.
+  const seenProviders: Record<string, true> = {};
+  for (const r of dro) seenProviders[r.source] = true;
+  const providers = useDiscovery
+    ? Object.keys(seenProviders).filter((s) => s !== "musicbrainz")
+    : [];
+  const answered = providers.length
+    ? `${providers.map((s) => PROVIDER_LABELS[s] ?? s).join(" · ")}${
+        srcMode === "auto" ? " · MusicBrainz fallback" : " · discovery only"
+      }`
+    : "MusicBrainz";
+  const rgMbid = album.data?.mbid ?? resolvedMbid ?? null;
 
   // Flatten entity-specific shapes into sortable flat rows for the columns.
   const shaped = useMemo(
@@ -472,70 +822,89 @@ export function MBSearchPage() {
 
   return (
     <div className="p-6 max-w-6xl mx-auto">
-      <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
-        <Zap className="h-6 w-6 text-accent" /> MusicBrainz
-      </h1>
-      <div className="relative mt-3">
-        <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-500" />
-        <input
-          className="input !pl-10"
-          placeholder="Search artists, releases, recordings… — or paste an MB ID / link"
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            // Enter is an explicit search — skip the typing debounce
-            if (e.key === "Enter") pushParams(text);
-          }}
-          autoFocus
-        />
-      </div>
-      <div className="mt-3">
-        <Segmented value={type} onChange={(t) => {
-          const next = new URLSearchParams(params);
-          next.set("type", t);
-          setParams(next, { replace: true });
-        }} options={TYPES} />
-      </div>
-
-      {/* Release types are two axes in MusicBrainz: a primary type (Album /
-          Single / EP / …) and any number of secondary types (Soundtrack /
-          Live / Compilation / …) — both narrow the search server-side. */}
-      {(type === "release" || type === "release-group") && (
-        <div className="mt-2 flex items-center gap-2 flex-wrap text-xs">
-          <span className="text-[10px] uppercase tracking-widest text-zinc-500">Type</span>
-          <select
-            className="input !py-1 !w-auto"
-            value={ptype}
-            onChange={(e) => setTypeFilter("ptype", e.target.value)}
-            title="MusicBrainz primary release type"
-          >
-            <option value="">Any</option>
-            {PRIMARY_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-          </select>
-          <span className="text-zinc-600">+</span>
-          <select
-            className="input !py-1 !w-auto"
-            value={stype}
-            onChange={(e) => setTypeFilter("stype", e.target.value)}
-            title="MusicBrainz secondary release type"
-          >
-            <option value="">Any</option>
-            {SECONDARY_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-          </select>
-          {(ptype || stype) && (
-            <button className="btn-ghost !py-1 text-[11px]" onClick={() => {
-              const next = new URLSearchParams(params);
-              next.delete("ptype");
-              next.delete("stype");
-              setParams(next, { replace: true });
-            }}>
-              Clear
-            </button>
-          )}
+      {/* The search header sticks: results scroll under it, and the mode /
+          tab controls stay reachable while reading a long result list. */}
+      <div className="sticky top-0 z-20 -mt-2 pt-2 pb-3 bg-bg/95 backdrop-blur space-y-3">
+        <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2">
+          <Zap className="h-6 w-6 text-accent" /> MusicBrainz
+        </h1>
+        <div className="relative">
+          <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-500" />
+          <input
+            className="input !pl-10"
+            placeholder="Search artists, releases, recordings… — or paste an MB ID / link"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              // Enter is an explicit search — skip the typing debounce
+              if (e.key === "Enter") pushParams(text);
+            }}
+            autoFocus
+          />
         </div>
-      )}
+        <div className="flex items-center gap-3 flex-wrap">
+          <Segmented value={type} onChange={(t) => {
+            const next = new URLSearchParams(params);
+            next.set("type", t);
+            setParams(next, { replace: true });
+          }} options={TYPES} />
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] uppercase tracking-widest text-zinc-500">Source</span>
+            <Segmented
+              value={srcMode}
+              onChange={(m) => saveSource.mutate(m)}
+              options={SEARCH_MODES}
+              className={saveSource.isPending ? "opacity-60" : ""}
+            />
+            <span className="text-[10px] text-zinc-600" title="Saved to the config key mb_search_source">
+              {srcMode === "auto" ? "discovery first, MusicBrainz behind it"
+                : srcMode === "discovery" ? "discovery providers only"
+                : "MusicBrainz API only"}
+            </span>
+          </div>
+        </div>
 
-      <div className="mt-4">
+        {/* Release types are two axes in MusicBrainz: a primary type (Album /
+            Single / EP / …) and any number of secondary types (Soundtrack /
+            Live / Compilation / …) — both narrow the search server-side, so
+            they only apply while MusicBrainz is the one answering. */}
+        {(type === "release" || type === "release-group") && !useDiscovery && (
+          <div className="flex items-center gap-2 flex-wrap text-xs">
+            <span className="text-[10px] uppercase tracking-widest text-zinc-500">Type</span>
+            <select
+              className="input !py-1 !w-auto"
+              value={ptype}
+              onChange={(e) => setTypeFilter("ptype", e.target.value)}
+              title="MusicBrainz primary release type"
+            >
+              <option value="">Any</option>
+              {PRIMARY_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <span className="text-zinc-600">+</span>
+            <select
+              className="input !py-1 !w-auto"
+              value={stype}
+              onChange={(e) => setTypeFilter("stype", e.target.value)}
+              title="MusicBrainz secondary release type"
+            >
+              <option value="">Any</option>
+              {SECONDARY_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+            {(ptype || stype) && (
+              <button className="btn-ghost !py-1 text-[11px]" onClick={() => {
+                const next = new URLSearchParams(params);
+                next.delete("ptype");
+                next.delete("stype");
+                setParams(next, { replace: true });
+              }}>
+                Clear
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="mt-1">
         {urlMatch ? (
           <Spinner />
         ) : bareId ? (
@@ -547,7 +916,47 @@ export function MBSearchPage() {
             <EmptyState title="No MusicBrainz entity found" hint={`Nothing lives at ${bareId}.`} />
           ) : null
         ) : !q || q.trim().length < 2 ? (
-          <EmptyState title="Type at least two characters" hint="Results come straight from musicbrainz.org (rate-limited to 1 request/second — repeated views are cached and pages prefetch on hover)." />
+          <EmptyState
+            title="Type at least two characters"
+            hint={
+              srcMode === "musicbrainz"
+                ? "Results come straight from musicbrainz.org (rate-limited to 1 request/second — repeated views are cached and pages prefetch on hover)."
+                : "Results come from the discovery providers, with MusicBrainz as the identity source for downloads. Switch the source to MusicBrainz for the raw musicbrainz.org search."
+            }
+          />
+        ) : useDiscovery ? (
+          disco.isLoading || (disco.isPlaceholderData && !dro.length) ? (
+            <ResultSkeleton />
+          ) : disco.error ? (
+            <LoadError e={disco.error} />
+          ) : dro.length === 0 ? (
+            <EmptyState title="No results" hint={`Nothing in the catalogue for “${q}”.`} />
+          ) : (
+            <>
+              <div className="mb-3 flex items-center justify-between gap-3 text-[11px] text-zinc-500">
+                <span>{dro.length} result{dro.length === 1 ? "" : "s"}</span>
+                <span
+                  className="truncate"
+                  title={`How this search was answered (config mb_search_source: ${srcMode})`}
+                >
+                  {answered}
+                </span>
+              </div>
+              <div
+                className={`grid gap-x-4 gap-y-5 transition-opacity ${disco.isPlaceholderData ? "opacity-50" : ""}`}
+                style={{ gridTemplateColumns: "repeat(auto-fill, minmax(164px, 1fr))" }}
+              >
+                {dro.map((row, i) => (
+                  <DiscoveryCard
+                    key={`${row.source}-${row.kind}-${row.deezer_id ?? row.mbid ?? i}`}
+                    row={row}
+                    onDrill={(path) => nav(path)}
+                    onOpen={openDetail}
+                  />
+                ))}
+              </div>
+            </>
+          )
         ) : search.isLoading || (search.isPlaceholderData && !rows.length) ? (
           <Spinner />
         ) : search.error ? (
@@ -555,41 +964,64 @@ export function MBSearchPage() {
         ) : rows.length === 0 ? (
           <EmptyState title="No results" hint={`Nothing on MusicBrainz for “${q}”.`} />
         ) : (
-          <div className={`rounded-lg border border-border overflow-hidden transition-opacity ${search.isPlaceholderData ? "opacity-50" : ""}`}>
-            <table className="w-full text-sm">
-              <thead className="border-b border-border">
-                <tr>
-                  {COLUMNS[type].map((c) => (
-                    <SortTh key={c.k} label={c.label} k={c.k} sort={sort} onSort={onSort} className={c.className} />
-                  ))}
-                  <th className="th w-10"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {sorted.map((r: any) => (
-                  <tr
-                    key={String(r.id)}
-                    className="table-row !cursor-pointer"
-                    onClick={() => nav(`/mb/${routeFor(type)}/${r.id}`)}
-                    onMouseEnter={() => prefetch(type, String(r.id))}
-                  >
-                    {renderCells(r)}
-                    <td className="td w-10 pr-2">
-                      <ExtLink href={mbUrl(type, String(r.id))} title="Open on MusicBrainz" />
-                    </td>
+          <>
+            <div className="mb-3 flex items-center justify-between gap-3 text-[11px] text-zinc-500">
+              <span>{rows.length} of {total} result{total === 1 ? "" : "s"} loaded</span>
+              <span title={`How this search was answered (config mb_search_source: ${srcMode})`}>{answered}</span>
+            </div>
+            <div className={`rounded-lg border border-border overflow-hidden transition-opacity ${search.isPlaceholderData ? "opacity-50" : ""}`}>
+              <table className="w-full text-sm">
+                <thead className="border-b border-border">
+                  <tr>
+                    {COLUMNS[type].map((c) => (
+                      <SortTh key={c.k} label={c.label} k={c.k} sort={sort} onSort={onSort} className={c.className} />
+                    ))}
+                    <th className="th w-10"></th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-            <LoadMore
-              loaded={rows.length}
-              total={total}
-              busy={search.isFetchingNextPage}
-              onLoad={() => search.fetchNextPage()}
-            />
-          </div>
+                </thead>
+                <tbody>
+                  {sorted.map((r: any) => (
+                    <tr
+                      key={String(r.id)}
+                      className="table-row !cursor-pointer"
+                      onClick={() => nav(`/mb/${routeFor(type)}/${r.id}`)}
+                      onMouseEnter={() => prefetch(type, String(r.id))}
+                    >
+                      {renderCells(r)}
+                      <td className="td w-10 pr-2">
+                        <ExtLink href={mbUrl(type, String(r.id))} title="Open on MusicBrainz" />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <LoadMore
+                loaded={rows.length}
+                total={total}
+                busy={search.isFetchingNextPage}
+                onLoad={() => search.fetchNextPage()}
+              />
+            </div>
+          </>
         )}
       </div>
+
+      {detail && (
+        <DiscoveryAlbumPanel
+          row={detail}
+          album={album.data}
+          loading={album.isLoading}
+          error={album.error}
+          wished={wished}
+          busy={wish.isPending}
+          mbid={rgMbid}
+          onWish={() => wish.mutate(detail)}
+          onViewMb={() => {
+            if (rgMbid) nav(`/mb/rg/${rgMbid}`);
+          }}
+          onClose={() => setDetail(null)}
+        />
+      )}
     </div>
   );
 }

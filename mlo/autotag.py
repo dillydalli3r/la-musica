@@ -1,4 +1,4 @@
-"""Automatic tagging: ALBUMITUNESADVISORY + INSTRUMENTAL.
+"""Automatic tagging: ALBUMITUNESADVISORY + INSTRUMENTAL + MOOD + GENRE.
 
 Script 8 ("Auto Tagging") derives values that would otherwise have to be
 filled in by hand:
@@ -7,7 +7,7 @@ filled in by hand:
        0 = unrated / not explicit, 1 = explicit, 2 = edited / safe.
    Across ALL of the album's tracks (every disc in a multi-disc folder):
        any explicit track (1)      -> 1
-       else any edited/safe (2)    -> 2
+       else any edited/safe track (2) -> 2
        else                        -> 0
 
 2) INSTRUMENTAL from lyrics presence per track:
@@ -15,6 +15,17 @@ filled in by hand:
        no lyrics -> LEFT UNTOUCHED. A track without downloaded lyric files
        may still be non-instrumental, so it is never auto-marked as
        instrumental.
+
+3) MOOD from the track's own audio (``mlo.moods``: tempo, energy, brightness,
+   dynamics → valence/arousal quadrant), refined by the track's GENRE in
+   hybrid mode. Grading requires the tag, so every track gets one unless the
+   file cannot be decoded or librosa is unavailable.
+
+4) GENRE autofill when the tags carry none, through a caller-supplied
+   provider hook (``set_genre_lookup``). The engine deliberately does not
+   ship an HTTP client for this: the server and the import pipeline register
+   their discovery/MusicBrainz chain, the CLI leaves it unset and step 4 is
+   skipped.
 
 Albums / tracks that already carry the correct values are skipped unless
 the run is forced.
@@ -50,6 +61,22 @@ def _derive_advisory(advisories):
     return 0
 
 
+# Genre autofill provider, registered by whoever HAS a provider chain (the
+# server's discovery layer, the import pipeline). The engine never imports the
+# server, so an unset hook simply means "step 4 does not run".
+_genre_lookup = None
+
+
+def set_genre_lookup(fn):
+    """Install `fn(artist, album, track_path) -> list[str]` for script 8.
+
+    The callable must never raise; returning an empty list means "no genres
+    found". Passing None removes the hook again (the CLI's default).
+    """
+    global _genre_lookup
+    _genre_lookup = fn
+
+
 # ----------------------------------------------------------------------
 # Script 8 runner
 # ----------------------------------------------------------------------
@@ -67,10 +94,22 @@ def run_auto_tagging(config):
     if config.get("auto_instrumental", True):
         log("  INSTRUMENTAL: 0 when lyrics present (no-lyrics tracks left "
             "untouched)")
+    if config.get("mood_enabled", True):
+        log("  MOOD: from the track's audio" + (
+            " (refined by GENRE)" if config.get("mood_source", "hybrid") == "hybrid"
+            else f" (source: {config.get('mood_source', 'hybrid')})"))
+    if config.get("genre_autofill", True):
+        log("  GENRE: filled from the provider chain when missing"
+            if _genre_lookup else
+            "  GENRE: autofill skipped (no provider chain in this runner)")
 
     force = config.get("force_auto_tag", False)
     do_advisory = config.get("auto_advisory", True)
     do_instrumental = config.get("auto_instrumental", True)
+    do_mood = config.get("mood_enabled", True)
+    do_genre = config.get("genre_autofill", True) and _genre_lookup is not None
+    if do_mood:
+        from . import moods  # local: keeps librosa discovery out of import time
     # Advisory zero-fill is OFF by default: a missing ITUNESADVISORY means
     # "unrated" and stays missing — only an explicit setting turns the
     # instrumental zero-fill back on.
@@ -92,7 +131,7 @@ def run_auto_tagging(config):
     def process_album(album):
         files = _album_files(album)
         if not files:
-            return album, 0, None, None
+            return album, 0, None, None, []
 
         # Single pass: load every file once and cache the values needed,
         # instead of re-parsing each file for advisory + instrumental.
@@ -113,7 +152,7 @@ def run_auto_tagging(config):
             except Exception:
                 continue
         if not info:
-            return album, 0, None, None
+            return album, 0, None, None, []
 
         modified = 0
         notes = []
@@ -219,17 +258,65 @@ def run_auto_tagging(config):
                                 notes[i] = f"advisory={new_val}"
                                 break
 
-        return album, modified, notes, advisory_value
+        return album, modified, notes, advisory_value, info
+
+    def process_album_full(album):
+        """`process_album` plus the mood/genre stages.
+
+        The mood classifier and the genre hook both need the tags the first
+        pass already read, so they reuse its parsed handles — a track is
+        never opened twice (the librosa decode is the expensive part).
+        """
+        _, modified, notes, advisory_value, info = process_album(album)
+        notes = list(notes or [])
+
+        mood_modified = 0
+        genre_modified = 0
+        for d in info:
+            af = d["af"]
+            path = af.path
+            if do_genre and not str(af.get_tag("GENRE") or "").strip():
+                artist = af.get_tag("ALBUMARTIST") or af.get_tag("ARTIST") or ""
+                album_tag = af.get_tag("ALBUM") or ""
+                try:
+                    names = _genre_lookup(artist, album_tag, path) or []
+                except Exception:
+                    names = []
+                if names and should_write_audio_tag(config, "GENRE", filepath=path):
+                    if af.set_tag("GENRE", "; ".join(names)):
+                        genre_modified += 1
+                        af = d["af"] = AudioFile(path)  # refresh for the mood prior
+            if do_mood:
+                try:
+                    # The decode is the expensive part (librosa, seconds per
+                    # track), so an already-correct tag short-circuits exactly
+                    # like the GENRE branch above: re-running Auto tagging, or
+                    # importing the same album again, must not re-analyse the
+                    # library for nothing.
+                    if not force and str(af.get_tag("MOOD") or "").strip():
+                        continue
+                    genre = af.get_tag("GENRE") or ""
+                    if moods.apply_mood_tags(af, path, config, genre=genre):
+                        mood_modified += 1
+                except Exception:
+                    continue
+
+        modified = (modified or 0) + mood_modified + genre_modified
+        if mood_modified:
+            notes.append("mood")
+        if genre_modified:
+            notes.append("genre")
+        return album, modified, notes, advisory_value, info
 
     counts = {"ok": 0, "skip": 0, "fail": 0}
     pbar = _make_pbar(len(album_dirs), "AutoTag", unit="album")
     workers = worker_count(config, default=8, maximum=8, items=len(album_dirs))
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(process_album, a): a for a in sorted(album_dirs)}
+        futures = {ex.submit(process_album_full, a): a for a in sorted(album_dirs)}
         for fut in as_completed(futures):
             album = futures[fut]
             try:
-                _album, modified, notes, advisory_value = fut.result()
+                _album, modified, notes, advisory_value, _info = fut.result()
             except Exception as e:
                 stats["total_scanned"] += 1
                 stats["error_count"] += 1

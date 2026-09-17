@@ -11,7 +11,10 @@ import { toast } from "../store";
 import LyricsViewer, { parseLrc } from "../components/LyricsViewer";
 import CoverSearchModal from "../components/CoverSearchModal";
 import CoverImg, { TrackCover } from "../components/CoverImg";
-import type { MBRelease, MatchSuggestion, Track } from "../types";
+import type {
+  AcoustidAlbumMatch, AcoustidMatch, ImportBulkJob, ImportScriptsPreview,
+  LyricsAutoResult, MBRelease, MatchSuggestion, Track,
+} from "../types";
 import { SCRIPTS } from "../lib/scripts";
 
 const STEPS = ["Select & separate", "Links", "Match", "Covers", "Genres", "Lyrics", "Advisory", "Finish"];
@@ -197,8 +200,6 @@ export default function ImportWizard() {
   // Covers step: album/per-track cover feedback + the per-track selection.
   const [coverNotice, setCoverNotice] = useState<string | null>(null);
   const [lyricsNotice, setLyricsNotice] = useState<string | null>(null);
-  // Live progress for the LRCLIB bulk import (null = not running).
-  const [lyrProgress, setLyrProgress] = useState<{ done: number; total: number; label: string } | null>(null);
   const [coverSel, setCoverSel] = useState<Set<string>>(new Set());
   const [coverUrl, setCoverUrl] = useState("");
   const [trackCoverUrl, setTrackCoverUrl] = useState("");
@@ -208,6 +209,38 @@ export default function ImportWizard() {
   const [busy, setBusy] = useState(false);
   const [fetchStatus, setFetchStatus] = useState<string | null>(null);
   const qc = useQueryClient();
+
+  // ---- Bulk queue (several albums at once) ------------------------------
+  // More than one album selected/dropped switches the wizard into queue mode:
+  // the 8 steps below keep working on the album picked in the dropdown, the
+  // queue itself is imported and post-processed through api.importBulk.
+  const [bulkJob, setBulkJob] = useState<ImportBulkJob | null>(null);
+  const queueMode = uploaded.length > 1 || albums.length > 1;
+  const [acoustid, setAcoustid] = useState<AcoustidMatch | null>(null);
+  const [acoustidBusy, setAcoustidBusy] = useState(false);
+  const [matchAllBusy, setMatchAllBusy] = useState(false);
+  // Per-track results of the last lyrics auto-import (provider per track).
+  const [lyrResults, setLyrResults] = useState<Record<string, LyricsAutoResult>>({});
+
+  // Exactly which scripts the import chain runs (Settings → Import).
+  const { data: scriptChain } = useQuery({
+    queryKey: ["importScripts"],
+    queryFn: () => api.importScriptsPreview(),
+  });
+
+  // Poll the bulk queue while it runs; done/failed stops the poll.
+  useEffect(() => {
+    if (bulkJob?.status !== "running") return;
+    const timer = setInterval(() => {
+      api.importBulkStatus()
+        .then((job) => {
+          setBulkJob(job);
+          if (job.status !== "running") qc.invalidateQueries({ queryKey: ["library"] });
+        })
+        .catch(() => setBulkJob(null)); // server restarted: nothing to poll
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [bulkJob?.status, qc]);
 
   const { data: lib } = useQuery({ queryKey: ["library"], queryFn: api.library });
 
@@ -617,6 +650,18 @@ export default function ImportWizard() {
       setAlbumPath(results[0].path);
       setStep(1);
       qc.invalidateQueries({ queryKey: ["library"] });
+      // Several albums: hand the staged queue to the bulk job, which moves
+      // whatever is still outside the library and runs the import chain per
+      // album. The queue panel polls api.importBulkStatus for progress.
+      if (results.length > 1) {
+        try {
+          const job = await api.importBulk(results.map((r) => ({ path: r.path })));
+          if (job.ok && job.job) setBulkJob(job.job);
+          else toast(`Queue import: ${job.error ?? "could not start"}`);
+        } catch (e) {
+          toast(`Queue import: ${e}`);
+        }
+      }
       toast(
         failed.length
           ? `Imported ${results.length} album${results.length > 1 ? "s" : ""} — failed: ${failed.map((f) => f.name).join(", ")}`
@@ -666,7 +711,7 @@ export default function ImportWizard() {
     doSearch(`artist:"${name}"`);
   };
 
-  const pickRelease = async (id: string) => {
+  const pickRelease = async (id: string, target: string | null = albumPath) => {
     if (!id) return;
     setBusy(true);
     setFetchStatus("Fetching release from MusicBrainz…");
@@ -676,7 +721,7 @@ export default function ImportWizard() {
       setRelease(rel);
       setReleaseId(id);
       setFetchStatus("Matching local tracks to the release…");
-      const matched = await api.mbMatch(albumPath!, id);
+      const matched = await api.mbMatch(target!, id);
       setSuggestions(matched.suggestions);
       if (!matched.suggestions.length) {
         toast("No audio tracks found in this folder — check the album folder contains the music files");
@@ -741,73 +786,198 @@ export default function ImportWizard() {
     }
   };
 
+  // ---------------- AcoustID: fingerprint the staged audio ----------------
+  /** Stage 2 of the AcoustID step: what the audio actually is. Says so and
+   *  leaves the manual MusicBrainz search alone when it cannot run. */
+  const runAcoustid = async () => {
+    // Everything staged, else the single album the wizard is on (?album=).
+    const paths = uploaded.length ? uploaded.map((a) => a.path) : albumPath ? [albumPath] : [];
+    if (!paths.length) {
+      toast("Import the files first — AcoustID fingerprints the staged album");
+      return;
+    }
+    setAcoustidBusy(true);
+    try {
+      const res = await api.importAcoustid(paths);
+      setAcoustid(res);
+      if (!res.available) toast(`Fingerprinting unavailable — ${res.note}`);
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setAcoustidBusy(false);
+    }
+  };
+
+  /** Which edition of a matched release group to use: the release with the
+   *  track count AcoustID heard, else the group's earliest. */
+  const releaseForRow = async (row: AcoustidAlbumMatch): Promise<string | null> => {
+    if (!row.release_group_id) return null;
+    const group: { releases?: { id?: string; track_count?: number }[] } = await withRetry(() =>
+      api.mbReleaseGroup(row.release_group_id!)
+    );
+    const releases = group?.releases ?? [];
+    const pick = releases.find((r) => r.track_count === row.total) ?? releases[0];
+    return pick?.id ?? null;
+  };
+
+  /** "Use this release" — resolves the matched release group to a release and
+   *  hands it to the SAME fetch + auto-match flow the wizard already uses
+   *  (api.mbReleaseGroup → api.mbMatch), so tags are written by one writer.
+   *  Accepting the match also writes its AcoustID identity into the files
+   *  (apply=true: ACOUSTID_ID + ACOUSTID_FINGERPRINT). In queue mode the
+   *  wizard follows the album the release is for. */
+  const useAcoustidRelease = async (row: AcoustidAlbumMatch) => {
+    const index = uploaded.findIndex((a) => a.path === row.path);
+    if (index >= 0 && index !== albumIndex) switchAlbum(index);
+    setAcoustidBusy(true);
+    setFetchStatus("Resolving the release group on MusicBrainz…");
+    try {
+      const rid = await releaseForRow(row);
+      if (!rid) {
+        toast("That release group has no releases on MusicBrainz — search manually below");
+        return;
+      }
+      setDetectedFromTags(false);
+      setMbLink(`https://musicbrainz.org/release/${rid}`);
+      setReleaseId(rid);
+      await pickRelease(rid, row.path);
+      // Accepting the match: keep the fingerprint on the album, so the
+      // on-disk check agrees with what was just matched.
+      try {
+        const applied = await api.importAcoustid([row.path], true);
+        const tagged = applied.albums?.find((a) => a.path === row.path)?.tagged ?? 0;
+        toast(
+          tagged
+            ? `Identity tags written to ${tagged} track(s)`
+            : "AcoustID identity tags not written — the files carry none of the tag families it targets"
+        );
+      } catch (e) {
+        toast(`Matched, but the AcoustID identity tags failed: ${e}`);
+      }
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setAcoustidBusy(false);
+      setFetchStatus(null);
+    }
+  };
+
+  /** Queue mode "match to release": the release chosen above is applied to
+   *  EVERY staged album — one release across the queue (a box set's discs, a
+   *  rip split over several folders). Per-album failures are reported, never
+   *  fatal: the albums are already in the library. */
+  const matchQueueToRelease = async () => {
+    const rid = releaseId || extractMbid(mbLink) || "";
+    if (!uploaded.length || !rid) {
+      toast("Pick a MusicBrainz release first (Links step, or AcoustID above)");
+      return;
+    }
+    setMatchAllBusy(true);
+    const failed: string[] = [];
+    let matched = 0;
+    try {
+      for (const a of uploaded) {
+        setFetchStatus(`Matching ${a.name} to the release…`);
+        try {
+          const res = await api.mbMatch(a.path, rid);
+          if (!res.suggestions.length) {
+            failed.push(`${a.name}: no audio files`);
+            continue;
+          }
+          await assignTracks(a.path, res.release, res.suggestions);
+          matched += 1;
+        } catch (e) {
+          failed.push(`${a.name}: ${e}`);
+        }
+      }
+      toast(
+        failed.length
+          ? `Matched ${matched}/${uploaded.length} album(s) — ${failed.slice(0, 3).join("; ")}`
+          : `Matched and tagged ${matched} album(s) to the release`
+      );
+      qc.invalidateQueries({ queryKey: ["library"] });
+    } finally {
+      setMatchAllBusy(false);
+      setFetchStatus(null);
+    }
+  };
+
   // ---------------- Step 2: matching ----------------
   const setSuggestion = (path: string, disc: number, position: number) => {
     const m = release?.media.find((x) => x.disc === disc && x.position === position);
     setSuggestions((ss) => ss.map((s) => (s.local === path ? { ...s, matched: !!m, confidence: 1, release_track: m ?? null } : s)));
   };
 
+  /** Write ONE album's matched rows to its files. The wizard's only tag
+   *  writer: the single-album Confirm calls it for the album on screen, the
+   *  queue's "match to release" calls it once per queued album. */
+  const assignTracks = async (path: string, release: MBRelease, suggestions: MatchSuggestion[]) => {
+    const writes: Record<string, Record<string, string | null>> = {};
+    const albumArtist = (release?.artists ?? []).map((a) => a.name).join(", ") || null;
+    const mediumFormat = release?.medium_formats?.[0] || mediaType || null;
+    for (const s of suggestions) {
+      const t = s.release_track;
+      writes[s.local] = {
+        // links / IDs
+        MUSICBRAINZ_TRACKID: t?.recording_mbid ?? null,
+        MUSICBRAINZ_ARTISTID: t?.artist_mbids?.[0] ?? null,
+        MUSICBRAINZ_ALBUMID: release?.id ?? null,
+        MUSICBRAINZ_RELEASEGROUPID: release?.release_group_id ?? null,
+        MUSICBRAINZ_RELEASEID: release?.id ?? null,
+        MUSICBRAINZ_ALBUMARTISTID: release?.artists?.[0]?.mbid ?? null,
+        // metadata
+        TITLE: t?.title ?? null,
+        ARTIST: t?.artist_credit || (release?.artists ?? [])[0]?.name || null,
+        ALBUM: release?.title ?? null,
+        ALBUMARTIST: albumArtist,
+        DATE: release?.date || null,
+        // UNPADDED: a file tag stores "1", never "01". Zero-padding is a
+        // FILENAME/display convention (the naming script's pattern), not a
+        // metadata one — MusicBrainz, Picard, beets and every player write
+        // the bare integer, and a padded tag sorts and diffs wrong against
+        // them.
+        TRACKNUMBER: t ? String(t.position) : null,
+        TRACKTOTAL: release?.media?.length ? String(release.media.length) : null,
+        DISCNUMBER: t ? String(t.disc) : null,
+        DISCTOTAL: release?.medium_count ? String(release.medium_count) : null,
+        MEDIA: mediumFormat,
+        RELEASETYPE: release?.release_type || null,
+        RELEASECOUNTRY: release?.country || null,
+        CATALOGNUMBER: release?.catalog_number || null,
+        LABEL: release?.label || null,
+      };
+    }
+    await api.mbAssign(writes);
+    // Record the RELEASE's own tracklist on the folder. A partial import
+    // (some of these tracks never brought in) leaves no other trace of what
+    // is absent, so the album page diffs against this list and greys out
+    // the missing rows. A failure here must not lose the tag writes that
+    // just succeeded, so it is reported and the caller moves on.
+    try {
+      await api.importExpected(
+        path,
+        release.id,
+        (release.media ?? []).map((m) => ({
+          disc: m.disc,
+          position: m.position,
+          title: m.title,
+          recording_mbid: m.recording_mbid ?? null,
+        }))
+      );
+    } catch (e) {
+      toast(`Metadata saved, but the release tracklist could not be recorded: ${e}`);
+    }
+  };
+
   const confirmMatch = async () => {
+    if (!albumPath || !release) {
+      toast("Fetch the MusicBrainz release first");
+      return;
+    }
     setBusy(true);
     setFetchStatus("Writing MusicBrainz metadata to files…");
     try {
-      const writes: Record<string, Record<string, string | null>> = {};
-      const albumArtist = (release?.artists ?? []).map((a) => a.name).join(", ") || null;
-      const mediumFormat = release?.medium_formats?.[0] || mediaType || null;
-      for (const s of suggestions) {
-        const t = s.release_track;
-        writes[s.local] = {
-          // links / IDs
-          MUSICBRAINZ_TRACKID: t?.recording_mbid ?? null,
-          MUSICBRAINZ_ARTISTID: t?.artist_mbids?.[0] ?? null,
-          MUSICBRAINZ_ALBUMID: release?.id ?? null,
-          MUSICBRAINZ_RELEASEGROUPID: release?.release_group_id ?? null,
-          MUSICBRAINZ_RELEASEID: release?.id ?? null,
-          MUSICBRAINZ_ALBUMARTISTID: release?.artists?.[0]?.mbid ?? null,
-          // metadata
-          TITLE: t?.title ?? null,
-          ARTIST: t?.artist_credit || (release?.artists ?? [])[0]?.name || null,
-          ALBUM: release?.title ?? null,
-          ALBUMARTIST: albumArtist,
-          DATE: release?.date || null,
-          // UNPADDED: a file tag stores "1", never "01". Zero-padding is a
-          // FILENAME/display convention (the naming script's pattern), not a
-          // metadata one — MusicBrainz, Picard, beets and every player write
-          // the bare integer, and a padded tag sorts and diffs wrong against
-          // them.
-          TRACKNUMBER: t ? String(t.position) : null,
-          TRACKTOTAL: release?.media?.length ? String(release.media.length) : null,
-          DISCNUMBER: t ? String(t.disc) : null,
-          DISCTOTAL: release?.medium_count ? String(release.medium_count) : null,
-          MEDIA: mediumFormat,
-          RELEASETYPE: release?.release_type || null,
-          RELEASECOUNTRY: release?.country || null,
-          CATALOGNUMBER: release?.catalog_number || null,
-          LABEL: release?.label || null,
-        };
-      }
-      await api.mbAssign(writes);
-      // Record the RELEASE's own tracklist on the folder. A partial import
-      // (some of these tracks never brought in) leaves no other trace of what
-      // is absent, so the album page diffs against this list and greys out
-      // the missing rows. A failure here must not lose the tag writes that
-      // just succeeded, so it is reported and the wizard moves on.
-      if (albumPath && release) {
-        try {
-          await api.importExpected(
-            albumPath,
-            release.id ?? releaseId ?? null,
-            (release.media ?? []).map((m) => ({
-              disc: m.disc,
-              position: m.position,
-              title: m.title,
-              recording_mbid: m.recording_mbid ?? null,
-            }))
-          );
-        } catch (e) {
-          toast(`Metadata saved, but the release tracklist could not be recorded: ${e}`);
-        }
-      }
+      await assignTracks(albumPath, release, suggestions);
       toast("MusicBrainz metadata written to files (titles, artists, album, dates, MBIDs)");
       setStep(3);
     } catch (e) {
@@ -1106,61 +1276,44 @@ export default function ImportWizard() {
     return !!(t.lyrics_embedded || t.lyrics_lrc); // what is already on disk
   };
 
-  const importLyricsForAll = async () => {
+  /** Auto-import lyrics through the configured provider chain (script 13's own
+   *  engine): one track from a track row, the whole step from the header.
+   *  Reports the winning provider per track plus skipped/failed counts — the
+   *  chain order lives in Settings → Lyrics. */
+  const autoImportLyrics = async (paths?: string[]) => {
+    const targets = paths ?? stepTracks.map((t) => t.path);
+    if (!targets.length) {
+      toast("No tracks to fetch lyrics for");
+      return;
+    }
     setBusy(true);
-    const total = stepTracks.length;
-    let fetched = 0;
-    let skipped = 0;
-    let missing = 0;
-    let seen = 0;
     try {
-      setLyrProgress({ done: 0, total, label: "Starting…" });
-      for (const t of stepTracks) {
-        const inst = instrumental[t.path] === "1";
-        const artist = inst ? "" : trackArtist(t.path);
-        const title = inst ? "" : trackTitle(t.path);
-        const skipReason = inst
-          ? "Skipped — instrumental"
-          : !artist || !title
-            ? "Skipped — no artist/title"
-            : null;
-        setLyrProgress({
-          done: seen,
-          total,
-          label: skipReason ?? `Fetching ${artist} — ${title}`,
-        });
-        if (skipReason) {
-          if (!inst) skipped++;
-        } else {
-          try {
-            const res = await api.lyricsGet(artist, title, trackAlbum, trackDuration(t.path));
-            const lrc = res?.syncedLyrics ?? res?.plainLyrics;
-            if (lrc) {
-              setLyricsDrafts((d) => ({ ...d, [t.path]: lrc }));
-              fetched++;
-            } else {
-              missing++;
-            }
-          } catch {
-            missing++;
-          }
-          // Gentle pacing for LRCLIB — only when another request follows.
-          if (seen + 1 < total) await new Promise((r) => setTimeout(r, 350));
-        }
-        seen++;
+      const res = await api.lyricsAuto(targets);
+      setLyrResults((m) => {
+        const next = { ...m };
+        for (const r of res.results) next[r.path] = r;
+        return next;
+      });
+      const byProvider = new Map<string, number>();
+      for (const r of res.results) {
+        if (r.status === "ok" && r.provider_label)
+          byProvider.set(r.provider_label, (byProvider.get(r.provider_label) ?? 0) + 1);
       }
-      setLyrProgress({ done: total, total, label: "Done" });
-      if (fetched) {
-        toast(`Imported lyrics for ${fetched} track(s)${missing ? ` — ${missing} not found on LRCLIB` : ""}`);
-      } else if (skipped) {
-        toast("No artist/title available for some tracks — matching the MusicBrainz release first improves lyrics results");
-      } else {
-        toast("No lyrics found on LRCLIB for these tracks (some songs genuinely have none)");
-      }
+      const got = [...byProvider].map(([label, n]) => `${label} ${n}`).join(", ");
+      const rest = [
+        res.skipped ? `${res.skipped} skipped` : "",
+        res.failed ? `${res.failed} failed` : "",
+      ].filter(Boolean).join(", ");
+      toast(
+        res.ok
+          ? `Lyrics written for ${res.ok} track(s)${got ? ` — ${got}` : ""}${rest ? ` (${rest})` : ""}`
+          : `No new lyrics found${rest ? ` — ${rest}` : ""}`
+      );
+      qc.invalidateQueries({ queryKey: ["library"] });
+    } catch (e) {
+      toast(String(e));
     } finally {
       setBusy(false);
-      // Hold the finished bar for a beat so 100% is actually visible.
-      setTimeout(() => setLyrProgress(null), 1500);
     }
   };
 
@@ -1258,9 +1411,10 @@ const [runAfterImport, setRunAfterImport] = useState<number[]>(
 );
 const [scriptsRunning, setScriptsRunning] = useState(false);
 
-/** Run EVERY post-import script on the new album(s) right now, without
- *  leaving the wizard. The checkboxes stay the "on Done" shortcut; this is
- *  the one-click "do the whole chain" path the Finish step was missing. */
+/** Run every configured post-import script on the new album(s) right now,
+ *  without leaving the wizard: api.importFinish is the same chain the bulk
+ *  queue and the Soulseek import run, and reports per-script errors. The
+ *  checkboxes stay the "on Done" shortcut for a chosen subset. */
 const runAllScripts = async () => {
   if (!uploaded.length) {
     toast("Nothing imported yet");
@@ -1268,11 +1422,14 @@ const runAllScripts = async () => {
   }
   setScriptsRunning(true);
   try {
-    await api.run(POST_IMPORT_SCRIPTS.map((s) => s.id), uploaded.map((a) => a.path));
+    const res = await api.importFinish(uploaded.map((a) => a.path));
+    const errors = res.albums.flatMap((a) =>
+      a.errors.map((e) => `${baseName(a.path) || a.path}: ${String(e)}`)
+    );
     toast(
-      `Running all ${POST_IMPORT_SCRIPTS.length} scripts on ${uploaded.length} album${
-        uploaded.length > 1 ? "s" : ""
-      } — progress shows at the top of the window`
+      errors.length
+        ? `Import chain finished with ${errors.length} script error(s): ${errors.slice(0, 3).join("; ")}`
+        : `Import chain finished on ${uploaded.length} album(s) — progress shows at the top of the window`
     );
     qc.invalidateQueries({ queryKey: ["library"] });
   } catch (e) {
@@ -1315,7 +1472,7 @@ const finish = async () => {
     setAdvisory({});
     setCoverNotice(null);
     setLyricsNotice(null);
-    setLyrProgress(null);
+    setLyrResults({});
     setCoverSel(new Set());
     setCoverUrl("");
     setTrackCoverUrl("");
@@ -1323,6 +1480,10 @@ const finish = async () => {
   };
 
   const totalFiles = albums.reduce((n, g) => n + g.files.length, 0);
+  // Queue panel rows: the staged albums, else what step 0 is about to import.
+  const queueItems: { name: string; path: string }[] = uploaded.length
+    ? uploaded
+    : albums.filter((g) => g.files.length).map((g) => ({ name: g.name.trim() || "Album", path: "" }));
   const hasRipFiles = albums.some((g) => g.files.some((f) => /\.(cue|log|accurip)$/i.test(f.relPath)));
   const canNext =
     step === 0
@@ -1387,6 +1548,98 @@ const finish = async () => {
           </div>
         ))}
       </div>
+
+      {/* ---------------- Queue mode: several albums at once ---------------- */}
+      {queueMode && (
+        <div className="bg-card rounded-lg border border-border p-3 space-y-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-semibold text-zinc-200 flex items-center gap-1.5">
+              <Disc3 className="h-4 w-4 text-accent" /> Queue mode — {queueItems.length} album(s)
+            </span>
+            {bulkJob?.status === "running" && (
+              <span className="text-xs text-zinc-400 flex items-center gap-1.5">
+                <span className="h-3 w-3 rounded-full border-2 border-zinc-700 border-t-accent-soft animate-spin shrink-0" />
+                <span className="truncate max-w-[16rem]" title={bulkJob.label}>{bulkJob.label || "Importing…"}</span>
+                <span className="font-mono tabular-nums shrink-0">
+                  {bulkJob.done ?? 0}/{bulkJob.total ?? queueItems.length}
+                </span>
+              </span>
+            )}
+            {bulkJob?.status === "done" && (
+              <span className="chip bg-emerald-900/50 text-emerald-300 border border-emerald-800">
+                <Check className="h-3 w-3" /> queue done — {bulkJob.done ?? 0}/{bulkJob.total ?? queueItems.length}
+              </span>
+            )}
+            {bulkJob?.status === "failed" && (
+              <span className="chip bg-red-900/40 text-red-300 border border-red-900">queue failed</span>
+            )}
+            <span className="text-xs text-zinc-500 ml-auto">
+              {uploaded.length
+                ? "The 8 steps below run on the album picked in the dropdown; shared actions cover the whole queue."
+                : "Importing runs the queue; each album can then be walked through the 8 steps."}
+            </span>
+          </div>
+          <ScriptChainNote preview={scriptChain} />
+          <div className="space-y-1">
+            {queueItems.map((it, i) => {
+              const row = it.path ? bulkJob?.items?.find((r) => r.path === it.path) : undefined;
+              const state = row?.status ?? "queued";
+              return (
+                <div
+                  key={it.path || `new-${i}`}
+                  className="flex items-center gap-2 bg-panel rounded border border-border px-3 py-1.5 text-xs"
+                >
+                  <Disc3 className="h-3.5 w-3.5 text-zinc-500 shrink-0" />
+                  {uploaded.length ? (
+                    <button
+                      className={`flex-1 min-w-0 text-left truncate ${
+                        i === albumIndex ? "text-accent-soft" : "text-zinc-300 hover:text-accent-soft"
+                      }`}
+                      onClick={() => switchAlbum(i)}
+                      title="Work this album through the steps below"
+                    >
+                      {it.name}
+                    </button>
+                  ) : (
+                    <span className="flex-1 min-w-0 truncate text-zinc-300">{it.name}</span>
+                  )}
+                  {row?.error && (
+                    <span className="text-[10px] text-red-300/90 truncate max-w-[18rem]" title={row.error}>
+                      {row.error}
+                    </span>
+                  )}
+                  <span
+                    className={`chip bg-raise border border-border shrink-0 ${
+                      state === "imported"
+                        ? "text-emerald-300"
+                        : state === "failed"
+                          ? "text-red-300"
+                          : state === "skipped"
+                            ? "text-amber-300"
+                            : "text-zinc-500"
+                    }`}
+                  >
+                    {state}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+          {bulkJob?.status === "failed" && bulkJob.error && (
+            <div className="text-xs text-red-300">Queue import failed: {bulkJob.error}</div>
+          )}
+          <AcoustidBlock
+            match={acoustid}
+            busy={acoustidBusy}
+            queue
+            canMatchAll={!!(releaseId || extractMbid(mbLink))}
+            matchAllBusy={matchAllBusy}
+            onRun={runAcoustid}
+            onUse={useAcoustidRelease}
+            onMatchAll={matchQueueToRelease}
+          />
+        </div>
+      )}
 
       {/* ---------------- Step 0: select & separate ---------------- */}
       {step === 0 && (
@@ -1551,6 +1804,19 @@ const finish = async () => {
       {/* ---------------- Step 1: links ---------------- */}
       {step === 1 && (
         <div className="space-y-4">
+          {/* Queue mode carries this block in the queue panel above. */}
+          {!queueMode && (
+            <AcoustidBlock
+              match={acoustid}
+              busy={acoustidBusy}
+              queue={false}
+              canMatchAll={false}
+              matchAllBusy={false}
+              onRun={runAcoustid}
+              onUse={useAcoustidRelease}
+              onMatchAll={matchQueueToRelease}
+            />
+          )}
           <div className="bg-card rounded-lg border border-border p-4 space-y-3">
             <div className="text-sm font-semibold text-zinc-300">
               MusicBrainz release <span className="text-zinc-500 font-normal">— {currentAlbumName}</span>
@@ -2131,27 +2397,31 @@ const finish = async () => {
             </div>
           )}
           <div className="flex items-center gap-2">
-            <button className="btn-primary text-xs" onClick={importLyricsForAll} disabled={busy}>
-              <CloudDownloadIcon /> Auto-import from LRCLIB
+            <button className="btn-primary text-xs" onClick={() => autoImportLyrics()} disabled={busy}>
+              <CloudDownloadIcon /> Auto-import lyrics
             </button>
-            <span className="text-xs text-zinc-500">Review below — Space stamps time while previewing; INSTRUMENTAL=1 skips lyrics.</span>
+            <span className="text-xs text-zinc-500">
+              Tries every provider in the saved order (Settings → Lyrics) and writes them straight to the
+              files. Review below — Space stamps time while previewing; INSTRUMENTAL=1 skips lyrics.
+            </span>
           </div>
-          {lyrProgress && (
-            <div className="bg-card rounded-lg border border-border px-3 py-2 space-y-1.5">
-              <div className="flex items-center gap-2 text-xs">
-                <span className="h-3 w-3 rounded-full border-2 border-zinc-700 border-t-accent-soft animate-spin shrink-0" />
-                <span className="flex-1 truncate text-zinc-300" title={lyrProgress.label}>{lyrProgress.label}</span>
-                <span className="text-zinc-500 font-mono tabular-nums shrink-0">
-                  {lyrProgress.done}/{lyrProgress.total}
-                </span>
+          {Object.keys(lyrResults).length > 0 && (
+            <div className="bg-card rounded-lg border border-border px-3 py-2 text-xs space-y-0.5">
+              <div className="flex items-center gap-3 text-zinc-400 flex-wrap">
+                {(["ok", "skipped", "failed"] as const).map((status) => {
+                  const rows = Object.values(lyrResults).filter((r) => r.status === status);
+                  if (!rows.length) return null;
+                  const labels = [...new Set(rows.map((r) => r.provider_label).filter(Boolean))];
+                  return (
+                    <span key={status}>
+                      <b className="text-zinc-200">{rows.length}</b> {status}
+                      {status === "ok" && labels.length > 0 && ` — ${labels.join(", ")}`}
+                    </span>
+                  );
+                })}
               </div>
-              <div className="h-1.5 rounded-sm bg-raise overflow-hidden">
-                <div
-                  className="h-full bg-gradient-to-r from-accent to-indigo-500 transition-all duration-300"
-                  style={{
-                    width: `${lyrProgress.total ? Math.min(100, (lyrProgress.done / lyrProgress.total) * 100) : 0}%`,
-                  }}
-                />
+              <div className="text-[10px] text-zinc-600">
+                Per track below — nothing found is normal for instrumentals and unreleased tracks.
               </div>
             </div>
           )}
@@ -2168,6 +2438,20 @@ const finish = async () => {
                       <Check className="h-3 w-3" /> Lyrics
                     </span>
                   )}
+                  {lyrResults[t.path] && (
+                    <span
+                      className={`chip border ${
+                        lyrResults[t.path].status === "ok"
+                          ? "bg-emerald-900/50 text-emerald-300 border-emerald-800"
+                          : lyrResults[t.path].status === "failed"
+                            ? "bg-red-900/40 text-red-300 border-red-900"
+                            : "bg-raise text-zinc-500 border-border"
+                      }`}
+                      title={lyrResults[t.path].reason || lyrResults[t.path].error || ""}
+                    >
+                      {lyrResults[t.path].status === "ok" ? lyrResults[t.path].provider_label : lyrResults[t.path].status}
+                    </span>
+                  )}
                   <label className="flex items-center gap-1.5 text-xs text-zinc-400 select-none" onClick={(e) => e.stopPropagation()}>
                     <input
                       type="checkbox"
@@ -2179,7 +2463,15 @@ const finish = async () => {
                   </label>
                 </summary>
                 {inst !== "1" ? (
-                  <div className="px-3">
+                  <div className="px-3 space-y-1.5">
+                    <button
+                      className="btn-ghost !py-0.5 text-[11px]"
+                      onClick={() => autoImportLyrics([t.path])}
+                      disabled={busy}
+                      title="Fetch this track's lyrics through the provider chain and write them to the file"
+                    >
+                      <CloudDownloadIcon /> Auto-import lyrics
+                    </button>
                     <LyricsViewer
                       path={t.path}
                       initialLyrics={lyricsDrafts[t.path] ?? ""}
@@ -2266,6 +2558,9 @@ const finish = async () => {
                 : "Links, MBIDs, metadata, genres, lyrics and advisory ratings are written to the files."}
             </div>
           </div>
+          <div className="mt-4">
+            <ScriptChainNote preview={scriptChain} />
+          </div>
           <div className="mt-5 bg-panel rounded-lg border border-border p-4">
             <div className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-2">
               Run scripts after import (on the new album{uploaded.length > 1 ? "s" : ""})
@@ -2292,13 +2587,13 @@ const finish = async () => {
                 className="btn-primary !py-1.5 text-xs"
                 onClick={runAllScripts}
                 disabled={scriptsRunning || !uploaded.length}
-                title={`Run every script (${POST_IMPORT_SCRIPTS.map((s) => s.label).join(", ")}) on the new album(s)`}
+                title="Run the configured import chain — the same scripts a bulk or Soulseek import runs"
               >
                 <Wand2 className={`h-3.5 w-3.5 ${scriptsRunning ? "animate-spin" : ""}`} />
-                {scriptsRunning ? "Starting…" : "Run all scripts"}
+                {scriptsRunning ? "Running…" : "Run the import chain"}
               </button>
               <span className="text-[10px] text-zinc-500">
-                Runs every script below — no need to tick them all first.
+                Runs the whole chain in its configured order; tick boxes above to run just those on Done.
               </span>
             </div>
           </div>
@@ -2349,6 +2644,127 @@ const finish = async () => {
 
 function CloudDownloadIcon() {
   return <ExternalLink className="h-3.5 w-3.5" />;
+}
+
+/** Exactly which optimizer scripts the import chain runs — the same chain the
+ *  bulk queue and the Soulseek import use, configured in Settings → Import. */
+function ScriptChainNote({ preview }: { preview?: ImportScriptsPreview }) {
+  if (!preview) return <div className="text-[11px] text-zinc-600">Reading the import chain…</div>;
+  const chain = preview.chain ?? [];
+  return (
+    <div className="text-[11px] text-zinc-500">
+      {chain.length ? (
+        <>
+          Runs automatically after import:{" "}
+          <span className="text-zinc-300">
+            {chain.map((id) => preview.labels?.[String(id)] ?? `script ${id}`).join(" → ")}
+          </span>{" "}
+          — the chain is configurable in Settings → Import.
+        </>
+      ) : (
+        <>The import chain is empty — albums are imported without post-processing (Settings → Import).</>
+      )}
+    </div>
+  );
+}
+
+/** AcoustID stage: fingerprint the staged audio and name the release group it
+ *  really is. "Use this release" hands the result back to the wizard's own
+ *  release fetch + auto-match flow — there is no second tag writer. */
+function AcoustidBlock({
+  match, busy, queue, canMatchAll, matchAllBusy, onRun, onUse, onMatchAll,
+}: {
+  match: AcoustidMatch | null;
+  busy: boolean;
+  /** Queue mode: offer the shared "apply the chosen release to the queue". */
+  queue: boolean;
+  canMatchAll: boolean;
+  matchAllBusy: boolean;
+  onRun: () => void;
+  onUse: (row: AcoustidAlbumMatch) => void;
+  onMatchAll: () => void;
+}) {
+  return (
+    <div className="bg-card rounded-lg border border-border p-4 space-y-2">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-sm font-semibold text-zinc-300">AcoustID fingerprint</span>
+        <span className="text-xs text-zinc-500">
+          — names the release group the audio actually is, before matching by hand.
+        </span>
+        {queue && (
+          <button
+            className="btn-primary !py-1 text-xs ml-auto"
+            onClick={onMatchAll}
+            disabled={matchAllBusy || !canMatchAll}
+            title="Match every queued album to the release chosen below and write its metadata"
+          >
+            <Check className="h-3.5 w-3.5" />
+            {matchAllBusy ? "Matching the queue…" : "Match the queue to the chosen release"}
+          </button>
+        )}
+        <button
+          className={`btn-ghost !py-1 text-xs ${queue ? "" : "ml-auto"}`}
+          onClick={onRun}
+          disabled={busy}
+        >
+          <Wand2 className={`h-3.5 w-3.5 ${busy ? "animate-spin" : ""}`} />
+          {busy ? "Fingerprinting…" : "Fingerprint & match"}
+        </button>
+      </div>
+      {match && !match.available && (
+        <div className="rounded-lg border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+          Fingerprinting is unavailable — {match.note}. Add an AcoustID API key (or install fpcalc) in{" "}
+          <b className="text-amber-100">Settings → Import</b>; until then search by title or paste a release
+          link below.
+        </div>
+      )}
+      {match?.available && (
+        <div className="space-y-1">
+          {match.albums?.map((row) => (
+            <div
+              key={row.path}
+              className="flex items-center gap-2 bg-panel rounded border border-border px-3 py-2 text-xs flex-wrap"
+            >
+              <Disc3 className="h-3.5 w-3.5 text-zinc-500 shrink-0" />
+              <span className="text-zinc-400 truncate max-w-[14rem]" title={row.path}>
+                {row.path.split(/[\\/]/).pop()}
+              </span>
+              {row.release_group_id ? (
+                <>
+                  <span className="text-zinc-200">{row.release_group_title}</span>
+                  {row.artists?.length ? <span className="text-zinc-500">{row.artists.join(", ")}</span> : null}
+                  {row.release_group_type && (
+                    <span className="chip bg-raise border border-border text-zinc-400">{row.release_group_type}</span>
+                  )}
+                  <span className="chip bg-emerald-900/50 text-emerald-300 border border-emerald-800">
+                    {row.matched}/{row.total} tracks
+                  </span>
+                  {row.score != null && (
+                    <span className="text-zinc-600 font-mono">score {Math.round(row.score * 100)}%</span>
+                  )}
+                  <button
+                    className="btn-ghost !py-0.5 text-[11px] ml-auto"
+                    onClick={() => onUse(row)}
+                    disabled={busy}
+                    title="Fetch this release and auto-match the album's tracks"
+                  >
+                    Use this release
+                  </button>
+                </>
+              ) : (
+                <span className="text-zinc-500">
+                  No release group matched {row.total} track(s) — search by title or paste a release link below.
+                </span>
+              )}
+            </div>
+          ))}
+          {match.albums?.length === 0 && (
+            <div className="text-xs text-zinc-500">Nothing staged to fingerprint yet.</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** Disc/track number badge shown on EVERY import step: "2.07" when the disc is

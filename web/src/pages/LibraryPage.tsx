@@ -427,8 +427,13 @@ export default function LibraryPage() {
     }
   };
 
-  /** Batch LRCLIB lyric download for the selection: skips instrumentals and
-   * tracks that already have lyrics; writes per the global lyrics_format. */
+  /** Auto-import lyrics for the selection through the provider chain.
+   *
+   * Skips instrumentals, videos and tracks that already have lyrics; the
+   * backend runs the configured chain (LRCLIB → NetEase → lyrics.ovh →
+   * Kugou), writes per the global lyrics_format and canonicalizes like
+   * script 13. Batched (100 tracks per request) so a big selection does not
+   * hold one API worker thread for minutes. */
   const downloadLyricsSelection = async () => {
     if (!selectionCount) {
       toast("Select albums, artists or tracks first");
@@ -436,51 +441,47 @@ export default function LibraryPage() {
     }
     setLyricsBusy(true);
     try {
-      const cfg = await api.config();
-      const fmt = String(cfg.lyrics_format ?? "EMBEDDED").toUpperCase();
       const albumSet = new Set(selection.albums);
       const artistSet = new Set(selection.artists);
       const trackSet = new Set(selection.tracks);
-      const targets: { track: Track; displayArtist?: string }[] = [
+      const targets = [
         ...flat.albums
           .filter((al) => albumSet.has(al.path))
-          .flatMap((al) => (al.tracks ?? []).map((t) => ({ track: t, displayArtist: al.artist }))),
+          .flatMap((al) => (al.tracks ?? []).map((t) => t as Track)),
         ...(lib?.artists ?? [])
           .filter((a) => artistSet.has(a.path))
-          .flatMap((a) => a.albums.flatMap((al) => al.tracks.map((t) => ({ track: t, displayArtist: al.album_artist || a.name })))),
-        ...flat.tracks.filter((t) => trackSet.has(t.path)).map((t) => ({ track: t as Track, displayArtist: t.artist })),
-      ];
+          .flatMap((a) => a.albums.flatMap((al) => al.tracks)),
+        ...flat.tracks.filter((t) => trackSet.has(t.path)).map((t) => t as Track),
+      ].filter((t) => t.tags.INSTRUMENTAL !== "1" && !t.lyrics_present && !t.is_video);
+      if (!targets.length) {
+        toast("Nothing to fetch — the selection has lyrics already (or is instrumental)");
+        return;
+      }
       let fetched = 0;
       let skipped = 0;
-      let missing = 0;
       let failed = 0;
-      for (const { track: t, displayArtist } of targets) {
-        if (t.tags.INSTRUMENTAL === "1" || t.lyrics_present || t.is_video) {
-          skipped++;
-          continue;
-        }
-        const artist = t.tags.ARTIST || displayArtist || undefined;
-        const title = t.tags.TITLE;
-        if (!artist || !title) {
-          skipped++;
-          continue;
-        }
-        try {
-          const res = await api.lyricsGet(artist, title, t.tags.ALBUM || undefined, t.tech?.length ? Math.round(t.tech.length) : undefined);
-          const lrc = res?.syncedLyrics ?? res?.plainLyrics;
-          if (!lrc) {
-            missing++;
-          } else {
-            if (fmt === "LRC" || fmt === "BOTH") await api.lyricsWrite(t.path, lrc);
-            if (fmt === "EMBEDDED" || fmt === "BOTH") await api.lyricsEmbed(t.path, lrc);
-            fetched++;
+      const providers: Record<string, number> = {};
+      const chunk = 100;
+      for (let i = 0; i < targets.length; i += chunk) {
+        const paths = targets.slice(i, i + chunk).map((t) => t.path);
+        const res = await api.lyricsAuto(paths);
+        fetched += res.ok;
+        skipped += res.skipped;
+        failed += res.failed;
+        for (const r of res.results) {
+          if (r.status === "ok" && r.provider_label) {
+            providers[r.provider_label] = (providers[r.provider_label] ?? 0) + 1;
           }
-        } catch {
-          failed++;
         }
-        await new Promise((r) => setTimeout(r, 350)); // LRCLIB rate-limit pacing
       }
-      toast(`Lyrics: ${fetched} downloaded · ${skipped} skipped · ${missing} not on LRCLIB${failed ? ` · ${failed} failed` : ""}`);
+      const source = Object.entries(providers)
+        .sort((a, b) => b[1] - a[1])
+        .map(([label, n]) => `${label} ${n}`)
+        .join(" · ");
+      toast(
+        `Lyrics: ${fetched} imported · ${skipped} skipped · ${failed} failed` +
+          (source ? ` — ${source}` : "")
+      );
       if (fetched) {
         clearSelection();
         invalidateLibrary(qc);
@@ -817,7 +818,7 @@ export default function LibraryPage() {
               className="btn-ghost !py-1 text-xs"
               onClick={downloadLyricsSelection}
               disabled={lyricsBusy}
-              title="Download missing lyrics from LRCLIB for the selection (skips instrumentals)"
+              title="Auto-import missing lyrics for the selection through the provider chain (skips instrumentals)"
             >
               <CloudDownload className="h-3.5 w-3.5" /> {lyricsBusy ? "Fetching…" : "Lyrics"}
             </button>

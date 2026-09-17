@@ -17,6 +17,19 @@ import TrackDownloadExport from "./TrackDownloadExport";
 import { trackRef } from "../lib/refs";
 import useSubtitleTracks from "./SubtitledVideo";
 
+/** Mirrors the `/api/replaygain` payload (see `api.replaygain`): `gain` is the
+ * dB the player applies (null = unity), `analyzed` says the backend had to
+ * measure the file on the fly because its tags carried no ReplayGain. */
+interface RgResult {
+  path: string;
+  gain: number | null;
+  peak: number | null;
+  mode: string;
+  source: string | null;
+  analyzed: boolean;
+}
+type RgMode = "track" | "album" | "off";
+
 /** One line of text (the song name) that auto-scrolls back and forth ONLY
  * when it genuinely overflows the space it's given. Everything else — the
  * advisory badge, the codec readout — sits outside this window and never
@@ -387,35 +400,51 @@ export default function PlayerBar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vol, current?.path, isVideo]);
 
-  // ReplayGain: fetched per track and applied to the WebAudio gain stage of
-  // BOTH elements (the gapless handover may swap them mid-album) so
-  // loudness stays even across tracks. Untagged tracks play at unity.
-  // Results are cached — a re-queued track costs no extra request.
-  const rgCache = useRef<Map<string, number | null>>(new Map());
-  // Last known preamp; re-applied when a WebAudio chain attaches (play).
+  // ReplayGain: fetched per track for the mode saved in the config (album
+  // mode asks for the album gain, off means unity) and applied to the WebAudio
+  // gain stage of BOTH elements (the gapless handover may swap them mid-album)
+  // so loudness stays even across tracks. The backend already adds
+  // `replaygain_preamp_db` and the clip protection, so the returned dB is
+  // exactly what goes into the gain stage. Untagged tracks play at unity.
+  // Results are cached per path and dropped when mode or preamp changes.
+  const { data: cfg } = useQuery({ queryKey: ["config"], queryFn: api.config, staleTime: 5 * 60 * 1000 });
+  const rgModeRaw = cfg?.replaygain_mode;
+  const rgMode: RgMode = rgModeRaw === "album" || rgModeRaw === "off" ? rgModeRaw : "track";
+  const rgPreamp = typeof cfg?.replaygain_preamp_db === "number" ? cfg.replaygain_preamp_db : 0;
+  const rgCache = useRef<Map<string, RgResult>>(new Map());
+  // Last applied gain; re-applied when a WebAudio chain attaches (play).
   const rgDb = useRef<number | null>(null);
-  const applyRG = (db: number | null) => {
-    rgDb.current = db;
-    applyReplayGain(aRef.current!, db);
-    applyReplayGain(bRef.current!, db);
+  // The result behind that gain — drives the readout beside the volume bar.
+  const [rgRes, setRgRes] = useState<RgResult | null>(null);
+  const applyRG = (r: RgResult | null) => {
+    rgDb.current = r?.gain ?? null;
+    applyReplayGain(aRef.current!, rgDb.current);
+    applyReplayGain(bRef.current!, rgDb.current);
+    setRgRes(r);
   };
+  // Both mode and preamp are baked into the returned dB — a change invalidates
+  // every cached gain. Declared before the fetch effect so the clear runs first.
+  useEffect(() => {
+    rgCache.current.clear();
+  }, [rgMode, rgPreamp]);
   useEffect(() => {
     if (!current) {
       applyRG(null);
       return;
     }
     const path = current.path;
-    if (rgCache.current.has(path)) {
-      applyRG(rgCache.current.get(path) ?? null);
+    const cached = rgCache.current.get(path);
+    if (cached) {
+      applyRG(cached);
       return;
     }
     let dead = false;
     api
-      .replaygain(path)
+      .replaygain(path, rgMode)
       .then((r) => {
         if (!dead) {
-          rgCache.current.set(path, r.gain);
-          applyRG(r.gain);
+          rgCache.current.set(path, r);
+          applyRG(r);
         }
       })
       .catch(() => {
@@ -425,7 +454,31 @@ export default function PlayerBar() {
       dead = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current?.path]);
+  }, [current?.path, rgMode, rgPreamp]);
+
+  // Mode/preamp edits from the fullscreen options menu — persisted into the
+  // config (a whole-document POST, hence the spread); the refetched config
+  // feeds rgMode/rgPreamp above, which re-fetches the gain for this track.
+  const saveRg = (patch: { replaygain_mode?: RgMode; replaygain_preamp_db?: number }) => {
+    if (!cfg) return;
+    api
+      .saveConfig({ ...cfg, ...patch })
+      .then(() => qc.invalidateQueries({ queryKey: ["config"] }))
+      .catch((e) => toast(String(e)));
+  };
+  // The bar's gain readout: a number whenever a gain actually applies (tags or
+  // measured on demand), and NOTHING at unity — a "0 dB" chip would claim the
+  // loudness was matched when nothing was.
+  const rgGain = rgRes?.gain ?? null;
+  const fmtDb = (db: number) => `${db >= 0 ? "+" : ""}${db.toFixed(1)} dB`;
+  const rgTip =
+    rgGain === null
+      ? ""
+      : `ReplayGain ${fmtDb(rgGain)} (${rgMode}) — ${
+          rgRes?.analyzed
+            ? "measured on demand: this file has no ReplayGain tags"
+            : "from ReplayGain tags"
+        }${rgRes?.source?.endsWith("+clamp") ? "; reduced to stop clipping" : ""}`;
 
   // Keyboard shortcuts: Space pause/play · [ / ] speed down/up · 0 reset ·
   // ← / → seek ±5s. Never hijacks typing or the lyrics editor (which owns
@@ -1062,6 +1115,14 @@ export default function PlayerBar() {
                 title="Volume — shared by the whole app"
               />
               <VolumePct value={vol} onChange={setVol} />
+              {/* the applied ReplayGain, right where the level is set — the
+                  number is the dB the player is adding, the tooltip says where
+                  it came from. Absent entirely at unity. */}
+              {rgGain !== null && (
+                <span className="text-[10px] font-mono tabular-nums shrink-0 text-zinc-500 cursor-help" title={rgTip}>
+                  RG {fmtDb(rgGain)}
+                </span>
+              )}
             </div>
           </div>
 
@@ -1241,6 +1302,16 @@ export default function PlayerBar() {
               getAudioTime={getAudioTime}
               speed={speed}
               onSpeedChange={setSpeed}
+              rg={{
+                mode: rgMode,
+                preamp: rgPreamp,
+                applied:
+                  rgGain === null
+                    ? null
+                    : { gain: rgGain, source: rgRes?.source ?? null, analyzed: !!rgRes?.analyzed },
+                onMode: (m) => saveRg({ replaygain_mode: m }),
+                onPreamp: (db) => saveRg({ replaygain_preamp_db: db }),
+              }}
             />,
             document.body
           )}

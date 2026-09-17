@@ -16,8 +16,9 @@ from .lyrics_xlit import (
 )
 from .cue import canonical_cue_text
 from .naming import DEFAULT_NAMING_SCRIPT
-from .paths import (AUDIO_EXTS, IMAGE_EXTS, LIB_AUDIO_EXTS, LIB_VIDEO_EXTS,
-                    get_track_cover, library_root, load_track_covers)
+from .paths import (ALBUM_SIDECAR_NAMES, AUDIO_EXTS, IMAGE_EXTS,
+                    LIB_AUDIO_EXTS, LIB_VIDEO_EXTS, get_track_cover,
+                    library_root, load_track_covers)
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, is_audio_file,
     _find_albums, _clean_set, _summarize_values, _collect_targets,
@@ -105,6 +106,7 @@ def _get_cover_dimensions(cover_path):
 
 PER_TRACK_TAGS = [
     "GENRE",
+    "MOOD",
     "ITUNESADVISORY",
     "REPLAYGAIN_TRACK_GAIN",
     "REPLAYGAIN_TRACK_PEAK",
@@ -113,6 +115,35 @@ PER_TRACK_TAGS = [
     "DYNAMIC RANGE",
     "INSTRUMENTAL",
 ]
+
+# Tags whose PRESENCE is graded by a toggle of its own instead of the
+# generic grade_check_missing_tags sweep, so one feature can be required
+# without the whole sweep: mood/genre are auto-filled by script 8 (and the
+# grader is what says a track may not ship without them), ReplayGain is the
+# opt-in loudness family (see REPLAYGAIN_TAGS). Value: (config key, per-track
+# issue code). Every entry defaults ON.
+TAG_PRESENCE_CHECKS = {
+    "GENRE": ("grade_check_genre", "GENRE_MISSING"),
+    "MOOD": ("grade_check_mood", "MOOD_MISSING"),
+    "REPLAYGAIN_TRACK_GAIN": ("grade_check_replaygain", "REPLAYGAIN_TRACK_GAIN"),
+    "REPLAYGAIN_TRACK_PEAK": ("grade_check_replaygain", "REPLAYGAIN_TRACK_PEAK"),
+    "REPLAYGAIN_ALBUM_GAIN": ("grade_check_replaygain", "REPLAYGAIN_ALBUM_GAIN"),
+    "REPLAYGAIN_ALBUM_PEAK": ("grade_check_replaygain", "REPLAYGAIN_ALBUM_PEAK"),
+}
+
+# The ReplayGain family is OPT-IN, like the AcoustID pair below: a file
+# carrying at least one of the four tags must carry the complete set, while a
+# file with none of them is never graded for them at all — the player can
+# measure loudness on the fly, so a library that never ran script 7 must not
+# be failed for the absence. grade_check_missing_tags never reaches these:
+# grade_check_replaygain is the only path that grades them, so enabling both
+# toggles cannot double-penalize a half-written set.
+REPLAYGAIN_TAGS = (
+    "REPLAYGAIN_TRACK_GAIN",
+    "REPLAYGAIN_TRACK_PEAK",
+    "REPLAYGAIN_ALBUM_GAIN",
+    "REPLAYGAIN_ALBUM_PEAK",
+)
 
 # Checks that only ever apply to audio-only containers. No engine script
 # writes ReplayGain / DR / AUDIT / Key&BPM into video files (the loudness,
@@ -490,7 +521,8 @@ SIDECAR_TYPES = {
 # Category -> config key deciding whether files of that kind are allowed.
 # 'other' is opt-in (extra files fail grading by default). Videos — remuxed
 # MKV and raw VOB/AVI/... — are their own allowed-by-default category; raw
-# videos still fail the dedicated un-remuxed-video check.
+# videos still fail the dedicated un-remuxed-video check. 'description' is
+# the app's own description.txt: it may not be called a stray file.
 CATEGORY_INCLUDE_KEYS = {
     "music": "grade_include_music",
     "cover": "grade_include_cover",
@@ -499,6 +531,7 @@ CATEGORY_INCLUDE_KEYS = {
     "lrc": "grade_include_lrc",
     "accurip": "grade_include_accurip",
     "video": "grade_include_video",
+    "description": "grade_include_description",
     "other": "grade_include_other",
 }
 
@@ -529,7 +562,8 @@ def _video_category_exts():
 
 
 def _classify_file(f):
-    """Category of a filename: music / cover / cue / log / lrc / accurip / video / other."""
+    """Category of a filename: music / cover / cue / log / lrc / accurip /
+    video / description / other."""
     low = f.lower()
     if low.endswith(_video_category_exts()):
         # Video containers FIRST: LIB_AUDIO_EXTS is AUDIO_EXTS +
@@ -551,6 +585,10 @@ def _classify_file(f):
         return "lrc"
     if low.endswith(".accurip"):
         return "accurip"
+    if low in ALBUM_SIDECAR_NAMES:
+        # The album/artist description the app writes itself — a legitimate
+        # library file, allowed by default like the cover art next to it.
+        return "description"
     return "other"
 
 
@@ -611,13 +649,18 @@ def _extra_images(album_dir, all_files, audio_files):
     ("01 - Song.jpg", extended stems like "01 - Song.front.jpg" count too —
     the same convention the organizer's sidecar pass follows), nor an image
     listed in the per-track cover manifest (a shared image is named after one
-    track only, so its stem says nothing about the other tracks that use it)."""
+    track only, so its stem says nothing about the other tracks that use it),
+    nor the artist's own artist.jpg / artist.png (stored at artist level by
+    mlo.artistdata — never stray album art)."""
+    from .artistdata import ARTIST_IMAGE_STEMS
     track_stems = {os.path.splitext(f)[0].lower() for f in audio_files}
     mapped = {v.lower() for v in load_track_covers(album_dir).values()}
     out = []
     for f in sorted(all_files):
         low = f.lower()
         if not low.endswith(IMAGE_EXTS) or low in COVER_NAMES:
+            continue
+        if os.path.splitext(low)[0] in ARTIST_IMAGE_STEMS:
             continue
         full = os.path.join(album_dir, f)
         if _skip_grading_file(full):
@@ -1137,10 +1180,22 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         # Required per-track tags (skip if per-filetype disabled).
         is_video_track = os.path.splitext(ap)[1].lower() in LIB_VIDEO_EXTS
         format_by_path[ap] = _audio_format_info(af)
+        # ReplayGain is opt-in per file: with none of the four tags present
+        # there is nothing to grade (and nothing is counted), so an
+        # untouched library is not penalized for the family at all.
+        grade_replaygain = (
+            bool(cfg.get("grade_check_replaygain", True))
+            and any(str(af.get_tag(t) or "").strip() for t in REPLAYGAIN_TAGS)
+        )
         for t in PER_TRACK_TAGS:
             if is_video_track and t in VIDEO_SKIP_TAGS:
                 # Video containers: ReplayGain / DR never apply (no engine
                 # script writes them there) — record, don't grade.
+                track["values"][t] = af.get_tag(t)
+                continue
+            if t in REPLAYGAIN_TAGS and not grade_replaygain:
+                # Not supposed to be graded for its filetype this run —
+                # record the value, don't grade or count it.
                 track["values"][t] = af.get_tag(t)
                 continue
             if not should_write_audio_tag(cfg, t, filepath=ap):
@@ -1156,10 +1211,15 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 # defect — nothing auto-fills 0 anymore, so a missing tag
                 # must not fail the check (a PRESENT value is still validated
                 # as 0/1/2 below).
-                if cfg.get("grade_check_missing_tags", True) and t != "ITUNESADVISORY":
-                    failed_checks += 1
-                    add_issue(f"Missing {t}", basename)
-                    track["issues"].append(t)
+                # GENRE / MOOD / ReplayGain answer to their own toggle (see
+                # TAG_PRESENCE_CHECKS), everything else to missing_tags.
+                if t != "ITUNESADVISORY":
+                    gate, code = TAG_PRESENCE_CHECKS.get(
+                        t, ("grade_check_missing_tags", t))
+                    if cfg.get(gate, True):
+                        failed_checks += 1
+                        add_issue(f"Missing {t}", basename)
+                        track["issues"].append(code)
             elif t == "ITUNESADVISORY":
                 raw = str(val)
                 stripped = raw.strip()
@@ -1280,6 +1340,30 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                         else:
                             add_issue(f"INITIALKEY '{v}' not {notation} notation", basename)
                         track["issues"].append(t)
+
+        # AcoustID fingerprint pair (opt-in feature): a file carrying one
+        # half must carry both — mlo.acoustid writes ID and fingerprint
+        # together. A file with neither is never graded, so a library that
+        # does not use the feature can never fail here.
+        if cfg.get("grade_check_acoustid", True) and not is_video_track:
+            _a_id = _a_fp = ""
+            for _k, _v in (af.all_tags() or {}).items():
+                # TXXX:ACOUSTID_ID / ----:com.apple.iTunes:acoustid_id both
+                # reduce to the semantic name under _tag_key_norm.
+                _name = _tag_key_norm(str(_k).rsplit(":", 1)[-1])
+                if _name == "ACOUSTIDID":
+                    _a_id = str(_v or "").strip()
+                elif _name == "ACOUSTIDFINGERPRINT":
+                    _a_fp = str(_v or "").strip()
+            if _a_id or _a_fp:
+                total_checks += 1
+                if not (_a_id and _a_fp):
+                    _missing = ("ACOUSTID_FINGERPRINT" if _a_id
+                                else "ACOUSTID_ID")
+                    failed_checks += 1
+                    add_issue(f"Missing {_missing} (incomplete AcoustID pair)",
+                              basename)
+                    track["issues"].append(_missing)
 
         # File/folder names must match the naming script (the same script the
         # organizer applies), relative to the music folder — exact match for
@@ -2592,6 +2676,17 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 shown += f" (+{len(extra_imgs) - 4} more)"
             add_issue(f"Extra artwork not tied to any track: {shown}", "album")
 
+    # Album description (the album page's "fetch description" feature):
+    # <album>/description.txt must exist and be non-blank. Lazy import — the
+    # grader is imported from contexts that must not pull in the image stack.
+    if cfg.get("grade_check_album_description", True):
+        from .artistdata import has_description as _has_description
+        total_checks += 1
+        if not _has_description(album_dir):
+            failed_checks += 1
+            add_issue("Album description missing — fetch one on the album page",
+                      "album")
+
     # File extensions must be lowercase ("01 - Song.FLAC" fails). organize
     # lowercases every extension it touches.
     if cfg.get("grade_check_ext_case", True):
@@ -2764,6 +2859,79 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
     }
 
 
+# Artist-level checks (the artist folder, not an album): the image and the
+# text the artist page fetches into the library. Order is display order; the
+# labels are what the UI shows for each row.
+ARTIST_CHECKS = [
+    {"key": "grade_check_artist_image", "label": "Artist image",
+     "description": "The artist folder must hold an artist.jpg / artist.png."},
+    {"key": "grade_check_artist_description", "label": "Artist description",
+     "description": "The artist folder must hold a non-blank description.txt."},
+]
+
+# Issue codes per artist check, and the artwork key each one reports on.
+_ARTIST_CHECK_ISSUES = {
+    "grade_check_artist_image": ("ARTIST_IMAGE_MISSING", "image"),
+    "grade_check_artist_description": ("ARTIST_DESCRIPTION_MISSING",
+                                       "description"),
+}
+
+
+def grade_artist(artist_dir, cfg=None) -> dict:
+    """Grade an artist folder on the two things that apply to it at all:
+    its image and its description (ARTIST_CHECKS). Album-level checks — tags,
+    logs, covers — never run here.
+
+    *pct* is 0 with both checks disabled: nothing graded is nothing failed, so
+    *pass* is True there. An unreadable/absent folder is the one hard failure
+    (a single ARTIST_FOLDER_MISSING issue, never an exception).
+    """
+    cfg = cfg or {}
+    folder = str(artist_dir or "")
+    where = os.path.basename(folder.replace("\\", "/").rstrip("/")) or folder
+    out = {
+        "path": folder,
+        "checks": 0,
+        "pass_count": 0,
+        "failed_checks": 0,
+        "pct": 0.0,
+        "pass": False,
+        "issues": [],
+        "artwork": {"image": False, "image_file": None, "description": False},
+    }
+    if not folder or not os.path.isdir(folder):
+        out["issues"].append({
+            "code": "ARTIST_FOLDER_MISSING", "label": "Artist folder",
+            "where": where,
+        })
+        return out
+
+    from .artistdata import has_description, image_path
+    image_file = image_path(folder)
+    out["artwork"] = {
+        "image": bool(image_file),
+        "image_file": image_file,
+        "description": has_description(folder),
+    }
+
+    for check in ARTIST_CHECKS:
+        if not cfg.get(check["key"], True):
+            # Toggle off: the artefact is neither required nor counted.
+            continue
+        out["checks"] += 1
+        code, art_key = _ARTIST_CHECK_ISSUES[check["key"]]
+        if not out["artwork"][art_key]:
+            out["failed_checks"] += 1
+            out["issues"].append({
+                "code": code, "label": check["label"], "where": where,
+            })
+
+    out["pass_count"] = out["checks"] - out["failed_checks"]
+    out["pct"] = (100.0 * out["pass_count"] / out["checks"]) if out["checks"] else 0.0
+    out["pass"] = out["failed_checks"] == 0
+    return out
+
+
 def format_grade_report(res, lyrics_format, track_file=None):
     """
     Build [(text, style), ...] lines for a grade result, for the GUI
@@ -2854,6 +3022,7 @@ def format_grade_report(res, lyrics_format, track_file=None):
         lines.append((f"  {i:02d}. {tr['file']}", "bold"))
         lines.append((
             f"      GENRE={_short_val(v.get('GENRE'), 18)} | "
+            f"MOOD={_short_val(v.get('MOOD'), 12)} | "
             f"ADVISORY={_short_val(v.get('ITUNESADVISORY'), 8)} | "
             f"DR={_short_val(v.get('DYNAMIC RANGE'), 6)} | "
             f"INST={_short_val(v.get('INSTRUMENTAL'), 4)}",
@@ -3033,6 +3202,7 @@ def run_grade_library(config):
                 log(f"  {i:02d}. {tr['file']}")
                 log(
                     f"      GENRE={_short_val(v.get('GENRE'), 18)} | "
+                    f"MOOD={_short_val(v.get('MOOD'), 12)} | "
                     f"ADVISORY={_short_val(v.get('ITUNESADVISORY'), 8)} | "
                     f"DR={_short_val(v.get('DYNAMIC RANGE'), 6)} | "
                     f"INST={_short_val(v.get('INSTRUMENTAL'), 4)}"

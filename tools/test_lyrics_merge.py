@@ -337,18 +337,23 @@ ok(tag_value(AudioFile(flac4), "MOOD") is None,
 mp3 = os.path.join(tmp, "tags.mp3")
 make_mp3(mp3)
 am = AudioFile(mp3)
-ok(am.set_any_tag("TXXX:MOOD", "happy"), "mp3 set_any_tag TXXX")
+# The raw-key probes use a key the app has no mapping for: MOOD is a
+# first-class tag now (TAG_MAP), so writing it as a raw TXXX frame would be
+# canonicalized back to "MOOD" on read — which is correct behaviour, but not
+# what this test is about.
+RAW = "TXXX:MLOTEST"
+ok(am.set_any_tag(RAW, "happy"), "mp3 set_any_tag TXXX")
 am2 = AudioFile(mp3)
-ok(am2.all_tags().get("TXXX:MOOD") == "happy",
+ok(am2.all_tags().get(RAW) == "happy",
    f"mp3 all_tags after TXXX set: {am2.all_tags()!r}")
 ok(am2.set_any_tag("TIT2", "New Title"), "mp3 set_any_tag plain frame")
 am3 = AudioFile(mp3)
 ok(am3.all_tags().get("TITLE") == "New Title",
    f"mp3 TIT2 canonicalized: {am3.all_tags()!r}")
 ok(am3.set_any_tag("TZZZ", "custom"), "mp3 set_any_tag unknown frame id")
-ok(am3.delete_any_tag("TXXX:MOOD"), "mp3 delete_any_tag TXXX")
+ok(am3.delete_any_tag(RAW), "mp3 delete_any_tag TXXX")
 after_mp3 = AudioFile(mp3).all_tags()
-ok("TXXX:MOOD" not in after_mp3, "mp3 TXXX gone after delete")
+ok(RAW not in after_mp3, "mp3 TXXX gone after delete")
 ok(after_mp3.get("TITLE") == "New Title", "mp3 other frames untouched")
 
 print(f"ALL {passed} MERGE TESTS PASSED")

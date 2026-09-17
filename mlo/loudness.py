@@ -11,17 +11,25 @@ New script 7. For every album (folder) it:
 Both tags are already required by the grader, so running this script is what
 populates them. Tools are optional: the script skips whatever is missing with
 a clear message instead of failing.
+
+The player also uses this module on demand: replaygain_for_path() answers one
+track's playback gain from its tags, measuring the file with ffmpeg's EBU R128
+filter (and caching the result under <music>/.mlo/data/) when they are missing.
 """
+import json
+import math
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 from .audio import AudioFile
 from .config import should_write_audio_tag
-from .paths import AUDIO_EXTS
+from .paths import AUDIO_EXTS, app_data_dir
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _walk_files,
     _collect_targets, _find_albums, is_audio_file, worker_count,
@@ -488,3 +496,284 @@ def _file_missing_dr(path):
         return not (str(af.get_tag("DYNAMIC RANGE") or "").strip())
     except Exception:
         return True
+
+
+# ======================================================================
+# On-demand per-file ReplayGain (player-facing)
+# ======================================================================
+# Batch runs above tag whole folders with rsgain. Playing a track that has
+# no tags yet — a fresh import, a file the user copied in, one whose
+# per-type ReplayGain writing was disabled — must not play at a different
+# loudness than the rest of the library, so this measures the ONE file on
+# demand with ffmpeg's EBU R128 filter and caches the result.
+#
+# ReplayGain 2.0 targets this reference loudness: gain = reference -
+# measured_integrated_loudness. A track already at the reference needs no
+# correction (0 dB); one measured 3 dB quieter than it gets +3 dB. The
+# filter implements the same ITU-R BS.1770 / EBU R128 meter rsgain uses, so
+# an on-demand value and a batch-written tag agree (ffmpeg's own ebur128
+# summary even prints "TARGET:-23 LUFS" — that is its streaming default, not
+# the ReplayGain reference; we override it with this constant).
+RG2_REFERENCE_LUFS = -18.0
+
+# ffmpeg summary block (see parse_ebur128). Anchored at line start so the
+# per-second progress lines — which carry their own "I:" and "FTPK:"/"TPK:"
+# fields — can never be mistaken for the summary values.
+EBUR128_I_RE = re.compile(r"^\s*I:\s*(-?\d+(?:\.\d+)?)\s*LUFS", re.MULTILINE)
+EBUR128_PEAK_RE = re.compile(r"^\s*Peak:\s*(-?\d+(?:\.\d+)?)\s*dBFS", re.MULTILINE)
+
+_FFMPEG_CACHE = {"exe": None, "checked": False}
+# One store rewrites the whole cache file, so the read-modify-write of
+# store_analysis is serialized (the player may ask while a scan writes).
+_CACHE_LOCK = threading.Lock()
+
+
+def _ffmpeg_exe():
+    """Cached ffmpeg path, or None when the dependency is not installed."""
+    if not _FFMPEG_CACHE["checked"]:
+        _FFMPEG_CACHE["checked"] = True
+        try:
+            _FFMPEG_CACHE["exe"] = (detect_all_tools().get("ffmpeg")
+                                    or {}).get("ffmpeg_exe")
+        except Exception:
+            _FFMPEG_CACHE["exe"] = None
+    return _FFMPEG_CACHE["exe"]
+
+
+def _tag_float(v):
+    """A ReplayGain tag value ("-3.21 dB", "0.987000") as a float, or None."""
+    try:
+        return float(str(v).lower().replace("db", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_ebur128(text):
+    """Parse an ffmpeg ``ebur128=peak=true`` log.
+
+    Returns ``{"lufs": float, "peak": float}`` — integrated loudness in LUFS
+    and the true peak as a LINEAR value (``10 ** (dBFS / 20)``), the unit the
+    REPLAYGAIN_*_PEAK tags and ReplayGain's clip protection use — or None
+    when the log holds no summary block (decoder failure, truncated output).
+
+    Only the block after the last ``Summary:`` counts: every progress line
+    prints an ``I:`` field too, and the last of those is not a measurement of
+    the whole file.
+    """
+    if not text:
+        return None
+    tail = text.rsplit("Summary:", 1)[-1]
+    m = EBUR128_I_RE.search(tail)
+    p = EBUR128_PEAK_RE.search(tail)
+    if not m or not p:
+        return None
+    return {"lufs": float(m.group(1)),
+            "peak": 10.0 ** (float(p.group(1)) / 20.0)}
+
+
+def _measure_file(path):
+    """EBU R128 measurement of one file ({"lufs","peak"}), or None."""
+    exe = _ffmpeg_exe()
+    if not exe:
+        return None
+    try:
+        proc = run_tool(
+            [exe, "-hide_banner", "-nostats", "-nostdin", "-i", path,
+             "-map", "0:a:0", "-af", "ebur128=peak=true", "-f", "null", "-"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=600,
+        )
+    except Exception:
+        return None
+    if proc.returncode:
+        # A decode that died halfway still prints a summary of what it read.
+        return None
+    return parse_ebur128(proc.stderr or "")
+
+
+def _rg_tags(path):
+    """The file's four ReplayGain tags as floats; unreadable -> all None."""
+    tags = {"gain_db": None, "peak": None,
+            "album_gain_db": None, "album_peak_db": None}
+    try:
+        af = AudioFile(path)
+        tags["gain_db"] = _tag_float(af.get_tag("REPLAYGAIN_TRACK_GAIN"))
+        tags["peak"] = _tag_float(af.get_tag("REPLAYGAIN_TRACK_PEAK"))
+        tags["album_gain_db"] = _tag_float(af.get_tag("REPLAYGAIN_ALBUM_GAIN"))
+        tags["album_peak_db"] = _tag_float(af.get_tag("REPLAYGAIN_ALBUM_PEAK"))
+    except Exception:
+        pass
+    return tags
+
+
+def analyze_file(path, cfg=None, force=False):
+    """ReplayGain for ONE file: its tags when they are complete, else ffmpeg.
+
+    Returns ``{"gain_db", "peak", "lufs", "album_gain_db", "album_peak_db",
+    "analyzed", "source"}`` — ``analyzed`` False and ``source`` "tags" when
+    all four tags were present (nothing measured), True and "ffmpeg" when the
+    file was measured (``lufs`` is then the measured integrated loudness and
+    the album fields are None). None when there is nothing to fall back on:
+    no decoder or an undecodable file. Never raises.
+
+    ``force`` re-measures even a fully tagged file. ``cfg`` is accepted for
+    caller symmetry; no config key changes a measurement.
+    """
+    if not force:
+        tags = _rg_tags(path)
+        if None not in tags.values():
+            return {"gain_db": tags["gain_db"], "peak": tags["peak"],
+                    "lufs": None,
+                    "album_gain_db": tags["album_gain_db"],
+                    "album_peak_db": tags["album_peak_db"],
+                    "analyzed": False, "source": "tags"}
+    measured = _measure_file(path)
+    if measured is None:
+        return None
+    return {"gain_db": RG2_REFERENCE_LUFS - measured["lufs"],
+            "peak": measured["peak"], "lufs": measured["lufs"],
+            "album_gain_db": None, "album_peak_db": None,
+            "analyzed": True, "source": "ffmpeg"}
+
+
+# ----------------------------------------------------------------------
+# Cache: <music>/.mlo/data/replaygain.json
+# ----------------------------------------------------------------------
+def _cache_path(cfg):
+    music = (cfg or {}).get("music_folder")
+    return os.path.join(app_data_dir(music), "replaygain.json")
+
+
+def _cache_key(path):
+    """Cache key: the absolute path, case-folded as the filesystem does."""
+    return os.path.normcase(os.path.normpath(os.path.abspath(str(path))))
+
+
+def _read_cache(cfg):
+    """The cache dict; a missing or corrupt file reads as empty (never raises)."""
+    try:
+        with open(_cache_path(cfg), "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def cached_analysis(cfg, path):
+    """The cached measurement for *path*, or None when absent or stale.
+
+    A size or mtime change means the bytes are not the ones we measured
+    (re-tagging, a re-encode, a re-download over the same name).
+    """
+    entry = _read_cache(cfg).get(_cache_key(path))
+    if not isinstance(entry, dict):
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    if entry.get("size") != st.st_size or entry.get("mtime") != st.st_mtime:
+        return None
+    return entry
+
+
+def store_analysis(cfg, path, data):
+    """Cache one file's analysis, atomically; never raises.
+
+    # ponytail: one JSON file rewritten whole per store — switch to a
+    # per-entry file or sqlite only if a big library makes this hurt.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return
+    entry = {k: (data or {}).get(k)
+             for k in ("gain_db", "peak", "lufs", "analyzed", "source")}
+    entry.update({"size": st.st_size, "mtime": st.st_mtime, "ts": time.time()})
+    target = _cache_path(cfg)
+    with _CACHE_LOCK:
+        cache = _read_cache(cfg)
+        cache[_cache_key(path)] = entry
+        tmp = None
+        try:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=".replaygain_", suffix=".json",
+                                       dir=os.path.dirname(target) or ".")
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+                json.dump(cache, f)
+                try:
+                    f.flush()
+                    os.fsync(f.fileno())
+                except OSError:
+                    pass
+            os.replace(tmp, target)
+        except OSError:
+            if tmp:
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+
+
+def replaygain_for_path(cfg, path, mode=None, preamp_db=None,
+                        clip_protection=None):
+    """Playback gain for one track: ``{"gain", "peak", "mode", "source",
+    "analyzed"}``.
+
+    ``gain`` is dB to add in the player's gain stage, or None for unity
+    (mode "off", or nothing to go on). ``mode`` "album" prefers
+    REPLAYGAIN_ALBUM_GAIN and falls back to the track value. Missing tags are
+    measured on demand (ffmpeg, via the cache) when
+    ``replaygain_analyze_missing`` is on. ``preamp_db`` is added before clip
+    protection, which clamps the gain so the resulting peak stays at or below
+    0 dBFS and says so in ``source`` ("tags+clamp"). Defaults come from *cfg*
+    (``replaygain_mode`` / ``_preamp_db`` / ``_clip_protection``); the
+    arguments override them. Never raises.
+    """
+    cfg = cfg or {}
+    if mode is None:
+        mode = cfg.get("replaygain_mode", "track")
+    if preamp_db is None:
+        preamp_db = cfg.get("replaygain_preamp_db", 0.0)
+    if clip_protection is None:
+        clip_protection = cfg.get("replaygain_clip_protection", False)
+
+    result = {"gain": None, "peak": None, "mode": mode, "source": None,
+              "analyzed": False}
+    if mode == "off":
+        return result
+
+    tags = _rg_tags(path)
+    if mode == "album" and tags["album_gain_db"] is not None:
+        gain, peak = tags["album_gain_db"], tags["album_peak_db"]
+    else:
+        gain, peak = tags["gain_db"], tags["peak"]
+    if peak is None:
+        peak = tags["peak"]
+    source = "tags" if gain is not None else None
+
+    if gain is None and cfg.get("replaygain_analyze_missing"):
+        data = cached_analysis(cfg, path)
+        if data is None:
+            data = analyze_file(path, cfg)
+            if data:
+                store_analysis(cfg, path, data)
+        if data:
+            gain = data.get("gain_db")
+            peak = data.get("peak")
+            source = data.get("source")
+            result["analyzed"] = bool(data.get("analyzed"))
+    if gain is None:
+        return result
+
+    try:
+        gain = float(gain) + float(preamp_db or 0.0)
+    except (TypeError, ValueError):
+        return result
+    if clip_protection and peak and peak > 0:
+        ceiling = -20.0 * math.log10(peak)
+        if gain > ceiling:
+            gain = ceiling
+            source = f"{source}+clamp"
+    result.update({"gain": gain, "peak": peak, "source": source})
+    return result

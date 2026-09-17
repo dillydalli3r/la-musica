@@ -52,6 +52,7 @@ _TAG_TO_FAMILY = {
     "UNSYNCEDLYRICS": "LYRICS",
     "BPM": "BPM",
     "INITIALKEY": "INITIALKEY",
+    "MOOD": "MOOD",
     # integrity tags follow AUDIT family (written alongside audit when present)
     "AUDIO_MD5": "AUDIT",
     "INTEGRITY": "AUDIT",
@@ -98,6 +99,7 @@ def should_write_audio_tag(config, tag_name, filepath=None, filetype=None):
         "MEDIA_SOURCE": "normalize_media_source",
         "INSTRUMENTAL": None,  # gated by two keys; handle below
         "ADVISORY": "auto_advisory",
+        "MOOD": "mood_enabled",
         "LYRICS": None,  # lyrics_format gates this separately
     }
     gkey = family_global.get(family)
@@ -183,6 +185,19 @@ DEFAULT_CONFIG = {
     "cover_sources": [],
     # Album covers re-encode to 90% quality; other images keep max quality.
     "cover_jpeg_quality": 90,
+    # Artist artwork & text pulled from the discovery providers and stored in
+    # the library itself — Artists/<Artist>/artist.jpg, description.txt and
+    # artist.json (provenance: provider, source URL, fetch time). Artist
+    # images have no minimum resolution by default; they are only cropped to
+    # the configured cover aspect and re-encoded at the cover JPEG quality.
+    # A target size of 0 keeps the provider's native size.
+    "artist_image_enabled": True,
+    "artist_image_sources": [],       # ordered provider ids; [] = built-in order
+    "artist_image_crop": True,
+    "artist_image_target_size": 0,
+    "artist_description_enabled": True,
+    "album_description_enabled": True,
+    "description_sources": [],        # ordered provider ids; [] = built-in order
 
     # Embedded cover art in audio files (applied by script 10 and the FLAC
     # optimizer). Default OFF: optimization REMOVES embedded art — covers
@@ -348,6 +363,28 @@ DEFAULT_CONFIG = {
     # Lossless but uncompressed sources (WAV/AIFF/APE/WV/SHN) fail grading —
     # script 3 converts them to FLAC.
     "grade_check_lossless_source": True,
+    # Mood & genre (script 8): both are computed/filled automatically, and a
+    # track missing either fails grading — the whole point is that no track
+    # ships without them.
+    "grade_check_mood": True,
+    "grade_check_genre": True,
+    # ReplayGain tags: opt-in like AcoustID — graded only when the file
+    # already carries at least one of the four REPLAYGAIN_* tags, and then
+    # the whole set is required. A library that never ran script 7 is never
+    # failed for their absence (the player measures on the fly instead);
+    # a half-written set is a real defect.
+    "grade_check_replaygain": True,
+    # AcoustID identity tags: pair check, never fires on files carrying
+    # neither ACOUSTID_ID nor ACOUSTID_FINGERPRINT.
+    "grade_check_acoustid": True,
+    # The album description sidecar (description.txt) is a legitimate part of
+    # an album folder — allowed as a file category by default.
+    "grade_include_description": True,
+    # Text and artwork stored inside the library: the album's description.txt,
+    # the artist's artist.jpg and the artist's description.txt.
+    "grade_check_album_description": True,
+    "grade_check_artist_image": True,
+    "grade_check_artist_description": True,
 
     # Audio audit (AudioAuditor CLI): full-track detectors (silence, DR,
     # true peak, LUFS, BPM) instead of the fast scan; force re-audits files
@@ -414,6 +451,16 @@ DEFAULT_CONFIG = {
     "dr_replaygain_enabled": True,
     "replaygain_skip_existing": True,
     "force_dr_replaygain": False,
+    # Playback gain. "track" applies REPLAYGAIN_TRACK_GAIN, "album" prefers
+    # REPLAYGAIN_ALBUM_GAIN (falling back to the track value), "off" plays at
+    # unity. A track whose file carries no ReplayGain tags is analysed on
+    # demand (ffmpeg EBU R128, cached) instead of silently playing loud.
+    "replaygain_mode": "track",
+    "replaygain_preamp_db": 0.0,
+    "replaygain_analyze_missing": True,
+    # Peak-aware limiting: clamp the applied gain so the track's peak cannot
+    # clip when it is known.
+    "replaygain_clip_protection": True,
 
     # Video remux (script 11): every video container -> MKV with the video
     # copied bit-exact and every audio stream re-encoded to FLAC (lossless
@@ -480,6 +527,14 @@ DEFAULT_CONFIG = {
     # Also write "<stem>.romaji.lrc" / "<stem>.<lang>.lrc" next to the audio.
     "lyrics_xlit_sidecars": True,
     "force_xlit": False,
+    # Lyrics sources, tried in order until one has the song — each provider
+    # falls back to the next, and MusicBrainz-independent providers are the
+    # only ones that can serve lyrics. Empty = the built-in order
+    # (LRCLIB, NetEase, lyrics.ovh); see Settings → Lyrics.
+    "lyrics_sources": [],
+    # Accept plain (unsynced) lyrics when no provider has a synced version.
+    # Off means "synced or nothing" — the canonical formatter still runs.
+    "lyrics_allow_plain": True,
 
     # Managed beets tagging (Picard parity).
     "beets_locale": "en",
@@ -490,6 +545,29 @@ DEFAULT_CONFIG = {
     # applies the naming script to filenames and gathers sidecars / covers
     # into the final album folder, which grading requires.
     "beets_organize_after": True,
+
+    # Import — drag & drop, the import wizard and the Soulseek pipelines all
+    # run the same script chain, so a freshly imported album leaves the
+    # pipeline complete instead of half-tagged. Empty `import_scripts` = the
+    # built-in chain: 2 CUEs → 3 FLACs → 11 videos → 1 lyrics format →
+    # 13 fetch lyrics → 8 auto tagging (mood/genre/advisory) → 5 images →
+    # 6 audit → 7 DR & ReplayGain → 9 AccurateRip → 12 key & BPM → 14 beets →
+    # 10 format all → 4 grade. An explicit list of script ids replaces it;
+    # `import_auto_scripts` off disables the chain entirely (the wizard still
+    # writes MusicBrainz tags, lyrics and covers itself).
+    "import_auto_scripts": True,
+    "import_scripts": [],
+    # Albums processed at the same time when several are imported at once.
+    "import_bulk_concurrency": 2,
+    # AcoustID release matching during import: fingerprint each track with
+    # chromaprint's fpcalc and ask AcoustID which MusicBrainz recording the
+    # audio actually is, then offer the release that contains them. Falls back
+    # to the existing title/artist search when fpcalc is missing, no key is
+    # configured, or nothing matches.
+    "import_acoustid": True,
+    "acoustid_enabled": True,
+    "acoustid_api_key": "",
+    "acoustid_min_score": 0.75,
 
     # Soulseek via managed slskd (shares = music folder).
     "soulseek_username": "",
@@ -546,6 +624,13 @@ DEFAULT_CONFIG = {
 
     # Genres imported from MusicBrainz per release/track (top voted first).
     "mb_genre_count": 1,
+    # Mood & genre tagging (script 8, Auto tagging). MOOD is derived from the
+    # track's audio (librosa features: tempo, energy, brightness, dynamics)
+    # and, in hybrid mode, cross-checked against provider metadata; GENRE is
+    # filled from the providers whenever the tags carry none. Both are graded.
+    "mood_enabled": True,
+    "genre_autofill": True,
+    "mood_source": "hybrid",   # CHOICES: audio | provider | hybrid
     # Script 3/10 removes tags outside the canonical set while optimizing.
     "strip_unknown_tags": True,
 
@@ -553,6 +638,26 @@ DEFAULT_CONFIG = {
     "home_recommendations": True,
     "home_rec_count": 18,
     "home_recent_count": 12,
+    # What drives "Recommended for you": the discovery chain (popularity-ranked
+    # from Deezer + ListenBrainz, resolved to MusicBrainz release groups),
+    # ListenBrainz's sitewide charts, or the plain MusicBrainz release-group
+    # search.
+    "home_rec_source": "discovery",
+    # Size of the "Popular right now" shelf (ListenBrainz sitewide listens).
+    "home_popular_count": 12,
+    # Discovery — the external music APIs behind recommendations, catalogue
+    # search, artist artwork and descriptions (Deezer, ListenBrainz, iTunes,
+    # TheAudioDB, Wikipedia). Empty source lists = the built-in order; every
+    # feature walks its list and falls back to the next provider, and
+    # MusicBrainz stays the final fallback so results keep their MBIDs.
+    "discovery_enabled": True,
+    "discovery_rec_sources": [],
+    "discovery_search_sources": [],
+    "discovery_timeout_s": 8,
+    # MusicBrainz browse page search: "auto" queries discovery first and falls
+    # back to MusicBrainz, "discovery" never falls back, "musicbrainz" keeps
+    # the plain MusicBrainz search.
+    "mb_search_source": "auto",
 
     # Misc
     "auto_advance": True,
@@ -608,6 +713,10 @@ _INT_RANGES = {
     "wishes_max_attempts": (0, 1000),
     "home_rec_count": (4, 60),
     "home_recent_count": (4, 60),
+    "home_popular_count": (4, 60),
+    "artist_image_target_size": (0, 4000),
+    "discovery_timeout_s": (3, 30),
+    "import_bulk_concurrency": (1, 8),
     "mb_genre_count": (1, 10),
 }
 _CHOICES = {
@@ -626,6 +735,11 @@ _CHOICES = {
     "audiometa_key_notation": {"musical", "camelot", "openkey"},
     "video_preset": {"ultrafast", "superfast", "veryfast", "faster", "fast",
                      "medium", "slow", "slower", "veryslow"},
+    # Discovery: which source drives recommendations / the MB-page search.
+    "home_rec_source": {"discovery", "listenbrainz", "musicbrainz"},
+    "mb_search_source": {"auto", "discovery", "musicbrainz"},
+    "mood_source": {"audio", "provider", "hybrid"},
+    "replaygain_mode": {"track", "album", "off"},
 }
 
 
@@ -700,6 +814,8 @@ def normalize_config(user=None) -> dict:
         ("discs_toc_unique_margin_s", 4.0, 0.5, 10.0),
         ("jpegxl_distance", 0.0, 0.0, 2.0),
         ("grader_strict_square_threshold", 0.005, 0.0, 0.05),
+        ("acoustid_min_score", 0.75, 0.0, 1.0),
+        ("replaygain_preamp_db", 0.0, -24.0, 24.0),
     ):
         try:
             v = float(cfg.get(k, default))
@@ -749,6 +865,34 @@ def normalize_config(user=None) -> dict:
         if not isinstance(v, (list, tuple)):
             v = []
         cfg[k] = [str(t).strip() for t in v if str(t).strip()][:64]
+
+    # Provider preference lists (discovery, lyrics, artist images, artwork
+    # text). Empty means "use the built-in order"; unknown ids are dropped so
+    # a hand-edited config can never wedge a feature.
+    for k in ("discovery_rec_sources", "discovery_search_sources",
+              "lyrics_sources", "artist_image_sources", "description_sources"):
+        v = cfg.get(k)
+        if isinstance(v, str):
+            v = [t for t in v.replace("\n", ";").split(";") if t.strip()]
+        if not isinstance(v, (list, tuple)):
+            v = []
+        cfg[k] = [str(t).strip().lower() for t in v if str(t).strip()][:16]
+
+    # Import script chain: script ids, order preserved, duplicates dropped.
+    scripts = cfg.get("import_scripts")
+    if isinstance(scripts, str):
+        scripts = scripts.replace(";", ",").replace("\n", ",").split(",")
+    if not isinstance(scripts, (list, tuple)):
+        scripts = []
+    chain = []
+    for item in scripts:
+        try:
+            value = int(item)
+        except (TypeError, ValueError):
+            continue
+        if value not in chain:
+            chain.append(value)
+    cfg["import_scripts"] = chain[:32]
 
     script = cfg.get("naming_script")
     if not isinstance(script, str) or not script.strip():

@@ -13,6 +13,7 @@ import CoverImg from "../components/CoverImg";
 import LyricsViewer from "../components/LyricsViewer";
 import LyricsManagerModal from "../components/LyricsManagerModal";
 import LyricsEditorModal from "../components/LyricsEditorModal";
+import MoreLikeThis from "../components/MoreLikeThis";
 import OverflowMenu from "../components/OverflowMenu";
 
 export default function TrackPage() {
@@ -184,7 +185,7 @@ export default function TrackPage() {
   const mainFields = ["TITLE", "ARTIST", "ALBUM", "GENRE", "DATE", "TRACKNUMBER", "DISCNUMBER",
     "ALBUMARTIST", "ORIGINALDATE", "RELEASETYPE", "RELEASECOUNTRY", "CATALOGNUMBER"];
   const extraFields = Object.keys(tags)
-    .filter((k) => !mainFields.includes(k) && !(k in linkTags) && !["LYRICS", "UNSYNCEDLYRICS"].includes(k))
+    .filter((k) => !mainFields.includes(k) && k !== "MOOD" && !(k in linkTags) && !["LYRICS", "UNSYNCEDLYRICS"].includes(k))
     .sort();
 
   return (
@@ -306,6 +307,23 @@ export default function TrackPage() {
                 </div>
               </>
             )}
+            {/* MOOD is written by the auto-tagging script (8) — absent until
+                that has run, so the empty case says what would fill it */}
+            <div className="flex items-center gap-2 pt-2 border-t border-border/60 mt-1">
+              <span className="text-[10px] text-zinc-500 uppercase w-44 shrink-0">MOOD</span>
+              {tags.MOOD ? (
+                <span className="chip bg-zinc-800/70 border border-border text-zinc-300" title="Written by the auto-tagging script">
+                  {tags.MOOD}
+                </span>
+              ) : (
+                <span
+                  className="text-xs text-zinc-600"
+                  title="Auto tagging (script 8) writes a MOOD tag from the audio and its metadata"
+                >
+                  no mood yet — run auto tagging (script 8)
+                </span>
+              )}
+            </div>
           </div>
 
           <div className="bg-card rounded-lg border border-border p-4">
@@ -402,6 +420,8 @@ export default function TrackPage() {
           />
         </div>
       </div>
+
+      <MoreLikeThis kind="track" artist={tags.ARTIST ?? tags.ALBUMARTIST ?? ""} title={tags.TITLE} album={tags.ALBUM} />
 
       {managerOpen && (
         <LyricsManagerModal

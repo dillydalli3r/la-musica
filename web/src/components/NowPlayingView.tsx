@@ -27,6 +27,10 @@ const VIS_KEY = "mlo.np.vis"; // "1" = background pulses with the beat
 const VIZ_KEY = "mlo.np.viz"; // "1" = frequency-bar visualizer visible
 const ZOOM_KEY = "mlo.np.lyrzoom.v2"; // lyrics zoom multiplier (persisted)
 
+/** How the player applies ReplayGain — mirrors the `replaygain_mode` config
+ * options (mlo/config.py). */
+type RgMode = "track" | "album" | "off";
+
 interface Props {
   current: { path: string; file: string; albumPath: string; artist?: string; album?: string; title?: string; coverFile?: string | null; albumCover?: string | null };
   queuePos: string;
@@ -48,6 +52,16 @@ interface Props {
    * view mirrors and edits the rate through these. */
   speed: number;
   onSpeedChange: (s: number) => void;
+  /** ReplayGain is stored in the config and applied by the player bar (it owns
+   * the decoders); the fullscreen options menu is where it gets edited. */
+  rg: {
+    mode: RgMode;
+    preamp: number;
+    /** What the bar is applying to this track — null at unity. */
+    applied: { gain: number; source: string | null; analyzed: boolean } | null;
+    onMode: (m: RgMode) => void;
+    onPreamp: (db: number) => void;
+  };
 }
 
 function hexToRgbTriplet(hex?: string | null): [number, number, number] | null {
@@ -102,6 +116,22 @@ export default function NowPlayingView(p: Props) {
   const [vis, setVis] = useState(() => localStorage.getItem(VIS_KEY) !== "0");
   // Frequency-bar visualizer (fullscreen + sidebar), default on.
   const [viz, setViz] = useState(() => localStorage.getItem(VIZ_KEY) !== "0");
+  // ReplayGain preamp: the slider drags locally and commits to the config on a
+  // short debounce, so one drag is one config write (and one re-fetch of the
+  // track's gain), not one per 0.5 dB step. The commit goes through a ref —
+  // the player bar re-renders several times a second, which would otherwise
+  // re-arm the timer from a stale closure forever.
+  const [preampDraft, setPreampDraft] = useState(p.rg.preamp);
+  const rgCommit = useRef(p.rg.onPreamp);
+  useEffect(() => {
+    rgCommit.current = p.rg.onPreamp;
+  });
+  useEffect(() => setPreampDraft(p.rg.preamp), [p.rg.preamp]);
+  useEffect(() => {
+    if (preampDraft === p.rg.preamp) return;
+    const t = setTimeout(() => rgCommit.current(preampDraft), 400);
+    return () => clearTimeout(t);
+  }, [preampDraft, p.rg.preamp]);
   const [options, setOptions] = useState(false);
   const [queueOpen, setQueueOpen] = useState(false);
   const [plOpen, setPlOpen] = useState(false);
@@ -656,6 +686,21 @@ export default function NowPlayingView(p: Props) {
 
   const VolIcon = vol <= 0 ? VolumeX : vol < 0.5 ? Volume1 : Volume2;
 
+  // What the options menu says about the gain the player is applying right now
+  // — the same three cases the bar's chip covers: tags, measured on demand,
+  // and unity (nothing shown in the bar).
+  const rgDb = (db: number) => `${db >= 0 ? "+" : ""}${db.toFixed(1)} dB`;
+  const rgLine =
+    p.rg.mode === "off"
+      ? "Off — every file plays at its own level."
+      : p.rg.applied
+        ? `${rgDb(p.rg.applied.gain)} — ${
+            p.rg.applied.analyzed
+              ? "measured on demand: this file has no ReplayGain tags"
+              : "from ReplayGain tags"
+          }${p.rg.applied.source?.endsWith("+clamp") ? "; reduced to stop clipping" : ""}`
+        : "Unity — no ReplayGain for this file.";
+
   // Shared control blocks — the audio layout shows them under the cover;
   // the fullscreen-video layout overlays them at the bottom of the picture.
   const textBlock = (
@@ -1051,6 +1096,44 @@ export default function NowPlayingView(p: Props) {
                     />
                     Visualizer bars
                   </label>
+                  {/* loudness matching — stored in the config (Settings → DR /
+                      ReplayGain) but felt right here, so it is edited here */}
+                  <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-1 pt-2 pb-1">Loudness · ReplayGain</div>
+                  <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-300">
+                    <span className="flex-1" title="Per track, per album, or no loudness matching at all">Gain</span>
+                    {(["track", "album", "off"] as const).map((m) => (
+                      <button
+                        key={m}
+                        className={`chip text-[10px] border ${p.rg.mode === m ? "bg-accent on-accent border-accent" : "bg-white/5 border-white/15 text-zinc-400 hover:text-white"}`}
+                        onClick={() => p.rg.onMode(m)}
+                        title={
+                          m === "album"
+                            ? "Album gain — one loudness offset for the whole album"
+                            : m === "track"
+                              ? "Track gain — each track matched on its own"
+                              : "Off — play files at their own level"
+                        }
+                      >
+                        {m.toUpperCase()}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-300">
+                    <span className="flex-1" title="Extra gain on top of the ReplayGain value, applied to every track">Preamp</span>
+                    <input
+                      type="range"
+                      min={-24}
+                      max={24}
+                      step={0.5}
+                      value={preampDraft}
+                      onChange={(e) => setPreampDraft(Number(e.target.value))}
+                      disabled={p.rg.mode === "off"}
+                      className="w-28 disabled:opacity-40"
+                      title="Preamp — ±24 dB"
+                    />
+                    <span className="w-14 text-right text-[10px] text-zinc-500 tabular-nums">{rgDb(preampDraft)}</span>
+                  </div>
+                  <div className="text-[10px] text-zinc-600 px-2 pb-1">{rgLine}</div>
                   <div className="text-[10px] text-zinc-600 px-2 pt-1">
                     AI translation uses Settings → AI; results are cached per track.
                   </div>

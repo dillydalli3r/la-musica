@@ -169,7 +169,40 @@ def _aggregate_albums(albums_data):
     }
 
 
-def build_album(album_dir, cfg):
+def _album_artwork(album_dir, light=False):
+    """Stored description metadata for an album folder.
+
+    `light` (the library payload, which covers every album in one response)
+    only answers "does a description exist?" — cheaply, from the file's size,
+    without reading the text or touching the shared provenance map. The album
+    page asks for the full payload instead.
+    """
+    if light:
+        try:
+            from mlo import artistdata
+            path = artistdata.description_path(album_dir)
+            present = bool(os.path.isfile(path) and os.path.getsize(path) > 0)
+        except Exception:
+            present = False
+        return {"description": bool(present), "description_text": None,
+                "description_source": None, "description_url": None}
+    try:
+        from mlo import artistdata
+        present = artistdata.has_description(album_dir)
+        text = (artistdata.read_description(album_dir) or "") if present else ""
+        provenance = artistdata.read_provenance(album_dir)
+    except Exception:
+        present, text, provenance = False, "", {}
+    return {
+        "description": bool(present),
+        "description_text": (text.strip() or None) if present else None,
+        "description_source": (provenance.get("description_source")
+                               or provenance.get("source")) if present else None,
+        "description_url": provenance.get("description_source_url") if present else None,
+    }
+
+
+def build_album(album_dir, cfg, light=False):
     """Grade + enrich a single album. Returns the enriched dict or None."""
     res = _grade_album(album_dir, str(cfg.get("lyrics_format", "EMBEDDED")).upper(), cfg)
     if res is None:
@@ -177,12 +210,14 @@ def build_album(album_dir, cfg):
     if "error" in res:
         res["path"] = album_dir.replace("\\", "/")
         res["tracks"] = []
+        res["artwork"] = _album_artwork(album_dir, light=True)
         return res
     res["path"] = res["path"].replace("\\", "/")
     for tr in res.get("tracks", []):
         _enrich_track(tr, album_dir)
     res["meta"] = _album_meta(album_dir, res.get("tracks", []))
     _add_expected_tracks(res, album_dir)
+    res["artwork"] = _album_artwork(album_dir, light=light)
     tc = res.get("total_checks", 0)
     res["grade_pct"] = round(100.0 * res.get("pass_count", 0) / tc, 1) if tc else None
     res["pass"] = res.get("pass_count", 0) == tc and tc > 0
@@ -217,13 +252,15 @@ def _add_expected_tracks(res, album_dir):
     res["partial"] = any(r["missing"] for r in rows)
 
 
-def build_albums_parallel(album_dirs, cfg):
+def build_albums_parallel(album_dirs, cfg, light=False):
     """Grade a list of album dirs concurrently, preserving order.
 
     Grading is mostly file I/O + image decode (Pillow releases the GIL),
     so a small thread pool cuts full-library scan time roughly by the
     worker count. Errors become {"path": ..., "error": ...} placeholders
-    so one bad folder never hides the rest of the library.
+    so one bad folder never hides the rest of the library. `light` is passed
+    through to `build_album` (the library payload only needs to know whether
+    a description exists, not its text).
     """
     workers = worker_count(cfg, default=min(8, os.cpu_count() or 1),
                            items=len(album_dirs))
@@ -231,7 +268,7 @@ def build_albums_parallel(album_dirs, cfg):
         results = []
         for alb in album_dirs:
             try:
-                a = build_album(alb, cfg)
+                a = build_album(alb, cfg, light=light)
                 results.append(a if a is not None else
                                {"path": alb.replace("\\", "/"), "error": "no audio files", "tracks": []})
             except Exception as e:
@@ -242,7 +279,7 @@ def build_albums_parallel(album_dirs, cfg):
 
     def _one(i, alb):
         try:
-            a = build_album(alb, cfg)
+            a = build_album(alb, cfg, light=light)
             results[i] = a if a is not None else {
                 "path": alb.replace("\\", "/"), "error": "no audio files", "tracks": []}
         except Exception as e:
@@ -254,18 +291,28 @@ def build_albums_parallel(album_dirs, cfg):
     return results
 
 
+def library_cache_key(cfg):
+    """The tagcache key for a library payload.
+
+    Exposed so callers that need the same payload (the discovery routes
+    matching owned albums, "more like this" exclusions) read the SAME cache
+    entry instead of building the tree a second time under their own key.
+    """
+    return (
+        cfg.get("music_folder") or "",
+        cfg.get("lyrics_format"),
+        cfg.get("worker_limit"),
+        cfg.get("short_folder_names"),
+    )
+
+
 def build_library(cfg, progress=None):
     """Full library tree with artist/album/track aggregates (TTL-cached)."""
     folder = cfg.get("music_folder") or ""
     if not folder or not os.path.isdir(folder):
         return {"folder": folder, "artists": [], "error": "music_folder not set or not found"}
 
-    cfg_key = (
-        folder,
-        cfg.get("lyrics_format"),
-        cfg.get("worker_limit"),
-        cfg.get("short_folder_names"),
-    )
+    cfg_key = library_cache_key(cfg)
 
     def _build():
         albums = _find_albums(folder)
@@ -278,7 +325,7 @@ def build_library(cfg, progress=None):
         for i, (artist_dir, alb_list) in enumerate(sorted(artists.items())):
             if progress:
                 progress(i + 1, total, "Scanning library")
-            albums_data = build_albums_parallel(sorted(alb_list), cfg)
+            albums_data = build_albums_parallel(sorted(alb_list), cfg, light=True)
             agg = _aggregate_albums(albums_data)
             result.append({
                 "path": artist_dir.replace("\\", "/"),

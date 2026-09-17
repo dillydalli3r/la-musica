@@ -82,7 +82,7 @@ export function parseLrc(lrc: string): LrcLine[] {
       });
     }
   }
-  // sort + drop exact duplicates (LRCLIB occasionally repeats lines)
+  // sort + drop exact duplicates (a provider may repeat lines)
   lines.sort((a, b) => a.time - b.time);
   const seen = new Set<string>();
   return lines.filter((l) => {
@@ -559,7 +559,7 @@ export default function LyricsViewer({
           toast("Track needs ARTIST and TITLE tags for candidate lookup");
           return;
         }
-        toast("Fetching LRCLIB candidates…");
+        toast("Fetching lyrics candidates…");
         let candidates: string[] = [];
         try {
           const hits = await api.lyricsSearch(artist, track, album, duration);
@@ -586,7 +586,7 @@ export default function LyricsViewer({
     }
   };
 
-  const importFromLrclib = async () => {
+  const importFromProviders = async () => {
     if (!artist || !track) {
       toast("Track needs ARTIST and TITLE tags first");
       return;
@@ -603,10 +603,11 @@ export default function LyricsViewer({
             ? hits.map((h) => ({ id: h.id, artist: String(h.artist ?? ""), track: String(h.track ?? ""), duration: h.duration ? Number(h.duration) : undefined }))
             : []
         );
-        if (!hits?.length) toast("No lyrics found on LRCLIB");
+        if (!hits?.length) toast("No lyrics found in any provider");
         return;
       }
-      applyImport(lrc, "Imported from LRCLIB");
+      const from = res?.provider_label ? `Imported from ${res.provider_label}` : "Imported";
+      applyImport(lrc, from);
     } catch (e) {
       toast(String(e));
     } finally {
@@ -637,7 +638,7 @@ export default function LyricsViewer({
       const res = await api.lyricsGet(hit.artist, hit.track, undefined, hit.duration);
       const lrc = res?.syncedLyrics ?? res?.plainLyrics;
       if (!lrc) {
-        toast("That result has no lyrics on LRCLIB");
+        toast("That result has no lyrics");
         return;
       }
       applyImport(lrc, `Imported "${hit.artist} — ${hit.track}"`);
@@ -663,8 +664,8 @@ export default function LyricsViewer({
             {playing ? <Square className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
             {playing ? "Stop" : "Preview"}
           </button>
-          <button className="btn-ghost !py-1 text-xs" onClick={importFromLrclib} disabled={loading}>
-            <CloudDownload className="h-3.5 w-3.5" /> LRCLIB
+          <button className="btn-ghost !py-1 text-xs" onClick={importFromProviders} disabled={loading}>
+            <CloudDownload className="h-3.5 w-3.5" /> Auto-import
           </button>
           {onEnhancedEditor && (
             <button
@@ -726,7 +727,7 @@ export default function LyricsViewer({
                 </button>
                 <button className="w-full text-left text-xs px-2 py-1.5 rounded-md hover:bg-white/10 flex items-center gap-2" onClick={() => runAi("repair")}>
                   <Eraser className="h-3.5 w-3.5 text-accent" />
-                  <span>Repair from LRCLIB candidates<span className="block text-zinc-500 text-[10px]">fill missing lines (LLM)</span></span>
+                  <span>Repair from lyrics candidates<span className="block text-zinc-500 text-[10px]">fill missing lines (LLM)</span></span>
                 </button>
               </div>
               </>
@@ -807,7 +808,7 @@ export default function LyricsViewer({
       {searchHits && (
         <div className="rounded-md border border-border bg-panel p-3 mb-2">
           <div className="text-[11px] text-zinc-400 mb-1.5">
-            {searchHits.length ? "Multiple matches — pick one:" : "No exact match — nothing found on LRCLIB."}
+            {searchHits.length ? "Multiple matches — pick one:" : "No exact match — nothing found in any provider."}
           </div>
           {searchHits.length > 0 && (
             <div className="space-y-1 max-h-40 overflow-auto">
@@ -839,7 +840,7 @@ export default function LyricsViewer({
         <div className="text-sm text-zinc-500 py-10 text-center">
           No lyrics yet. Press <kbd className="chip bg-raise border border-border">Play</kbd>, then select a line and
           press <kbd className="chip bg-raise border border-border">{keys.stampLine}</kbd> on each line to stamp its
-          timestamp — or import from LRCLIB / use the AI menu.
+          timestamp — or auto-import lyrics / use the AI menu.
         </div>
       ) : (
         <div

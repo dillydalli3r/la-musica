@@ -1,11 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle, ArrowDownToLine, Disc3, FolderInput, FolderOpen, RefreshCw, Trash2, X,
 } from "lucide-react";
 import { api } from "../api";
 import { toast } from "../store";
-import type { DownloadEntry } from "../types";
+import type { DownloadEntry, ImportBulkJob } from "../types";
 
 /** Human byte size. Local deliberately: the player bar's formatter is tuned for
  *  audio readouts, and these are multi-GB folder totals. */
@@ -32,12 +32,31 @@ export default function DownloadsPage() {
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  /** The bulk job an import of 2+ entries runs (null = none). */
+  const [bulkJob, setBulkJob] = useState<ImportBulkJob | null>(null);
 
   const { data, isLoading, isFetching, refetch } = useQuery({
     queryKey: ["downloads"],
     queryFn: api.downloads,
     refetchInterval: 15000,
   });
+
+  // Poll the bulk queue while it runs; done/failed stops the poll.
+  useEffect(() => {
+    if (bulkJob?.status !== "running") return;
+    const timer = setInterval(() => {
+      api.importBulkStatus()
+        .then((job) => {
+          setBulkJob(job);
+          if (job.status !== "running") {
+            qc.invalidateQueries({ queryKey: ["downloads"] });
+            qc.invalidateQueries({ queryKey: ["library"] });
+          }
+        })
+        .catch(() => setBulkJob(null)); // server restarted: nothing to poll
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [bulkJob?.status, qc]);
 
   const entries: DownloadEntry[] = data?.entries ?? [];
   const totals = useMemo(
@@ -70,22 +89,30 @@ export default function DownloadsPage() {
   };
 
   const doImport = async () => {
-    if (!liveSelection.length) return;
+    if (!liveSelection.length || !data?.folder) return;
     setBusy(true);
     try {
-      const res = await api.downloadsImport(liveSelection);
-      const ok = res.moved.length;
-      after(
-        res.failed.length
-          ? `Imported ${ok} — ${res.failed.length} failed: ${res.failed.map((f) => `${f.name} (${f.error})`).join(", ")}`
-          : `Imported ${ok} album(s) into the library`
+      // ONE entry or several: same route. The bulk queue moves each entry into
+      // the library AND runs the configured import chain on it — a single
+      // entry used to take the move-only route and silently skip the chain.
+      const job = await api.importBulk(
+        liveSelection.map((name) => ({ path: `${data.folder}/${name}`, move: true }))
       );
+      if (job.ok && job.job) {
+        setBulkJob(job.job);
+        setSel(new Set());
+        toast(`Importing ${liveSelection.length} entr${liveSelection.length === 1 ? "y" : "ies"} — progress below`);
+      } else {
+        toast(`Queue import: ${job.error ?? "could not start"}`);
+      }
     } catch (e) {
       toast(String(e));
     } finally {
       setBusy(false);
     }
   };
+
+  const bulkFailed = (bulkJob?.items ?? []).filter((r) => r.status === "failed");
 
   const doDelete = async () => {
     if (!liveSelection.length) return;
@@ -133,6 +160,42 @@ export default function DownloadsPage() {
         </div>
       )}
 
+      {/* Bulk import (2+ entries): per-album progress of the queue. */}
+      {bulkJob?.status === "running" && (
+        <div className="bg-card rounded-lg border border-border px-3 py-2 space-y-1.5">
+          <div className="flex items-center gap-2 text-xs">
+            <span className="h-3 w-3 rounded-full border-2 border-zinc-700 border-t-accent-soft animate-spin shrink-0" />
+            <span className="flex-1 truncate text-zinc-300" title={bulkJob.label}>
+              {bulkJob.label || "Importing…"}
+            </span>
+            <span className="text-zinc-500 font-mono tabular-nums shrink-0">
+              {bulkJob.done ?? 0}/{bulkJob.total ?? 0}
+            </span>
+          </div>
+          <div className="h-1.5 rounded-sm bg-raise overflow-hidden">
+            <div
+              className="h-full bg-gradient-to-r from-accent to-indigo-500 transition-all duration-300"
+              style={{
+                width: `${bulkJob.total ? Math.min(100, ((bulkJob.done ?? 0) / bulkJob.total) * 100) : 0}%`,
+              }}
+            />
+          </div>
+          <div className="text-[10px] text-zinc-500">
+            Importing moves each entry into the library and runs the configured import chain on it.
+          </div>
+        </div>
+      )}
+
+      {bulkFailed.length > 0 && (
+        <div className="bg-card rounded-lg border border-red-900/60 px-3 py-2 text-xs text-red-300 space-y-0.5">
+          {bulkFailed.map((r) => (
+            <div key={r.path} className="truncate" title={`${r.path} — ${r.error}`}>
+              {r.path.split(/[\\/]/).pop()} — {r.error}
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Nothing to work with: the folder is created by the app on first use,
           so an absent one is normal on a fresh install, not an error. */}
       {!isLoading && !data?.exists && (
@@ -163,9 +226,14 @@ export default function DownloadsPage() {
               className="btn-primary !py-1 text-xs"
               onClick={doImport}
               disabled={busy || !liveSelection.length}
-              title="Move the selected entries into the library as albums"
+              title={
+                liveSelection.length > 1
+                  ? "Move the selected entries into the library and run the import chain on each"
+                  : "Move the selected entry into the library and run the import chain on it"
+              }
             >
-              <FolderInput className="h-3.5 w-3.5" /> Import to library
+              <FolderInput className="h-3.5 w-3.5" />{" "}
+              {liveSelection.length > 1 ? `Import ${liveSelection.length} (queue)` : "Import to library"}
             </button>
             {confirmDelete ? (
               <>
@@ -238,8 +306,9 @@ export default function DownloadsPage() {
 
       {entries.length > 0 && (
         <div className="text-[10px] text-zinc-600">
-          Import moves an entry into the library as its own album named after the folder. Delete removes it
-          from disk for good — nothing here is copied to the trash bin first.
+          Import moves an entry into the library as its own album named after the folder and runs the
+          configured import chain on it (Settings → Import); several entries are just a queue of that.
+          Delete removes it from disk for good — nothing here is copied to the trash bin first.
         </div>
       )}
     </div>

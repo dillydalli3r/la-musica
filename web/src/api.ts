@@ -1,4 +1,29 @@
-import type { CoverInfo, CoverSourceCatalog, CoverWriteResult, DownloadsPayload, LayoutReport } from "./types";
+import type {
+  AcoustidMatch,
+  ArtistArtwork,
+  ArtistArtworkDescription,
+  ArtistArtworkImage,
+  CoverInfo,
+  CoverSourceCatalog,
+  CoverWriteResult,
+  DiscoveryAlbumDetail,
+  DiscoveryCatalog,
+  DiscoveryImageRow,
+  DiscoveryRow,
+  DiscoverySearch,
+  DownloadsPayload,
+  HomeData,
+  ImportBulkJob,
+  ImportBulkResult,
+  ImportScriptsPreview,
+  LayoutReport,
+  LyricsAutoResult,
+  LyricsHit,
+  LyricsProviders,
+  ScriptRunResult,
+  Wish,
+  WishesPayload,
+} from "./types";
 
 // In the Tauri desktop shell the frontend is served from tauri://localhost,
 // so relative /api paths cannot reach the Python backend — use absolute.
@@ -299,10 +324,12 @@ export const api = {
     `${API}/videos/subtitle?path=${encodeURIComponent(path)}${sidecar ? `&sidecar=${encodeURIComponent(sidecar)}` : ""}${typeof n === "number" && n >= 0 ? `&n=${n}` : ""}`,
   // Read-only tag view (tag writing was removed; grading scripts own writes).
   tags: (path: string) => json<any>(`${API}/tags?path=${encodeURIComponent(path)}`),
-  // ReplayGain preamp for playback loudness matching (null when untagged).
-  replaygain: (path: string) =>
-    json<{ path: string; gain: number | null; peak: number | null }>(
-      `${API}/replaygain?path=${encodeURIComponent(path)}`
+  // ReplayGain for playback loudness matching. `mode` overrides the saved
+  // replaygain_mode for one call (track/album/off); `analyzed` is true when
+  // the gain had to be measured on the fly because the tags were missing.
+  replaygain: (path: string, mode?: "track" | "album" | "off") =>
+    json<{ path: string; gain: number | null; peak: number | null; mode: string; source: string | null; analyzed: boolean }>(
+      `${API}/replaygain?path=${encodeURIComponent(path)}${mode ? `&mode=${mode}` : ""}`
     ),
   lyricsEmbed: (path: string, lyrics: string) =>
     json<{ ok: boolean }>(`${API}/lyrics/embed`, {
@@ -331,12 +358,17 @@ export const api = {
       `${API}/cover/info?album=${encodeURIComponent(albumPath)}${coverFile ? `&file=${encodeURIComponent(coverFile)}` : ""}`
     ),
 
+  // Scripts run synchronously on the server, so the client must wait far
+  // longer than the shared 20 s default: a single album's chain (mood
+  // analysis, lyrics, beets, rsgain, audit, grade) legitimately takes
+  // minutes, and aborting would hide the per-script report behind a
+  // client-side timeout while the server kept working.
   run: (ids: number[], targets?: string[], force?: Record<string, boolean>) =>
-    json<{ results: any[] }>(`${API}/run`, {
+    json<{ results: ScriptRunResult[] }>(`${API}/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ids, targets, force }),
-    }),
+    }, 3600000),
 
   // playlists
   playlists: () => json<import("./types").Playlist[]>(`${API}/playlists`),
@@ -835,15 +867,15 @@ export const api = {
     json<any>(`${API}/soulseek/user/${encodeURIComponent(username)}`, undefined, 30000),
 
   // Wishes — MusicBrainz releases saved now, auto-filled from Soulseek later
-  wishes: () => json<import("./types").WishesPayload>(`${API}/wishes`, undefined, 30000),
+  wishes: () => json<WishesPayload>(`${API}/wishes`, undefined, 30000),
   wishAdd: (body: { release_mbid: string; title?: string; artist?: string; year?: string; note?: string; target_dir?: string; queries?: string[] }) =>
-    json<{ ok: boolean; wish: import("./types").Wish }>(`${API}/wishes`, {
+    json<{ ok: boolean; wish: Wish }>(`${API}/wishes`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }, 60000),
   wishUpdate: (id: number, patch: { note?: string; target_dir?: string; status?: string; queries?: string[] }) =>
-    json<{ ok: boolean; wish: import("./types").Wish }>(`${API}/wishes/${id}`, {
+    json<{ ok: boolean; wish: Wish }>(`${API}/wishes/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch),
@@ -854,5 +886,192 @@ export const api = {
   wishesReconcile: () => json<{ ok: boolean; resolved: number }>(`${API}/wishes/reconcile`, { method: "POST" }, 120000),
 
   // Home page (recommendations + highlights)
-  home: () => json<import("./types").HomeData>(`${API}/home`, undefined, 60000),
+  home: () => json<HomeData>(`${API}/home`, undefined, 60000),
+
+  // ----------------------------------------------------------------- //
+  // Discovery — recommendations, catalogue search, more-like-this.     //
+  // Provider order and fallbacks live server-side; these calls just    //
+  // ask for rows (see server/discovery.py).                            //
+  // ----------------------------------------------------------------- //
+  discoverySources: () => json<DiscoveryCatalog>(`${API}/discovery/sources`),
+  discoverySearch: (
+    q: string,
+    type: "album" | "artist" = "album",
+    limit = 25,
+    opts?: { artist?: string; album?: string; source?: string }
+  ) => {
+    const p = new URLSearchParams({ q, type, limit: String(limit) });
+    if (opts?.artist) p.set("artist", opts.artist);
+    if (opts?.album) p.set("album", opts.album);
+    if (opts?.source) p.set("source", opts.source);
+    return json<DiscoverySearch>(`${API}/discovery/search?${p}`, undefined, 45000);
+  },
+  discoveryAlbum: (deezerId: number, resolve = false) =>
+    json<DiscoveryAlbumDetail>(
+      `${API}/discovery/album?deezer_id=${deezerId}${resolve ? "&resolve=1" : ""}`,
+      undefined,
+      45000
+    ),
+  discoveryPopular: (limit = 12, range = "week") =>
+    json<{ rows: DiscoveryRow[]; range: string }>(
+      `${API}/discovery/popular?limit=${limit}&range=${range}`,
+      undefined,
+      45000
+    ),
+  discoverySimilar: (
+    kind: "album" | "track" | "artist",
+    artist: string,
+    opts?: { title?: string; album?: string; mbid?: string; limit?: number }
+  ) => {
+    const p = new URLSearchParams({ kind, artist, limit: String(opts?.limit ?? 12) });
+    if (opts?.title) p.set("title", opts.title);
+    if (opts?.album) p.set("album", opts.album);
+    if (opts?.mbid) p.set("mbid", opts.mbid);
+    return json<{ kind: string; artist: string; rows: DiscoveryRow[] }>(
+      `${API}/discovery/similar?${p}`, undefined, 45000
+    );
+  },
+  /** Turn a discovery row into a Soulseek wish (MusicBrainz-resolved when the
+   *  row has no MBID yet). */
+  discoveryWish: (body: { artist: string; title: string; year?: string; note?: string; mbid?: string }) =>
+    json<{ ok: boolean; wish: Wish; resolved: DiscoveryRow | null }>(
+      `${API}/discovery/wish`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      45000
+    ),
+
+  // ----------------------------------------------------------------- //
+  // Artist artwork + descriptions, album descriptions                  //
+  // ----------------------------------------------------------------- //
+  /** `artist` accepts the artist folder path (from the artist payload) or a
+   *  plain artist name. */
+  artistArtwork: (artist: string) =>
+    json<ArtistArtwork>(`${API}/artist/artwork?artist=${encodeURIComponent(artist)}`),
+  artistImageUrl: (artist: string) => `${API}/artist/image?artist=${encodeURIComponent(artist)}`,
+  artistImageCandidates: (artist: string) =>
+    json<{ artist: string; rows: DiscoveryImageRow[] }>(
+      `${API}/artist/image/candidates?artist=${encodeURIComponent(artist)}`, undefined, 45000
+    ),
+  artistImageSave: (artist: string, url = "", source = "") =>
+    json<{ ok: boolean; file: string; source: string; source_url: string; image: ArtistArtworkImage }>(
+      `${API}/artist/image`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ artist, url, source }),
+      },
+      60000
+    ),
+  artistImageUpload: (artist: string, file: File) => {
+    const fd = new FormData();
+    fd.append("artist", artist);
+    fd.append("file", file);
+    return json<{ ok: boolean; file: string; image: ArtistArtworkImage }>(
+      `${API}/artist/image/upload`,
+      { method: "POST", body: fd },
+      60000
+    );
+  },
+  artistImageClear: (artist: string) =>
+    json<{ ok: boolean }>(`${API}/artist/image?artist=${encodeURIComponent(artist)}`, { method: "DELETE" }),
+  artistDescriptionSave: (artist: string, text = "") =>
+    json<{ ok: boolean; source: string | null; text: string; description: ArtistArtworkDescription }>(
+      `${API}/artist/description`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ artist, text }),
+      },
+      45000
+    ),
+  artistDescriptionClear: (artist: string) =>
+    json<{ ok: boolean }>(`${API}/artist/description?artist=${encodeURIComponent(artist)}`, { method: "DELETE" }),
+  albumDescriptionSave: (path: string, text = "", artist = "", album = "") =>
+    json<{ ok: boolean; source: string | null; text: string }>(
+      `${API}/album/description`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path, text, artist, album }),
+      },
+      45000
+    ),
+  albumDescriptionClear: (path: string) =>
+    json<{ ok: boolean }>(`${API}/album/description?path=${encodeURIComponent(path)}`, { method: "DELETE" }),
+
+  // ----------------------------------------------------------------- //
+  // Lyrics — provider chain (LRCLIB → NetEase → lyrics.ovh → Kugou)   //
+  // ----------------------------------------------------------------- //
+  lyricsProviders: () => json<LyricsProviders>(`${API}/lyrics/providers`),
+  /** Auto-import lyrics for one or more tracks through the provider chain.
+   *  Set force to re-fetch a track that already has lyrics. */
+  lyricsAuto: (paths: string[], force = false) =>
+    json<{ results: LyricsAutoResult[]; order: string[]; ok: number; skipped: number; failed: number }>(
+      `${API}/lyrics/auto`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths, force }),
+      },
+      120000
+    ),
+  lyricsFind: (artist: string, title: string, album = "", duration = 0) => {
+    const p = new URLSearchParams({ artist, title });
+    if (album) p.set("album", album);
+    if (duration) p.set("duration", String(duration));
+    return json<LyricsHit>(`${API}/lyrics/find?${p}`, undefined, 45000);
+  },
+
+  // ----------------------------------------------------------------- //
+  // Import — AcoustID matching, script chain, bulk queue               //
+  // ----------------------------------------------------------------- //
+  /** Fingerprint an album (folder or track paths) and return the MusicBrainz
+   *  release group the audio actually is. `apply` also writes the accepted
+   *  match's identity tags (ACOUSTID_ID / ACOUSTID_FINGERPRINT) into the files. */
+  importAcoustid: (paths: string[], apply = false) =>
+    json<AcoustidMatch>(
+      `${API}/import/acoustid`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths, apply }),
+      },
+      600000
+    ),
+  /** Run the configured import script chain over already-imported albums. */
+  importFinish: (paths: string[], force: Record<string, boolean> = {}) =>
+    json<{ albums: { path: string; chain: number[]; scripts: unknown[]; errors: unknown[] }[] }>(
+      `${API}/import/finish`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths, force }),
+      },
+      1800000
+    ),
+  /** Bulk import: move several staged albums into the library at once. */
+  importBulk: (items: { path: string; move?: boolean; release?: Record<string, unknown> }[]) =>
+    json<ImportBulkResult>(
+      `${API}/import/bulk`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items }),
+      },
+      60000
+    ),
+  importBulkStatus: () => json<ImportBulkJob>(`${API}/import/bulk/status`),
+  importScriptsPreview: (paths: string[] = []) =>
+    json<ImportScriptsPreview>(
+      `${API}/import/scripts/preview`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths }),
+      }
+    ),
 };

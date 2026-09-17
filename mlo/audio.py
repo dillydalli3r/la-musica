@@ -108,6 +108,28 @@ TAG_MAP = {
         "mp3": ("TXXX", "INITIALKEY"),
         "mp4": ("freeform", "com.apple.iTunes", "INITIALKEY"),
     },
+    # Mood word computed by script 8 (see mlo.moods) — same freeform/TXXX
+    # shape as INITIALKEY, so MP3/MP4 carry a real frame instead of the
+    # synthetic one set_any_tag would invent.
+    "MOOD": {
+        "flac": "MOOD",
+        "mp3": ("TXXX", "MOOD"),
+        "mp4": ("freeform", "com.apple.iTunes", "MOOD"),
+    },
+    # AcoustID identity (Picard-compatible). Written during import when a
+    # fingerprint match is accepted; graded only when a file already carries
+    # one of the two, so a library that never fingerprinted anything is never
+    # failed for their absence.
+    "ACOUSTID_ID": {
+        "flac": "ACOUSTID_ID",
+        "mp3": ("TXXX", "ACOUSTID_ID"),
+        "mp4": ("freeform", "com.apple.iTunes", "ACOUSTID_ID"),
+    },
+    "ACOUSTID_FINGERPRINT": {
+        "flac": "ACOUSTID_FINGERPRINT",
+        "mp3": ("TXXX", "ACOUSTID_FINGERPRINT"),
+        "mp4": ("freeform", "com.apple.iTunes", "ACOUSTID_FINGERPRINT"),
+    },
     # Classical work/movement (Picard-compatible: ID3 MVNM/MVIN, TXXX:WORK)
     "WORK": {
         "flac": "WORK",

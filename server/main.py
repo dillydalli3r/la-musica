@@ -17,6 +17,7 @@ import pathlib
 import tempfile
 from contextlib import asynccontextmanager
 from typing import List, Optional
+from urllib.parse import quote
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -39,6 +40,10 @@ from server import playlists as pl_mod
 from server import integrations as intg
 from server import tagcache
 from server import exporter
+from server import api_discovery
+from server import api_imports
+from server import api_lyrics
+from server import discovery
 from mlo.paths import (SKIP_DIRS, clear_track_covers, downloads_dir,
                        library_root, load_track_covers, move_path,
                        save_track_covers, set_track_covers, trash_dir)
@@ -109,6 +114,21 @@ app.add_middleware(
 # The /api/library payload is large (every track's tags + grading details);
 # gzip cuts it ~10x for a cheap first-paint win on big libraries.
 app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+# Feature routers live in their own modules (discovery/artwork/lyrics/import)
+# so each provider layer stays independently testable; main.py only wires
+# them. They are included here, right after the middleware, before the rest
+# of the app's own routes.
+app.include_router(api_discovery.router)
+app.include_router(api_imports.router)
+app.include_router(api_lyrics.router)
+
+# Script 8 (Auto tagging) writes MOOD from the audio itself and fills a
+# missing GENRE through a provider hook its caller supplies — the engine
+# never imports this layer. Registering the discovery chain here means a
+# library-wide Auto tagging run gets genres exactly like the import pipeline.
+from mlo import autotag as _autotag  # noqa: E402
+_autotag.set_genre_lookup(discovery.genre_lookup)
 
 # --------------------------------------------------------------------------- #
 # Progress relay (WebSocket + original hook)
@@ -274,6 +294,17 @@ def set_config(cfg: dict):
     ok = save_config(cfg)
     if not ok:
         raise HTTPException(500, "Failed to save config")
+    # A settings change can alter what the recommendation shelf and the
+    # discovery chains return (source order, counts, providers on/off), and
+    # the library payload carries grading results that depend on the grader
+    # toggles — drop both caches so the next read reflects the new config
+    # instead of up to 15 minutes of stale rows.
+    try:
+        from server import recommendations
+        recommendations.invalidate()
+    except Exception:
+        pass
+    tagcache.invalidate_all()
     return load_config()
 
 
@@ -632,12 +663,46 @@ def get_artist(path: str = Query(...)):
     # Display name: the tag-derived artist (folders carry an MBID suffix).
     display_name = next((a.get("album_artist") for a in albums_data
                          if a.get("album_artist")), None)
+    # Artwork the app itself stores for the artist (see mlo/artistdata):
+    # the image, the description, and the artist-level grade that watches
+    # for both. A failure here must not take the whole artist page down.
+    image_file = None
+    description = ""
+    provenance = {}
+    try:
+        from mlo import artistdata
+        description = artistdata.read_description(p) or ""
+        image_file = os.path.basename(artistdata.image_path(p) or "") or None
+        provenance = artistdata.read_provenance(p)
+    except Exception:
+        pass
+    try:
+        from mlo import grader
+        grade = grader.grade_artist(p, cfg)
+    except Exception as e:
+        grade = {"error": str(e)}
     return {
         "path": p.replace("\\", "/"),
         "name": os.path.basename(p),
         "display_name": display_name,
         "albums": albums_data,
         "aggregate": lib_mod._aggregate_albums(albums_data),
+        "artwork": {
+            "image": bool(image_file),
+            "image_file": image_file,
+            "image_url": (f"/api/artist/image?artist={quote(p.replace(chr(92), '/'))}"
+                          if image_file else None),
+            "description": description.strip() or None,
+            "description_source": provenance.get("description_source") or provenance.get("source"),
+            "description_url": provenance.get("description_source_url"),
+            "provenance": provenance,
+            # May the app fetch these on the user's behalf? (Settings →
+            # Artist images & descriptions.) The UI greys its Fetch actions
+            # when off rather than letting the request 403.
+            "auto_image": bool(cfg.get("artist_image_enabled", True)),
+            "auto_description": bool(cfg.get("artist_description_enabled", True)),
+        },
+        "grade": grade,
     }
 
 
@@ -894,31 +959,33 @@ def get_tags(path: str = Query(...)):
 
 
 @app.get("/api/replaygain")
-def get_replaygain(path: str = Query(...)):
-    """ReplayGain preamp (track gain in dB) for one track. The player applies
-    it in its WebAudio gain stage so loudness stays even between tracks —
-    it is playback metadata, deliberately not surfaced as a column."""
-    from mlo.audio import AudioFile
+def get_replaygain(path: str = Query(...), mode: str = Query("")):
+    """ReplayGain for one track: the gain the player should apply, in dB.
+
+    The player applies this in its WebAudio gain stage so loudness stays even
+    between tracks — it is playback metadata, deliberately not surfaced as a
+    column. `mode` (track/album/off) overrides the saved `replaygain_mode`
+    for one request; album mode prefers REPLAYGAIN_ALBUM_GAIN and falls back
+    to the track value. A file whose tags carry no ReplayGain is measured on
+    the spot (ffmpeg EBU R128) and cached under `.mlo/data/replaygain.json`,
+    so a library that was never run through script 7 still plays level.
+    """
+    from mlo import loudness
 
     p = os.path.normpath(mbresolve.resolve_track(path) or path)
     if not os.path.isfile(p):
         raise HTTPException(404, "file not found")
     if not _in_music_folder(p, _music_folder()):
         raise HTTPException(400, "file outside music folder")
-    af = AudioFile(p)
-    if af.audio is None:
-        raise HTTPException(500, af.error or "unreadable")
-
-    def _num(v):
-        try:
-            return float(str(v).lower().replace("db", "").strip())
-        except (TypeError, ValueError):
-            return None
-
+    cfg = load_config()
+    res = loudness.replaygain_for_path(cfg, p, mode=(mode or None))
     return {
         "path": p.replace("\\", "/"),
-        "gain": _num(af.get_tag("REPLAYGAIN_TRACK_GAIN")),
-        "peak": _num(af.get_tag("REPLAYGAIN_TRACK_PEAK")),
+        "gain": res.get("gain"),
+        "peak": res.get("peak"),
+        "mode": res.get("mode"),
+        "source": res.get("source"),
+        "analyzed": bool(res.get("analyzed")),
     }
 
 
@@ -1818,107 +1885,55 @@ def lyrics_xlit_store(req: TrackPathRequest):
 # Run scripts
 # --------------------------------------------------------------------------- #
 # Scripts mutate the library in place, so two overlapping runs (double-clicked
-# Run, or an import-triggered organize landing on a UI run) would fight over
-# the same files. Non-blocking: the second caller gets 409 instead of queueing.
-_run_lock = threading.Lock()
-
-
+# Run, or an import-triggered chain landing on a UI run) would fight over the
+# same files. The lock itself lives in server.script_runners, because the
+# import pipeline and the bulk queue run the same scripts; a second caller
+# gets 409 instead of queueing.
 @app.post("/api/run")
 def run_scripts(req: RunRequest):
-    if not _run_lock.acquire(blocking=False):
-        raise HTTPException(409, "a script run is already in progress")
+    from server import script_runners
     try:
         return _run_scripts(req)
-    finally:
-        _run_lock.release()
+    except script_runners.RunBusy as e:
+        raise HTTPException(409, str(e))
 
 
 def _run_scripts(req: RunRequest):
-    from mlo import (
-        run_format_lyrics, run_format_cues, run_optimize_flacs, run_grade_library,
-        run_process_images, run_audit_library, run_auto_tagging,
-    )
-    from mlo.loudness import run_calc_dr_replaygain
-    try:
-        from mlo.accurip import run_generate_accurip
-    except ImportError:
-        run_generate_accurip = None
-    try:
-        from mlo.format_all import run_format_all
-    except ImportError:
-        run_format_all = None
-    try:
-        from mlo.remux import run_remux_videos
-    except ImportError:
-        run_remux_videos = None
-    try:
-        from mlo.audiometa import run_analyze_audiometa
-    except ImportError:
-        run_analyze_audiometa = None
-    try:
-        from mlo.lyrics_fetch import run_fetch_lyrics
-    except ImportError:
-        run_fetch_lyrics = None
-    try:
-        from mlo.lyrics_xlit import run_lyrics_xlit
-    except ImportError:
-        run_lyrics_xlit = None
-    try:
-        from server.beetscfg import run_beets_tagging
-    except ImportError:
-        run_beets_tagging = None
+    """Run the requested scripts (ids in request order) against the library.
 
-    RUNNERS = {
-        1: run_format_lyrics, 2: run_format_cues, 3: run_optimize_flacs,
-        4: run_grade_library, 5: run_process_images, 6: run_audit_library,
-        7: run_calc_dr_replaygain, 8: run_auto_tagging, 9: run_generate_accurip,
-        10: run_format_all, 11: run_remux_videos, 12: run_analyze_audiometa,
-        13: run_fetch_lyrics, 14: run_beets_tagging, 15: run_lyrics_xlit,
-    }
+    The id → runner registry lives in `server.script_runners` so the import
+    pipeline, the bulk queue and the Soulseek auto-importer run the exact same
+    scripts; this handler is the HTTP shell around it (target scoping, force
+    semantics, cache invalidation, progress).
+    """
+    from server import script_runners
+
     cfg = load_config()
     if req.targets:
         cfg["targets"] = [os.path.normpath(t) for t in req.targets]
     # Per-script options default from saved config; the request can override.
-    # A *supplied* force dict is authoritative and complete: the UI's one-shot
-    # Force switch sends every checked key, so an unchecked key must turn the
-    # force off rather than fall back to a saved-on config value. Only a
-    # request that omits `force` entirely falls back to the saved Settings.
+    # A *supplied* force dict is authoritative and complete (see
+    # script_runners._apply_force): the UI's one-shot Force switch sends every
+    # checked key, so an unchecked key must turn the force off rather than
+    # fall back to a saved-on config value.
     f = req.force or {}
-    oneshot = req.force is not None
-    if oneshot:
-        cfg["force_reencode_flac"] = bool(f.get("flac", False))
-        cfg["force_reencode_images"] = bool(f.get("images", False))
-        cfg["force_audit"] = bool(f.get("audit", False))
-        cfg["force_lyrics"] = bool(f.get("lyrics", False))
-        cfg["force_cue"] = bool(f.get("cue", False))
-        cfg["force_dr_replaygain"] = bool(f.get("dr", False))
-        cfg["force_auto_tag"] = bool(f.get("autotag", False))
-        cfg["force_accurip"] = bool(f.get("accurip", False))
-        cfg["force_audiometa"] = bool(f.get("audiometa", False))
-        cfg["force_xlit"] = bool(f.get("xlit", False))
-    # image-option overrides (subset of run_process_images knobs)
-    for key in ("rename_to_cover", "reencode_to_jxl", "images_convert_to_jpeg",
-                "images_convert_lossless_to_png", "convert_jxl_back", "remove_alpha",
-                "jpeg_progressive", "cover_resize_enabled", "cover_crop_enabled",
-                "cover_target_size", "cover_jpeg_quality", "jpegxl_effort",
-                "jpegxl_distance", "png_optimization_level"):
-        if key in f:
-            cfg[key] = f[key]
+    if req.force is not None:
+        # image-option overrides (subset of run_process_images knobs)
+        for key in ("rename_to_cover", "reencode_to_jxl", "images_convert_to_jpeg",
+                    "images_convert_lossless_to_png", "convert_jxl_back", "remove_alpha",
+                    "jpeg_progressive", "cover_resize_enabled", "cover_crop_enabled",
+                    "cover_target_size", "cover_jpeg_quality", "jpegxl_effort",
+                    "jpegxl_distance", "png_optimization_level"):
+            if key in f:
+                cfg[key] = f[key]
 
     for i in req.ids:
-        if i not in RUNNERS or RUNNERS[i] is None:
+        if script_runners.RUNNERS.get(i, (None, None))[1] is None:
             raise HTTPException(400, f"runner {i} not available")
 
-    results = []
-    for i in req.ids:
-        runner = RUNNERS[i]
-        try:
-            s = runner(cfg)
-            results.append({"id": i, "name": runner.__name__, "stats": s})
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            results.append({"id": i, "error": str(e)})
+    results = script_runners.run_chain(
+        cfg, list(req.ids), targets=None, force=req.force if req.force is not None else None,
+    )
     tagcache.invalidate_all()
     mbresolve.invalidate()
     return {"results": results}
@@ -2321,17 +2336,61 @@ def mb_assign(req: AssignTagsRequest):
     return {"ok": True, "changed": changed}
 
 
+def _lyrics_record(hit, artist="", track="", album=None, duration=None):
+    """A provider-chain hit in the record shape the lyrics UI already consumes.
+
+    The album/library batch download, the lyrics manager's search list and the
+    viewer all read `id` / `plainLyrics` / `syncedLyrics` / `artist` / `track`
+    (the LRCLIB record shape). Keeping it means those callers get the whole
+    fallback chain — LRCLIB → NetEase → lyrics.ovh → Kugou — without changing,
+    and `provider` / `provider_label` ride along for anything that wants to
+    show where the lyrics came from.
+    """
+    if not hit:
+        return None
+    synced = (hit.get("synced") or "").strip()
+    plain = (hit.get("plain") or "").strip()
+    if not synced and not plain:
+        return None
+    import zlib
+    key = f"{hit.get('provider')}|{hit.get('matched_artist')}|{hit.get('matched_title')}"
+    return {
+        # Stable positive id: the manager modal dedupes candidates by it.
+        "id": zlib.crc32(key.encode("utf-8")) & 0x7FFFFFFF,
+        "trackName": hit.get("matched_title") or track,
+        "artistName": hit.get("matched_artist") or artist,
+        "albumName": hit.get("matched_album") or album,
+        "duration": hit.get("duration") or duration,
+        "instrumental": bool(hit.get("instrumental")),
+        "plainLyrics": plain or None,
+        "syncedLyrics": synced or None,
+        "provider": hit.get("provider"),
+        "provider_label": hit.get("provider_label") or hit.get("provider"),
+        # The UI's older field names (kept for the search list rendering).
+        "artist": hit.get("matched_artist") or artist,
+        "track": hit.get("matched_title") or track,
+    }
+
+
 @app.get("/api/lyrics/search")
 async def lyrics_search(
     artist: str = Query(...), track: str = Query(...),
     album: str = Query(None), duration: int = Query(None),
 ):
+    """Lyrics candidates from the configured provider chain.
+
+    At most one row (the chain returns its best hit); the list shape is what
+    the editor's candidate picker expects, and a miss is an empty list rather
+    than a 404 so a search can just say "nothing found".
+    """
+    from mlo.lyrics_providers import fetch_lyrics
     try:
-        return await asyncio.to_thread(
-            intg.lrclib_search, artist, track, album, duration
-        )
+        hit = await asyncio.to_thread(
+            fetch_lyrics, load_config(), artist, track, album, duration)
     except Exception as e:
-        raise HTTPException(502, f"lrclib search failed: {e}")
+        raise HTTPException(502, f"lyrics search failed: {e}")
+    record = _lyrics_record(hit, artist, track, album, duration)
+    return [record] if record else []
 
 
 @app.get("/api/lyrics/get")
@@ -2339,13 +2398,17 @@ async def lyrics_get(
     artist: str = Query(""), track: str = Query(...),
     album: str = Query(None), duration: int = Query(None),
 ):
+    """The best lyrics hit for a track, through the chain (with fallbacks)."""
+    from mlo.lyrics_providers import fetch_lyrics
     try:
-        res = await asyncio.to_thread(intg.lrclib_get, artist, track, album, duration)
-        if res is None:
-            return JSONResponse({"found": False}, status_code=404)
-        return res
+        hit = await asyncio.to_thread(
+            fetch_lyrics, load_config(), artist, track, album, duration)
     except Exception as e:
         raise HTTPException(502, str(e))
+    record = _lyrics_record(hit, artist, track, album, duration)
+    if record is None:
+        return JSONResponse({"found": False}, status_code=404)
+    return {"found": True, **record}
 
 
 class LyricsWriteRequest(BaseModel):
@@ -3423,25 +3486,6 @@ def _tag_media_for_albums(album_dirs):
     return tagged
 
 
-def _run_background_tagging():
-    """After an import: AutoTag (ITUNESADVISORY), fetch lyrics, then re-grade
-    the library — in a background thread with the shared progress relay so
-    the UI's live progress bar follows along."""
-    import traceback as _tb
-
-    from mlo import run_auto_tagging, run_grade_library
-    from mlo.lyrics_fetch import run_fetch_lyrics
-
-    def chain():
-        for runner in (run_auto_tagging, run_fetch_lyrics, run_grade_library):
-            try:
-                runner(load_config())
-            except Exception:
-                _tb.print_exc()
-
-    threading.Thread(target=chain, name="mlo-import-tagging", daemon=True).start()
-
-
 @app.post("/api/soulseek/import")
 def soulseek_import():
     """Move completed downloads from the download dir into the library,
@@ -3499,8 +3543,17 @@ def soulseek_import():
                     "organized": False,
                     "organize_error": str(e), "media_tagged": media_tagged,
                     "converted": converted, "tagging_started": False}
-        # Fire-and-forget: advisory + lyrics tagging, then a fresh grade.
-        _run_background_tagging()
+        # Fire-and-forget: the configured import script chain per album
+        # (CUEs → FLACs → videos → lyrics → mood/genre → images → audit →
+        # DR & ReplayGain → AccurateRip → key & BPM → beets → format all →
+        # grade) on a background thread, so the HTTP call returns at once.
+        from server import imports as imports_mod
+        for album in moved:
+            threading.Thread(
+                target=imports_mod.finish_album,
+                args=(album, load_config()),
+                daemon=True,
+            ).start()
     tagcache.invalidate_all()
     mbresolve.invalidate()
     return {"ok": True, "moved": moved, "skipped": skipped,
@@ -4999,9 +5052,14 @@ def library_layout():
 
     Read-only. Checks the music-folder root, <music>/Artists, each artist
     folder, each album folder and the tree's depth — reporting every place the
-    canonical `<music>/Artists/<Artist>/<Album>/<files>` shape is not met."""
+    canonical `<music>/Artists/<Artist>/<Album>/<files>` shape is not met.
+
+    What the app itself stores counts as expected, never as a stray: the
+    album's description.txt (mlo.paths.ALBUM_SIDECAR_NAMES) next to the
+    cover art, and inside an artist folder its artist.jpg / artist.png and
+    description.txt (only audio with no album folder is reported there)."""
     from mlo.naming import DEFAULT_NAMING_SCRIPT
-    from mlo.paths import IMAGE_EXTS
+    from mlo.paths import ALBUM_SIDECAR_NAMES, IMAGE_EXTS
     cfg = load_config()
     folder = cfg.get("music_folder") or ""
     # The canonical spellings the `wrong_case` check compares against: the
@@ -5086,6 +5144,9 @@ def library_layout():
                         "audio file directly in the artist folder \u201c%s\u201d "
                         "(no album folder)" % name,
                         "give it an album folder: Artists/<Artist>/<Album>/"))
+                # Any other file in an artist folder is the artist's own
+                # content (artist.jpg / artist.png / description.txt written
+                # by mlo.artistdata) — expected, so nothing to report.
                 continue
             out["albums"] += 1
             if not _layout_has_audio(ap):
@@ -5120,6 +5181,8 @@ def library_layout():
                     pass                      # .lrc/.cue/.log/.accurip: expected
                 elif ext in IMAGE_EXTS:
                     pass                      # cover art: expected
+                elif f.lower() in ALBUM_SIDECAR_NAMES:
+                    pass                      # album description.txt: expected
                 elif f.startswith("."):
                     pass                      # the app's own manifests
                 else:

@@ -53,6 +53,7 @@ DISPLAY_NAMES = {
     "librosa": "librosa",
     "beets": "beets",
     "slskd": "slskd",
+    "chromaprint": "Chromaprint (fpcalc)",
 }
 
 REPOS = {
@@ -66,6 +67,7 @@ REPOS = {
     "ffmpeg": "BtbN/FFmpeg-Builds",
     "logchecker": "OPSnet/Logchecker",
     "cuetools": "gchudov/cuetools.net",
+    "chromaprint": "acoustid/chromaprint",
 }
 
 # Ordered asset-name preferences (regex, matched case-insensitively).
@@ -83,6 +85,7 @@ ASSET_PATTERNS = {
     "ffmpeg": [r"^ffmpeg-master-latest-win64-gpl\.zip$"],
     "logchecker": [r"^logchecker\.phar$"],
     "cuetools": [r"^CUETools\.zip$", r"^cuetools.*\.zip$"],
+    "chromaprint": [r"^chromaprint-fpcalc-[\d.]+-windows-x86_64\.zip$"],
 }
 
 INSTALL_PREFIX = {
@@ -99,6 +102,7 @@ INSTALL_PREFIX = {
     "librosa": "librosa",
     "beets": "beets",
     "slskd": "slskd",
+    "chromaprint": "chromaprint",
 }
 
 # Vendored pure-Python tools: installed with `pip install --target` into a
@@ -140,6 +144,7 @@ MARKER_EXES = {
     "php": ("php.exe",),
     "cuetools": ("CUETools.exe",),
     "slskd": ("slskd.exe",),
+    "chromaprint": ("fpcalc.exe",),
 }
 
 # Tools whose release asset is a single bare exe - no archive to extract.
@@ -219,6 +224,11 @@ PINNED = {
         "tag": "0.26.0",
         "asset": "slskd-0.26.0-win-x64.zip",
         "version": "0.26.0",
+    },
+    "chromaprint": {
+        "tag": "v1.6.1",
+        "asset": "chromaprint-fpcalc-1.6.1-windows-x86_64.zip",
+        "version": "1.6.1",
     },
 }
 
@@ -303,6 +313,11 @@ def installed_versions():
     d = installed_path("slskd")
     if d and os.path.isfile(os.path.join(d, "slskd.exe")):
         out["slskd"] = PINNED["slskd"]["version"]
+    # Same for chromaprint's fpcalc - detect_all_tools doesn't scan for it.
+    d = installed_path("chromaprint")
+    if d and any(os.path.isfile(os.path.join(d, n))
+                 for n in MARKER_EXES["chromaprint"]):
+        out["chromaprint"] = PINNED["chromaprint"]["version"]
     return out
 
 

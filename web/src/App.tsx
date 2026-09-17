@@ -39,21 +39,40 @@ const MBRecordingPage = lazy(() => import("./pages/MusicBrainzPage").then((m) =>
 import PlayerBar from "./components/PlayerBar";
 import { ProgressInline } from "./components/ProgressBar";
 
-const NAV = [
-  { to: "/", label: "Home", icon: Home, end: true },
-  { to: "/library", label: "Library", icon: Library, end: false },
-  { to: "/downloads", label: "Downloads", icon: ArrowDownToLine, end: true },
-  { to: "/trash", label: "Trash", icon: Trash2, end: true },
-  { to: "/playlists", label: "Playlists", icon: ListMusic, end: false },
-  { to: "/favorites", label: "Favorites", icon: Heart, end: false },
-  { to: "/import", label: "Import", icon: Import, end: false },
-  { to: "/soulseek", label: "Soulseek", icon: ArrowDownUp, end: false },
-  { to: "/mb/search", label: "MusicBrainz", icon: Music4, end: false },
-  { to: "/export", label: "Export", icon: HardDriveDownload, end: false },
-  { to: "/optimize", label: "Optimization", icon: Gauge, end: false },
-  { to: "/grading", label: "Grading", icon: ClipboardCheck, end: false },
-  { to: "/dependencies", label: "Dependencies", icon: Wrench, end: false },
-  { to: "/settings", label: "Settings", icon: SettingsIcon, end: false },
+// Sidebar sections: a long flat list of 14 entries is hard to scan, so the
+// rail groups them by what the user is doing (browse / acquire / maintain)
+// and renders a label above each group. Collapsed, the labels give way to a
+// hairline divider so the rail stays a clean icon column.
+const NAV_GROUPS = [
+  {
+    label: "Library",
+    items: [
+      { to: "/", label: "Home", icon: Home, end: true },
+      { to: "/library", label: "Library", icon: Library, end: false },
+      { to: "/downloads", label: "Downloads", icon: ArrowDownToLine, end: true },
+      { to: "/trash", label: "Trash", icon: Trash2, end: true },
+      { to: "/playlists", label: "Playlists", icon: ListMusic, end: false },
+      { to: "/favorites", label: "Favorites", icon: Heart, end: false },
+    ],
+  },
+  {
+    label: "Discover",
+    items: [
+      { to: "/import", label: "Import", icon: Import, end: false },
+      { to: "/soulseek", label: "Soulseek", icon: ArrowDownUp, end: false },
+      { to: "/mb/search", label: "MusicBrainz", icon: Music4, end: false },
+      { to: "/export", label: "Export", icon: HardDriveDownload, end: false },
+    ],
+  },
+  {
+    label: "Maintain",
+    items: [
+      { to: "/optimize", label: "Optimization", icon: Gauge, end: false },
+      { to: "/grading", label: "Grading", icon: ClipboardCheck, end: false },
+      { to: "/dependencies", label: "Dependencies", icon: Wrench, end: false },
+      { to: "/settings", label: "Settings", icon: SettingsIcon, end: false },
+    ],
+  },
 ];
 
 const COLLAPSE_KEY = "mlo.sidebar.collapsed";
@@ -315,43 +334,58 @@ export default function App() {
             </button>
           </span>
         </div>
-        {NAV.map(({ to, label, icon: Icon, end }) => (
-          <NavLink
-            key={to}
-            to={to}
-            end={end}
-            title={collapsed ? label : undefined}
-            className={({ isActive }) =>
-              // Monochrome-style: the active entry is a solid accent block
-              // with contrast text; inactive ones stay quiet. The label
-              // collapses via max-width so the icon glides with the
-              // shrinking sidebar instead of jumping to a new layout.
-              `flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors border ${
-                isActive
-                  ? "bg-accent on-accent font-semibold border-transparent shadow-sm"
-                  : "text-zinc-400 hover:text-white hover:bg-raise border-transparent"
-              }`
-            }
-          >
-            <span className="relative shrink-0 inline-flex">
-              <Icon className="h-4 w-4 shrink-0" />
-              {to === "/soulseek" && <SlskIconDot dot={slskDot} />}
-            </span>
-            <span
-              className={`overflow-hidden whitespace-nowrap text-ellipsis transition-[max-width,opacity] duration-150 ${
-                collapsed ? "max-w-0 opacity-0" : "max-w-[110px] opacity-100"
-              }`}
-            >
-              {/* the tab always reads "Soulseek"; the account name is in the dot tooltip */}
-              {label}
-            </span>
-          </NavLink>
+        {NAV_GROUPS.map((group) => (
+          <div key={group.label} className="flex flex-col gap-1">
+            {/* Section label: fades to a hairline divider when collapsed, so
+                the rail keeps its rhythm without a jump in icon positions. */}
+            {collapsed ? (
+              <div className="mx-2 my-1 border-t border-border/60" />
+            ) : (
+              <div className="px-3 pt-2 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
+                {group.label}
+              </div>
+            )}
+            {group.items.map(({ to, label, icon: Icon, end }) => (
+              <NavLink
+                key={to}
+                to={to}
+                end={end}
+                title={collapsed ? label : undefined}
+                className={({ isActive }) =>
+                  // Monochrome-style: the active entry is a solid accent block
+                  // with contrast text; inactive ones stay quiet. The label
+                  // collapses via max-width so the icon glides with the
+                  // shrinking sidebar instead of jumping to a new layout.
+                  `flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors border ${
+                    isActive
+                      ? "bg-accent on-accent font-semibold border-transparent shadow-sm"
+                      : "text-zinc-400 hover:text-white hover:bg-raise border-transparent"
+                  }`
+                }
+              >
+                <span className="relative shrink-0 inline-flex">
+                  <Icon className="h-4 w-4 shrink-0" />
+                  {to === "/soulseek" && <SlskIconDot dot={slskDot} />}
+                </span>
+                <span
+                  className={`overflow-hidden whitespace-nowrap text-ellipsis transition-[max-width,opacity] duration-150 ${
+                    collapsed ? "max-w-0 opacity-0" : "max-w-[110px] opacity-100"
+                  }`}
+                >
+                  {/* the tab always reads "Soulseek"; the account name is in the dot tooltip */}
+                  {label}
+                </span>
+              </NavLink>
+            ))}
+          </div>
         ))}
         {!collapsed && (
-          <div className="mt-auto text-[10px] text-zinc-600 px-3 pb-2">
+          <div className="mt-auto text-[10px] text-zinc-600 px-3 pb-2 leading-relaxed">
             Grading · Auditing · Optimization
             <br />
-            MusicBrainz · LRCLIB · RYM
+            MusicBrainz · Deezer · ListenBrainz
+            <br />
+            LRCLIB · NetEase · Wikipedia
           </div>
         )}
       </aside>
@@ -373,26 +407,33 @@ export default function App() {
                 <X className="h-4 w-4" />
               </button>
             </div>
-            {NAV.map(({ to, label, icon: Icon, end }) => (
-              <NavLink
-                key={to}
-                to={to}
-                end={end}
-                onClick={() => setNavOpen(false)}
-                className={({ isActive }) =>
-                  `flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm transition-colors border ${
-                    isActive
-                      ? "bg-accent on-accent font-semibold border-transparent shadow-sm"
-                      : "text-zinc-400 hover:text-white hover:bg-raise border-transparent"
-                  }`
-                }
-              >
-                <span className="relative shrink-0 inline-flex">
-                  <Icon className="h-4 w-4 shrink-0" />
-                  {to === "/soulseek" && <SlskIconDot dot={slskDot} />}
-                </span>
-                <span className="whitespace-nowrap">{label}</span>
-              </NavLink>
+            {NAV_GROUPS.map((group) => (
+              <div key={group.label} className="flex flex-col gap-1">
+                <div className="px-3 pt-2 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
+                  {group.label}
+                </div>
+                {group.items.map(({ to, label, icon: Icon, end }) => (
+                  <NavLink
+                    key={to}
+                    to={to}
+                    end={end}
+                    onClick={() => setNavOpen(false)}
+                    className={({ isActive }) =>
+                      `flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm transition-colors border ${
+                        isActive
+                          ? "bg-accent on-accent font-semibold border-transparent shadow-sm"
+                          : "text-zinc-400 hover:text-white hover:bg-raise border-transparent"
+                      }`
+                    }
+                  >
+                    <span className="relative shrink-0 inline-flex">
+                      <Icon className="h-4 w-4 shrink-0" />
+                      {to === "/soulseek" && <SlskIconDot dot={slskDot} />}
+                    </span>
+                    <span className="whitespace-nowrap">{label}</span>
+                  </NavLink>
+                ))}
+              </div>
             ))}
           </aside>
         </>

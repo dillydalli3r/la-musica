@@ -17,10 +17,13 @@ whole pipeline a careful human would do by hand:
      the album,
   4. wait for the album (a file counts as arrived only once slskd itself says
      the transfer finished) and verify every track against the .log CRCs (CD)
-     or decode-check each file (digital media),
+     or decode-check each file (digital media); with AcoustID configured the
+     audio is also matched against the release's group (a mismatch is logged,
+     never fatal),
   5. import into the library: stamp the MusicBrainz release/recording IDs
      that drove the search into the tags, write MEDIA, organize with the
-     naming script, then run the usual tagging chain.
+     naming script, then run the configured import chain
+     (server.imports.finish_album) in the background.
 
 Progress is reported through mlo.stats.progress_hook (the same relay the
 WebSocket /ws/progress endpoint forwards to the UI) and mirrored into a
@@ -1725,6 +1728,85 @@ def _cleanup_partial(ddir, username, local_files, remove_root=None):
         pass
 
 
+def _start_import_chain(album_dir, cfg):
+    """Run the configured import chain over a freshly imported album.
+
+    Delegates to ``server.imports.finish_album`` — the same chain every other
+    import path runs (CUEs → FLACs → videos → lyrics → auto tagging → images →
+    audit → DR & ReplayGain → AccurateRip → key & BPM → beets → format all →
+    grade), not the old hardcoded autotag/lyrics/grade list.
+
+    It runs in a daemon thread (a job's result is where the album is, not
+    twenty minutes of re-encoding) and is failure-tolerant by design: a script
+    that fails is written into the job log and the import still succeeds — the
+    album is already in the library.
+    """
+    from server import imports
+
+    def chain():
+        try:
+            result = imports.finish_album(album_dir, cfg)
+            if not result["chain"]:
+                _log("Import script chain is off (import_auto_scripts / "
+                     "import_scripts) — album imported, nothing else was run.")
+                return
+            for r in result["scripts"]:
+                if r.get("error"):
+                    _log(f"  ! {r.get('label') or r.get('id')}: {r['error']}")
+                elif r.get("skipped"):
+                    _log(f"  - {r.get('label') or r.get('id')}: "
+                         f"skipped ({r.get('reason')})")
+            ok = sum(1 for r in result["scripts"]
+                     if not r.get("error") and not r.get("skipped"))
+            tail = f", {len(result['errors'])} error(s)" if result["errors"] else ""
+            _log(f"Import pipeline finished: {ok}/{len(result['scripts'])} "
+                 f"script(s) ok{tail}")
+        except Exception:
+            traceback.print_exc()
+            _log("Import pipeline crashed: "
+                 f"{traceback.format_exc().strip().splitlines()[-1]}")
+
+    _log(f"Import script chain started in the background "
+         f"({len(imports.chain_for(cfg))} script(s)).")
+    threading.Thread(target=chain, name="mlo-soulseek-import-chain",
+                     daemon=True).start()
+
+
+def _verify_acoustid(album_dir, release, cfg):
+    """Check the downloaded audio against the release the job searched for.
+
+    AcoustID fingerprints what actually arrived and names its release group;
+    a different pressing/edition downloads fine, passes the log/CRC gate and
+    is still not the release the tags claim. That is a WARNING in the job log
+    (``server.imports.release_group_mismatch``), never a rejected download —
+    the user can see it on the Soulseek page and decide.
+    """
+    want = str(release.get("release_group_id") or "").strip()
+    if not want or not cfg.get("import_acoustid"):
+        return
+    try:
+        from mlo import acoustid
+        from server import imports
+
+        if not acoustid.available(cfg):
+            _log(f"AcoustID check skipped: {acoustid.acoustid_enabled_note(cfg)}")
+            return
+        result = imports.acoustid_match([album_dir], cfg)
+        row = (result.get("albums") or [{}])[0]
+        warning = imports.release_group_mismatch(row, want)
+        if warning:
+            _log("WARNING: " + warning + " — the download may be a different "
+                 "pressing or edition.")
+        elif row.get("release_group_id"):
+            _log(f"AcoustID confirmed the release group "
+                 f"({row.get('matched')}/{row.get('total')} tracks).")
+        else:
+            _log("AcoustID check: no release group matched the audio "
+                 "(inconclusive, not a rejection).")
+    except Exception:
+        traceback.print_exc()
+
+
 def _import(local_root, release, cfg, media):
     """Move the verified download into the library and run the pipeline.
 
@@ -1756,6 +1838,10 @@ def _import(local_root, release, cfg, media):
             f"a file is still locked (Soulseek holding it open?); the download "
             f"is left intact at {local_root}")
     _log(f"Moved into the library: {os.path.basename(dest)}")
+
+    # AcoustID verification of what actually arrived, against the release this
+    # job searched for: a warning in the job log, never a rejection.
+    _verify_acoustid(dest, release, cfg)
 
     # Any lossless source the folder arrived in (WAV/APE/ALAC...) becomes the
     # configured lossless codec BEFORE it is named and graded, so the naming
@@ -1797,8 +1883,7 @@ def _import(local_root, release, cfg, media):
     except Exception as e:
         organize_error = str(e)
 
-    srv._run_background_tagging()
-    _log("Background tagging chain started (autotag → lyrics → grade).")
+    _start_import_chain(album_path, cfg)
     return {"album_path": album_path, "imported": True,
             "staging_path": dest, "organized": organized,
             "organize_error": organize_error}

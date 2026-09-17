@@ -1,7 +1,7 @@
 ﻿import { Fragment, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync, FolderOpen, BarChart3, ImageUp, Image as ImageIcon, FileVideo, Disc3, CloudDownload, Sparkles, ListPlus, ListStart, ShieldCheck, FileMusic, ListChecks, Info as InfoIcon, X } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync, FolderOpen, BarChart3, ImageUp, Image as ImageIcon, FileVideo, Disc3, CloudDownload, Sparkles, ListPlus, ListStart, ShieldCheck, FileMusic, ListChecks, Info as InfoIcon, X, Loader2, Pencil, RefreshCw } from "lucide-react";
 import { api } from "../api";
 import { LinkChips, LinkEditorButton } from "../components/Links";
 import { SubtitledVideo } from "../components/SubtitledVideo";
@@ -14,6 +14,7 @@ import { invalidateLibrary } from "../lib/invalidate";
 import { auditFails } from "../lib/status";
 import { isVideoFile } from "../lib/fmt";
 import BulkTagsDialog from "../components/BulkTagsDialog";
+import MoreLikeThis from "../components/MoreLikeThis";
 import OverflowMenu from "../components/OverflowMenu";
 import StatsPanel from "../components/StatsPanel";
 import TrackDetails from "../components/TrackDetails";
@@ -23,6 +24,20 @@ import { toast, useStore } from "../store";
 import { fmtTech, albumTech } from "../lib/fmt";
 import { fmtDuration } from "../lib/fmt";
 import type { ExpectedTrack, Track } from "../types";
+
+/** Provider id → the name a reader knows ("wikipedia" → Wikipedia). */
+const SOURCE_NAMES: Record<string, string> = {
+  wikipedia: "Wikipedia",
+  lastfm: "Last.fm",
+  discogs: "Discogs",
+  musicbrainz: "MusicBrainz",
+  deezer: "Deezer",
+  itunes: "Apple Music",
+  audiodb: "TheAudioDB",
+  listenbrainz: "ListenBrainz",
+  upload: "Uploaded",
+  manual: "Manual",
+};
 
 /** Whether a track file is a music video container (playable with <video>). */
 export { isVideoFile };
@@ -60,6 +75,11 @@ export default function AlbumPage() {
   // track checkboxes (and the selection toolbar) only exist in select mode
   const [selectMode, setSelectMode] = useState(false);
   const [tagsDialogOpen, setTagsDialogOpen] = useState(false);
+  // album description (description.txt in the album folder): the edit buffer
+  // and one busy flag for the fetch/save/clear trio
+  const [descEditing, setDescEditing] = useState(false);
+  const [descDraft, setDescDraft] = useState("");
+  const [descBusy, setDescBusy] = useState<string | null>(null);
   // tracklist columns: visible set + drag-resized widths, persisted under the
   // SAME key the library's expanded album rows use — one tracklist, one prefs
   const [trackCols, toggleTrackCol] = useColumnPrefs("album-tracks", ALBUM_TRACK_COLS);
@@ -75,6 +95,10 @@ export default function AlbumPage() {
     retry: false,
   });
   const rawVideos = videosData?.videos ?? [];
+
+  // Whether the album-description check grades this folder (Settings →
+  // Grading). The config is already in the app-wide cache, so this is free.
+  const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
 
   const convertVideos = async () => {
     setRemuxing(true);
@@ -119,6 +143,14 @@ export default function AlbumPage() {
   if (isLoading || !data) return <PageLoading label="Loading album…" />;
 
   const tracks = sortRows(data.tracks, sort);
+  // Album identity (title/artist) for the description + similarity calls, and
+  // the stored description the folder carries (description.txt).
+  const albumTitle = data.meta?.ALBUM ?? data.path.split("/").pop() ?? "";
+  const albumArtist = data.meta?.ALBUMARTIST ?? data.meta?.ARTIST ?? "";
+  const desc = data.artwork ?? null;
+  // The grading check ("Album description missing") is on by default; with it
+  // off, a missing description is not a problem and gets no hint.
+  const descGraded = config?.grade_check_album_description !== false;
   // highest disc number across the album (filename fallback included) —
   // drives the "N discs" note in the header and the Disc rows below
   const maxDisc = data.tracks.reduce((m, t) => Math.max(m, t.discnumber ?? 1), 1);
@@ -260,48 +292,91 @@ export default function AlbumPage() {
     }
   };
 
-  /** Download missing lyrics from LRCLIB for every track in this album,
-   * writing per the global lyrics_format (EMBEDDED / LRC / BOTH). */
+  /** Auto-import missing lyrics for every track in this album.
+   *
+   * One backend call per album runs the whole provider chain (LRCLIB →
+   * NetEase → lyrics.ovh → Kugou, in the order Settings → Lyrics sets),
+   * writes per the global lyrics_format and canonicalizes exactly like
+   * script 13 — the same code path the track page's button uses. */
   const downloadLyricsAlbum = async () => {
     setLyricsBusy(true);
     try {
-      const cfg = await api.config();
-      const fmt = String(cfg.lyrics_format ?? "EMBEDDED").toUpperCase();
-      let fetched = 0;
-      let skipped = 0;
-      let missing = 0;
-      for (const t of data.tracks) {
-        if (t.tags.INSTRUMENTAL === "1" || t.lyrics_present) {
-          skipped++;
-          continue;
-        }
-        const artist = t.tags.ARTIST || data.meta?.ALBUMARTIST || data.meta?.ARTIST || undefined;
-        const title = t.tags.TITLE;
-        if (!artist || !title) {
-          skipped++;
-          continue;
-        }
-        try {
-          const res = await api.lyricsGet(artist, title, (t.tags.ALBUM ?? data.meta?.ALBUM) || undefined, t.tech?.length ? Math.round(t.tech.length) : undefined);
-          const lrc = res?.syncedLyrics ?? res?.plainLyrics;
-          if (!lrc) {
-            missing++;
-          } else {
-            if (fmt === "LRC" || fmt === "BOTH") await api.lyricsWrite(t.path, lrc);
-            if (fmt === "EMBEDDED" || fmt === "BOTH") await api.lyricsEmbed(t.path, lrc);
-            fetched++;
-          }
-        } catch {
-          missing++;
-        }
-        await new Promise((r) => setTimeout(r, 350)); // LRCLIB rate-limit pacing
+      const paths = data.tracks
+        .filter((t) => t.tags.INSTRUMENTAL !== "1" && !t.lyrics_present)
+        .map((t) => t.path);
+      if (!paths.length) {
+        toast("Every track already has lyrics (or is instrumental)");
+        return;
       }
-      toast(`Lyrics: ${fetched} downloaded · ${skipped} skipped · ${missing} not found`);
+      const res = await api.lyricsAuto(paths);
+      const providers: Record<string, number> = {};
+      for (const r of res.results) {
+        if (r.status === "ok" && r.provider_label) {
+          providers[r.provider_label] = (providers[r.provider_label] ?? 0) + 1;
+        }
+      }
+      const source = Object.entries(providers)
+        .sort((a, b) => b[1] - a[1])
+        .map(([label, n]) => `${label} ${n}`)
+        .join(" · ");
+      toast(
+        `Lyrics: ${res.ok} imported · ${res.skipped} skipped · ${res.failed} failed` +
+          (source ? ` — ${source}` : "")
+      );
       invalidateLibrary(qc);
+      qc.invalidateQueries({ queryKey: ["album", decoded] });
     } catch (e) {
       toast(String(e));
     } finally {
       setLyricsBusy(false);
+    }
+  };
+
+  /** Description writes change the album's grade as well as its text, so both
+   *  the album payload and the library listing are refreshed. */
+  const refreshDescription = () => {
+    qc.invalidateQueries({ queryKey: ["album", decoded] });
+    qc.invalidateQueries({ queryKey: ["library"] });
+  };
+
+  const fetchDescription = async () => {
+    setDescBusy("fetch");
+    try {
+      await api.albumDescriptionSave(data.path, "", albumArtist, albumTitle);
+      toast("Description fetched");
+      refreshDescription();
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setDescBusy(null);
+    }
+  };
+
+  const saveDescription = async () => {
+    setDescBusy("save");
+    try {
+      await api.albumDescriptionSave(data.path, descDraft, albumArtist, albumTitle);
+      toast("Description saved");
+      setDescEditing(false);
+      refreshDescription();
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setDescBusy(null);
+    }
+  };
+
+  const clearDescription = async () => {
+    if (!window.confirm("Remove this album's stored description?")) return;
+    setDescBusy("clear");
+    try {
+      await api.albumDescriptionClear(data.path);
+      toast("Description removed");
+      refreshDescription();
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      setDescBusy(null);
     }
   };
 
@@ -509,7 +584,7 @@ export default function AlbumPage() {
                 {
                   title: "Lyrics",
                   items: [
-                    { label: lyricsBusy ? "Fetching…" : "Download missing (LRCLIB)", icon: CloudDownload, onClick: downloadLyricsAlbum, disabled: lyricsBusy },
+                    { label: lyricsBusy ? "Fetching…" : "Auto-import lyrics", icon: CloudDownload, onClick: downloadLyricsAlbum, disabled: lyricsBusy },
                   ],
                 },
                 {
@@ -538,6 +613,122 @@ export default function AlbumPage() {
           </div>
         </div>
         </div>
+      </div>
+
+      {/* the folder's description.txt — fetch a Wikipedia summary or write
+          your own; it is one of the grading checks, so its absence is called
+          out here rather than only in the issue list */}
+      <div className="bg-card rounded-lg border border-border p-4">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Description</span>
+          {desc?.description_source && (
+            <span className="text-[10px] text-zinc-600">
+              {desc.description_url ? (
+                <a
+                  href={desc.description_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="hover:text-accent-soft underline decoration-dotted"
+                  title={desc.description_url}
+                >
+                  {SOURCE_NAMES[desc.description_source] ?? desc.description_source}
+                </a>
+              ) : (
+                SOURCE_NAMES[desc.description_source] ?? desc.description_source
+              )}
+            </span>
+          )}
+          {!desc?.description && descGraded && (
+            <span
+              className="text-[10px] text-amber-400/80 border border-amber-900/40 bg-amber-950/20 rounded px-1.5 py-0.5"
+              title="The album-description grading check fails while description.txt is missing (Settings → Grading)"
+            >
+              needs a description
+            </span>
+          )}
+          <div className="ml-auto flex items-center gap-1.5">
+            <button
+              className="btn-ghost !py-1 text-xs"
+              onClick={fetchDescription}
+              disabled={!!descBusy}
+              title="Fetch the album description from the configured sources (Wikipedia first)"
+            >
+              {descBusy === "fetch" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+              Fetch
+            </button>
+            <button
+              className="btn-ghost !py-1 text-xs"
+              onClick={() => {
+                setDescDraft(desc?.description_text ?? "");
+                setDescEditing(true);
+              }}
+              title="Write or edit the description yourself"
+            >
+              <Pencil className="h-3.5 w-3.5" /> Edit
+            </button>
+            {desc?.description && (
+              <button
+                className="btn-ghost !py-1 text-xs text-red-300/80 hover:text-red-200"
+                onClick={clearDescription}
+                disabled={!!descBusy}
+                title="Remove the stored description"
+              >
+                {descBusy === "clear" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                Clear
+              </button>
+            )}
+          </div>
+        </div>
+        {descEditing ? (
+          <div className="mt-2.5 space-y-2">
+            <textarea
+              className="input w-full h-40 text-sm leading-relaxed"
+              value={descDraft}
+              onChange={(e) => setDescDraft(e.target.value)}
+              placeholder={`About ${albumTitle}…`}
+            />
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                className="btn-primary !py-1 text-xs"
+                onClick={saveDescription}
+                disabled={descBusy === "save" || !descDraft.trim()}
+              >
+                {descBusy === "save" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null} Save
+              </button>
+              <button className="btn-ghost !py-1 text-xs" onClick={() => setDescEditing(false)}>
+                Cancel
+              </button>
+              <span className="text-[10px] text-zinc-600">
+                Stored as description.txt in the album folder — counts for the album grade.
+              </span>
+            </div>
+          </div>
+        ) : desc?.description_text ? (
+          <p
+            className="mt-2 text-sm text-zinc-300 leading-relaxed whitespace-pre-line max-h-72 overflow-y-auto"
+            title={`${desc.description_text.length} characters`}
+          >
+            {desc.description_text}
+          </p>
+        ) : (
+          <div className="mt-2 text-xs text-zinc-500">
+            No description yet —{" "}
+            <button className="text-accent-soft hover:underline" onClick={fetchDescription} disabled={!!descBusy}>
+              fetch one
+            </button>{" "}
+            or{" "}
+            <button
+              className="text-accent-soft hover:underline"
+              onClick={() => {
+                setDescDraft("");
+                setDescEditing(true);
+              }}
+            >
+              write your own
+            </button>
+            .
+          </div>
+        )}
       </div>
 
       {statsOpen && (
@@ -621,7 +812,7 @@ export default function AlbumPage() {
 
       <div>
         <table className="w-full text-sm">
-          <thead className="border-b border-border">
+          <thead className="border-b border-border sticky top-0 z-10 bg-bg/95 backdrop-blur">
             <tr>
               {selectMode && <th className="th w-10"></th>}
               {ALBUM_TRACK_COLS.filter((c) => trackCols.includes(c.id)).map((c) =>
@@ -814,6 +1005,8 @@ export default function AlbumPage() {
           </tbody>
         </table>
       </div>
+
+      <MoreLikeThis kind="album" artist={albumArtist} album={albumTitle} mbid={data.meta?.MUSICBRAINZ_RELEASEGROUPID ?? undefined} />
 
       {coverSearchOpen && (
         <CoverSearchModal

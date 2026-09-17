@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { FolderOpen, Save, RotateCcw, Settings as SettingsIcon, Check, Eye, EyeOff } from "lucide-react";
+import { FolderOpen, Save, RotateCcw, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, X } from "lucide-react";
 import { api } from "../api";
 import ConfirmButton from "../components/ConfirmButton";
 import FolderPicker from "../components/FolderPicker";
@@ -25,6 +25,103 @@ const ENCODER_FORMATS = ["flac", "jpeg", "png", "jxl"] as const;
 const ENCODER_FIELDS = ["ENCODER_PROGRAM", "ENCODER_QUALITY", "ENCODER_VERSION"] as const;
 const AUDIO_TYPES = ["flac", "mp3", "mp4", "ogg", "opus", "aac"] as const;
 const TAG_FAMILIES = ["AUDIT", "LOG_GRADE", "REPLAYGAIN", "DYNAMIC_RANGE", "MEDIA_SOURCE", "INSTRUMENTAL", "ADVISORY", "LYRICS", "BPM", "INITIALKEY"] as const;
+
+type ProviderOption = { id: string; label: string; notes?: string };
+
+/** Ordered provider picker for a `list` config key: the listed providers are
+ *  tried in order (first one with an answer wins). An empty list means the
+ *  built-in order, shown as a placeholder. */
+function ProviderOrder({
+  options, builtin, order, onChange, help,
+}: {
+  options: ProviderOption[];
+  builtin: string[];
+  order: string[];
+  onChange: (next: string[]) => void;
+  help?: string;
+}) {
+  const move = (i: number, d: number) => {
+    const next = order.slice();
+    [next[i], next[i + d]] = [next[i + d], next[i]];
+    onChange(next);
+  };
+  return (
+    <div className="space-y-1.5">
+      {order.length === 0 ? (
+        <div className="rounded-md border border-dashed border-border px-2 py-1.5 text-[11px] text-zinc-500">
+          <span className="text-zinc-400">Built-in order: </span>
+          {builtin.map((id) => options.find((o) => o.id === id)?.label ?? id).join(" → ")}
+        </div>
+      ) : (
+        <div className="rounded-md border border-border divide-y divide-border/60">
+          {order.map((id, i) => {
+            const opt = options.find((o) => o.id === id);
+            return (
+              <div key={id} className="flex items-start gap-2 px-2 py-1">
+                <span className="w-4 pt-0.5 text-[10px] text-zinc-600">{i + 1}</span>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[12px] text-zinc-200 truncate">{opt?.label ?? id}</div>
+                  {opt?.notes && <div className="text-[10px] text-zinc-600 truncate">{opt.notes}</div>}
+                </div>
+                <button
+                  type="button"
+                  className="text-zinc-500 hover:text-white disabled:opacity-30"
+                  title="Move up"
+                  disabled={i === 0}
+                  onClick={() => move(i, -1)}
+                >
+                  <ChevronUp className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  className="text-zinc-500 hover:text-white disabled:opacity-30"
+                  title="Move down"
+                  disabled={i === order.length - 1}
+                  onClick={() => move(i, 1)}
+                >
+                  <ChevronDown className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  className="text-zinc-500 hover:text-red-300"
+                  title="Remove from the list (unlisted providers are not used)"
+                  onClick={() => onChange(order.filter((x) => x !== id))}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {options.some((o) => !order.includes(o.id)) && (
+        <div className="flex flex-wrap gap-1.5">
+          {options.filter((o) => !order.includes(o.id)).map((o) => (
+            <button
+              key={o.id}
+              type="button"
+              className="chip border border-white/15 bg-white/5 text-[10px] text-zinc-400 hover:text-white"
+              title={o.notes}
+              onClick={() => onChange([...order, o.id])}
+            >
+              + {o.label}
+            </button>
+          ))}
+        </div>
+      )}
+      {order.length > 0 && (
+        <button
+          type="button"
+          className="text-[10px] text-zinc-500 hover:text-white underline"
+          onClick={() => onChange([])}
+        >
+          Reset to the built-in order
+        </button>
+      )}
+      {help && <div className="text-[10px] text-zinc-600">{help}</div>}
+    </div>
+  );
+}
 
 export default function SettingsPage() {
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
@@ -54,13 +151,19 @@ export default function SettingsPage() {
   // which password fields are currently revealed
   const [showPasswords, setShowPasswords] = useState<Set<string>>(new Set());
 
+  // Provider catalogues behind the order editors (Discovery / Lyrics lists).
+  const { data: discoveryCat } = useQuery({ queryKey: ["discoverySources"], queryFn: api.discoverySources });
+  const { data: lyricsCat } = useQuery({ queryKey: ["lyricsProviders"], queryFn: api.lyricsProviders });
+
   // ---- script options (persisted to config; /api/run uses them as defaults) ----
   type CfgField =
     | { k: string; label: string; type: "bool" }
     | { k: string; label: string; type: "number"; min?: number; max?: number; step?: number }
     | { k: string; label: string; type: "select"; options: [string, string][] }
     | { k: string; label: string; type: "text" }
-    | { k: string; label: string; type: "password" };
+    | { k: string; label: string; type: "password" }
+    /** Ordered provider preference list; an empty list means the built-in order. */
+    | { k: string; label: string; type: "list"; catalog: "discovery" | "lyrics"; help?: string };
   interface CfgGroup {
     title: string;
     blurb?: string;
@@ -141,6 +244,11 @@ export default function SettingsPage() {
       fields: [
         { k: "optimize_lrc", label: "Optimize .lrc sidecars", type: "bool" },
         { k: "optimize_embedded_lyrics", label: "Optimize embedded lyrics", type: "bool" },
+        {
+          k: "lyrics_sources", label: "Lyrics providers (order)", type: "list", catalog: "lyrics",
+          help: "Providers are tried top to bottom when lyrics are fetched from an album, artist or track page. Providers left out of the list are never used.",
+        },
+        { k: "lyrics_allow_plain", label: "Accept plain (unsynced) lyrics", type: "bool" },
         { k: "lrc_timestamp_precision", label: "Timestamp precision (decimals)", type: "number", min: 2, max: 3 },
         { k: "lrc_strip_metadata", label: "Strip metadata tags ([ti:], [ar:])", type: "bool" },
         { k: "lrc_collapse_blank_lines", label: "Collapse blank lines", type: "bool" },
@@ -167,6 +275,16 @@ export default function SettingsPage() {
       title: "DR / ReplayGain (script 7)",
       fields: [
         { k: "dr_replaygain_enabled", label: "Enabled", type: "bool" },
+        {
+          k: "replaygain_mode", label: "Gain mode", type: "select",
+          options: [["track", "Track gain"], ["album", "Album gain"], ["off", "Off — no gain applied"]],
+        },
+        { k: "replaygain_preamp_db", label: "Preamp (dB)", type: "number", min: -24, max: 24, step: 0.5 },
+        {
+          k: "replaygain_analyze_missing", label: "Measure tracks without ReplayGain tags instead of playing them at unity",
+          type: "bool",
+        },
+        { k: "replaygain_clip_protection", label: "Clip protection", type: "bool" },
         { k: "replaygain_skip_existing", label: "Skip files that already have RG tags", type: "bool" },
         { k: "force_dr_replaygain", label: "Force re-run", type: "bool" },
       ],
@@ -205,6 +323,16 @@ export default function SettingsPage() {
       title: "AutoTag (script 8)",
       fields: [
         { k: "auto_advisory", label: "Set advisory automatically", type: "bool" },
+        { k: "mood_enabled", label: "Write mood tags", type: "bool" },
+        { k: "genre_autofill", label: "Fill in missing genres", type: "bool" },
+        {
+          k: "mood_source", label: "Mood source", type: "select",
+          options: [
+            ["audio", "Audio analysis"],
+            ["provider", "Provider metadata"],
+            ["hybrid", "Hybrid — audio, trusting the genre when the audio is ambiguous"],
+          ],
+        },
         { k: "auto_instrumental", label: "Set INSTRUMENTAL automatically", type: "bool" },
         { k: "auto_zero_advisory_for_instrumental", label: "Zero advisory on instrumentals", type: "bool" },
         { k: "fix_instrumental_from_lyrics", label: "Fix INSTRUMENTAL from lyrics", type: "bool" },
@@ -254,6 +382,7 @@ export default function SettingsPage() {
         { k: "grade_include_log", label: "Allow LOG files", type: "bool" },
         { k: "grade_include_lrc", label: "Allow LRC files", type: "bool" },
         { k: "grade_include_accurip", label: "Allow .accurip files", type: "bool" },
+        { k: "grade_include_description", label: "Allow album description files (description.txt)", type: "bool" },
         { k: "grade_include_video", label: "Allow remuxed videos (MKV)", type: "bool" },
         { k: "grade_include_other", label: "Allow other files", type: "bool" },
         { k: "grade_check_raw_video", label: "Fail un-remuxed videos (VOB/AVI...)", type: "bool" },
@@ -365,6 +494,68 @@ export default function SettingsPage() {
       ],
     },
     {
+      title: "Discovery",
+      blurb:
+        "Online providers (Deezer, ListenBrainz, MusicBrainz, Last.fm, Wikipedia…) used for search, recommendations, artist images and album/artist descriptions. Each order list is tried top to bottom; the first provider with a usable answer wins. An empty list means the built-in order shown as the placeholder.",
+      fields: [
+        { k: "discovery_enabled", label: "Enabled (off = MusicBrainz only)", type: "bool" },
+        {
+          k: "discovery_rec_sources", label: "Recommendation sources (order)", type: "list", catalog: "discovery",
+          help: "Used by Home recommendations and “similar artists/albums”.",
+        },
+        {
+          k: "discovery_search_sources", label: "Search sources (order)", type: "list", catalog: "discovery",
+          help: "Used by the Discovery search tab for albums and artists.",
+        },
+        {
+          k: "artist_image_sources", label: "Artist image sources (order)", type: "list", catalog: "discovery",
+          help: "Used when fetching an artist image automatically; the picked image can still be overridden per artist.",
+        },
+        {
+          k: "description_sources", label: "Description sources (order)", type: "list", catalog: "discovery",
+          help: "Used for artist and album descriptions.",
+        },
+        { k: "discovery_timeout_s", label: "Request timeout (s)", type: "number", min: 3, max: 30 },
+        {
+          k: "mb_search_source", label: "MusicBrainz search goes through", type: "select",
+          options: [["auto", "Auto — discovery first, MusicBrainz as fallback"], ["discovery", "Discovery providers"], ["musicbrainz", "MusicBrainz only"]],
+        },
+        {
+          k: "home_rec_source", label: "Home recommendation source", type: "select",
+          options: [["discovery", "Discovery providers"], ["listenbrainz", "ListenBrainz"], ["musicbrainz", "MusicBrainz"]],
+        },
+        { k: "home_popular_count", label: "Popular albums shown on Home", type: "number", min: 4, max: 60 },
+      ],
+    },
+    {
+      title: "Artist images & descriptions",
+      blurb:
+        "Artwork and text that live next to the audio: artist photos stored with the artist, and descriptions stored in non-destructive tags. Grading can require them (see the Grading tab).",
+      fields: [
+        { k: "artist_image_enabled", label: "Fetch artist images", type: "bool" },
+        { k: "artist_image_crop", label: "Crop artist images to a square", type: "bool" },
+        { k: "artist_image_target_size", label: "Artist image max size (px, 0 = keep native size)", type: "number", min: 0, max: 4000 },
+        { k: "artist_description_enabled", label: "Fetch artist descriptions", type: "bool" },
+        { k: "album_description_enabled", label: "Fetch album descriptions", type: "bool" },
+      ],
+    },
+    {
+      title: "Import pipeline",
+      blurb:
+        "What happens after an album lands in the library (Soulseek downloads, Drag & drop, Finish import). The script chain below runs in order; leaving it blank runs the built-in chain: dedupe → sort → tag → covers → lyrics → audit → ReplayGain → AccurateRip. AcoustID fingerprints the audio to identify the exact release — it needs a free application key from acoustid.org; without one, matching falls back to title/artist/genre against MusicBrainz.",
+      fields: [
+        { k: "import_auto_scripts", label: "Run the script chain after import", type: "bool" },
+        {
+          k: "import_scripts", label: "Import script ids (e.g. 1, 3, 5, 7 — blank = built-in chain)", type: "text",
+        },
+        { k: "import_bulk_concurrency", label: "Bulk import concurrency", type: "number", min: 1, max: 8 },
+        { k: "import_acoustid", label: "Fingerprint with AcoustID", type: "bool" },
+        { k: "acoustid_enabled", label: "AcoustID enabled", type: "bool" },
+        { k: "acoustid_api_key", label: "AcoustID application key (free, acoustid.org)", type: "password" },
+        { k: "acoustid_min_score", label: "Minimum AcoustID match score", type: "number", min: 0, max: 1, step: 0.05 },
+      ],
+    },
+    {
       title: "Import & tag cleanup",
       blurb: "Genre importing from MusicBrainz and tag hygiene applied while optimizing.",
       fields: [
@@ -424,6 +615,13 @@ export default function SettingsPage() {
     { k: "grade_check_excess_tags", label: "Excess tags (non-canonical)", type: "bool" },
     { k: "grade_check_key_bpm", label: "Key & BPM tags", type: "bool" },
     { k: "grade_check_lyrics_lang_tags", label: "Transform tags carry language (TRANSLATION-EN)", type: "bool" },
+    { k: "grade_check_mood", label: "Mood tag present", type: "bool" },
+    { k: "grade_check_genre", label: "Genre tag present", type: "bool" },
+    { k: "grade_check_album_description", label: "Album description stored", type: "bool" },
+    { k: "grade_check_artist_image", label: "Artist image stored", type: "bool" },
+    { k: "grade_check_artist_description", label: "Artist description stored", type: "bool" },
+    { k: "grade_check_replaygain", label: "ReplayGain tags present (only when a file already carries one)", type: "bool" },
+    { k: "grade_check_acoustid", label: "AcoustID tags present (only when a file already carries one)", type: "bool" },
   ];
   // Toggles the General tab renders by hand (they belong to no group tab) —
   // listed here so they load, save and search like every other setting.
@@ -509,6 +707,9 @@ export default function SettingsPage() {
     { id: "autoimport", label: "Auto-import", section: "Integrations" },
     { id: "wishes", label: "Wishes", section: "Integrations" },
     { id: "deps", label: "Dependencies", section: "Integrations" },
+    { id: "discovery", label: "Discovery", section: "Providers" },
+    { id: "artistimages", label: "Artist images", section: "Providers" },
+    { id: "import", label: "Import", section: "Providers" },
     { id: "flac", label: "FLACs & lossless", section: "Scripts" },
     { id: "embedcovers", label: "Embedded covers", section: "Scripts" },
     { id: "images", label: "Images", section: "Scripts" },
@@ -634,6 +835,7 @@ export default function SettingsPage() {
       toast("Config saved");
       qc.invalidateQueries({ queryKey: ["config"] });
       qc.invalidateQueries({ queryKey: ["library"] });
+      qc.invalidateQueries({ queryKey: ["importScriptsPreview"] });
     } catch (e) {
       toast(String(e));
     }
@@ -678,6 +880,7 @@ export default function SettingsPage() {
       ["ai", "AI-assisted"], ["audiometa", "Key & BPM"], ["beets", "Beets tagging"],
       ["soulseek", "Soulseek (managed slskd)"], ["autoimport", "Auto-import"],
       ["wishes", "Wishes"], ["home", "Home"],
+      ["discovery", "Discovery"], ["artistimages", "Artist images"], ["import", "Import pipeline"],
       ["importtags", "Import & tag cleanup"],
     ].map(([tab, prefix]) => [
       tab,
@@ -741,9 +944,44 @@ export default function SettingsPage() {
     }
   };
 
+  // Which scripts the saved import chain runs (blank import_scripts = built-in).
+  const { data: chainPreview } = useQuery({
+    queryKey: ["importScriptsPreview"],
+    queryFn: () => api.importScriptsPreview([]),
+    enabled: tab === "import",
+  });
+
+  // Catalogues behind the `list` fields: pickable providers plus the built-in
+  // order, shown as the placeholder while a list is empty.
+  const listCatalogs: Record<"discovery" | "lyrics", { options: ProviderOption[]; builtin: (k: string) => string[] }> = {
+    discovery: { options: discoveryCat?.sources ?? [], builtin: (k) => discoveryCat?.defaults?.[k] ?? [] },
+    lyrics: { options: lyricsCat?.sources ?? [], builtin: () => lyricsCat?.default_order ?? [] },
+  };
+
   const renderFields = (fields: CfgField[]) => (
     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-x-6 gap-y-2.5 mt-2">
-      {fields.map((f) => (
+      {fields.map((f) => {
+        if (f.type === "list") {
+          const raw = scriptCfg[f.k];
+          const order = Array.isArray(raw)
+            ? raw.map(String)
+            : typeof raw === "string"
+              ? raw.split(/[,;\s]+/).filter(Boolean)
+              : [];
+          return (
+            <div key={f.k} className="md:col-span-2 xl:col-span-3">
+              <div className="text-[11px] text-zinc-400 mb-1">{f.label}</div>
+              <ProviderOrder
+                options={listCatalogs[f.catalog].options}
+                builtin={listCatalogs[f.catalog].builtin(f.k)}
+                order={order}
+                onChange={(next) => setCfg(f.k, next)}
+                help={f.help}
+              />
+            </div>
+          );
+        }
+        return (
         <label key={f.k} className="flex items-center gap-2 text-[13px] text-zinc-300 cursor-pointer select-none">
           {f.type === "bool" ? (
             <>
@@ -818,7 +1056,8 @@ export default function SettingsPage() {
             </div>
           )}
         </label>
-      ))}
+        );
+      })}
     </div>
   );
 
@@ -1196,6 +1435,26 @@ export default function SettingsPage() {
                     Run "Tag with beets" from an album page to import it: beets matches against MusicBrainz, writes tags
                     (translations / work &amp; movement / release-type caps per the settings above) and organizes files with
                     your naming script.
+                  </div>
+                </div>
+              )}
+              {tab === "import" && (
+                <div className="pt-2 border-t border-border space-y-1">
+                  <div className="text-[11px] text-zinc-400">
+                    Chain after saving ({chainPreview?.count ?? 0}{" "}
+                    {(chainPreview?.count ?? 0) === 1 ? "script" : "scripts"}):{" "}
+                    <span className="text-zinc-300">
+                      {chainPreview?.chain.length
+                        ? chainPreview.chain
+                            .map((id) => chainPreview.labels[String(id)] ?? `#${id}`)
+                            .join(" → ")
+                        : "nothing runs"}
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-zinc-600">
+                    Read from the saved config — click <em>Save all settings</em> to preview an edited list.
+                    A blank field falls back to the built-in chain, and the chain is skipped entirely when
+                    &ldquo;Run the script chain after import&rdquo; is off.
                   </div>
                 </div>
               )}

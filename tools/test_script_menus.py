@@ -50,8 +50,8 @@ def strip_accents(s):
 
 
 def server_runners():
-    src = read("server/main.py")
-    block = re.search(r"RUNNERS = \{(.*?)\n    \}", src, re.S).group(1)
+    src = read("server/script_runners.py")
+    block = re.search(r"RUNNERS[^=]*= \{(.*?)\n\}", src, re.S).group(1)
     return {int(n) for n in re.findall(r"(\d+):", block)}
 
 
@@ -84,23 +84,31 @@ def readme_scripts():
 def force_keys():
     src = read("web/src/lib/force.ts")
     keys = re.findall(r'key:\s*"(\w+)"', src)
-    # server/main.py maps these request keys onto config force_* flags
-    server = read("server/main.py")
-    block = re.search(r"if oneshot:(.*?)\n\n", server, re.S)
-    mapped = set(re.findall(r'f\.get\("(\w+)"', block.group(1))) if block else set()
+    # server/script_runners.py maps these request keys onto the config
+    # force_* flags (_FORCE_ALIASES) — the one place that knows the mapping
+    # since /api/run delegates its execution there.
+    server = read("server/script_runners.py")
+    block = re.search(r"_FORCE_ALIASES = \{(.*?)\n\}", server, re.S)
+    mapped = set(re.findall(r'"(\w+)":', block.group(1))) if block else set()
     return set(keys), mapped
 
 
 def force_defaults_are_false():
     """A supplied force dict must be authoritative: unselected keys have to
-    read ``f.get(key, False)``, never fall back to the saved config value —
-    otherwise unchecking a script in the one-shot Force menu still forces it."""
-    server = read("server/main.py")
-    block = re.search(r"if oneshot:(.*?)\n\n", server, re.S)
+    end up OFF, never left at the saved config value — otherwise unchecking a
+    script in the one-shot Force menu still forces it.
+
+    The semantics live in `server.script_runners._apply_force`, which clears
+    every force flag before applying the supplied selection."""
+    src = read("server/script_runners.py")
+    block = re.search(r"def _apply_force\(.*?\n(.*?)\n    for raw, value",
+                      src, re.S)
     body = block.group(1) if block else ""
-    fallbacks = re.findall(r'f\.get\("\w+",\s*cfg\.get\(', body)
-    wrong_default = re.findall(r'f\.get\("\w+",\s*(?!False)\w', body)
-    return fallbacks, wrong_default
+    clears = re.findall(r"cfg\[key\] = False", body)
+    # A "clear first" block must exist for both the whole-chain (sid None) and
+    # the single-script case, and the dict loop must never seed a saved value.
+    fallbacks = re.findall(r'cfg\[key\] = cfg\.get\(', body)
+    return ([] if len(clears) >= 2 else ["no authoritative clear"]), fallbacks
 
 
 def check_run_all_migration(check):

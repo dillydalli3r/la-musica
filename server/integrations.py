@@ -1062,17 +1062,85 @@ def cover_search(artist, album, limit=40, timeout=60.0, sources=None,
     return results
 
 
+# Image downloads are the one place a caller supplies a URL the server then
+# fetches. Provider CDNs do redirect (Cover Art Archive → archive.org), so
+# redirects are followed — but each hop is re-validated, the destination must
+# be a public host, and the body is capped: artwork that is not a few
+# megabytes is a mistake or an attack, not a cover.
+IMAGE_MAX_BYTES = 20 * 1024 * 1024
+IMAGE_MAX_REDIRECTS = 5
+
+
+def _public_host(host):
+    """False for localhost, loopback, private, link-local, reserved, multicast
+    and unspecified addresses — the SSRF guard for caller-supplied URLs."""
+    import ipaddress
+    import socket
+    name = str(host or "").strip().strip("[]")
+    if not name or name.lower().endswith(".local"):
+        return False
+    if name.lower() in ("localhost", "localhost.localdomain", "ip6-localhost"):
+        return False
+    try:
+        infos = socket.getaddrinfo(name, None)
+    except OSError:
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            return False
+    return True
+
+
 def fetch_image_bytes(url, timeout=60.0):
-    """Download an image URL (cover art hosts serve public CDN files) and
-    return (data, content_type). Only http(s) is allowed."""
-    from urllib.parse import urlparse
+    """Download an image URL and return (data, content_type).
+
+    Only http(s) to a *public* host is allowed, every redirect hop is
+    re-checked (a redirect chain must not reach an internal address after the
+    first check), and the body is capped at IMAGE_MAX_BYTES so a huge or slow
+    endpoint cannot be used as a memory/time hold.
+    """
+    from urllib.parse import urljoin, urlparse
+    headers = {"User-Agent": COV_UA, "Referer": f"{COV_BASE}/"}
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise ValueError("invalid image url")
+    if not _public_host(parsed.hostname):
+        raise ValueError("image url is not a public host")
     with httpx.Client(timeout=httpx.Timeout(timeout, read=timeout),
-                      follow_redirects=True) as client:
-        r = client.get(url, headers={"User-Agent": COV_UA,
-                                     "Referer": f"{COV_BASE}/"})
-        r.raise_for_status()
-        ctype = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
-        return r.content, ctype
+                      follow_redirects=False) as client:
+        for _hop in range(IMAGE_MAX_REDIRECTS + 1):
+            with client.stream("GET", url, headers=headers) as r:
+                if r.is_redirect:
+                    target = urljoin(url, str(r.headers.get("location") or ""))
+                    hop = urlparse(target)
+                    if hop.scheme not in ("http", "https") or not hop.netloc:
+                        raise ValueError("invalid image redirect")
+                    if not _public_host(hop.hostname):
+                        raise ValueError("image redirect leaves the public internet")
+                    url = target
+                    continue
+                r.raise_for_status()
+                ctype = (r.headers.get("content-type") or "").split(";")[0].strip().lower()
+                chunks, size = [], 0
+                for chunk in r.iter_bytes(65536):
+                    size += len(chunk)
+                    if size > IMAGE_MAX_BYTES:
+                        raise ValueError("image is too large")
+                    chunks.append(chunk)
+                return b"".join(chunks), ctype
+    raise ValueError("too many image redirects")
+
+
+def lyrics_chain(cfg, artist, track, album=None, duration=None):
+    """First provider hit for a track across the lyrics chain (LRCLIB, NetEase,
+    lyrics.ovh, Kugou) — same dict as mlo.lyrics_providers.fetch_lyrics, or
+    None. Imported lazily so the engine module stays out of this header."""
+    from mlo.lyrics_providers import fetch_lyrics
+    return fetch_lyrics(cfg, artist, track, album, duration)

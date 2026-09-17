@@ -1,11 +1,19 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { useState } from "react";
-import { AlertTriangle, ArrowDownUp, Clock, Disc3, Heart, RefreshCw, Sparkles, Star, Users } from "lucide-react";
+import { AlertTriangle, ArrowDownUp, Clock, Disc3, Flame, Heart, RefreshCw, Sparkles, Star, Users } from "lucide-react";
 import { api } from "../api";
+import { toast } from "../store";
 import { PageLoading } from "../components/Badges";
 import CoverImg from "../components/CoverImg";
-import type { HomeAlbum, HomeArtist } from "../types";
+import type { HomeAlbum, HomeArtist, HomeRecSource } from "../types";
+
+/** Which provider chain actually built `recommended` (see `rec_source`). */
+const REC_SOURCE_LABEL: Record<HomeRecSource, string> = {
+  discovery: "Deezer / ListenBrainz",
+  listenbrainz: "ListenBrainz",
+  musicbrainz: "MusicBrainz",
+};
 
 function ccaUrl(mbid: string, kind = "rg") {
   const entity = kind === "release" ? "release" : "release-group";
@@ -16,46 +24,94 @@ function mbUrl(a: HomeAlbum) {
   return `/mb/${a.mb_kind === "release" ? "release" : "rg"}/${a.mbid}`;
 }
 
-function HomeCard({ a }: { a: HomeAlbum }) {
-  const [failed, setFailed] = useState(false);
-  const to = a.owned && a.path ? `/album/${encodeURIComponent(a.path)}` : a.mbid ? mbUrl(a) : "/library";
-  const art = a.owned ? (
-    <CoverImg
-      albumPath={a.path}
-      coverFile={a.cover}
-      wrapperClass="aspect-square w-full rounded-xl shadow-lg ring-1 ring-black/40 overflow-hidden"
-    />
-  ) : a.mbid && !failed ? (
-    <div className="aspect-square w-full rounded-xl shadow-lg ring-1 ring-black/40 overflow-hidden bg-raise">
-      <img
-        src={ccaUrl(a.mbid, a.mb_kind)}
-        alt=""
-        loading="lazy"
-        decoding="async"
-        onError={() => setFailed(true)}
-        className="h-full w-full object-cover"
-      />
-    </div>
-  ) : (
-    <div className="aspect-square w-full rounded-xl shadow-lg ring-1 ring-black/40 overflow-hidden bg-raise flex items-center justify-center text-zinc-700">
-      <Disc3 className="h-1/3 w-1/3" />
-    </div>
-  );
+/** Shelf chip: the reason a row is recommended, or its popularity label. */
+function Chip({ text, title, tone = "accent" }: { text: string; title?: string; tone?: "accent" | "zinc" }) {
   return (
-    <div className="group rounded-xl p-2 transition-all duration-200 hover:bg-panel/70 hover:-translate-y-0.5">
-      <Link to={to} className="block" title={a.owned ? "Open album page" : "Open on MusicBrainz"}>
-        <div className="relative">{art}</div>
-      </Link>
-      <div className="mt-2 px-0.5">
-        <Link to={to} className="text-sm font-medium truncate block hover:text-accent-soft" title={a.album}>
-          {a.album || "—"}
+    <span
+      className={`truncate rounded-full px-1.5 py-0.5 text-[10px] leading-tight ${
+        tone === "accent" ? "bg-accent/10 text-accent-soft" : "bg-raise text-zinc-400"
+      }`}
+      title={title ?? text}
+    >
+      {text}
+    </span>
+  );
+}
+
+function HomeCard({ a }: { a: HomeAlbum }) {
+  const qc = useQueryClient();
+  const [fails, setFails] = useState(0);
+  const wish = useMutation({
+    mutationFn: () => api.discoveryWish({ artist: a.artist, title: a.album, year: a.year ?? undefined }),
+    onSuccess: (res) => {
+      toast(`Wish added — ${res.resolved?.title ?? a.album}`);
+      qc.invalidateQueries({ queryKey: ["wishes"] });
+    },
+    onError: (e) => toast(String(e)),
+  });
+
+  const to = a.owned && a.path ? `/album/${encodeURIComponent(a.path)}` : a.mbid ? mbUrl(a) : null;
+  // Provider artwork first, then the Cover Art Archive for MBID-native rows.
+  const candidates = a.owned
+    ? []
+    : [a.cover_url, a.mbid ? ccaUrl(a.mbid, a.mb_kind) : null].filter((u): u is string => !!u);
+  const src = candidates[fails] ?? null;
+  const wishable = !a.owned && !a.mbid && !!a.album && !!a.artist;
+
+  const art =
+    a.owned && a.path ? (
+      <CoverImg
+        albumPath={a.path}
+        coverFile={a.cover}
+        wrapperClass="aspect-square w-full rounded-xl shadow-lg ring-1 ring-black/40 overflow-hidden"
+      />
+    ) : src ? (
+      <div className="aspect-square w-full rounded-xl shadow-lg ring-1 ring-black/40 overflow-hidden bg-raise">
+        <img
+          src={src}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          onError={() => setFails((f) => f + 1)}
+          className="h-full w-full object-cover"
+        />
+      </div>
+    ) : (
+      <div className="aspect-square w-full rounded-xl shadow-lg ring-1 ring-black/40 overflow-hidden bg-raise flex items-center justify-center text-zinc-700">
+        <Disc3 className="h-1/3 w-1/3" />
+      </div>
+    );
+
+  return (
+    <div className="group flex h-full flex-col rounded-xl p-2 transition-all duration-200 hover:bg-panel/70 hover:-translate-y-0.5">
+      {to ? (
+        <Link
+          to={to}
+          className="block"
+          title={a.owned ? "Open album page" : "Open on MusicBrainz"}
+        >
+          <div className="relative">{art}</div>
         </Link>
-        <div className="text-[11px] text-zinc-500 truncate flex items-center gap-1.5 mt-0.5">
-          {!a.owned && (
-            <span title={a.reason} className="shrink-0 inline-flex">
-              <Sparkles className="h-3 w-3 text-accent-soft" />
-            </span>
-          )}
+      ) : (
+        <div className="relative" title={a.artist ? `${a.artist} — ${a.album}` : a.album}>
+          {art}
+        </div>
+      )}
+      <div className="mt-2 px-0.5 flex flex-1 flex-col gap-1">
+        {to ? (
+          <Link
+            to={to}
+            className="text-sm font-medium truncate hover:text-accent-soft"
+            title={a.album}
+          >
+            {a.album || "—"}
+          </Link>
+        ) : (
+          <div className="text-sm font-medium truncate" title={a.album}>
+            {a.album || "—"}
+          </div>
+        )}
+        <div className="text-[11px] text-zinc-500 truncate flex items-center gap-1.5">
           <span className="truncate" title={a.artist}>{a.artist}</span>
           {a.year && <span className="ml-auto shrink-0 tabular-nums">{a.year}</span>}
           {a.owned && a.grade_pct != null && (
@@ -64,6 +120,31 @@ function HomeCard({ a }: { a: HomeAlbum }) {
             </span>
           )}
         </div>
+        {(a.popularity_label || wishable) && (
+          <div className="mt-auto flex items-center gap-1 min-w-0">
+            {a.popularity_label && (
+              <Chip tone="zinc" text={a.popularity_label} title="Provider popularity" />
+            )}
+            {wishable && (
+              <button
+                className="ml-auto shrink-0 rounded-full p-1 text-zinc-500 hover:text-accent-soft hover:bg-raise disabled:opacity-50 transition-colors"
+                title={
+                  wish.isSuccess
+                    ? "On the wishlist — the Soulseek worker is hunting it"
+                    : "Wish for this album — the Soulseek worker will hunt it down"
+                }
+                onClick={() => wish.mutate()}
+                disabled={wish.isPending || wish.isSuccess}
+              >
+                <Heart
+                  className={`h-3.5 w-3.5 ${wish.isSuccess ? "text-emerald-400" : ""}`}
+                  fill={wish.isSuccess ? "currentColor" : "none"}
+                />
+              </button>
+            )}
+          </div>
+        )}
+        {a.reason && <Chip text={a.reason} />}
       </div>
     </div>
   );
@@ -74,13 +155,16 @@ function Shelf({
   icon: Icon,
   items,
   blurb,
+  empty,
 }: {
   title: string;
   icon: typeof Sparkles;
   items: HomeAlbum[];
   blurb?: string;
+  /** Shown instead of nothing when the shelf is empty (omit to hide the shelf). */
+  empty?: string;
 }) {
-  if (!items.length) return null;
+  if (!items.length && !empty) return null;
   return (
     <section className="space-y-2">
       <div className="flex items-baseline gap-2 px-1">
@@ -88,11 +172,15 @@ function Shelf({
         <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
         {blurb && <span className="text-[11px] text-zinc-600">{blurb}</span>}
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 gap-3 stagger">
-        {items.map((a, i) => (
-          <HomeCard key={`${a.mbid ?? a.path}-${i}`} a={a} />
-        ))}
-      </div>
+      {items.length ? (
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 gap-3 stagger">
+          {items.map((a, i) => (
+            <HomeCard key={`${a.mbid ?? a.path}-${i}`} a={a} />
+          ))}
+        </div>
+      ) : (
+        <p className="px-1 text-xs text-zinc-600">{empty}</p>
+      )}
     </section>
   );
 }
@@ -154,6 +242,7 @@ export default function HomePage() {
   }
 
   const { stats } = data;
+  const recLabel = data.rec_source ? REC_SOURCE_LABEL[data.rec_source] : null;
   return (
     <div className="p-6 space-y-7">
       {/* hero */}
@@ -194,7 +283,14 @@ export default function HomePage() {
         title="Recommended for you"
         icon={Sparkles}
         items={data.recommended}
-        blurb="New releases from artists and genres you collect"
+        blurb={recLabel ? `source: ${recLabel}` : "New releases from artists and genres you collect"}
+        empty="Nothing new from your artists and genres right now — discovery needs a reachable provider and some tagged genres."
+      />
+      <Shelf
+        title="Popular right now"
+        icon={Flame}
+        items={data.popular ?? []}
+        blurb="What people are actually listening to"
       />
       <Shelf title="Recently added" icon={Clock} items={data.recent} />
       <Shelf

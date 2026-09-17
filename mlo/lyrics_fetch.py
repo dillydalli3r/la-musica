@@ -1,24 +1,22 @@
-"""Script 13 — Fetch Lyrics (LRCLIB).
+"""Script 13 — Fetch Lyrics.
 
-Downloads missing lyrics for every track from lrclib.net and writes them
-per the global ``lyrics_format`` (EMBEDDED / LRC / BOTH), canonicalized
+Downloads missing lyrics for every track from the configured provider chain
+(LRCLIB → NetEase → lyrics.ovh → Kugou; see ``lyrics_providers``) and writes
+them per the global ``lyrics_format`` (EMBEDDED / LRC / BOTH), canonicalized
 with the same formatting rules as script 1. Tracks tagged INSTRUMENTAL=1
 and tracks that already carry lyrics (embedded or an .lrc sidecar) are
 skipped unless the run is forced. Standard library only, so the runner
 works in every install (no httpx dependency).
 """
-import json
 import os
-import threading
-import time
-import urllib.error
-import urllib.parse
-import urllib.request
 
 from .audio import AudioFile
 from .lyrics import (
     _atomic_write_text, _format_for_storage, _lrc_for,
     _process_lyrics_for_audio,
+)
+from .lyrics_providers import (  # noqa: F401  (lrclib_fetch is a re-export shim)
+    SOURCE_LABELS, fetch_lyrics, lrclib_fetch, provider_order,
 )
 from .paths import AUDIO_EXTS
 from .stats import (
@@ -27,81 +25,88 @@ from .stats import (
 )
 from .ui import print_header, log, c, Color
 
-LRCLIB_BASE = "https://lrclib.net/api"
-_USER_AGENT = "MusicLibraryOptimizer/2 (la musica)"
-_throttle_lock = threading.Lock()
-_last_request = 0.0
 
+def fetch_one(path, config, force=False):
+    """Fetch + write lyrics for ONE track; the shared core of script 13 and
+    the API's "auto-import lyrics" button.
 
-def _lrclib_get(endpoint, params, timeout=15, retries=3):
-    """Rate-throttled LRCLIB GET with retry on 429/5xx (they throttle IPs).
-    Returns the decoded JSON body, or None for not-found / errors."""
-    global _last_request
-    url = f"{LRCLIB_BASE}/{endpoint}?{urllib.parse.urlencode(params)}"
-    for attempt in range(retries):
-        with _throttle_lock:
-            elapsed = time.time() - _last_request
-            if elapsed < 0.4:
-                time.sleep(0.4 - elapsed)
-            status, body = 0, b""
-            try:
-                req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-                with urllib.request.urlopen(req, timeout=timeout) as r:
-                    status, body = r.status, r.read()
-            except urllib.error.HTTPError as e:
-                status = e.code
-            except Exception:
-                status = 0
-            _last_request = time.time()
-        if status in (429, 500, 502, 503, 504) and attempt < retries - 1:
-            time.sleep(2.0 * (attempt + 1))
-            continue
-        if status == 200:
-            try:
-                return json.loads(body.decode("utf-8", "replace"))
-            except Exception:
-                return None
-        return None
-    return None
+    Returns `{path, status: "ok"|"skipped"|"failed", provider,
+    provider_label, synced, wrote: {embedded, lrc}, reason, error}`. The skip
+    rules (INSTRUMENTAL, existing embedded/sidecar lyrics unless *force*),
+    the `lyrics_format` write mode and the canonicalization pass are the same
+    ones the batch runner uses, so a lyrics run from the UI and a lyrics run
+    from the Optimization page produce identical files.
+    """
+    result = {"path": path, "status": "skipped", "provider": None,
+              "provider_label": None, "synced": False,
+              "wrote": {"embedded": False, "lrc": None},
+              "reason": "", "error": ""}
+    fmt = str(config.get("lyrics_format") or "EMBEDDED").upper()
+    write_embedded = fmt != "LRC"      # EMBEDDED or BOTH
+    write_sidecar = fmt in ("LRC", "BOTH")
+    try:
+        af = AudioFile(path)
+        if af.audio is None:
+            raise RuntimeError(af.error or "unreadable")
 
+        instrumental = str(af.get_tag("INSTRUMENTAL") or "").strip() == "1"
+        existing = (af.get_lyrics() or "").strip()
+        has_sidecar = os.path.isfile(_lrc_for(path))
+        if not force and (instrumental or existing or has_sidecar):
+            result["reason"] = "instrumental" if instrumental else "lyrics already present"
+            return result
 
-def lrclib_fetch(artist, track, album=None, duration=None):
-    """Best LRCLIB record for a track: exact /get lookup first, then a
-    /search fallback preferring synced lyrics and the closest duration.
-    Returns the record dict (syncedLyrics / plainLyrics) or None."""
-    params = {"artist_name": artist, "track_name": track}
-    if album:
-        params["album_name"] = album
-    if duration:
-        params["duration"] = int(round(duration))
-    rec = _lrclib_get("get", params)
-    if isinstance(rec, dict) and (rec.get("syncedLyrics") or rec.get("plainLyrics")):
-        return rec
-    # The exact lookup is strict — retry as a search, without the album
-    # filter first (it can hurt matches).
-    for album_filter in dict.fromkeys((None, album)):
-        search = {"track_name": track, "artist_name": artist}
-        if album_filter:
-            search["album_name"] = album_filter
-        hits = _lrclib_get("search", search)
-        if isinstance(hits, list) and hits:
-            synced = [h for h in hits if h.get("syncedLyrics")]
-            pool = synced or hits
-            if duration:
-                pool = sorted(pool, key=lambda h: abs(int(h.get("duration") or 0) - int(duration)))
-            return pool[0]
-    return None
+        artist = af.get_tag("ARTIST")
+        title = af.get_tag("TITLE")
+        if not artist or not title:
+            result["reason"] = "missing ARTIST/TITLE tags"
+            return result
+
+        duration = None
+        try:
+            duration = af.audio.info.length
+        except Exception:
+            pass
+        hit = fetch_lyrics(config, artist, title, af.get_tag("ALBUM"), duration)
+        # A synced provider hit keeps its timestamps; a plain one does not.
+        text = ((hit or {}).get("synced") or (hit or {}).get("plain") or "").strip()
+        if not text:
+            result["reason"] = "no provider had lyrics"
+            return result
+        result["provider"] = hit["provider"]
+        result["provider_label"] = hit.get("provider_label") or hit["provider"]
+        result["synced"] = bool((hit.get("synced") or "").strip())
+
+        if write_sidecar:
+            final = _format_for_storage(text, config, optimize=True, is_for_lrc=True)
+            _atomic_write_text(_lrc_for(path), final)
+            result["wrote"]["lrc"] = _lrc_for(path)
+        if write_embedded:
+            final = _format_for_storage(text, config, optimize=True)
+            if not af.set_lyrics(final):
+                raise RuntimeError(af.error or "lyrics write failed")
+            result["wrote"]["embedded"] = True
+        # Normalize with the exact script-1 code path so grading sees the
+        # canonical form (blank lines, zero stamps, …).
+        _process_lyrics_for_audio(path, config)
+        result["status"] = "ok"
+        return result
+    except Exception as e:
+        result["status"] = "failed"
+        result["error"] = str(e)
+        return result
 
 
 def run_fetch_lyrics(config):
     folder = config.get("music_folder") or ""
     stats = new_stats()
+    stats["by_provider"] = {}
 
-    print_header("Fetch Lyrics (LRCLIB)")
+    print_header("Fetch Lyrics")
     fmt = str(config.get("lyrics_format") or "EMBEDDED").upper()
-    write_embedded = fmt != "LRC"  # EMBEDDED or BOTH
-    write_sidecar = fmt in ("LRC", "BOTH")
     force = bool(config.get("force_lyrics", False))
+    log("sources: " + " → ".join(
+        SOURCE_LABELS[p] for p in provider_order(config)))
     log(f"write mode: {fmt}" + ("  (forced: re-fetch existing lyrics)" if force else ""))
 
     if config.get("targets") is not None:
@@ -125,61 +130,20 @@ def run_fetch_lyrics(config):
     pbar = _make_pbar(total=len(files), desc="Fetch lyrics")
     try:
         for path in files:
-            try:
-                af = AudioFile(path)
-                if af.audio is None:
-                    raise RuntimeError(af.error or "unreadable")
-
-                instrumental = str(af.get_tag("INSTRUMENTAL") or "").strip() == "1"
-                existing = (af.get_lyrics() or "").strip()
-                has_sidecar = os.path.isfile(_lrc_for(path))
-                if not force and (instrumental or existing or has_sidecar):
-                    stats["skipped_count"] += 1
-                    _pbar_skip(pbar, counts)
-                    continue
-
-                artist = af.get_tag("ARTIST")
-                title = af.get_tag("TITLE")
-                if not artist or not title:
-                    stats["skipped_count"] += 1
-                    _pbar_skip(pbar, counts)
-                    continue
-
-                duration = None
-                try:
-                    duration = af.audio.info.length
-                except Exception:
-                    pass
-                rec = lrclib_fetch(artist, title, af.get_tag("ALBUM"), duration)
-                text = ((rec or {}).get("syncedLyrics")
-                        or (rec or {}).get("plainLyrics") or "").strip()
-                if not text:
-                    stats["skipped_count"] += 1  # not on LRCLIB
-                    counts["skip"] += 1
-                    _pbar_skip(pbar, counts)
-                    continue
-
-                written = False
-                if write_sidecar:
-                    final = _format_for_storage(text, config, optimize=True, is_for_lrc=True)
-                    _atomic_write_text(_lrc_for(path), final)
-                    written = True
-                if write_embedded:
-                    final = _format_for_storage(text, config, optimize=True)
-                    if not af.set_lyrics(final):
-                        raise RuntimeError(af.error or "lyrics write failed")
-                    written = True
-                if written:
-                    # Normalize with the exact script-1 code path so grading
-                    # sees the canonical form (blank lines, zero stamps, …).
-                    _process_lyrics_for_audio(path, config)
-                    stats["modified_count"] += 1
-                    _pbar_update(pbar, counts, "ok")
-            except Exception as e:
+            res = fetch_one(path, config, force=force)
+            if res["status"] == "ok":
+                pid = res["provider"]
+                stats["by_provider"][pid] = stats["by_provider"].get(pid, 0) + 1
+                stats["modified_count"] += 1
+                _pbar_update(pbar, counts, "ok")
+            elif res["status"] == "failed":
                 stats["error_count"] += 1
                 if len(stats["errors"]) < 25:
-                    stats["errors"].append(f"{os.path.basename(path)}: {e}")
+                    stats["errors"].append(f"{os.path.basename(path)}: {res['error']}")
                 _pbar_update(pbar, counts, "fail")
+            else:
+                stats["skipped_count"] += 1
+                _pbar_skip(pbar, counts)
     finally:
         try:
             pbar.close()
@@ -190,4 +154,10 @@ def run_fetch_lyrics(config):
         f"lyrics fetched: {counts['ok']} · skipped: {counts['skip']} · failed: {counts['fail']}",
         Color.GREEN if counts["fail"] == 0 else Color.YELLOW,
     ))
+    if stats["by_provider"]:
+        summary = " · ".join(
+            f"{SOURCE_LABELS.get(p, p)}: {n}"
+            for p, n in sorted(stats["by_provider"].items(), key=lambda kv: -kv[1])
+        )
+        log(f"sources: {summary}")
     return stats
