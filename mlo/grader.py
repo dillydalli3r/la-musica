@@ -901,9 +901,16 @@ def _grade_sidecars(album_dir, all_files, cfg):
 
 
 def _norm_path_case(p):
-    """Separator + case normalization so path comparisons work on both
-    Windows (case-insensitive, backslashes) and POSIX."""
-    return os.path.normcase(str(p or "").replace("/", os.sep).replace("\\", os.sep))
+    """Separator + case normalization so a case-only difference is recognised
+    on BOTH platforms.
+
+    `os.path.normcase` reads like the portable answer and is not one: it
+    lowercases on Windows and is the identity on POSIX, so on Linux a path
+    differing only in letter case fell through to the "path" verdict — a full
+    naming failure — instead of "case", which meant the PATH_CASE check and
+    its switch did not exist for a Docker or Linux install at all. Folding
+    the case here makes the comparison mean the same thing everywhere."""
+    return str(p or "").replace("/", os.sep).replace("\\", os.sep).casefold()
 
 
 def _fs_cased_dir(path, base):

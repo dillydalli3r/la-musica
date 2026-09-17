@@ -389,17 +389,20 @@ class FakeBrowse:
         return self.dirs
 
 
+# slskd publishes remote paths with FORWARD slashes on every platform it runs
+# on, and that is what the job splits names out of — a fixture spelled with
+# backslashes only "worked" on Windows, where os.sep made the split happen.
 BROWSE_DIRS = [
-    {"directory": "downloads\\Album", "files": [
-        {"filename": "downloads\\Album\\01 a.flac", "size": 10, "length": 123},
-        {"filename": "downloads\\Album\\02 b.FLAC", "size": 11},
-        {"filename": "downloads\\Album\\cover.jpg", "size": 5},
-        {"filename": "downloads\\Album\\rip.log", "size": 2},
+    {"directory": "downloads/Album", "files": [
+        {"filename": "downloads/Album/01 a.flac", "size": 10, "length": 123},
+        {"filename": "downloads/Album/02 b.FLAC", "size": 11},
+        {"filename": "downloads/Album/cover.jpg", "size": 5},
+        {"filename": "downloads/Album/rip.log", "size": 2},
     ]},
-    {"directory": "downloads\\Other", "files": [{"filename": "downloads\\Other\\z.mp3"}]},
+    {"directory": "downloads/Other", "files": [{"filename": "downloads/Other/z.mp3"}]},
 ]
 
-browsed = soulseek_auto._release_from_folder("peer", "downloads\\Album",
+browsed = soulseek_auto._release_from_folder("peer", "downloads/Album",
                                              FakeBrowse(BROWSE_DIRS))
 assert not browsed["id"], browsed["id"]
 assert browsed["title"] == "Album", browsed["title"]

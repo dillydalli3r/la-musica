@@ -11,6 +11,7 @@ Run:  python tools/test_soulseek_ownership.py
 """
 import os
 import sys
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -92,6 +93,13 @@ _real_popen = soulseek.subprocess.Popen
 soulseek.subprocess.Popen = lambda *a, **kw: spawned.append(a) or (_ for _ in ()).throw(AssertionError("spawned"))
 soulseek._proc["proc"] = None
 
+# start() checks for the binary BEFORE it looks at the port, so a machine with
+# no slskd installed (CI) answered "slskd is not installed" and never reached
+# the ownership refusal this section pins. The lookup therefore points at a
+# throwaway path: nothing is spawned here (Popen is stubbed above), the port
+# logic is what actually runs.
+soulseek.slskd_exe = lambda: os.path.join(tempfile.gettempdir(), "slskd")
+
 port_foreign, close3 = serve(401, b"")
 ok, msg = soulseek.start(cfg(port_foreign))
 assert ok is False, (ok, msg)
@@ -147,8 +155,6 @@ assert killed == [port], killed
 # --------------------------------------------------------------------------- #
 # 4. slskd's single-instance lock must not look like a dead Start button
 # --------------------------------------------------------------------------- #
-import tempfile  # noqa: E402
-
 tmpdir = tempfile.mkdtemp()
 cmd = os.path.join(tmpdir, "fake_slskd.cmd")
 with open(cmd, "w", newline="\r\n") as f:

@@ -296,8 +296,12 @@ CFG = {"music_folder": MUSIC, "cover_target_size": 1200, "naming_script": ""}
 srv.load_config = lambda: dict(CFG)
 
 REAL = REAL_MUSIC_FOLDER.replace("\\", "/").rstrip("/").lower()
-assert not MUSIC.replace("\\", "/").lower().startswith(REAL), \
-    f"temp fixture {MUSIC} sits inside the real music folder"
+# Only meaningful when there IS a configured music folder to stay away from: a
+# checkout without config.json (CI) reads "" here, and every path starts with
+# "" — which would fail a fixture that is in fact hermetic.
+if REAL:
+    assert not MUSIC.replace("\\", "/").lower().startswith(REAL), \
+        f"temp fixture {MUSIC} sits inside the real music folder"
 
 
 class Upload:
