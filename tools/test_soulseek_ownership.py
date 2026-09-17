@@ -156,10 +156,20 @@ assert killed == [port], killed
 # 4. slskd's single-instance lock must not look like a dead Start button
 # --------------------------------------------------------------------------- #
 tmpdir = tempfile.mkdtemp()
-cmd = os.path.join(tmpdir, "fake_slskd.cmd")
-with open(cmd, "w", newline="\r\n") as f:
-    f.write("@echo off\necho [00:00:01 INF] slskd 0.26.0 starting\n"
-            "echo An instance of slskd is already running\nexit /b 1\n")
+if os.name == "nt":
+    cmd = os.path.join(tmpdir, "fake_slskd.cmd")
+    with open(cmd, "w", newline="\r\n") as f:
+        f.write("@echo off\necho [00:00:01 INF] slskd 0.26.0 starting\n"
+                "echo An instance of slskd is already running\nexit /b 1\n")
+else:
+    # POSIX: the same shim as a shebang script with the exec bit — Popen can
+    # run anything, and a runner has no .cmd interpreter, so the check would
+    # otherwise die on PermissionError before slskd's lock message is read.
+    cmd = os.path.join(tmpdir, "fake_slskd")
+    with open(cmd, "w") as f:
+        f.write("#!/bin/sh\necho '[00:00:01 INF] slskd 0.26.0 starting'\n"
+                "echo 'An instance of slskd is already running'\nexit 1\n")
+    os.chmod(cmd, 0o755)
 
 soulseek.subprocess.Popen = _real_popen
 soulseek.slskd_exe = lambda: cmd

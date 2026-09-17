@@ -259,16 +259,20 @@ ok(res["total_checks"] == good["total_checks"] + 1
 
 # The grade follows the case the DISK stores, never the caller's spelling:
 # Windows resolves "2020 - Album" to a folder stored as "2020 - ALBUM", so a
-# caller-supplied path used to decide the case verdict on its own.
-res = _grade_album(os.path.join(_bad_root, "Artists", "Artist", "2020 - Album"),
-                   "EMBEDDED", bad_cfg)
-ok("PATH_CASE" in res["tracks"][0]["issues"],
-   "canonically-spelled caller path still reports the folder's real case")
-res = _grade_album(os.path.join(good_root, "Artists", "Artist", "2020 - album"),
-                   "EMBEDDED", good_cfg)
-ok("PATH_CASE" not in res["tracks"][0]["issues"]
-   and res["pass_count"] == res["total_checks"],
-   "loosely-spelled caller path is not graded against its own spelling")
+# caller-supplied path used to decide the case verdict on its own. Only a
+# case-INSENSITIVE filesystem reaches that code path at all — on Linux the
+# other spelling is not a directory, so there is no caller spelling for the
+# grader to be fooled by and nothing here to assert.
+if os.path.exists(os.path.join(_bad_root, "Artists", "Artist", "2020 - Album")):
+    res = _grade_album(os.path.join(_bad_root, "Artists", "Artist", "2020 - Album"),
+                       "EMBEDDED", bad_cfg)
+    ok("PATH_CASE" in res["tracks"][0]["issues"],
+       "canonically-spelled caller path still reports the folder's real case")
+    res = _grade_album(os.path.join(good_root, "Artists", "Artist", "2020 - album"),
+                       "EMBEDDED", good_cfg)
+    ok("PATH_CASE" not in res["tracks"][0]["issues"]
+       and res["pass_count"] == res["total_checks"],
+       "loosely-spelled caller path is not graded against its own spelling")
 
 # switches: PATH_CASE has its own, PATH keeps its own
 res = _grade_album(bad_dir, "EMBEDDED", dict(bad_cfg, grade_check_filename_case=False))
