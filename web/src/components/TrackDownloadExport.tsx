@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Download, FileOutput } from "lucide-react";
 import { api } from "../api";
 import { toast } from "../store";
-import { cacheTrack, isTrackCached, uncacheTrack } from "../lib/mediaCache";
+import { CACHED_PATHS_KEY, cacheTrack, isTrackCached, uncacheTrack } from "../lib/mediaCache";
 import Popover from "./Popover";
 
 /** Codec choices for per-track exports; lossy codecs expose a bitrate. */
@@ -38,6 +39,7 @@ export default function TrackDownloadExport({ path, title, compact, iconOnly, di
   const [codec, setCodec] = useState("flac");
   const [bitrate, setBitrate] = useState(320);
   const [busy, setBusy] = useState(false);
+  const qc = useQueryClient();
   // cache state for the current track
   const [cached, setCached] = useState(false);
   const [cacheBusy, setCacheBusy] = useState(false);
@@ -66,6 +68,9 @@ export default function TrackDownloadExport({ path, title, compact, iconOnly, di
         setCached(true);
         toast("Cached — plays without the server");
       }
+      // The title marks and the downloads page read the shared snapshot.
+      qc.invalidateQueries({ queryKey: CACHED_PATHS_KEY });
+      qc.invalidateQueries({ queryKey: ["cachedBytes"] });
     } catch (e) {
       toast(`Cache failed: ${e instanceof Error ? e.message : e}`);
     } finally {

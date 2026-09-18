@@ -15,8 +15,17 @@ const TILT_DB = 30;
  * band's rolling peak that survives one frame (~8 s half-life at 60 fps). */
 const PEAK_REF = 0.55;
 const PEAK_DECAY = 0.9985;
-/** Idle redraw interval (ms) when no signal is live. */
-const IDLE_MS = 250;
+/** Idle redraw interval (ms) when no signal is live. The loop drops from the
+ *  display clock to this timer while there is nothing to draw, and stops
+ *  repainting altogether once the strip has eased onto its baseline — a
+ *  paused canvas costs ten wake-ups a second, not sixty frames. */
+const IDLE_MS = 100;
+/** Bar count. One strip reads the same at 56 everywhere it is mounted. */
+const BARS = 56;
+/** The idle baseline a bar rests on, and how close to it counts as "at
+ *  rest" for the stop-painting check. */
+const BASE = 0.015;
+const REST_EPS = 0.002;
 /** Per-frame height easing: fast attack, slower release. The attack is
  * near-instant (~1.5 frames) so a kick lands on the frame it happens; the
  * release is what makes the strip readable, and it must stay well under the
@@ -34,6 +43,18 @@ const PEAK_FALL = 0.0065;
 /** Level above which a bar gets its halo — the decorative motion that is
  * skipped under prefers-reduced-motion. */
 const GLOW_AT = 0.55;
+
+/** Are the bars — and their falling caps — already sitting on the idle
+ *  baseline? Then there is nothing left to ease and nothing to redraw: a
+ *  paused strip should cost its timer and nothing else, not the same flat
+ *  line ten times a second. */
+function atRest(levels: Float32Array, peaks: Float32Array, n: number): boolean {
+  for (let i = 0; i < n; i++) {
+    if (Math.abs((levels[i] ?? 0) - BASE) > REST_EPS) return false;
+    if (Math.abs((peaks[i] ?? 0) - BASE) > REST_EPS) return false;
+  }
+  return true;
+}
 
 /** Frequency-bar visualizer driven ONLY by the shared WebAudio analyser.
  * Bars use logarithmic band mapping — music's energy lives in the low
@@ -59,23 +80,19 @@ const GLOW_AT = 0.55;
  * shows its shape while a sustained fortissimo keeps its raw height.
  * Heights then ease asymmetrically (ATTACK/RELEASE) and the loudest bars get
  * a faint halo — the one decorative touch, and the only thing dropped under
- * prefers-reduced-motion: the bars themselves are the meter and keep moving. */
-export default function Visualizer({
-  playing,
-  bars = 56,
-  className = "",
-  mirror = false,
-}: {
-  playing: boolean;
-  bars?: number;
-  className?: string;
-  /** Draw a mirrored (top+bottom) field instead of bars on one baseline. */
-  mirror?: boolean;
-}) {
+ * prefers-reduced-motion: the bars themselves are the meter and keep moving.
+ *
+ * Cost: ONE ramp gradient per frame instead of one per bar, and the loop
+ * moves to the idle timer — then stops painting entirely — when there is no
+ * signal, so a paused strip is not a 60 fps redraw of the same flat line.
+ * The ramp is anchored to the strip rather than to each bar (quiet colour at
+ * the baseline, bright at the top), so a taller bar carries more of it and
+ * level reads as brightness as well as height. */
+export default function Visualizer({ playing, className = "" }: { playing: boolean; className?: string }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const levels = useRef<Float32Array>(new Float32Array(bars));
-  const peaks = useRef<Float32Array>(new Float32Array(bars));
-  const norm = useRef<Float32Array>(new Float32Array(bars));
+  const levels = useRef<Float32Array>(new Float32Array(BARS));
+  const peaks = useRef<Float32Array>(new Float32Array(BARS));
+  const norm = useRef<Float32Array>(new Float32Array(BARS));
   const playingRef = useRef(playing);
   useEffect(() => {
     playingRef.current = playing;
@@ -97,33 +114,19 @@ export default function Visualizer({
     // halo this small (the ambient background re-reads its own on every open).
     const motion = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-    let raf = 0;
+    let handle = 0;
+    let onTimer = false;
     let freq: Uint8Array | null = null;
     let lastW = 0;
     let lastIdle = 0;
 
     const tick = () => {
-      // The loop NEVER cancels itself. It used to stop after ~2 s of silent
-      // frames and restart only on a `playing` PROP CHANGE — so a buffering
-      // stall, a seek, a gapless element swap or a silent passage killed the
-      // strip for the rest of the session (track changes keep `playing`
-      // true), and the first play (suspended context) never recovered.
-      raf = requestAnimationFrame(tick);
       const dpr = Math.min(2, window.devicePixelRatio || 1);
       const w = canvas.clientWidth;
       const h = canvas.clientHeight;
-      if (!w || !h) return;
-      // A canvas resize blanks the backing store by itself, so a resized
-      // frame is always repainted (see the idle skip below).
-      const resized = w !== lastW;
-      if (resized) {
-        canvas.width = Math.round(w * dpr);
-        canvas.height = Math.round(h * dpr);
-        lastW = w;
-      }
 
       const analyser = activeAnalyser();
-      const n = bars;
+      const n = BARS;
 
       // ---- gather band values (0..1) -------------------------------
       let live = false;
@@ -140,16 +143,42 @@ export default function Visualizer({
       }
       const synthetic = !live;
 
-      // Idle: nothing to animate, so redraw at ~4 Hz (the baseline still
-      // eases down) while the loop keeps running — the next live frame is
-      // drawn immediately, with no prop change to restart anything.
-      // The skipped frames must not CLEAR either: the canvas is composited at
-      // the display rate, so clearing and returning left the strip blank for
-      // 59 of every 60 frames while paused (measured: 0 painted pixels on
-      // 7 of 8 samples; the baseline showed only as a 4 Hz flash). An idle
-      // frame now leaves the previous one on screen.
+      // The loop NEVER cancels itself: with a signal it re-arms on the
+      // display clock, without one on the idle timer. It used to stop after
+      // ~2 s of silent frames and restart only on a `playing` PROP CHANGE —
+      // so a buffering stall, a seek, a gapless element swap or a silent
+      // passage killed the strip for the rest of the session (track changes
+      // keep `playing` true), and the first play (suspended context) never
+      // recovered.
+      onTimer = synthetic;
+      handle = synthetic ? window.setTimeout(tick, IDLE_MS) : requestAnimationFrame(tick);
+      if (!w || !h) return;
+
+      // A canvas resize blanks the backing store by itself, so a resized
+      // frame is always repainted (see the idle skip below).
+      const resized = w !== lastW;
+      if (resized) {
+        canvas.width = Math.round(w * dpr);
+        canvas.height = Math.round(h * dpr);
+        lastW = w;
+      }
+
+      // Idle: nothing to animate, so the strip eases onto its baseline and
+      // then stops repainting altogether — a paused canvas costs the timer
+      // and nothing else. The skipped frames must not CLEAR either: the
+      // canvas is composited at the display rate, so clearing and returning
+      // left the strip blank for 59 of every 60 frames while paused
+      // (measured: 0 painted pixels on 7 of 8 samples; the baseline showed
+      // only as a 4 Hz flash). An idle frame leaves the previous one on
+      // screen.
       const now = performance.now();
-      if (synthetic && !resized && now - lastIdle < IDLE_MS) return;
+      if (synthetic && !resized) {
+        if (now - lastIdle < IDLE_MS) return;
+        if (atRest(levels.current, peaks.current, n)) {
+          lastIdle = now;
+          return;
+        }
+      }
       lastIdle = now;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, w, h);
@@ -177,7 +206,7 @@ export default function Visualizer({
           // No real signal (paused, idle, or unobservable stream): hold a
           // flat near-zero baseline. The strip must only ever draw actual
           // audio — never synthesized motion or noise.
-          target = 0.015;
+          target = BASE;
         }
         // Fast attack, slower release: the rise is what a kick is, the fall is
         // what lets the eye follow one band instead of a wall.
@@ -197,11 +226,21 @@ export default function Visualizer({
       // ---- draw ------------------------------------------------------
       const gap = Math.max(1.5, w / n * 0.28);
       const bw = Math.max(1.5, (w - gap * (n - 1)) / n);
-      const base = mirror ? h / 2 : h;
+      const base = h;
+      // ONE ramp for the whole strip, anchored to the canvas instead of
+      // rebuilt per bar: the old code allocated a CanvasGradient for every
+      // bar on every frame (56 throwaway objects at 60 fps). The ramp still
+      // runs from the quiet colour at the baseline to the bright one at the
+      // top of the strip, so a taller bar now carries MORE of it — the
+      // meter reads level as brightness too, and the peak caps stay bright
+      // against it.
+      const ramp = ctx.createLinearGradient(0, base, 0, base - Math.max(1, h - 2));
+      ramp.addColorStop(0, `rgb(${accent} / 0.5)`);
+      ramp.addColorStop(1, `rgb(${accentSoft} / 0.95)`);
       for (let i = 0; i < n; i++) {
         const v = Math.max(0.02, levels.current[i] ?? 0);
         const x = i * (bw + gap);
-        const bh = Math.max(2, v * (mirror ? h / 2 - 2 : h - 2));
+        const bh = Math.max(2, v * (h - 2));
         const r = Math.min(bw / 2, 2);
         // Halo behind the loudest bars: a wider, faint rounded rect instead of
         // shadowBlur, which would re-blur the whole strip every frame.
@@ -212,34 +251,26 @@ export default function Visualizer({
           ctx.roundRect(x - pad, base - bh - pad, bw + pad * 2, bh + pad, r + pad);
           ctx.fill();
         }
-        const grad = ctx.createLinearGradient(0, base - bh, 0, base);
-        grad.addColorStop(0, `rgb(${accentSoft} / 0.95)`);
-        grad.addColorStop(1, `rgb(${accent} / 0.35)`);
-        ctx.fillStyle = grad;
+        ctx.fillStyle = ramp;
         ctx.beginPath();
         ctx.roundRect(x, base - bh, bw, bh, r);
         ctx.fill();
-        if (mirror) {
-          ctx.beginPath();
-          ctx.roundRect(x, base, bw, bh * 0.62, r);
-          ctx.fill();
-        }
         // falling peak cap
         const pk = peaks.current[i] ?? 0;
         if (pk > 0.02) {
-          const py = base - Math.max(2, pk * (mirror ? h / 2 - 2 : h - 2)) - 2;
+          const py = base - Math.max(2, pk * (h - 2)) - 2;
           ctx.fillStyle = `rgb(${accent} / 0.9)`;
           ctx.fillRect(x, py, bw, 2);
         }
       }
     };
 
-    raf = requestAnimationFrame(tick);
+    handle = requestAnimationFrame(tick);
     return () => {
-      cancelAnimationFrame(raf);
-      raf = 0;
+      if (onTimer) window.clearTimeout(handle);
+      else cancelAnimationFrame(handle);
     };
-  }, [bars, mirror]);
+  }, []);
 
   return <canvas ref={canvasRef} className={className} aria-hidden />;
 }

@@ -1,3 +1,5 @@
+import { useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { isVideoFile } from "./fmt";
 
@@ -135,4 +137,16 @@ export async function cachedBytes(): Promise<number> {
 /** Evict everything (offline cache reset). */
 export async function clearMediaCache(): Promise<void> {
   await caches.delete(CACHE_NAME);
+}
+
+/** The query key for the cached-path snapshot. One key, so CachedTracksView,
+ *  the download controls and every downloaded mark on a title read the SAME
+ *  list — a download anywhere shows up everywhere on the next invalidation. */
+export const CACHED_PATHS_KEY = ["cachedPaths"] as const;
+
+/** The downloaded paths as a set. Each row mounts its own observer, but the
+ *  shared key dedupes them into one Cache Storage scan. */
+export function useCachedPaths(): Set<string> {
+  const { data } = useQuery({ queryKey: CACHED_PATHS_KEY, queryFn: cachedPaths });
+  return useMemo(() => new Set(data ?? []), [data]);
 }

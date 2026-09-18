@@ -3,13 +3,13 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, Play, RefreshCw, Trash2 } from "lucide-react";
 import { api } from "../api";
 import { toast, useStore, type QueueTrack } from "../store";
-import { cachedBytes, cachedPaths, clearMediaCache, uncacheTrack } from "../lib/mediaCache";
+import { CACHED_PATHS_KEY, cachedBytes, cachedPaths, clearMediaCache, uncacheTrack } from "../lib/mediaCache";
 import { sortRows, SortHeader, toggleSort, type SortState } from "../lib/sort";
 import { ColumnResizer, ColumnsMenu, useColumnPrefs, useColumnWidths, type Col } from "../lib/columns";
 import { fmtDuration, fmtTech, originalYear } from "../lib/fmt";
 import { albumRef } from "../lib/refs";
 import type { Album, Track } from "../types";
-import { EmptyState } from "./Badges";
+import { CachedMark, EmptyState } from "./Badges";
 import AlbumRow, { type AlbumRowCell } from "./AlbumRow";
 import ConfirmButton from "./ConfirmButton";
 
@@ -184,7 +184,12 @@ function CachedAlbumRow({
                   </td>
                 )}
                 {trackCols.includes("title") && (
-                  <td className="td break-words">{t.tags.TITLE ?? t.file}</td>
+                  <td className="td break-words">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="break-words">{t.tags.TITLE ?? t.file}</span>
+                      <CachedMark path={t.path} />
+                    </div>
+                  </td>
                 )}
                 {trackCols.includes("dur") && <td className="td text-zinc-500">{fmtDuration(t.tech.length)}</td>}
                 {trackCols.includes("bitrate") && <td className="td text-zinc-500">{fmtTech(t.tech) || "—"}</td>}
@@ -228,7 +233,7 @@ export default function CachedTracksView() {
   const [trackW, setTrackW, resetTrackW] = useColumnWidths("cached-tracks");
 
   const { data: lib } = useQuery({ queryKey: ["library"], queryFn: api.library });
-  const { data: paths, isFetching, refetch } = useQuery({ queryKey: ["cachedPaths"], queryFn: cachedPaths });
+  const { data: paths, isFetching, refetch } = useQuery({ queryKey: CACHED_PATHS_KEY, queryFn: cachedPaths });
   const { data: total } = useQuery({ queryKey: ["cachedBytes"], queryFn: cachedBytes });
 
   const cached = useMemo(() => new Set(paths ?? []), [paths]);
@@ -258,7 +263,7 @@ export default function CachedTracksView() {
   }, [lib, cached, paths, sort]);
 
   const after = () => {
-    qc.invalidateQueries({ queryKey: ["cachedPaths"] });
+    qc.invalidateQueries({ queryKey: CACHED_PATHS_KEY });
     qc.invalidateQueries({ queryKey: ["cachedBytes"] });
   };
 

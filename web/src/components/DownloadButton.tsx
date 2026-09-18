@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, CircleDashed, Download, Loader2 } from "lucide-react";
 import ConfirmButton from "./ConfirmButton";
-import { cacheTrack, isTrackCached, uncacheTrack } from "../lib/mediaCache";
+import { CACHED_PATHS_KEY, cacheTrack, isTrackCached, uncacheTrack } from "../lib/mediaCache";
 import { toast } from "../store";
 
 /** How many of `paths` are already in the offline cache. */
@@ -22,13 +23,19 @@ export default function DownloadButton({
   paths,
   label = "Download",
   size = "sm",
+  iconOnly = false,
 }: {
   /** The entity's track paths — `track.path` as the API reports it. */
   paths: string[];
   /** Text of the idle state; the cached/partial states name themselves. */
   label?: string;
   size?: "sm" | "md";
+  /** A square icon button with no text, for an action row of icon buttons
+   *  (the album page). Everything the label carried moves into the tooltip
+   *  and the aria-label. */
+  iconOnly?: boolean;
 }) {
+  const qc = useQueryClient();
   const [state, setState] = useState<"none" | "partial" | "full">("none");
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(0);
@@ -49,9 +56,15 @@ export default function DownloadButton({
     };
   }, [key]);
 
+  /** Re-read this button's own state AND tell the rest of the app: every
+   *  downloaded mark on a track title reads the shared snapshot, and the
+   *  downloads page reads its byte total — both are stale the moment the
+   *  cache changes here. */
   const rescan = async () => {
     const n = paths.length ? await countCached(paths) : 0;
     setState(n === 0 ? "none" : n === paths.length ? "full" : "partial");
+    qc.invalidateQueries({ queryKey: CACHED_PATHS_KEY });
+    qc.invalidateQueries({ queryKey: ["cachedBytes"] });
   };
 
   const download = async () => {
@@ -95,14 +108,21 @@ export default function DownloadButton({
     }
   };
 
-  const cls = size === "sm" ? "btn-ghost !py-1.5 text-xs" : "btn-ghost";
-  const iconCls = size === "sm" ? "h-3.5 w-3.5" : "h-4 w-4";
+  // Square mode matches the album row's other icon buttons: `!p-2.5` around a
+  // 16px glyph is the same 36px box the play button uses.
+  const cls = iconOnly
+    ? "btn-ghost !p-2.5 !rounded-md"
+    : size === "sm"
+      ? "btn-ghost !py-1.5 text-xs"
+      : "btn-ghost";
+  const iconCls = iconOnly || size === "md" ? "h-4 w-4" : "h-3.5 w-3.5";
   const count = `${paths.length} track${paths.length === 1 ? "" : "s"}`;
 
   if (state === "full") {
     const body = (
       <>
-        <CheckCircle2 className={`${iconCls} text-emerald-500`} /> Downloaded
+        <CheckCircle2 className={`${iconCls} text-emerald-500`} />
+        {iconOnly ? null : "Downloaded"}
       </>
     );
     // Bulk removal is worth a second click; one track is not.
@@ -121,6 +141,7 @@ export default function DownloadButton({
         className={cls}
         onClick={remove}
         disabled={busy}
+        aria-label={iconOnly ? "Downloaded — remove from the offline cache" : undefined}
         title="Downloaded for offline playback — click to remove"
       >
         {body}
@@ -133,6 +154,7 @@ export default function DownloadButton({
       className={cls}
       onClick={download}
       disabled={busy || !paths.length}
+      aria-label={iconOnly ? `${state === "partial" ? "Partly downloaded — " : ""}Download ${count} for offline playback` : undefined}
       title={
         state === "partial"
           ? `Partly downloaded — click to cache the remaining of ${count}`
@@ -141,15 +163,18 @@ export default function DownloadButton({
     >
       {busy ? (
         <>
-          <Loader2 className={`${iconCls} animate-spin`} /> {done}/{paths.length}
+          <Loader2 className={`${iconCls} animate-spin`} />
+          {iconOnly ? null : `${done}/${paths.length}`}
         </>
       ) : state === "partial" ? (
         <>
-          <CircleDashed className={`${iconCls} text-amber-400`} /> Partial
+          <CircleDashed className={`${iconCls} text-amber-400`} />
+          {iconOnly ? null : "Partial"}
         </>
       ) : (
         <>
-          <Download className={iconCls} /> {label}
+          <Download className={iconCls} />
+          {iconOnly ? null : label}
         </>
       )}
     </button>

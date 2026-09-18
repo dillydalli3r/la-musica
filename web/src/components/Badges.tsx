@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
-import { Check, X, Disc3, CircleAlert, Loader2 } from "lucide-react";
+import { Check, X, Disc3, CircleAlert, CheckCircle2, Loader2 } from "lucide-react";
+import { useCachedPaths } from "../lib/mediaCache";
 
 /** The one condensed grade verdict: a small check (pass) or cross (fail)
  * and nothing else — grading stays out of the way; `score` (the old
@@ -230,5 +231,25 @@ export function PageLoading({ label = "Loading…" }: { label?: string }) {
       <Loader2 className="h-4 w-4 animate-spin" />
       {label}
     </div>
+  );
+}
+
+/** The downloaded mark for a track title: the same check the download button
+ *  shows once the audio is in the offline cache (lib/mediaCache), rendered
+ *  only while it is there — a track that was never downloaded gets NO mark,
+ *  so the badge means "you can play this without the server" and nothing
+ *  else. */
+export function CachedMark({ path, size = "sm" }: { path: string; size?: "sm" | "md" }) {
+  const cached = useCachedPaths();
+  if (!cached.has(path)) return null;
+  return (
+    <span
+      role="img"
+      aria-label="Downloaded"
+      title="Downloaded — plays without the server"
+      className="shrink-0 inline-flex text-emerald-500"
+    >
+      <CheckCircle2 className={size === "sm" ? "h-3.5 w-3.5" : "h-4 w-4"} />
+    </span>
   );
 }

@@ -47,6 +47,13 @@ const AMB_CEIL_DB = -57;
  * per-frame paint — the smoothing below is what keeps a kick off the screen. */
 const AMB_TICK_MS = 70;
 
+/** How far --amb has to move before it is written again. The eased value
+ *  sits within a hair of the last write through a steady or silent passage,
+ *  and re-writing the same number 14x/s restarts a transition on a
+ *  full-viewport layer for nothing. Below this the glow simply stays where
+ *  the last write put it. */
+const AMB_WRITE_EPS = 0.002;
+
 /** How the player applies ReplayGain — mirrors the `replaygain_mode` config
  * options (mlo/config.py). */
 type RgMode = "track" | "album" | "off";
@@ -297,6 +304,9 @@ export default function NowPlayingView(p: Props) {
     }
     let timer = 0;
     let freq: Uint8Array | null = null;
+    // Starts at the CSS fallback, so the first tick only writes if the
+    // audio actually asks for something else.
+    let written = 0.45;
     const read = () => {
       let energy = 0;
       if (playingRef.current) {
@@ -330,11 +340,15 @@ export default function NowPlayingView(p: Props) {
       // ONE custom property every AMB_TICK_MS and .amb-glow eases its own
       // opacity/scale from it. The old 0.12/0.03 per 120 ms stacked a ~1 s
       // attack on top of multi-second CSS transitions and flattened the whole
-      // layer; these constants ride the beat (~0.16 s attack) while the
+      // layer; these constants ride the beat (~0.4 s attack) while the
       // release stays the slower half, so nothing flashes on a kick.
       const prev = eased.current.energy;
-      eased.current.energy = prev + (energy - prev) * (energy > prev ? 0.34 : 0.1);
-      el.style.setProperty("--amb", eased.current.energy.toFixed(3));
+      const next = prev + (energy - prev) * (energy > prev ? 0.34 : 0.1);
+      eased.current.energy = next;
+      if (Math.abs(next - written) > AMB_WRITE_EPS) {
+        written = next;
+        el.style.setProperty("--amb", next.toFixed(3));
+      }
       timer = window.setTimeout(read, AMB_TICK_MS);
     };
     read();

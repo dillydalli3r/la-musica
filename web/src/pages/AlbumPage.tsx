@@ -5,7 +5,7 @@ import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync
 import { api } from "../api";
 import { LinkChips, LinkEditorButton } from "../components/Links";
 import { SubtitledVideo } from "../components/SubtitledVideo";
-import { EmptyState, AdvisoryMark, GradeBadge, PageLoading } from "../components/Badges";
+import { EmptyState, AdvisoryMark, CachedMark, GradeBadge, PageLoading } from "../components/Badges";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import CoverSearchModal from "../components/CoverSearchModal";
 import Description from "../components/Description";
@@ -666,7 +666,7 @@ export default function AlbumPage() {
                     >
                       <Play className="h-4 w-4 fill-current" />
                     </button>
-                    <DownloadButton paths={data.tracks.map((t) => t.path)} />
+                    <DownloadButton paths={data.tracks.map((t) => t.path)} iconOnly />
                     <LinkEditorButton
                       mode="album"
                       paths={data.tracks.map((t) => t.path)}
@@ -1189,6 +1189,7 @@ export default function AlbumPage() {
                       )}
                       <GradeBadge pass={verdictTrack(tr)} audit={tr.audit} size="sm" />
                       <AdvisoryMark value={tr.tags.ITUNESADVISORY} />
+                      <CachedMark path={tr.path} />
                       {(tr.is_video || isVideoFile(tr.file)) && (
                         <button
                           className="text-zinc-500 hover:text-white shrink-0"

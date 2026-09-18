@@ -15,10 +15,11 @@ try {
 const BASE = process.argv[2] || process.env.BASE || "http://127.0.0.1:8000";
 
 // Must stay in sync with NAV in web/src/App.tsx.
-// Downloads is deliberately absent: the staging page folded into Soulseek.
+// Downloads is the browser's offline cache, a page of its own again; the
+// Soulseek *staging* list stays a tab on the Soulseek page.
 const EXPECTED_NAV = [
-  "Home", "Library", "Genres", "Trash", "Playlists", "Favorites", "Import",
-  "Soulseek", "Export", "Optimization", "Grading", "Dependencies", "Settings",
+  "Home", "Library", "Genres", "Trash", "Playlists", "Favorites", "Downloads",
+  "Import", "Soulseek", "Export", "Optimization", "Grading", "Dependencies", "Settings",
 ];
 
 (async () => {

@@ -20,7 +20,7 @@ import { gradeSliver, statusFor, auditFails } from "../lib/status";
 import { invalidateLibrary } from "../lib/invalidate";
 import { albumRef, trackRef, artistRef, entityLinkClick } from "../lib/refs";
 import { fmtTech, fmtDuration, fmtDateCell, originalYear, GRID_SIZE_MIN } from "../lib/fmt";
-import { EmptyState, GradeBadge, MediaChip, AdvisoryMark, PageLoading } from "../components/Badges";
+import { EmptyState, GradeBadge, MediaChip, AdvisoryMark, CachedMark, PageLoading } from "../components/Badges";
 import { forceDict, loadForceSel } from "../lib/force";
 import Segmented from "../components/Segmented";
 import PageHeader from "../components/PageHeader";
@@ -1062,6 +1062,7 @@ export default function LibraryPage() {
                           )}
                           <GradeBadge pass={!!t.grade_pass && !auditFails(t.audit)} audit={t.audit} size="sm" />
                           <AdvisoryMark value={t.tags.ITUNESADVISORY} />
+                          <CachedMark path={t.path} />
                           <span className="row-hover shrink-0"><FavHeart kind="track" id={t.path} mbid={t.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" /></span>
                           {t.tags.INSTRUMENTAL === "1" && (
                             <span className="chip bg-zinc-800 text-zinc-400 border border-border text-[9px] shrink-0">INST</span>
@@ -1283,6 +1284,7 @@ export default function LibraryPage() {
                             )}
                             <GradeBadge pass={!!tr.grade_pass && !auditFails(tr.audit)} audit={tr.audit} size="sm" />
                             <AdvisoryMark value={tr.tags.ITUNESADVISORY} />
+                            <CachedMark path={tr.path} />
                             {tr.is_video && <span title="Music video" className="shrink-0 inline-flex"><FileVideo className="h-3.5 w-3.5 text-zinc-500" /></span>}
                             <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
                               <FavHeart kind="track" id={tr.path} mbid={tr.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" />
@@ -1561,6 +1563,7 @@ function AlbumRowGroup({
                                 )}
                                 <GradeBadge pass={!!t.grade_pass && !auditFails(t.audit)} audit={t.audit} size="sm" />
                                 <AdvisoryMark value={t.tags.ITUNESADVISORY} />
+                                <CachedMark path={t.path} />
                                 {t.is_video && <span title="Music video" className="shrink-0 inline-flex"><FileVideo className="h-3.5 w-3.5 text-zinc-500" /></span>}
                                 <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
                                   <FavHeart kind="track" id={t.path} mbid={t.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" />

@@ -2,7 +2,7 @@ import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowDownUp, ChevronLeft, ChevronRight, ClipboardCheck, Disc3, Gauge, HardDriveDownload, Heart, Home, Import,
+  ArrowDownUp, ChevronLeft, ChevronRight, ClipboardCheck, Disc3, Download, Gauge, HardDriveDownload, Heart, Home, Import,
   Keyboard, Library, ListMusic, Menu, Music2, PanelLeftClose, Search, Tags, Trash2, User, X,
   Settings as SettingsIcon, Wrench,
 } from "lucide-react";
@@ -34,6 +34,7 @@ const GradingPage = lazy(() => import("./pages/GradingPage"));
 const OptimizationPage = lazy(() => import("./pages/OptimizationPage"));
 const DependenciesPage = lazy(() => import("./pages/DependenciesPage"));
 const GenrePage = lazy(() => import("./pages/GenrePage"));
+const DownloadsPage = lazy(() => import("./pages/DownloadsPage"));
 const ImportWizard = lazy(() => import("./pages/ImportWizard"));
 
 import PlayerBar from "./components/PlayerBar";
@@ -53,6 +54,7 @@ const NAV_GROUPS = [
       { to: "/trash", label: "Trash", icon: Trash2, end: true },
       { to: "/playlists", label: "Playlists", icon: ListMusic, end: false },
       { to: "/favorites", label: "Favorites", icon: Heart, end: false },
+      { to: "/downloads", label: "Downloads", icon: Download, end: true },
     ],
   },
   {
@@ -696,9 +698,9 @@ export default function App() {
             <Route path="/" element={<HomePage />} />
             <Route path="/library" element={<LibraryPage />} />
             <Route path="/genres" element={<GenrePage />} />
-            {/* The staging/downloads page folded into the Soulseek page; the
-                redirect keeps old bookmarks and links from dead-ending. */}
-            <Route path="/downloads" element={<Navigate to="/soulseek" replace />} />
+            {/* The offline downloads: the tracks this browser can play with
+                the server down, as the library's own album table. */}
+            <Route path="/downloads" element={<DownloadsPage />} />
             <Route path="/trash" element={<TrashPage />} />
             <Route path="/artist/:path" element={<ArtistPage />} />
             <Route path="/album/:path" element={<AlbumPage />} />

@@ -5,7 +5,7 @@ import { Disc3, FileVideo, Heart, ListMusic, Mic2, Play } from "lucide-react";im
 import { useStore } from "../store";
 import { toast } from "../store";
 import { useFavorites, useTrackLikes } from "../lib/favs";
-import { AdvisoryMark, EmptyState, PageLoading } from "../components/Badges";
+import { AdvisoryMark, CachedMark, EmptyState, PageLoading } from "../components/Badges";
 import PageHeader from "../components/PageHeader";
 import { TrackCover } from "../components/CoverImg";
 import AlbumCard from "../components/AlbumCard";
@@ -267,6 +267,7 @@ function LikedTracks() {
                       {r.title}
                     </span>
                     {!r.missing && <AdvisoryMark value={r.advisory} />}
+                    <CachedMark path={r.path} />
                     {!r.missing && r.isVideo && (
                       <span title="Music video" className="shrink-0 inline-flex"><FileVideo className="h-3.5 w-3.5 text-zinc-500" /></span>
                     )}

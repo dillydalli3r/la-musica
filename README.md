@@ -16,6 +16,8 @@ trash (`.mlo/trash`) beside it — one folder to back up or carry between
 machines.
 
 ## Highlights
+- **Downloads page, downloaded marks, calmer visuals** (new in 2.7.1) — the offline cache is a sidebar page again (`/downloads`, the library's own album table, per-track removal, two-step *Clear all*), and every track title carries a small green check while its audio is downloaded — and nothing when it is not; the album page's download control is a square icon button in the row with play and the tag actions; the fullscreen player's frequency strip allocates one gradient per frame instead of one per bar, drops from the display clock to a 10 Hz timer with no signal and stops painting once it has eased onto its baseline; and the background glow's CSS easing was shortened to a fraction of a second so it tracks the music instead of lagging a second behind it (writes are skipped unless the value moved).
+
 - **Polish, robustness and hardening pass** (new in 2.7.0) — sidebar hover nudge plus shared motion tokens for consistent animation; lyrics robustness with millisecond precision, `[offset:]` clamping, translation/transliteration alignment, mixed synced+plain files, and a stale-track seek guard; performance via debounced library search, O(1) cover lookup, 60 s library cache, optimistic offline cache, and no background-tab polling; backend hardening with symlink-safe path guards, capped caches, and partial-success bulk tagging; Soulseek with bounded wish waits, no silent-drop handoffs, and daemon errors surfaced in the UI; plus keyboard/screen-reader and small-phone/tablet fixes.
 
 - **Home** — a sidebar landing page of library highlights: recently added,
@@ -87,12 +89,18 @@ machines.
   per-band rolling reference, so a loud master shows shape instead of pinning
   every bar at full height, and it meters both audio and music videos —
   starting on the first play, surviving track changes, seeks and buffering.
+  With nothing playing the strip eases onto its baseline and then stops
+  drawing (the loop drops from the display clock to a 10 Hz timer and skips
+  the repaint), and its colour ramp is one gradient per frame rather than one
+  per bar, so a paused or idle player is not a 60 fps redraw of the same
+  line.
   The fullscreen background is **layered, not beat-driven**: a blurred
   cover, a slow aurora sweep and drifting color fields each run on their own
   long clock (62-180 s), the cover's grain and vignette settle them, and the
   music swells ONE soft glow — driven by a value written a few times a
-  second, eased over seconds by CSS, so the light breathes and can never
-  flash. Both halves are switchable under the player's *Background* options
+  second and eased under a quarter-second by CSS, so the light rides the
+  beat without ever flashing (a write is skipped unless the value actually
+  moved). Both halves are switchable under the player's *Background* options
   (`mlo.np.orbs` color drift, `mlo.np.vis` music glow) and
   `prefers-reduced-motion` freezes the lot.
   ReplayGain is applied through the WebAudio gain
@@ -1130,11 +1138,29 @@ catalogue, `GET /api/cover/sources` lists the selectable sources, the regions
 and the saved defaults, and `POST /api/cover/fromurl` saves a chosen result to
 disk.
 
-## Downloads — the Soulseek page's Downloads and Cached tabs (new in 2.6.9)
+## Downloads — the sidebar page, and Soulseek's own tabs (new in 2.7.1)
 
-Everything download-related now lives on the **Soulseek** page; there is no
-separate *Downloads* page in the sidebar (an old `/downloads` link redirects
-there).
+**Downloads** is a sidebar page again (`/downloads`), and it is the *offline
+cache*: the tracks this browser can play with the server down, laid out as the
+library's album table (album rows with covers, expandable tracklists, the same
+Columns menu and drag-resizable widths), with play and "remove from cache" per
+track plus a two-step *Clear all*. It renders the very same panel the Soulseek
+page shows as its **Cached tracks** tab, so the two can never disagree, and the
+total size comes from the same cache the player reads.
+
+Downloading stays where the music is — the album, artist, playlist and player
+bar controls all mean "cache this for offline playback". Every track title in
+the app (library rows and tracklist, album page, favourites, downloads) carries
+a small green check while its audio is in that cache and **nothing at all**
+when it is not, so the mark only ever means *plays without the server*. The
+album page's download control is a square icon button in the same row as play
+and the tag actions; it fills in as it downloads, becomes *Downloaded* when the
+whole album is cached, and asks twice before dropping a bulk download. The
+state is one shared query, so a download started in the player bar marks the
+title rows immediately.
+
+Saving a file to disk is *Export*'s job and the staging folder is Soulseek's —
+neither is this page.
 
 Releases downloaded to the staging folder `<music>/.mlo/downloads` are listed
 by `GET /api/downloads` (newest first); `POST /api/downloads/import` moves
@@ -1160,7 +1186,9 @@ an album plays without the server or the network. It is laid out like the
 library viewer (album rows with covers, expandable tracklists, the same
 Columns menu and drag-resizable widths), groups by album, and offers play and
 "remove from cache" per track plus a two-step *Clear all*. The total size is
-read from the same cache the player uses.
+read from the same cache the player uses. The *Downloads* page in the sidebar
+is this exact panel with a page header, for when you are managing the offline
+copy rather than fetching something.
 
 ## Getting started
 
