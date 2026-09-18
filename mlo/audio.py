@@ -41,7 +41,15 @@ TAG_MAP = {
         "flac": "DATE", "mp3": ("TDRC", None), "mp4": "\xa9day",
     },
     "ORIGINALDATE": {
-        "flac": "ORIGINALDATE", "mp3": ("TDRL", None),
+        # ID3 keeps the ORIGINAL release date in TDOR ("original release
+        # time"), which is what Picard and beets' mediafile read — beets
+        # never looks at TDRL, so a file tagged there carried an original
+        # date the beets import (script 14) could not see, and the album
+        # folder it computed lacked the date the MLO organizer's script
+        # expects. TDRL (this app's older spelling) is still read, and is
+        # replaced on the next write.
+        "flac": "ORIGINALDATE",
+        "mp3": (("TDOR", None), ("TDRL", None)),
         # Uppercase atom name: beets' mediafile lists ORIGINALDATE /
         # "ORIGINAL YEAR" (case-sensitive reads), so a lowercase atom was
         # invisible to beets — including the path it computes for an import.

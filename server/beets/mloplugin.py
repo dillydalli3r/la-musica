@@ -11,6 +11,11 @@ Adds Picard-parity behaviors on top of a vanilla beets import:
   the alias sort names.
 * Work relationships — recordings linked to a work in MusicBrainz get
   WORK (and MOVEMENT when the work is a movement/part).
+* Release dates — DATE (this release's own date) and ORIGINALDATE (the
+  release group's first release) are written from beets' own fields: filled
+  when empty, sharpened to the full date when the tag only held a year. The
+  naming script names the album folder with both, so the tags must agree
+  with the path beets just computed from them.
 * Release-type capitalization: ``ep`` → ``EP``, others Title Case
   (Picard's common $map release-type script).
 
@@ -160,6 +165,36 @@ def _date_str(y, m, d):
     if int(m or 0):
         return f"{y:04d}-{int(m):02d}"
     return f"{y:04d}"
+
+
+def _write_date_tags(af, item):
+    """DATE and ORIGINALDATE from beets' item — the two dates the naming
+    script names the album folder with.
+
+    Both are filled when the tag is empty, and SHARPENED when beets spells
+    the same date more precisely ("1980" → "1980-10-01", the shared
+    mlo.naming.fuller_date rule). beets places the file by evaluating the
+    naming script over these very fields, so without this the folder could
+    land on a full date while the tags keep a bare year — and the MLO
+    organizer would then move the album back to the year. A value another
+    tagger wrote that says something else is left alone. Returns whether
+    anything was written.
+    """
+    from mlo.naming import fuller_date
+
+    changed = False
+    for tag, value in (
+            ("ORIGINALDATE",
+             _date_str(item.original_year, item.original_month, item.original_day)),
+            ("DATE", _date_str(item.year, item.month, item.day))):
+        if not value:
+            continue
+        have = str(af.get_tag(tag) or "").strip()
+        fill = fuller_date(have, value) if have else value
+        if fill and fill != have:
+            af.set_tag(tag, fill)
+            changed = True
+    return changed
 
 
 def _first(value):
@@ -422,12 +457,11 @@ class MloPlugin(BeetsPlugin):
                 except Exception as e:  # noqa: BLE001
                     self._log.warning("work-rels lookup failed for {0}: {1}", path, e)
 
-            # 3) Original release date (release-group first release). Beets
-            #    knows it and the naming script uses it for folder names,
-            #    but beets never writes the tag itself — Picard does.
-            orig = _date_str(item.original_year, item.original_month, item.original_day)
-            if orig and str(af.get_tag("ORIGINALDATE") or "").strip() != orig:
-                af.set_tag("ORIGINALDATE", orig)
+            # 3) The two dates that name the album folder: the release-group
+            #    first release (ORIGINALDATE) and the release's own date
+            #    (DATE). Beets knows both and computes the path from them,
+            #    but writes neither tag itself — Picard does.
+            if _write_date_tags(af, item):
                 changed = True
             orig_year = f"{item.original_year:04d}" if item.original_year else ""
             if orig_year and str(af.get_tag("ORIGINALYEAR") or "").strip() != orig_year:

@@ -467,8 +467,21 @@ System of a Down [cc0b7089-…]/[Album] 2001-08-27 - 2001-09-04 - Toxicity {US -
 
 - the album folder: name + release id, the artist folder: name + artist id
 - `[Release type]` uses the tag's own spelling; **both dates are written in
-  full** — the original (release-group) date first, then the release's own —
-  whenever the tags carry more than a year
+  full** — the original (release-group) date first, then the release's own.
+  The tags are kept full, not merely read: *Auto tagging* fills DATE and
+  ORIGINALDATE from the cached MusicBrainz release and **sharpens** a value
+  that only holds a year of the same date (`1980` → `1980-10-01`,
+  `1980-10` → `1980-10-01`), the beets plugin writes both from its own
+  match, and the Soulseek stamper writes the release it downloaded. A tag
+  that already carries the day — or that names another date entirely — is
+  never touched. Re-run *Auto tagging* (or a beets pass) and then *Organize*
+  to bring an existing library's folders onto the full dates.
+- the original date reaches the folder from whatever container it lives in:
+  MP3 keeps it in **TDOR** (`ORIGINALDATE`'s vorbis comment on FLAC, the
+  `ORIGINALDATE` freeform atom on MP4) — the spelling Picard and beets read,
+  so the beets import computes the same album folder the organizer expects.
+  Files this app tagged before that spelling are still read and are rewritten
+  to TDOR on the next write.
 - the brace group is `country - media - catalog number`, each segment joined
   only when the one before it is present (a rip with no catalog number keeps
   its `CD`, and one with nothing to say keeps no braces at all)

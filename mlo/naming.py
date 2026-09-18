@@ -264,6 +264,47 @@ def lookup_style_release_type(value):
     return "+".join(p.lower() for p in _type_parts(value))
 
 
+# A date tag ("DATE", "ORIGINALDATE") in one of the three spellings
+# MusicBrainz, Picard and beets write: a year, a year-month, or a full ISO
+# day. Anything else ("circa 1970", a range, a stray value) is not a date
+# this app may sharpen and is left exactly as it is.
+_ISO_DATE_RE = re.compile(r"\d{4}(?:-\d{2}(?:-\d{2})?)?\Z")
+
+
+def fuller_date(existing, new):
+    """*new* when it spells the SAME date more precisely than *existing*.
+
+    The album folder is named after both date tags ("[Album] 1980-10-01 -
+    1997-05-06 - Remain in Light"), so a tag holding only "1980" pins the
+    folder to a year even when MusicBrainz knows the day. Filling EMPTY tags
+    is not enough for that: the value has to be SHARPENED. This is the one
+    write rule that touches a non-empty tag, and it can only ever add
+    precision — "1980" → "1980-10-01", "1980-10" → "1980-10-01".
+
+    Returns "" (leave the tag alone) for a value that already carries at
+    least as much detail, one that contradicts the new date ("1979" vs
+    "1980-10-01"), and any non-ISO spelling of either side.
+    """
+    have = str(existing or "").strip()
+    fresh = str(new or "").strip()
+    if not have or len(fresh) <= len(have) or not fresh.startswith(have):
+        return ""
+    if not _ISO_DATE_RE.match(fresh) or not _ISO_DATE_RE.match(have):
+        return ""
+    return fresh
+
+
+def date_is_partial(value):
+    """True for a date tag that stops short of the day ("1980", "1980-10").
+
+    Such a value is the one thing MusicBrainz may still be able to sharpen,
+    so a caller deciding whether an album is already complete has to treat
+    it as unfinished (mlo.autotag's release-tag pass does).
+    """
+    text = str(value or "").strip()
+    return bool(_ISO_DATE_RE.match(text)) and len(text) < 10
+
+
 def _first_part(value):
     """'1/1' (disc 1 of 1) → '1' — multi-value tags must not inject '/'
     into paths where the sanitizer treats '/' as a folder separator."""

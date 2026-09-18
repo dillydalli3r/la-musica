@@ -43,8 +43,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from .audio import AudioFile
 from .config import should_write_audio_tag
 # the app's RELEASETYPE spelling ("album+live" -> "Album; Live"), shared with
-# the organizer and the grader so one release_type reads the same everywhere
-from .naming import mb_style_release_type
+# the organizer and the grader so one release_type reads the same everywhere;
+# fuller_date is the same shared rule for the two DATE tags the album folder
+# is named after
+from .naming import date_is_partial, fuller_date, mb_style_release_type
 from .paths import AUDIO_EXTS, load_expected_tracks
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _collect_targets,
@@ -126,9 +128,18 @@ _RELEASE_TAGS = (
     ("CATALOGNUMBER", "catalog_number"),
     ("RELEASECOUNTRY", "country"),
     ("RELEASETYPE", "release_type"),
+    # The two dates the naming script puts in the album folder: the release's
+    # own date and the release group's first release. Both are written in
+    # FULL (YYYY-MM-DD) whenever MusicBrainz knows the day — a tag holding a
+    # bare year is sharpened, never overwritten (see fuller_date).
+    ("DATE", "date"),
     ("ORIGINALDATE", "originaldate"),
     ("MEDIA", "medium"),
 )
+
+# The two date slots above: the only tags this stage may SHARPEN (year ->
+# full date) rather than merely fill when empty.
+_DATE_TAGS = ("DATE", "ORIGINALDATE")
 
 # Per-track slots this stage matches against the release (or the manifest):
 # the recording id of the track's own position, and the artist it credits.
@@ -206,6 +217,11 @@ def _cached_release(mbid):
         "country": str(data.get("country") or ""),
         # the spelling the app's writers use ("album+live" -> "Album; Live")
         "release_type": mb_style_release_type("+".join(t for t in types if t)),
+        # the RELEASE's own date (full when MusicBrainz has the day) — the
+        # naming script's %date%, second in the album folder
+        "date": str(data.get("date") or ""),
+        # the release GROUP's first release date — %originaldate%, first in
+        # the album folder
         "originaldate": str(rg.get("first-release-date") or ""),
         # the first medium (CD / Vinyl / Digital Media) — the naming script's
         # %media%
@@ -234,19 +250,33 @@ def _track_position(af, path):
     return disc, pos
 
 
+def _slot_open(af, tag):
+    """Whether *tag* still has something to gain from MusicBrainz: it is
+    EMPTY, or it is a DATE that stops short of the day ("1980" → the full
+    "1980-10-01" the album folder should spell)."""
+    value = str(af.get_tag(tag) or "").strip()
+    if not value:
+        return True
+    return tag in _DATE_TAGS and date_is_partial(value)
+
+
 def _fill_release_tags(info, config, album_dir):
     """Fill each track's EMPTY MusicBrainz release identity tags.
 
     Album-level facts the naming script reads per track (label, catalog
-    number, country, type, original date, medium + the release's own ids) are
+    number, country, type, both DATES, medium + the release's own ids) are
     written to EVERY file of the album; the per-track ones (recording id, and
     the credited artist id) come from a POSITION match — the album's own
     `.mlo_expected.json` manifest first (it records the release the wizard
     matched), then the release payload's tracklist. A track with no
     counterpart is left alone and counted.
 
-    A tag that already holds a value is never touched: another pressing's
-    label, or ids another tagger wrote, are the album's own business. Returns
+    A tag that already holds a value is never touched — another pressing's
+    label, or ids another tagger wrote, are the album's own business — with
+    ONE exception: DATE and ORIGINALDATE are SHARPENED to MusicBrainz's
+    spelling when the tag holds a coarser form of the same date ("1980" →
+    "1980-10-01", see fuller_date). Those two name the album folder, so a
+    year-only value would otherwise keep it a year forever. Returns
     (written, note) — the album's report line, including the "nothing
     written" cases.
     """
@@ -265,10 +295,11 @@ def _fill_release_tags(info, config, album_dir):
 
     # Prescan: an album that already carries every tag this stage could write
     # is finished, so it never costs a request. A library-wide run must not
-    # ask MusicBrainz about albums that are already complete.
+    # ask MusicBrainz about albums that are already complete. A date that
+    # stops short of the day is NOT complete: MusicBrainz may spell the same
+    # date in full, and the album folder is named after it.
     slots = [tag for tag, _key in _RELEASE_TAGS] + list(_PER_TRACK_TAGS)
-    if not any(not str(d["af"].get_tag(tag) or "").strip()
-               for d in info for tag in slots):
+    if not any(_slot_open(d["af"], tag) for d in info for tag in slots):
         return 0, "release tags: nothing to fill"
 
     release = _cached_release(mbid)
@@ -303,8 +334,16 @@ def _fill_release_tags(info, config, album_dir):
         ]
         for tag, value in values + per_track:
             try:
-                if str(af.get_tag(tag) or "").strip():
-                    continue          # already has a value — never overwrite
+                have = str(af.get_tag(tag) or "").strip()
+                if have:
+                    # A tag that already holds a value is never overwritten.
+                    # The one exception is a DATE MusicBrainz spells more
+                    # precisely: the album folder is named after it, so a
+                    # bare year would otherwise pin the folder there for
+                    # good. fuller_date can only add detail.
+                    value = fuller_date(have, value)
+                    if not value:
+                        continue
                 if not should_write_audio_tag(config, tag, filepath=af.path):
                     continue          # the same gate every write here honours
                 if af.set_tag(tag, value):
@@ -332,9 +371,12 @@ def run_auto_tagging(config):
         log("  ALBUMITUNESADVISORY: from per-track ITUNESADVISORY "
             "(any explicit -> 1, else any safe -> 2, else 0)")
     log("  MUSICBRAINZ release identity: label, catalog number, country, type, "
-        "original date, medium + missing MBIDs (release id, release-group id, "
-        "artist ids, per-track recording id) filled from the cached release — "
-        "only where a tag is EMPTY")
+        "medium + missing MBIDs (release id, release-group id, artist ids, "
+        "per-track recording id) filled from the cached release — only where "
+        "a tag is EMPTY")
+    log("  DATE / ORIGINALDATE (the album folder's two dates): filled when "
+        "empty, and sharpened to MusicBrainz's full date when the tag holds "
+        "only a year or a year-month of the same date")
     if config.get("auto_zero_advisory_for_instrumental", False):
         log("  ITUNESADVISORY: zeroed on instrumentals (auto_zero_advisory_for_instrumental)")
     if config.get("auto_instrumental", True):
