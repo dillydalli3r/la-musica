@@ -31,13 +31,18 @@ const VIS_KEY = "mlo.np.vis"; // "1" = background pulses with the beat
 const VIZ_KEY = "mlo.np.viz"; // "1" = frequency-bar visualizer visible
 const ZOOM_KEY = "mlo.np.lyrzoom.v2"; // lyrics zoom multiplier (persisted)
 
-/** Background-ambience energy window, in dBFS MEAN bin level (averaged over
- * every FFT bin, so it sits ~20 dB below the loudest band): below the floor
- * the glow is closed, at the ceiling fully open. Measured on a real track
- * this mean swings around −70 dBFS. See the ambience tick for why the mean
- * is taken in dB and not in raw bytes. */
-const AMB_FLOOR_DB = -82;
-const AMB_CEIL_DB = -57;
+/** The ambience window, in dB, measured RELATIVE to this track's own rolling
+ * loud reference — a fixed window cannot work across masters. On a real
+ * track the bass-weighted mix below swings inside ~4 dB, so the old fixed
+ * −82..−57 window (25 dB wide) moved --amb by about 0.15 and the whole
+ * backdrop barely breathed. The reference follows the loudest mix level
+ * heard recently (~0.9 dB/s fall), and AMB_DYN_DB is the span beneath it
+ * that maps to closed → open: quiet passages close the glow, the loud ones
+ * open it, whatever the master's own level happens to be.
+ * See the ambience tick for why the level is taken in dB, not raw bytes. */
+const AMB_DYN_DB = 8;
+const AMB_REF_FALL_DB = 0.07; // per tick (~0.9 dB/s at AMB_TICK_MS)
+const AMB_REF_START_DB = -60;
 
 /** How often the ambience reads the analyser and updates --amb, in ms. This
  * has to keep up with `.amb-glow`'s own transitions in index.css: with the
@@ -307,6 +312,7 @@ export default function NowPlayingView(p: Props) {
     // Starts at the CSS fallback, so the first tick only writes if the
     // audio actually asks for something else.
     let written = 0.45;
+    let refDb = AMB_REF_START_DB;
     const read = () => {
       let energy = 0;
       if (playingRef.current) {
@@ -330,7 +336,11 @@ export default function NowPlayingView(p: Props) {
             for (let i = 0; i < lowBins; i++) low += freq[i];
             const lowDb = MIN_DB + (low / lowBins / 255) * (MAX_DB - MIN_DB);
             const mixDb = 0.6 * lowDb + 0.4 * meanDb;
-            energy = Math.min(1, Math.max(0, (mixDb - AMB_FLOOR_DB) / (AMB_CEIL_DB - AMB_FLOOR_DB)));
+            // Loud reference for THIS material: rises to a new peak at once,
+            // falls slowly, so the window below it keeps working on a quiet
+            // master and on a loud one alike.
+            refDb = Math.max(mixDb, refDb - AMB_REF_FALL_DB);
+            energy = Math.min(1, Math.max(0, (mixDb - (refDb - AMB_DYN_DB)) / AMB_DYN_DB));
           }
         } catch {
           energy = 0;
@@ -338,12 +348,13 @@ export default function NowPlayingView(p: Props) {
       }
       // Asymmetric smoothing here, CSS easing on the other side: this writes
       // ONE custom property every AMB_TICK_MS and .amb-glow eases its own
-      // opacity/scale from it. The old 0.12/0.03 per 120 ms stacked a ~1 s
-      // attack on top of multi-second CSS transitions and flattened the whole
-      // layer; these constants ride the beat (~0.4 s attack) while the
-      // release stays the slower half, so nothing flashes on a kick.
+      // opacity/scale from it. The attack is ~0.2 s (three ticks) so a kick
+      // lands while it is still a kick, and the release is a little over a
+      // second so the glow falls back instead of flickering — the old
+      // 0.12/0.03 per 120 ms stacked a ~1 s attack on top of multi-second CSS
+      // transitions and flattened the whole layer.
       const prev = eased.current.energy;
-      const next = prev + (energy - prev) * (energy > prev ? 0.34 : 0.1);
+      const next = prev + (energy - prev) * (energy > prev ? 0.45 : 0.1);
       eased.current.energy = next;
       if (Math.abs(next - written) > AMB_WRITE_EPS) {
         written = next;
@@ -907,11 +918,13 @@ export default function NowPlayingView(p: Props) {
       {!videoPath && (
       <>
       {/* ---- ambient background -------------------------------------------
-          Five layers, all composed here and animated by CSS on long clocks:
-          the cover's own colors blurred underneath, a slow aurora sweep,
-          drifting color fields, one glow the music swells (--amb, written
-          every 70 ms), then grain and a vignette to settle it. The layers
-          never react per frame — that was the strobing. */}
+          Five layers: the cover's own colors blurred underneath, an aurora
+          sweep, drifting color fields, one glow the music swells (--amb,
+          written every 70 ms), then grain and a vignette to settle it. Only
+          the glow reacts to the audio, and only through that stepped value —
+          per-frame reactions were what strobed. The rest run on their own
+          CSS clocks (24-55 s), fast enough to read as movement and slow
+          enough to stay a backdrop. */}
       <div ref={ambRef} className="absolute inset-0 overflow-clip" aria-hidden>
         <div className="amb-cover absolute inset-0 blur-3xl opacity-[0.34]">
           <CoverImg albumPath={p.current.albumPath} coverFile={coverFile} wrapperClass="w-full h-full" />

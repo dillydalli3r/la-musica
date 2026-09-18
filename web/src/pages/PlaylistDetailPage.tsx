@@ -206,9 +206,8 @@ export default function PlaylistDetailPage() {
     albumCover: trackMeta.get(t)?.albumCover ?? null,
   }));
 
-  const iconBtn =
-    "p-2 rounded-lg border border-border bg-panel/60 text-zinc-400 hover:text-white hover:bg-raise transition-colors";
-
+  // The action row is one size: `.btn-icon` in index.css is the same 36px
+  // square for play, download, like, filter and the overflow menu.
   const openFilterEditor = () => {
     setConditions(playlist?.filter?.conditions ?? []);
     setMatchAll(playlist?.filter?.match !== "any");
@@ -291,7 +290,7 @@ export default function PlaylistDetailPage() {
                       <button className="btn-primary text-xs" onClick={rename}>Save</button>
                     )}
                     <button
-                      className="btn-primary !p-2.5 !rounded-md"
+                      className="btn-icon-primary"
                       onClick={() => queueTracks.length && playNow(queueTracks)}
                       title="Play the playlist from the top"
                       aria-label="Play playlist"
@@ -302,16 +301,16 @@ export default function PlaylistDetailPage() {
                     <FavHeart
                       kind="playlist"
                       id={String(pid)}
-                      className="!p-2 !rounded-md border border-border bg-panel/60 hover:!bg-raise"
+                      className="btn-icon"
                       iconClass="h-4 w-4"
                     />
                     {playlist.kind === "smart" && (
-                      <button className={iconBtn} onClick={openFilterEditor} title="Edit smart filter">
+                      <button className="btn-icon" onClick={openFilterEditor} title="Edit smart filter">
                         <Pencil className="h-4 w-4" />
                       </button>
                     )}
                     <OverflowMenu
-                      buttonClass={iconBtn}
+                      buttonClass="btn-icon"
                       buttonTitle="All playlist actions"
                       sections={[
                         {

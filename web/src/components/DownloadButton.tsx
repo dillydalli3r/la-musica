@@ -11,6 +11,31 @@ async function countCached(paths: string[]): Promise<number> {
   return hits.filter(Boolean).length;
 }
 
+/** Determinate progress ring — the square button's stand-in for the "3/8" the
+ *  labelled variant prints. The arc is the fraction cached, so a bulk download
+ *  is visibly filling instead of just spinning. */
+function ProgressRing({ pct, className = "" }: { pct: number; className?: string }) {
+  const r = 6.5;
+  const circumference = 2 * Math.PI * r;
+  return (
+    <svg viewBox="0 0 16 16" className={`h-4 w-4 -rotate-90 ${className}`} aria-hidden>
+      <circle cx="8" cy="8" r={r} fill="none" stroke="currentColor" strokeWidth="2" opacity="0.25" />
+      <circle
+        cx="8"
+        cy="8"
+        r={r}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeDasharray={circumference}
+        strokeDashoffset={circumference * (1 - Math.max(0.02, Math.min(1, pct)))}
+        style={{ transition: "stroke-dashoffset 0.25s ease-out" }}
+      />
+    </svg>
+  );
+}
+
 /** "Downloaded" means the audio is in the browser's offline cache (see
  *  lib/mediaCache) — one control for a whole entity: an album, an artist's
  *  catalogue, a playlist, or a single track.
@@ -18,7 +43,12 @@ async function countCached(paths: string[]): Promise<number> {
  *  Three states: nothing cached, some cached (the button finishes the job, it
  *  never claims a full download), all cached — where pressing again REMOVES
  *  them. A bulk removal arms first (ConfirmButton); a single track toggles
- *  directly, the way the player bar's own download button already does. */
+ *  directly, the way the player bar's own download button already does.
+ *
+ *  `iconOnly` is the square button the album/playlist action row uses: the
+ *  state has to read from the glyph alone there, so it NEVER prints a label —
+ *  a progress arc fills while it caches, the check scales in when it is done,
+ *  and removing arms the same box red instead of expanding it. */
 export default function DownloadButton({
   paths,
   label = "Download",
@@ -39,6 +69,7 @@ export default function DownloadButton({
   const [state, setState] = useState<"none" | "partial" | "full">("none");
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(0);
+  const [have, setHave] = useState(0);
   // Callers build the list inline, so a fresh array arrives every render —
   // the joined content is what actually changes.
   const key = paths.join("\n");
@@ -46,9 +77,11 @@ export default function DownloadButton({
   useEffect(() => {
     let dead = false;
     setState("none");
+    setHave(0);
     if (!paths.length) return;
     countCached(paths).then((n) => {
       if (dead) return;
+      setHave(n);
       setState(n === 0 ? "none" : n === paths.length ? "full" : "partial");
     });
     return () => {
@@ -62,6 +95,7 @@ export default function DownloadButton({
    *  cache changes here. */
   const rescan = async () => {
     const n = paths.length ? await countCached(paths) : 0;
+    setHave(n);
     setState(n === 0 ? "none" : n === paths.length ? "full" : "partial");
     qc.invalidateQueries({ queryKey: CACHED_PATHS_KEY });
     qc.invalidateQueries({ queryKey: ["cachedBytes"] });
@@ -108,24 +142,50 @@ export default function DownloadButton({
     }
   };
 
-  // Square mode matches the album row's other icon buttons: `!p-2.5` around a
-  // 16px glyph is the same 36px box the play button uses.
   const cls = iconOnly
-    ? "btn-ghost !p-2.5 !rounded-md"
+    ? "btn-icon"
     : size === "sm"
       ? "btn-ghost !py-1.5 text-xs"
       : "btn-ghost";
   const iconCls = iconOnly || size === "md" ? "h-4 w-4" : "h-3.5 w-3.5";
   const count = `${paths.length} track${paths.length === 1 ? "" : "s"}`;
+  /** Fraction of the entity already on disk: what is cached plus what this
+   *  run has finished (the rescan that updates `have` only lands at the end). */
+  const pct = paths.length ? Math.min(1, (have + done) / paths.length) : 0;
 
   if (state === "full") {
+    const tick = <CheckCircle2 className={`${iconCls} text-emerald-500`} />;
+    // Bulk removal is worth a second click; one track is not. Icon-only
+    // buttons arm IN PLACE (red + pulsing square) instead of growing a
+    // label — nothing in the row changes size or shape.
+    if (iconOnly) {
+      return paths.length > 1 ? (
+        <ConfirmButton
+          iconOnly
+          className={cls}
+          onConfirm={remove}
+          disabled={busy}
+          title={`All ${count} downloaded — click twice to remove them`}
+        >
+          <span className="icon-swap inline-flex">{tick}</span>
+        </ConfirmButton>
+      ) : (
+        <button
+          className={cls}
+          onClick={remove}
+          disabled={busy}
+          aria-label="Downloaded — remove from the offline cache"
+          title="Downloaded for offline playback — click to remove"
+        >
+          <span className="icon-swap inline-flex">{tick}</span>
+        </button>
+      );
+    }
     const body = (
       <>
-        <CheckCircle2 className={`${iconCls} text-emerald-500`} />
-        {iconOnly ? null : "Downloaded"}
+        {tick} Downloaded
       </>
     );
-    // Bulk removal is worth a second click; one track is not.
     return paths.length > 1 ? (
       <ConfirmButton
         className={cls}
@@ -137,17 +197,23 @@ export default function DownloadButton({
         {body}
       </ConfirmButton>
     ) : (
-      <button
-        className={cls}
-        onClick={remove}
-        disabled={busy}
-        aria-label={iconOnly ? "Downloaded — remove from the offline cache" : undefined}
-        title="Downloaded for offline playback — click to remove"
-      >
+      <button className={cls} onClick={remove} disabled={busy} title="Downloaded for offline playback — click to remove">
         {body}
       </button>
     );
   }
+
+  /// The state, as one glyph: progress arc while caching (determinate — the
+  /// button has no room for the "3/8" the labelled variant prints), the same
+  /// arc amber when part of the entity is already cached, the arrow when
+  /// there is nothing yet. Each swap scales in rather than cutting.
+  const glyph = busy ? (
+    <ProgressRing pct={pct} className="text-accent" />
+  ) : state === "partial" ? (
+    <ProgressRing pct={pct} className="text-amber-400" />
+  ) : (
+    <Download className={iconCls} />
+  );
 
   return (
     <button
@@ -161,20 +227,21 @@ export default function DownloadButton({
           : `Download ${count} for offline playback`
       }
     >
-      {busy ? (
+      {iconOnly ? (
+        <span key={busy ? "busy" : state} className="icon-swap inline-flex">
+          {glyph}
+        </span>
+      ) : busy ? (
         <>
-          <Loader2 className={`${iconCls} animate-spin`} />
-          {iconOnly ? null : `${done}/${paths.length}`}
+          <Loader2 className={`${iconCls} animate-spin`} /> {done}/{paths.length}
         </>
       ) : state === "partial" ? (
         <>
-          <CircleDashed className={`${iconCls} text-amber-400`} />
-          {iconOnly ? null : "Partial"}
+          <CircleDashed className={`${iconCls} text-amber-400`} /> Partial
         </>
       ) : (
         <>
-          <Download className={iconCls} />
-          {iconOnly ? null : label}
+          <Download className={iconCls} /> {label}
         </>
       )}
     </button>

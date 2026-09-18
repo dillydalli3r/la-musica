@@ -275,11 +275,8 @@ export default function AlbumPage() {
     invalidateLibrary(qc);
   };
 
-  // One shared square icon-button style for the header action row — play is
-  // the only accent-filled button, everything else stays quiet and boxed.
-  const iconBtn =
-    "p-2 rounded-lg border border-border bg-panel/60 text-zinc-400 hover:text-white hover:bg-raise transition-colors";
-
+  // Every button in the album's action row is the same 36px square (`.btn-icon`
+  // in index.css) — play is the accent-filled one, everything else is quiet.
   /** The library artist page for this album's artist: by album-artist MBID
    * when tagged, else the artist folder (the album's parent directory). */
   const artistHref = data.meta?.MUSICBRAINZ_ALBUMARTISTID
@@ -659,7 +656,7 @@ export default function AlbumPage() {
                 {/* the album's actions, directly under the problems line */}
                 <div className="flex items-center gap-2 flex-wrap pt-2">
                     <button
-                      className="btn-primary !p-2.5 !rounded-md"
+                      className="btn-icon-primary"
                       onClick={() => playNow(queueTracks)}
                       title="Play the album from the top"
                       aria-label="Play album"
@@ -677,7 +674,7 @@ export default function AlbumPage() {
                       kind="album"
                       id={data.path}
                       mbid={data.meta?.MUSICBRAINZ_ALBUMID}
-                      className="!p-2 !rounded-md border border-border bg-panel/60 hover:!bg-raise"
+                      className="btn-icon"
                       iconClass="h-4 w-4"
                     />
                     <TagActionsMenu
@@ -686,12 +683,12 @@ export default function AlbumPage() {
                       artist={data.album_artist ?? undefined}
                       releaseMbid={data.meta?.MUSICBRAINZ_ALBUMID ?? undefined}
                       covers={() => setCoverSearch({})}
-                      buttonClass={iconBtn}
+                      buttonClass="btn-icon"
                       buttonTitle="Tag actions"
                       onDone={() => invalidateLibrary(qc)}
                     />
                     <OverflowMenu
-              buttonClass={iconBtn}
+              buttonClass="btn-icon"
               buttonTitle="All album actions"
               sections={[
                 {

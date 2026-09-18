@@ -187,6 +187,26 @@ body {
   .btn-danger {
     @apply btn bg-red-900/60 text-red-200 hover:bg-red-800/60 border border-red-900;
   }
+  /* One square icon button for every entity action row (album, playlist).
+     All three variants are the SAME 36px box, so play, download, links, like,
+     tags and the overflow menu read as one row — a labelled button and an
+     icon button are different objects, so this does not reuse `.btn`'s
+     padding/radius. */
+  .btn-icon {
+    @apply inline-flex h-9 w-9 items-center justify-center rounded-md border border-border bg-panel/60 text-zinc-400 hover:bg-raise hover:text-white disabled:opacity-40 disabled:pointer-events-none;
+    transition: transform 0.12s ease, background-color var(--motion-fast) ease,
+      color var(--motion-fast) ease, border-color var(--motion-fast) ease;
+  }
+  .btn-icon-primary {
+    @apply btn-icon border-accent bg-accent text-white hover:bg-accent-soft hover:text-white;
+  }
+  /* The armed half of an icon-only confirmation (nothing to expand into). */
+  .btn-icon-danger {
+    @apply btn-icon border-red-800 bg-red-900/70 text-red-200 hover:bg-red-800/70 hover:text-white;
+  }
+  .btn-armed {
+    animation: arm-pulse 1.4s ease-in-out infinite;
+  }
   .chip {
     @apply inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium;
   }
@@ -299,21 +319,24 @@ table td {
 /* drives .amb-glow through --amb, which the component writes every    */
 /* 70 ms (a stepped value, never a per-frame paint).                   */
 /* ------------------------------------------------------------------ */
-/* 1) the cover itself, blurred and breathing — 90 s, ±4% scale */
+/* 1) the cover itself, blurred and breathing. The clocks here are what decide
+   whether the backdrop reads as ALIVE: at the old 62-180 s they moved ~0.2%
+   of their travel per second, which is indistinguishable from a still image.
+   These are slow enough to stay ambient and fast enough to see. */
 .amb-cover {
-  animation: amb-breathe 90s ease-in-out infinite alternate;
+  animation: amb-breathe 32s ease-in-out infinite alternate;
   will-change: transform;
 }
 @keyframes amb-breathe {
-  from { transform: scale(1.08); }
-  to   { transform: scale(1.16); }
+  from { transform: scale(1.06); }
+  to   { transform: scale(1.15); }
 }
 
-/* 2) aurora sweep: one conic band turning a full circle every 3 minutes.
+/* 2) aurora sweep: one conic band turning a full circle a minute.
    Transform-only, so it costs nothing to keep running. */
 .amb-sweep {
-  opacity: 0.5;
-  animation: amb-sweep 180s linear infinite;
+  opacity: 0.55;
+  animation: amb-sweep 55s linear infinite;
   will-change: transform;
 }
 @keyframes amb-sweep {
@@ -321,10 +344,10 @@ table td {
   to   { transform: rotate(360deg); }
 }
 
-/* 3) drifting color fields. The blur has to READ through 70px, so each
-   field crosses a few viewport units — slowly, and with an easing turn at
-   each end (alternate), which is what keeps the backdrop from reading as
-   "moving on its own clock". */
+/* 3) drifting color fields. The blur has to READ through 70px, so each field
+   crosses a few viewport units, with an easing turn at each end (alternate),
+   which is what keeps the backdrop from reading as "moving on its own
+   clock". */
 .amb-orb {
   position: absolute;
   border-radius: 9999px;
@@ -335,34 +358,38 @@ table td {
   will-change: transform;
   pointer-events: none;
 }
-.amb-orb-a { opacity: 0.72; animation: amb-drift-a 62s ease-in-out infinite alternate; }
-.amb-orb-b { opacity: 0.64; animation: amb-drift-b 76s ease-in-out infinite alternate; }
-.amb-orb-c { opacity: 0.58; animation: amb-drift-c 88s ease-in-out infinite alternate; }
+.amb-orb-a { opacity: 0.78; animation: amb-drift-a 24s ease-in-out infinite alternate; }
+.amb-orb-b { opacity: 0.7; animation: amb-drift-b 30s ease-in-out infinite alternate; }
+.amb-orb-c { opacity: 0.64; animation: amb-drift-c 37s ease-in-out infinite alternate; }
 @keyframes amb-drift-a {
   from { transform: translate3d(0, 0, 0) scale(1); }
-  to   { transform: translate3d(9vw, 7vh, 0) scale(1.18); }
+  to   { transform: translate3d(16vw, 11vh, 0) scale(1.28); }
 }
 @keyframes amb-drift-b {
-  from { transform: translate3d(0, 0, 0) scale(1.1); }
-  to   { transform: translate3d(-8vw, -6vh, 0) scale(0.94); }
+  from { transform: translate3d(0, 0, 0) scale(1.16); }
+  to   { transform: translate3d(-13vw, -9vh, 0) scale(0.88); }
 }
 @keyframes amb-drift-c {
-  from { transform: translate3d(0, 0, 0) scale(0.96); }
-  to   { transform: translate3d(-6vw, 8vh, 0) scale(1.12); }
+  from { transform: translate3d(0, 0, 0) scale(0.9); }
+  to   { transform: translate3d(-11vw, 13vh, 0) scale(1.22); }
 }
 
 /* 4) the only music-driven layer. --amb (0..1) is written ~14x/s by the
    ambience tick; the transitions below turn those steps into a breath that
    follows the music instead of a slow swell. They must stay within a couple
-   of ticks of the write cadence: the JS easing already smooths the beat
-   (~0.4 s attack, slower release), and a transition several times longer
-   than the tick stacks a SECOND, slower smoother on top of it — the layer
-   then lags the music by more than a second and a kick never lands. These
-   are 2-4 ticks: enough to hide the steps, short enough to stay snappy.
-   Both properties are compositor-only, so this is also the cheap layer. */
+   of ticks of the write cadence: the JS easing already smooths the beat, and
+   a transition several times longer than the tick stacks a SECOND, slower
+   smoother on top of it — the layer then lags the music by more than a
+   second and a kick never lands. These are 2-4 ticks: enough to hide the
+   steps, short enough to stay snappy.
+   The RANGE is the other half: 0.06..0.46 opacity over a soft gradient is a
+   ~2% change on screen, which is why the glow looked frozen however fast it
+   tracked. It now swings most of a 0.9 peak and a third of the scale, which
+   is what makes the background read as following the music. Both properties
+   are compositor-only, so this is also the cheap layer. */
 .amb-glow {
-  opacity: calc(0.06 + 0.4 * var(--amb, 0.45));
-  transform: scale(calc(0.98 + 0.11 * var(--amb, 0.45)));
+  opacity: calc(0.04 + 0.86 * var(--amb, 0.45));
+  transform: scale(calc(0.9 + 0.36 * var(--amb, 0.45)));
   transition: opacity 0.16s ease-out, transform 0.3s ease-out;
   will-change: opacity, transform;
   pointer-events: none;
@@ -408,7 +435,8 @@ table td {
     color var(--motion-fast) ease, border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
 }
 .btn-primary:active,
-.btn-ghost:active {
+.btn-ghost:active,
+.btn-icon:active {
   transform: scale(0.96);
 }
 .chip {
@@ -453,6 +481,23 @@ table td {
 }
 .anim-pop {
   animation: pop-in 0.18s var(--ease-motion);
+}
+
+/* An icon button changing state (download → progress → done) swaps its glyph
+   in place: a small scale-in instead of a hard cut, and never a label. */
+@keyframes icon-swap {
+  from { opacity: 0; transform: scale(0.55); }
+  to   { opacity: 1; transform: none; }
+}
+.icon-swap {
+  animation: icon-swap 0.22s var(--ease-motion);
+}
+
+/* Armed confirmation on a square button: a ring pulses out of it, so the
+   second click is visibly "the same button, armed" rather than a new one. */
+@keyframes arm-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(239 68 68 / 0.5); }
+  50% { box-shadow: 0 0 0 5px rgb(239 68 68 / 0); }
 }
 
 @keyframes fade-in {
@@ -500,6 +545,8 @@ table td {
   .stagger > *,
   .anim-pop,
   .anim-fade,
+  .icon-swap,
+  .btn-armed,
   .page-enter,
   .toast-in,
   .skeleton,

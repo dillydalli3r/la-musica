@@ -16,6 +16,8 @@ trash (`.mlo/trash`) beside it — one folder to back up or carry between
 machines.
 
 ## Highlights
+- **One row, one button, one moving background** (new in 2.7.2) — the album and playlist action rows are now a single shared 36px square recipe (`.btn-icon`, with an accent-filled play and a red armed state), so play, download, links, like, tags and the overflow menu line up instead of being four slightly different boxes; the square download button never prints a label — it fills a determinate progress arc while caching, scales its check in when done, and arming a removal turns the SAME box red and pulsing rather than expanding into "Remove 8?"; and the fullscreen background actually moves: the music window is measured against a rolling loud reference (a fixed dB window moved the glow by ~0.15 and the backdrop looked frozen), the glow swings most of its opacity and a third of its scale per beat, and the cover/sweep/colour-field clocks are 24-55 s instead of 62-180 s.
+
 - **Downloads page, downloaded marks, calmer visuals** (new in 2.7.1) — the offline cache is a sidebar page again (`/downloads`, the library's own album table, per-track removal, two-step *Clear all*), and every track title carries a small green check while its audio is downloaded — and nothing when it is not; the album page's download control is a square icon button in the row with play and the tag actions; the fullscreen player's frequency strip allocates one gradient per frame instead of one per bar, drops from the display clock to a 10 Hz timer with no signal and stops painting once it has eased onto its baseline; and the background glow's CSS easing was shortened to a fraction of a second so it tracks the music instead of lagging a second behind it (writes are skipped unless the value moved).
 
 - **Polish, robustness and hardening pass** (new in 2.7.0) — sidebar hover nudge plus shared motion tokens for consistent animation; lyrics robustness with millisecond precision, `[offset:]` clamping, translation/transliteration alignment, mixed synced+plain files, and a stale-track seek guard; performance via debounced library search, O(1) cover lookup, 60 s library cache, optimistic offline cache, and no background-tab polling; backend hardening with symlink-safe path guards, capped caches, and partial-success bulk tagging; Soulseek with bounded wish waits, no silent-drop handoffs, and daemon errors surfaced in the UI; plus keyboard/screen-reader and small-phone/tablet fixes.
@@ -94,13 +96,20 @@ machines.
   the repaint), and its colour ramp is one gradient per frame rather than one
   per bar, so a paused or idle player is not a 60 fps redraw of the same
   line.
-  The fullscreen background is **layered, not beat-driven**: a blurred
-  cover, a slow aurora sweep and drifting color fields each run on their own
-  long clock (62-180 s), the cover's grain and vignette settle them, and the
-  music swells ONE soft glow — driven by a value written a few times a
-  second and eased under a quarter-second by CSS, so the light rides the
-  beat without ever flashing (a write is skipped unless the value actually
-  moved). Both halves are switchable under the player's *Background* options
+  The fullscreen background is **mostly ambient, with one beat layer**: a
+  blurred cover, an aurora sweep and drifting color fields each animate on
+  their own CSS clock (24-55 s — measured to actually read as movement, where
+  the old 62-180 s was indistinguishable from a still image), the cover's
+  grain and vignette settle them, and the music swells ONE glow. That glow is
+  the only audio-driven layer, and it is measured against a **rolling loud
+  reference** rather than a fixed dB window: a fixed window cannot work
+  across masters (on a real track the mix swings inside ~4 dB, which moved
+  `--amb` by ~0.15 and left the backdrop looking frozen), so the reference
+  follows the track's own loud passages and the glow swings most of its
+  opacity and a third of its scale against it. The value is written ~14x/s
+  and eased under a quarter-second by CSS — snappy enough to ride a kick,
+  slow enough to never flash (a write is skipped unless the value moved).
+  Both halves are switchable under the player's *Background* options
   (`mlo.np.orbs` color drift, `mlo.np.vis` music glow) and
   `prefers-reduced-motion` freezes the lot.
   ReplayGain is applied through the WebAudio gain
@@ -1153,11 +1162,14 @@ bar controls all mean "cache this for offline playback". Every track title in
 the app (library rows and tracklist, album page, favourites, downloads) carries
 a small green check while its audio is in that cache and **nothing at all**
 when it is not, so the mark only ever means *plays without the server*. The
-album page's download control is a square icon button in the same row as play
-and the tag actions; it fills in as it downloads, becomes *Downloaded* when the
-whole album is cached, and asks twice before dropping a bulk download. The
-state is one shared query, so a download started in the player bar marks the
-title rows immediately.
+album and playlist action rows are one shared 36px square recipe — play,
+download, links, like, tags and the overflow menu differ only in glyph and
+accent — and the square download button states everything through that glyph:
+a determinate progress arc fills as it caches, the check scales in when the
+entity is complete, and a removal arms the same box red and pulsing (second
+click confirms, outside click or Escape disarms) instead of growing a label.
+The state is one shared query, so a download started in the player bar marks
+the title rows immediately.
 
 Saving a file to disk is *Export*'s job and the staging folder is Soulseek's —
 neither is this page.

@@ -345,7 +345,7 @@ export function LinkEditorButton({
   return (
     <div className="relative">
       <button
-        className={iconOnly ? "p-2 rounded-lg border border-border bg-panel/60 text-zinc-400 hover:text-white hover:bg-raise transition-colors" : "btn-ghost !py-1.5 text-xs"}
+        className={iconOnly ? "btn-icon" : "btn-ghost !py-1.5 text-xs"}
         onClick={() => setOpen(!open)}
         title="Paste MusicBrainz / RateYourMusic links"
         aria-label="Links"
