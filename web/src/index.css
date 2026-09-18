@@ -197,8 +197,17 @@ body {
     transition: transform 0.12s ease, background-color var(--motion-fast) ease,
       color var(--motion-fast) ease, border-color var(--motion-fast) ease;
   }
+  /* Solid accent fill (play). The glyph is `--accent-fg`, never `text-white`:
+     the mono theme's accent IS white, so a white glyph on the white button
+     disappeared until something else coloured it. The explicit `:hover` rule
+     keeps that colour on the lightened hover fill, where `.btn-icon`'s own
+     `hover:text-white` would otherwise win. */
   .btn-icon-primary {
-    @apply btn-icon border-accent bg-accent text-white hover:bg-accent-soft hover:text-white;
+    @apply btn-icon border-accent bg-accent shadow-sm hover:bg-accent-soft;
+    color: rgb(var(--accent-fg));
+  }
+  .btn-icon-primary:hover {
+    color: rgb(var(--accent-fg));
   }
   /* The armed half of an icon-only confirmation (nothing to expand into). */
   .btn-icon-danger {

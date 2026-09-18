@@ -526,11 +526,12 @@ export default function AlbumPage() {
                 onChange={(e) => e.target.files?.[0] && uploadCover(e.target.files[0])}
               />
               {/* small square menu over the cover: upload / find online / info.
-                  The button and panel keep an opaque backdrop so they stay
+                  Same box as the action row below (`.btn-icon`), with an
+                  opaque backdrop instead of the panel tint so it stays
                   readable on any cover. */}
               <div className="absolute top-1.5 right-1.5 opacity-0 group-hover/cover:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity">
                 <OverflowMenu
-                  buttonClass="!p-1.5 bg-black/80 hover:bg-black border border-white/20 text-zinc-100"
+                  buttonClass="btn-icon bg-black/80 border-white/20 text-zinc-100 hover:bg-black hover:text-white"
                   buttonTitle="Cover art actions"
                   sections={[
                     {
@@ -663,19 +664,19 @@ export default function AlbumPage() {
                     >
                       <Play className="h-4 w-4 fill-current" />
                     </button>
-                    <DownloadButton paths={data.tracks.map((t) => t.path)} iconOnly />
-                    <LinkEditorButton
-                      mode="album"
-                      paths={data.tracks.map((t) => t.path)}
-                      current={(data.meta ?? {}) as Record<string, unknown>}
-                      iconOnly
-                    />
                     <FavHeart
                       kind="album"
                       id={data.path}
                       mbid={data.meta?.MUSICBRAINZ_ALBUMID}
                       className="btn-icon"
                       iconClass="h-4 w-4"
+                    />
+                    <DownloadButton paths={data.tracks.map((t) => t.path)} iconOnly />
+                    <LinkEditorButton
+                      mode="album"
+                      paths={data.tracks.map((t) => t.path)}
+                      current={(data.meta ?? {}) as Record<string, unknown>}
+                      iconOnly
                     />
                     <TagActionsMenu
                       paths={data.tracks.map((t) => t.path)}

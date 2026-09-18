@@ -297,13 +297,13 @@ export default function PlaylistDetailPage() {
                     >
                       <Play className="h-4 w-4 fill-current" />
                     </button>
-                    <DownloadButton paths={tracks} size="md" />
                     <FavHeart
                       kind="playlist"
                       id={String(pid)}
                       className="btn-icon"
                       iconClass="h-4 w-4"
                     />
+                    <DownloadButton paths={tracks} size="md" />
                     {playlist.kind === "smart" && (
                       <button className="btn-icon" onClick={openFilterEditor} title="Edit smart filter">
                         <Pencil className="h-4 w-4" />
