@@ -173,7 +173,17 @@ ok(any("AUDIT tag is FAKE" in i or "Missing AUDIT tag" in i
    f"the failure names the tag ({res['issues']})")
 
 print("== script 6 writes the verified verdict itself ==")
-if not FFMPEG or not real_crc:
+# AudioAuditorCLI is a Windows-only .NET tool that is NOT vendored on the CI
+# runners / a Linux install: `run_audit_library` refuses to run without it, so
+# the sections that drive script 6 end-to-end can only be exercised where it
+# exists. The grader-side assertions above are the portable half of the suite.
+from mlo.tools import detect_all_tools as _detect_all_tools  # noqa: E402
+
+HAS_AA = bool((_detect_all_tools().get("audioauditor") or {}).get("cli_exe"))
+if not HAS_AA:
+    print("  skipped: AudioAuditorCLI not installed (Windows-only) — "
+          "script 6's own verdict is not exercised here")
+elif not FFMPEG or not real_crc:
     print("  skipped: no ffmpeg")
 else:
     write_log(f"{real_crc:0>8}".upper())
@@ -198,7 +208,9 @@ else:
        f"({verdict})")
 
 print("== a CRC-verified rip needs no verifiable log SHA256 ==")
-if not FFMPEG or not real_crc:
+if not HAS_AA:
+    print("  skipped: AudioAuditorCLI not installed (Windows-only)")
+elif not FFMPEG or not real_crc:
     print("  skipped: no ffmpeg")
 else:
     # The user's rule: the .log's per-track CRCs matching the audio is proof
