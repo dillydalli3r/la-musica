@@ -3,7 +3,7 @@ import os
 
 from .deps import (
     FLAC, OggVorbis, OggOpus, MP3, MP4, MP4FreeForm,
-    TXXX, USLT, COMM, Encoding, TextFrame, Frames, APIC, MP4Cover, Picture,
+    TXXX, USLT, COMM, UFID, Encoding, TextFrame, Frames, APIC, MP4Cover, Picture,
 )
 from .stats import _decode_mp4_value
 
@@ -42,28 +42,62 @@ TAG_MAP = {
     },
     "ORIGINALDATE": {
         "flac": "ORIGINALDATE", "mp3": ("TDRL", None),
-        "mp4": ("freeform", "com.apple.iTunes", "originaldate"),
+        # Uppercase atom name: beets' mediafile lists ORIGINALDATE /
+        # "ORIGINAL YEAR" (case-sensitive reads), so a lowercase atom was
+        # invisible to beets — including the path it computes for an import.
+        # Reading stays case-insensitive (_mp4_freeform_keys), so files this
+        # app previously wrote keep their value.
+        "mp4": ("freeform", "com.apple.iTunes", "ORIGINALDATE"),
     },
     "ORIGINALYEAR": {
         "flac": "ORIGINALYEAR", "mp3": ("TXXX", "ORIGINALYEAR"),
         "mp4": ("freeform", "com.apple.iTunes", "ORIGINALYEAR"),
     },
+    # Release identity. The first ID3/MP4 spelling is the MusicBrainz spec
+    # one (what Picard and beets write, so both see the app's tags and the
+    # app reads theirs — including the folder name each side computes); the
+    # second is what earlier versions of this app wrote and is still read
+    # and cleaned up on the next write (see _mp3_specs).
     "RELEASETYPE": {
-        "flac": "RELEASETYPE", "mp3": ("TXXX", "RELEASETYPE"),
-        "mp4": ("freeform", "com.apple.iTunes", "RELEASETYPE"),
+        "flac": "RELEASETYPE",
+        "mp3": (("TXXX", "MusicBrainz Album Type"), ("TXXX", "RELEASETYPE")),
+        "mp4": (("freeform", "com.apple.iTunes", "MusicBrainz Album Type"),
+                ("freeform", "com.apple.iTunes", "RELEASETYPE")),
+    },
+    "RELEASESTATUS": {
+        "flac": "RELEASESTATUS",
+        "mp3": ("TXXX", "MusicBrainz Album Status"),
+        "mp4": ("freeform", "com.apple.iTunes", "MusicBrainz Album Status"),
     },
     "RELEASECOUNTRY": {
-        "flac": "RELEASECOUNTRY", "mp3": ("TXXX", "RELEASECOUNTRY"),
-        "mp4": ("freeform", "com.apple.iTunes", "RELEASECOUNTRY"),
+        "flac": "RELEASECOUNTRY",
+        "mp3": (("TXXX", "MusicBrainz Album Release Country"),
+                ("TXXX", "RELEASECOUNTRY")),
+        "mp4": (("freeform", "com.apple.iTunes",
+                 "MusicBrainz Album Release Country"),
+                ("freeform", "com.apple.iTunes", "RELEASECOUNTRY")),
     },
     "CATALOGNUMBER": {
         "flac": "CATALOGNUMBER", "mp3": ("TXXX", "CATALOGNUMBER"),
         "mp4": ("freeform", "com.apple.iTunes", "CATALOGNUMBER"),
     },
-    # Record label (Picard writes "LABEL"; beets writes the same vorbis /
-    # TXXX / MP4 freeform keys, so both tagging paths stay interchangeable).
+    # Barcode of the release (MusicBrainz `barcode`), Picard/beets spelling.
+    "BARCODE": {
+        "flac": "BARCODE", "mp3": ("TXXX", "BARCODE"),
+        "mp4": ("freeform", "com.apple.iTunes", "BARCODE"),
+    },
+    # Writing system of the release's language (MusicBrainz `script`).
+    "SCRIPT": {
+        "flac": "SCRIPT", "mp3": ("TXXX", "SCRIPT"),
+        "mp4": ("freeform", "com.apple.iTunes", "SCRIPT"),
+    },
+    # Record label. ID3 keeps it in the standard TPUB frame (what beets and
+    # Picard write; TXXX:LABEL is not part of the MusicBrainz ID3 TXXX set),
+    # MP4 in the freeform atom both write. Earlier versions of this app used
+    # TXXX:LABEL, which is still read and replaced on the next write.
     "LABEL": {
-        "flac": "LABEL", "mp3": ("TXXX", "LABEL"),
+        "flac": "LABEL",
+        "mp3": (("TPUB", None), ("TXXX", "LABEL")),
         "mp4": ("freeform", "com.apple.iTunes", "LABEL"),
     },
     "TRACKTOTAL": {
@@ -220,9 +254,11 @@ TAG_MAP = {
         "mp3": ("TXXX", "INSTRUMENTAL"),
         "mp4": ("freeform", "com.apple.iTunes", "INSTRUMENTAL"),
     },
+    # Medium of the release. ID3's standard frame is TMED (what beets and
+    # Picard write); TXXX:MEDIA is this app's older spelling, still read.
     "MEDIA": {
         "flac": "MEDIA",
-        "mp3": ("TXXX", "MEDIA"),
+        "mp3": (("TMED", None), ("TXXX", "MEDIA")),
         "mp4": ("freeform", "com.apple.iTunes", "MEDIA"),
     },
     "SOURCE": {
@@ -289,9 +325,15 @@ TAG_MAP = {
         "mp3": ("TXXX", "MusicBrainz Artist Id"),
         "mp4": ("freeform", "com.apple.iTunes", "MusicBrainz Artist Id"),
     },
+    # The RECORDING id. ID3 keeps it in a UFID frame owned by
+    # musicbrainz.org (the MusicBrainz spec; mutagen's own
+    # `musicbrainz_trackid`, beets and Picard all read/write it there, so a
+    # TXXX:desc spelling is invisible to them). The TXXX spelling this app
+    # used before is still read and dropped on the next write.
     "MUSICBRAINZ_TRACKID": {
         "flac": "MUSICBRAINZ_TRACKID",
-        "mp3": ("TXXX", "MusicBrainz Track Id"),
+        "mp3": (("UFID", "http://musicbrainz.org"),
+                ("TXXX", "MusicBrainz Track Id")),
         "mp4": ("freeform", "com.apple.iTunes", "MusicBrainz Track Id"),
     },
     "MUSICBRAINZ_RELEASEID": {
@@ -303,6 +345,21 @@ TAG_MAP = {
         "flac": "MUSICBRAINZ_RELEASEGROUPID",
         "mp3": ("TXXX", "MusicBrainz Release Group Id"),
         "mp4": ("freeform", "com.apple.iTunes", "MusicBrainz Release Group Id"),
+    },
+    # The id of this track's POSITION on this release (distinct from
+    # MUSICBRAINZ_TRACKID, the recording): the naming script offers both, and
+    # beets/Picard write this one to every file they touch.
+    "MUSICBRAINZ_RELEASETRACKID": {
+        "flac": "MUSICBRAINZ_RELEASETRACKID",
+        "mp3": ("TXXX", "MusicBrainz Release Track Id"),
+        "mp4": ("freeform", "com.apple.iTunes", "MusicBrainz Release Track Id"),
+    },
+    # The work (composition) a classical track performs; its movement tags
+    # below are only meaningful next to it.
+    "MUSICBRAINZ_WORKID": {
+        "flac": "MUSICBRAINZ_WORKID",
+        "mp3": ("TXXX", "MusicBrainz Work Id"),
+        "mp4": ("freeform", "com.apple.iTunes", "MusicBrainz Work Id"),
     },
     # RateYourMusic links (URLs).
     "RATEYOURMUSIC_ALBUM": {
@@ -329,6 +386,40 @@ TAG_MAP = {
 # a leading ID3v2 chunk — what Picard and foobar2000 write for .aac, and what
 # ffmpeg/ffprobe skip past when decoding the stream.
 _ID3_KINDS = ("mp3", "aac")
+
+
+def _mp3_specs(spec):
+    """ID3 spellings a TAG_MAP entry accepts, the written one first.
+
+    Most fields have exactly one. A field may have several when taggers
+    disagree on where it lives — the MusicBrainz spec's UFID frame vs. the
+    older TXXX description — where every spelling must be READ (existing
+    files carry either) but only one is written, and writing drops the other
+    so a file never holds the same id twice.
+    """
+    raw = (spec or {}).get("mp3")
+    if not raw:
+        return ()
+    if isinstance(raw[0], tuple):
+        return tuple(raw)
+    return (raw,)
+
+
+def _mp4_specs(spec):
+    """MP4 atom spellings a TAG_MAP entry accepts, the written one first.
+
+    Same purpose as _mp3_specs: MP4 keeps some fields under more than one
+    freeform atom name (Picard/beets vs. this app's older names). Values of
+    the SAME atom name in another case are not aliases — freeform reads are
+    case-insensitive already.
+    """
+    raw = (spec or {}).get("mp4")
+    if not raw:
+        return ()
+    if isinstance(raw[0], tuple):
+        return tuple(raw)
+    return (raw,)
+
 
 # Video containers routed through ffprobe/ffmpeg (MP4/M4V stay on mutagen).
 VIDEO_FFMPEG_EXTS = (
@@ -786,6 +877,73 @@ class AudioFile:
             return "; ".join(str(item) for item in value)
         return str(value) if value is not None else None
 
+    def _id3_read(self, frame_type, desc=None):
+        """Value of one ID3 spelling (None when that frame is absent).
+
+        UFID is the one binary frame a semantic tag maps to: its payload is
+        the MusicBrainz id itself, the owner names the authority.
+        """
+        if frame_type == "USLT":
+            return self.get_lyrics()
+        if frame_type == "UFID":
+            frame = self.audio.tags.get(f"UFID:{desc}")
+            data = getattr(frame, "data", None) if frame is not None else None
+            if not data:
+                return None
+            return data.decode("ascii", "replace").strip() or None
+        if frame_type == "TXXX":
+            for frame in self.audio.tags.getall("TXXX"):
+                if frame.desc.upper() == str(desc).upper():
+                    return self._id3_text(frame)
+            return None
+        for frame in self.audio.tags.getall(frame_type):
+            if frame_type == "COMM" and getattr(frame, "lang", "eng") != "eng":
+                continue
+            return self._id3_text(frame)
+        return None
+
+    @staticmethod
+    def _mp3_canonical(frame_type, desc=""):
+        """TAG_MAP name for a stored ID3 frame, or None.
+
+        Descriptions (and UFID owners) are compared case-insensitively:
+        taggers disagree on their case and every spelling of a field must
+        read back under the same semantic name.
+        """
+        want = "" if desc in (None, "") else str(desc).upper()
+        for name, spec in TAG_MAP.items():
+            for ft, od in _mp3_specs(spec):
+                if ft != frame_type:
+                    continue
+                got = "" if od in (None, "") else str(od).upper()
+                if got == want:
+                    return name
+        return None
+
+    def _mp4_read(self, atom):
+        """Value of one MP4 atom spelling (None when the atom is absent)."""
+        if isinstance(atom, tuple) and atom[0] == "freeform":
+            _, mean, name = atom
+            for k in self._mp4_freeform_keys(mean, name):
+                vals = self.audio.tags.get(k) if self.audio.tags else None
+                if vals:
+                    return _decode_mp4_value(vals[0])
+            return None
+        return self._mp4_text(self.audio.get(atom))
+
+    def _mp4_delete(self, atom):
+        """Remove one atom spelling; True when anything was removed."""
+        if isinstance(atom, tuple) and atom[0] == "freeform":
+            changed = False
+            for k in self._mp4_freeform_keys(atom[1], atom[2]):
+                del self.audio[k]
+                changed = True
+            return changed
+        if atom in self.audio:
+            del self.audio[atom]
+            return True
+        return False
+
     # Attributes that identify an ID3 frame carrying no .text, in probe
     # order: the first one present names the frame in all_tags()
     # (PRIV:owner, POPM:email, GEOB:desc, WXXX:desc, CHAP:element_id, ...).
@@ -895,41 +1053,20 @@ class AudioFile:
                 return self._tag_cache.get(spec["flac"].lower())
 
             elif kind in _ID3_KINDS:
-                frame_type, desc = spec["mp3"]
                 if self.audio.tags is None:
                     return None
-                if frame_type == "TXXX":
-                    for frame in self.audio.tags.getall("TXXX"):
-                        if frame.desc.upper() == desc.upper():
-                            return self._id3_text(frame)
-                    return None
-                if frame_type == "USLT":
-                    return self.get_lyrics()
-                for frame in self.audio.tags.getall(frame_type):
-                    if frame_type == "COMM" and getattr(frame, "lang", "eng") != "eng":
-                        continue
-                    return self._id3_text(frame)
+                for frame_type, desc in _mp3_specs(spec):
+                    val = self._id3_read(frame_type, desc)
+                    if val is not None:
+                        return val
                 return None
 
             elif kind == "mp4":
-                atom = spec["mp4"]
-
-                if isinstance(atom, tuple) and atom[0] == "freeform":
-                    _, mean, name2 = atom
-                    key = f"----:{mean}:{name2}"
-                    vals = self.audio.tags.get(key) if self.audio.tags else None
-                    if not vals:
-                        # Atom subnames are case-sensitive in the container
-                        # but taggers disagree on case (see the scan).
-                        for k in self._mp4_freeform_keys(mean, name2):
-                            vals = self.audio.tags.get(k)
-                            if vals:
-                                break
-                    if not vals:
-                        return None
-                    return _decode_mp4_value(vals[0])
-
-                return self._mp4_text(self.audio.get(atom))
+                for atom in _mp4_specs(spec):
+                    val = self._mp4_read(atom)
+                    if val:
+                        return val
+                return None
 
         except Exception:
             return None
@@ -1024,27 +1161,26 @@ class AudioFile:
                         continue
                     if fid == "TXXX":
                         desc = str(frame.desc)
-                        canonical = next(
-                            (name for name, spec in TAG_MAP.items()
-                             if spec.get("mp3") == ("TXXX", desc)
-                             or (spec.get("mp3", (None, None))[0] == "TXXX"
-                                 and str(spec["mp3"][1]).upper() == desc.upper())),
-                            f"TXXX:{desc}",
-                        )
-                        out[canonical] = self._id3_text(frame) or ""
+                        canonical = self._mp3_canonical("TXXX", desc)
+                        out[canonical or f"TXXX:{desc}"] = self._id3_text(frame) or ""
                     elif fid == "USLT":
                         out["LYRICS"] = self.get_lyrics() or ""
                     elif fid == "APIC":
                         continue
                     elif fid == "COMM":
                         out.setdefault("COMMENT", self._id3_text(frame) or "")
+                    elif fid == "UFID":
+                        # Binary frame carrying an id (the MusicBrainz
+                        # recording id lives here); name it by its owner so
+                        # the mapped ones read as their semantic tag.
+                        owner = str(getattr(frame, "owner", "") or "")
+                        canonical = self._mp3_canonical("UFID", owner)
+                        data = getattr(frame, "data", b"") or b""
+                        out[canonical or f"UFID:{owner}"] = data.decode(
+                            "ascii", "replace")
                     elif isinstance(frame, TextFrame):
-                        canonical = next(
-                            (name for name, spec in TAG_MAP.items()
-                             if spec.get("mp3", (None, None))[0] == fid),
-                            fid,
-                        )
-                        out[canonical] = self._id3_text(frame) or ""
+                        canonical = self._mp3_canonical(fid)
+                        out[canonical or fid] = self._id3_text(frame) or ""
                     else:
                         # Every OTHER ID3 frame (PRIV, POPM, WXXX, GEOB,
                         # RVA2, PCNT, UFID, CHAP, SYLT…). They used to be
@@ -1068,15 +1204,16 @@ class AudioFile:
                         name = raw.rsplit(":", 1)[-1]
                         canonical = next(
                             (n for n, spec in TAG_MAP.items()
-                             if isinstance(spec.get("mp4"), tuple)
-                             and spec["mp4"][0] == "freeform"
-                             and spec["mp4"][2].lower() == name.lower()),
+                             if any(isinstance(a, tuple) and a[0] == "freeform"
+                                    and a[2].lower() == name.lower()
+                                    for a in _mp4_specs(spec))),
                             raw,
                         )
                     else:
                         canonical = next(
                             (n for n, spec in TAG_MAP.items()
-                             if spec.get("mp4") == raw), raw
+                             if any(not isinstance(a, tuple) and a == raw
+                                    for a in _mp4_specs(spec))), raw
                         )
                     out[canonical] = self._mp4_text(val) or ""
         except Exception:
@@ -1089,7 +1226,9 @@ class AudioFile:
         Used by the GUI tag editor: flac/ogg/opus take raw vorbis
         comment names, mp3 takes "TXXX:desc" custom frames or plain
         frame IDs, mp4 takes "----:mean:name" freeform atoms or plain
-        atom names.
+        atom names. A key the container cannot hold (a semantic name on
+        mp3/mp4) is refused with self.error instead of being written as a
+        truncated frame no reader finds — set_tag maps semantic names.
         """
         self._invalidate_cache()
         if self.audio is None:
@@ -1126,6 +1265,14 @@ class AudioFile:
                     self.audio.tags.add(
                         TXXX(encoding=Encoding.UTF8, desc=desc, text=[value])
                     )
+                elif len(str(key)) != 4:
+                    # An ID3 frame ID is exactly four characters. Writing a
+                    # longer key produced a malformed frame that no reader
+                    # (this app included) can find, so the value was lost
+                    # silently — refuse it and name the working spelling.
+                    self.error = (f"set_any_tag: {key!r} is not an ID3 frame "
+                                  f"ID — custom tags use TXXX:{key}")
+                    return False
                 else:
                     self.audio.tags.delall(str(key))
                     frame_cls = Frames.get(str(key))
@@ -1151,6 +1298,17 @@ class AudioFile:
                             MP4FreeForm(value.encode("utf-8"))
                         ]
                 else:
+                    if len(str(key)) != 4:
+                        # An MP4 atom name is four bytes. mutagen silently
+                        # truncates a longer key to its first four characters
+                        # and stores the value under THAT name, where no
+                        # reader looks for it (a semantic name like "TITLE"
+                        # became atom "TITL"): refuse it instead, and point
+                        # at the freeform spelling.
+                        self.error = (f"set_any_tag: {key!r} is not a "
+                                      f"4-character MP4 atom — custom tags use "
+                                      f"----:com.apple.iTunes:{key}")
+                        return False
                     self.audio[str(key)] = [value]
                 self._save()
                 return True
@@ -1270,13 +1428,34 @@ class AudioFile:
                 return True
 
             elif kind in _ID3_KINDS:
-                frame_type, desc = spec["mp3"]
+                specs = _mp3_specs(spec)
+                frame_type, desc = specs[0]
                 if self.audio.tags is None:
                     self.audio.add_tags()
 
+                # Drop the other spellings of the same field: one id written
+                # twice leaves two answers on disk for every reader.
+                for alt_type, alt_desc in specs[1:]:
+                    try:
+                        if alt_type == "TXXX":
+                            for frame in list(self.audio.tags.getall("TXXX")):
+                                if frame.desc.upper() == str(alt_desc).upper():
+                                    del self.audio.tags[frame.HashKey]
+                        elif alt_type == "UFID":
+                            del self.audio.tags[f"UFID:{alt_desc}"]
+                        else:
+                            self.audio.tags.delall(alt_type)
+                    except Exception:
+                        pass
+
                 if frame_type == "USLT":
                     return self.set_lyrics(value)
-                if frame_type == "TXXX":
+                if frame_type == "UFID":
+                    self.audio.tags.add(
+                        UFID(owner=str(desc),
+                             data=value.encode("ascii", "replace"))
+                    )
+                elif frame_type == "TXXX":
                     for frame in list(self.audio.tags.getall("TXXX")):
                         if frame.desc.upper() == desc.upper():
                             try:
@@ -1312,7 +1491,14 @@ class AudioFile:
                 return True
 
             elif kind == "mp4":
-                atom = spec["mp4"]
+                atom = _mp4_specs(spec)[0]
+                # One field, one atom: drop this entry's other spellings
+                # (older freeform names) before writing the current one.
+                for alt in _mp4_specs(spec)[1:]:
+                    try:
+                        self._mp4_delete(alt)
+                    except Exception:
+                        pass
 
                 if isinstance(atom, tuple) and atom[0] == "freeform":
                     _, mean, name2 = atom
@@ -1320,8 +1506,7 @@ class AudioFile:
 
                     # Replace, never append next to a differently-cased
                     # atom of the same name (taggers disagree on case).
-                    for k in self._mp4_freeform_keys(mean, name2):
-                        del self.audio[k]
+                    self._mp4_delete(atom)
 
                     fmt = getattr(MP4FreeForm, "FORMAT_UTF8", 1)
 
@@ -1403,23 +1588,29 @@ class AudioFile:
                 return True
 
             elif kind in _ID3_KINDS:
-                frame_type, desc = spec["mp3"]
+                specs = _mp3_specs(spec)
                 if self.audio.tags is None:
                     return True
 
                 changed = False
-                if frame_type == "USLT":
-                    return self.delete_lyrics()
-                if frame_type == "TXXX":
-                    for frame in list(self.audio.tags.getall("TXXX")):
-                        if frame.desc.upper() == desc.upper():
-                            try:
-                                del self.audio.tags[frame.HashKey]
-                                changed = True
-                            except Exception:
-                                pass
-                else:
-                    if frame_type == "COMM":
+                for frame_type, desc in specs:
+                    if frame_type == "USLT":
+                        return self.delete_lyrics()
+                    if frame_type == "UFID":
+                        try:
+                            del self.audio.tags[f"UFID:{desc}"]
+                            changed = True
+                        except Exception:
+                            pass
+                    elif frame_type == "TXXX":
+                        for frame in list(self.audio.tags.getall("TXXX")):
+                            if frame.desc.upper() == str(desc).upper():
+                                try:
+                                    del self.audio.tags[frame.HashKey]
+                                    changed = True
+                                except Exception:
+                                    pass
+                    elif frame_type == "COMM":
                         # Remove only the English/undescribed comment.
                         for frame in list(self.audio.tags.getall("COMM")):
                             if frame.lang == "eng" and not frame.desc:
@@ -1439,18 +1630,14 @@ class AudioFile:
                 return True
 
             elif kind == "mp4":
-                atom = spec["mp4"]
                 changed = False
 
-                if isinstance(atom, tuple) and atom[0] == "freeform":
+                # Every spelling the entry accepts: a field may sit under an
+                # older freeform name as well as the current one.
+                for atom in _mp4_specs(spec):
                     # Case-insensitive: the atom may be stored in another
                     # tagger's case (see _mp4_freeform_keys).
-                    for k in self._mp4_freeform_keys(atom[1], atom[2]):
-                        del self.audio[k]
-                        changed = True
-                elif atom in self.audio:
-                    del self.audio[atom]
-                    changed = True
+                    changed = self._mp4_delete(atom) or changed
 
                 if changed:
                     self._save()

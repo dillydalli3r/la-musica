@@ -22,8 +22,10 @@ whole pipeline a careful human would do by hand:
      never fatal),
   5. import into the library: stamp the MusicBrainz release/recording IDs
      that drove the search into the tags, write MEDIA, organize with the
-     naming script, then run the configured import chain
-     (server.imports.finish_album) in the background.
+     naming script, then stage the album in the background — RateYourMusic
+     links, artist metadata and cover art — via
+     ``server.imports.finish_album(..., defer_tagging=True)``. Nothing
+     unattended tags: the script chain is the wizard's / menu actions' job.
 
 Progress is reported through mlo.stats.progress_hook (the same relay the
 WebSocket /ws/progress endpoint forwards to the UI) and mirrored into a
@@ -89,17 +91,62 @@ def _start_next():
             _queue.insert(0, item)
 
 
+def _release_key(release_mbid, release=None):
+    """The identity a release is deduped by: its MusicBrainz id, whether it was
+    handed in as an mbid or inside a resolved release dict."""
+    return str(release_mbid or (release or {}).get("id") or "").strip().lower()
+
+
+def _running_key():
+    """The release id of the job the pipeline is currently on ("" when none)."""
+    with _lock:
+        return _release_key((_job.get("release") or {}).get("id"))
+
+
+def _queued_keys():
+    """Release ids already waiting in the bulk queue."""
+    with _queue_lock:
+        return {_release_key(i.get("release_mbid"), i.get("release"))
+                for i in _queue} - {""}
+
+
 def enqueue(release_mbid=None, release=None, queries=None, kind=None, mode=None):
     """Queue one release for auto-import; starts it immediately when idle.
 
     kind/mode describe an ID the HTTP route queued BEFORE resolving it (a
     release group or a whole artist): the job does that lookup — see _run.
 
+    The same release id is never queued twice, and never while it is the job
+    already running: the "download all" routes hand over a target list that can
+    repeat (an artist page whose groups share an edition, a release already
+    queued behind it), and a second copy of the same id just downloads and
+    imports the same album again. A duplicate is logged with its reason and the
+    live queue depth is returned.
+
     Returns the queue depth (0 when the release started right away)."""
     item = {"release_mbid": release_mbid, "release": release,
             "queries": queries, "kind": kind, "mode": mode}
+    key = _release_key(release_mbid, release)
+    # Read the running job's id BEFORE taking the queue lock. _start_next calls
+    # job_state()/start_job() WITH the queue lock held, so queue → job is the
+    # order this module locks in; taking them the other way round here would
+    # deadlock against it.
+    running = _running_key()
+    dup = ""
     with _queue_lock:
-        _queue.append(item)
+        if not key:
+            _queue.append(item)
+        elif key == running:
+            dup = "already being imported"
+        elif any(_release_key(i.get("release_mbid"), i.get("release")) == key
+                 for i in _queue):
+            dup = "already queued"
+        else:
+            _queue.append(item)
+    if dup:
+        _log(f"{release_mbid or key}: {dup} — not queued again.")
+        with _queue_lock:
+            return len(_queue)
     _start_next()
     with _queue_lock:
         # our item is gone once it started → depth 0
@@ -120,22 +167,18 @@ def _job_search_done():
         _job["search"] = None
 
 
-def _job_search_progress(query, elapsed, wait_s, res):
-    """Publish search progress so the UI can show a moving bar instead of a
-    single frozen "Searching…" line.
+def _job_search_progress(query, res):
+    """Publish what the search stage is doing: which query, how many peers and
+    files have answered.
 
-    `wait` is the requested window; the search itself keeps being polled for
-    `_SEARCH_GRACE_S` past it (slskd only hands back responses once a search
-    has ENDED), so `deadline_s` names the real cap and `remaining` counts down
-    to the requested window. `elapsed` is clamped to `wait` — the UI must
-    never print a search that overran the window it advertised."""
+    Deliberately NO countdown. The window is a ceiling that a usable candidate
+    ends early, so a timer readout promised a duration the search does not
+    serve — the UI shows the live response counts and an indeterminate
+    "searching" instead, which is honest whether the wait ends in one second or
+    in the full window."""
     with _lock:
         _job["search"] = {
             "query": query,
-            "elapsed": int(min(elapsed, wait_s)),
-            "wait": int(wait_s),
-            "deadline_s": int(wait_s + _SEARCH_GRACE_S),
-            "remaining": int(max(0, wait_s - elapsed)),
             "state": str(res.get("state") or ""),
             "responses": int(res.get("responseCount") or 0),
             "files": int(res.get("fileCount") or 0),
@@ -205,6 +248,20 @@ def _log(msg):
             _job["stage"] = str(msg)
 
 
+def _prune_downloads():
+    """Drop the empty shells a finished job left in the download dir.
+
+    The job's rejected/cancelled candidates and its imported album all take
+    files away; slskd never removes a directory it created, so without this
+    the `<user>/<batch id>/<album>` chains pile up. rmdir-only (see
+    soulseek.prune_download_dirs) — nothing that still holds a byte goes."""
+    try:
+        from server import soulseek as slsk
+        slsk.prune_download_dirs(slsk.download_dir())
+    except Exception:
+        pass
+
+
 def _finish(state, result=None):
     with _lock:
         _job["state"] = state
@@ -212,6 +269,7 @@ def _finish(state, result=None):
         _job["progress"] = None   # nothing is downloading any more
         if state == "done":
             _job["stage"] = "Done"
+    _prune_downloads()
     if state != "cancelled":
         # Bulk import: this release is over, start the next one in the queue.
         # A cancelled job stops the queue instead (the user said stop).
@@ -227,13 +285,63 @@ def _norm_text(s):
     return re.sub(r"\s+", " ", s).strip()
 
 
+# A release can carry several catalog numbers (one per label/pressing). Each is
+# searched as its OWN query — the caller runs every returned query as a
+# separate search and merges the responses — but a release with a dozen numbers
+# must not flood the network, so the expansion stops here.
+_MAX_CATALOG_QUERIES = 4
+
+
+def _catalog_numbers(release):
+    """Every distinct, normalized catalog number of a release, in MB order.
+
+    Older payloads carry only the singular `catalog_number`; it is used as the
+    sole entry when the plural key is missing or empty.
+    """
+    raw = release.get("catalog_numbers") or [release.get("catalog_number", "")]
+    out = []
+    for v in raw:
+        v = _norm_text(v)
+        if v and v not in out:
+            out.append(v)
+        if len(out) >= _MAX_CATALOG_QUERIES:
+            break
+    return out
+
+
+def _expand_template(tpl, fields, catalogs):
+    """Render one template. A template naming `catalognumber` yields one query
+    per catalog number (so `["catalognumber"]` on a two-number CD is two
+    queries); any other template yields exactly one, as it always has."""
+    names = [f.strip().lower() for f in str(tpl).split()]
+    if "catalognumber" not in names:
+        q = _norm_text(" ".join(p for p in (fields.get(f, "") for f in names) if p))
+        return [q] if q else []
+    out = []
+    for cn in catalogs:
+        parts = [cn if f == "catalognumber" else fields.get(f, "") for f in names]
+        q = _norm_text(" ".join(p for p in parts if p))
+        if q and q not in out:
+            out.append(q)
+    return out
+
+
 def release_queries(release, cfg):
     """Search queries from the release's traits, in configured priority order.
 
     Each template is a space-separated list of field names; supported fields:
     artist, album, year, date, country, catalognumber, barcode, label.
-    CD releases default to the catalog number (the only trait commonly
-    present in rip folder names), digital media to "artist album year".
+    A CD defaults to its catalog number alone (the trait rip folders actually
+    carry, and the one search that does not drag in every other pressing);
+    digital media, which has no catalog number, to "artist album year".
+
+    A CD whose release carries NO catalog number would otherwise have nothing
+    to search for at all, so it falls back to the digital template instead of
+    failing the job — one search, and the caller logs which one it was.
+
+    A release carrying several catalog numbers (one per label/pressing) yields
+    one query per number for every template that names `catalognumber`, capped
+    at `_MAX_CATALOG_QUERIES`.
     """
     is_cd = "CD" in (release.get("medium_formats") or [])
     key = "soulseek_auto_cd_queries" if is_cd else "soulseek_auto_digital_queries"
@@ -241,8 +349,7 @@ def release_queries(release, cfg):
     if isinstance(templates, str):
         templates = [templates]
     if not templates:
-        templates = (["catalognumber", "artist album catalognumber", "artist album"]
-                     if is_cd else ["artist album year", "artist album"])
+        templates = ["catalognumber"] if is_cd else ["artist album year"]
 
     fields = {
         "artist": _norm_text((release.get("artists") or [{}])[0].get("name", "")),
@@ -250,16 +357,27 @@ def release_queries(release, cfg):
         "year": str(release.get("date") or "")[:4],
         "date": str(release.get("date") or ""),
         "country": str(release.get("country") or ""),
-        "catalognumber": _norm_text(release.get("catalog_number", "")),
         "barcode": str(release.get("barcode") or ""),
         "label": _norm_text(release.get("label", "")),
     }
+    catalogs = _catalog_numbers(release)
     queries = []
     for tpl in templates:
-        parts = [fields.get(f.strip().lower(), "") for f in str(tpl).split()]
-        q = _norm_text(" ".join(p for p in parts if p))
-        if q and q not in queries:
-            queries.append(q)
+        for q in _expand_template(tpl, fields, catalogs):
+            if q not in queries:
+                queries.append(q)
+    if not queries and is_cd:
+        # The catalog-number template resolved to nothing (MusicBrainz has no
+        # CATALOGNUMBER for this release). `catalognumber` is the default for a
+        # reason, but a release with none would have no search at all — one
+        # broader query beats a job that cannot start, and the fallback is
+        # logged so it is never a silent change of plan.
+        fallback = _norm_text(" ".join(p for p in
+                                      (fields["artist"], fields["album"], fields["year"]) if p))
+        if fallback:
+            _log("this release has no catalog number — searching by "
+                 f"“{fallback}” instead")
+            queries.append(fallback)
     return queries
 
 
@@ -619,8 +737,16 @@ def find_candidates(results, release, cfg):
                 seen.add(f["file"])
                 downloads.append(f)
         total = sum(int(f.get("size") or 0) for f in downloads)
+        # A fast peer both finishes sooner and is likelier to serve the whole
+        # folder, so the rate the network advertised decides between otherwise
+        # equal folders: the folder's SLOWEST file (a folder is only as fast as
+        # its worst peer) earns up to 4.5 points at 1 MiB/s per point —
+        # deliberately under one matched track (5), so speed breaks ties
+        # between equally complete folders instead of buying an incomplete one.
+        speed_mib = (min(speeds) if speeds else 0) / (1024 * 1024)
         score = (5 * matched + 2 * len(logs) + len(cues)
-                 + 8 * lossless + 4 * slot - queue / 100.0)
+                 + 8 * lossless + 4 * slot - queue / 100.0
+                 + min(4.5, speed_mib))
         return {
             "username": username, "dir": root, "files": downloads, "audio": plans,
             "logs": logs, "cues": cues, "matched": matched, "expected": len(expected),
@@ -654,17 +780,21 @@ _SEARCH_POLL_S = 0.75      # one loop polls EVERY outstanding search this often
 _TRANSFER_POLL_S = 1.0     # download poll cadence
 
 
-def _search_queries(slsk, queries, wait_s, usable=None):
+def _search_queries(slsk, queries, wait_s, usable=None, response_limit=0):
     """Run every query template AT ONCE and poll them in one loop.
 
     All templates are POSTed up front, so the wall time is one window
     (`wait_s` + the grace tail) instead of one window per template — up to
-    three minutes before the first byte became one minute. `usable(merged)`
-    is asked on every tick and ends the wait the moment the merged responses
-    already hold what we came for, so the remaining templates are never
-    waited out. The per-request `timeout` is passed in MILLISECONDS because
-    slskd counts it that way (see soulseek.search); responses are only
-    retrievable after a search ends, hence the grace tail past `wait_s`.
+    three minutes before the first byte became one minute. The per-request
+    `timeout` is passed in MILLISECONDS because slskd counts it that way (see
+    soulseek.search), and it is QUIET time: a search only ends when the
+    network stops answering. That is why `response_limit` matters — slskd
+    serves `/searches/{id}/responses` only once a search has ENDED, so a
+    popular album (peers replying for a minute straight) used to hand back
+    nothing until the whole ceiling had elapsed even though hundreds of files
+    were already counted. The limit ends the search as soon as enough peers
+    have answered, which is what makes a good copy start downloading in
+    seconds instead of a minute.
 
     Returns (results, errors, skipped): results = [(query, response DTO)] for
     the searches that reached a terminal state, errors = one line per query
@@ -676,7 +806,8 @@ def _search_queries(slsk, queries, wait_s, usable=None):
     watch, errors = [], []
     for q in queries:
         try:
-            watch.append([slsk.search(q, timeout_ms=int(wait_s * 1000)), q, None])
+            watch.append([slsk.search(q, timeout_ms=int(wait_s * 1000),
+                                      response_limit=response_limit), q, None])
         except Exception as e:
             errors.append(f"Soulseek search could not be started for “{q}”: {e}")
     early = False
@@ -687,7 +818,7 @@ def _search_queries(slsk, queries, wait_s, usable=None):
             except Exception:
                 pass
         pending = [e for e in watch if not slsk.is_search_done(e[2] or {})]
-        _job_search_progress(display, time.time() - started, wait_s, {
+        _job_search_progress(display, {
             "state": "InProgress" if pending else "Completed",
             "responseCount": sum(int((e[2] or {}).get("responseCount") or 0) for e in watch),
             "fileCount": sum(int((e[2] or {}).get("fileCount") or 0) for e in watch),
@@ -701,8 +832,15 @@ def _search_queries(slsk, queries, wait_s, usable=None):
         time.sleep(_SEARCH_POLL_S)
 
     results, skipped = [], 0
-    for _sid, q, res in watch:
+    for sid, q, res in watch:
         if not slsk.is_search_done(res or {}):
+            # Still running when the window closed. Nothing readable will come
+            # out of it (responses are served only after a search ends), so it
+            # is cancelled rather than left occupying slskd's search slots.
+            try:
+                slsk.cancel_search(sid)
+            except Exception:
+                pass
             if early:
                 skipped += 1     # in hand already — never waited out
             else:
@@ -766,10 +904,13 @@ def _index_download_tree(ddir, username, leaves):
     """basename -> [local path] under the candidate's OWN album trees.
 
     slskd keeps the remote folder structure under its download dir, but the
-    layout depends on version/settings: 0.26 writes `<ddir>/<leaf>/…` with no
-    username segment, older builds nest `<ddir>/<username>/<leaf>/…`. The
-    caller builds this ONCE per poll tick instead of walking the tree once per
-    pending file; a same-named file from another album must never satisfy a
+    layout depends on version/settings: the generated config pins slskd's
+    destination template to `${SOURCE_USERNAME}/${BATCH_ID}/${SOURCE_PATH}`
+    (see soulseek.DESTINATION_SUBDIR), so a download lands at
+    `<ddir>/<user>/<batch id>/<remote path>/…`; a pre-upgrade install still has
+    `<ddir>/<leaf>/…` (slskd's old default) or `<ddir>/<username>/<leaf>/…`.
+    The caller builds this ONCE per poll tick instead of walking the tree once
+    per pending file; a same-named file from another album must never satisfy a
     pending download, so the scan never walks the whole download dir.
 
     Dot-directories are pruned: partials now stage in a SIBLING `incomplete/`
@@ -778,7 +919,9 @@ def _index_download_tree(ddir, username, leaves):
     as a completed one."""
     index = {}
     incomplete = (os.sep + ".incomplete").lower()
+    unreached = []
     for leaf in leaves:
+        found = False
         for scan_root in (os.path.join(ddir, leaf), os.path.join(ddir, username, leaf)):
             if not os.path.isdir(scan_root):
                 continue
@@ -789,20 +932,49 @@ def _index_download_tree(ddir, username, leaves):
                 for f in files:
                     index.setdefault(f, []).append(
                         os.path.normpath(os.path.join(root, f)))
+                    found = True
+        if not found:
+            # the batch id sits between the username and the leaf, so neither
+            # scan root can name this download's tree
+            unreached.append(leaf)
+    if unreached:
+        _index_user_tree(ddir, username, index)
     return index
+
+
+def _index_user_tree(ddir, username, index):
+    """Index THIS user's own subtree into `index` (basename -> [paths]).
+
+    The batch-dir layout puts the download below the username but above the
+    folder leaf, which the leaf-rooted scans in _index_download_tree cannot
+    reach. One walk of that user alone — never of the whole download dir —
+    finds it, with dot-dirs and `incomplete` pruned exactly as there."""
+    user = str(username or "").strip()
+    user_root = os.path.join(ddir, user)
+    if not user or not _inside(user_root, ddir) or not os.path.isdir(user_root):
+        return
+    incomplete = (os.sep + ".incomplete").lower()
+    for root, dirs, files in os.walk(user_root):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        if incomplete in root.lower():
+            continue
+        for f in files:
+            index.setdefault(f, []).append(
+                os.path.normpath(os.path.join(root, f)))
 
 
 def _local_download_candidates(ddir, username, remote, size, index=None):
     """All plausible local locations for a remote file.
 
-    Both exact shapes (`<ddir>/<rel>` and `<ddir>/<username>/<rel>`) are
-    checked first, then the candidate's own album tree from `index` (see
-    _index_download_tree) catches the file when slskd sanitised the share name
-    or the file sits a level deeper; without an index the tree of THIS file's
-    leaf is walked, so the function stays usable on its own. A missing file
-    (slskd renamed or removed it between the isfile test and the size read) or
-    an unreadable one counts as not-yet-present rather than raising out of the
-    job."""
+    The exact batch-dir shape (`<ddir>/<username>/<batch id>/<rel>`) cannot be
+    named here — the batch id is slskd's own — so the two fixed shapes
+    (`<ddir>/<rel>`, `<ddir>/<username>/<rel>`) are checked first and the
+    candidate's own album tree from `index` (see _index_download_tree) then
+    catches the file wherever the batch id put it, or where slskd sanitised a
+    share name; without an index the tree of THIS file's leaf is walked, so the
+    function stays usable on its own. A missing file (slskd renamed or removed
+    it between the isfile test and the size read) or an unreadable one counts
+    as not-yet-present rather than raising out of the job."""
     rel = _remote_rel(remote)
     out = []
     for exact in (os.path.join(ddir, rel), os.path.join(ddir, username, rel)):
@@ -815,7 +987,16 @@ def _local_download_candidates(ddir, username, remote, size, index=None):
     base = os.path.basename(remote.replace("\\", "/"))
     if index is None:
         index = _index_download_tree(ddir, username, [leaf])
-    for p in index.get(base, ()):
+    # The batch-dir layout keeps the remote path INTACT below the batch id, so
+    # a hit ending in the full remote relative path is that very file; a hit
+    # sharing only the basename is the fallback for the layouts that dropped
+    # the remote parent directories. Callers take cands[0], so the exact ones
+    # are offered first — a same-named file of the user's other album must not
+    # win on tree order.
+    full_tail = os.path.normcase(os.sep + rel.replace("/", os.sep))
+    hits = sorted(index.get(base, ()),
+                  key=lambda p: not os.path.normcase(p).endswith(full_tail))
+    for p in hits:
         if p in out:
             continue
         # a size mismatch means a different (or truncated) file — only when
@@ -833,14 +1014,16 @@ def _local_album_root(ddir, files):
     """The album root on disk for a candidate: the highest directory below
     `ddir` that still holds EVERY downloaded file of it.
 
-    slskd's default destination is `${SOURCE_DIRECTORY}` (the remote folder's
-    leaf), so the files live at `<ddir>/<leaf>/…`, or `<ddir>/<user>/<leaf>/…`
-    on older builds. Taking the first file's directory instead half-imported
-    a multi-disc release: it verified one disc folder and stranded the rest.
-    Returns None when the files do not share one directory below `ddir`
-    (slskd split them across top-level folders, or they landed loose in it)
-    — the caller rejects the candidate with a clear reason rather than
-    verifying a directory it cannot name."""
+    Files live under `<ddir>/<user>/<batch id>/<remote path>/…` (the pinned
+    destination template, see soulseek.DESTINATION_SUBDIR), or at the older
+    `<ddir>/<leaf>/…` / `<ddir>/<user>/<leaf>/…` shapes. The common parent of
+    the candidate's own files is the album either way: taking the first file's
+    directory instead half-imported a multi-disc release (it verified one disc
+    folder and stranded the rest), and slskd's leaf-only default stranded them
+    above `ddir` entirely. Returns None when the files do not share one
+    directory below `ddir` (they landed loose in it) — the caller rejects the
+    candidate with a clear reason rather than verifying a directory it cannot
+    name."""
     paths = [os.path.abspath(os.path.normpath(p)) for p in files or []]
     if not paths:
         return None
@@ -856,6 +1039,28 @@ def _local_album_root(ddir, files):
 
 _FAILED_TRANSFER_STATES = ("Cancelled", "TimedOut", "Errored", "Rejected",
                            "FileNotFound", "Aborted", "Failed")
+
+
+def _transfer_ok(state):
+    """slskd reports this transfer finished SUCCESSFULLY — the terminal states
+    minus the failures (finished_transfer() alone is true for Errored too)."""
+    from server.soulseek import finished_transfer
+    st = str(state or "")
+    return (finished_transfer(st)
+            and not any(x in st for x in _FAILED_TRANSFER_STATES))
+
+
+def _transfer_active(state):
+    """slskd still owes us this file: a state that is neither terminal nor a
+    failure (Queued, Initializing, InProgress, Requested). This is the state a
+    complete local file must NOT be sitting under for the wait to trust it."""
+    from server.soulseek import finished_transfer
+    st = str(state or "")
+    return (not finished_transfer(st)
+            and not any(x in st for x in _FAILED_TRANSFER_STATES))
+
+
+
 # An InProgress transfer with no byte movement for this long is dead (a peer
 # that stopped responding); waiting out the full per-candidate timeout for it
 # is what made a stuck candidate look like a hung import.
@@ -882,130 +1087,432 @@ def _est_timeout(cand):
     return int(min(7200, max(900, (size + queued) / rate)))
 
 
-def _progress_snapshot(username, wanted, got, transfers, phase):
+def _queue_budget(cand):
+    """How long this candidate's own queue is worth waiting for: the files the
+    search reported queued ahead of us, at the peer's rate — the same figures
+    _est_timeout budgets the queued part of its total from. Floored at
+    _STALL_AFTER_S so a peer that reported no queue at all still gets the old
+    grace, and capped by the wait's own deadline either way."""
+    rate = float(cand.get("speed") or 0) or _MIN_RATE
+    size = float(cand.get("total_size") or 0)
+    files = len(cand.get("files") or []) or 1
+    queued = int(cand.get("queue") or 0) * (size / files)
+    return max(_STALL_AFTER_S, queued / rate)
+
+
+def _progress_snapshot(username, wanted, got, transfers, phase, speed=None):
     """The live download block the Soulseek page renders.
 
     Aggregate counters plus one row per wanted file, straight from slskd's own
     transfer records (`_user_transfers`, consumed per candidate user+files —
     never unrelated downloads). A file slskd has not reported a size for
     contributes only what is known; nothing is invented, and `percent` is
-    clamped so a peer's own bogus counter cannot print 240 %."""
+    clamped so a peer's own bogus counter cannot print 240 %.
+
+    The two file counts are deliberately different units and are labelled as
+    such by the UI: `files_done` is what SLSKD calls complete (a terminal
+    success, or 100 % of a known size) and `files_arrived` is what this job's
+    wait has formally accepted on disk (a file's `done` flag). `percent`/
+    `bytes`/`size` stay byte-weighted.
+
+    `speed` is the instantaneous aggregate rate the wait measured from the
+    byte delta between its own ticks. When there is no measurement yet (the
+    first tick, the call made before any poll) the fallback is slskd's
+    per-transfer `averageSpeed` summed over the ACTIVE transfers only — a
+    finished file's frozen average is not throughput. `eta_s` is the remaining
+    bytes over that rate, so it is null/nothing rather than the largest
+    per-file guess (a queued file's `remainingTime` guess used to win) when no
+    rate is known."""
     by_name = {t["filename"]: t for t in transfers}
-    files, nbytes, nsize, speed, eta = [], 0, 0, 0.0, None
+    files, nbytes, nsize, arrived, complete, fallback = [], 0, 0, 0, 0, 0.0
     for w in wanted:
         name = w["filename"]
         t = by_name.get(name) or {}
         done = name in got
         size = int(t.get("size") or w.get("size") or 0)
         b = size if done else int(t.get("bytes") or 0)
-        pct = t.get("percent")
+        state = str(t.get("state") or "")
+        slsk_pct = t.get("percent")
+        pct = slsk_pct
         if done:
             pct = 100
         elif pct is None:
-            pct = int(b * 100 / size) if size else 0
+            pct = (b * 100 / size) if size else 0
+        # `complete` is slskd's verdict, never ours: a file this wait accepted
+        # from disk alone (b) has no transfer record to vouch for it.
+        is_complete = (bool(t) and _transfer_ok(state)) or (
+            slsk_pct is not None and float(slsk_pct) >= 100 and size > 0)
         files.append({
             "name": os.path.basename(name.replace("\\", "/")),
-            "bytes": b, "size": size, "percent": max(0, min(100, int(pct))),
+            "bytes": b, "size": size,
+            # One decimal, not a whole percent: a big file's bar has to move
+            # between two of slskd's own samples.
+            "percent": round(max(0.0, min(100.0, float(pct))), 1),
             "speed": float(t.get("speed") or 0),
-            "state": "Done" if done else str(t.get("state") or ""),
-            "done": done,
+            "state": "Done" if done else state,
+            "done": done, "complete": is_complete,
         })
         nbytes += b
         nsize += size
-        speed += float(t.get("speed") or 0)
-        if not done and t.get("remaining") is not None:
-            eta = max(eta or 0, int(t["remaining"]))
-    if eta is None and speed > 0 and nsize > nbytes:
-        eta = int((nsize - nbytes) / speed)
+        arrived += 1 if done else 0
+        complete += 1 if is_complete else 0
+        if _transfer_active(state):
+            fallback += float(t.get("speed") or 0)
+    if speed is None:
+        speed = fallback
+    remaining = max(0, nsize - nbytes)
     return {
         "phase": phase,
         "username": username,
         "dir": os.path.dirname(wanted[0]["filename"].replace("\\", "/")) if wanted else "",
-        "files_done": sum(1 for f in files if f["done"]),
+        "files_done": complete,
+        "files_arrived": arrived,
         "files_total": len(files),
         "bytes": nbytes,
         "size": nsize,
-        "percent": max(0, min(100, int(nbytes * 100 / nsize))) if nsize else 0,
+        "percent": round(max(0.0, min(100.0, nbytes * 100 / nsize)), 1) if nsize else 0,
         "speed": speed,
-        "eta_s": eta,
+        "eta_s": int(remaining / speed) if speed > 0 and remaining else None,
         "files": files,
     }
 
 
-def _cancel_rest(slsk, username, wanted, keep):
-    """Drop the transfers we no longer want after a failed log grade: slskd
-    otherwise keeps fetching files whose partials the caller deletes next."""
-    names = {w["filename"] for w in wanted} - set(keep)
+# A cancelled transfer is not instant. slskd answers the DELETE while a request
+# is still in flight and flushes the bytes it already received, which re-created
+# the very files the rejection had just deleted — and the next candidate, often
+# the same album from another peer, downloaded the whole thing again. Settle
+# before each sweep, then keep sweeping until a pass removes nothing (live runs
+# showed temp writes still landing seconds after the cancel).
+_CANCEL_SETTLE_S = 1.0
+# Pass ceiling for that convergence loop: a peer that keeps dribbling bytes
+# must not hold the job, and 3 passes of settle+delete cover the observed
+# window (the writes landed within a second or two of the DELETE).
+_CANCEL_SWEEPS = 3
+# slskd's temp write: the target name plus `_<ticks>` before the extension
+# ("01 - Bombtrack_639252322461155685.flac"). 6+ digits is deliberately looser
+# than the 18-19 it emits today, and the stem still has to be a wanted file.
+_TEMP_SUFFIX_RE = re.compile(r"^(.*)_(\d{6,})$")
+
+
+def _cancel_candidate(slsk, username, wanted):
+    """Cancel this candidate's transfers and confirm slskd really dropped them.
+
+    soulseek.cancel_downloads reports the ids it did NOT confirm through its
+    `failed` collector (a real refusal, or an unreachable slskd — never the
+    404/400 of a transfer that was already gone). Those are retried once; the
+    caller deletes only afterwards, because a transfer slskd still tracks would
+    just re-fetch the files being removed. Returns the ids left unconfirmed."""
+    names = {w["filename"] for w in wanted}
+    if not names:
+        return []
     from server.soulseek import _user_transfers
     try:
         ids = [t["id"] for t in _user_transfers(slsk, username, names) if t.get("id")]
-        if ids:
-            slsk.cancel_downloads(username, ids)
     except Exception:
-        pass
+        return []
+    for _ in range(2):
+        if not ids:
+            return []
+        failed = []
+        try:
+            slsk.cancel_downloads(username, ids, failed=failed)
+        except Exception:
+            return []
+        if not failed:
+            return []
+        ids = failed          # one retry for the ids slskd did not confirm
+    return ids
+
+
+def _candidate_dirs(ddir, username, wanted, known_files=()):
+    """The candidate's OWN album folder(s) on disk — where slskd writes the
+    temp-suffixed partials of this candidate's files.
+
+    Named from the remote path, not from whatever happens to be on disk: the
+    remote folder's own components must be a path's tail below this user's tree
+    (the batch id sits in between, see _index_user_tree), which keeps the scan
+    on the candidate's album and nowhere else. The parents of files already
+    resolved (`known_files`) are added for the one layout that has no remote
+    folder to match — a candidate whose files sit at the top of the share."""
+    tails = set()
+    for w in wanted:
+        tail = _remote_rel(w["filename"]).split("/")[:-1]
+        if tail:
+            tails.add(tuple(os.path.normcase(x) for x in tail))
+    out = []
+    for tail in sorted(tails):
+        for base in (os.path.join(ddir, *tail), os.path.join(ddir, username, *tail)):
+            if os.path.isdir(base) and base not in out:
+                out.append(base)
+    user_root = os.path.join(str(ddir), str(username or "").strip())
+    if str(username or "").strip() and _inside(user_root, ddir) and os.path.isdir(user_root):
+        for root, dirs, _files in os.walk(user_root):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            parts = os.path.normcase(os.path.normpath(root)).replace("\\", "/").split("/")
+            for tail in tails:
+                if tuple(parts[-len(tail):]) == tail and root not in out:
+                    out.append(root)
+    for p in known_files:
+        d = os.path.dirname(str(p))
+        if os.path.isdir(d) and d not in out:
+            out.append(d)
+    return out
+
+
+def _slskd_partial(name, wanted):
+    """Whether `name` is slskd's temp write of one of THIS candidate's files:
+    `<wanted stem>_<digits><same extension>` (`01 - Bombtrack_639252322461155685.flac`).
+
+    slskd writes a transfer's bytes into the DESTINATION dir under that name
+    while it runs and renames it on success. A cancelled transfer leaves the
+    temp file behind — seconds after the DELETE answered — so a candidate that
+    looked clean still held near-complete copies. The resolver cannot name them
+    (the suffix breaks the basename test) and clear_transfer_files refuses
+    download-dir bytes with no size to compare, so they are matched here: the
+    stripped stem and the extension must be one of the candidate's own wanted
+    files, and nothing else. A stem that is not wanted (another album's) never
+    matches, whatever its suffix."""
+    stem, ext = os.path.splitext(str(name))
+    m = _TEMP_SUFFIX_RE.match(stem)
+    if not m:
+        return False
+    base = m.group(1)
+    for w in wanted:
+        wstem, wext = os.path.splitext(os.path.basename(_remote_rel(w["filename"])))
+        if (os.path.normcase(ext) == os.path.normcase(wext)
+                and os.path.normcase(base) == os.path.normcase(wstem)):
+            return True
+    return False
+
+
+def _drop_temp_partials(ddir, username, wanted, known_files=()):
+    """Delete slskd's temp-suffixed partials of this candidate's own files.
+
+    Only inside the candidate's own album folder(s) (see _candidate_dirs) and
+    only for a stem in the candidate's wanted set (see _slskd_partial): a
+    foreign peer's identically named temp file, and a same-suffix file of
+    another album, are never touched. Returns how many files it removed."""
+    removed = 0
+    for d in _candidate_dirs(ddir, username, wanted, known_files):
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            if not _slskd_partial(name, wanted):
+                continue
+            p = os.path.join(d, name)
+            if not os.path.isfile(p):
+                continue
+            try:
+                os.remove(p)
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
+def _sweep_candidate(slsk, ddir, username, wanted, remove_root=None):
+    """ONE delete pass over a rejected candidate: its own files, its staged
+    partials under `incomplete/`, and slskd's temp-suffixed partials in its own
+    album folder. Returns how many files it removed — 0 means the candidate is
+    gone, which is what ends _drop_candidate's convergence loop."""
+    files = _local_wanted_files(ddir, username, wanted)
+    removed = _cleanup_partial(ddir, files, remove_root=remove_root)
+    for w in wanted:
+        # only the STAGING dirs (size 0 makes the helper's download-dir test
+        # refuse every file there): its staged shapes are derived from this
+        # file's own remote path, while its basename scan of the download dir
+        # would reach a sibling candidate's leftover.
+        try:
+            removed += int(slsk.clear_transfer_files(ddir, username,
+                                                     w["filename"], 0)["files_deleted"])
+        except Exception:
+            pass
+    return removed + _drop_temp_partials(ddir, username, wanted, files)
+
+
+def _drop_candidate(slsk, ddir, username, wanted, remove_root=None):
+    """Make a rejection final: cancel, then delete — verified, until it holds.
+
+    Cancelling first (and confirming it) stops slskd from re-requesting the
+    files the next lines delete. Each pass then removes the candidate's WHOLE
+    set — album audio, cue and the graded log — resolved by layout
+    (`<ddir>/<user>/<batch id>/<remote path>` as well as the older shapes, see
+    _local_wanted_files), its staged partials under `incomplete/`
+    (clear_transfer_files, which owns that path) and slskd's temp-suffixed
+    partials in the candidate's own album folder (_drop_temp_partials).
+
+    The passes repeat over a settle until one removes NOTHING: slskd keeps
+    flushing a cancelled transfer's bytes for a moment, and a live run showed
+    temp writes landing in the destination dir seconds after the cancel — a
+    fixed two passes missed those. _CANCEL_SWEEPS bounds it, and a pass count
+    above one is logged so a peer that keeps dribbling bytes is visible.
+
+    Scope is strictly the candidate's own remote paths under its own user tree:
+    a sibling candidate's same-named file and an already-completed download are
+    never touched (see _in_candidate_folder for why the resolver's basename
+    fallback is not used on a delete)."""
+    unconfirmed = _cancel_candidate(slsk, username, wanted)
+    if unconfirmed:
+        _log(f"  slskd did not confirm {len(unconfirmed)} cancelled transfer(s) — "
+             f"removing what is on disk anyway")
+    passes = 0
+    for _ in range(_CANCEL_SWEEPS):
+        time.sleep(_CANCEL_SETTLE_S)
+        if not _sweep_candidate(slsk, ddir, username, wanted, remove_root):
+            break            # nothing left: the candidate is really gone
+        passes += 1          # this pass had work to do
+    if passes > 1:
+        _log(f"  candidate removed in {passes} pass(es) — slskd kept writing "
+             f"after the cancel")
+
+
+def _in_candidate_folder(path, remote):
+    """Whether a LOCAL path is where THIS remote file lives: its last two
+    components — "<album folder>/<file>", or just the file at the top of the
+    share — must be the remote file's own.
+
+    _local_download_candidates answers "has this file arrived?" and its
+    basename fallback is right for that. "May I DELETE this file?" needs the
+    candidate's own path back: on the second sweep the rejected candidate's
+    bytes are already gone, so the fallback matched the SAME user's OTHER album
+    — same basename, even the same size — and deleted a candidate that had not
+    been tried yet. Kept case-insensitive, like the resolver's own comparisons;
+    the last two components still hold when slskd drops the remote's parent
+    directories below the batch id, which is why the tail, not the whole
+    relative path, is the test."""
+    tail = _remote_rel(remote).split("/")[-2:]
+    parts = os.path.normpath(str(path)).replace("\\", "/").split("/")
+    return [os.path.normcase(x) for x in parts[-len(tail):]] == \
+           [os.path.normcase(x) for x in tail]
+
+
+def _local_wanted_files(ddir, username, wanted):
+    """Local paths of this candidate's OWN files that are on disk already —
+    the partials a rejection must delete, the WHOLE set included.
+
+    The .log gate queues the album in the same pass as the logs, so a rejected
+    gate used to delete the logs only and leave the album bytes that had landed
+    as orphans for the next candidate to download again. One entry per remote
+    file, and two deliberate differences from what the download wait accepts:
+    no size test (a truncated leftover IS what a rejected candidate leaves
+    behind, and the peer's reported size is what the wait, not the delete,
+    needs), and the candidate's own remote folder (see _in_candidate_folder —
+    nothing outside the candidate's own tree may be removed)."""
+    leaves = {_leaf_of(w["filename"]) for w in wanted} - {""}
+    index = _index_download_tree(ddir, username, leaves)
+    out = []
+    for w in wanted:
+        for p in _local_download_candidates(ddir, username, w["filename"], 0,
+                                            index=index):
+            if _in_candidate_folder(p, w["filename"]):
+                if p not in out:
+                    out.append(p)
+                break
+    return out
+
+
+def _log_fail_reason(name, score, state, min_score):
+    """Why one rip log did not clear the bar.
+
+    The reason names the required score, so the bar this run is judging by
+    (Settings → Auto-import) is discoverable from the attempt itself instead of
+    a bare number the user has to guess at."""
+    if score is None:
+        return f"{name} — unscorable"
+    if state == "invalid":
+        return f"{name} — checksum invalid"
+    return f"{name} — score {score} is below the required {min_score}"
 
 
 def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
-                    phase="download", display_wanted=None):
-    """Poll until every wanted remote path is present locally AND slskd says
-    the transfer finished successfully.
+                    phase="download", queue_budget_s=None):
+    """Poll until every wanted remote path is present locally AND slskd vouches
+    for it.
 
-    A file on disk is not proof on its own: the peer may never have reported a
-    size for it (0/unknown must not satisfy the wait), and a same-named file
-    left behind by an earlier attempt would otherwise count as arrived. The
-    path must exist with the expected size AND slskd must report a successful
-    terminal state for that transfer (`finished_transfer`) — which also
-    removes the window where slskd still holds the file open.
+    A pending file is accepted when EITHER
+
+      (a) slskd reports a successful terminal state for it AND a local file
+          matches — path shapes first, then this candidate's own album tree at
+          exactly the expected size — or
+      (b) slskd has NO record in an ACTIVE state for it (_transfer_active: a
+          transfer list pruned or cleared mid-job, or a record in a failed
+          state) AND a local file sits at the expected size inside the
+          candidate's OWN album trees with an mtime older than two poll
+          intervals. Disk presence is not proof of a live transfer, so (b) is
+          fenced: never while a recorded state is active, never on a size
+          mismatch, never for a file still being written. It is logged per file
+          so a missing slskd record is visible rather than silent. Without (b) a
+          finished album whose slskd record was dropped was rejected, its files
+          deleted, and the album downloaded again from the next peer.
+
+    A file on disk is otherwise not proof on its own: the peer may never have
+    reported a size for it (0/unknown must not satisfy the wait), and a
+    same-named file left behind by an earlier attempt would otherwise count as
+    arrived.
 
     slskd's transfer states are read alongside the filesystem, so a peer that
     rejects the slot (or an errored transfer) costs a poll interval instead of
-    the whole per-candidate timeout. A transfer that has moved no bytes for
-    `_STALL_AFTER_S` while every live transfer is InProgress (a peer that
-    stopped sending) OR while NOTHING is InProgress (a dropped request, a
-    queue that never moves, no transfer record at all) is dead too — all of
-    them otherwise hold the candidate for the full timeout. A peer with a mix
-    of moving and waiting files, or a transfer that is still moving, is never
-    abandoned early.
+    the whole per-candidate timeout.
+
+    Stall rules, in order:
+      * records exist and some are InProgress — a transfer that has moved no
+        bytes for `_STALL_AFTER_S` while EVERY live transfer is InProgress (a
+        peer that stopped sending) is dead. A peer with a mix of moving and
+        waiting files, or a transfer that is still moving, is never abandoned
+        early.
+      * no live transfer is InProgress at all (every one Queued, a dropped
+        request, or no record) — the peer is simply busy, and `_est_timeout`
+        has always budgeted that queue wait, so the candidate is held for
+        `queue_budget_s` (its own queue budget, see _queue_budget) instead of
+        180 s. Defaults to `_STALL_AFTER_S` when the caller has no candidate
+        budget (the .log gate, which is deliberately cheap and bounded).
 
     Each tick publishes the download progress payload (phase 'logging' while
     the .log gate is being fetched, 'download' for the album) and clears it
     again on the way out — search, verify and import have no download in
-    flight. wanted = [{filename, size}]. Returns {remote: local_path} for the
+    flight. `speed` in that payload is the INSTANTANEOUS rate measured here
+    from the byte delta between ticks, never slskd's per-transfer lifetime
+    average. wanted = [{filename, size}]. Returns {remote: local_path} for the
     files that arrived complete; missing entries are absent from the dict.
 
-    `display_wanted` overrides what the progress block SHOWS without changing
-    what is waited for. The .log gate uses it to display the whole album: the
-    album transfers are queued in the same call as the logs, so they are
-    already coming down while the log is graded, and showing only the log made
-    the UI look like it was stuck on one file."""
+    The progress block SHOWS exactly the `wanted` set: the wait is only ever
+    called once the transfers it waits for are the only ones queued (the .log
+    gate's album is requested after the gate passes, see _run), so there is
+    nothing further to display."""
     deadline = time.time() + timeout_s
+    started = time.time()
     from server.soulseek import _user_transfers
-    shown = list(display_wanted) if display_wanted else list(wanted)
+    shown = list(wanted)
     pending = {w["filename"]: w for w in wanted}
-    # Transfers are fetched for the DISPLAY set, not just the waited-for set:
-    # during the .log gate the album is already downloading and its live
-    # bytes/speed/ETA are exactly what the progress block is showing, so
-    # fetching only the log published a bar frozen at 0 % with no metrics.
-    # `pending` still drives the wait and the stall detection below, so the
-    # gate is still only satisfied by the logs.
-    fetch_names = set(pending) | {w["filename"] for w in shown}
+    # Transfers are fetched for the DISPLAY set and frozen at entry, so every
+    # row in the progress block keeps its live state even after its file lands
+    # (a row fetched per tick lost its bytes/speed the moment it completed).
+    fetch_names = {w["filename"] for w in shown}
     leaves = {_leaf_of(w["filename"]) for w in wanted} - {""}
     got = {}
     live = []
     last_bytes = -1
     last_progress = time.time()
+    rate = None            # measured bytes/s between the last two ticks
+    disp_bytes = None
+    disp_time = None
+    queue_ceiling = _STALL_AFTER_S if queue_budget_s is None else queue_budget_s
     try:
         while time.time() < deadline and pending:
+            tick = time.time()
             if cancel_check and cancel_check():
                 break
             # one transfer-tree fetch per tick, and one tree walk per tick too
-            # (only when slskd actually says a file is done)
+            # (only when slskd actually says a file is done, or when a file has
+            # no live record and its local counterpart has to be looked for)
             live = _user_transfers(slsk, username, fetch_names)
-            done_states = {t["filename"] for t in live
-                           if slsk.finished_transfer(t["state"])
-                           and not any(x in t["state"] for x in _FAILED_TRANSFER_STATES)}
+            done_states = {t["filename"] for t in live if _transfer_ok(t["state"])}
+            active = {t["filename"] for t in live if _transfer_active(t["state"])}
             ready = [r for r in pending if r in done_states]
-            if ready:
+            orphans = [r for r in pending if r not in done_states and r not in active]
+            if ready or orphans:
                 index = _index_download_tree(ddir, username, leaves)
                 for remote in ready:
                     cands = _local_download_candidates(
@@ -1014,7 +1521,36 @@ def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
                     if cands:
                         got[remote] = cands[0]
                         del pending[remote]
-            _job_progress(_progress_snapshot(username, shown, got, live, phase))
+                for remote in orphans:
+                    if remote not in pending:
+                        continue
+                    size = int(pending[remote].get("size") or 0)
+                    if not size:
+                        continue     # an unknown size proves nothing
+                    for p in _local_download_candidates(ddir, username, remote, size,
+                                                        index=index):
+                        try:
+                            st = os.stat(p)
+                        except OSError:
+                            continue
+                        if st.st_size != size or tick - st.st_mtime <= 2 * _TRANSFER_POLL_S:
+                            continue     # another file, or one still being written
+                        got[remote] = p
+                        del pending[remote]
+                        _log(f"  {os.path.basename(remote)}: slskd has no live "
+                             f"transfer record — accepted the local file "
+                             f"({size / (1024 * 1024):.1f} MB, unchanged for "
+                             f"{int(2 * _TRANSFER_POLL_S)}s)")
+                        break
+            # Instantaneous throughput from the byte delta between ticks: slskd's
+            # per-transfer averageSpeed is a LIFETIME average, so finished files
+            # kept inflating the reported rate long after they stopped moving.
+            moved_shown = sum(t["bytes"] for t in live)
+            if disp_bytes is not None and tick > disp_time:
+                rate = max(0.0, (moved_shown - disp_bytes) / (tick - disp_time))
+            disp_bytes, disp_time = moved_shown, tick
+            _job_progress(_progress_snapshot(username, shown, got, live, phase,
+                                             speed=rate))
             if not pending:
                 break
             moving = [t for t in live if t["filename"] in pending]
@@ -1024,14 +1560,22 @@ def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
             inprog = [t for t in moving if "InProgress" in t["state"]]
             if moved > last_bytes:
                 last_bytes, last_progress = moved, time.time()
-            elif (time.time() - last_progress > _STALL_AFTER_S
-                  and (not inprog or len(inprog) == len(moving))):
+            elif inprog:
                 # every live transfer InProgress and none moving = a peer that
-                # stopped sending; NONE InProgress = a dropped/queued request
-                # that never starts. A mix (one file moving, another still
+                # stopped sending. A mix (one file moving, another still
                 # queued) is a working peer and is left alone.
-                _log(f"  transfer stalled for {int(_STALL_AFTER_S)}s with no progress — "
-                     f"moving on")
+                if (time.time() - last_progress > _STALL_AFTER_S
+                        and len(inprog) == len(moving)):
+                    _log(f"  transfer stalled for {int(_STALL_AFTER_S)}s with no "
+                         f"progress — moving on")
+                    break
+            elif tick - started > queue_ceiling:
+                # nothing InProgress at all: the peer is intact, we are just
+                # behind its queue (or slskd never started the transfer). The
+                # candidate's own queue budget — the wait _est_timeout already
+                # paid for — is the only reason to give up on it.
+                _log(f"  still queued after {int(queue_ceiling)}s (this peer's own "
+                     f"queue budget) — moving on")
                 break
             time.sleep(_TRANSFER_POLL_S)
     finally:
@@ -1326,7 +1870,32 @@ def start_job(release_mbid=None, release=None, queries=None, username=None,
     found no usable folder at all and the release could be wished instead.
     False (the background wishes worker) means lossy copies are never taken
     silently — and a wish is never asked to become a wish.
-    """
+
+    A release id already waiting in the bulk queue is refused: it is about to
+    run anyway, and letting it through here both downloaded it twice and left
+    the duplicate behind in the queue to run a third time."""
+    # The queue lock is taken on its own (never while holding _lock): _finish
+    # holds _lock and calls _start_next, which takes this one, so queue → job
+    # is the order this module locks in and the reverse would deadlock.
+    key = _release_key(release_mbid, release)
+    if key and key in _queued_keys():
+        return {"ok": False, "error": "this release is already queued for import",
+                "job": job_state()}
+    # Already in the library: nothing to import, and re-downloading it is what
+    # left a second copy of the same album beside the first (observed live —
+    # the HTTP start route reached this function with a release the library
+    # already held). The bulk paths skip owned releases; so does this one now.
+    # A folder grab (username + target_dir, no MusicBrainz id) has nothing to
+    # compare and stays untouched.
+    if key:
+        try:
+            from server import wishes
+            if key in wishes.owned_mbids(load_config()):
+                return {"ok": False, "error": "this release is already in your "
+                                              "library — nothing to download",
+                        "job": job_state()}
+        except Exception:
+            pass      # a library that cannot be read must not block the job
     with _lock:
         if _job["state"] in ("running", "confirm"):
             return {"ok": False, "error": "a job is already running", "job": job_state()}
@@ -1397,6 +1966,62 @@ def _reject(username, folder, reason):
         _job["attempts"].append({"username": username, "dir": folder, "reason": str(reason)[:200]})
 
 
+def _ask_to_wish(release, queries, waited, cfg, confirm_lossy):
+    """Park the job on the "add to wishes?" prompt; add the wish if accepted.
+
+    A job that ends with nothing imported used to leave the user a bare error
+    and nothing else, even though the background wishes worker keeps searching
+    for any release in the wish list — with these very queries. So the two
+    dead ends (no usable folder at all, and every candidate rejected) both offer
+    the SAME parking spot, through this one helper: one prompt per job, one
+    payload shape (reason "no_results"), one place that decides when the offer
+    does not apply — a release with no MusicBrainz id has nothing to wish for,
+    and the background wishes path (confirm_lossy False) must never ask a wish
+    to become a wish.
+
+    Returns the finished-job result when the wish was added, else None (the
+    prompt did not apply, or the user declined); a cancelled job is reported by
+    the caller's own `_cancelled()` check, which is the same check every other
+    prompt in this file uses."""
+    if not (confirm_lossy and release.get("id")
+            and cfg.get("soulseek_auto_wish_prompt", True)):
+        return None
+    from server import wishes
+    _log("No usable result — asking whether to add this release to the wishes list.")
+    with _lock:
+        _job["state"] = "confirm"
+        _job["stage"] = "No usable results — add to wishes?"
+        _job["confirm"] = {
+            "reason": "no_results",
+            "waited": int(waited),
+            "queries": list(queries),
+            "formats": [],
+            "candidates": [],
+        }
+    _confirm_event.wait()  # released by confirm() or cancel()
+    _confirm_event.clear()
+    with _lock:
+        _job["confirm"] = None
+        _job["state"] = "running"
+        accepted = _confirm_answer["accept"]
+    if not accepted:
+        return None
+    wish = wishes.add_wish(
+        release.get("id"), title=release.get("title") or "",
+        artist=((release.get("artists") or [{}])[0].get("name", "")),
+        year=str(release.get("date") or "")[:4],
+        queries=list(queries))
+    _log(f"Added to wishes (#{wish['id']}) — the worker keeps searching for this "
+         f"release in the background with the same queries, so nothing is lost "
+         f"by parking this job.")
+    # Nothing landed in the library: report the wish, never a download. The
+    # import path's result keys are kept (as None/0) so a caller reading
+    # result["album_path"] sees one shape for every finished job.
+    return {"wished": True, "wish_id": wish["id"],
+            "album_path": None, "staging_path": None,
+            "imported": 0, "organized": 0, "organize_error": None}
+
+
 def _run(release_mbid=None, release=None, queries=None, username=None,
          target_dir=None, confirm_lossy=False, kind=None, mode=None):
     from server import soulseek as slsk
@@ -1464,6 +2089,10 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
              f" · {len(release.get('media') or [])} track(s) · {'CD' if is_cd else 'Digital Media'}")
 
         # ---- candidates ------------------------------------------------------
+        # The queries this job searched with and the window it waited out are
+        # reported by the wish prompt, and the candidate loop below can reach
+        # both on EITHER path (a browsed-folder grab searches with nothing).
+        queries_built, search_wait = [], 0
         if username and target_dir:
             _log(f"Manual entry: {username} · {target_dir}")
             entries = slsk.browse(username)
@@ -1507,14 +2136,19 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
             else:
                 queries_built = release_queries(release, cfg)
             if not queries_built:
-                raise RuntimeError("No usable search queries for this release "
-                                   "(no catalog number / title available)")
-            # No forced minimum. A usable candidate already ends the wait the
-            # moment it appears (see `usable` below), and an album with a live
-            # source must start downloading immediately rather than sitting out
-            # a window — the configured value is the CEILING a search may run,
-            # not a floor it must serve.
-            search_wait = int(cfg.get("soulseek_auto_search_wait", 15) or 15)
+                raise RuntimeError(
+                    "Nothing to search by: this release has neither a catalog "
+                    "number nor an artist + title that a query template can "
+                    "use. Add one in Settings → Auto-import.")
+            # How long a search may run, and how many peers it needs before it
+            # is worth scoring. The window is QUIET time (slskd ends a search
+            # when the network stops answering) and the response limit ends it
+            # outright once that many peers have replied — without the limit a
+            # popular album never goes quiet, so nothing is readable until the
+            # whole ceiling has elapsed. A usable candidate ends the wait even
+            # sooner, so both values are ceilings, never floors.
+            search_wait = int(cfg.get("soulseek_auto_search_wait", 10) or 10)
+            response_limit = int(cfg.get("soulseek_auto_response_limit", 15) or 15)
             # Every template goes out at once and the merged responses are
             # scored on each tick: the first complete+lossless folder ends the
             # wait for ALL of them, so a weak template never costs another full
@@ -1524,10 +2158,12 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                         if c["complete"] and c["lossless"]]
 
             _log(f"Searching Soulseek with {len(queries_built)} query template(s) in "
-                 f"parallel: “{'” · “'.join(queries_built)}” … (up to "
+                 f"parallel: “{'” · “'.join(queries_built)}” … (a good folder ends "
+                 f"the search at once, otherwise {response_limit} responses or "
                  f"{int(search_wait + _SEARCH_GRACE_S)}s)")
             results, search_failed, skipped = _search_queries(
-                slsk, queries_built, search_wait, usable=_usable)
+                slsk, queries_built, search_wait, usable=_usable,
+                response_limit=response_limit)
             _job_search_done()
             for line in search_failed:
                 # a query slskd errored on is not "no results": it is reported
@@ -1543,21 +2179,114 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 _log(f"  Usable candidate found ({len(best)} complete lossless) — "
                      f"a good copy is in hand, so the search stopped here and the "
                      f"remaining {skipped} query template(s) were not waited out")
+
+            # ---- ONE broader query, run after the configured one(s) -----------
+            # A release whose configured templates name it too precisely (a CD
+            # searched by catalog number, whose Soulseek copies are all WEB
+            # rips that never carry one) answered with hundreds of files and no
+            # usable folder. This is not a return of the removed templates: it
+            # fires only as a SECOND attempt, sequentially, when the first
+            # produced nothing usable, and never runs alongside it (a competing
+            # window would only cost the user another search).
+            all_responses = list(responses)
+            broad = [q for q in _build_from_templates(["artist album year"], release)
+                     if q not in queries_built]
+            if not best and broad:
+                _log(f"No usable folder from the configured template(s) — one broader "
+                     f"search: “{'” · “'.join(broad)}”")
+                fb_results, fb_failed, _fb_skipped = _search_queries(
+                    slsk, broad, search_wait, response_limit=response_limit)
+                _job_search_done()
+                for line in fb_failed:
+                    _log(f"  ✕ {line}")
+                fb_responses = [f for _q, res in fb_results
+                                for f in (res.get("responses") or [])]
+                all_responses += fb_responses
+                candidates.extend(find_candidates(fb_responses, release, cfg))
+                candidates.sort(key=_rank)
+                best = [c for c in candidates if c["complete"] and c["lossless"]]
+                _log(f"  broader query: {len(fb_responses)} result file(s), "
+                     f"{len(candidates)} candidate folder(s) in total")
+
+            # ---- a complete lossless copy that simply has no rip log ----------
+            # (CD only.) The CD gate needs one .log + one .cue per disc, so a
+            # WEB rip of a CD is dropped before it is even a candidate and the
+            # release could never import at all. The folders are scored a second
+            # time as the Digital Media release they would become — the same
+            # view the rest of the job takes if the user says yes — and only
+            # when NO gate-passing candidate exists, so a real rip with a log
+            # always keeps the log gate.
+            loose = []
+            if is_cd and not best:
+                loose = [c for c in find_candidates(
+                    all_responses, {**release, "medium_formats": ["Digital Media"]}, cfg)
+                    if c["complete"] and c["lossless"]]
+                loose.sort(key=_rank)
+            declined = False
+            if loose and confirm_lossy:
+                with _lock:
+                    _job["state"] = "confirm"
+                    _job["stage"] = "No rip log — import as Digital Media?"
+                    _job["confirm"] = {
+                        "reason": "no_logs",
+                        "media": "Digital Media",
+                        "candidates": [{
+                            "username": c["username"],
+                            "dir": c["dir"],
+                            "format": os.path.splitext(c["audio"][0]["file"])[1].lstrip(".").upper()
+                                      if c["audio"] else "",
+                            "matched": c["matched"],
+                            "expected": c["expected"],
+                            "size": c["total_size"],
+                            "score": c["score"],
+                        } for c in loose[:5]],
+                    }
+                _log(f"No CD rip with a .log/.cue found — {len(loose)} complete "
+                     f"lossless folder(s) hold every track but no log to grade. "
+                     f"Waiting for your go-ahead to take one as Digital Media.")
+                _confirm_event.wait()  # released by confirm() or cancel()
+                _confirm_event.clear()
+                with _lock:
+                    _job["confirm"] = None
+                    _job["state"] = "running"
+                    accepted = _confirm_answer["accept"]
+                if _cancelled():
+                    return _finish("cancelled")
+                if accepted:
+                    _log("no CD rip with logs found — downloading the complete "
+                         "lossless copy and stamping it as Digital Media")
+                    # The one line that changes what this job believes it is
+                    # importing: everything downstream reads medium_formats —
+                    # _verify_album's CD log/CRC audit, _stamp_media's medium and
+                    # _import's — so the switch happens BEFORE verify/import and
+                    # nowhere later. Nothing else in the release dict is touched:
+                    # the MusicBrainz ids, country and catalog number stay, so the
+                    # album still carries its release identity.
+                    release = {**release, "medium_formats": ["Digital Media"]}
+                    is_cd = False
+                    # The WHOLE offered set stays the working list, best first
+                    # (already `_rank`-sorted): the accepted peer can still
+                    # stall, fail to queue or be rejected, and a live run that
+                    # kept only `loose[0]` ended with "Every candidate was
+                    # rejected (1 attempt(s))" while three usable peers sat
+                    # untouched. The next candidate is simply the next in this
+                    # list; nothing is re-searched and no second prompt fires.
+                    candidates = list(loose)
+                else:
+                    declined = True
+
             if not candidates and search_failed:
                 raise RuntimeError("; ".join(search_failed[:3]))
-            if not candidates:
+            if not candidates or declined:
                 # slskd answered, but no folder held the whole album. That used
                 # to be a hard stop ("No candidate folder contained every
                 # track"), which threw away a search the user just waited out
                 # for a release that is merely rare right now. On the
-                # interactive path the job instead parks on the SAME prompt the
-                # lossy branch uses and offers to add the release to the wishes
-                # list: the background worker then keeps searching for it with
-                # the very queries this job used, so nothing is lost by parking
-                # the job — the user only decides whether it is worth watching
-                # for. A release with no MusicBrainz id has nothing to wish for
-                # (the browsed-folder grab), and the background wishes path
-                # (confirm_lossy=False) fails quietly as before.
+                # interactive path the job instead parks and offers to add the
+                # release to the wishes list (see _ask_to_wish): the background
+                # worker then keeps searching for it with the very queries this
+                # job used, so nothing is lost by parking the job — the user
+                # only decides whether it is worth watching for.
                 #
                 # How long a search runs is decided in ONE place —
                 # soulseek_auto_search_wait (the requested window) plus
@@ -1565,49 +2294,12 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 # once a search ended) — and this prompt fires exactly when that
                 # window has just ended with nothing usable. `waited` reports
                 # that same cap to the UI instead of a second, competing timer.
-                if (confirm_lossy and release.get("id")
-                        and cfg.get("soulseek_auto_wish_prompt", True)):
-                    from server import wishes
-                    _log("No usable result — asking whether to add this release "
-                         "to the wishes list.")
-                    with _lock:
-                        _job["state"] = "confirm"
-                        _job["stage"] = "No usable results — add to wishes?"
-                        _job["confirm"] = {
-                            "reason": "no_results",
-                            "waited": int(search_wait + _SEARCH_GRACE_S),
-                            "queries": list(queries_built),
-                            "formats": [],
-                            "candidates": [],
-                        }
-                    _confirm_event.wait()  # released by confirm() or cancel()
-                    _confirm_event.clear()
-                    with _lock:
-                        _job["confirm"] = None
-                        _job["state"] = "running"
-                        accepted = _confirm_answer["accept"]
-                    if _cancelled():
-                        return _finish("cancelled")
-                    if accepted:
-                        wish = wishes.add_wish(
-                            release.get("id"), title=release.get("title") or "",
-                            artist=((release.get("artists") or [{}])[0]
-                                    .get("name", "")),
-                            year=str(release.get("date") or "")[:4],
-                            queries=list(queries_built))
-                        _log(f"Added to wishes (#{wish['id']}) — the worker keeps "
-                             f"searching for this release in the background with "
-                             f"the same queries, so nothing is lost by parking "
-                             f"this job.")
-                        # Nothing landed in the library: report the wish, never a
-                        # download. The import path's result keys are kept (as
-                        # None/0) so a caller reading result["album_path"] sees
-                        # one shape for every finished job.
-                        return _finish("done", {
-                            "wished": True, "wish_id": wish["id"],
-                            "album_path": None, "staging_path": None,
-                            "imported": 0, "organized": 0,
-                            "organize_error": None})
+                wished = _ask_to_wish(release, queries_built,
+                                      search_wait + _SEARCH_GRACE_S, cfg, confirm_lossy)
+                if _cancelled():
+                    return _finish("cancelled")
+                if wished:
+                    return _finish("done", wished)
                 raise RuntimeError("No candidate folder contained every track "
                                    "(and cue/log per disc for CD). Try the "
                                    "manual entry or different search terms.")
@@ -1656,25 +2348,23 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 _log("Lossy download approved — continuing with the lossy copy.")
 
         # ---- try candidates in order -----------------------------------------
-        # Rejected candidates are the attempts that get capped: the first one
-        # that verifies is imported immediately (the `return` below).
-        max_attempts = int(cfg.get("soulseek_auto_max_attempts", 3) or 3)
-        capped = False
+        # EVERY candidate the search scored is tried, best first: each rejected
+        # peer costs only its own attempt (its partials are cleaned up), while
+        # stopping early throws away copies that would have verified. The job
+        # ends when a candidate imports, or when the list runs out.
         for cand in candidates:
             if _cancelled():
                 return _finish("cancelled")
-            if len(_job["attempts"]) >= max_attempts:
-                _log(f"Attempt cap reached ({len(_job['attempts'])}/{max_attempts} "
-                     f"rejected candidate(s)) — stopping the search for this album.")
-                capped = True
-                break
             uname, folder = cand["username"], cand["dir"]
             _log(f"Candidate: {uname} · …{folder[-60:]} ({cand['matched']}/{cand['expected']} tracks matched)")
 
-            # --- ONE enqueue pass: logs and album together --------------------
-            # Queueing both in one call means a peer's queue is joined once,
-            # and the .log gate still runs first: a slow log is graded the
-            # moment it lands while the album keeps downloading behind it.
+            # --- CD: the .log is queued FIRST, the album only after it passes --
+            # Queueing the album in the same call as the log meant a peer whose
+            # log grades below the bar still sent (and was paid for) album
+            # bytes, which then had to be swept as orphans. So the gate's own
+            # files go out alone, and the rest of `wanted` is requested only
+            # once the log has passed (see the gate below). A non-CD candidate
+            # has no gate: everything goes out in this one call.
             wanted, seen = [], set()
             for f in cand["files"]:
                 if f["file"] in seen:
@@ -1686,93 +2376,132 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 continue
             if _cancelled():
                 return _finish("cancelled")
+            wanted_logs = ([{"filename": f["file"], "size": f["size"]}
+                            for f in cand["logs"]]
+                           if is_cd and cand["logs"] else [])
+            log_names = {w["filename"] for w in wanted_logs}
+            album_wanted = [w for w in wanted if w["filename"] not in log_names]
             try:
-                slsk.enqueue_download(uname, wanted)
+                slsk.enqueue_download(uname, wanted_logs or wanted)
             except Exception as e:
                 _reject(uname, folder, f"download failed to queue: {e}")
+                # slskd refuses a folder one file at a time: the peers that DID
+                # accept are already queued, so the attempt is dropped the same
+                # way a rejected one is instead of leaving those bytes behind.
+                _drop_candidate(slsk, ddir, uname, wanted)
                 continue
 
             # The job is DOWNLOADING from this point, so say so immediately:
             # the search bar is cleared and a transfer block is published
             # before the first poll, so the UI switches to "downloading" the
             # moment the peer has the files instead of sitting on the finished
-            # search until a byte count shows up.
+            # search until a byte count shows up. On a CD only the log is in
+            # flight yet, so the block shows the log alone.
             _job_search_done()
-            _job_progress(_progress_snapshot(uname, wanted, set(), [], "queued"))
+            _job_progress(_progress_snapshot(uname, wanted_logs or wanted,
+                                             set(), [], "queued"))
 
             # --- the log is the cheap gate (CD) --------------------------------
-            if is_cd and cand["logs"]:
+            if wanted_logs:
                 # exactly one log per disc (candidate selection), so this wait
                 # is over the wanted logs alone: it returns the moment they are
                 # all local instead of waiting out a junk extra log's timeout.
-                # The album transfers were queued in the SAME call above, so
-                # they are already coming down: they are displayed alongside the
-                # log (display_wanted) even though only the log gates progress.
-                wanted_logs = [{"filename": f["file"], "size": f["size"]}
-                               for f in cand["logs"]]
+                # They are also the ONLY transfers queued so far, so the block
+                # shows them and nothing else.
                 _log("Downloading .log file(s) first for a quality check…")
                 got_logs = _wait_for_files(slsk, ddir, uname, wanted_logs,
                                            timeout_s=_LOG_TIMEOUT_S,
-                                           cancel_check=_cancelled, phase="logging",
-                                           display_wanted=wanted)
+                                           cancel_check=_cancelled, phase="logging")
                 if len(got_logs) < len(wanted_logs):
-                    _reject(uname, folder, f"only {len(got_logs)}/{len(wanted_logs)} log(s) arrived")
-                    _cleanup_partial(ddir, uname, list(got_logs.values()))
-                    _cancel_rest(slsk, uname, wanted, keep=got_logs)
+                    _reject(uname, folder,
+                            f"{len(got_logs)} of {len(wanted_logs)} log(s) arrived "
+                            f"within {int(_LOG_TIMEOUT_S)}s — trying the next candidate")
+                    # The log is the only thing this candidate queued, but the
+                    # WHOLE wanted set is dropped: a partial log, a transfer
+                    # record or a temp file the peer is still flushing all live
+                    # under this candidate's own album tree, and the next
+                    # candidate downloaded them again.
+                    _drop_candidate(slsk, ddir, uname, wanted)
                     continue
                 if _cancelled():
                     return _finish("cancelled")
                 _log("Grading rip log(s) with Logchecker…")
                 scores = _score_logs(list(got_logs.values()), cfg)
-                good, ignored = [], []
+                good, bad = [], []
                 for p, score, state, detail in scores:
                     _log(f"  {os.path.basename(p)}: score "
                          f"{score if score is not None else '?'}, checksum {state or '?'}")
-                    (good if _log_passes(score, state, min_score) else ignored).append(
-                        f"{os.path.basename(p)} — score "
-                        f"{score if score is not None else 'unscorable'}"
-                        f"{', checksum ' + state if state else ''}")
+                    if _log_passes(score, state, min_score):
+                        good.append(os.path.basename(p))
+                    else:
+                        bad.append((os.path.basename(p), score, state))
                 # A folder can hold a second, junk log for the same disc (and a
                 # manual/browse pick can hold several): the album rides on the
                 # log that grades well, the rest are reported and ignored. A
                 # checksum MISMATCH still costs the album its evidence — with
-                # no good log left, the candidate is rejected and the album
-                # transfers it just queued are dropped again.
+                # no good log left, the candidate is rejected and the log that
+                # just landed is dropped again.
                 if not good:
-                    _reject(uname, folder, "log rejected: " + "; ".join(ignored))
-                    _cleanup_partial(ddir, uname, list(got_logs.values()))
-                    _cancel_rest(slsk, uname, wanted, keep=got_logs)
+                    _reject(uname, folder,
+                            "log rejected: " + "; ".join(
+                                _log_fail_reason(n, s, st, min_score)
+                                for n, s, st in bad)
+                            + " (Settings → Auto-import); trying the next candidate")
+                    _drop_candidate(slsk, ddir, uname, wanted)
                     continue
-                for line in ignored:
-                    _log(f"  ignoring {line}")
+                for n, s, st in bad:
+                    _log(f"  ignoring {_log_fail_reason(n, s, st, min_score)}")
                 _log(f"{len(good)} log(s) pass — downloading the full album…")
 
-            # --- the album (already queued: no second queue wait) --------------
+                # The log cleared the bar, so the album has earned its bytes:
+                # it is requested NOW, in a second call, and only its own files
+                # — the logs are already local. A queue failure here is a
+                # rejected candidate like any other, reason named as such.
+                try:
+                    slsk.enqueue_download(uname, album_wanted)
+                except Exception as e:
+                    _reject(uname, folder, f"album failed to queue: {e}")
+                    _drop_candidate(slsk, ddir, uname, wanted)
+                    continue
+
+            # --- the album (queued above: the log first, the album after it) ----
             est_timeout = _est_timeout(cand)
             _log(f"Downloading {len(wanted)} file(s) "
                  f"({cand['total_size'] / (1024 * 1024):.0f} MB, up to {est_timeout}s)…")
-            got = _wait_for_files(slsk, ddir, uname, wanted,
-                                  timeout_s=est_timeout, cancel_check=_cancelled)
+            got = _wait_for_files(slsk, ddir, uname, album_wanted or wanted,
+                                  timeout_s=est_timeout, cancel_check=_cancelled,
+                                  queue_budget_s=_queue_budget(cand))
+            if wanted_logs:
+                # The logs are already on disk with terminal transfers, and the
+                # album wait above did not cover them (they went out in the
+                # first call, not the second): they are folded back in so the
+                # album root, verification and import still see the whole
+                # candidate.
+                got = {**got, **got_logs}
             if _cancelled():
                 return _finish("cancelled")
             if len(got) < len(wanted):
                 missing = [w["filename"] for w in wanted if w["filename"] not in got]
                 _reject(uname, folder, f"download incomplete: {len(missing)} file(s) missing/timed out")
-                _cleanup_partial(ddir, uname, list(got.values()))
+                # the files that DID arrive are this candidate's, and the rest of
+                # its transfers are still queued: both are dropped together
+                _drop_candidate(slsk, ddir, uname, wanted)
                 continue
 
             # --- stage 3: audit -------------------------------------------------
             # The album root on disk is the highest directory below the
-            # download dir holding EVERY file of this candidate: slskd's
-            # default `<ddir>/<leaf>/…` and the older `<ddir>/<user>/<leaf>/…`
-            # both land there, and a multi-disc tree split over one parent
-            # (…/CD1 + …/CD2) verifies as the union instead of half-importing.
+            # download dir holding EVERY file of this candidate: the pinned
+            # `<ddir>/<user>/<batch id>/<remote path>/…` layout lands there,
+            # and so do the older `<ddir>/<leaf>/…` /
+            # `<ddir>/<user>/<leaf>/…` ones; a multi-disc tree split over one
+            # parent (…/CD1 + …/CD2) verifies as the union instead of
+            # half-importing.
             resolved = list(got.values())
             local_root = _local_album_root(ddir, resolved)
             if not local_root:
                 _reject(uname, folder, "downloaded files did not land in one album "
                                        "folder under the download dir")
-                _cleanup_partial(ddir, uname, resolved)
+                _drop_candidate(slsk, ddir, uname, wanted)
                 continue
             _log("Verifying downloads against the rip log / decoders…")
             media = "CD" if is_cd else "Digital Media"
@@ -1786,7 +2515,10 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 for pr in problems[:6]:
                     _log("  ✕ " + pr)
                 _reject(uname, folder, f"verification failed ({len(problems)} problem(s))")
-                _cleanup_partial(ddir, uname, [], remove_root=local_root)
+                # the album root is this candidate's own (resolved from its own
+                # files below the download dir) — a junk file it also dropped
+                # there goes with it, and the sweep still runs afterwards
+                _drop_candidate(slsk, ddir, uname, wanted, remove_root=local_root)
                 continue
             _log("Verification passed — importing into the library…")
 
@@ -1795,9 +2527,19 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
             _finish("done", result)
             return
 
-        if capped:
-            raise RuntimeError(f"Stopped after {max_attempts} rejected candidate(s) "
-                               f"— see the log.")
+        # ---- every candidate was tried ---------------------------------------
+        # Five peers, each one offline or never delivering its .log, and the job
+        # died on this bare error with the release forgotten again. Same offer
+        # as the no-usable-folder dead end (_ask_to_wish): the release goes into
+        # the wish list — with the queries this job already searched with — and
+        # the background worker keeps looking for it.
+        wished = _ask_to_wish(release, queries_built,
+                              search_wait + _SEARCH_GRACE_S, cfg, confirm_lossy)
+        if _cancelled():
+            return _finish("cancelled")
+        if wished:
+            _finish("done", wished)
+            return
         raise RuntimeError("Every candidate was rejected "
                            f"({len(_job['attempts'])} attempt(s) — see the log).")
 
@@ -1851,70 +2593,118 @@ def _stamp_media(album_dir, media, cfg):
     return n, problems
 
 
-def _cleanup_partial(ddir, username, local_files, remove_root=None):
-    """Remove rejected partials so they don't linger in the download dir."""
+def _cleanup_partial(ddir, local_files, remove_root=None):
+    """Remove rejected partials so they don't linger in the download dir.
+
+    Returns how many files (and, when `remove_root` went, the directory) it
+    removed — 0 is what tells the caller's sweep loop the candidate is gone."""
+    removed = 0
     for p in local_files:
         try:
             if os.path.isfile(p):
                 os.remove(p)
+                removed += 1
         except OSError:
             pass
     if remove_root:
         try:
             if os.path.isdir(remove_root) and _inside(remove_root, ddir):
                 shutil.rmtree(remove_root, ignore_errors=True)
+                removed += 1
         except Exception:
             pass
-    try:
-        upath = os.path.join(ddir, username)
-        if os.path.isdir(upath) and not os.listdir(upath):
-            os.rmdir(upath)
-    except OSError:
-        pass
+    # the album/batch/user shells the deleted files leave behind — slskd never
+    # removes a directory it created (rmdir only takes the empty ones, so a
+    # sibling download keeps its own)
+    from server.soulseek import prune_download_dirs
+    prune_download_dirs(ddir)
+    return removed
 
 
 def _start_import_chain(album_dir, cfg):
-    """Run the configured import chain over a freshly imported album.
+    """Stage the freshly imported album — links, metadata, covers — and stop.
 
-    Delegates to ``server.imports.finish_album`` — the same chain every other
-    import path runs (CUEs → FLACs → videos → lyrics → auto tagging → images →
-    audit → DR & ReplayGain → AccurateRip → key & BPM → beets → format all →
-    grade), not the old hardcoded autotag/lyrics/grade list.
+    Delegates to ``server.imports.finish_album(..., defer_tagging=True)``: the
+    album was moved, AcoustID-checked, converted, MB/MEDIA-stamped and named
+    by ``_import`` before this runs, so all that is left is the identity
+    stamping, the artist metadata and the cover art. The tag-writing chain
+    (auto tagging, lyrics, DR & ReplayGain, grade, format all) is deliberately
+    NOT run — an unattended download must not rewrite the user's tags, that is
+    what the wizard and the menu actions are for.
 
     It runs in a daemon thread (a job's result is where the album is, not
-    twenty minutes of re-encoding) and is failure-tolerant by design: a script
-    that fails is written into the job log and the import still succeeds — the
+    twenty minutes of re-encoding) and is failure-tolerant by design: a
+    failure is written into the job log and the import still succeeds — the
     album is already in the library.
+
+    ``_account_metadata`` runs after it: the artist image and the artist/album
+    descriptions are the three things an unattended import has to account for,
+    so the log always names each one's outcome even when the chain's own
+    metadata step was switched off or staged them for review.
     """
     from server import imports
 
     def chain():
         try:
-            result = imports.finish_album(album_dir, cfg)
-            if not result["chain"]:
-                _log("Import script chain is off (import_auto_scripts / "
-                     "import_scripts) — album imported, nothing else was run.")
-                return
-            for r in result["scripts"]:
-                if r.get("error"):
-                    _log(f"  ! {r.get('label') or r.get('id')}: {r['error']}")
-                elif r.get("skipped"):
-                    _log(f"  - {r.get('label') or r.get('id')}: "
-                         f"skipped ({r.get('reason')})")
-            ok = sum(1 for r in result["scripts"]
-                     if not r.get("error") and not r.get("skipped"))
-            tail = f", {len(result['errors'])} error(s)" if result["errors"] else ""
-            _log(f"Import pipeline finished: {ok}/{len(result['scripts'])} "
-                 f"script(s) ok{tail}")
+            result = imports.finish_album(album_dir, cfg, defer_tagging=True)
+            for err in result["errors"]:
+                _log("  ! " + err)
+            _log("Album staged and placed: links, metadata and cover art. "
+                 "Tagging (auto tagging, lyrics, DR, grade, format all) is "
+                 "left to the wizard / menu actions.")
         except Exception:
             traceback.print_exc()
             _log("Import pipeline crashed: "
                  f"{traceback.format_exc().strip().splitlines()[-1]}")
+        _account_metadata(album_dir, cfg)
 
-    _log(f"Import script chain started in the background "
-         f"({len(imports.chain_for(cfg))} script(s)).")
+    _log("Staging the imported album in the background "
+         "(RateYourMusic links, metadata, cover art).")
     threading.Thread(target=chain, name="mlo-soulseek-import-chain",
                      daemon=True).start()
+
+
+def _account_metadata(album_dir, cfg):
+    """Find and account for the album's artist image and descriptions.
+
+    One line per item — fetched from where, already there, switched off, or
+    nothing found — the same step (and the same wording) the import menu
+    drives, so an unattended import states what it did about all three
+    instead of leaving them a silent gap the artist page later shows as
+    missing. Never fatal: a provider being down is not an import failure.
+
+    With the metadata step switched off, or set to stage candidates for
+    review, the user's choice is reported instead of overruled — writing here
+    would be exactly the automatic behaviour they turned off.
+    """
+    if not cfg.get("metadata_auto_fetch", True):
+        _log("Artist image / descriptions: the metadata step is off "
+             "(Settings → Metadata), so none were fetched.")
+        return
+    if cfg.get("metadata_review", False):
+        _log("Artist image / descriptions: metadata review is on — candidates "
+             "were staged for you instead of written. Apply them from the "
+             "album's page.")
+        return
+    from server.api_discovery import ensure_artist_album_metadata, meta_line
+    try:
+        result = ensure_artist_album_metadata(album_dir, cfg,
+                                              progress=_metadata_progress)
+        for item, res in result.items():
+            _log("  " + meta_line(item, res))
+    except Exception:
+        traceback.print_exc()
+        _log("Artist image / descriptions: the metadata step failed — "
+             "the album itself is fine.")
+
+
+def _metadata_progress(done, total, label):
+    """Live stage text while the metadata step is on the network.
+
+    Sets the job's stage only — the per-item outcome is what the log carries,
+    so the pending/finished pair would just double every line."""
+    with _lock:
+        _job["stage"] = f"Artist image / descriptions {done}/{total}: {label}"
 
 
 def _verify_acoustid(album_dir, release, cfg):

@@ -12,7 +12,7 @@ import os
 
 from .audio import AudioFile
 from .lyrics import (
-    _atomic_write_text, _format_for_storage, _lrc_for,
+    _atomic_write_text, _format_for_storage, _lrc_for, has_lyrics_text,
     _process_lyrics_for_audio,
 )
 from .lyrics_providers import (  # noqa: F401  (lrclib_fetch is a re-export shim)
@@ -24,6 +24,15 @@ from .stats import (
     _make_pbar, _pbar_skip, _pbar_update,
 )
 from .ui import print_header, log, c, Color
+
+# Confidence an AUTOMATIC write needs. _MIN_SCORE (0.6, the search floor) lets
+# a same-title answer from a different artist through when that artist is
+# unknown to the provider (the score falls back to the "artist unknown"
+# weight, 0.65 + 0.14 of duration credit ≈ 0.79) — a fine candidate to SHOW
+# a person, a bad lyric to write unattended. 0.85 keeps an unknown artist only
+# when the title is an exact match and the duration agrees, and rejects it as
+# soon as the duration is off or the title is fuzzy.
+_AUTO_MIN_SCORE = 0.85
 
 
 def fetch_one(path, config, force=False):
@@ -51,7 +60,14 @@ def fetch_one(path, config, force=False):
 
         instrumental = str(af.get_tag("INSTRUMENTAL") or "").strip() == "1"
         existing = (af.get_lyrics() or "").strip()
-        has_sidecar = os.path.isfile(_lrc_for(path))
+        # A sidecar only blocks the fetch when it really holds lyrics: a
+        # 0-byte file or a metadata/timestamp-only stub counts as ABSENT, so
+        # the fetch proceeds and overwrites it.
+        try:
+            with open(_lrc_for(path), "r", encoding="utf-8", errors="replace") as _f:
+                has_sidecar = has_lyrics_text(_f.read())
+        except OSError:
+            has_sidecar = False
         if not force and (instrumental or existing or has_sidecar):
             result["reason"] = "instrumental" if instrumental else "lyrics already present"
             return result
@@ -73,8 +89,21 @@ def fetch_one(path, config, force=False):
         youtube_id = youtube_id_from(af.get_tag("YOUTUBEID"),
                                      af.get_tag("YOUTUBE_URL"),
                                      os.path.basename(path))
+        # AUTOMATIC writes only take lyrics we are confident about. The search
+        # floor (0.6) is deliberately loose — it is what a person browsing
+        # candidates wants — but nothing is written here that a person would
+        # have rejected: a hit must clear _AUTO_MIN_SCORE, which a same-title
+        # different-artist answer cannot (that is the usual false positive:
+        # the lyrics of a namesake cover). The manual search endpoints keep
+        # the loose floor and never write on their own.
         hit = fetch_lyrics(config, artist, title, af.get_tag("ALBUM"), duration,
-                           youtube_id=youtube_id)
+                           youtube_id=youtube_id, min_score=_AUTO_MIN_SCORE)
+        if hit is None:
+            # Either no provider had it, or every answer was a weak match —
+            # both mean "nothing safe to write", and both are retried by the
+            # next run (nothing is written, so nothing is remembered as done).
+            result["reason"] = "no confident match"
+            return result
         # A synced provider hit keeps its timestamps; a plain one does not.
         text = ((hit or {}).get("synced") or (hit or {}).get("plain") or "").strip()
         if not text:

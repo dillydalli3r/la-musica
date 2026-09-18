@@ -1,4 +1,4 @@
-"""The 14 library scripts, in one place every caller shares.
+"""The 17 library scripts, in one place every caller shares.
 
 Extracted from ``server/main.py``'s ``RUNNERS`` table so the import pipeline
 (:mod:`server.imports`), the bulk queue and the Soulseek importer run exactly
@@ -21,7 +21,11 @@ from mlo import (
     run_audit_library, run_auto_tagging, run_format_cues, run_format_lyrics,
     run_grade_library, run_optimize_flacs, run_process_images,
 )
+from mlo import stats as mlo_stats
 from mlo.loudness import run_calc_dr_replaygain
+from mlo.paths import (SKIP_DIRS, load_expected_tracks, prune_empty_dirs,
+                       save_expected_tracks)
+from mlo.ui import Color, c, log, print_header
 
 
 def _optional(module, name):
@@ -36,6 +40,135 @@ def _optional(module, name):
         return None
 
 
+# --------------------------------------------------------------------------- #
+# Script 15 — Release tracklist (.mlo_expected.json)
+# --------------------------------------------------------------------------- #
+# Album-level identity tags are uniform across an album's tracks, so a handful
+# of files settle it and one unreadable file cannot cost the album its
+# manifest (the same bound server.imports._album_mbids uses).
+_TRACKLIST_PROBE_FILES = 5
+
+
+def _album_release_id(album_dir):
+    """The album's MusicBrainz id, else its release-group id, else ""."""
+    from mlo.audio import AudioFile
+
+    try:
+        names = sorted(f for f in os.listdir(album_dir)
+                       if mlo_stats.is_audio_file(f))
+    except OSError:
+        return ""
+    album_id = rg_id = ""
+    for name in names[:_TRACKLIST_PROBE_FILES]:
+        try:
+            af = AudioFile(os.path.join(album_dir, name))
+            if getattr(af, "audio", None) is None:
+                continue
+            album_id = album_id or str(af.get_tag("MUSICBRAINZ_ALBUMID") or "").strip()
+            rg_id = rg_id or str(af.get_tag("MUSICBRAINZ_RELEASEGROUPID") or "").strip()
+        except Exception:
+            continue
+        if album_id:
+            break
+    return album_id or rg_id
+
+
+def run_release_tracklist(config):
+    """Script 15 — write each album's release tracklist manifest.
+
+    Grading REQUIRES ``.mlo_expected.json`` (grade_check_expected_tracks): the
+    files on disk only describe themselves, so nothing else can say whether a
+    partially imported album was meant to hold more tracks. An import records
+    the manifest from the release it imported; an album that arrived any other
+    way (beets, a hand-placed rip, a library from before this existed) carries
+    only the MusicBrainz id in its tags — so the tracklist is fetched from
+    that id, through the app's own MusicBrainz access (server.integrations;
+    no new HTTP path, and its 1 req/s etiquette means a whole-library run
+    costs one rate-limited request per album).
+
+    No id on the album means NO manifest: one line says so. A fabricated
+    tracklist would fail the album forever for tracks that release never had.
+    A manifest already present is left alone unless the force flag is set.
+    """
+    from mlo.grader import _relpath_guard
+    from mlo.paths import EXPECTED_TRACKS_FILE
+    from server import integrations
+
+    config = config or {}
+    stats = mlo_stats.new_stats()
+    print_header("Release tracklist (.mlo_expected.json)")
+
+    folder = str(config.get("music_folder") or "")
+    force = bool(config.get("force_tracklist", False))
+    log(f"music folder: {folder} · "
+        f"existing manifests: {'rewritten (force)' if force else 'kept'}")
+
+    if config.get("targets") is not None:
+        files = mlo_stats._collect_targets(config["targets"], mlo_stats.LIB_AUDIO_EXTS)
+        albums = [d for d in sorted({os.path.dirname(f) for f in files})
+                  if os.path.isdir(d)]
+    elif os.path.isdir(folder):
+        albums = mlo_stats._find_albums(folder)
+    else:
+        albums = []
+    if not albums:
+        log("No albums found.")
+        return stats
+
+    counts = {"ok": 0, "skip": 0, "fail": 0}
+    pbar = mlo_stats._make_pbar(len(albums), "Release tracklist", unit="album")
+    for album in albums:
+        rel = _relpath_guard(album, folder or album)
+        if not force and load_expected_tracks(album)["tracks"]:
+            stats["skipped_count"] += 1
+            mlo_stats._pbar_skip(pbar, counts)
+            continue
+
+        mbid = _album_release_id(album)
+        if not mbid:
+            log(f"{rel}: no MUSICBRAINZ_ALBUMID (or RELEASEGROUPID) on its "
+                f"tracks — no manifest written")
+            stats["skipped_count"] += 1
+            mlo_stats._pbar_skip(pbar, counts)
+            continue
+
+        try:
+            release, release_id = integrations.resolve_release(mbid)
+        except Exception as e:
+            log(c(f"{rel}: MusicBrainz lookup failed — {e}", Color.YELLOW))
+            stats["error_count"] += 1
+            stats["errors"].append((album, str(e)))
+            mlo_stats._pbar_update(pbar, counts, kind="fail")
+            continue
+
+        tracks = (release or {}).get("media") or []
+        if not tracks:
+            log(f"{rel}: MusicBrainz holds no tracklist for {mbid} — "
+                f"no manifest written")
+            stats["skipped_count"] += 1
+            mlo_stats._pbar_skip(pbar, counts)
+            continue
+
+        rid = release_id or mbid
+        if save_expected_tracks(album, rid, tracks):
+            log(f"{rel}: {len(tracks)} track(s) recorded from release {rid}")
+            stats["modified_count"] += 1
+            mlo_stats._pbar_update(pbar, counts)
+        else:
+            log(c(f"{rel}: could not write {EXPECTED_TRACKS_FILE}", Color.YELLOW))
+            stats["error_count"] += 1
+            stats["errors"].append((album, "manifest write failed"))
+            mlo_stats._pbar_update(pbar, counts, kind="fail")
+
+    if pbar:
+        pbar.close()
+    log(c(f"release tracklist: {stats['modified_count']} written · "
+          f"{stats['skipped_count']} skipped · "
+          f"{stats['error_count']} failed", Color.GREEN if not stats["error_count"]
+          else Color.YELLOW))
+    return stats
+
+
 # id -> (label, runner). Labels are the ones web/src/lib/scripts.ts renders,
 # id for id; ids and names must stay in step with README.md and the frozen
 # EXPECTED_SCRIPTS in tools/test_script_menus.py.
@@ -47,13 +180,22 @@ RUNNERS: dict[int, tuple[str, "callable"]] = {
     5: ("Process images", run_process_images),
     6: ("Audit library", run_audit_library),
     7: ("DR & ReplayGain", run_calc_dr_replaygain),
-    8: ("Auto tagging", run_auto_tagging),
+    8: ("Auto tagging (mood & energy)", run_auto_tagging),
     9: ("AccurateRip", _optional("mlo.accurip", "run_generate_accurip")),
     10: ("Format all", _optional("mlo.format_all", "run_format_all")),
     11: ("Remux videos (MKV)", _optional("mlo.remux", "run_remux_videos")),
     12: ("Key & BPM", _optional("mlo.audiometa", "run_analyze_audiometa")),
     13: ("Fetch lyrics", _optional("mlo.lyrics_fetch", "run_fetch_lyrics")),
     14: ("Beets tagging", _optional("server.beetscfg", "run_beets_tagging")),
+    15: ("Release tracklist", run_release_tracklist),
+    16: ("Mood & Energy", _optional("mlo.moods", "run_detect_mood_energy")),
+    # 17 is the AI pass: it reads the lyrics script 13 stored and writes
+    # TRANSLITERATION-*/TRANSLATION-* tags (and sidecars). No AI configured =
+    # one log line, no failure.
+    17: ("Lyrics transliterate (AI)", _optional("mlo.lyrics_xlit", "run_lyrics_xlit")),
+    # 18 gives back: this library's lyrics go to LRCLIB for recordings the
+    # database does not have yet. Off = `lrclib_auto_publish` is off.
+    18: ("Publish lyrics (LRCLIB)", _optional("mlo.lyrics_publish", "run_publish_lyrics")),
 }
 
 # The config key a script's own force flag lives under. `force` may be keyed by
@@ -71,6 +213,15 @@ _FORCE_KEYS = {
     10: ("force_accurip", "force_cue", "force_lyrics", "force_auto_tag"),
     12: ("force_audiometa",),
     13: ("force_lyrics",),
+    # 15 rewrites a manifest that already exists (otherwise it is left alone).
+    15: ("force_tracklist",),
+    # 16 re-analyses every track, tagged or not — the same flag script 8's
+    # mood stage answers to.
+    16: ("force_mood",),
+    # 17 re-transforms tracks that already carry a stored transform.
+    17: ("force_xlit",),
+    # 18 re-submits lyrics for tracks LRCLIB already answers for.
+    18: ("force_publish",),
 }
 _FORCE_ALIASES = {
     "lyrics": "force_lyrics",
@@ -82,12 +233,21 @@ _FORCE_ALIASES = {
     "autotag": "force_auto_tag",
     "accurip": "force_accurip",
     "audiometa": "force_audiometa",
+    "tracklist": "force_tracklist",
+    "mood": "force_mood",
+    "xlit": "force_xlit",
+    "publish": "force_publish",
 }
 # Scripts whose feature has its own on/off switch: with it off the runner is a
-# no-op at best and a crash at worst, so a chain skips them instead.
+# no-op at best and a crash at worst, so a chain skips them instead. A tuple
+# means the script runs while ANY of the switches is on (17 does
+# transliteration, translation, or both).
 _DISABLED = {
     7: "dr_replaygain_enabled",
     12: "audiometa_enabled",
+    16: "mood_enabled",
+    17: ("lyrics_xlit_enabled", "lyrics_translate_enabled"),
+    18: "lrclib_auto_publish",
 }
 
 
@@ -132,8 +292,115 @@ def _apply_force(cfg, force, sid=None):
                 cfg[key] = bool(value)
 
 
-def run_script(sid, cfg, targets=None, force=None, skip_disabled=True):
+def _run_with_progress(runner, cfg, label, chain=None):
+    """Run *runner* with the UI's progress bar pointed at this script.
+
+    Every runner builds its own tqdm-style bar, and that bar is what the UI
+    header follows (``mlo.stats.progress_hook`` → ``server/main.py``'s relay →
+    the WebSocket the front-end draws). Two of them have no bar at all
+    (AccurateRip, Beets tagging) and the rest return early WITHOUT creating
+    one whenever the album holds nothing for them (no CUE file, no video,
+    every track already key/BPM-tagged, no image to optimize) — their runtime
+    then showed the previous script's numbers, or a bar frozen on the last
+    file, with no way to tell a slow script from a stuck one.
+
+    So the script owns the header for its whole run: the runner's own ticks
+    are forwarded (under the script's UI label, so the header names the script
+    the way the menus do rather than the runner's internal "FLAC"/"Grading"),
+    it is announced before the work starts, and completed afterwards when the
+    runner reported nothing on its own.
+
+    *chain* is ``(index, count)`` — this script's 1-based place in a multi-step
+    run, and how many steps that run has. It is what makes the header honest
+    for Run All: ``done`` becomes "finished scripts + this script's own
+    fraction" and ``total`` the scripts in the run, so the numbers run from
+    0 to count across the whole chain. Without it each script reported ITS OWN
+    counts and its own completion, which is exactly what a chain must not do:
+    every script boundary reset the numbers to zero and then declared the bar
+    finished (`done >= total`), so the header flipped to indeterminate and the
+    front-end cleared it while the run was still going.
+
+    ponytail: one process-wide hook swapped for the duration of the call —
+    script runs are serialized by RUN_LOCK, so nothing else can observe the
+    swap, and the original hook is restored in `finally` even on a raise.
+    """
+    prior = getattr(mlo_stats, "progress_hook", None)
+    if not callable(prior):
+        return runner(cfg)          # a headless caller (CLI/tests): no UI bar
+    index, count = chain or (0, 0)
+    chained = count > 1
+    # How far into its own slice this script has been seen to be. Monotonic:
+    # a runner that draws two bars in a row (albums, then files) restarts its
+    # counts at the second one, and a chain bar that steps backwards reads as
+    # a stall.
+    span = [0.0]
+    # The last (done, total) the runner reported on its own, for the
+    # single-script completion below. Two slots instead of the list of ones
+    # this used to append per file — that list only ever answered "did the
+    # runner tick at all" and grew once per file.
+    last = [0, 0]
+
+    def hook(done, total, _desc):
+        last[0], last[1] = done, total
+        if not chained:
+            try:
+                prior(done, total, label)
+            except Exception:
+                pass
+            return
+        try:
+            frac = float(done) / float(total) if total else span[0]
+        except (TypeError, ValueError, ZeroDivisionError):
+            frac = span[0]
+        span[0] = frac = max(span[0], min(1.0, frac))
+        try:
+            prior(index - 1 + frac, count, label)
+        except Exception:
+            pass
+
+    mlo_stats.progress_hook = hook
+    try:
+        if chained:
+            # Claim the bar at this script's slice — determinate from the very
+            # first frame, so the header never falls back to the sweep between
+            # two steps of a run that is still going.
+            prior(index - 1, count, label)
+        else:
+            # Claim the bar before the first file. Announced with NO total on
+            # purpose: a runner that never ticks (AccurateRip's CUETools pass,
+            # Beets' single `beet import`) would otherwise sit at "0/1" — an
+            # empty bar for the whole run, which reads as hung. With total 0 the
+            # header draws the indeterminate sweep instead, and the first real
+            # tick (or the finally below) turns it into live numbers.
+            prior(0, 0, label)
+        return runner(cfg)
+    finally:
+        if chained:
+            # This script is done: its whole slice is behind us whatever it
+            # reported on its own (a no-op script still consumed a step).
+            try:
+                prior(index, count, label)
+            except Exception:
+                pass
+        elif not last[1] or last[0] < last[1]:
+            # Whatever this runner reported, it is over: either it never
+            # opened a bar (AccurateRip, Beets), or its own bar is still short
+            # of its total (a run that stopped early, a sub-bar left open).
+            # Both must finish the header rather than leave it looking hung.
+            try:
+                prior(1, 1, label)
+            except Exception:
+                pass
+        mlo_stats.progress_hook = prior
+
+
+def run_script(sid, cfg, targets=None, force=None, skip_disabled=True, chain=None):
     """Run one script against *cfg* and report what happened.
+
+    *chain* ``(index, count)`` is passed by :func:`run_chain` so a step of a
+    multi-script run reports against the WHOLE run's bar; a lone caller leaves
+    it None and the script's own counts are the bar (see
+    :func:`_run_with_progress`).
 
     Returns ``{"id", "name", "label", "stats"}``, ``{"id", ..., "skipped": True,
     "reason"}`` for a script whose feature is switched off, or ``{"id",
@@ -148,12 +415,16 @@ def run_script(sid, cfg, targets=None, force=None, skip_disabled=True):
         return {"id": sid, "error": f"runner {sid} not available"}
 
     gate = _DISABLED.get(sid)
-    if skip_disabled and gate and not cfg.get(gate, True):
-        return {"id": sid, "name": getattr(runner, "__name__", ""), "label": label,
-                "skipped": True, "reason": f"{gate} is off"}
+    if skip_disabled and gate:
+        keys = gate if isinstance(gate, tuple) else (gate,)
+        if not any(cfg.get(k, True) for k in keys):
+            joined = " and ".join(keys)
+            return {"id": sid, "name": getattr(runner, "__name__", ""), "label": label,
+                    "skipped": True,
+                    "reason": f"{joined} {'are' if len(keys) > 1 else 'is'} off"}
     try:
         return {"id": sid, "name": getattr(runner, "__name__", ""),
-                "label": label, "stats": runner(cfg)}
+                "label": label, "stats": _run_with_progress(runner, cfg, label, chain)}
     except Exception as e:
         traceback.print_exc()
         return {"id": sid, "name": getattr(runner, "__name__", ""),
@@ -204,6 +475,140 @@ def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
         RUN_LOCK.release()
 
 
+def _prune_empty_target_dirs(cfg):
+    """Remove the folders the run emptied, from each target up to the library.
+
+    An organize or a removal takes the last file out of a disc or album folder
+    and leaves the empty shell behind, so after the scripts have run the
+    target is swept: its own subtree first (the disc folder that just went
+    empty), then the folders above it that are now empty too. Only the run's
+    OWN targets are swept, and only below the music folder — the root itself
+    and everything outside the library is never a candidate — so a chain that
+    ran no scripts cannot walk (let alone empty) the whole library.
+
+    Best-effort by design: this is housekeeping AFTER the scripts, and a
+    permission error must never turn a finished run into a failed one.
+    Returns the removed paths, deepest first."""
+    targets = cfg.get("targets") or []
+    mf = str(cfg.get("music_folder") or "").strip()
+    if not mf or not targets:
+        return []
+    prefix = os.path.normcase(os.path.abspath(mf)) + os.sep
+    removed = []
+    for raw in targets:
+        d = os.path.abspath(str(raw))
+        if not os.path.isdir(d):
+            d = os.path.dirname(d)
+        if not os.path.normcase(d).startswith(prefix):
+            continue
+        removed += prune_empty_dirs(d)
+        # The target's own chain, deepest first: a folder still holding a file
+        # (or an unremovable child) stops the climb, because nothing above a
+        # non-empty folder can be empty either.
+        while os.path.normcase(d).startswith(prefix):
+            if os.path.basename(d).startswith(".") or os.path.basename(d) in SKIP_DIRS:
+                break
+            try:
+                os.rmdir(d)
+            except OSError:
+                break
+            removed.append(d)
+            d = os.path.dirname(d)
+    return removed
+
+
+def _audio_basenames(folder):
+    """Lower-cased audio file names directly inside *folder* (a set)."""
+    try:
+        return {f.name.lower() for f in os.scandir(folder)
+                if f.is_file() and mlo_stats.is_audio_file(f.name)}
+    except OSError:
+        return set()
+
+
+def _has_audio(folder):
+    """True when *folder* holds at least one audio file directly inside it.
+
+    The chain only ever asks this as a yes/no (a target counts as "vanished"
+    once no audio is left in it), and it asks it for every target after every
+    script — so this stops at the first hit instead of listing the whole
+    directory: an album folder holds more covers, .cue and .log than tracks,
+    and the audio files are usually the first entries scandir hands over.
+    """
+    try:
+        for f in os.scandir(folder):
+            if f.is_file() and mlo_stats.is_audio_file(f.name):
+                return True
+    except OSError:
+        pass                # gone, unreadable, or not a directory at all
+    return False
+
+
+def _find_moved_album(names, music_folder):
+    """The library folder that holds *names* among its audio, else "".
+
+    A subset, not equality: a folder that already held files of the same
+    names (a second rip of the same album, a re-import) leaves the moved
+    tracks beside them as "… (2).flac", so the album still has to be
+    recognised by the names it brought with it.
+    """
+    if not names or not music_folder or not os.path.isdir(music_folder):
+        return ""
+    skip = {d.lower() for d in SKIP_DIRS}
+    for dirpath, dirs, files in os.walk(music_folder):
+        dirs[:] = [d for d in dirs
+                   if not d.startswith(".") and d.lower() not in skip]
+        found = {f.lower() for f in files if mlo_stats.is_audio_file(f)}
+        if names <= found:
+            return dirpath
+    return ""
+
+
+def _follow_moved_targets(cfg, audio_names):
+    """Re-point the chain at an album a script moved, and never lose it silently.
+
+    Script 14 (beets) rewrites the tags and applies the naming script, so an
+    album whose folder was not already canonical comes out somewhere else —
+    and the rest of the chain is scoped to the path the import started with.
+    A vanished target then made every later script a no-op: Format all said
+    "No files found to format.", Grade said "No albums found.", both with
+    zero stats and no error, so the album was left unformatted and ungraded
+    as if the scripts had run and found nothing to do.
+
+    Identity, not name: an album's audio file names travel with it, so the
+    folder that now holds the vanished target's whole audio set is the album.
+    A move that also renamed every file cannot be followed that way — then
+    the target stays put and the chain says so out loud instead of printing a
+    cheerful "nothing to do".
+
+    "Vanished" means the target holds no audio any more, not that the
+    directory is gone: beets only takes the audio, so the staging folder is
+    still there afterwards, holding the covers / .cue / .log it left behind —
+    which is exactly the empty-of-audio folder that made the tail a no-op.
+    """
+    targets = cfg.get("targets") or []
+    out = []
+    for t in targets:
+        if os.path.isfile(t) or _has_audio(t):
+            out.append(t)
+            continue
+        names = audio_names.get(t) or set()
+        if not names:                   # nothing of ours was there to follow
+            out.append(t)
+            continue
+        moved = _find_moved_album(names, str(cfg.get("music_folder") or ""))
+        if moved:
+            log(f"Album moved: {t} → {moved}; the rest of the chain follows it")
+            audio_names[moved] = names
+            out.append(moved)
+        else:
+            log(f"WARNING: no audio left in {t} and the album could not be "
+                f"found in the library — the scripts after this one have "
+                f"nothing to run on")
+            out.append(t)
+    cfg["targets"] = out
+
+
 def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None):
     cfg = dict(cfg)
     if targets is not None:
@@ -212,13 +617,26 @@ def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None):
 
     results = []
     total = len(ids)
+    # Each target's audio, taken before any script runs: the only way to
+    # recognise the album again once a script has moved its folder.
+    audio_names = {t: _audio_basenames(t) for t in (cfg.get("targets") or [])}
     for done, sid in enumerate(ids, 1):
-        result = run_script(sid, cfg)
+        result = run_script(sid, cfg, chain=(done, total))
         results.append(result)
+        _follow_moved_targets(cfg, audio_names)
         if progress is not None:
             label = RUNNERS.get(sid, (f"Script {sid}", None))[0]
             try:
                 progress(done, total, label, result)
             except Exception:
                 traceback.print_exc()
+    if ids:
+        try:
+            removed = _prune_empty_target_dirs(cfg)
+        except Exception:
+            traceback.print_exc()
+            removed = []
+        if removed:
+            log(f"Removed {len(removed)} empty folder(s) left by the run: "
+                + ", ".join(removed))
     return results

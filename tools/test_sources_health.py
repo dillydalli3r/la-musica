@@ -70,8 +70,11 @@ health = sh.health_payload(cfg={}, probe=False)
 rows = health["sources"]
 ids = [r["id"] for r in rows]
 
+# The RYM link row shares its id with the genre source that reads the same
+# cookie — the id may appear twice, the (kind, id) pair may not.
 expected = (list(LYRICS_SOURCES) + sorted(intg.ADVISORY_SOURCES)
-            + list(intg.GENRE_SOURCES) + list(discovery.IMAGE_SOURCES))
+            + list(intg.GENRE_SOURCES) + list(discovery.IMAGE_SOURCES)
+            + ["rateyourmusic"])
 ok(sorted(ids) == sorted(expected),
    f"every registered source is reported once ({len(ids)} rows, "
    f"expected {len(expected)})")
@@ -94,6 +97,11 @@ ok(all(isinstance(r["detail"], str) and r["detail"] for r in rows),
    "every row explains itself")
 ok(all(("synced" in r) == (r["kind"] == "lyrics") for r in rows),
    "`synced` is on the lyrics rows only")
+link_rows = [r for r in rows if r["kind"] == "links"]
+ok(len(link_rows) == 1 and link_rows[0]["id"] == "rateyourmusic"
+   and link_rows[0]["needs"] == ["rym_cookie"],
+   f"the one link row is RateYourMusic and asks for the cookie "
+   f"({[r['label'] for r in link_rows]})")
 lyrics_rows = [r for r in rows if r["kind"] == "lyrics"]
 ok([r.get("rank") for r in lyrics_rows] == [1, 2, 3, 4, 5, 6],
    f"the lyrics rows carry the registry's 1-based rank in order "
@@ -196,6 +204,44 @@ ok(calls("lyrics_probe") >= 5,
    f"the configured lyrics providers WERE probed ({calls('lyrics_probe')} calls)")
 ok(calls("deezer_artist") >= 1,
    f"the configured metadata source WAS probed ({calls('deezer_artist')} calls)")
+
+print("== the RYM link probe ==")
+saved_rym_links, saved_failures = intg.rym_links, intg._rym_failures
+try:
+    def _links(album=None, artist=None, note=""):
+        # *a/**k on purpose: the probe calls this positionally, and named
+        # parameters would shadow the captured values.
+        return lambda *a, **k: {"album": album, "artist": artist, "note": note}
+
+    intg.rym_links = _links("https://rateyourmusic.com/release/album/radiohead/pablo-honey/",
+                            "https://rateyourmusic.com/artist/radiohead")
+    st, detail = sh._probe_links("rateyourmusic", {"rym_cookie": "cf=1"})
+    ok(st == "ok" and "album" in detail and "artist" in detail,
+       f"both links found is an ok row ({detail})")
+
+    intg.rym_links = _links(note="could not resolve RateYourMusic links")
+    st, detail = sh._probe_links("rateyourmusic", {"rym_cookie": "cf=1"})
+    ok(st == "fail" and "could not resolve" in detail,
+       f"a verified miss is a fail carrying RYM's own note ({detail})")
+
+    def _refused(artist="", album="", cfg=None, mbid=None):
+        intg._rym_failures += 1
+        return {"album": None, "artist": None, "note": ""}
+
+    intg.rym_links = _refused
+    st, detail = sh._probe_links("rateyourmusic", {"rym_cookie": "cf=1"})
+    ok(st == "fail" and "Cookie" in detail,
+       f"RYM refusing the client says how to get past it ({detail})")
+
+    intg.rym_links = _links(artist="https://rateyourmusic.com/artist/radiohead")
+    st, detail = sh._probe_links("rateyourmusic", {"rym_cookie": "cf=1"})
+    ok(st == "ok" and "artist" in detail and "album" not in detail,
+       f"one half of the pair is still an ok row ({detail})")
+
+    ok(sh._probe_links("deezer", {})[1] == "unknown source",
+       "an id this probe does not own is skipped, never guessed at")
+finally:
+    intg.rym_links, intg._rym_failures = saved_rym_links, saved_failures
 
 print("== a rate-limited source says so ==")
 

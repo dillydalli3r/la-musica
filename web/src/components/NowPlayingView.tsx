@@ -11,7 +11,7 @@ import { fmtTech, fmtPair, isVideoFile } from "../lib/fmt";
 import { AdvisoryMark } from "./Badges";
 import CoverImg from "./CoverImg";
 import ScrubSeek from "./ScrubSeek";
-import { activeAnalyser } from "../lib/analyser";
+import { MAX_DB, MIN_DB, activeAnalyser } from "../lib/analyser";
 import Visualizer from "./Visualizer";
 import { parsePlayerLrc, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
 import type { Playlist } from "../types";
@@ -29,6 +29,14 @@ const ORBS_KEY = "mlo.np.orbs"; // "1" = animated background
 const VIS_KEY = "mlo.np.vis"; // "1" = background pulses with the beat
 const VIZ_KEY = "mlo.np.viz"; // "1" = frequency-bar visualizer visible
 const ZOOM_KEY = "mlo.np.lyrzoom.v2"; // lyrics zoom multiplier (persisted)
+
+/** Background-ambience energy window, in dBFS MEAN bin level (averaged over
+ * every FFT bin, so it sits ~20 dB below the loudest band): below the floor
+ * the bloom is closed, at the ceiling fully open. Measured on a real track
+ * this mean swings around −70 dBFS. See the ambience tick for why the mean
+ * is taken in dB and not in raw bytes. */
+const AMB_FLOOR_DB = -82;
+const AMB_CEIL_DB = -57;
 
 /** How the player applies ReplayGain — mirrors the `replaygain_mode` config
  * options (mlo/config.py). */
@@ -244,6 +252,17 @@ export default function NowPlayingView(p: Props) {
   const bloomRef = useRef<HTMLDivElement>(null);
   const orbsRef = useRef<HTMLDivElement>(null);
   const eased = useRef({ energy: 0 });
+  // Read through a ref, exactly like the bars do: the ambience loop already
+  // handles silence internally (energy stays 0), so `p.playing` must not be an
+  // effect dependency. It was, and the teardown/rebuild on every pause reset
+  // the breathing phase `t` to 0 — the whole background snapped to another
+  // scale in a single frame (measured: 1.0814 → 1.1100 on the pause frame
+  // against ~0.0005 per frame normally), i.e. a visible twitch of the blurred
+  // cover on every pause and resume.
+  const playingRef = useRef(p.playing);
+  useEffect(() => {
+    playingRef.current = p.playing;
+  }, [p.playing]);
   useEffect(() => {
     if (!vis) {
       // effect disabled → restore the static ambience
@@ -266,7 +285,7 @@ export default function NowPlayingView(p: Props) {
       // Real signal energy 0..1 from the shared analyser (same source the
       // visualizer bars draw). Zero when paused or unobservable.
       let energy = 0;
-      if (p.playing) {
+      if (playingRef.current) {
         try {
           const an = activeAnalyser();
           if (an) {
@@ -276,7 +295,22 @@ export default function NowPlayingView(p: Props) {
             an.getByteFrequencyData(freq as Uint8Array<ArrayBuffer>);
             let sum = 0;
             for (let i = 0; i < freq.length; i++) sum += freq[i];
-            energy = Math.min(1, sum / (freq.length * 255) * 3.2);
+            // Bytes are the analyser's dB window (lib/analyser.ts) squeezed
+            // into 0..255 — averaging them raw saturated the bloom on any
+            // loud master (every bin pinned at the old −30 dBFS ceiling), so
+            // the mean is taken in dB and mapped over the window above, the
+            // same way the bars read the same node.
+            const meanDb = MIN_DB + (sum / freq.length / 255) * (MAX_DB - MIN_DB);
+            // The LOW bands carry the beat — a mean over all 512 bins barely
+            // moves between a kick and a verse, which is why the ambience
+            // looked like a constant wash. 60% bass, 40% overall keeps the
+            // swell musical instead of either flat or strobe-like.
+            const lowBins = Math.max(1, freq.length >> 3);
+            let low = 0;
+            for (let i = 0; i < lowBins; i++) low += freq[i];
+            const lowDb = MIN_DB + (low / lowBins / 255) * (MAX_DB - MIN_DB);
+            const mixDb = 0.6 * lowDb + 0.4 * meanDb;
+            energy = Math.min(1, Math.max(0, (mixDb - AMB_FLOOR_DB) / (AMB_CEIL_DB - AMB_FLOOR_DB)));
           }
         } catch {
           energy = 0;
@@ -286,30 +320,31 @@ export default function NowPlayingView(p: Props) {
       const prev = eased.current.energy;
       eased.current.energy = energy > prev ? energy : prev + (energy - prev) * 0.06;
       const env = eased.current.energy;
-      // Blurred cover: a very slow breathing zoom plus a touch of the real
-      // energy. Opacity never changes — brightness pumping is what read as
+      // Blurred cover: a very slow breathing zoom the music now clearly rides
+      // on. Opacity never changes — brightness pumping is what read as
       // "flashing" before.
       const breathe = 0.5 + 0.5 * Math.sin(t * 0.21);
       if (bgRef.current) {
-        bgRef.current.style.transform = `scale(${(1.08 + 0.06 * breathe + 0.03 * env).toFixed(4)})`;
+        bgRef.current.style.transform = `scale(${(1.06 + 0.04 * breathe + 0.1 * env).toFixed(4)})`;
       }
-      // Bloom: the only energy-visible layer, eased so it swells rather
-      // than snaps, and capped well below flash territory.
+      // Bloom: the energy-visible layer, eased so it swells rather than
+      // snaps, and capped well below flash territory.
       if (bloomRef.current) {
-        bloomRef.current.style.opacity = String(0.14 + 0.16 * env);
-        bloomRef.current.style.transform = `scale(${(0.96 + 0.1 * env).toFixed(4)})`;
+        bloomRef.current.style.opacity = String(0.1 + 0.34 * env);
+        bloomRef.current.style.transform = `scale(${(0.94 + 0.2 * env).toFixed(4)})`;
       }
-      // Color field: all motion lives in the CSS keyframes (large travel,
-      // 9-16s loops, per-orb hue). The energy only nudges the field's
-      // scale — never opacity or brightness, so nothing can flash.
+      // Color field: the CSS keyframes give it a slow drift (a background
+      // has to live a little on its own), and the music drives the part a
+      // viewer actually reads as "reacting" — a visible swell with the
+      // bass. Never opacity or brightness, so nothing can flash.
       if (orbsRef.current) {
-        orbsRef.current.style.transform = `scale(${(1 + 0.012 * env).toFixed(4)})`;
+        orbsRef.current.style.transform = `scale(${(1 + 0.06 * env).toFixed(4)})`;
       }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [vis, p.playing]);
+  }, [vis]);
 
   // Persisted-toggle helper shared by the options menu and inline buttons.
   const persist = (key: string, v: string) => localStorage.setItem(key, v);
@@ -710,7 +745,10 @@ export default function NowPlayingView(p: Props) {
       >
         {fmtSpeed(p.speed)}
       </button>
-      <span className="w-px h-6 bg-white/15 mx-1" />
+      {/* the divider belongs to the row's CONTROL line, not the row box:
+          self-center + a fixed height keep it on the same axis as the icons
+          either side of it, whatever heights they have */}
+      <span className="w-px h-6 bg-white/15 mx-1 self-center shrink-0" />
       <button
         className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${p.liked ? "text-accent" : "text-zinc-500 hover:text-zinc-300"}`}
         onClick={p.onToggleLike}
@@ -777,10 +815,14 @@ export default function NowPlayingView(p: Props) {
         onChange={p.onSeek}
         className="flex-1 min-w-0"
       />
-      <span className="w-10 font-mono tabular-nums">{fmtDuration(duration)}</span>
       {/* the divider sits dead-center between the duration and volume
-          groups, on the same optical axis as the sliders */}
-      <span className="w-px h-5 bg-white/15 self-center shrink-0 mx-2" />
+          groups, on the same optical axis as the sliders — same height and
+          margins as the transport row's, so both read as one separator. The
+          duration hugs it (text-right in its fixed box): the box's trailing
+          slack would otherwise push the divider visibly off-centre towards
+          the volume group. */}
+      <span className="w-10 text-right font-mono tabular-nums">{fmtDuration(duration)}</span>
+      <span className="w-px h-6 bg-white/15 self-center shrink-0 mx-2" />
       <div className="hidden md:flex items-center gap-1.5 text-zinc-500 shrink-0" title={`Volume — ${Math.round(vol * 100)}%`}>
         <VolIcon className="h-4 w-4" />
         <input
@@ -1156,9 +1198,18 @@ export default function NowPlayingView(p: Props) {
         {!videoPath && (
         <div className={`flex-1 min-h-0 flex flex-col lg:flex-row items-center gap-4 sm:gap-8 px-4 sm:px-8 pb-4 overflow-clip ${layoutHasLyrics ? "" : "lg:justify-center"}`}>
           {/* left column: cover, track/album/artist, all playback controls —
-              centered as a group inside the full column height */}
+              centered as a group inside the full column height.
+              max-h-full + overflow-y-auto: on a short window this column is
+              taller than the clipped row above it, which used to silently cut
+              the bottom controls (and the visualizer strip with them) off with
+              no way to reach them. Capping it makes it scroll instead, and the
+              strip sticks to the bottom of that scrollport so the bars are
+              always visible when enabled.
+              ponytail: `justify-center` in a scroll container leaves the TOP
+              overflow unreachable on very short windows; move to a safe-center
+              layout if anyone ever uses the player that small. */}
           <div
-            className={`flex flex-col items-center justify-center gap-4 shrink-0 min-w-0 ${
+            className={`flex flex-col items-center justify-center gap-4 shrink-0 min-w-0 max-h-full min-h-0 overflow-x-clip overflow-y-auto ${
               layoutHasLyrics ? "lg:w-[42%] lg:h-full" : ""
             }`}
           >
@@ -1182,10 +1233,13 @@ export default function NowPlayingView(p: Props) {
             {/* seek + volume — a single line under the transport */}
             {seekRow}
             {/* frequency-bar visualizer — the same one the fullscreen view
-                uses; toggle via the button in the top bar or options menu */}
+                uses; toggle via the button in the top bar or options menu.
+                shrink-0 + explicit min height: this is the LAST child of a
+                clipped column, and a shrinking flex item there collapsed to
+                nothing (bars rendered, box clipped away). */}
             {viz && (
-              <div className="w-[26rem] px-2">
-                <Visualizer playing={p.playing} className="h-12 w-full" />
+              <div className="sticky bottom-0 z-10 shrink-0 min-h-12 w-[26rem] px-2">
+                <Visualizer playing={p.playing} className="block h-12 w-full" />
               </div>
             )}
           </div>

@@ -1,18 +1,15 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Save, RotateCcw, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, X } from "lucide-react";
+import { Save, RotateCcw, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, Wand2, X } from "lucide-react";
 import { api } from "../api";
 import ConfirmButton from "../components/ConfirmButton";
 import SourcesPanel from "../components/SourcesPanel";
+import AiTestButton from "../components/AiTestButton";
 import PageHeader from "../components/PageHeader";
 import { toast } from "../store";
 import { applyAccent } from "../App";
 import { DEFAULT_RUN_ALL, SCRIPT_LABEL, isScriptId } from "../lib/scripts";
-
-/** The shipped default (mlo/naming.py DEFAULT_NAMING_SCRIPT) — used until a
- *  config arrives and by the "Reset to default" button. Keep the two in sync. */
-const DEFAULT_NAMING_SCRIPT =
-  "%albumartist% [%musicbrainz_albumartistid%]/%album%$if(%releasetype%,$if(%year%, (%releasetype%, %year%), (%releasetype%)),$if(%year%, (%year%),))$if(%label%, [%label%])$if(%releasecountry%, [%releasecountry%])/%discnumber%-$num(%tracknumber%,2) %title%";
 
 const ACCENT_OPTIONS: { id: string; name: string; color: string }[] = [
   { id: "violet", name: "Violet", color: "#8b5cf6" },
@@ -46,7 +43,10 @@ const CFG_DEFAULTS: Record<string, unknown> = {
   youtube_enabled: true,
   youtube_max_height: 0,
   auto_import_avoid_promo: true,
+  auto_import_require_country: true,
   auto_import_medium_order: ["CD", "Digital Media", "Vinyl", "Cassette", "Other"],
+  cover_auto_fetch: true,
+  cover_review: true,
 };
 
 type ProviderOption = { id: string; label: string; notes?: string; rank?: number };
@@ -291,6 +291,7 @@ function CoverDefaults() {
 }
 
 export default function SettingsPage() {
+  const navigate = useNavigate();
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   // open-source credits (vendored tools + packages), rendered at the bottom
   const { data: credits } = useQuery({
@@ -305,7 +306,9 @@ export default function SettingsPage() {
   const [musicFolder, setMusicFolder] = useState("");
   const [lyricsFormat, setLyricsFormat] = useState("EMBEDDED");
   const [workerLimit, setWorkerLimit] = useState(0);
-  const [namingScript, setNamingScript] = useState(DEFAULT_NAMING_SCRIPT);
+  // Filled from the config the server normalizes (naming_script is never
+  // empty there) — the shipped default is the server's, never a copy here.
+  const [namingScript, setNamingScript] = useState("");
   const [shortFolderNames, setShortFolderNames] = useState(false);
   const [accent, setAccent] = useState<string>(() => localStorage.getItem("mlo.accent") ?? "mono");
   const [defaultView, setDefaultView] = useState<string>(() => localStorage.getItem("mlo.defaultView.v2") ?? "grid");
@@ -338,7 +341,7 @@ export default function SettingsPage() {
   // ---- script options (persisted to config; /api/run uses them as defaults) ----
   type CfgField =
     | { k: string; label: string; type: "bool"; help?: string }
-    | { k: string; label: string; type: "number"; min?: number; max?: number; step?: number }
+    | { k: string; label: string; type: "number"; min?: number; max?: number; step?: number; help?: string }
     | { k: string; label: string; type: "select"; options: [string, string][] }
     | { k: string; label: string; type: "text"; help?: string }
     | { k: string; label: string; type: "password"; help?: string }
@@ -354,6 +357,25 @@ export default function SettingsPage() {
     fields: CfgField[];
   }
   const CFG_GROUPS: CfgGroup[] = [
+    {
+      title: "AI lyric transforms (script 17)",
+      blurb:
+        "The one optional model in the app. Script 17 romanizes non-Latin lyrics and translates them into the languages below, writing TRANSLITERATION-*/TRANSLATION-* tags (and .romaji.lrc / .<lang>.lrc sidecars for LRC/BOTH lyric formats). Any OpenAI-compatible /chat/completions endpoint works — OpenAI, OpenRouter, LM Studio, llama.cpp, or Google Gemini's OpenAI-compatible endpoint (paste the bare generativelanguage.googleapis.com host and it is routed). Nothing else in the app depends on it: with the URL or model empty, the script logs one line and skips. Reasoning effort is sent as `reasoning_effort` on every call — a provider that rejects the field gets one plain retry.",
+      fields: [
+        { k: "ai_base_url", label: "Base URL", type: "text", help: "e.g. https://api.openai.com/v1, http://localhost:1234/v1, or generativelanguage.googleapis.com" },
+        { k: "ai_api_key", label: "API key", type: "password", help: "Sent as a Bearer token. Local servers (LM Studio, llama.cpp) usually ignore it — leave it empty there." },
+        { k: "ai_model", label: "Model", type: "text", help: "The model id the endpoint expects, e.g. gpt-4o-mini or gemini-2.5-flash." },
+        {
+          k: "ai_effort", label: "Reasoning effort", type: "select",
+          options: [["high", "High — best quality (default)"], ["medium", "Medium"], ["low", "Low"], ["minimal", "Minimal — no thinking, fastest"]],
+        },
+        { k: "lyrics_translation_langs", label: "Translation languages", type: "text", help: "Comma separated, e.g. en,de. The first is the reader's language (it decides when romanization is worth generating) and names the TRANSLATION tag; each language also gets its own .<lang>.lrc sidecar." },
+        { k: "lyrics_xlit_enabled", label: "Transliterate non-Latin lyrics", type: "bool" },
+        { k: "lyrics_translate_enabled", label: "Translate lyrics", type: "bool" },
+        { k: "lyrics_xlit_sidecars", label: "Write .romaji.lrc / .<lang>.lrc sidecars (LRC formats only)", type: "bool" },
+        { k: "force_xlit", label: "Force: re-transform tracks that already have one", type: "bool" },
+      ],
+    },
     {
       title: "FLACs & lossless sources (script 3)",
       blurb: "Re-encodes FLACs at the target level and converts every other lossless source (WAV/AIFF/APE/WV/SHN/TTA, ALAC in MP4) to the target codec below, losslessly — the same conversion runs on Soulseek imports. FLAC is what the rest of the pipeline assumes; choosing ALAC re-containers FLACs into .m4a as well.",
@@ -394,6 +416,14 @@ export default function SettingsPage() {
         { k: "images_jpeg_quality", label: "JPEG quality", type: "number", min: 70, max: 100 },
         { k: "png_optimization_level", label: "PNG optimization level", type: "number", min: 0, max: 6 },
         { k: "cover_jpeg_quality", label: "Cover JPEG quality", type: "number", min: 70, max: 100 },
+        {
+          k: "cover_auto_fetch", label: "Fetch missing covers during import", type: "bool",
+          help: "During import, an album with no image gets cover candidates looked up (Cover Art Archive first, then Deezer/Apple). Off leaves the finder and the Grading screen's Missing cover verdict to you.",
+        },
+        {
+          k: "cover_review", label: "…and let me pick which one (off = take the best automatically)", type: "bool",
+          help: "On: the candidates are shown on the album page for you to choose, and nothing is written until you do. Off: the best candidate is downloaded and normalised on the spot, as before. Ignored while 'Fetch missing covers during import' is off.",
+        },
         { k: "cover_resize_enabled", label: "Resize covers", type: "bool" },
         { k: "cover_target_size", label: "Cover target size (px)", type: "number", min: 0, max: 4000 },
         { k: "cover_crop_enabled", label: "Crop covers to square", type: "bool" },
@@ -414,7 +444,7 @@ export default function SettingsPage() {
       ],
     },
     {
-      title: "Lyrics & CUEs (scripts 1 & 2)",
+      title: "Lyrics & CUEs (scripts 1, 2 & 18)",
       fields: [
         { k: "optimize_lrc", label: "Optimize .lrc sidecars", type: "bool" },
         { k: "optimize_embedded_lyrics", label: "Optimize embedded lyrics", type: "bool" },
@@ -425,6 +455,14 @@ export default function SettingsPage() {
         {
           k: "lyrics_allow_plain", label: "Accept plain (unsynced) lyrics", type: "bool",
           help: "Off by default: every provider in the chain answers with timestamps, and an answer without them is thrown away as if it had none. Turn this on only to let untimed text (LRCLIB's plain records) through when nothing synced exists.",
+        },
+        {
+          k: "lrclib_auto_publish", label: "Auto-publish missing lyrics to LRCLIB", type: "bool",
+          help: "Script 18 (and every import chain that includes it) submits this library's own lyrics to LRCLIB for tracks the database does not have yet — artist, title, album and duration decide that, and a track LRCLIB already answers for is never touched. Outward-facing: with it off, nothing is ever submitted automatically (the manual 'Publish to LRCLIB' button on the lyrics editor still works).",
+        },
+        {
+          k: "force_publish", label: "Force: re-submit lyrics LRCLIB already has", type: "bool",
+          help: "One-shot per run — re-publishes even when LRCLIB answers for the track, e.g. when this library's text is the better one. LRCLIB may still reject the duplicate.",
         },
         {
           k: "lyrics_youtube_captions", label: "Use YouTube captions (yt-dlp)", type: "bool",
@@ -519,6 +557,13 @@ export default function SettingsPage() {
         { k: "auto_zero_advisory_for_instrumental", label: "Zero advisory on instrumentals", type: "bool" },
         { k: "fix_instrumental_from_lyrics", label: "Fix INSTRUMENTAL from lyrics", type: "bool" },
         { k: "force_auto_tag", label: "Force re-tag", type: "bool" },
+        { k: "force_mood", label: "Force mood & energy re-analysis (script 16)", type: "bool" },
+      ],
+    },
+    {
+      title: "Release tracklist (script 15)",
+      fields: [
+        { k: "force_tracklist", label: "Force rewrite of an existing .mlo_expected.json", type: "bool" },
       ],
     },
     {
@@ -631,12 +676,23 @@ export default function SettingsPage() {
       title: "Auto-import (MusicBrainz → Soulseek)",
       blurb: "Search terms are templates of release fields (artist album year date country catalognumber barcode label). CD rips are found by catalog number, digital media by title + year; every disc's .log must reach the score threshold before the album downloads.",
       fields: [
-        { k: "soulseek_auto_cd_queries", label: "CD query templates (; separated)", type: "text" },
+        {
+          k: "soulseek_auto_cd_queries", label: "CD query templates (; separated)", type: "text",
+          help: "A CD is searched by its catalog number alone by default — the one trait rip folder names carry. Add templates (semicolon-separated) to widen the search; a release with no catalog number falls back to artist + album + year automatically.",
+        },
         { k: "soulseek_auto_digital_queries", label: "Digital query templates (; separated)", type: "text" },
         { k: "soulseek_auto_log_min_score", label: "Min .log score (0–100)", type: "number", min: 0, max: 100 },
         { k: "soulseek_auto_complete_ratio", label: "Required track completeness (0.5–1)", type: "number", min: 0.5, max: 1, step: 0.05 },
-        { k: "soulseek_auto_search_wait", label: "Search window (seconds of quiet before slskd ends a query)", type: "number", min: 5, max: 300 },
+        { k: "soulseek_auto_search_wait", label: "Fallback search window (seconds of quiet on a rare album)", type: "number", min: 5, max: 300 },
+        {
+          k: "soulseek_auto_response_limit", label: "Responses before a search is scored (5–500)", type: "number", min: 5, max: 500,
+          help: "slskd only hands back a search's results once it has ENDED, and a popular album never goes quiet — this ends the search early instead of waiting out the whole window. Lower = faster and fewer peers; higher = slower and more candidates.",
+        },
         { k: "auto_import_avoid_promo", label: "Never auto-import promotional / bootleg editions", type: "bool" },
+        {
+          k: "auto_import_require_country", label: "Only auto-import editions with a release country", type: "bool",
+          help: "A MusicBrainz release without RELEASECOUNTRY is usually an unsorted import, and the CD query templates are built from that field — such editions are skipped, and a group whose only editions lack one is reported as ineligible instead.",
+        },
         {
           k: "auto_import_medium_order", label: "Medium preference (comma-separated, best first)", type: "csv",
           help: "Editions are chosen by this media order first, then by earliest release date. Blank = the built-in order (CD, Digital Media, Vinyl, Cassette, Other).",
@@ -655,29 +711,18 @@ export default function SettingsPage() {
       ],
     },
     {
-      title: "Home (recommendations)",
+      title: "Home",
       blurb:
-        "The Home section in the sidebar. Recommendations are seeded from your most-collected artists and genres and resolved against MusicBrainz release groups you don't own yet.",
+        "The Home section in the sidebar — its shelves are built from the library itself (recently added, best graded, top artists, favorites, wants, needs attention) with nothing fetched online.",
       fields: [
-        { k: "home_recommendations", label: "Include MusicBrainz recommendations", type: "bool" },
-        { k: "home_rec_count", label: "Recommendations shown", type: "number", min: 4, max: 60 },
         { k: "home_recent_count", label: "Recently-added albums shown", type: "number", min: 4, max: 60 },
       ],
     },
     {
       title: "Discovery",
       blurb:
-        "Online providers (Deezer, ListenBrainz, MusicBrainz, Last.fm, Wikipedia…) used for search, recommendations, artist images and album/artist descriptions. Each order list is tried top to bottom; the first provider with a usable answer wins. An empty list means the built-in order shown as the placeholder.",
+        "Online providers (Deezer, ListenBrainz, MusicBrainz, Last.fm, Wikipedia…) used for artist images and album/artist descriptions. Each order list is tried top to bottom; the first provider with a usable answer wins. An empty list means the built-in order shown as the placeholder.",
       fields: [
-        { k: "discovery_enabled", label: "Enabled (off = MusicBrainz only)", type: "bool" },
-        {
-          k: "discovery_rec_sources", label: "Recommendation sources (order)", type: "list", catalog: "discovery",
-          help: "Used by Home recommendations and “similar artists/albums”.",
-        },
-        {
-          k: "discovery_search_sources", label: "Search sources (order)", type: "list", catalog: "discovery",
-          help: "Used by the Discovery search tab for albums and artists.",
-        },
         {
           k: "artist_image_sources", label: "Artist image sources (order)", type: "list", catalog: "discovery",
           help: "Used when fetching an artist image automatically; the picked image can still be overridden per artist.",
@@ -688,17 +733,8 @@ export default function SettingsPage() {
         },
         { k: "discovery_timeout_s", label: "Request timeout (s)", type: "number", min: 3, max: 30 },
         {
-          k: "mb_search_source", label: "MusicBrainz search goes through", type: "select",
-          options: [["auto", "Auto — discovery first, MusicBrainz as fallback"], ["discovery", "Discovery providers"], ["musicbrainz", "MusicBrainz only"]],
-        },
-        {
-          k: "home_rec_source", label: "Home recommendation source", type: "select",
-          options: [["discovery", "Discovery providers"], ["listenbrainz", "ListenBrainz"], ["musicbrainz", "MusicBrainz"]],
-        },
-        { k: "home_popular_count", label: "Popular albums shown on Home", type: "number", min: 4, max: 60 },
-        {
           k: "rym_cookie", label: "RateYourMusic cookie", type: "password",
-          help: "Only needed when RYM answers with a challenge — the Cookie header of a signed-in rateyourmusic.com tab (dev tools → Network → any rym request → Request Headers → Cookie). Blank = RYM is skipped like any other unavailable source.",
+          help: "Only needed when RYM answers with a challenge. Sign in to rateyourmusic.com, press F12 → Network → reload → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\" and paste it here (newlines and the \"Cookie:\" label are handled for you). It is a session credential — do not share it, and paste a fresh one when RYM starts refusing, since signing out or clearing cookies invalidates it. Blank = RYM is skipped like any other unavailable source; MusicBrainz still resolves RYM links for well-known releases. Test it with the Sources panel's Test button.",
         },
         {
           k: "rym_links_auto", label: "Auto-find RateYourMusic links", type: "bool",
@@ -804,6 +840,7 @@ export default function SettingsPage() {
     { k: "grade_check_cue_format", label: "CUE format", type: "bool" },
     { k: "grade_check_disallowed", label: "Disallowed files", type: "bool" },
     { k: "grade_check_extra_images", label: "Extra artwork (images not tied to a track)", type: "bool" },
+    { k: "grade_check_empty_folders", label: "Empty folders (nothing anywhere beneath them)", type: "bool" },
     { k: "grade_check_naming", label: "Naming script paths", type: "bool" },
     { k: "grade_check_filename_case", label: "Filename capitalization (exact case)", type: "bool" },
     { k: "grade_check_ext_case", label: "Lowercase file extensions", type: "bool" },
@@ -811,6 +848,7 @@ export default function SettingsPage() {
     { k: "grade_check_key_bpm", label: "Key & BPM tags", type: "bool" },
     { k: "grade_check_lyrics_lang_tags", label: "Transform tags carry language (TRANSLATION-EN)", type: "bool" },
     { k: "grade_check_mood", label: "Mood tag present", type: "bool" },
+    { k: "grade_check_energy", label: "Energy tag present (0-100, with MOOD)", type: "bool" },
     { k: "grade_check_genre", label: "Genre tag present", type: "bool" },
     { k: "grade_check_album_description", label: "Album description stored", type: "bool" },
     { k: "grade_check_artist_image", label: "Artist image stored", type: "bool" },
@@ -886,6 +924,10 @@ export default function SettingsPage() {
     { k: "force_auto_tag", label: "8 · AutoTag re-run" },
     { k: "force_accurip", label: "9 · AccurateRip re-generate" },
     { k: "force_audiometa", label: "12 · Key & BPM re-analysis" },
+    { k: "force_tracklist", label: "15 · Release tracklist rewrite" },
+    { k: "force_mood", label: "16 · Mood & Energy re-analysis" },
+    { k: "force_xlit", label: "17 · Lyrics re-transliterate / re-translate" },
+    { k: "force_publish", label: "18 · Lyrics re-publish to LRCLIB" },
   ];
 
   const NAV: { id: string; label: string; section?: string }[] = [
@@ -903,6 +945,7 @@ export default function SettingsPage() {
     { id: "discovery", label: "Discovery", section: "Providers" },
     { id: "sources", label: "Sources", section: "Providers" },
     { id: "artistimages", label: "Artist images", section: "Providers" },
+    { id: "ai", label: "AI", section: "Providers" },
     { id: "import", label: "Import", section: "Providers" },
     { id: "flac", label: "FLACs & lossless", section: "Scripts" },
     { id: "embedcovers", label: "Embedded covers", section: "Scripts" },
@@ -942,7 +985,7 @@ export default function SettingsPage() {
     setMusicFolder(String(config.music_folder ?? ""));
     setLyricsFormat(String(config.lyrics_format ?? "EMBEDDED"));
     setWorkerLimit(Number(config.worker_limit ?? 0));
-    setNamingScript(String(config.naming_script ?? "") || DEFAULT_NAMING_SCRIPT);
+    setNamingScript(String(config.naming_script ?? ""));
     setShortFolderNames(!!config.short_folder_names);
     setScriptCfg(Object.fromEntries(ALL_CFG_KEYS.map((k) => [k, config[k] ?? CFG_DEFAULTS[k]])));
     const enc = (config.encoder_tags ?? {}) as Record<string, Record<string, boolean>>;
@@ -1063,7 +1106,7 @@ export default function SettingsPage() {
       ["audiometa", "Key & BPM"], ["beets", "Beets tagging"],
       ["soulseek", "Soulseek (managed slskd)"], ["autoimport", "Auto-import"],
       ["wishes", "Wishes"], ["home", "Home"],
-      ["discovery", "Discovery"], ["artistimages", "Artist images"], ["import", "Import pipeline"],
+      ["discovery", "Discovery"], ["artistimages", "Artist images"], ["ai", "AI lyric transforms"], ["import", "Import pipeline"],
       ["importtags", "Import & tag cleanup"],
     ].map(([tab, prefix]) => [
       tab,
@@ -1284,17 +1327,20 @@ export default function SettingsPage() {
               {f.help && <div className="text-[10px] text-zinc-600 mt-0.5">{f.help}</div>}
             </div>
           ) : (
-            <div className="flex items-center gap-2 w-full">
-              <span className="flex-1 min-w-0 truncate">{f.label}</span>
-              <input
-                className="input !w-20 !py-0.5 text-[11px] shrink-0 text-right"
-                type="number"
-                min={f.min}
-                max={f.max}
-                step={f.step ?? 1}
-                value={String(scriptCfg[f.k] ?? "")}
-                onChange={(e) => setCfg(f.k, Number(e.target.value))}
-              />
+            <div className="w-full">
+              <div className="flex items-center gap-2 w-full">
+                <span className="flex-1 min-w-0 truncate">{f.label}</span>
+                <input
+                  className="input !w-20 !py-0.5 text-[11px] shrink-0 text-right"
+                  type="number"
+                  min={f.min}
+                  max={f.max}
+                  step={f.step ?? 1}
+                  value={String(scriptCfg[f.k] ?? "")}
+                  onChange={(e) => setCfg(f.k, Number(e.target.value))}
+                />
+              </div>
+              {f.help && <div className="text-[10px] text-zinc-600 mt-0.5">{f.help}</div>}
             </div>
           )}
         </label>
@@ -1408,6 +1454,20 @@ export default function SettingsPage() {
                 </div>
                 <div className="text-[10px] text-zinc-600 mt-1">The Run All button executes them in this order.</div>
               </details>
+              <div className="rounded-md border border-border bg-zinc-950/40 px-3 py-2 space-y-1.5">
+                <div className="text-xs text-zinc-400">Setup wizard</div>
+                <div className="text-[11px] text-zinc-600 leading-relaxed">
+                  Re-runs the first-run walkthrough — music folder, dependencies, sources, AI &amp;
+                  RateYourMusic, Soulseek sharing. Every step is skippable, and nothing on this page is
+                  reset by it: it only writes what you enter there.
+                </div>
+                <button
+                  className="btn-ghost !py-1 text-xs"
+                  onClick={() => navigate("/setup")}
+                >
+                  <Wand2 className="h-3 w-3" /> Run the setup wizard again
+                </button>
+              </div>
               <details className="bg-zinc-950/40 rounded-lg border border-border px-3 py-2">
                 <summary className="text-xs font-medium cursor-pointer text-zinc-400 select-none">
                   Force options — re-run scripts even when up to date
@@ -1537,16 +1597,23 @@ export default function SettingsPage() {
                 spellCheck={false}
               />
               <div className="text-[11px] text-zinc-600 leading-relaxed">
-                Variables: <code>%albumartist% %musicbrainz_albumartistid% %releasetype% %year% %originaldate% %date% %album% %label% %releasecountry% %media% %catalognumber% %discnumber% %tracknumber% %title%</code> ·
-                Functions: <code>$if(a,b,c) $left(s,n) $num(s,n) $lower $upper $replace $ne $right</code> · <code>/</code> creates folders.
-                Applied from the album page or the bulk selection toolbar.
+                Variables: <code>%albumartist% %musicbrainz_albumartistid% %album% %musicbrainz_albumid% %title% %musicbrainz_trackid% %releasetype% %year% %originaldate% %date% %label% %releasecountry% %media% %catalognumber% %discnumber% %tracknumber%</code> ·
+                Functions: <code>$if(a,b,c) $left(s,n) $right(s,n) $num(s,n) $lower $upper $replace $eq $ne $not $and $or</code> · <code>/</code> creates folders.
+                Applied from the album page or the bulk selection toolbar; Grading compares every path against this script.
               </div>
               <div className="flex items-center gap-4 flex-wrap">
                 <label className="flex items-center gap-2 text-xs text-zinc-400 cursor-pointer select-none">
                   <input type="checkbox" checked={shortFolderNames} onChange={(e) => setShortFolderNames(e.target.checked)} />
                   Shorter folder names (truncate MusicBrainz IDs to 8 chars)
                 </label>
-                <button className="btn-ghost !py-1 text-xs" onClick={() => setNamingScript(DEFAULT_NAMING_SCRIPT)}>
+                <button
+                  className="btn-ghost !py-1 text-xs"
+                  onClick={() =>
+                    setNamingScript(
+                      String((configDefaults as Record<string, unknown> | undefined)?.naming_script ?? "")
+                    )
+                  }
+                >
                   <RotateCcw className="h-3.5 w-3.5" /> Reset to default
                 </button>
                 <button className="btn-ghost !py-1 text-xs" onClick={runPreview} disabled={previewing}>
@@ -1614,9 +1681,9 @@ export default function SettingsPage() {
                       <tr key={t.key} className="table-row cursor-default">
                         <td className="td font-medium">{t.name}</td>
                         <td className="td">
-                          {t.state === "ok" && <span className="chip bg-emerald-900/50 text-emerald-300 border border-emerald-800">ready</span>}
-                          {t.state === "update" && <span className="chip bg-amber-900/50 text-amber-300 border border-amber-900">update</span>}
-                          {t.state === "missing" && <span className="chip bg-red-900/50 text-red-300 border border-red-900">missing</span>}
+                          {t.state === "ok" && <span className="chip bg-emerald-900/50 text-emerald-300 border border-emerald-800">Ready</span>}
+                          {t.state === "update" && <span className="chip bg-amber-900/50 text-amber-300 border border-amber-900">Update</span>}
+                          {t.state === "missing" && <span className="chip bg-red-900/50 text-red-300 border border-red-900">Missing</span>}
                         </td>
                         <td className="td text-zinc-500">{t.installed_version ?? t.detected_version ?? "—"}</td>
                         <td className="td text-zinc-500">{t.latest_version ?? "—"}</td>
@@ -1637,6 +1704,15 @@ export default function SettingsPage() {
               <div className="text-xs font-bold text-zinc-300">{GROUP_BY_TAB[tab].title}</div>
               {GROUP_BY_TAB[tab].blurb && <div className="text-[10px] text-zinc-600">{GROUP_BY_TAB[tab].blurb}</div>}
               {renderFields(GROUP_BY_TAB[tab].fields)}
+              {tab === "ai" && (
+                <div className="pt-2 border-t border-border space-y-1">
+                  <AiTestButton value={scriptCfg} />
+                  <div className="text-[10px] text-zinc-600">
+                    Tests the values on screen — save first if you want them to stick. Script 17 runs from the
+                    Optimization page, the library selection menu, or as part of Run All.
+                  </div>
+                </div>
+              )}
               {tab === "images" && (
                 <div className="pt-2 border-t border-border">
                   <CoverDefaults />

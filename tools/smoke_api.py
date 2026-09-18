@@ -91,7 +91,6 @@ def main():
         (f"/api/album/scan-tracks?path={q(apath)}", "GET", None),
         (f"/api/lyrics/get?artist={q(artist_name)}&track={q(track_title)}", "GET", None),
         (f"/api/lyrics/search?artist={q(artist_name)}&track={q(track_title)}", "GET", None),
-        ("/api/mb/search?q=test", "GET", None),
         ("/api/mb/search/artists?q=test", "GET", None),
         ("/api/mb/search/releases?q=test", "GET", None),
         ("/api/rym/validate?url=https://rateyourmusic.com/release/album/x/y", "GET", None),

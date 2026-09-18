@@ -21,6 +21,14 @@ What this pins, with every HTTP seam stubbed (no network at all):
   * `resolve_cov_search` lets a per-search `sources`/`country` override the
     saved defaults for that one search, validates ids against the catalogue,
     and never mutates the config;
+  * the import cover step (`run_cover_step`) honours the shipped defaults:
+    `cover_review` ON (the default) STAGES the found candidates in the
+    metadata review file and writes no cover at all, asks the finder for the
+    review limit, goes by release-group id through the Cover Art Archive when
+    the tags carry one, and keeps the other keys of a pre-existing staged
+    entry; OFF writes the best hit through the cover page's own writer;
+    `cover_auto_fetch` OFF fetches, stages and writes nothing; an album that
+    already has art is the same no-op in all three modes;
   * the lyrics built-in chain is the documented ranking, `available_sources()`
     carries a stable 1-based `rank` (and states each provider's caveats), and
     a saved `lyrics_sources` list still wins.
@@ -526,7 +534,283 @@ assert mlo_config.DEFAULT_CONFIG["cover_country"] == "us"
 
 
 # --------------------------------------------------------------------------- #
-# 7) The lyrics ranking
+# 7) The import cover step: `cover_review` on stages the candidates
+# --------------------------------------------------------------------------- #
+# `run_cover_step` identifies an album by its own tags and hands the review
+# file what the finder returned. Building real tagged audio here would test
+# mutagen, so the tags come from a table; the HTTP seams above are the ones
+# the finder actually uses.
+from mlo import audio as mlo_audio
+from server import imports as imp
+
+MUSIC = os.path.join(_TMP, "music")
+REVIEW_FILE = os.path.join(MUSIC, ".mlo", "data", "metadata_review.json")
+# The no-op shape: nothing wanted or nothing to do — the same answer for an
+# album that already has art and for a switch that is off.
+NOOP = {"fetched": False, "applied": {}, "source": None, "note": "",
+        "staged": False, "candidates": 0}
+
+_TAGS = {}
+
+
+class FakeAudioFile:
+    """`mlo.audio.AudioFile`, minus mutagen: the step reads artist/album/the
+    release-group id straight off the tags."""
+
+    def __init__(self, path):
+        self.path = path
+        self.audio = object()          # not None → the tags are read
+        self.tags = _TAGS.get(os.path.normpath(str(path)), {})
+
+    def get_tag(self, name):
+        return self.tags.get(name)
+
+
+mlo_audio.AudioFile = FakeAudioFile
+
+
+def album(name, artist="Radiohead", title="OK Computer", rg="", cover=False,
+          album_id=""):
+    """A folder with one audio file carrying these TAGS, and maybe a cover."""
+    path = os.path.join(MUSIC, "Artists", name)
+    os.makedirs(path, exist_ok=True)
+    track = os.path.join(path, "01 - Airbag.flac")
+    open(track, "wb").close()
+    _TAGS[os.path.normpath(track)] = {"ALBUMARTIST": artist, "ALBUM": title,
+                                      "MUSICBRAINZ_RELEASEGROUPID": rg,
+                                      "MUSICBRAINZ_ALBUMID": album_id}
+    if cover:
+        open(os.path.join(path, "cover.jpg"), "wb").close()
+    return path
+
+
+# The shipped defaults, straight from the config schema: on, and an explicit
+# "off" round-trips instead of being defaulted back on.
+assert mlo_config.normalize_config({})["cover_review"] is True
+assert mlo_config.normalize_config({})["cover_auto_fetch"] is True
+assert mlo_config.normalize_config({"cover_review": False})["cover_review"] is False
+assert mlo_config.DEFAULT_CONFIG["cover_review"] is True
+assert mlo_config.DEFAULT_CONFIG["cover_auto_fetch"] is True
+# a review is a pick-one screen, so the step asks for a screenful
+assert imp.COVER_REVIEW_LIMIT == 12
+
+REVIEW_ON = {"music_folder": MUSIC, "cover_review": True}
+# A pass-through recorder around the finder: the review limit is applied a
+# second time to the staged rows, so only the CALL shows which limit the step
+# actually asked the provider for.
+_real_search = intg.cover_search
+asked = []
+
+
+def recording_search(artist, album, **kw):
+    asked.append(kw)
+    return _real_search(artist, album, **kw)
+
+
+intg.cover_search = recording_search
+
+staged_album = album("Radiohead/OK Computer", album_id="rel-1")
+clear_caches()
+stub_probe({})
+calls = stub_cov(cover_lines(20, width=1200, height=1200))
+stub_json({})
+out = imp.run_cover_step(staged_album, REVIEW_ON)
+# staged, NOT fetched, and the count is the review limit — not the finder's
+# own default of 40, and not the single hit the auto-apply used to take.
+assert (out["staged"], out["fetched"], out["candidates"]) == (True, False, 12), out
+assert out["source"] == "cov" and "12 cover" in out["note"], out
+assert set(out) == set(NOOP), out
+assert asked[0]["limit"] == imp.COVER_REVIEW_LIMIT, asked
+assert len(calls) == 1, calls
+assert calls[0]["body"]["artist"] == "Radiohead", calls[0]["body"]
+assert calls[0]["body"]["album"] == "OK Computer", calls[0]["body"]
+# no cover file: the step wrote nothing at all
+assert os.listdir(staged_album) == ["01 - Airbag.flac"], os.listdir(staged_album)
+
+# The candidates live in the metadata step's own review file, under the
+# album's key, with that step's keys left alone.
+review = json.load(open(REVIEW_FILE, encoding="utf-8"))
+covers = review[imp._review_key(staged_album)]["covers"]
+assert set(covers) == {"artist", "album", "album_id", "release_group",
+                       "provider", "staged_at", "results"}, covers
+assert covers["artist"] == "Radiohead" and covers["album"] == "OK Computer"
+assert covers["release_group"] == "" and covers["provider"] == "cov"
+# `album_id` is the release the album's tags name — the second identity the
+# lookup can fall back on when the import chain has moved the album.
+assert covers["album_id"] == "rel-1", covers["album_id"]
+assert len(covers["staged_at"]) == 20 and covers["staged_at"].endswith("Z"), \
+    covers["staged_at"]
+# the provider's rows, verbatim and in its own order
+assert len(covers["results"]) == 12, len(covers["results"])
+assert covers["results"][0] == {
+    "source": "itunes", "small": "https://img.test/a0-500.jpg",
+    "big": "https://img.test/a0.jpg", "title": "T", "artist": "A", "tracks": 12,
+    "url": "https://rel/", "width": 1200, "height": 1200}, covers["results"][0]
+assert [r["big"] for r in covers["results"]] == \
+    [f"https://img.test/a{i}.jpg" for i in range(12)], covers["results"]
+
+# The import chain relocates the album (beets/organize), so the record must be
+# findable from a path the import never saw: `staged_metadata` falls back to
+# the album folder name and then to the album's own MusicBrainz ids, read from
+# the tags of whichever folder the page is looking at.
+_moved = album("Someone Else/OK Computer (2017 remaster)", artist="Radiohead",
+               title="OK Computer", album_id="rel-1")
+assert imp.staged_metadata(_moved, REVIEW_ON)["covers"]["provider"] == "cov", \
+    "moved album lost its staged covers"
+assert imp.staged_metadata(staged_album, REVIEW_ON) == imp.staged_metadata(_moved, REVIEW_ON), \
+    "the moved lookup returned a different record"
+
+# The DEFAULT is the review: a config that says nothing about it stages too.
+default_album = album("Blur/Think Tank", artist="Blur", title="Think Tank")
+clear_caches()
+stub_cov(cover_lines(3, width=1000, height=1000))
+stub_json({})
+out = imp.run_cover_step(default_album, {"music_folder": MUSIC})
+assert (out["staged"], out["fetched"], out["candidates"]) == (True, False, 3), out
+
+# A row with no image URL is not an option the pick screen could apply at all
+# (`POST /api/cover/fromurl` takes a URL), so it is not staged — and a set
+# that would have been all-dead is the "nothing found" case above.
+nowrite_album = album("Muse/Origin of Symmetry", artist="Muse",
+                      title="Origin of Symmetry")
+clear_caches()
+lines = cover_lines(3, width=1000, height=1000)
+lines.append(json.dumps({"type": "cover", "source": "itunes",
+                         "smallCoverUrl": "https://img.test/x-500.jpg",
+                         "releaseInfo": {"title": "T", "artist": "A"}}))
+stub_cov(lines)
+stub_json({})
+out = imp.run_cover_step(nowrite_album, REVIEW_ON)
+assert (out["staged"], out["candidates"]) == (True, 3), out
+staged = imp.staged_metadata(nowrite_album, REVIEW_ON)["covers"]["results"]
+assert [r["big"] for r in staged] == [f"https://img.test/a{i}.jpg" for i in range(3)], staged
+
+# A release-group id in the tags asks the Cover Art Archive BY IDENTITY — the
+# name search is not asked at all — and gets the same review limit.
+rg_album = album("Radiohead/Amnesiac", title="Amnesiac", rg=CAA_RG)
+clear_caches()
+cov_calls = stub_cov([])
+jcalls = stub_json({"coverartarchive.org": {"images": [
+    {"front": i == 0, "image": f"https://coverartarchive.org/release/rg/{i}.png",
+     "thumbnails": {"large": f"https://coverartarchive.org/release/rg/{i}-500.jpg"}}
+    for i in range(15)]}})
+out = imp.run_cover_step(rg_album, REVIEW_ON)
+assert (out["staged"], out["candidates"], out["source"]) == \
+    (True, 12, "coverartarchive"), out
+assert cov_calls == [], cov_calls
+assert [c[0] for c in jcalls] == [f"{intg.CAA_BASE}/release-group/{CAA_RG}"], jcalls
+entry = imp.staged_metadata(rg_album, REVIEW_ON)["covers"]
+assert entry["release_group"] == CAA_RG and len(entry["results"]) == 12, entry
+
+# The metadata step may have staged this very album: its keys survive.
+imp.stage_metadata(staged_album, {"artist": "Radiohead",
+                                  "album": "OK Computer",
+                                  "candidates": [{"url": "https://artist.test/x.jpg"}]},
+                   REVIEW_ON)
+clear_caches()
+stub_cov(cover_lines(4, width=1000, height=1000))
+stub_json({})
+out = imp.run_cover_step(staged_album, REVIEW_ON)
+entry = imp.staged_metadata(staged_album, REVIEW_ON)
+assert entry["candidates"] == [{"url": "https://artist.test/x.jpg"}], entry
+assert entry["artist"] == "Radiohead" and entry["album"] == "OK Computer", entry
+assert len(entry["covers"]["results"]) == 4, entry
+
+
+# --------------------------------------------------------------------------- #
+# 8) `cover_review` off: the best hit is written here; the two no-ops
+# --------------------------------------------------------------------------- #
+# The step reaches back into `server.main` for the cover page's own writer
+# (download + normalise + store), so that is what gets stubbed here.
+from server import main as srv_main
+
+fetched = []
+written = []
+
+
+def fake_url_bytes(url, artist="", album="", rg=""):
+    fetched.append({"url": url, "artist": artist, "album": album, "rg": rg})
+    return png(600, 600), "image/png"
+
+
+def fake_write_cover(album_dir, stem, ext, data):
+    written.append({"album_dir": album_dir, "stem": stem, "ext": ext,
+                    "data": data})
+    return {"path": os.path.join(album_dir, stem + ext)}
+
+
+srv_main._cover_url_bytes = fake_url_bytes
+srv_main._write_cover_bytes = fake_write_cover
+srv_main._sniff_image_ext = lambda data, ctype=None: ".png"
+
+staged_before = copy.deepcopy(imp.staged_metadata(staged_album, REVIEW_ON))
+clear_caches()
+calls = stub_cov(cover_lines(5, width=1000, height=1000))
+stub_json({})
+out = imp.run_cover_step(staged_album, {"music_folder": MUSIC,
+                                        "cover_review": False})
+assert (out["fetched"], out["staged"], out["candidates"]) == (True, False, 0), out
+assert out["source"] == "cov" and out["note"].startswith("cover fetched"), out
+# no review: the step asks for the best hit (the old shape), takes it, writes it
+assert asked[-1]["limit"] == 2, asked
+assert out["applied"] == {"cover": os.path.join(staged_album, "cover.png")}, out
+# the first (best) hit went through the writer, with the album's identity
+assert fetched == [{"url": "https://img.test/a0.jpg", "artist": "Radiohead",
+                    "album": "OK Computer", "rg": ""}], fetched
+assert [w["album_dir"] for w in written] == [staged_album], written
+assert written[0]["stem"] == "cover" and written[0]["data"] == png(600, 600), written
+# the file is the writer's, and the staged set an earlier step left is untouched
+assert not os.path.exists(os.path.join(staged_album, "cover.png"))
+assert imp.staged_metadata(staged_album, REVIEW_ON) == staged_before, \
+    imp.staged_metadata(staged_album, REVIEW_ON)
+
+# `cover_auto_fetch` off: nothing is fetched, staged or written, with either
+# value of cover_review — the finder is not even asked.
+off_album = album("Portishead/Dummy", artist="Portishead", title="Dummy")
+clear_caches()
+calls = stub_cov(cover_lines(3, width=1000, height=1000))
+stub_json({})
+wrote = (len(fetched), len(written))
+for off_cfg in ({"music_folder": MUSIC, "cover_auto_fetch": False},
+                {"music_folder": MUSIC, "cover_auto_fetch": False,
+                 "cover_review": True},
+                {"music_folder": MUSIC, "cover_auto_fetch": False,
+                 "cover_review": False}):
+    assert imp.run_cover_step(off_album, off_cfg) == NOOP, off_cfg
+assert calls == [] and (len(fetched), len(written)) == wrote, (calls, fetched, written)
+assert imp.staged_metadata(off_album, REVIEW_ON) == {}
+
+# An album that already has art: the same no-op in all three modes, and still
+# no staged entry (a covered album's staged set is not a thing the UI reads).
+covered = album("Air/Moon Safari", artist="Air", title="Moon Safari", cover=True)
+clear_caches()
+calls = stub_cov(cover_lines(3, width=1000, height=1000))
+stub_json({})
+results = [imp.run_cover_step(covered, mode) for mode in (
+    {"music_folder": MUSIC},
+    {"music_folder": MUSIC, "cover_review": False},
+    {"music_folder": MUSIC, "cover_auto_fetch": False})]
+assert results == [NOOP] * 3, results
+assert calls == [] and (len(fetched), len(written)) == wrote, (calls, fetched, written)
+assert imp.staged_metadata(covered, REVIEW_ON) == {}
+assert sorted(os.listdir(covered)) == ["01 - Airbag.flac", "cover.jpg"], \
+    sorted(os.listdir(covered))
+
+# Nobody has anything: a note that says so — never an exception, never a
+# staged entry with no candidates in it.
+empty_album = album("Nobody/Nothing", artist="Nobody", title="Nothing")
+clear_caches()
+calls = stub_cov([])
+jcalls = stub_json({})
+out = imp.run_cover_step(empty_album, REVIEW_ON)
+assert (out["staged"], out["fetched"], out["candidates"]) == (False, False, 0), out
+assert "no cover" in out["note"], out
+assert len(calls) == 1 and jcalls, (calls, jcalls)   # the fallbacks found none either
+assert imp.staged_metadata(empty_album, REVIEW_ON) == {}
+
+
+# --------------------------------------------------------------------------- #
+# 9) The lyrics ranking
 # --------------------------------------------------------------------------- #
 # The documented ranking IS the code's ranking: every provider appears in the
 # module docstring, in the order it is tried.

@@ -7,14 +7,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from .audio import AudioFile, TAG_MAP
 from .config import should_write_audio_tag
 from .lyrics import (
-    _lrc_for, _canonical_lyrics, format_lyrics_text, text_meets_sync_level,
+    _lrc_for, _canonical_lyrics, format_lyrics_text, has_lyrics_text,
+    text_meets_sync_level,
 )
 from .cue import canonical_cue_text
 from .naming import (DEFAULT_NAMING_SCRIPT, UNKNOWN_RELEASE_TYPE,
                      lookup_style_release_type, mb_style_release_type)
 from .paths import (ALBUM_SIDECAR_NAMES, AUDIO_EXTS, IMAGE_EXTS,
-                    LIB_AUDIO_EXTS, LIB_VIDEO_EXTS, get_track_cover,
-                    library_root, load_track_covers)
+                    LIB_AUDIO_EXTS, LIB_VIDEO_EXTS, SKIP_DIRS, get_track_cover,
+                    library_root, load_expected_tracks, load_track_covers)
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, is_audio_file,
     _find_albums, _clean_set, _summarize_values, _collect_targets,
@@ -848,16 +849,17 @@ def _cover_image_ok(path, config):
             w, h = img.size
             if w <= 0 or h <= 0:
                 return False
-            # Size enforcement — dimensions must match the resolution
-            # target exactly (within tolerance) in BOTH directions: an
-            # undersized cover fails just like an oversized one.
+            # Size enforcement — a cover LARGER than the target fails: the
+            # image pass downscales it. An undersized one is accepted, because
+            # that same pass never upscales (resampling up invents pixels), so
+            # failing it would be a permanent FAIL nothing can clear.
             if enforce_size and resize_enabled and target > 0:
                 try:
                     tol = int(config.get("grader_cover_size_tolerance_px", 0) or 0)
                     tol = max(0, min(5, tol))
                 except Exception:
                     tol = 0
-                if abs(w - target) > tol or abs(h - target) > tol:
+                if w - target > tol or h - target > tol:
                     return False
             # Square enforcement (force_exact => strict)
             if enforce_square:
@@ -892,7 +894,7 @@ def _cover_image_ok(path, config):
                     tol = max(0, min(5, tol))
                 except Exception:
                     tol = 0
-                if abs(jw - target) > tol or abs(jh - target) > tol:
+                if jw - target > tol or jh - target > tol:
                     return False
             if jw and jh and enforce_square:
                 ratio = jw / jh if jh else 1.0
@@ -906,7 +908,10 @@ def _cover_image_ok(path, config):
                 return True
         except Exception:
             pass
-        return True
+        # Enforcement is on and no reader could state the dimensions: that is
+        # an unreadable/corrupt cover, not a pass (the album-cover path has
+        # always failed it — the two must agree).
+        return not (enforce_size or enforce_square)
 
 
 def _grade_sidecars(album_dir, all_files, cfg):
@@ -1260,6 +1265,23 @@ def _audio_format_info(af):
     return (bits, getattr(info, "sample_rate", None))
 
 
+def _ambiguous_lrc_stems(filenames):
+    """Stems shared by more than one graded file in one album folder.
+
+    `_lrc_for` drops only the LAST extension, so "01 Song.flac", "01 Song.mp3"
+    and "01 Song.mp4" in the same folder all resolve to the same
+    "01 Song.lrc" — one real sidecar would be credited to every one of them.
+    A sidecar that belongs to several tracks belongs to none, so these stems
+    get no lrc credit at all (their embedded lyrics still count).
+    `normcase` compares stems the way this OS's filesystem does.
+    """
+    counts = {}
+    for name in filenames:
+        stem = os.path.normcase(os.path.splitext(name)[0])
+        counts[stem] = counts.get(stem, 0) + 1
+    return {stem for stem, n in counts.items() if n > 1}
+
+
 def _grade_album(album_dir, lyrics_format, cfg=None):
     if cfg is None:
         cfg = {}
@@ -1354,6 +1376,13 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
     # and only the missing-tag sweep grades it — skip the probe otherwise.
     multi_disc = (_multi_disc_album(album_dir, all_files)
                   if cfg.get("grade_check_missing_tags", True) else False)
+
+    # One .lrc cannot be credited to several same-stem tracks (see
+    # _ambiguous_lrc_stems) — computed once for the whole folder.
+    ambiguous_lrc_stems = _ambiguous_lrc_stems(files)
+    # CD tracks whose AUDIT requirement is decided after the .log/.accurip
+    # verification runs (see the deferred resolution further down).
+    deferred_audit = {}
 
     for ap in audio_paths:
         af = AudioFile(ap)
@@ -1490,8 +1519,11 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         # Excess tags: anything NEITHER this pipeline's scripts NOR beets
         # would have written — the optimizer's strip pass would remove every
         # key outside the shared vocabulary. Their presence counts against
-        # grading so unoptimized files surface.
-        if cfg.get("grade_check_excess_tags", True) and not is_video_track:
+        # grading so unoptimized files surface. Gated on `strip_unknown_tags`
+        # as well: with the strip pass switched off nothing in the pipeline
+        # can clear an excess tag, so demanding it would be a permanent FAIL.
+        if cfg.get("grade_check_excess_tags", True) \
+                and cfg.get("strip_unknown_tags", True) and not is_video_track:
             # Script vocabulary: TAG_MAP keys, the encoder identity tags,
             # beets/mediafile's own spellings and Picard's — the SAME
             # predicate the Optimize strip pass applies (mlo.format_all), so
@@ -1729,19 +1761,30 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         track["audit"] = audit_clean or None
         if (
             should_write_audio_tag(cfg, "AUDIT", filepath=ap)
-            and cfg.get("grade_check_audit", True)
+            # Default OFF, matching mlo.config.DEFAULT_CONFIG: a partial cfg
+            # (tests, library-grade helpers) must not auto-fail an
+            # unaudited library.
+            and cfg.get("grade_check_audit", False)
             and not is_video_track
         ):
-            total_checks += 1
-            if not audit_clean:
-                failed_checks += 1
-                add_issue("Missing AUDIT tag (run Audit Library)", basename)
-                track["issues"].append("AUDIT")
-            elif audit_clean.upper() != "REAL":
-                failed_checks += 1
-                add_issue(f"AUDIT tag is {audit_clean.upper()} (not REAL)",
-                          basename)
-                track["issues"].append("AUDIT")
+            if _is_cd(media_clean):
+                # A CD rip's integrity is decided by its own verification
+                # (.log CRC / .accurip), which is only read AFTER this loop —
+                # so this verdict is DEFERRED. AudioAuditor's spectrogram
+                # verdict must never be the last word on a disc whose rip is
+                # provably intact.
+                deferred_audit[ap] = (basename, audit_clean)
+            else:
+                total_checks += 1
+                if not audit_clean:
+                    failed_checks += 1
+                    add_issue("Missing AUDIT tag (run Audit Library)", basename)
+                    track["issues"].append("AUDIT")
+                elif audit_clean.upper() != "REAL":
+                    failed_checks += 1
+                    add_issue(f"AUDIT tag is {audit_clean.upper()} (not REAL)",
+                              basename)
+                    track["issues"].append("AUDIT")
 
         # MusicBrainz / RateYourMusic identity links — required for a PASS.
         # Exactly two links are graded: the MusicBrainz RELEASE (falling
@@ -1787,15 +1830,16 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
 
         # Lyrics status. A sidecar only counts when it actually holds text:
         # an empty .lrc left behind by an aborted run used to make a
-        # lyric-less track report (and grade as) having lyrics.
+        # lyric-less track report (and grade as) having lyrics, and content
+        # that is only metadata or bare timestamps is no better. A sidecar
+        # shared with a same-stem sibling is credited to nobody.
         lyr = af.get_lyrics()
         embedded = bool(lyr and str(lyr).strip())
         lrc = False
-        _lrc_path = _lrc_for(ap)
-        if os.path.exists(_lrc_path):
+        if os.path.normcase(os.path.splitext(basename)[0]) not in ambiguous_lrc_stems:
             try:
-                with open(_lrc_path, "r", encoding="utf-8", errors="replace") as _f:
-                    lrc = bool(_f.read().strip())
+                with open(_lrc_for(ap), "r", encoding="utf-8", errors="replace") as _f:
+                    lrc = has_lyrics_text(_f.read())
             except OSError:
                 lrc = False
 
@@ -1902,11 +1946,16 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     if lrc_text and TIMESTAMP_RE_GRADE.search(lrc_text) \
                             and not text_meets_sync_level(lrc_text, _level):
                         fmt_ok = False
-                # Unsynced lyrics must fail — plain text without any [mm:ss.xx] is not synced
-                if lyr_text and not TIMESTAMP_RE_GRADE.search(lyr_text):
-                    fmt_ok = False
-                if lrc_text and not TIMESTAMP_RE_GRADE.search(lrc_text):
-                    fmt_ok = False
+                # Unsynced lyrics fail — plain text with no [mm:ss.xx] is not
+                # synced — UNLESS the user opted into plain lyrics
+                # (lyrics_allow_plain). The provider chain is then allowed to
+                # store an untimed answer, and no script can invent the
+                # missing timestamps: grading what the pipeline can produce.
+                if not cfg.get("lyrics_allow_plain", False):
+                    if lyr_text and not TIMESTAMP_RE_GRADE.search(lyr_text):
+                        fmt_ok = False
+                    if lrc_text and not TIMESTAMP_RE_GRADE.search(lrc_text):
+                        fmt_ok = False
                 if not fmt_ok:
                     failed_checks += 1
                     add_issue("Lyrics not optimally formatted "
@@ -2157,7 +2206,9 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     tr["issues"].append("LOG_GRADE")
                 else:
                     try:
-                        thresh = int(cfg.get("grade_log_score_threshold", 0) or 0)
+                        # 100 = the shipped default (mlo.config); 0 is a
+                        # deliberate "no threshold", never a partial-cfg fallback.
+                        thresh = int(cfg.get("grade_log_score_threshold", 100) or 0)
                         thresh = max(0, min(100, thresh))
                     except Exception:
                         thresh = 0
@@ -2240,11 +2291,17 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                         d = (disc_by_path.get(ap)
                              or disc_of_filename(os.path.basename(ap)) or 1)
                         crcs = per_disc_crc.get(d)
-                        if crcs is None and (single_log or unmapped_crc):
-                            # One log (or a log whose disc could not be told
-                            # from its name) covers the album's tracks.
-                            crcs = unmapped_crc or next(
-                                iter(per_disc_crc.values()), {})
+                        if crcs is None and single_log:
+                            # Exactly one log covers the album's tracks,
+                            # whichever disc its name claims — a single-disc
+                            # rip whose log name carries no disc number.
+                            crcs = next(iter(per_disc_crc.values()), {}) or unmapped_crc
+                        elif crcs is None and unmapped_crc and not per_disc_crc:
+                            # Every log failed to state its disc (unusual
+                            # names): their checksums are all there is, and
+                            # nothing can be attributed to the wrong disc
+                            # because no disc was attributable at all.
+                            crcs = unmapped_crc
                         covered = tn is not None and tn in (crcs or {})
                         total_checks += 1
                         if not covered:
@@ -2563,6 +2620,50 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                             tr["audit"] = "FAKE"
                 except Exception:
                     pass
+            # ---- the CD's own evidence is the last word on its AUDIT -------
+            # A rip whose .log verifies, or whose .accurip verifies, is intact
+            # on that evidence alone: the stored tag (AudioAuditor's spectral
+            # verdict, or a stale FAKE from an earlier run) is corrected here,
+            # for the viewer, whether or not the AUDIT check is graded — a
+            # provably good CD must not render red. The per-track CRC match
+            # it is graded on is proven by script 6, which writes the tag.
+            for tr in tracks:
+                if not _is_cd(media_summary) or _is_video_file(tr.get("file")):
+                    continue
+                if (tr.get("checksum_status") == "REAL"
+                        or tr.get("accuraterip_status") == "REAL"):
+                    tr["audit"] = "REAL"
+                    tr["audit_verified"] = ("log-checksum" if tr.get("checksum_status") == "REAL"
+                                            else "accuraterip")
+            # ---- CD verification resolves the deferred AUDIT requirement --
+            # A rip whose .log CRC verifies, or whose .accurip verifies, is
+            # REAL on that evidence alone: the stored tag (AudioAuditor's
+            # spectral verdict, or a stale FAKE from an earlier run) is
+            # corrected, and the requirement is satisfied.
+            for ap, (basename, stored_tag) in deferred_audit.items():
+                tr = track_by_path.get(ap)
+                if tr is None:
+                    continue
+                total_checks += 1
+                if (tr.get("checksum_status") == "REAL"
+                        or tr.get("accuraterip_status") == "REAL"):
+                    tr["audit"] = "REAL"
+                    # What proved it: the rip log's own EAC checksum, or the
+                    # .accurip's AccurateRip verdict. (The per-track CRC match
+                    # is proven by script 6, which is what writes the tag.)
+                    tr["audit_verified"] = ("log-checksum" if tr.get("checksum_status") == "REAL"
+                                            else "accuraterip")
+                    if str(tr.get("values", {}).get("AUDIT") or "").strip().upper() != "REAL":
+                        tr["values"]["AUDIT"] = "REAL"
+                    continue
+                failed_checks += 1
+                if not stored_tag:
+                    add_issue("Missing AUDIT tag (run Audit Library)", basename)
+                else:
+                    add_issue(f"AUDIT tag is {stored_tag.upper()} (not REAL)",
+                              basename)
+                tr["issues"].append("AUDIT")
+
             # ---- manual override wins over every derived verdict ----------
             # AudioAuditor's REAL/FAKE is EVIDENCE, not a fact: a user who has
             # verified a rip by other means (a second drive, a different tool,
@@ -2630,6 +2731,7 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         size_failed = False
         square_failed = False
         size_info = ""
+        under_info = ""
         # Force exact: when cover_force_exact_size is on, it implies both size and square
         # must be exactly target×target, regardless of the separate enforce toggles.
         force_exact = bool(cfg.get("cover_force_exact_size", False))
@@ -2654,12 +2756,17 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             except Exception:
                 tol = 0
             if w is not None and h is not None:
-                if abs(w - target_cov) > tol or abs(h - target_cov) > tol:
+                if w - target_cov > tol or h - target_cov > tol:
                     failed_checks += 1
                     size_failed = True
                     cover_ok = False
                     size_info = f"{w}x{h} → {target_cov}x{target_cov}"
-                    add_issue(f"Cover image wrong size {w}x{h} (need {target_cov}x{target_cov})", "album")
+                    add_issue(f"Cover image too large {w}x{h} (need {target_cov}x{target_cov})", "album")
+                elif w < target_cov - tol or h < target_cov - tol:
+                    # Undersized: the image pass never upscales, so the target
+                    # is unreachable for this file and failing it would be
+                    # permanent. Report it, do not fail it.
+                    under_info = f"{w}x{h}, below the {target_cov}px target (never upscaled)"
             elif cover_read_error:
                 failed_checks += 1
                 size_failed = True
@@ -2713,9 +2820,14 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 cover_detail = f"{cover_file} (not square {size_info})"
             else:
                 cover_detail = f"{cover_file} (needs resize)"
+        elif under_info:
+            cover_detail = f"{cover_file} ({under_info})"
         else:
             cover_detail = cover_file
         # ENCODER for cover image per-format (only when that field is enabled)
+        # Gated like the audio check (grade_check_encoder) and on
+        # image processing: script 5 is the only writer of those markers,
+        # so with it off the check would fail an album nothing can fix.
         try:
             cov_ext = os.path.splitext(cover_file)[1].lower() if cover_file else ""
             cov_enc_key = None
@@ -2725,7 +2837,9 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 cov_enc_key = "png"
             elif cov_ext == ".jxl":
                 cov_enc_key = "jxl"
-            if cov_enc_key and cover_file:
+            if cov_enc_key and cover_file \
+                    and cfg.get("grade_check_encoder", True) \
+                    and cfg.get("reencode_images", True):
                 cov_enc_cfg = (cfg.get("encoder_tags") or {}).get(cov_enc_key, {})
                 for field in ("ENCODER_PROGRAM", "ENCODER_QUALITY", "ENCODER_VERSION"):
                     default_on = False if field == "ENCODER_PROGRAM" else True
@@ -2914,6 +3028,19 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 shown += f" (+{len(uncompressed) - 4} more)"
             add_issue(f"Uncompressed lossless file(s): {shown} (convert to FLAC)", "album")
 
+    # Every album must carry the MusicBrainz release's own tracklist manifest
+    # (.mlo_expected.json, written at import and by script 15). The files on
+    # disk only describe themselves, so without the manifest a PARTIAL import
+    # (3 tracks of 12) is indistinguishable from a complete album and grades
+    # PASS. An album that HAS the manifest is never failed by this check —
+    # its tracklist is diffed against the files as before (see
+    # server.library._add_expected_tracks → `expected_tracks` / `partial`).
+    if cfg.get("grade_check_expected_tracks", True):
+        total_checks += 1
+        if not load_expected_tracks(album_dir)["tracks"]:
+            failed_checks += 1
+            add_issue(EXPECTED_TRACKS_MISSING, "album")
+
     pass_count = max(0, total_checks - failed_checks)
 
     # Ensure viewer columns have values even for non-CD albums
@@ -2951,8 +3078,12 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
         cd_tracks = [tr for tr in tracks if not _is_video_file(tr.get("file"))]
         try:
             if _is_cd(media_summary) and cfg.get("audit_require_accuraterip", True) and cfg.get("grade_check_accuraterip", True):
-                # Check per-track accuraterip: if any track is NONE/FAKE, album audit is FAKE, but per-track already set correctly above
+                # Per-track AccurateRip: a NONE/FAKE track makes the album
+                # FAKE — unless that track's rip is verified by its own .log
+                # CRC, which stands on its own evidence.
                 for tr in cd_tracks:
+                    if tr.get("checksum_status") == "REAL":
+                        continue
                     if tr.get("accuraterip_status") in ("NONE", "FAKE"):
                         return "FAKE"
         except Exception:
@@ -2981,7 +3112,13 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             return "FAKE"
         # For REAL, require all per-track checks to be REAL as well (not just album aggregate)
         try:
-            all_ar_real = all(tr.get("accuraterip_status") == "REAL" for tr in cd_tracks) if _is_cd(media_summary) and cfg.get("audit_require_accuraterip", True) and cfg.get("grade_check_accuraterip", True) else True
+            # A track verified by EITHER source (its .log CRC or its
+            # .accurip) counts as accurately ripped for the album verdict.
+            all_ar_real = all(
+                tr.get("accuraterip_status") == "REAL"
+                or tr.get("checksum_status") == "REAL"
+                for tr in cd_tracks
+            ) if _is_cd(media_summary) and cfg.get("audit_require_accuraterip", True) and cfg.get("grade_check_accuraterip", True) else True
             all_csum_ok = all(tr.get("checksum_status") != "FAKE" for tr in tracks) if _is_cd(media_summary) and cfg.get("audit_verify_log_checksum", True) and cfg.get("grade_check_log_checksum", True) else True
         except Exception:
             all_ar_real = accuraterip_status == "REAL"
@@ -3241,6 +3378,76 @@ def _relpath_guard(path, base):
         return os.path.basename(path)
 
 
+# Issue code for a library folder that holds nothing beneath it at all. The
+# label the UI shows for it is "Empty folder"; the row's `where` is the
+# folder's path relative to the music folder.
+EMPTY_FOLDER = "EMPTY_FOLDER"
+
+# Issue code for an album folder with no .mlo_expected.json: the release's own
+# tracklist is missing, so nothing can say whether the album is complete.
+# Album-wide like the other album checks (see grade_check_expected_tracks).
+EXPECTED_TRACKS_MISSING = "EXPECTED_TRACKS_MISSING"
+
+
+def _find_empty_folders(root):
+    """Directories under *root* with no file anywhere in their subtree.
+
+    Albums are derived from audio files (_find_albums), so such a folder never
+    becomes one and would otherwise be invisible to grading. One os.walk for
+    the whole library: hidden dirs and SKIP_DIRS (the app's own state, .git,
+    the recycle bin) are pruned, and the music folder root itself is never
+    reported — an empty music folder is not a folder that needs cleaning up.
+    """
+    has_files = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in SKIP_DIRS and not d.startswith(".")]
+        has_files[dirpath] = bool(filenames)
+    # Deepest first: one file makes its whole chain of ancestors non-empty.
+    for dirpath in sorted(has_files, key=len, reverse=True):
+        if has_files[dirpath]:
+            parent = os.path.dirname(dirpath)
+            if parent in has_files:
+                has_files[parent] = True
+    root_norm = os.path.normpath(root)
+    return sorted(d for d, has in has_files.items()
+                  if not has and os.path.normpath(d) != root_norm)
+
+
+def _empty_folder_result(folder, folder_root):
+    """Grade-style row for an empty folder: one failed check, zero tracks.
+
+    Same shape as _grade_album's dict so the run's summary loop totals it like
+    any other row — that is what makes it count against grading.
+    """
+    rel = _relpath_guard(folder, folder_root)
+    return {
+        "path": folder,
+        "where": rel,
+        "album_artist": "",
+        "audit_summary": "",
+        "media": "",
+        "source_summary": "",
+        "track_count": 0,
+        "pass_count": 0,
+        "total_checks": 1,
+        "cover_file": "",
+        "cover_detail": "",
+        "cover_ok": False,
+        "has_log": False,
+        "has_cue": False,
+        "checksum_status": "NONE",
+        "accuraterip_status": "NONE",
+        "lyrics_present": 0,
+        "lyrics_expected": 0,
+        "instrumental_count": 0,
+        "tracks": [],
+        "sidecars": [],
+        "album_values": {t: "" for t in ALBUM_TAGS},
+        "issues": {EMPTY_FOLDER: [rel]},
+    }
+
+
 def run_grade_library(config):
     folder = config["music_folder"]
     lyrics_format = config.get("lyrics_format", "EMBEDDED").upper()
@@ -3259,7 +3466,7 @@ def run_grade_library(config):
         f"INST=1 no lyrics | INST=0 lyrics required"
     )
     try:
-        _th = int(config.get("grade_log_score_threshold", 0) or 0)
+        _th = int(config.get("grade_log_score_threshold", 100) or 0)
         if _th > 0:
             log(f"  CD log threshold: {_th}/100 (via Logchecker) — LOG_GRADE < {_th} fails grading")
     except Exception:
@@ -3274,14 +3481,26 @@ def run_grade_library(config):
         # NOT walk the whole library first (costly on large trees).
         target_files = _collect_targets(config["targets"], AUDIO_EXTS)
         albums = sorted({os.path.dirname(f) for f in target_files})
+        # No library-wide walk on a targeted run, so no empty-folder sweep
+        # either: the user graded a selection, not the tree.
+        empty_folders = []
     else:
         albums = _find_albums(folder)
+        # Completely empty folders hold no audio, so _find_albums never yields
+        # them and grading would skip them silently. Collected before the
+        # no-albums exit so a library of nothing but empty folders still
+        # reports them.
+        empty_folders = (_find_empty_folders(folder)
+                         if config.get("grade_check_empty_folders", True) else [])
 
-    if not albums:
+    if not albums and not empty_folders:
         log("No albums found.")
         return stats
 
-    results = []
+    results = [_empty_folder_result(d, folder) for d in empty_folders]
+    # Each empty folder is one graded row: keep "graded N" in step with
+    # grade_dist, otherwise the failure rate can exceed 100%.
+    stats["total_scanned"] += len(empty_folders)
     counts = {"ok": 0, "skip": 0, "fail": 0}
     workers = worker_count(config, default=16, maximum=16, items=len(albums))
 
@@ -3357,14 +3576,15 @@ def run_grade_library(config):
         missing_tags = [
             t for t in ALBUM_TAGS if not result["album_values"].get(t)
         ]
-        if missing_tags:
+        # An empty folder carries no tags to be missing (and no tracks below).
+        if missing_tags and result["track_count"]:
             log(c(f"    missing album tags: {', '.join(missing_tags)}",
                   Color.YELLOW))
 
         if result["issues"]:
             log(c(f"    issues: {', '.join(result['issues'])}", Color.RED))
 
-        if verbose:
+        if verbose and result["tracks"]:
             log("Tracks:")
 
             for i, tr in enumerate(result["tracks"], 1):

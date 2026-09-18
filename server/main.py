@@ -11,6 +11,7 @@ import re
 import sys
 import asyncio
 import glob
+import inspect
 import json
 import threading
 import time
@@ -79,6 +80,9 @@ async def _lifespan(app: FastAPI):
         wishes_worker.start()
     except Exception as e:
         print(f"[mlo] wishes worker failed to start: {e}")
+    # Soulseek status watcher: pushes a frame the moment the login state,
+    # daemon state or port conflict changes (see _soulseek_watch).
+    threading.Thread(target=_soulseek_watch, daemon=True).start()
     yield
     try:
         from server import wishes_worker
@@ -145,12 +149,8 @@ _progress_lock = threading.Lock()
 orig_hook = stats_mod.progress_hook
 
 
-def _relay(done, total, desc):
-    try:
-        if orig_hook:
-            orig_hook(done, total, desc)
-    except Exception:
-        pass
+def _broadcast(payload):
+    """Send *payload* to every connected UI socket (no-op with no clients)."""
     loop = _MAIN_LOOP
     if loop is None or loop.is_closed():
         return
@@ -158,15 +158,72 @@ def _relay(done, total, desc):
         clients = list(progress_clients)
     for ws in clients:
         try:
-            asyncio.run_coroutine_threadsafe(
-                ws.send_json({"done": done, "total": total, "desc": desc}), loop
-            )
+            asyncio.run_coroutine_threadsafe(ws.send_json(payload), loop)
         except Exception:
             pass
 
 
+def _relay(done, total, desc):
+    try:
+        if orig_hook:
+            orig_hook(done, total, desc)
+    except Exception:
+        pass
+    _broadcast({"done": done, "total": total, "desc": desc})
+
+
 stats_mod.progress_hook = _relay
 stats_mod.tqdm = None
+
+
+# --------------------------------------------------------------------------- #
+# Soulseek status push
+# --------------------------------------------------------------------------- #
+# The dot on the Soulseek tab is drawn from /api/soulseek/status, which the UI
+# only re-fetched on its own timer: a login that landed, a logout, or a slskd
+# that died left the dot stale until the next poll (up to 20 seconds) — or
+# until a page reload. This watcher re-derives the SAME payload and pushes a
+# frame the moment anything in it changes, so the browser repaints the dot
+# immediately. One payload definition, so the push can never disagree with a
+# refresh.
+_SLSK_SIG = None
+_SLSK_INTERVAL_S = 2.0
+
+
+def _slsk_signature(payload):
+    return (
+        bool(payload.get("installed")), bool(payload.get("running")),
+        payload.get("logged_in"), payload.get("error") or "",
+        payload.get("conflict") or "", payload.get("account") or "",
+    )
+
+
+def _soulseek_check():
+    """One watcher pass: push a frame when the status changed.
+
+    Returns True when a frame was pushed. Split from the loop so the push
+    rule itself is testable without a socket or a timer."""
+    global _SLSK_SIG
+    with _progress_lock:
+        if not progress_clients:
+            # Nobody to tell: skip the daemon query entirely, and leave the
+            # memo alone so the next client gets a fresh comparison.
+            return False
+    sig = _slsk_signature(soulseek_status_payload())
+    if sig == _SLSK_SIG:
+        return False
+    _SLSK_SIG = sig
+    _broadcast({"type": "soulseek"})
+    return True
+
+
+def _soulseek_watch():
+    while True:
+        try:
+            _soulseek_check()
+        except Exception:
+            pass
+        time.sleep(_SLSK_INTERVAL_S)
 
 
 # --------------------------------------------------------------------------- #
@@ -181,6 +238,8 @@ class RunRequest(BaseModel):
 class LyricsEmbedRequest(BaseModel):
     path: str
     lyrics: str
+    # The import wizard's staged album (not in the library yet).
+    staged: bool = False
 
 
 class PlaylistCreate(BaseModel):
@@ -206,11 +265,13 @@ class SmartFilter(BaseModel):
 class MatchRequest(BaseModel):
     album_path: str
     release_id: str
+    staged: bool = False  # the import wizard's not-yet-imported album
 
 
 class AssignTagsRequest(BaseModel):
     """Write MB/RYM links to tags. `tracks` maps track path -> {tag: value}."""
     tracks: dict
+    staged: bool = False  # the import wizard's not-yet-imported album
 
 
 class ImportCommit(BaseModel):
@@ -219,6 +280,7 @@ class ImportCommit(BaseModel):
     target_dir: str
     mb_link: Optional[str] = None
     rym_link: Optional[str] = None
+    staged: bool = False  # the wizard's album folder, wherever the user put it
 
 
 class ImportExpected(BaseModel):
@@ -231,6 +293,7 @@ class ImportExpected(BaseModel):
     target_dir: str
     release_id: Optional[str] = None
     tracks: List[dict] = []
+    staged: bool = False  # the wizard's album folder, wherever the user put it
 
 
 class DownloadsDelete(BaseModel):
@@ -241,6 +304,16 @@ class DownloadsDelete(BaseModel):
 class DownloadsImport(BaseModel):
     """Basenames of <music>/.mlo/downloads entries to move into the library."""
     names: List[str] = []
+
+
+class StagingRequest(BaseModel):
+    """One slskd staging root, and (for delete) the entry inside it.
+
+    `root` is "downloads" or "incomplete" — the two staging folders slskd
+    writes to. It is a NAME, never a path: the server resolves it from the
+    config, so a client can never aim a delete at an arbitrary directory."""
+    root: str = ""
+    name: Optional[str] = None
 
 
 class AlbumRemove(BaseModel):
@@ -316,6 +389,46 @@ def get_config_defaults():
     return DEFAULT_CONFIG
 
 
+class AiTestRequest(BaseModel):
+    """Optional overrides so the wizard can test keys BEFORE they are saved;
+    anything omitted comes from the saved config."""
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+    effort: Optional[str] = None
+
+
+@app.post("/api/ai/test")
+def ai_test(req: AiTestRequest):
+    """One tiny round trip to the configured model.
+
+    The answer to "is this AI setup usable?" — the setup wizard and Settings →
+    AI both call it after keys are entered. A provider that refuses is a
+    normal 200 payload carrying its own message, never a 500: the message is
+    the whole point of the button."""
+    from server import ai
+
+    cfg = dict(load_config() or {})
+    for key, value in (("ai_base_url", req.base_url), ("ai_api_key", req.api_key),
+                       ("ai_model", req.model), ("ai_effort", req.effort)):
+        if value is not None:
+            cfg[key] = value
+    out = {"ok": False, "reply": "", "error": ""}
+    try:
+        reply = ai.ai_chat(
+            cfg,
+            "You are a connectivity check. Answer with the single word: ok.",
+            "Reply with ok.",
+            timeout=30.0,
+        )
+    except Exception as e:
+        out["error"] = str(e)
+        return out
+    out["ok"] = True
+    out["reply"] = (reply or "").strip()[:200]
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Library
 # --------------------------------------------------------------------------- #
@@ -352,6 +465,33 @@ def _in_music_folder(p, folder):
     return os.path.normcase(common) == os.path.normcase(af)
 
 
+def _allow_staged(p, staged):
+    """The import wizard's opt-in allowance for a path that is NOT in the
+    library yet.
+
+    The wizard's per-track steps run on albums the library tree does not list
+    — the folder the user pointed it at, a finished download, a staged batch —
+    so "inside the music folder" is the wrong test for those calls. It is
+    opt-in per request (`staged=true`), and the path still has to EXIST: a
+    library-facing call that does not ask for it stays exactly as strict, and
+    nothing gains a read of something that is not there.
+    """
+    return bool(staged) and os.path.exists(p)
+
+
+def _guard_folder(p, staged=False, what="file", folder=None):
+    """The music-folder guard, with the wizard's staged allowance folded in.
+
+    `what` names the thing in the 400 ("file", "folder", "album", "path") and
+    `folder` overrides the music folder for the routes that already carry one.
+    """
+    if _in_music_folder(p, folder or _music_folder()):
+        return
+    if _allow_staged(p, staged):
+        return
+    raise HTTPException(400, f"{what} outside music folder")
+
+
 def _skip_names():
     return {d.lower() for d in SKIP_DIRS}
 
@@ -365,8 +505,9 @@ def library():
 
 @app.get("/api/home")
 def home():
-    """Home page: stats, recent additions, top grades and MusicBrainz-backed
-    album recommendations derived from the library's own taste."""
+    """Home page: stats, recent additions, top grades, favorites, a random
+    rediscovery shelf, most-collected artists, open wishes and albums failing
+    their checks."""
     from server import recommendations
     try:
         return recommendations.build_home(load_config())
@@ -395,6 +536,11 @@ def naming_preview(req: dict):
         "DISCNUMBER": "1", "TRACKNUMBER": "4", "TITLE": str(sample.get("title") or "Psycho"),
         "MUSICBRAINZ_ALBUMID": "f8a44d0f-8241-3bdd-9988-413f28606650",
         "MUSICBRAINZ_ALBUMARTISTID": "cc0b7089-5d5c-4c2e-a48f-7b9c3e5d1a2b",
+        # The shipped default ends the file name with the track's own id, so
+        # the sample carries one too — without it the preview showed a path
+        # the script could never produce.
+        "MUSICBRAINZ_TRACKID": "4f0e7e10-1cf6-4f77-9c48-2c9e9f6f1a11",
+        "LABEL": str(sample.get("label") or "American Recordings"),
     }
     try:
         path = eval_script(script, track_variables(tags, tags["RELEASETYPE"]), shorter_ids=shorter)
@@ -577,7 +723,7 @@ def dependencies_install(req: DepsInstallRequest):
 
 
 @app.get("/api/album/mbdetect")
-def album_mbdetect(path: str = Query(...)):
+def album_mbdetect(path: str = Query(...), staged: bool = Query(False)):
     """Live scan: find a MusicBrainz release ID in ANY track tag.
 
     Scans every audio file's raw tags case-insensitively for a key
@@ -591,8 +737,7 @@ def album_mbdetect(path: str = Query(...)):
     p = os.path.normpath(path)
     if not os.path.isdir(p):
         raise HTTPException(404, "album not found")
-    if not _in_music_folder(p, _music_folder()):
-        raise HTTPException(400, "album outside music folder")
+    _guard_folder(p, staged, "album")
     uuid_re = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
     # Recursive: some libraries nest the album folder inside a folder of the
     # same name, so scan subdirectories too. Album tags are uniform across
@@ -632,15 +777,14 @@ def album_mbdetect(path: str = Query(...)):
 
 
 @app.get("/api/album")
-def get_album(path: str = Query(...)):
+def get_album(path: str = Query(...), staged: bool = Query(False)):
     """Album detail. `path` may be a real folder or an "mb:<release MBID>"
     reference — the app links albums by MusicBrainz ID so pages survive
     reorganization."""
     p = os.path.normpath(mbresolve.resolve_album(path) or path)
     if not os.path.isdir(p):
         raise HTTPException(404, "album not found")
-    if not _in_music_folder(p, _music_folder()):
-        raise HTTPException(400, "album outside music folder")
+    _guard_folder(p, staged, "album")
     res = lib_mod.build_album(p, load_config())
     if res is None:
         raise HTTPException(404, "no audio files")
@@ -874,16 +1018,16 @@ def videos_meta(path: str = Query(...)):
 
 
 @app.get("/api/tags")
-def get_tags(path: str = Query(...)):
+def get_tags(path: str = Query(...), staged: bool = Query(False)):
     """Read-only tag/lyrics/cover view (tag *writing* was removed — the
     engine's grading/auditing scripts own all tag writes now). Accepts an
-    "mb:<recording MBID>" reference as well as a path."""
+    "mb:<recording MBID>" reference as well as a path. `staged` lets the
+    import wizard read an album folder that is not in the library yet."""
     from mlo.audio import AudioFile
     p = os.path.normpath(mbresolve.resolve_track(path) or path)
     if not os.path.isfile(p):
         raise HTTPException(404, "file not found")
-    if not _in_music_folder(p, _music_folder()):
-        raise HTTPException(400, "file outside music folder")
+    _guard_folder(p, staged, "file")
     af = AudioFile(p)
     if af.audio is None:
         raise HTTPException(500, af.error or "unreadable")
@@ -992,15 +1136,14 @@ def get_replaygain(path: str = Query(...), mode: str = Query("")):
 
 @app.get("/api/cover")
 def get_cover(request: Request, album: str = Query(...), file: Optional[str] = Query(None),
-              color: int = Query(0)):
+              color: int = Query(0), staged: bool = Query(False)):
     """Serve an album's cover art, cached with ETag; ?color=1 returns the
     dominant color instead of the image bytes (UI tinting). Accepts an
     "mb:<release MBID>" album reference."""
     alb = os.path.normpath(mbresolve.resolve_album(album) or album)
     if not os.path.isdir(alb):
         raise HTTPException(404, "album not found")
-    if not _in_music_folder(alb, _music_folder()):
-        raise HTTPException(400, "album outside music folder")
+    _guard_folder(alb, staged, "album")
     if color:
         c = tagcache.cover_color(alb, file)
         if c is None:
@@ -1066,7 +1209,8 @@ def _cover_url_bytes(url, artist="", album="", rg=""):
 @app.post("/api/cover")
 async def upload_cover(album: str = Query(...), file: UploadFile = File(...),
                        track: Optional[str] = Query(None),
-                       tracks: Optional[str] = Query(None)):
+                       tracks: Optional[str] = Query(None),
+                       staged: bool = Query(False)):
     """Upload cover art.
 
     No `track`/`tracks` replaces the album's cover.*; `track=<audio filename>`
@@ -1078,8 +1222,7 @@ async def upload_cover(album: str = Query(...), file: UploadFile = File(...),
     alb = os.path.normpath(album)
     if not os.path.isdir(alb):
         raise HTTPException(404, "album not found")
-    if not _in_music_folder(alb, _music_folder()):
-        raise HTTPException(400, "album outside music folder")
+    _guard_folder(alb, staged, "album")
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in (".jpg", ".jpeg", ".png", ".jxl", ".webp", ".bmp"):
         ext = ".jpg"
@@ -1425,7 +1568,8 @@ def cover_sources():
 async def cover_from_url(album: str = Query(...), url: str = Query(...),
                          track: Optional[str] = Query(None),
                          tracks: Optional[str] = Query(None),
-                         artist: str = "", title: str = "", rg: str = ""):
+                         artist: str = "", title: str = "", rg: str = "",
+                         staged: bool = Query(False)):
     """Download a cover image from a URL (e.g. a COV search result) and
     store it like an uploaded cover (album cover.*, one per-track sidecar, or
     one image mapped to a whole `tracks=` selection).
@@ -1436,8 +1580,7 @@ async def cover_from_url(album: str = Query(...), url: str = Query(...),
     alb = os.path.normpath(album)
     if not os.path.isdir(alb):
         raise HTTPException(404, "album not found")
-    if not _in_music_folder(alb, _music_folder()):
-        raise HTTPException(400, "album outside music folder")
+    _guard_folder(alb, staged, "album")
     stem, selected = _cover_write_target(alb, track, tracks)
     try:
         data, ctype = await asyncio.to_thread(
@@ -1457,6 +1600,7 @@ async def cover_from_url(album: str = Query(...), url: str = Query(...),
 class CoverClearRequest(BaseModel):
     album: str
     tracks: Optional[List[str]] = None  # None/empty = every per-track entry
+    staged: bool = False                # the import wizard's staged album
 
 
 @app.post("/api/cover/clear")
@@ -1466,8 +1610,7 @@ def cover_clear(req: CoverClearRequest):
     alb = os.path.normpath(mbresolve.resolve_album(req.album) or req.album)
     if not os.path.isdir(alb):
         raise HTTPException(404, "album not found")
-    if not _in_music_folder(alb, _music_folder()):
-        raise HTTPException(400, "album outside music folder")
+    _guard_folder(alb, req.staged, "album")
     names = [os.path.basename(str(t)) for t in (req.tracks or []) if str(t).strip()]
     clear_track_covers(alb, names or None)
     tagcache.invalidate_all()
@@ -1743,7 +1886,8 @@ def videos_match(req: VideoMatchRequest):
 
 
 @app.get("/api/cover/info")
-def cover_info(album: str = Query(...), file: str = Query(None)):
+def cover_info(album: str = Query(...), file: str = Query(None),
+               staged: bool = Query(False)):
     """Image details for the album cover (resolution, aspect ratio,
     format, byte size) — powers the album page's Cover info dialog."""
     import io
@@ -1751,8 +1895,7 @@ def cover_info(album: str = Query(...), file: str = Query(None)):
     alb = os.path.normpath(mbresolve.resolve_album(album) or album)
     if not os.path.isdir(alb):
         raise HTTPException(404, "album not found")
-    if not _in_music_folder(alb, _music_folder()):
-        raise HTTPException(400, "album outside music folder")
+    _guard_folder(alb, staged, "album")
     data, ctype, _etag = tagcache.cover_bytes(alb, file)
     if data is None:
         raise HTTPException(404, "no cover")
@@ -1804,8 +1947,7 @@ def lyrics_embed(req: LyricsEmbedRequest):
     p = os.path.normpath(mbresolve.resolve_track(req.path) or req.path)
     if not os.path.isfile(p):
         raise HTTPException(404, "file not found")
-    if not _in_music_folder(p, _music_folder()):
-        raise HTTPException(400, "file outside music folder")
+    _guard_folder(p, req.staged, "file")
     af = AudioFile(p)
     if af.audio is None:
         raise HTTPException(500, af.error or "unreadable")
@@ -2231,41 +2373,7 @@ def mb_release_genres_query(mbid: str = Query(...), limit: Optional[int] = Query
         raise HTTPException(502, f"MusicBrainz genre lookup failed: {e}")
 
 
-# ---- generic MusicBrainz browser (search + entity pages) -------------------
-@app.get("/api/mb/search")
-def mb_search(q: str = Query(..., min_length=1), type: str = Query("release"),
-              limit: int = Query(100), offset: int = Query(0),
-              mode: str = Query("free"), primary_type: str = Query(""),
-              secondary_type: str = Query("")):
-    """Search MusicBrainz for the in-app browser: type = artist |
-    release-group | release | recording; mode = free | catno | barcode
-    (catno/barcode only apply to releases); primary_type/secondary_type narrow
-    releases and release groups to MusicBrainz release types (Album, EP,
-    Single, Soundtrack, Live, ...). Returns {rows, total} — searches page 100
-    rows at a time via offset."""
-    if type not in intg.MB_ENTITIES:
-        raise HTTPException(400, "type must be one of " + ", ".join(intg.MB_ENTITIES))
-    if mode not in ("free", "catno", "barcode"):
-        raise HTTPException(400, "mode must be free, catno or barcode")
-    try:
-        return intg.search_mb(type, q, limit, mode, max(0, offset),
-                              primary_type=primary_type.strip(),
-                              secondary_type=secondary_type.strip())
-    except Exception as e:
-        raise HTTPException(502, f"MusicBrainz search failed: {e}")
-
-
-@app.get("/api/mb/artist/{mbid}")
-def mb_artist(mbid: str, limit: int = Query(300), offset: int = Query(0)):
-    rid = intg._mbid(mbid)
-    if not rid:
-        raise HTTPException(400, "invalid MusicBrainz ID or URL")
-    try:
-        return intg.artist_browse(rid, max(1, limit), max(0, offset))
-    except Exception as e:
-        raise HTTPException(502, f"MusicBrainz lookup failed: {e}")
-
-
+# ---- release-group browse (the import wizard's release picker) -------------
 @app.get("/api/mb/release-group/{mbid}")
 def mb_release_group(mbid: str, limit: int = Query(300), offset: int = Query(0)):
     rid = intg._mbid(mbid)
@@ -2273,32 +2381,6 @@ def mb_release_group(mbid: str, limit: int = Query(300), offset: int = Query(0))
         raise HTTPException(400, "invalid MusicBrainz ID or URL")
     try:
         return intg.release_group_browse(rid, max(1, limit), max(0, offset))
-    except Exception as e:
-        raise HTTPException(502, f"MusicBrainz lookup failed: {e}")
-
-
-@app.get("/api/mb/recording/{mbid}")
-def mb_recording(mbid: str, limit: int = Query(300), offset: int = Query(0)):
-    rid = intg._mbid(mbid)
-    if not rid:
-        raise HTTPException(400, "invalid MusicBrainz ID or URL")
-    try:
-        return intg.recording_browse(rid, max(1, limit), max(0, offset))
-    except Exception as e:
-        raise HTTPException(502, f"MusicBrainz lookup failed: {e}")
-
-
-@app.get("/api/mb/detect/{mbid}")
-def mb_detect(mbid: str):
-    """Identify which MusicBrainz entity kind a bare MBID belongs to, so the
-    browser can route pasted IDs without the user choosing a type."""
-    rid = intg._mbid(mbid)
-    if not rid:
-        raise HTTPException(400, "invalid MusicBrainz ID or URL")
-    try:
-        return intg.detect_mbid(rid)
-    except LookupError as e:
-        raise HTTPException(404, str(e))
     except Exception as e:
         raise HTTPException(502, f"MusicBrainz lookup failed: {e}")
 
@@ -2323,8 +2405,12 @@ def mb_search_artists(q: str = Query(..., min_length=1), limit: int = 5):
         raise HTTPException(502, f"MusicBrainz search failed: {e}")
 
 
-def _scan_album_tracks(album_dir):
-    """Recursively list audio files in an album folder with tags + tech info."""
+def _scan_album_tracks(album_dir, lyrics=False):
+    """Recursively list audio files in an album folder with tags + tech info.
+
+    `lyrics=True` adds the per-track lyrics state (see `_add_lyrics_state`) —
+    the wizard's per-track steps read this payload for an album the library
+    tree does not list yet (a staged import)."""
     tracks = []
     skip = _skip_names()
     for root, dirs, files in os.walk(album_dir):
@@ -2348,7 +2434,40 @@ def _scan_album_tracks(album_dir):
                 "tags": tags,
                 "tech": tech,
             })
+    if lyrics:
+        _add_lyrics_state(tracks)
     return tracks
+
+
+def _add_lyrics_state(tracks):
+    """Mark scanned tracks with the lyrics they actually have.
+
+    A scan used to carry no lyrics fields, so the import wizard's per-track
+    steps hardcoded "no lyrics" and every track of a staged album claimed
+    lyrics it already carried. The flags come from `mlo.grader._grade_album`,
+    the one place that decides what counts as lyrics (an embedded
+    LYRICS/UNSYNCEDLYRICS tag, and an .lrc that holds text and is not shared
+    with a same-stem sibling), called per FOLDER because a disc folder is its
+    own album to the grader. A folder the grader cannot read leaves the flags
+    unset rather than claiming anything.
+    """
+    from mlo import grader
+
+    cfg = load_config()
+    fmt = str(cfg.get("lyrics_format") or "EMBEDDED")
+    graded = {}
+    for folder in {os.path.dirname(t["path"]) for t in tracks}:
+        try:
+            res = grader._grade_album(folder, fmt, cfg)
+        except Exception:
+            continue
+        for row in (res or {}).get("tracks") or []:
+            graded[os.path.normpath(os.path.join(folder, row.get("file") or ""))] = row
+    for t in tracks:
+        row = graded.get(os.path.normpath(t["path"])) or {}
+        t["lyrics_embedded"] = bool(row.get("lyrics_embedded"))
+        t["lyrics_lrc"] = bool(row.get("lyrics_lrc"))
+        t["lyrics_present"] = t["lyrics_embedded"] or t["lyrics_lrc"]
 
 
 @app.post("/api/mb/match")
@@ -2357,8 +2476,7 @@ def mb_match(req: MatchRequest):
     album_dir = os.path.normpath(req.album_path)
     if not os.path.isdir(album_dir):
         raise HTTPException(404, "album not found")
-    if not _in_music_folder(album_dir, _music_folder()):
-        raise HTTPException(400, "album outside music folder")
+    _guard_folder(album_dir, req.staged, "album")
     rid = intg._mbid(req.release_id)
     if not rid:
         raise HTTPException(400, "invalid release ID")
@@ -2393,7 +2511,7 @@ def mb_assign(req: AssignTagsRequest):
         if not os.path.isfile(fp):
             errors.append(f"{p}: not found")
             continue
-        if not _in_music_folder(fp, folder):
+        if not _in_music_folder(fp, folder) and not _allow_staged(fp, req.staged):
             errors.append(f"{p}: outside music folder")
             continue
         af = AudioFile(fp)
@@ -2524,6 +2642,7 @@ class LyricsWriteRequest(BaseModel):
     path: str
     lrc: str = ""
     source: str = "lrclib"
+    staged: bool = False  # the import wizard's not-yet-imported album
 
 
 @app.post("/api/lyrics/write")
@@ -2533,8 +2652,7 @@ def lyrics_write(req: LyricsWriteRequest):
     p = os.path.normpath(mbresolve.resolve_track(req.path) or req.path)
     if not os.path.isfile(p):
         raise HTTPException(404, "audio file not found")
-    if not _in_music_folder(p, _music_folder()):
-        raise HTTPException(400, "file outside music folder")
+    _guard_folder(p, req.staged, "file")
     lrc_path = os.path.splitext(p)[0] + ".lrc"
     cfg = load_config()
     try:
@@ -2612,7 +2730,16 @@ async def lyrics_publish(req: LyricsPublishRequest):
 
 @app.get("/api/rym/validate")
 def rym_validate(url: str = Query(...)):
-    return {"valid": intg.parse_rym_album_url(url) is not None}
+    """Is this a RateYourMusic link, and WHICH page is it?
+
+    `valid` keeps its old meaning ("a RYM URL") for callers that only accept
+    or reject a paste; `kind` is what lets the link editor put an artist page
+    in the artist field instead of storing it as the album link — a song page
+    written into RATEYOURMUSIC_ALBUM would look resolved forever and block the
+    automatic album lookup.
+    """
+    kind = intg.rym_url_kind(url)
+    return {"valid": kind is not None, "kind": kind}
 
 
 @app.get("/api/rym/resolve")
@@ -2625,6 +2752,107 @@ def rym_resolve(artist: str = Query(""), album: str = Query("")):
     answer, so it is a 200 here, never an error.
     """
     return intg.rym_links(artist, album, cfg=load_config())
+
+
+# --------------------------------------------------------------------------- #
+# Credits / performers
+# --------------------------------------------------------------------------- #
+def _credit_files(album_dir, limit=60):
+    """The album's audio files, capped.
+
+    Credits are stated per RELEASE, so a box set of a thousand files must not
+    cost a thousand tag reads: the MBID and the tag fallback come from the
+    first handful of tracks, which carry the same album tags anyway.
+    """
+    skip = _skip_names()
+    out = []
+    for root, dirs, files in os.walk(album_dir):
+        dirs[:] = [d for d in dirs if d.lower() not in skip]
+        for f in sorted(files):
+            if is_audio_file(f):
+                out.append(os.path.join(root, f))
+                if len(out) >= limit:
+                    return out
+    return out
+
+
+def _mb_credit_rows(fetch, mbid):
+    """MusicBrainz credits, or a 502 carrying MusicBrainz's own reason.
+
+    An unavailable or busy MusicBrainz is MB's answer, not a bug in here, so
+    it must never surface as a 500: 502 + the reason is the same report the
+    rest of the UI gives for the same outage.
+    """
+    try:
+        return fetch(mbid)
+    except Exception as e:
+        raise HTTPException(502, f"MusicBrainz credits unavailable: {e}")
+
+
+@app.get("/api/credits")
+def credits(path: str = Query(""), album: str = Query("")):
+    """Credits / performers for one track (`path`) or a whole album (`album`).
+
+    MusicBrainz recording `artist-rels` are the answer: each relation states
+    the role itself (performer, instrument, vocal, producer, engineer, mix,
+    mastering, arranger, composer, lyricist, conductor, remixer…), the
+    instrument or vocal part in its attributes, and the person's own name and
+    MBID — and one cached RELEASE request covers every track of an album. A
+    file with no MusicBrainz ID, or a release MB reports no relation for, is
+    answered from the files' own credit tags (`source: "tags"`) so the panel
+    is never empty. Rows are `{role, attributes[], artist, mbid}`.
+    """
+    folder = _music_folder()
+    source = "musicbrainz"
+    rows, artist, album_name, track_mbid, release_mbid = [], "", "", "", ""
+    if path:
+        p = os.path.normpath(mbresolve.resolve_track(path) or path)
+        if not os.path.isfile(p):
+            raise HTTPException(404, "file not found")
+        if not _in_music_folder(p, folder):
+            raise HTTPException(400, "file outside music folder")
+        tags = tagcache.read_track(p, None)[0] or {}
+        artist = str(tags.get("ARTIST") or tags.get("ALBUMARTIST") or "").strip()
+        album_name = (str(tags.get("ALBUM") or "").strip()
+                      or os.path.basename(os.path.dirname(p)))
+        track_mbid = intg._mbid(tags.get("MUSICBRAINZ_TRACKID")) or ""
+        if track_mbid:
+            rows = _mb_credit_rows(intg.recording_credits, track_mbid)
+        if not rows:
+            source, rows = "tags", intg.credit_rows_from_tags(tags)
+    elif album:
+        d = os.path.normpath(mbresolve.resolve_album(album) or album)
+        if not os.path.isdir(d):
+            raise HTTPException(404, "album not found")
+        if not _in_music_folder(d, folder):
+            raise HTTPException(400, "album outside music folder")
+        files = _credit_files(d)
+        if not files:
+            raise HTTPException(404, "no audio files in this album")
+        tagsets = [tagcache.read_track(f, None)[0] or {} for f in files]
+        album_name = os.path.basename(d)
+        for t in tagsets:
+            artist = artist or str(t.get("ALBUMARTIST") or t.get("ARTIST")
+                                   or "").strip()
+            release_mbid = (release_mbid
+                            or intg._mbid(t.get("MUSICBRAINZ_ALBUMID")) or "")
+            if artist and release_mbid:
+                break
+        if release_mbid:
+            rows = _mb_credit_rows(intg.release_credits, release_mbid)
+        if not rows:
+            source = "tags"
+            for t in tagsets:
+                rows += intg.credit_rows_from_tags(t)
+    else:
+        raise HTTPException(404, "path or album is required")
+    rows = intg.tidy_credit_rows(rows)
+    if not rows and not (track_mbid or release_mbid):
+        raise HTTPException(404, "no MusicBrainz id and no credit tags on "
+                                 + ("this track" if path else "these files"))
+    return {"artist": artist, "album": album_name, "rows": rows,
+            "source": source, "cached": source == "musicbrainz",
+            "track_mbid" if path else "release_mbid": track_mbid or release_mbid}
 
 
 # --------------------------------------------------------------------------- #
@@ -2683,8 +2911,14 @@ def album_remove(req: AlbumRemove):
 # "[Album] 2010-12-15 - 2010-12-15 - Aimai Elegy {JP - CD - XECJ-1011}" -> the
 # title is whatever sits between the date prefix and the brace suffix. Only
 # structural decoration is dropped; nothing is ever synthesised.
+#
+# The trailing bracket groups are the current default script's optional
+# ` [label] [release id]` segments (the older shape ended at the braces), and
+# a folder with no date or no braces keeps its raw basename — the label is
+# cosmetic, so a shape this regex does not know is left alone.
 _ALBUM_NAME_RE = re.compile(
-    r"^\[Album\]\s*\d{4}-\d{2}-\d{2}\s*-\s*(?:\d{4}-\d{2}-\d{2}\s*-\s*)?(.+?)\s*\{[^{}]*\}\s*$")
+    r"^\[Album\]\s*\d{4}-\d{2}-\d{2}\s*-\s*(?:\d{4}-\d{2}-\d{2}\s*-\s*)?"
+    r"(.+?)\s*\{[^{}]*\}(?:\s*\[[^\[\]]*\])*\s*$")
 
 
 def _trash_dir(folder):
@@ -3012,14 +3246,18 @@ def trash_restore(req: TrashRestore = TrashRestore()):
 
 
 @app.get("/api/album/scan-tracks")
-def album_scan_tracks(path: str = Query(...)):
-    """Direct folder scan: audio files with tags (independent of the library)."""
+def album_scan_tracks(path: str = Query(...), staged: bool = Query(False)):
+    """Direct folder scan: audio files with tags (independent of the library).
+
+    Carries the per-track lyrics state as well (`lyrics_embedded`,
+    `lyrics_lrc`, `lyrics_present`), because the import wizard's per-track
+    steps run on albums the library tree does not list yet — `staged=true` is
+    what the wizard sends for exactly that."""
     p = os.path.normpath(path)
     if not os.path.isdir(p):
         raise HTTPException(404, "folder not found")
-    if not _in_music_folder(p, _music_folder()):
-        raise HTTPException(400, "folder outside music folder")
-    return {"path": p.replace("\\", "/"), "tracks": _scan_album_tracks(p)}
+    _guard_folder(p, staged, "folder")
+    return {"path": p.replace("\\", "/"), "tracks": _scan_album_tracks(p, lyrics=True)}
 
 
 class OrganizeRequest(BaseModel):
@@ -3102,9 +3340,18 @@ class SoulseekDownloadRequest(BaseModel):
 @app.get("/api/soulseek/status")
 def soulseek_status():
     """Managed slskd availability, running state, login and download dir."""
+    return soulseek_status_payload()
+
+
+def soulseek_status_payload():
+    """The status the tab's dot is drawn from (one definition for the route
+    and the change watcher below, so the pushed frame can never drift from
+    what a refresh would fetch)."""
     from server import soulseek
     cfg = load_config()
-    owns, foreign_user, conflict = soulseek.instance_owner(cfg)
+    # `live_user` is whoever slskd is signed in as — ours or a foreign
+    # instance's (see instance_owner) — so the tab can name the account.
+    owns, live_user, conflict = soulseek.instance_owner(cfg)
     running = soulseek.is_running() or owns
     logged_in = None
     server = None
@@ -3126,7 +3373,7 @@ def soulseek_status():
         # port 5030 is shared). The UI must explain that instead of the
         # misleading "running, not logged in".
         "conflict": conflict or None,
-        "conflict_username": foreign_user,
+        "conflict_username": live_user,
         "server": server,
         "download_dir": soulseek.download_dir(cfg),
         "web_port": int(cfg.get("soulseek_web_port") or 5030),
@@ -3134,6 +3381,12 @@ def soulseek_status():
         # saved credentials — the Soulseek tab prefills the login form and
         # slskd auto-connects with them at every start
         "username": str(cfg.get("soulseek_username") or ""),
+        # the account slskd is ACTUALLY signed in as (GET /application's
+        # user.username, else GET /options' soulseek.username). A saved
+        # username and a live one drift apart the moment the login is
+        # corrected on slskd's own page, and the tab must show what the
+        # network sees, not what the config file remembers.
+        "account": live_user or "",
         "password": str(cfg.get("soulseek_password") or ""),
         "has_credentials": bool(str(cfg.get("soulseek_username") or "").strip()
                                 and cfg.get("soulseek_password")),
@@ -3283,6 +3536,25 @@ def soulseek_search_cancel(req: SoulseekSearchCancelRequest):
     return {"ok": True}
 
 
+def _queue_downloads(soulseek, username, files):
+    """Queue files, turning slskd's own refusal into a readable 502.
+
+    slskd answers the enqueue with 500 plus the reason in the body (`User
+    <name> appears to be offline`) or with a 201 whose `Failed` list names the
+    files the peer would not take. Both are the user's answer — "why did
+    nothing queue" — so they must not arrive as a bare "Internal Server
+    Error" from this app.
+    """
+    try:
+        return soulseek.enqueue_download(username, files)
+    except soulseek.SlskdError as e:
+        raise HTTPException(502, f"slskd did not queue the download: {e}")
+    except Exception as e:
+        # SlskdHTTPError is an httpx.HTTPStatusError; its str() now carries
+        # slskd's own message (see soulseek._error_text).
+        raise HTTPException(502, f"slskd did not queue the download: {e}")
+
+
 @app.post("/api/soulseek/download")
 def soulseek_download(req: SoulseekDownloadRequest):
     """Queue files from a user for download into the download dir."""
@@ -3291,7 +3563,7 @@ def soulseek_download(req: SoulseekDownloadRequest):
         raise HTTPException(400, "slskd is not running — start it first")
     if not req.username or not req.files:
         raise HTTPException(400, "username and files required")
-    soulseek.enqueue_download(req.username, req.files)
+    _queue_downloads(soulseek, req.username, req.files)
     return {"ok": True, "queued": len(req.files)}
 
 
@@ -3332,7 +3604,7 @@ def soulseek_download_bulk(req: SoulseekBulkDownloadRequest):
              for f in (req.files or []) if str(f.get("filename") or "").strip()]
     if not str(req.username or "").strip() or not files:
         raise HTTPException(400, "username and a non-empty files list are required")
-    soulseek.enqueue_download(req.username, files)
+    _queue_downloads(soulseek, req.username, files)
     return {"queued": len(files)}
 
 
@@ -3387,7 +3659,7 @@ def soulseek_download_user(req: SoulseekUserDownloadRequest):
 
     queue = [f for f in wanted if f["filename"] not in active]
     if queue:
-        soulseek.enqueue_download(username, queue)
+        _queue_downloads(soulseek, username, queue)
     return {"queued": len(queue), "scanned": scanned,
             "skipped": len(wanted) - len(queue)}
 
@@ -3416,28 +3688,54 @@ def soulseek_downloads_cancel(req: SoulseekCancelRequest):
 
 
 class SoulseekClearRequest(BaseModel):
+    scope: Optional[str] = None
     username: Optional[str] = None
     states: Optional[List[str]] = None
 
 
+# Scopes the clear route accepts. "failed" lives here rather than in a route
+# of its own because a second "Clear failed" button is a filter over the same
+# transfer list, not a different operation.
+_CLEAR_SCOPES = ("finished", "failed", "incomplete", "all")
+
+
 @app.post("/api/soulseek/downloads/clear")
 def soulseek_downloads_clear(req: SoulseekClearRequest):
-    """Clear FINISHED transfers from the history — optionally for one user,
-    optionally narrowed to some of the finished states. In-progress and
-    queued transfers are never touched: the queue is the only record of what
-    is still coming, and clearing it mid-download throws away bytes already
-    on disk. The response counts the finished transfers handed to slskd's
-    per-transfer DELETE (best effort: one already gone still counts)."""
+    """Clear transfers from slskd's history + their local partial bytes, by
+    scope (see _CLEAR_SCOPES):
+
+    - `finished` (the default) — the terminal transfers that SUCCEEDED. Their
+      bytes stay: a completed download IS the album the app imports.
+    - `failed` — the terminal ones that did not succeed (errored, cancelled,
+      rejected, timed out…), plus the partials they staged.
+    - `incomplete` — everything still in flight: dropped in slskd with
+      `?remove=true` and its staged partial deleted (the queue is the only
+      record of what is still coming, so this is what the UI must confirm).
+    - `all` — finished + failed + incomplete.
+
+    `username` narrows any scope; `states` still narrows by substring within
+    what the scope selected. A request WITHOUT `scope` keeps the old behaviour
+    exactly — every finished transfer (failures included), no local deletes —
+    and answers with the old {"ok", "cleared"} body.
+
+    Best effort per transfer: one slskd refusal or one undeletable partial is
+    reported in `failed`, never a 500."""
     from server import soulseek
     if not (soulseek.is_running() or soulseek.web_up(load_config())):
         raise HTTPException(400, "slskd is not running")
+    legacy = not str(req.scope or "").strip()
+    scope = str(req.scope or "finished").strip().lower()
+    if scope not in _CLEAR_SCOPES:
+        raise HTTPException(400, f"unknown scope {req.scope!r} — expected one of "
+                                 f"{', '.join(_CLEAR_SCOPES)}")
     wanted = [str(s).strip().lower() for s in (req.states or []) if str(s).strip()]
     try:
         tree = soulseek.downloads_state()
     except Exception as e:
         raise HTTPException(502, f"downloads lookup failed: {e}")
+    ddir = soulseek.download_dir(load_config())
 
-    targets = {}
+    targets: dict = {}
     for user in tree or []:
         who = str(user.get("username") or "")
         if req.username and who != req.username:
@@ -3445,26 +3743,61 @@ def soulseek_downloads_clear(req: SoulseekClearRequest):
         for d in (user.get("directories") or []):
             for f in (d.get("files") or []):
                 st = str(f.get("state") or "")
-                # `states` only narrows WITHIN the finished ones, so a client
-                # asking for "InProgress" clears nothing instead of killing a
-                # live download
-                if not soulseek.finished_transfer(st):
+                done = soulseek.finished_transfer(st)
+                ok = soulseek.successful_transfer(st)
+                if legacy:
+                    sel = done          # old callers: every finished transfer
+                elif scope == "all":
+                    sel = True
+                elif scope == "finished":
+                    sel = done and ok
+                elif scope == "failed":
+                    sel = done and not ok
+                else:                   # incomplete
+                    sel = not done
+                if not sel or not f.get("id"):
                     continue
+                # `states` narrows INSIDE the finished ones, so a client asking
+                # for "InProgress" clears nothing instead of killing a live
+                # download
                 if wanted and not any(w in st.lower() for w in wanted):
                     continue
-                if f.get("id"):
-                    targets.setdefault(who, []).append(str(f["id"]))
+                targets.setdefault(who, []).append(
+                    (str(f["id"]), str(f.get("filename") or ""),
+                     int(f.get("size") or 0), done and ok))
 
     cleared = 0
-    for who, tids in targets.items():
-        # one user's failure must not abort the rest (cancel_downloads is a
-        # best-effort loop over one DELETE per transfer)
+    files_deleted = 0
+    bytes_freed = 0
+    failed: list = []
+    for who, items in targets.items():
+        refused: list = []
         try:
-            soulseek.cancel_downloads(who, tids)
-        except Exception:
-            continue
-        cleared += len(tids)
-    return {"ok": True, "cleared": cleared}
+            # one user's failure must not abort the rest (cancel_downloads is a
+            # best-effort loop over one DELETE per transfer)
+            soulseek.cancel_downloads(who, [t[0] for t in items], failed=refused)
+        except Exception as e:
+            failed.append({"username": who, "filename": "",
+                           "reason": f"could not be dropped in slskd: {e}"})
+        cleared += len(items)
+        if legacy:
+            continue                # old callers never had local bytes touched
+        for tid, name, size, complete in items:
+            if tid in refused:
+                failed.append({"username": who, "filename": name,
+                               "reason": "slskd did not confirm the transfer was dropped"})
+            if complete:
+                continue            # a succeeded transfer's bytes are the album
+            res = soulseek.clear_transfer_files(ddir, who, name, size)
+            files_deleted += res["files_deleted"]
+            bytes_freed += res["bytes_freed"]
+            for p in res["problems"]:
+                failed.append({"username": who, "filename": name, "reason": p})
+
+    if legacy:
+        return {"ok": True, "cleared": cleared}
+    return {"cleared": cleared, "files_deleted": files_deleted,
+            "bytes_freed": bytes_freed, "failed": failed}
 
 
 @app.get("/api/soulseek/uploads")
@@ -4137,8 +4470,9 @@ def _resolve_release(mbid):
     One resolution path for every caller in this file: the edition is picked
     by the auto-import policy (Official first, CD → Digital Media → … by
     medium, earliest date breaking ties, promotional/bootleg editions never
-    while auto_import_avoid_promo is on). Raises 502 when MusicBrainz cannot
-    resolve the id at all."""
+    while auto_import_avoid_promo is on, editions with no release country
+    never while auto_import_require_country is on). Raises 502 when
+    MusicBrainz cannot resolve the id at all."""
     try:
         return intg.resolve_release(mbid)
     except Exception as e:
@@ -4163,7 +4497,9 @@ def soulseek_auto_start(req: SoulseekAutoRequest):
             raise HTTPException(
                 502, "MusicBrainz release not found, or it has no edition "
                      "eligible for auto-import (promotional/bootleg editions "
-                     "are skipped while auto_import_avoid_promo is on)")
+                     "are skipped while auto_import_avoid_promo is on, and "
+                     "editions without a release country while "
+                     "auto_import_require_country is on)")
     r = soulseek_auto.start_job(release_mbid=release_mbid, release=release,
                                 queries=req.queries, username=req.username,
                                 target_dir=req.target_dir,
@@ -4286,9 +4622,9 @@ def soulseek_test_log(req: SoulseekTestLogRequest):
     upath = os.path.join(ddir, user)
     if not _in_music_folder(upath, ddir):
         raise HTTPException(400, "username escapes the download dir")
-    soulseek.enqueue_download(req.username,
-                              [{"filename": f["filename"], "size": f.get("size") or 0}
-                               for f in logs])
+    _queue_downloads(soulseek, req.username,
+                     [{"filename": f["filename"], "size": f.get("size") or 0}
+                      for f in logs])
     from server.soulseek_auto import _wait_for_files, _remote_rel
     got = _wait_for_files(soulseek, ddir, req.username, logs, timeout_s=180)
 
@@ -4510,12 +4846,13 @@ def _genre_files(paths):
     return files
 
 
-def _tag_paths_guard(paths):
+def _tag_paths_guard(paths, staged=False):
     """Containment guard (same as /api/tags/bulk and /api/mb/assign): genre
-    routes write tags, so paths outside the music folder are refused."""
+    routes write tags, so paths outside the music folder are refused — unless
+    the import wizard asks for its staged album, which is not in it yet."""
     folder = _music_folder()
     for p in paths:
-        if not _in_music_folder(p, folder):
+        if not _in_music_folder(p, folder) and not _allow_staged(p, staged):
             raise HTTPException(400, f"path outside music folder: {p}")
 
 
@@ -4602,10 +4939,14 @@ def mb_genres_import(req: GenreImportRequest):
 class GenreChainImportRequest(BaseModel):
     paths: List[str]  # audio files (or one album dir)
     limit: Optional[int] = None  # defaults to mb_genre_count from settings
+    # Which sources to ask. Omitted = every configured source in order (the
+    # chain, which the album/track menus use); the wizard passes exactly ONE
+    # so its two buttons are MusicBrainz and RateYourMusic, separately.
+    sources: Optional[List[str]] = None
+    staged: bool = False  # the import wizard's not-yet-imported album
 
 
-@app.post("/api/genres/import")
-def genres_import(req: GenreChainImportRequest):
+def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=False):
     """Import GENRE from EVERY configured genre source, per track.
 
     The chain runs in the order of `genre_sources` (RateYourMusic → Soulseek
@@ -4615,12 +4956,16 @@ def genres_import(req: GenreChainImportRequest):
     that cannot answer are reported in `notes` (a blocked RYM, a Discogs or
     Last.fm source without its token/key) — nothing is filled in from a guess.
     MusicBrainz recording genres refine each track when the album names a
-    release. Returns {updated, per_source, notes, genres}."""
+    release. Returns {updated, per_source, notes, genres}.
+
+    `progress(i, total, source)` is the chain's own per-source step, which is
+    what the background job (and the websocket relay) reports while it runs.
+    """
     from mlo.audio import AudioFile
 
     cfg = load_config()
-    _tag_paths_guard(req.paths)
-    files = _genre_files(req.paths)
+    _tag_paths_guard(paths, staged)
+    files = _genre_files(paths)
 
     probe = AudioFile(files[0])
     mbid = str(probe.get_tag("MUSICBRAINZ_ALBUMID") or "").strip()
@@ -4634,11 +4979,16 @@ def genres_import(req: GenreChainImportRequest):
             release = None
 
     try:
-        limit = int(req.limit) if req.limit else None
+        limit = int(limit) if limit else None
     except (TypeError, ValueError):
         raise HTTPException(400, "limit must be a number")
+    # The per-source hook ships with the chain itself; a checkout that has not
+    # landed it yet still runs, just without the `source i/N` steps.
+    hook = {"progress": progress} if progress is not None and \
+        "progress" in inspect.signature(intg.genre_chain).parameters else {}
     chain = intg.genre_chain(artist=artist, album=album, release=release,
-                             limit=limit, cfg=cfg, files=files)
+                             limit=limit, cfg=cfg, files=files, sources=sources,
+                             **hook)
     names = chain.get("genres") or []
     # The chain already merged every track's own genres ahead of the
     # release-wide ones and capped them per track — `_write_album_genres`, the
@@ -4655,6 +5005,17 @@ def genres_import(req: GenreChainImportRequest):
             # contributed, plus the tier that answered (track/album/artist).
             "sources": chain.get("sources") or {},
             "levels": chain.get("levels") or {}}
+
+
+@app.post("/api/genres/import")
+def genres_import(req: GenreChainImportRequest):
+    """Import GENRE from the given sources (all configured ones by default).
+
+    The wizard's two per-source buttons pass one source each, so MusicBrainz
+    and RateYourMusic are asked separately and each reply reports what that
+    source wrote."""
+    return _run_genre_chain(req.paths, req.limit, sources=req.sources,
+                            staged=req.staged)
 
 
 @app.get("/api/genres/facets")
@@ -4696,6 +5057,7 @@ def genres_facets():
 class AdvisoryFetchRequest(BaseModel):
     paths: Optional[List[str]] = None           # audio files or album folders
     release_mbid: Optional[str] = None          # a MusicBrainz release id/URL
+    staged: bool = False                        # the wizard's staged album
 
 @app.post("/api/mb/advisory/fetch")
 def mb_advisory_fetch(req: AdvisoryFetchRequest):
@@ -4733,7 +5095,7 @@ def mb_advisory_fetch(req: AdvisoryFetchRequest):
         except Exception as e:
             raise HTTPException(502, f"MusicBrainz release lookup failed: {e}")
     if req.paths:
-        _tag_paths_guard(req.paths)
+        _tag_paths_guard(req.paths, req.staged)
         result = imports_mod.fetch_advisories(req.paths, load_config())
         updated = int(result.get("updated") or 0)
         values.update(result.get("values") or {})
@@ -4745,6 +5107,7 @@ def mb_advisory_fetch(req: AdvisoryFetchRequest):
 
 class InstrumentalFetchRequest(BaseModel):
     paths: Optional[List[str]] = None           # audio files or album folders
+    staged: bool = False                        # the wizard's staged album
 
 
 @app.post("/api/instrumental/fetch")
@@ -4767,7 +5130,7 @@ def instrumental_fetch(req: InstrumentalFetchRequest):
 
     if not req.paths:
         raise HTTPException(400, "paths required")
-    _tag_paths_guard(req.paths)
+    _tag_paths_guard(req.paths, req.staged)
     result = imports_mod.fetch_instrumentals(req.paths, load_config())
     return {"updated": int(result.get("updated") or 0),
             "values": result.get("values") or {},
@@ -4784,7 +5147,8 @@ def _metadata_album_identity(album_dir, artist=""):
 
 
 @app.get("/api/metadata/candidates")
-def metadata_candidates_route(artist: str = Query(""), album_path: str = Query("")):
+def metadata_candidates_route(artist: str = Query(""), album_path: str = Query(""),
+                              staged: bool = Query(False)):
     """Image / description candidates for an artist or an album folder.
 
     Read-only: nothing is written. The list is composed by
@@ -4805,8 +5169,7 @@ def metadata_candidates_route(artist: str = Query(""), album_path: str = Query("
         album_dir = os.path.normpath(album_path)
         if not os.path.isdir(album_dir):
             raise HTTPException(404, "album not found")
-        if not _in_music_folder(album_dir, _music_folder(cfg)):
-            raise HTTPException(400, "album outside music folder")
+        _guard_folder(album_dir, staged, "album", _music_folder(cfg))
         artist, album = _metadata_album_identity(album_dir, artist)
     try:
         candidates = discovery.metadata_candidates(artist, album, cfg=cfg)
@@ -4855,7 +5218,7 @@ def metadata_apply(req: MetadataApplyRequest):
         source = "manual"
         label = None
         if not url:
-            hit = discovery.artist_image(_metadata_artist_name(folder, artist), cfg=cfg)
+            hit = discovery.artist_image(_metadata_artist_name(folder, artist), mbid=artistdata.folder_mbid(folder) or artistdata.folder_mbid(artist), cfg=cfg)
             if not hit or not hit.get("url"):
                 raise HTTPException(404, "no artist image found in any configured source")
             url, source, label = hit["url"], hit.get("source") or "auto", hit.get("label")
@@ -4882,7 +5245,7 @@ def metadata_apply(req: MetadataApplyRequest):
             folder = _metadata_artist_folder(artist, cfg)
             name = _metadata_artist_name(folder, artist)
             if not text:
-                found = discovery.artist_description(name, cfg=cfg)
+                found = discovery.artist_description(name, mbid=artistdata.folder_mbid(folder) or artistdata.folder_mbid(artist), cfg=cfg)
                 if not found:
                     raise HTTPException(404, "no description found in any configured source")
                 text, source = found["text"], found.get("source")
@@ -5072,6 +5435,19 @@ def organize(req: OrganizeRequest):
                             target = os.path.join(ddir, dstem + fext.lower())
                             if fpath == target:
                                 continue  # already in place (exact)
+                            # Same rule as the track moves above: a name the
+                            # destination already holds is never overwritten.
+                            # move_path ends in os.replace, so without this a
+                            # sidecar silently ate the file already sitting
+                            # there (another track's art, a cover search's
+                            # pick) instead of taking a " (2)" name.
+                            n = 2
+                            base, ext_l = os.path.splitext(os.path.basename(target))
+                            while os.path.exists(target) and \
+                                    os.path.normcase(os.path.abspath(target)) != \
+                                    os.path.normcase(os.path.abspath(fpath)):
+                                target = os.path.join(ddir, f"{base} ({n}){ext_l}")
+                                n += 1
                             sidecar_moves.append((fpath, target))
             except OSError:
                 pass
@@ -5323,8 +5699,7 @@ def import_commit(req: ImportCommit):
     target = os.path.normpath(req.target_dir)
     if not os.path.isabs(target):
         target = os.path.normpath(os.path.join(library_root(folder), req.target_dir))
-    if not _in_music_folder(target, folder):
-        raise HTTPException(400, "target outside music folder")
+    _guard_folder(target, req.staged, "target", folder)
     if not os.path.isdir(target):
         raise HTTPException(404, "album not found")
     from mlo.audio import AudioFile
@@ -5375,8 +5750,7 @@ def import_expected(req: ImportExpected):
     target = os.path.normpath(req.target_dir)
     if not os.path.isabs(target):
         target = os.path.normpath(os.path.join(library_root(folder), req.target_dir))
-    if not _in_music_folder(target, folder):
-        raise HTTPException(400, "target outside music folder")
+    _guard_folder(target, req.staged, "target", folder)
     if not os.path.isdir(target):
         raise HTTPException(404, "album not found")
     if not save_expected_tracks(target, req.release_id, req.tracks):
@@ -5467,6 +5841,31 @@ def _downloads_entry(root, name):
             "album": False, "partial": partial, "_mtime": mtime}
 
 
+def _staging_listing(path):
+    """One staging folder as the page needs it: totals plus newest-first
+    entries, each in `_downloads_entry`'s shape minus its private `_mtime`.
+
+    A missing or unreadable folder is reported as empty and never as an
+    error: slskd creates both roots on its own schedule, so the page polls
+    this and must not see a failure just because nothing is staged yet."""
+    out = {"folder": (os.path.abspath(path) if path else "").replace("\\", "/"),
+           "exists": False, "count": 0, "bytes": 0, "entries": []}
+    if not path or not os.path.isdir(path):
+        return out
+    root = os.path.realpath(path)
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return out
+    entries = [e for e in (_downloads_entry(root, n) for n in names) if e]
+    entries.sort(key=lambda e: e["_mtime"], reverse=True)
+    for e in entries:
+        del e["_mtime"]
+    out.update(exists=True, count=len(entries), entries=entries,
+               bytes=sum(e["bytes"] for e in entries))
+    return out
+
+
 @app.get("/api/downloads")
 def downloads_list():
     """Contents of <music_folder>/.mlo/downloads, newest first.
@@ -5476,23 +5875,8 @@ def downloads_list():
     per entry (size, file counts, whether it holds audio) for the page to
     offer Import only where it is meaningful."""
     folder = load_config().get("music_folder") or ""
-    ddir = _downloads_dir(folder)
-    out = {"folder": (ddir or "").replace("\\", "/"), "exists": False,
-           "count": 0, "bytes": 0, "entries": [],
-           "music_folder": folder.replace("\\", "/")}
-    if not ddir or not os.path.isdir(ddir):
-        return out
-    root = os.path.realpath(ddir)
-    try:
-        names = os.listdir(ddir)
-    except OSError:
-        return out
-    entries = [e for e in (_downloads_entry(root, n) for n in names) if e]
-    entries.sort(key=lambda e: e["_mtime"], reverse=True)
-    for e in entries:
-        del e["_mtime"]
-    out.update(exists=True, count=len(entries), entries=entries,
-               bytes=sum(e["bytes"] for e in entries))
+    out = _staging_listing(_downloads_dir(folder))
+    out["music_folder"] = folder.replace("\\", "/")
     return out
 
 
@@ -5583,6 +5967,135 @@ def downloads_import(req: DownloadsImport = DownloadsImport()):
         mbresolve.invalidate()
         _refresh_slskd_shares_soon()
     return {"moved": moved, "failed": failed}
+
+
+# --------------------------------------------------------------------------- #
+# /api/soulseek/staging — both of slskd's staging folders, by NAME
+# --------------------------------------------------------------------------- #
+# slskd writes finished files to the download dir and partials to its sibling
+# `incomplete` dir (see soulseek._incomplete_dir). The app manages both from
+# the Soulseek page, but the client only ever names a root — the path is
+# resolved here from the config, so no request can aim a delete elsewhere.
+def _staging_root(cfg, root):
+    """The configured path of the staging root NAMED `root`, else None.
+
+    Both come from soulseek.download_dir / _incomplete_dir, NOT from
+    _downloads_dir(music_folder): slskd is configured with the former pair, so
+    a custom `soulseek_download_dir` (and the `incomplete` sibling derived from
+    it) is where the bytes actually are — the music-folder-derived path would
+    show the page a folder slskd never writes to, or miss one it does."""
+    from server import soulseek
+    if root == "downloads":
+        return soulseek.download_dir(cfg)
+    if root == "incomplete":
+        return soulseek._incomplete_dir(cfg)
+    return None
+
+
+def _staging_remove(root, name):
+    """Delete one entry under *root*. Returns (error, bytes freed).
+
+    Size is measured BEFORE the bytes go, since after rmtree they are gone.
+    A symlink is unlinked, never followed: the name guard only cleared the
+    link's own segment, so following it would delete a target that may live
+    outside the root entirely."""
+    import shutil
+    p = os.path.join(root, name)
+    try:
+        if os.path.islink(p):
+            os.remove(p)
+            return None, 0
+        if os.path.isdir(p):
+            # _dir_stats reports an unreadable part as 0 rather than raising,
+            # so a locked subfolder cannot turn the count into a failure.
+            size = _dir_stats(p)[1]
+            shutil.rmtree(p)
+        else:
+            size = os.path.getsize(p)
+            os.remove(p)
+        return None, size
+    except OSError as e:
+        return (str(e) or "delete failed"), 0
+
+
+@app.get("/api/soulseek/staging")
+def soulseek_staging():
+    """Both slskd staging folders: `downloads` (finished, waiting to be
+    imported) and `incomplete` (in-flight partials).
+
+    Each root is reported on its own — a missing one is `exists: false` with
+    empty totals, never an error, because slskd creates them on its own
+    schedule and the page polls this."""
+    cfg = load_config()
+    from server import soulseek
+    return {"downloads": _staging_listing(soulseek.download_dir(cfg)),
+            "incomplete": _staging_listing(soulseek._incomplete_dir(cfg))}
+
+
+@app.post("/api/soulseek/staging/delete")
+def soulseek_staging_delete(req: StagingRequest):
+    """Delete ONE entry (file or folder tree) from a named staging root.
+
+    Unlike POST /api/downloads/delete this is a single all-or-nothing action:
+    the page deletes what the user picked, so the outcome is either "gone"
+    (with the bytes it freed) or a status the UI can explain."""
+    cfg = load_config()
+    path = _staging_root(cfg, (req.root or "").strip().lower())
+    if path is None:
+        raise HTTPException(400, "unknown staging root")
+    if not os.path.isdir(path):
+        raise HTTPException(404, "staging folder not found")
+    root = os.path.realpath(path)
+    # Same guard the downloads routes use: basename-only, and anything whose
+    # realpath leaves the root (traversal, absolute path, symlink) is refused.
+    err = _downloads_name_error(req.name, root)
+    if err:
+        raise HTTPException(400, err)
+    if not os.path.lexists(os.path.join(root, req.name)):
+        raise HTTPException(404, "entry not found in staging")
+    err, freed = _staging_remove(root, req.name)
+    if err:
+        raise HTTPException(502, err)
+    tagcache.invalidate_all()
+    _refresh_slskd_shares_soon()
+    return {"ok": True, "freed": freed}
+
+
+@app.post("/api/soulseek/staging/clear")
+def soulseek_staging_clear(req: StagingRequest):
+    """Empty a named staging root: every entry in it, nothing else.
+
+    One entry that will not delete (a file slskd still holds open is expected
+    while a transfer is running) is reported in `failed` and the rest are
+    still removed. The root itself is never removed — slskd validates it at
+    boot and would refuse to start without it."""
+    cfg = load_config()
+    path = _staging_root(cfg, (req.root or "").strip().lower())
+    if path is None:
+        raise HTTPException(400, "unknown staging root")
+    if not os.path.isdir(path):
+        raise HTTPException(404, "staging folder not found")
+    root = os.path.realpath(path)
+    try:
+        names = os.listdir(root)
+    except OSError as e:
+        raise HTTPException(502, str(e) or "could not read the staging folder")
+    cleared, freed, failed = 0, 0, []
+    for name in names:
+        err = _downloads_name_error(name, root)
+        if err is None and not os.path.lexists(os.path.join(root, name)):
+            err = "not found in staging"
+        if err is None:
+            err, size = _staging_remove(root, name)
+            if err is None:
+                cleared += 1
+                freed += size
+        if err:
+            failed.append({"name": name, "reason": err})
+    if cleared:
+        tagcache.invalidate_all()
+        _refresh_slskd_shares_soon()
+    return {"ok": True, "cleared": cleared, "freed": freed, "failed": failed}
 
 
 # --------------------------------------------------------------------------- #

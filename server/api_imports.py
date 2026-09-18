@@ -40,6 +40,7 @@ class AcoustidRequest(BaseModel):
     # Write the accepted match into the files as ACOUSTID_ID /
     # ACOUSTID_FINGERPRINT (what the wizard sends when the user accepts).
     apply: bool = False
+    staged: bool = False  # the wizard's album folder, wherever the user put it
 
 
 class FinishRequest(BaseModel):
@@ -47,6 +48,7 @@ class FinishRequest(BaseModel):
     # script id -> force flag; a supplied dict is authoritative (see
     # server.script_runners._apply_force)
     force: Optional[Dict[str, bool]] = None
+    staged: bool = False  # the wizard's album folder, wherever the user put it
 
 
 class BulkItem(BaseModel):
@@ -79,8 +81,14 @@ def _cap(count, limit, what):
                  f"split it into several calls or use the bulk queue")
 
 
-def _guard(paths):
+def _guard(paths, staged=False):
     """Refuse any path outside the music folder (400), like every other route.
+
+    `staged` is the import wizard's opt-in allowance for its own album: the
+    wizard runs on albums that are not in the library yet (a finished
+    download, a folder the user pointed it at), and the path still has to
+    exist. Nothing else passes it, so a library-facing call stays as strict as
+    before.
 
     An empty list guards nothing, so it returns before touching the music
     folder: the wizard asks `/api/import/scripts/preview` with no paths on
@@ -90,10 +98,10 @@ def _guard(paths):
     wanted = [p for p in (paths or []) if str(p).strip()]
     if not wanted:
         return
-    from server.main import _in_music_folder, _music_folder
+    from server.main import _allow_staged, _in_music_folder, _music_folder
     folder = _music_folder()
     for p in wanted:
-        if not _in_music_folder(p, folder):
+        if not _in_music_folder(p, folder) and not _allow_staged(p, staged):
             raise HTTPException(400, f"path outside music folder: {p}")
 
 
@@ -105,7 +113,7 @@ def import_acoustid(req: AcoustidRequest):
     files (`ACOUSTID_ID`, `ACOUSTID_FINGERPRINT`).
     """
     _cap(len(req.paths), MAX_PATHS, "paths")
-    _guard(req.paths)
+    _guard(req.paths, req.staged)
     return imports.acoustid_match(req.paths, apply=bool(req.apply))
 
 
@@ -113,7 +121,7 @@ def import_acoustid(req: AcoustidRequest):
 def import_finish(req: FinishRequest):
     """Run the configured import chain over each album folder, synchronously."""
     _cap(len(req.paths), MAX_PATHS, "paths")
-    _guard(req.paths)
+    _guard(req.paths, req.staged)
     return {"albums": [imports.finish_album(p, force=req.force)
                        for p in req.paths]}
 

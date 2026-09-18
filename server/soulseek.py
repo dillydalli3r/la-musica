@@ -163,6 +163,25 @@ def share_exclude(cfg=None):
     return out
 
 
+# slskd's destination template for every batch this app enqueues, written to
+# `transfers.download.destination.subdirectory`. The tokens are slskd 0.26's
+# own (DownloadService.DeriveDestination): ${SOURCE_USERNAME}, ${SOURCE_PATH},
+# ${SOURCE_DIRECTORY}, ${BATCH_ID}, ${BATCH_EXTERNAL_ID}, ${SEARCH_ID},
+# ${SEARCH_TEXT} — slskd has NO artist/album variable.
+#
+# WHY not slskd's default `${SOURCE_DIRECTORY}` (the remote folder's LEAF
+# only): one enqueue call is one batch, so `${BATCH_ID}` gives every candidate
+# a root of its own — two peers' copies of the same album can never share a
+# folder and drag a stranger's files into an import. `${SOURCE_PATH}` keeps the
+# peer's own album/disc structure below that root, which is what the importer
+# needs: the leaf-only default flattened a peer's `Album/CD1` + `Album/CD2`
+# into two TOP-LEVEL `CD1/` + `CD2/` folders whose common parent is the
+# download root itself, so _local_album_root() refused every multi-disc album.
+# Result: `<downloads>/<user>/<batch id>/<remote path>/<file>` — below the
+# download dir, one candidate per folder.
+DESTINATION_SUBDIR = "${SOURCE_USERNAME}/${BATCH_ID}/${SOURCE_PATH}"
+
+
 def generate_yaml(cfg=None):
     """Render slskd config; returns (yaml_text, api_key)."""
     cfg = cfg or load_config()
@@ -214,6 +233,15 @@ def generate_yaml(cfg=None):
     transfers += ["  download:", f"    slots: {dl_slots}"]
     if down_kib > 0:
         transfers.append(f"    speed_limit: {down_kib}")
+    # slskd's own key is transfers -> download -> destination -> subdirectory
+    # (Options.TransfersOptions.DownloadOptions.DestinationOptions.Subdirectory).
+    # Anywhere else it is silently ignored and every download keeps slskd's
+    # flat `${SOURCE_DIRECTORY}` layout — see DESTINATION_SUBDIR for why that
+    # layout is unusable here.
+    transfers += [
+        "    destination:",
+        f"      subdirectory: {_yq(DESTINATION_SUBDIR)}",
+    ]
 
     lines += [
         "soulseek:",
@@ -667,22 +695,99 @@ def _http_client(cfg=None):
         return client
 
 
-def _request(method, path, json_body=None, timeout=30.0):
+def _error_text(response):
+    """slskd's own message for a failed request, as plain text.
+
+    slskd puts the reason in the body — a peer that went offline between the
+    search and the enqueue answers 500 `User <name> appears to be offline`,
+    and the download-request limiter answers 429. ASP.NET may wrap it in a
+    ProblemDetails object; both shapes are read here, and the body is read
+    from the bytes httpx already buffered (never re-fetched)."""
+    text = ""
+    try:
+        body = response.json()
+    except Exception:
+        body = None
+    if isinstance(body, dict):
+        text = str(body.get("message") or body.get("detail") or body.get("title") or "")
+    if not text:
+        try:
+            text = (response.text or "").strip()
+        except Exception:
+            text = ""
+    if not text:
+        return ""
+    # An HTML error page (a proxy in the way, a crashed ASP.NET pipeline) names
+    # no reason we can use, and must not land in a job log or a toast.
+    if text.lstrip()[:1] == "<":
+        return ""
+    return " ".join(text.split())[:200]
+
+
+class SlskdHTTPError(httpx.HTTPStatusError):
+    """An slskd refusal that carries slskd's own reason in `str(e)`.
+
+    httpx's message is only "Server error '500 Internal Server Error' for url
+    …", which hides the actionable half of every slskd failure — a peer that
+    went offline between the search and the enqueue answers 500 with the text
+    `User <name> appears to be offline`. Subclassing (rather than replacing)
+    keeps every existing `except httpx.HTTPStatusError` handler and its
+    `e.response.status_code` checks working untouched.
+    """
+
+    def __init__(self, message, *, request, response, detail=""):
+        super().__init__(message, request=request, response=response)
+        self.detail = (detail or "").strip()
+
+    def __str__(self):
+        base = super().__str__()
+        return f"{base} — slskd said: {self.detail}" if self.detail else base
+
+
+class SlskdError(RuntimeError):
+    """An slskd refusal with no HTTP status to attach (a refused enqueue).
+
+    Same contract as `SlskdHTTPError` for the callers that report a reason:
+    `str(e)` is what the user reads.
+    """
+
+    def __init__(self, message, path=""):
+        self.message = (message or "").strip()
+        super().__init__(f"{self.message}{f' ({path})' if path else ''}")
+
+
+def _request(method, path, json_body=None, timeout=30.0, retries=1):
     client = _http_client()
-    # per-request timeout: the shared client keeps the 30 s default, every
-    # call keeps overriding it exactly as it did when it built its own client
-    r = client.request(method, path, json=json_body, headers=_headers(),
-                       timeout=timeout)
-    if r.status_code in (401, 403) and _proc["api_key"]:
-        # stale key from a previous slskd boot — the running instance
-        # mints its own; retry anonymously (auth is localhost-only)
-        _proc["api_key"] = None
+    for attempt in range(retries + 1):
         r = client.request(method, path, json=json_body, headers=_headers(),
                            timeout=timeout)
-    r.raise_for_status()
-    if r.status_code == 204 or not r.content:
-        return None
-    return r.json()
+        if r.status_code in (401, 403) and _proc["api_key"]:
+            # stale key from a previous slskd boot — the running instance
+            # mints its own; retry anonymously (auth is localhost-only)
+            _proc["api_key"] = None
+            r = client.request(method, path, json=json_body, headers=_headers(),
+                               timeout=timeout)
+        # 429 is slskd's download-request limiter (a global two-slot
+        # semaphore): the request was NOT accepted, so it is safe to re-send
+        # once after a moment instead of failing the caller's whole album.
+        if r.status_code == 429 and attempt < retries:
+            time.sleep(1.5)
+            continue
+        # 3xx too: the pooled client does not follow redirects, and
+        # raise_for_status() — which this replaced — treated a redirect as an
+        # error. Nothing here wants a redirect body parsed as a payload.
+        if r.status_code >= 300:
+            raise SlskdHTTPError(
+                f"slskd {method} {path} answered {r.status_code} for url "
+                f"'{r.request.url}'",
+                request=r.request, response=r, detail=_error_text(r))
+        if r.status_code == 204 or not r.content:
+            return None
+        try:
+            return r.json()
+        except ValueError:
+            return None
+    return None
 
 
 def wait_until_ready(timeout=25.0):
@@ -700,7 +805,7 @@ def wait_until_ready(timeout=25.0):
 # --------------------------------------------------------------------------- #
 # High-level operations
 # --------------------------------------------------------------------------- #
-def search(query, cfg=None, timeout_ms=None):
+def search(query, cfg=None, timeout_ms=None, response_limit=None):
     """Start a search; returns the search id for polling.
 
     slskd validates a client-supplied id as a GUID — older builds ignored
@@ -714,12 +819,22 @@ def search(query, cfg=None, timeout_ms=None):
     SearchOptions as ms — measured against slskd 0.26, `searchTimeout: 45`
     ends the search in ~1.5 s with 0 responses while `5000` runs ~27 s and
     collects 62. Sending a seconds-style number therefore kills the search
-    outright (this is what starved candidate discovery in auto-import)."""
+    outright (this is what starved candidate discovery in auto-import).
+
+    response_limit is slskd's `responseLimit`: the search terminates with
+    state `ResponseLimitReached` once that many peers have answered. The
+    quiet timer alone is not enough for a popular album — peers keep replying,
+    so the search never goes quiet and nothing is readable until it does
+    (slskd only serves `/searches/{id}/responses` once a search has ENDED).
+    Measured: `responseLimit: 5` on an active query returns 5 responses and
+    76 files after ~1.4 s instead of the full window."""
     search_id = str(uuid.uuid4())
     body = {"id": search_id, "searchText": query}
     if timeout_ms:
         # slskd's DTO field is SearchTimeout; a "timeout" key is ignored.
         body["searchTimeout"] = max(1, int(timeout_ms))
+    if response_limit:
+        body["responseLimit"] = max(1, int(response_limit))
     try:
         resp = _request("POST", "/searches", json_body=body, timeout=30.0)
     except httpx.HTTPStatusError as e:
@@ -843,11 +958,30 @@ def enqueue_download(username, files, cfg=None):
     """Queue files for download: files = [{filename, size}].
 
     slskd's enqueue route is per-user (POST /transfers/downloads/{username})
-    with a bare list body — there is no top-level /downloads route."""
+    with a bare list body — there is no top-level /downloads route.
+
+    The 201 body reports what slskd queued and what the peer refused
+    (`{Enqueued, Failed}`). A refusal is NOT a success: the transfer never
+    starts, so the caller would wait out its whole timeout for files that were
+    never asked for. Raises `SlskdError` naming the refused files instead.
+    """
     body = [{"filename": f["filename"], "size": int(f.get("size") or 0)}
             for f in files]
-    _request("POST", f"/transfers/downloads/{quote(str(username), safe='')}",
-             json_body=body, timeout=30.0)
+    res = _request("POST", f"/transfers/downloads/{quote(str(username), safe='')}",
+                   json_body=body, timeout=30.0)
+    failed = res.get("Failed") if isinstance(res, dict) else None
+    if failed:
+        names = []
+        for item in failed:
+            name = item.get("filename") if isinstance(item, dict) else str(item)
+            if name:
+                names.append(str(name).replace("\\", "/").rsplit("/", 1)[-1])
+        shown = ", ".join(names[:3])
+        raise SlskdError(
+            f"{len(failed)} file(s) refused by the peer"
+            + (f": {shown}{'…' if len(names) > 3 else ''}" if shown else ""),
+            "enqueue",
+        )
     return True
 
 
@@ -875,6 +1009,16 @@ def finished_transfer(state):
     return any(x in st for x in _FINISHED_STATES)
 
 
+def successful_transfer(state):
+    """True when a slskd transfer state names a SUCCEEDED download.
+
+    Only "Succeeded" — slskd reports its failures as compounds too
+    ("Completed, Errored", "Completed, Cancelled"), so "Completed" alone is a
+    finished transfer, not a good one."""
+    st = str(state or "")
+    return finished_transfer(st) and "Succeeded" in st
+
+
 def _duration_seconds(value):
     """slskd serializes TimeSpan fields as "hh:mm:ss" ("d.hh:mm:ss" past a
     day, e.g. a long queue wait); a bare number is already seconds. None when
@@ -897,12 +1041,16 @@ def _duration_seconds(value):
 
 def _percent(value, done, size):
     """percentComplete clamped to 0..100, falling back to bytes/size when
-    slskd omits it (a transfer it has not started measuring yet)."""
+    slskd omits it (a transfer it has not started measuring yet).
+
+    Kept to one decimal: slskd reports a float and the UI shows it — a
+    900 MB file stepping in whole percent moves in ~9 MB jumps, which reads
+    as a frozen bar."""
     try:
         pct = float(value)
     except (TypeError, ValueError):
         pct = (100.0 * done / size) if size else 0.0
-    return max(0, min(100, int(round(pct))))
+    return max(0.0, min(100.0, round(pct, 1)))
 
 
 def _user_transfers(slsk, username, pending, states=None):
@@ -948,14 +1096,18 @@ def _user_transfers(slsk, username, pending, states=None):
     return out
 
 
-def cancel_downloads(username, transfer_ids, cfg=None):
+def cancel_downloads(username, transfer_ids, cfg=None, failed=None):
     """Cancel + untrack downloads of one user (DELETE /transfers/downloads/…).
 
     slskd's cancel route is per transfer and takes an optional ?remove=true
     ("also drop it from the tracked list"). A rejected/errored transfer stays
     queued otherwise, so slskd re-requests the very files whose partials the
     auto-importer just deleted. Best effort: a transfer that is already gone
-    answers 404/400 and must not abort the run."""
+    answers 404/400 and must not abort the run.
+
+    When `failed` (a list) is passed, the ids slskd did NOT confirm dropped are
+    appended to it — only a real refusal or an unreachable slskd, never the
+    404/400 of a transfer that was already gone."""
     user = quote(str(username), safe="")
     for tid in transfer_ids:
         if not tid:
@@ -964,7 +1116,14 @@ def cancel_downloads(username, transfer_ids, cfg=None):
             _request("DELETE",
                      f"/transfers/downloads/{user}/{quote(str(tid), safe='')}?remove=true",
                      timeout=15.0)
+        except httpx.HTTPStatusError as e:
+            code = e.response.status_code if e.response is not None else 0
+            if failed is not None and code not in (400, 404):
+                failed.append(str(tid))
+            continue
         except Exception:
+            if failed is not None:
+                failed.append(str(tid))
             continue
     return True
 
@@ -1298,6 +1457,34 @@ def _prune_incomplete(ddir):
                     pass
 
 
+def prune_download_dirs(ddir):
+    """Delete the empty user/batch/album shells left under the download dir.
+
+    slskd creates the directories of a transfer's destination (see
+    DESTINATION_SUBDIR: `<ddir>/<user>/<batch id>/<remote path>/…`) and never
+    removes one again, so a rejected candidate, a cancelled job and a
+    successful import each left an empty chain behind. `rmdir` bottom-up only
+    ever removes a directory that holds NOTHING — a partial, a stray file or a
+    dot-dir keeps its parents alive — and the download root itself is never
+    touched (slskd validates that one exists at boot).
+
+    Dot-dirs are skipped: `.incomplete` is slskd's staging tree and belongs to
+    _prune_incomplete, which keeps that root by design."""
+    if not ddir or not os.path.isdir(ddir):
+        return
+    empties = []
+    for base, dirs, _files in os.walk(ddir):
+        # topdown keeps the walk out of dot-dirs; the list is built
+        # parents-first, so it is walked in REVERSE to empty a chain bottom-up
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        empties += [os.path.join(base, d) for d in dirs]
+    for path in reversed(empties):
+        try:
+            os.rmdir(path)
+        except OSError:
+            pass
+
+
 def _incomplete_dir_for(downloads):
     """The incomplete dir belonging to *downloads*: its sibling `incomplete`.
 
@@ -1307,6 +1494,93 @@ def _incomplete_dir_for(downloads):
     from mlo.paths import INCOMPLETE_DIR_NAME
     parent = os.path.dirname(os.path.abspath(downloads)) or downloads
     return os.path.join(parent, INCOMPLETE_DIR_NAME)
+
+
+def clear_transfer_files(ddir, username, filename, size=0):
+    """Delete the local partial bytes ONE slskd transfer left behind.
+
+    Returns {"files_deleted", "bytes_freed", "problems"}: `problems` holds the
+    one thing a caller can report as a failure (a file that would not delete —
+    slskd still holding it open is expected), and nothing here ever raises.
+
+    A file under a staging dir is unfinished by definition. In the DOWNLOAD dir
+    the only honest test is size: slskd moves a finished transfer into place,
+    so a file already at the peer's reported size may be the album ITSELF (it
+    is, for a succeeded transfer) — refused, deliberately without a problem, so
+    clearing a completed download can never delete it. Only a short file there
+    is a truncated leftover from a cancelled/failed attempt.
+
+    Paths are the ones the auto-importer resolves: the destination template is
+    `<downloads>/<user>/<batch id>/<remote path>/<file>` (see
+    DESTINATION_SUBDIR) while a staged partial keeps the remote relative path
+    under `incomplete/` — and the same roots are checked again for an install
+    that has not migrated yet and still stages into `<downloads>/.incomplete`,
+    or still has files at the older `${SOURCE_DIRECTORY}` shapes."""
+    from server.soulseek_auto import _leaf_of, _remote_rel
+    out = {"files_deleted": 0, "bytes_freed": 0, "problems": []}
+    rel = _remote_rel(str(filename or ""))
+    if not (ddir and rel):
+        return out
+    user = str(username or "").strip()
+    base = rel.rsplit("/", 1)[-1]
+    leaf = _leaf_of(rel)
+    # every shape slskd may have written the bytes at: the full remote path,
+    # the old `${SOURCE_DIRECTORY}` pattern's `<leaf>/<file>`, and a flat
+    # `<file>`, each with and without the username segment slskd adds on its
+    # own
+    shapes = [rel, base]
+    if leaf:
+        shapes += [os.path.join(leaf, base)]
+    if user:
+        shapes += [os.path.join(user, s) for s in list(shapes)]
+    roots = [(ddir, False),
+             (_incomplete_dir_for(ddir), True),
+             (os.path.join(ddir, ".incomplete"), True)]
+    paths = []
+    for root, staged in roots:
+        for shape in shapes:
+            paths.append((os.path.normpath(os.path.join(root, shape)), staged))
+    # the CURRENT layout adds slskd's batch id between the user and the remote
+    # path, which no fixed shape can name: the user's own subtree is searched
+    # once for the file's basename (a bounded walk, never the whole download
+    # dir). The size test below still decides — only a file SHORTER than the
+    # transfer's reported size is a leftover here.
+    user_root = os.path.join(ddir, user)
+    if user and _inside(user_root, ddir):
+        incomplete = (os.sep + ".incomplete").lower()
+        for base_dir, dirs, files in os.walk(user_root):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            if incomplete in base_dir.lower():
+                continue
+            for f in files:
+                if os.path.normcase(f) == os.path.normcase(base):
+                    paths.append((os.path.normpath(os.path.join(base_dir, f)), False))
+    seen = set()
+    for p, staged in paths:
+        if p in seen:
+            continue
+        seen.add(p)
+        if not os.path.isfile(p):
+            continue
+        try:
+            on_disk = os.path.getsize(p)
+        except OSError:
+            continue          # renamed/removed under us: nothing to delete
+        if not staged and not (size and on_disk < int(size)):
+            continue          # possibly the completed download itself
+        try:
+            os.remove(p)
+        except OSError as e:
+            out["problems"].append(f"{p}: {e}")
+            continue
+        out["files_deleted"] += 1
+        out["bytes_freed"] += on_disk
+    if out["files_deleted"]:
+        _prune_incomplete(ddir)
+        # the album/batch/user chain the deleted file leaves behind, when
+        # nothing else is in it
+        prune_download_dirs(ddir)
+    return out
 
 
 def _move(src, dst):
@@ -1326,12 +1600,13 @@ def _move(src, dst):
 def _pending_album_folders(cfg=None):
     """Leaf names of remote folders whose transfers are still running.
 
-    The generated slskd config sets no destination pattern, so slskd uses its
-    default `${SOURCE_DIRECTORY}`: a completed transfer lands in
-    `<download dir>/<leaf of the remote folder>/<file>`. A folder carrying
-    that leaf name therefore belongs to a live transfer and must not be moved
-    into the library yet (the legacy layout nests it under the username, but
-    the leaf is the same).
+    The destination template keeps the remote folder structure below the
+    username and the batch id (see DESTINATION_SUBDIR), so the LEAF of a
+    transfer's remote path is still the name of the local directory the file
+    lands in — slskd recreates that directory wherever the rest of the path
+    puts it. `take_album` therefore matches a name anywhere inside the folder
+    it is about to move (a multi-disc album is moved as one `Album` folder
+    while its running transfers sit in `CD1`/`CD2`).
     """
     from server.soulseek_auto import _remote_rel
     try:
@@ -1414,18 +1689,23 @@ def import_completed(cfg=None, finish=False, progress=None):
     steps (the naming script renames the album folder, and grading an
     unorganized album is a false verdict).
 
-    slskd's completed layout is `<download dir>/<leaf of the remote folder>/
-    <file>` — its default destination pattern is `${SOURCE_DIRECTORY}`, which
-    this app does not override. So each top-level entry is classified:
+    slskd's completed layout is `<download dir>/<user>/<batch id>/<remote
+    path>/<album>/<file>` (see DESTINATION_SUBDIR — the batch id is slskd's
+    own, one per enqueue call, so no two candidates share a root). Each
+    top-level entry is classified:
 
-      * holds audio anywhere inside -> ONE album folder, moved whole;
+      * holds an album file directly -> ONE album folder, moved whole;
       * holds only rip evidence (a peer's `.log`/`.cue`) and no audio ->
         leftover: left in the download dir and reported by
         last_import_leftovers();
-      * holds no audio but has audio-bearing children -> the legacy per-user
-        layout: every child is an album, leftover loose files become
-        "Soulseek <user>";
+      * holds no album file of its own but album folders below it -> a
+        container (the per-user, per-batch and peer-path levels the staging
+        layout nests): the folders inside it are imported, and any loose file
+        beside them becomes a "Soulseek <container>" album;
       * a loose file -> gathered into a "Soulseek" album.
+
+    A folder whose children are all disc folders (`…/Album/CD1` + `…/CD2`) is
+    taken as the ONE album it is, not as two albums named after the discs.
 
     Every move goes through mlo.paths.move_path, so a file slskd still holds
     open is retried and then reported instead of degrading into copy+delete
@@ -1434,7 +1714,8 @@ def import_completed(cfg=None, finish=False, progress=None):
     {"path", "reason"}. An album whose transfers are still running comes back
     from last_import_skipped(). Dot-dirs are never moved (a pre-migration
     `.incomplete/` may still sit here), and the empty staging trees under the
-    incomplete dir are pruned. Returns the list of new album paths.
+    incomplete dir — and the emptied containers left under the download dir —
+    are pruned. Returns the list of new album paths.
     """
     cfg = cfg or load_config()
     folder = str(cfg.get("music_folder") or "").strip()
@@ -1469,9 +1750,25 @@ def import_completed(cfg=None, finish=False, progress=None):
 
     moved = []
 
+    def still_downloading(src):
+        """True when a folder about to be moved holds a remote folder whose
+        transfers are still running.
+
+        A multi-disc album is moved as ONE `Album` folder while the transfers
+        still coming down sit in its `CD1`/`CD2`, so matching the moved
+        folder's own name is not enough: every directory name inside it counts
+        (the remote folder's leaf is the local directory name — one per
+        running file)."""
+        if not pending:
+            return False
+        for base, _dirs, _files in os.walk(src):
+            if os.path.basename(base).lower() in pending:
+                return True
+        return False
+
     def take_album(src):
         """Move one album folder whole — unless it is still downloading."""
-        if os.path.basename(src).lower() in pending:
+        if still_downloading(src):
             _last_import_skipped.append(src)
             return
         dest = unique_album_dir(os.path.basename(src))
@@ -1505,6 +1802,49 @@ def import_completed(cfg=None, finish=False, progress=None):
             return
         moved.append(dest)
 
+    def disc_parent(path):
+        """True when every album-bearing child of `path` is a DISC folder
+        (…/Album/CD1 + …/Album/CD2): `path` is then the album, not its
+        discs."""
+        from server.soulseek_auto import _disc_number
+        children = [c for c in sorted(os.listdir(path))
+                    if not c.startswith(".")
+                    and os.path.isdir(os.path.join(path, c))
+                    and _holds_album_files(os.path.join(path, c))]
+        return bool(children) and all(_disc_number(c) for c in children)
+
+    def take_tree(epath):
+        """Import the album folders below a CONTAINER directory, then any loose
+        file sitting beside them.
+
+        A directory holding an album file directly is an album; one whose
+        children are all disc folders is its album's parent. Anything else is a
+        container — a per-user folder, a batch id, or a level of the peer's own
+        share path — and the walk follows it down until it reaches albums, so
+        the staging layout's depth needs no special case here."""
+        for c in sorted(os.listdir(epath)):
+            if c.startswith("."):
+                continue
+            cpath = os.path.join(epath, c)
+            if not os.path.isdir(cpath) or os.path.islink(cpath):
+                # a loose file, or a link (never descended: a junction back
+                # into the tree would walk for ever)
+                continue
+            if not _holds_album_files(cpath):
+                continue          # scans/ with no album file: not an album
+            if not _holds_audio(cpath):
+                # rip evidence with no audio anywhere below it: a peer's stray
+                # log/cue folder, which must never publish an album
+                _last_import_leftovers.append(cpath)
+                continue
+            if _holds_album_files(cpath, direct_only=True) or disc_parent(cpath):
+                take_album(cpath)
+            else:
+                take_tree(cpath)
+        gather([f for f in os.listdir(epath)
+                if os.path.isfile(os.path.join(epath, f))],
+               epath, f"Soulseek {os.path.basename(epath)}")
+
     loose = []
     for entry in sorted(os.listdir(ddir)):
         # slskd stages every in-progress transfer in
@@ -1518,39 +1858,31 @@ def import_completed(cfg=None, finish=False, progress=None):
         if not os.path.isdir(epath):
             loose.append(entry)
             continue
-        if not _holds_audio(epath) and _holds_album_files(epath):
+        if not _holds_album_files(epath):
+            # nothing album-shaped anywhere below: left alone, never swept in
+            continue
+        if not _holds_audio(epath):
             # rip evidence with no audio anywhere below it: a peer's stray
             # log/cue folder, which must never publish an album
             _last_import_leftovers.append(epath)
             continue
-        if _holds_album_files(epath, direct_only=True):
+        if _holds_album_files(epath, direct_only=True) or disc_parent(epath):
             take_album(epath)
             continue
-        # No album file of its own: only a legacy per-user folder can still
-        # hold albums (its children), and anything without a single album file
-        # below it is left alone rather than swept into the library.
-        children = {}
-        for c in sorted(os.listdir(epath)):
-            cpath = os.path.join(epath, c)
-            if not c.startswith(".") and os.path.isdir(cpath):
-                children[c] = _holds_audio(cpath)
-        albums = [c for c, audio in children.items() if audio]
-        if not albums:
-            continue
-        for c, audio in children.items():
-            if not audio and _holds_album_files(os.path.join(epath, c)):
-                _last_import_leftovers.append(os.path.join(epath, c))
-        for child in albums:
-            take_album(os.path.join(epath, child))
-        gather([f for f in os.listdir(epath)
-                if os.path.isfile(os.path.join(epath, f))],
-               epath, f"Soulseek {entry}")
+        # No album file of its own: a container (the per-user / batch id /
+        # peer path levels of the staging layout). Its albums are imported by
+        # walking down to them; anything with no album file anywhere below is
+        # left alone rather than swept into the library.
+        take_tree(epath)
         try:
             os.rmdir(epath)
         except OSError:
             pass  # an album-less child (scans/, a stray folder) keeps it alive
     # loose files directly in the download root -> one album folder
     gather(loose, ddir, "Soulseek")
+    # the user/batch/album shells the moves above emptied (a leftover or a
+    # failed move keeps its own chain alive — rmdir only takes empty dirs)
+    prune_download_dirs(ddir)
     if finish and moved:
         # The configured chain, once per imported album. A failure is recorded
         # (last_import_scripts) and never loses the import: the albums are in

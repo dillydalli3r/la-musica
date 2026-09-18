@@ -60,10 +60,12 @@ def _diff_bytes(before_size, final_size, existing_dest_size=0):
 
 def _existing_size(path, avoid_path=None):
     try:
-        if not path or not os.path.exists(path):
+        if not path:
             return 0
         if avoid_path and os.path.normcase(os.path.normpath(path)) == os.path.normcase(os.path.normpath(avoid_path)):
             return 0
+        # One syscall, not two: getsize already answers "missing" with the
+        # OSError the old os.path.exists probe paid a whole extra stat for.
         return os.path.getsize(path)
     except OSError:
         return 0
@@ -120,16 +122,15 @@ def _make_pbar(total, desc, unit="file"):
 
 
 def _pbar_skip(pbar, counts):
-    counts["skip"] += 1
-    if pbar is not None:
-        try:
-            with _write_lock:
-                # A skipped file is still one scanned file: advance the bar so
-                # the denominator cannot shrink and x/y keeps matching the run.
-                pbar.update(1)
-                pbar.set_postfix(ok=counts["ok"], skip=counts["skip"], fail=counts["fail"])
-        except Exception:
-            pass
+    # A skipped file is still one scanned file: it advances the bar so the
+    # denominator cannot shrink and x/y keeps matching the run.
+    with _write_lock:
+        counts["skip"] += 1
+    # The bar is ticked OUTSIDE the lock: every worker thread of a run comes
+    # through here once per file, and rendering (tqdm formatting its line,
+    # writing to the terminal) is orders of magnitude longer than the two int
+    # increments the lock exists to protect.
+    _pbar_tick(pbar, counts)
 
 
 def _pbar_update(pbar, counts, kind="ok"):
@@ -138,24 +139,43 @@ def _pbar_update(pbar, counts, kind="ok"):
             counts["ok"] += 1
         elif kind == "fail":
             counts["fail"] += 1
+    _pbar_tick(pbar, counts)
 
-        if pbar is not None:
-            try:
-                pbar.update(1)
-                pbar.set_postfix(ok=counts["ok"], skip=counts["skip"], fail=counts["fail"])
-            except Exception:
-                pass
+
+def _pbar_tick(pbar, counts):
+    """Advance *pbar* by one file and refresh its postfix counters."""
+    if pbar is None:
+        return
+    try:
+        pbar.update(1)
+        pbar.set_postfix(ok=counts["ok"], skip=counts["skip"], fail=counts["fail"])
+    except Exception:
+        pass
 
 
 def _walk_files(root_dir, extensions):
     """Fast recursive file walker using os.scandir()."""
     if not os.path.isdir(root_dir):
         return
+    yield from _walk_dir(root_dir, extensions)
+
+
+def _walk_dir(root_dir, extensions):
+    """The recursion half of :func:`_walk_files`.
+
+    *root_dir* is known to be a directory here — its parent's scandir said so —
+    so this must NOT stat it again: ``os.path.isdir`` per level was one extra
+    syscall per directory (a warm-cache 400-album walk spent 17 of its 65 ms
+    there, `nt._path_isdir` on the clock). A directory that vanished or turned
+    unreadable between the scan and the descent still reports nothing: scandir
+    raises OSError, which the guard below already swallows exactly as the
+    old isdir check did.
+    """
     try:
         for entry in os.scandir(root_dir):
             if entry.is_dir(follow_symlinks=False):
                 if entry.name.lower() not in _SKIP_DIRS_LOWER:
-                    yield from _walk_files(entry.path, extensions)
+                    yield from _walk_dir(entry.path, extensions)
             elif entry.is_file(follow_symlinks=False):
                 if os.path.splitext(entry.name)[1].lower() in extensions:
                     yield entry.path
@@ -204,11 +224,19 @@ def _decode_mp4_value(v):
 
 def _find_albums(root_dir):
     albums = set()
+    # The walker yields a directory's files one after another, so the parent
+    # is the same string for the whole album: normalizing it once per album
+    # instead of once per track saves a normpath call per file (a 20-track
+    # album cost 20, the same path 20 times).
+    last_raw = last_album = None
     for file_path in _walk_files(root_dir, LIB_AUDIO_EXTS):
-        # Normalize so F:/Music/Artists + \System\... mixed separators don't
-        # create mismatched keys between the scanner and the UI's
-        # os.path.dirname comparisons (Windows allows both / and \).
-        albums.add(os.path.normpath(os.path.dirname(file_path)))
+        raw = os.path.dirname(file_path)
+        if raw != last_raw:
+            # Normalize so F:/Music/Artists + \System\... mixed separators don't
+            # create mismatched keys between the scanner and the UI's
+            # os.path.dirname comparisons (Windows allows both / and \).
+            last_raw, last_album = raw, os.path.normpath(raw)
+            albums.add(last_album)
     return sorted(albums)
 
 
@@ -231,8 +259,17 @@ def _collect_targets(targets, extensions):
             if os.path.splitext(t)[1].lower() in extensions:
                 files[os.path.normcase(os.path.normpath(t))] = t
         elif os.path.isdir(t):
+            # Same memo as _find_albums: the walker hands one directory's files
+            # over together, and normcase(normpath(parent + sep + name)) is
+            # normcase(normpath(parent)) + normcase(sep + name) — the parent's
+            # two string operations run once per directory, not once per file.
+            last_raw = last_key = None
             for f in _walk_files(t, extensions):
-                files[os.path.normcase(os.path.normpath(f))] = f
+                raw = os.path.dirname(f)
+                if raw != last_raw:
+                    last_raw = raw
+                    last_key = os.path.normcase(os.path.normpath(raw))
+                files[last_key + f[len(raw):]] = f
     return sorted(files.values())
 
 

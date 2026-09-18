@@ -426,6 +426,36 @@ try:
         "the folder's own legacy state was copied instead of moved"
     os.environ.pop("MLO_MUSIC_FOLDER", None)
 
+    # A music folder inside the OS temp dir is never a real library: a leaked
+    # MLO_MUSIC_FOLDER or a stub config.json left pointing at a test redirect
+    # would otherwise stage downloads, imports and grading on a throwaway
+    # folder with nothing saying so. Both entry points must warn; a real path
+    # must stay quiet.
+    import contextlib
+    import io
+    import tempfile
+    import mlo.paths as mp
+
+    leaked = os.path.join(tempfile.gettempdir(), "mlo-leak-check")
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        mp._warn_if_temp_folder(leaked)
+    assert "inside the OS temp directory" in buf.getvalue(), \
+        "a temp music folder was not warned about"
+
+    os.environ["MLO_MUSIC_FOLDER"] = leaked
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        assert mp.read_music_folder_guess() == leaked
+    os.environ.pop("MLO_MUSIC_FOLDER", None)
+    assert "inside the OS temp directory" in buf.getvalue(), \
+        "the env-var redirect resolved without a warning"
+
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        mp._warn_if_temp_folder(os.path.join(os.sep, "mlo-not-temp", "music"))
+    assert buf.getvalue() == "", "a normal music folder was warned about"
+
     print("PASS  all config-migration scenarios")
 finally:
     os.environ.pop("MLO_MUSIC_FOLDER", None)

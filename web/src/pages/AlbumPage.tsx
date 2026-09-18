@@ -1,32 +1,32 @@
 ﻿import { Fragment, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync, FolderOpen, BarChart3, ImageUp, Image as ImageIcon, FileVideo, Film, Disc3, CloudDownload, Sparkles, ListPlus, ListStart, ShieldCheck, FileMusic, ListChecks, Info as InfoIcon, Loader2, Pencil, RefreshCw } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync, FolderOpen, BarChart3, ImageUp, Image as ImageIcon, FileVideo, Film, Disc3, CloudDownload, Sparkles, ListPlus, ListStart, ShieldCheck, FileMusic, ListChecks, Info as InfoIcon, Loader2, Pencil, RefreshCw, Users } from "lucide-react";
 import { api } from "../api";
 import { LinkChips, LinkEditorButton } from "../components/Links";
 import { SubtitledVideo } from "../components/SubtitledVideo";
 import { EmptyState, AdvisoryMark, GradeBadge, PageLoading } from "../components/Badges";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import CoverSearchModal from "../components/CoverSearchModal";
+import Description from "../components/Description";
 import FavHeart from "../components/FavHeart";
 import { trackRef, entityLinkClick } from "../lib/refs";
 import { invalidateLibrary } from "../lib/invalidate";
 import { auditFails } from "../lib/status";
 import { isVideoFile } from "../lib/fmt";
 import BulkTagsDialog from "../components/BulkTagsDialog";
-import MoreLikeThis from "../components/MoreLikeThis";
 import Modal from "../components/Modal";
 import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
 import TagActionsMenu from "../components/TagActionsMenu";
 import StatsPanel from "../components/StatsPanel";
-import TrackDetails from "../components/TrackDetails";
+import TrackDetails, { CreditsPanel } from "../components/TrackDetails";
 import { SortHeader, sortRows, toggleSort, groupByDisc, type SortState } from "../lib/sort.tsx";
 import { ColumnsMenu, ColumnResizer, useColumnPrefs, useColumnWidths, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W } from "../lib/columns";
 import { toast, useStore } from "../store";
 import { fmtTech, albumTech } from "../lib/fmt";
 import { fmtDuration } from "../lib/fmt";
-import type { ExpectedTrack, Track } from "../types";
+import type { CoverResult, ExpectedTrack, Track } from "../types";
 
 /** Provider id → the name a reader knows ("wikipedia" → Wikipedia). */
 const SOURCE_NAMES: Record<string, string> = {
@@ -57,6 +57,19 @@ export default function AlbumPage() {
     queryFn: () => api.coverColor(decoded),
     retry: false,
   });
+  // Candidates the import staged for a cover-less album (`cover_review` on).
+  // Asked ONLY while the album has no cover file: a covered album's staged set
+  // is irrelevant, and this must not add a request to every album page.
+  const stagedCovers = useQuery({
+    queryKey: ["stagedCovers", decoded],
+    queryFn: async () => {
+      const c = await api.metadataCandidates(data?.meta?.ALBUMARTIST ?? data?.meta?.ARTIST ?? "", decoded);
+      return c.staged?.covers ?? null;
+    },
+    enabled: !!data && !data.cover_file,
+    retry: false,
+  });
+  const stagedCoverRows = stagedCovers.data?.results ?? null;
   const playNow = useStore((s) => s.playNow);
   const queue = useStore((s) => s.queue);
   const queueAdd = useStore((s) => s.queueAdd);
@@ -70,11 +83,15 @@ export default function AlbumPage() {
   const [detailTrack, setDetailTrack] = useState<Track | null>(null);
   const [videoOpen, setVideoOpen] = useState<string | null>(null);
   const [remuxing, setRemuxing] = useState(false);
-  const [coverSearchOpen, setCoverSearchOpen] = useState(false);
+  // Cover finder modal: null = closed, else the candidates it opens on (empty
+  // = search from scratch, staged rows = the import's own picks).
+  const [coverSearch, setCoverSearch] = useState<{ results?: CoverResult[]; provider?: string | null } | null>(null);
   const [beetsBusy, setBeetsBusy] = useState(false);
   const [lyricsBusy, setLyricsBusy] = useState(false);
   const [issuesOpen, setIssuesOpen] = useState(false);
   const [coverInfoOpen, setCoverInfoOpen] = useState(false);
+  // Album-wide credits dialog — nothing is fetched until it is opened.
+  const [creditsOpen, setCreditsOpen] = useState(false);
   // track checkboxes (and the selection toolbar) only exist in select mode
   const [selectMode, setSelectMode] = useState(false);
   const [tagsDialogOpen, setTagsDialogOpen] = useState(false);
@@ -150,8 +167,8 @@ export default function AlbumPage() {
   if (isLoading || !data) return <PageLoading label="Loading album…" />;
 
   const tracks = sortRows(data.tracks, sort);
-  // Album identity (title/artist) for the description + similarity calls, and
-  // the stored description the folder carries (description.txt).
+  // Album identity (title/artist) for the description calls, and the stored
+  // description the folder carries (description.txt).
   const albumTitle = data.meta?.ALBUM ?? data.path.split("/").pop() ?? "";
   const albumArtist = data.meta?.ALBUMARTIST ?? data.meta?.ARTIST ?? "";
   const desc = data.artwork ?? null;
@@ -512,12 +529,31 @@ export default function AlbumPage() {
                       items: [
                         { label: "Cover info", icon: InfoIcon, onClick: () => setCoverInfoOpen(true) },
                         { label: "Upload cover…", icon: ImageUp, onClick: () => coverInput.current?.click() },
-                        { label: "Find cover online", icon: ImageIcon, onClick: () => setCoverSearchOpen(true) },
+                        { label: "Find cover online", icon: ImageIcon, onClick: () => setCoverSearch({}) },
                       ],
                     },
                   ]}
                 />
               </div>
+              {/* The import fetched candidates and wrote nothing (`cover_review`
+                  on). The pick the silent auto-apply used to make is now one
+                  click — shown only for a cover-less album that has a staged
+                  set, so an album with art looks exactly as before. */}
+              {!data.cover_file && !!stagedCoverRows?.length && (
+                <button
+                  className="btn-primary mt-2 w-40 sm:w-56 !py-1.5 text-xs"
+                  onClick={() =>
+                    setCoverSearch({
+                      results: stagedCoverRows,
+                      provider: stagedCovers.data?.provider ?? null,
+                    })
+                  }
+                  title="Covers fetched during import, waiting for you to pick one"
+                >
+                  <ImageIcon className="h-3.5 w-3.5" />
+                  Choose a cover ({stagedCoverRows.length})
+                </button>
+              )}
             </div>
             <div className="flex-1 min-w-0 w-full">
               <PageHeader
@@ -637,7 +673,7 @@ export default function AlbumPage() {
                       albumPath={data.path}
                       artist={data.album_artist ?? undefined}
                       releaseMbid={data.meta?.MUSICBRAINZ_ALBUMID ?? undefined}
-                      covers={() => setCoverSearchOpen(true)}
+                      covers={() => setCoverSearch({})}
                       buttonClass={iconBtn}
                       buttonTitle="Tag actions"
                       onDone={() => invalidateLibrary(qc)}
@@ -659,6 +695,7 @@ export default function AlbumPage() {
                     { label: "Organize (naming script)", icon: FolderSync, onClick: organizeAlbum },
                     { label: "Open folder", icon: FolderOpen, onClick: async () => { try { await api.openFolder(data.path); } catch (e) { toast.error(String(e)); } } },
                     { label: "Stats", icon: BarChart3, onClick: () => setStatsOpen(true) },
+                    { label: "Credits", icon: Users, onClick: () => setCreditsOpen(true) },
                   ],
                 },
                 {
@@ -708,7 +745,7 @@ export default function AlbumPage() {
                 <a
                   href={desc.description_url}
                   target="_blank"
-                  rel="noreferrer"
+                  rel="noopener noreferrer"
                   className="hover:text-accent-soft underline decoration-dotted"
                   title={desc.description_url}
                 >
@@ -785,12 +822,7 @@ export default function AlbumPage() {
             </div>
           </div>
         ) : desc?.description_text ? (
-          <p
-            className="mt-2 text-sm text-zinc-300 leading-relaxed whitespace-pre-line max-h-72 overflow-y-auto"
-            title={`${desc.description_text.length} characters`}
-          >
-            {desc.description_text}
-          </p>
+          <Description key={data.path} text={desc.description_text} />
         ) : (
           <div className="mt-2 text-xs text-zinc-500">
             No description yet —{" "}
@@ -853,6 +885,19 @@ export default function AlbumPage() {
         />
       )}
 
+      {creditsOpen && (
+        <Modal
+          onClose={() => setCreditsOpen(false)}
+          icon={Users}
+          title="Credits"
+          subtitle={data.meta?.ALBUM ?? data.path.split("/").pop() ?? "album"}
+          width="max-w-lg"
+          bodyClass="px-5 py-5"
+        >
+          <CreditsPanel album={data.path} />
+        </Modal>
+      )}
+
       {(selectMode || selectedHere.length > 0) && (
         <div className="flex items-center gap-2 bg-accent/15 border border-accent/40 rounded-lg px-3 py-2 flex-wrap">
           {selectMode && (
@@ -870,7 +915,7 @@ export default function AlbumPage() {
               <button className="btn-ghost !py-0.5 text-xs" onClick={selectNoneHere}>
                 None
               </button>
-              <span className="w-px h-4 bg-border mx-0.5" />
+              <span className="w-px h-5 bg-border mx-0.5 self-center shrink-0" />
             </>
           )}
           <span className="text-xs font-medium text-accent-soft">
@@ -1181,15 +1226,15 @@ export default function AlbumPage() {
         </table>
       </div>
 
-      <MoreLikeThis kind="album" artist={albumArtist} album={albumTitle} mbid={data.meta?.MUSICBRAINZ_RELEASEGROUPID ?? undefined} />
-
-      {coverSearchOpen && (
+      {coverSearch && (
         <CoverSearchModal
           albumPath={data.path}
           artist={data.meta?.ALBUMARTIST ?? data.meta?.ARTIST ?? ""}
           album={data.meta?.ALBUM ?? ""}
           releaseGroupMbid={data.meta?.MUSICBRAINZ_RELEASEGROUPID ?? undefined}
-          onClose={() => setCoverSearchOpen(false)}
+          initialResults={coverSearch.results}
+          initialProvider={coverSearch.provider}
+          onClose={() => setCoverSearch(null)}
           onApplied={() => {
             qc.invalidateQueries({ queryKey: ["library"] });
             qc.invalidateQueries({ queryKey: ["coverColor", decoded] });

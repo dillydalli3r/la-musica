@@ -5,13 +5,12 @@ import type {
   ArtistArtworkImage,
   CoverInfo,
   CoverSourceCatalog,
+  CoverResult,
   CoverSearch,
   CoverWriteResult,
-  DiscoveryAlbumDetail,
   DiscoveryCatalog,
   DiscoveryImageRow,
-  DiscoveryRow,
-  DiscoverySearch,
+  DownloadEntry,
   DownloadsPayload,
   HomeData,
   ImportBulkJob,
@@ -95,6 +94,29 @@ function noteContainerSwap<T extends ContainerSwap>(r: T): T {
   return r;
 }
 
+/** One credit row of `/api/credits`: who did what on a track or an album.
+ *  `role` arrives already lower-cased and grouped-ready, `attributes` are the
+ *  instrument / vocal part the relation stated, and `mbid` is empty on rows
+ *  that came from the files' own tags. */
+export interface CreditRow {
+  role: string;
+  attributes: string[];
+  artist: string;
+  mbid: string;
+}
+
+/** `/api/credits` reply. `source` must be shown next to the rows: a tag
+ *  fallback is not MusicBrainz data and must never read as if it were. */
+export interface Credits {
+  artist: string;
+  album: string;
+  rows: CreditRow[];
+  source: "musicbrainz" | "tags";
+  track_mbid?: string;
+  release_mbid?: string;
+  cached: boolean;
+}
+
 /** One item in <music folder>/.mlo/trash. `cover` is false when the cover
  *  endpoint would 404 for this directory — render a placeholder then. */
 export interface TrashEntry {
@@ -136,19 +158,43 @@ export interface TrashDeleteResult {
 }
 
 /** Live per-query search progress (server/soulseek_auto.py job_state()) while
- *  the search stage runs — null once the query has been scored. `elapsed` and
- *  `wait` are seconds of the current query's window. */
+ *  the search stage runs — null once the query has been scored. There is no
+ *  clock here on purpose: slskd's window is a ceiling that a good candidate
+ *  ends early, so the payload carries only what the network answered. */
 export interface SlskSearchProgress {
   query: string;
-  elapsed: number;
-  wait: number;
   state: string;
   responses: number;
   files: number;
-  /** Seconds left in this query's window, and the absolute deadline the
-   *  server computed for it. Older servers send neither. */
-  remaining?: number | null;
-  deadline_s?: number | null;
+}
+
+/** `/api/soulseek/status` — slskd's availability and login, plus the saved
+ *  credentials and the ports from the config. */
+export interface SlskStatus {
+  installed: boolean;
+  running: boolean;
+  /** slskd's own network login; null while the daemon is not running. */
+  logged_in: boolean | null;
+  /** slskd's words for a failed login (INVALIDPASS, no credentials) — the
+   *  only explanation some failures have. */
+  error: string | null;
+  /** Set when slskd's web port is held by ANOTHER app's slskd. */
+  conflict: string | null;
+  conflict_username: string | null;
+  /** slskd's GET /application payload (transfer speeds, counters). */
+  server: { uploadSpeed?: number; downloadSpeed?: number; [k: string]: unknown } | null;
+  download_dir: string;
+  web_port: number;
+  listen_port: number;
+  /** Saved config value — prefills the login form. */
+  username: string;
+  /** The account slskd is ACTUALLY signed in as, "" when unknown. Drifts from
+   *  `username` as soon as the login is corrected on slskd's own page. */
+  account: string;
+  password: string;
+  has_credentials: boolean;
+  autostart: boolean;
+  share_dirs: string[];
 }
 
 /** One file of the running auto-import download, as slskd reports it. */
@@ -156,9 +202,13 @@ export interface SlskAutoFile {
   name?: string;
   bytes?: number;
   size?: number;
+  /** fractional file completion (0-100), never only 0-or-100 */
   percent?: number;
   speed?: number;
   state?: string;
+  /** slskd reports the transfer finished */
+  complete?: boolean;
+  /** the pipeline formally accepted the file — it landed on disk */
   done?: boolean;
 }
 
@@ -169,12 +219,18 @@ export interface SlskAutoProgress {
   phase?: string;
   username?: string;
   dir?: string;
+  /** files SLKSD reports complete — a different measure from files_arrived */
   files_done?: number;
+  /** files the pipeline has accepted onto disk */
+  files_arrived?: number;
   files_total?: number;
   bytes?: number;
   size?: number;
+  /** byte-weighted share of `size`, not a file count */
   percent?: number;
+  /** instantaneous aggregate rate in bytes/s (delta between polls) */
   speed?: number;
+  /** remaining bytes / speed, null while nothing is moving */
   eta_s?: number | null;
   files?: SlskAutoFile[] | null;
 }
@@ -201,17 +257,21 @@ export interface SlskAutoJob {
     wished?: boolean; wish_id?: number;
   } | null;
   /** The prompt while state == "confirm". `reason` picks the card: "lossy_only"
-   *  asks whether a lossy copy may be downloaded, "no_results" reports a search
-   *  that came back empty and offers the wish handoff. Both are answered through
-   *  soulseekAutoConfirm(). Only the fields of the variant at hand are
+   *  asks whether a lossy copy may be downloaded, "no_logs" asks whether a
+   *  lossless album without a rip log may be downloaded, "no_results" reports a
+   *  search that came back empty and offers the wish handoff. All are answered
+   *  through soulseekAutoConfirm(). Only the fields of the variant at hand are
    *  published, so every field past `reason` is optional and the panel renders
    *  whatever subset arrives. */
   confirm: {
-    reason?: "lossy_only" | "no_results";
+    reason?: "lossy_only" | "no_logs" | "no_results";
     /** How long the search ran, in seconds (no_results). */
     waited?: number;
     /** The queries that came back empty (no_results). */
     queries?: string[];
+    /** The media the release is (no_logs) — what the album grades as without
+     *  a rip log to verify it. */
+    media?: string;
     formats?: string[];
     candidates?: {
       username: string; dir: string; format: string;
@@ -239,6 +299,35 @@ export interface SlskTransferUser {
 
 export interface SlskDownloads {
   downloads: SlskTransferUser[];
+}
+
+/** Which staging root an action targets. They are two directories —
+ *  `<music>/.mlo/downloads` and its `<incomplete>` sibling — and a name is
+ *  only unique INSIDE one of them, so every call names its root. */
+export type StagingRootId = "downloads" | "incomplete";
+
+/** One staging entry — the server's `_downloads_entry()` minus its private
+ *  `_mtime` sort key. `partial` is slskd's own in-flight leftover, `album` an
+ *  entry holding audio (so it can be imported). */
+export interface StagingEntry extends DownloadEntry {
+  /** Epoch seconds of the entry's newest file; the list arrives newest first. */
+  modified: number;
+}
+
+/** One staging root. A folder that was never created reports `exists: false`
+ *  with zero totals — never an error. */
+export interface StagingRoot {
+  /** Absolute path, forward slashes. */
+  folder: string;
+  exists: boolean;
+  count: number;
+  bytes: number;
+  entries: StagingEntry[];
+}
+
+export interface SoulseekStaging {
+  downloads: StagingRoot;
+  incomplete: StagingRoot;
 }
 
 export interface SlskBrowse {
@@ -283,6 +372,21 @@ export interface MetadataCandidates {
   images: MetadataImageCandidate[];
   artist_description: MetadataText | null;
   album_description: MetadataText | null;
+  /** What the import chain STAGED for this album instead of applying, when
+   *  the review switches are on (`metadata_review`, `cover_review`). The cover
+   *  branch is the candidate set the album page offers as "Choose a cover". */
+  staged?: {
+    candidates?: unknown;
+    covers?: {
+      artist: string;
+      album: string;
+      release_group: string;
+      /** Who answered the staged fetch — the badge the picker shows. */
+      provider: string | null;
+      staged_at: string;
+      results: CoverResult[];
+    } | null;
+  };
 }
 
 /* ---------------------------------------------------------------------- *
@@ -357,6 +461,30 @@ export async function checkTrackValues(paths: string[]): Promise<{
   };
 }
 
+/* ---------------------------------------------------------------------- *
+ * Artist image / descriptions — the album metadata step. One call accounts *
+ * for all three items an import is expected to carry.                     *
+ * ---------------------------------------------------------------------- */
+
+/** The three artwork/text items `/api/album/metadata/fetch` accounts for. */
+export type MetadataItemKind = "artist_image" | "artist_description" | "album_description";
+
+/** One item's outcome: what happened, who answered, and why not.
+ *  `present` = already stored, `fetched` = a provider answered now,
+ *  `disabled` = switched off in Settings, `not-found` = no source has it. */
+export interface MetadataFetchItem {
+  state: "fetched" | "present" | "disabled" | "not-found" | "error" | string;
+  source?: string | null;
+  detail?: string | null;
+}
+
+/** `&staged=1` for the import wizard's own album folder.
+
+ *  The wizard's per-track steps run on albums the library tree does not list
+ *  yet, so the server accepts them only when the call asks for it. Every other
+ *  caller leaves it off and stays as strict as before. */
+const stagedQ = (staged?: boolean) => (staged ? "&staged=1" : "");
+
 export const api = {
   health: () => json<{ status: string; version: string }>(`${API}/health`),
   config: () => json<Record<string, unknown>>(`${API}/config`),
@@ -367,8 +495,19 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(cfg),
     }),
+  /** One tiny round trip to the configured AI endpoint (POST /api/ai/test).
+   *  The overrides let the wizard test keys before they are saved; a provider
+   *  that refuses comes back as `{ok:false, error}` — that message is the
+   *  point of the button, so it is never thrown as a request error. */
+  aiTest: (body: { base_url?: string; api_key?: string; model?: string; effort?: string }) =>
+    json<{ ok: boolean; reply: string; error: string }>(`${API}/ai/test`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, 60000),
   library: () => json<import("./types").Library>(`${API}/library`),
-  album: (path: string) => json<import("./types").Album>(`${API}/album?path=${encodeURIComponent(path)}`),
+  album: (path: string, staged = false) =>
+    json<import("./types").Album>(`${API}/album?path=${encodeURIComponent(path)}${stagedQ(staged)}`),
   artist: (path: string) => json<import("./types").Artist>(`${API}/artist?path=${encodeURIComponent(path)}`),
   removeAlbum: (path: string) =>
     json<{ ok: boolean; trash: string }>(`${API}/album/remove`, {
@@ -394,15 +533,15 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ names, dest: dest ?? null }),
     }),
-  mbDetect: (path: string) =>
+  mbDetect: (path: string, staged = false) =>
     json<{ mbid: string | null; key?: string; track?: string }>(
-      `${API}/album/mbdetect?path=${encodeURIComponent(path)}`,
+      `${API}/album/mbdetect?path=${encodeURIComponent(path)}${stagedQ(staged)}`,
       undefined,
       8000
     ),
-  scanTracks: (path: string) =>
+  scanTracks: (path: string, staged = false) =>
     json<{ path: string; tracks: any[] }>(
-      `${API}/album/scan-tracks?path=${encodeURIComponent(path)}`,
+      `${API}/album/scan-tracks?path=${encodeURIComponent(path)}${stagedQ(staged)}`,
       undefined,
       30000
     ),
@@ -433,7 +572,10 @@ export const api = {
   subtitleUrl: (path: string, sidecar?: string, n?: number) =>
     `${API}/videos/subtitle?path=${encodeURIComponent(path)}${sidecar ? `&sidecar=${encodeURIComponent(sidecar)}` : ""}${typeof n === "number" && n >= 0 ? `&n=${n}` : ""}`,
   // Read-only tag view (tag writing was removed; grading scripts own writes).
-  tags: (path: string) => json<any>(`${API}/tags?path=${encodeURIComponent(path)}`),
+  // `staged` reads a track of an album the import wizard is editing before it
+  // is in the library.
+  tags: (path: string, staged = false) =>
+    json<any>(`${API}/tags?path=${encodeURIComponent(path)}${stagedQ(staged)}`),
   // ReplayGain for playback loudness matching. `mode` overrides the saved
   // replaygain_mode for one call (track/album/off); `analyzed` is true when
   // the gain had to be measured on the fly because the tags were missing.
@@ -441,11 +583,11 @@ export const api = {
     json<{ path: string; gain: number | null; peak: number | null; mode: string; source: string | null; analyzed: boolean }>(
       `${API}/replaygain?path=${encodeURIComponent(path)}${mode ? `&mode=${mode}` : ""}`
     ),
-  lyricsEmbed: (path: string, lyrics: string) =>
+  lyricsEmbed: (path: string, lyrics: string, staged = false) =>
     json<{ ok: boolean }>(`${API}/lyrics/embed`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path, lyrics }),
+      body: JSON.stringify({ path, lyrics, staged }),
     }),
   videosScan: (path?: string) =>
     json<{ videos: { path: string; album: string; file: string; size: number; video_codec: string | null; audio_codecs: string[]; duration: number | null; mp4_safe: boolean | null }[] }>(
@@ -463,9 +605,9 @@ export const api = {
     }, 600000).then(noteContainerSwap),
   /** Dimensions etc. of an album's cover — or, with `coverFile`, of any image
    *  in the album folder, which is how a track's own art is measured. */
-  coverInfo: (albumPath: string, coverFile?: string | null) =>
+  coverInfo: (albumPath: string, coverFile?: string | null, staged = false) =>
     json<CoverInfo>(
-      `${API}/cover/info?album=${encodeURIComponent(albumPath)}${coverFile ? `&file=${encodeURIComponent(coverFile)}` : ""}`
+      `${API}/cover/info?album=${encodeURIComponent(albumPath)}${coverFile ? `&file=${encodeURIComponent(coverFile)}` : ""}${stagedQ(staged)}`
     ),
 
   // Scripts run synchronously on the server, so the client must wait far
@@ -534,6 +676,16 @@ export const api = {
 
   // integrations
   mbRelease: (id: string) => json<import("./types").MBRelease>(`${API}/mb/release?mbid=${encodeURIComponent(id)}`),
+  /** Credits / performers for one track (`path`) or a whole album (`album`):
+   *  a role-grouped MusicBrainz answer, or the files' own credit tags
+   *  (`source: "tags"`) when MB has nothing. At most one MB request (cached
+   *  server-side), but a cold cache is slow — hence the generous timeout. */
+  credits: (opts: { path?: string; album?: string }) => {
+    const q = new URLSearchParams();
+    if (opts.path) q.set("path", opts.path);
+    else if (opts.album) q.set("album", opts.album);
+    return json<Credits>(`${API}/credits?${q}`, undefined, 60000);
+  },
   mbGenres: (id: string, limit?: number) =>
     json<import("./types").GenreCascade>(
       `${API}/mb/release-genres?mbid=${encodeURIComponent(id)}${limit ? `&limit=${limit}` : ""}`
@@ -541,42 +693,22 @@ export const api = {
   mbSearchReleases: (q: string, mode: "release" | "track" | "catno" | "barcode" = "release") =>
     json<any[]>(`${API}/mb/search/releases?q=${encodeURIComponent(q)}&mode=${mode}`),
   mbSearchArtists: (q: string) => json<any[]>(`${API}/mb/search/artists?q=${encodeURIComponent(q)}`),
-  // Generic MusicBrainz browser (in-app entity pages). Searches and
-  // discographies page 100 rows at a time — pass offset for "load more".
-  // primaryType/secondaryType map onto MusicBrainz's own release-type
-  // qualifiers (Album/EP/Single + Soundtrack/Live/Compilation/...).
-  mbSearch: (
-    type: string, q: string, limit = 100,
-    mode: "free" | "catno" | "barcode" = "free", offset = 0,
-    primaryType = "", secondaryType = ""
-  ) =>
-    json<{ rows: any[]; total: number }>(
-      `${API}/mb/search?type=${encodeURIComponent(type)}&q=${encodeURIComponent(q)}` +
-      `&limit=${limit}&offset=${offset}&mode=${mode}` +
-      `&primary_type=${encodeURIComponent(primaryType)}&secondary_type=${encodeURIComponent(secondaryType)}`
-    ),
-  mbArtist: (id: string, offset = 0, limit = 300) =>
-    json<any>(`${API}/mb/artist/${id}?offset=${offset}&limit=${limit}`),
   mbReleaseGroup: (id: string, offset = 0, limit = 300) =>
     json<any>(`${API}/mb/release-group/${id}?offset=${offset}&limit=${limit}`),
-  mbRecording: (id: string, offset = 0, limit = 300) =>
-    json<any>(`${API}/mb/recording/${id}?offset=${offset}&limit=${limit}`),
-  mbIdentify: (id: string) =>
-    json<{ type: string; id: string; title: string }>(`${API}/mb/detect/${id}`),
-  mbMatch: (albumPath: string, releaseId: string) =>
+  mbMatch: (albumPath: string, releaseId: string, staged = false) =>
     json<{ release: import("./types").MBRelease; suggestions: import("./types").MatchSuggestion[] }>(
       `${API}/mb/match`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ album_path: albumPath, release_id: releaseId }),
+        body: JSON.stringify({ album_path: albumPath, release_id: releaseId, staged }),
       }
     ),
-  mbAssign: (tracks: Record<string, Record<string, string | null>>) =>
+  mbAssign: (tracks: Record<string, Record<string, string | null>>, staged = false) =>
     json<{ ok: boolean; changed: number } & ContainerSwap>(`${API}/mb/assign`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tracks }),
+      body: JSON.stringify({ tracks, staged }),
     }).then(noteContainerSwap),
 
   lyricsSearch: (artist: string, track: string, album?: string, duration?: number) =>
@@ -585,11 +717,11 @@ export const api = {
     json<any>(
       `${API}/lyrics/get?artist=${encodeURIComponent(artist)}&track=${encodeURIComponent(track)}${album ? `&album=${encodeURIComponent(album)}` : ""}${duration ? `&duration=${duration}` : ""}`
     ),
-  lyricsWrite: (path: string, lrc: string) =>
+  lyricsWrite: (path: string, lrc: string, staged = false) =>
     json<{ ok: boolean; lrc: string }>(`${API}/lyrics/write`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path, lrc }),
+      body: JSON.stringify({ path, lrc, staged }),
     }),
   // Submit lyrics to LRCLIB on behalf of a track (or with explicit fields).
   lyricsPublish: (body: { path?: string; artist?: string; track?: string; album?: string; duration?: number; plain?: string; synced?: string }) =>
@@ -676,23 +808,24 @@ export const api = {
       `${API}/import/ingest?source=${encodeURIComponent(source)}&target=${encodeURIComponent(target)}`,
       { method: "POST" }
     ),
-  importCommit: (targetDir: string, mbLink?: string, rymLink?: string) =>
+  importCommit: (targetDir: string, mbLink?: string, rymLink?: string, staged = false) =>
     json<{ ok: boolean; changed: number }>(`${API}/import/commit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target_dir: targetDir, mb_link: mbLink || null, rym_link: rymLink || null }),
+      body: JSON.stringify({ target_dir: targetDir, mb_link: mbLink || null, rym_link: rymLink || null, staged }),
     }),
   /** Record the release's full tracklist on the album, so a PARTIAL import
    *  can grey out the tracks that never came in. Empty tracks clears it. */
   importExpected: (
     targetDir: string,
     releaseId: string | null,
-    tracks: { disc: number; position: number; title?: string; recording_mbid?: string | null }[]
+    tracks: { disc: number; position: number; title?: string; recording_mbid?: string | null }[],
+    staged = false
   ) =>
     json<{ ok: boolean; tracks: number }>(`${API}/import/expected`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target_dir: targetDir, release_id: releaseId || null, tracks }),
+      body: JSON.stringify({ target_dir: targetDir, release_id: releaseId || null, tracks, staged }),
     }),
 
   /** slskd's staging area: <music>/.mlo/downloads. */
@@ -745,11 +878,11 @@ export const api = {
    *  sidecar; `tracks` → ONE image for the whole selection (sidecar of the
    *  first, recorded per track in the manifest). Never gated on size: the
    *  response still carries `warning` when the image is under the target. */
-  cover: (albumPath: string, file: File, track?: string, tracks?: string[]) => {
+  cover: (albumPath: string, file: File, track?: string, tracks?: string[], staged = false) => {
     const fd = new FormData();
     fd.append("file", file);
     return json<CoverWriteResult>(
-      `${API}/cover?album=${encodeURIComponent(albumPath)}${coverQuery(track, tracks)}`,
+      `${API}/cover?album=${encodeURIComponent(albumPath)}${coverQuery(track, tracks)}${stagedQ(staged)}`,
       { method: "POST", body: fd }
     );
   },
@@ -778,23 +911,25 @@ export const api = {
     url: string,
     track?: string,
     tracks?: string[],
-    identity?: { artist?: string | null; album?: string | null; rg?: string | null }
+    identity?: { artist?: string | null; album?: string | null; rg?: string | null },
+    staged = false
   ) =>
     json<CoverWriteResult>(
       `${API}/cover/fromurl?album=${encodeURIComponent(albumPath)}&url=${encodeURIComponent(url)}${coverQuery(track, tracks)}` +
         (identity?.artist ? `&artist=${encodeURIComponent(identity.artist)}` : "") +
         (identity?.album ? `&title=${encodeURIComponent(identity.album)}` : "") +
-        (identity?.rg ? `&rg=${encodeURIComponent(identity.rg)}` : ""),
+        (identity?.rg ? `&rg=${encodeURIComponent(identity.rg)}` : "") +
+        stagedQ(staged),
       { method: "POST" },
       120000
     ),
   /** Drop `tracks` from the album's per-track cover manifest (all of them when
    *  omitted). The image file itself is never deleted. */
-  coverClear: (albumPath: string, tracks?: string[]) =>
+  coverClear: (albumPath: string, tracks?: string[], staged = false) =>
     json<{ ok: boolean }>(`${API}/cover/clear`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ album: albumPath, tracks: tracks?.length ? tracks : undefined }),
+      body: JSON.stringify({ album: albumPath, tracks: tracks?.length ? tracks : undefined, staged }),
     }),
 
   beetsStatus: () =>
@@ -813,7 +948,7 @@ export const api = {
     ),
 
   soulseekStatus: () =>
-    json<any>(`${API}/soulseek/status`),
+    json<SlskStatus>(`${API}/soulseek/status`),
   soulseekStart: () =>
     json<{ ok: boolean; ready: boolean; message: string; has_credentials: boolean }>(`${API}/soulseek/start`, { method: "POST" }, 30000),
   soulseekRestart: () =>
@@ -865,6 +1000,25 @@ export const api = {
       body: JSON.stringify({ username, files }),
     }, 60000),
   soulseekDownloads: () => json<SlskDownloads>(`${API}/soulseek/downloads`, undefined, 30000),
+  /** What is actually sitting in the two staging folders, each reported on its
+   *  own. Separate from soulseekDownloads(): that one is slskd's transfer
+   *  history (and empty while the daemon is stopped), this one is the disk. */
+  soulseekStaging: () => json<SoulseekStaging>(`${API}/soulseek/staging`, undefined, 60000),
+  /** Delete ONE entry (file or folder tree) from a staging root. */
+  soulseekStagingDelete: (root: StagingRootId, name: string) =>
+    json<{ ok: boolean; freed: number }>(`${API}/soulseek/staging/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ root, name }),
+    }, 60000),
+  /** Empty one staging root. Per-entry failures come back in `failed` — the
+   *  rest still goes, so the reply is a report, not an abort. */
+  soulseekStagingClear: (root: StagingRootId) =>
+    json<{ ok: boolean; cleared: number; freed: number; failed: { name: string; reason: string }[] }>(
+      `${API}/soulseek/staging/clear`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ root }) },
+      120000
+    ),
   // Private messages — the conversation list carries the unread total (for the
   // tab badge), the thread is fetched per peer, usernames percent-encoded.
   soulseekMessages: () =>
@@ -900,14 +1054,22 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username, transfer_ids }),
     }, 30000),
-  /** Clear FINISHED transfers (completed / errored / cancelled) from the
-   *  history. In-progress and queued transfers are never touched. */
-  soulseekDownloadsClear: (username?: string, states?: string[]) =>
-    json<{ ok: boolean; cleared: number }>(`${API}/soulseek/downloads/clear`, {
+  /** Bulk-clear transfers from slskd's history. `finished` drops completed and
+   *  failed rows and keeps the queue, `failed` only the ones that did not
+   *  succeed, `incomplete` also stops what is in flight and DELETES the partial
+   *  bytes already on disk, `all` does both. The server answers with the counts
+   *  plus a `failed` list of transfers whose cleanup was refused. */
+  soulseekDownloadsClear: (scope: "finished" | "failed" | "incomplete" | "all" = "finished") =>
+    json<{
+      cleared: number;
+      files_deleted?: number;
+      bytes_freed?: number;
+      failed?: { username: string; filename: string; reason: string }[];
+    }>(`${API}/soulseek/downloads/clear`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, states }),
-    }, 30000),
+      body: JSON.stringify({ scope }),
+    }, 60000),
   // Completed downloads on disk — the review workflow (preview → tag → import).
   soulseekReview: () =>
     json<{ dir: string; files: { path: string; file: string; ext: string; is_video: boolean; size: number; mtime: number; user: string; tags: Record<string, string | null>; tech: Record<string, number | string> }[] }>(
@@ -1016,60 +1178,9 @@ export const api = {
   home: () => json<HomeData>(`${API}/home`, undefined, 60000),
 
   // ----------------------------------------------------------------- //
-  // Discovery — recommendations, catalogue search, more-like-this.     //
-  // Provider order and fallbacks live server-side; these calls just    //
-  // ask for rows (see server/discovery.py).                            //
+  // Discovery — the provider catalogue behind Settings' order editors. //
   // ----------------------------------------------------------------- //
   discoverySources: () => json<DiscoveryCatalog>(`${API}/discovery/sources`),
-  discoverySearch: (
-    q: string,
-    type: "album" | "artist" = "album",
-    limit = 25,
-    opts?: { artist?: string; album?: string; source?: string }
-  ) => {
-    const p = new URLSearchParams({ q, type, limit: String(limit) });
-    if (opts?.artist) p.set("artist", opts.artist);
-    if (opts?.album) p.set("album", opts.album);
-    if (opts?.source) p.set("source", opts.source);
-    return json<DiscoverySearch>(`${API}/discovery/search?${p}`, undefined, 45000);
-  },
-  discoveryAlbum: (deezerId: number, resolve = false) =>
-    json<DiscoveryAlbumDetail>(
-      `${API}/discovery/album?deezer_id=${deezerId}${resolve ? "&resolve=1" : ""}`,
-      undefined,
-      45000
-    ),
-  discoveryPopular: (limit = 12, range = "week") =>
-    json<{ rows: DiscoveryRow[]; range: string }>(
-      `${API}/discovery/popular?limit=${limit}&range=${range}`,
-      undefined,
-      45000
-    ),
-  discoverySimilar: (
-    kind: "album" | "track" | "artist",
-    artist: string,
-    opts?: { title?: string; album?: string; mbid?: string; limit?: number }
-  ) => {
-    const p = new URLSearchParams({ kind, artist, limit: String(opts?.limit ?? 12) });
-    if (opts?.title) p.set("title", opts.title);
-    if (opts?.album) p.set("album", opts.album);
-    if (opts?.mbid) p.set("mbid", opts.mbid);
-    return json<{ kind: string; artist: string; rows: DiscoveryRow[] }>(
-      `${API}/discovery/similar?${p}`, undefined, 45000
-    );
-  },
-  /** Turn a discovery row into a Soulseek wish (MusicBrainz-resolved when the
-   *  row has no MBID yet). */
-  discoveryWish: (body: { artist: string; title: string; year?: string; note?: string; mbid?: string }) =>
-    json<{ ok: boolean; wish: Wish; resolved: DiscoveryRow | null }>(
-      `${API}/discovery/wish`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      },
-      45000
-    ),
 
   // ----------------------------------------------------------------- //
   // Artist artwork + descriptions, album descriptions                  //
@@ -1137,13 +1248,13 @@ export const api = {
   lyricsProviders: () => json<LyricsProviders>(`${API}/lyrics/providers`),
   /** Auto-import lyrics for one or more tracks through the provider chain.
    *  Set force to re-fetch a track that already has lyrics. */
-  lyricsAuto: (paths: string[], force = false) =>
+  lyricsAuto: (paths: string[], force = false, staged = false) =>
     json<{ results: LyricsAutoResult[]; order: string[]; ok: number; skipped: number; failed: number }>(
       `${API}/lyrics/auto`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ paths, force }),
+        body: JSON.stringify({ paths, force, staged }),
       },
       120000
     ),
@@ -1160,24 +1271,24 @@ export const api = {
   /** Fingerprint an album (folder or track paths) and return the MusicBrainz
    *  release group the audio actually is. `apply` also writes the accepted
    *  match's identity tags (ACOUSTID_ID / ACOUSTID_FINGERPRINT) into the files. */
-  importAcoustid: (paths: string[], apply = false) =>
+  importAcoustid: (paths: string[], apply = false, staged = false) =>
     json<AcoustidMatch>(
       `${API}/import/acoustid`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ paths, apply }),
+        body: JSON.stringify({ paths, apply, staged }),
       },
       600000
     ),
   /** Run the configured import script chain over already-imported albums. */
-  importFinish: (paths: string[], force: Record<string, boolean> = {}) =>
+  importFinish: (paths: string[], force: Record<string, boolean> = {}, staged = false) =>
     json<{ albums: { path: string; chain: number[]; scripts: unknown[]; errors: unknown[] }[] }>(
       `${API}/import/finish`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ paths, force }),
+        body: JSON.stringify({ paths, force, staged }),
       },
       1800000
     ),
@@ -1221,7 +1332,7 @@ export const api = {
    *  tracks — the values land in `values` and are written to `paths`, and
    *  `answers` reports every provider that had something to say (the UI's
    *  provenance). */
-  mbAdvisoryFetch: (body: { paths?: string[]; release_mbid?: string }) =>
+  mbAdvisoryFetch: (body: { paths?: string[]; release_mbid?: string; staged?: boolean }) =>
     json<AdvisoryFetchResult>(`${API}/mb/advisory/fetch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1230,11 +1341,11 @@ export const api = {
 
   /** Check INSTRUMENTAL for a set of tracks: each value the sources can state
    *  is written, and `evidence` reports who decided it. */
-  instrumentalFetch: (paths: string[]) =>
+  instrumentalFetch: (paths: string[], staged = false) =>
     json<InstrumentalFetchResult>(`${API}/instrumental/fetch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ paths }),
+      body: JSON.stringify({ paths, staged }),
     }, 120000),
 
   soulseekDownloadBulk: (username: string, files: { filename: string; size?: number }[]) =>
@@ -1257,14 +1368,43 @@ export const api = {
       body: JSON.stringify({ id }),
     }, 30000),
 
-  /** Import genres for a set of album/track paths from the configured
-   *  sources; `per_source` reports how many values each source contributed. */
-  genresImport: (paths: string[], limit?: number) =>
-    json<{ updated: number; per_source: Record<string, number> }>(`${API}/genres/import`, {
+  /** Import genres for a set of album/track paths.
+
+   *  `sources` picks which providers to ask — the wizard's two per-source
+   *  buttons pass one each (MusicBrainz, RateYourMusic); omitted asks every
+   *  configured source in order. `per_source`/`notes` report what each source
+   *  contributed and why one stayed silent. */
+  genresImport: (paths: string[], limit?: number, sources?: string[], staged = false) =>
+    json<{
+      updated: number;
+      genres: string[];
+      per_source: Record<string, string[]>;
+      notes: Record<string, string>;
+      per_track: boolean;
+      sources: Record<string, string[]>;
+      levels: Record<string, string | null>;
+    }>(`${API}/genres/import`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ paths, limit }),
+      body: JSON.stringify({ paths, limit, sources, staged }),
     }, 300000),
+  /** Fetch what an album's metadata step owes: the artist's image and
+   *  description, and the album's own description. Omit `items` for all
+   *  three, or send one per request to drive a bar per item (each call is
+   *  cheap once the content is stored). Per item: `{state, source, detail}` —
+   *  `state` is `fetched` / `present` / `disabled` (the Settings toggle) /
+   *  `not-found` / `error`, so a row can say why nothing arrived instead of
+   *  showing a dead button. `force=false` twice in a row is a no-op. */
+  albumMetadataFetch: (body: { path: string; items?: MetadataItemKind[]; force?: boolean; staged?: boolean }) =>
+    json<{ ok: boolean; path: string; items: Partial<Record<MetadataItemKind, MetadataFetchItem>> }>(
+      `${API}/album/metadata/fetch`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+      300000
+    ),
   /** Genre browsing surface: every genre with its track count, plus the
    *  category cards that group them. */
   genresFacets: () =>
@@ -1273,9 +1413,10 @@ export const api = {
     ),
 
   /** Candidate artist images + descriptions for the metadata review modal. */
-  metadataCandidates: (artist: string, albumPath?: string) => {
+  metadataCandidates: (artist: string, albumPath?: string, staged = false) => {
     const p = new URLSearchParams({ artist });
     if (albumPath) p.set("album_path", albumPath);
+    if (staged) p.set("staged", "1");
     return json<MetadataCandidates>(`${API}/metadata/candidates?${p}`, undefined, 90000);
   },
   /** Apply one reviewed candidate: an artist image URL, or the artist/album

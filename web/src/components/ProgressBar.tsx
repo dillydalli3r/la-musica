@@ -1,5 +1,11 @@
+import { fmtCounts } from "../lib/fmt";
+
 /** Compact live progress for the top bar's free space: spinner + label + a
- * thin bar + done/total. Replaces the old full-width progress row. */
+ * thin bar + done/total. Replaces the old full-width progress row.
+ *
+ * `done` may be fractional (bytes of a download, a script's own sub-step):
+ * the bar has always drawn the continuous share, and the readout prints the
+ * fraction rather than a rounded integer. */
 export function ProgressInline({ progress }: { progress: { done: number; total: number; desc: string } | null }) {
   if (!progress) return null;
   const known = !!progress.total;
@@ -17,8 +23,8 @@ export function ProgressInline({ progress }: { progress: { done: number; total: 
         />
       </div>
       {known && (
-        <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap">
-          {progress.done}/{progress.total}
+        <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap tabular-nums" title="files done / total">
+          {fmtCounts(progress.done, progress.total)}
         </span>
       )}
     </div>

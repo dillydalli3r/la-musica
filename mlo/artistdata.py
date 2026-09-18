@@ -14,10 +14,15 @@ path::
     {"f:/music/artists/foo": {"kind": "artist", "source": "deezer",
                               "source_url": "https://...", "label": "Deezer",
                               "fetched": "2026-01-01T00:00:00Z",
-                              "title": "Foo", "updated": "..."}}
+                              "title": "Foo", "updated": "...",
+                              "description_source": "wikipedia",
+                              "description_source_url": "https://...",
+                              "description_title": "Foo"}}
 
 Both the image and the description of one folder share that single entry, so
-clearing the image never discards the description's provenance.
+clearing the image never discards the description's provenance — which is why
+the description's provider is recorded under ``description_*``: the plain
+``source`` above belongs to the image.
 
 Image rules: the bytes must be a real image (Pillow), then they are cropped to
 the configured cover aspect when ``artist_image_crop`` is on AND covers are
@@ -39,6 +44,7 @@ than that, route this through those helpers instead of growing this one.
 import io
 import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -54,6 +60,11 @@ from .paths import MLO_DATA_DIR_NAME, MLO_DIR_NAME, app_data_dir, library_root
 
 # Stems an artist image may use ("artist.jpg", "Artist.PNG", ...).
 ARTIST_IMAGE_STEMS = ("artist",)
+# The naming script's trailing MusicBrainz id: "[a16371b9-…]", "(a16371b9)"
+# and the 8-char short form from `short_folder_names` all match.
+_MBID_SUFFIX_RE = re.compile(r"\s*[\[(][0-9a-f][0-9a-f-]{6,34}[0-9a-f][\])]\s*$", re.I)
+# A bare id (the `mb:<MBID>` form) with no brackets around it.
+_MBID_ONLY_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 # Image extensions the artist image may carry on disk.
 ARTIST_IMAGE_EXTS = (".jpg", ".jpeg", ".png")
 DESCRIPTION_NAME = "description.txt"
@@ -192,13 +203,47 @@ def _drop_provenance(folder, cfg=None):
         _save_map(cfg, data, folder)
 
 
+def strip_mbid_suffix(name):
+    """*name* without the trailing MusicBrainz id in brackets.
+
+    The naming script builds artist folders as "Slowdive [a16371b9-…]" (and
+    ``short_folder_names`` truncates the id to 8 chars), so a lookup by the
+    artist's NAME must strip that suffix or it finds nothing and every artist
+    image / description silently misses the folder the artist page reads."""
+    return _MBID_SUFFIX_RE.sub("", str(name or "")).strip()
+
+
+def folder_mbid(name):
+    """The full MusicBrainz artist id inside a folder name, or "".
+
+    Only a full uuid is useful: `short_folder_names` truncates the suffix to 8
+    chars, and a truncated id cannot key a provider lookup — the caller then
+    falls back to a name search as before. `ref` may also be the artist PAGE's
+    own `mb:<MBID>` form, which carries the id without brackets."""
+    ref = str(name or "").strip()
+    if ref.lower().startswith("mb:"):
+        ref = ref[3:]
+        return ref.lower() if _MBID_ONLY_RE.match(ref) else ""
+    m = _MBID_SUFFIX_RE.search(ref)
+    if not m:
+        return ""
+    digits = re.sub(r"[^0-9a-f]", "", m.group(0), flags=re.I).lower()
+    if len(digits) != 32:
+        return ""
+    # Providers key on the canonical dashed form; the brackets may carry it
+    # either way (a copied id, or the naming script's own spelling).
+    return (f"{digits[:8]}-{digits[8:12]}-{digits[12:16]}-"
+            f"{digits[16:20]}-{digits[20:]}")
+
+
 def artist_dir(cfg, artist):
     """The library folder of *artist*, or None when it does not exist.
 
     Names with a path separator (or a bare "." / "..") are refused: the artist
     comes from a provider payload / the UI and must never escape the library
     root. Lookup is case-insensitive, the way the rest of the library handles
-    Windows paths."""
+    Windows paths, and tolerates the naming script's MBID suffix (see
+    :func:`strip_mbid_suffix`) — an artist's folder is named after their id."""
     name = str(artist or "").strip()
     if not name or name in (".", ".."):
         return None
@@ -207,7 +252,7 @@ def artist_dir(cfg, artist):
     root = library_root(_music_folder(cfg))
     if not root:
         return None
-    low = name.lower()
+    want = {name.lower(), strip_mbid_suffix(name).lower()}
     try:
         entries = os.listdir(root)
     except OSError:
@@ -216,9 +261,11 @@ def artist_dir(cfg, artist):
     # what gets written into provenance, so return what the disk says.
     fallback = None
     for entry in entries:
-        if entry == name and os.path.isdir(os.path.join(root, entry)):
+        if not os.path.isdir(os.path.join(root, entry)):
+            continue
+        if entry == name:
             return os.path.join(root, entry)
-        if entry.lower() == low and fallback is None and os.path.isdir(os.path.join(root, entry)):
+        if fallback is None and ({entry.lower(), strip_mbid_suffix(entry).lower()} & want):
             fallback = os.path.join(root, entry)
     if fallback:
         return fallback
@@ -482,7 +529,12 @@ def write_description(folder, text, cfg=None, source=None, source_url=None,
         except OSError:
             pass
         return ""
-    write_provenance(folder, {"source": source, "source_url": source_url},
+    # The description's provider belongs under the `description_*` keys: this
+    # entry is shared with the folder's artist image, and writing the plain
+    # "source" here renamed the IMAGE's provider to the text's one (the image
+    # payload reads `source` straight out of the same entry).
+    write_provenance(folder, {"description_source": source,
+                              "description_source_url": source_url},
                      kind=kind, cfg=cfg)
     return dest
 

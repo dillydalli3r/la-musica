@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, ArrowRight, ArrowLeft, RotateCcw, Users } from "lucide-react";
+import { Check, ArrowRight, ArrowLeft, RotateCcw, Users, Sparkles, Music2 } from "lucide-react";
 import { api } from "../api";
 import SourcesPanel from "../components/SourcesPanel";
+import AiTestButton from "../components/AiTestButton";
 import { toast } from "../store";
 
-type Step = 1 | 2 | 3 | 4 | 5;
+type Step = 1 | 2 | 3 | 4 | 5 | 6;
 
 export default function SetupPage() {
   const navigate = useNavigate();
@@ -15,7 +16,10 @@ export default function SetupPage() {
   const [step, setStep] = useState<Step>(1);
   const [musicFolder, setMusicFolder] = useState("");
   const [busy, setBusy] = useState(false);
-  // Soulseek sharing setup (step 3)
+  // AI lyric transforms (step 4) — the keys script 17 reads.
+  const [ai, setAi] = useState<Record<string, unknown>>({});
+  const [rymLinksAuto, setRymLinksAuto] = useState(true);
+  // Soulseek sharing setup (step 5)
   const [ssUser, setSsUser] = useState("");
   const [ssPass, setSsPass] = useState("");
   const [ssPort, setSsPort] = useState(50000);
@@ -32,6 +36,17 @@ export default function SetupPage() {
   useEffect(() => {
     if (!config) return;
     if (config.music_folder) setMusicFolder(String(config.music_folder));
+    setAi({
+      ai_base_url: String(config.ai_base_url ?? ""),
+      ai_api_key: String(config.ai_api_key ?? ""),
+      ai_model: String(config.ai_model ?? ""),
+      ai_effort: String(config.ai_effort ?? "high"),
+      lyrics_translation_langs: String(config.lyrics_translation_langs ?? "en"),
+      lyrics_xlit_enabled: config.lyrics_xlit_enabled !== false,
+      lyrics_translate_enabled: config.lyrics_translate_enabled !== false,
+      lyrics_xlit_sidecars: config.lyrics_xlit_sidecars !== false,
+    });
+    setRymLinksAuto(config.rym_links_auto !== false);
     setSsUser(String(config.soulseek_username ?? ""));
     setSsPass(String(config.soulseek_password ?? ""));
     setSsPort(Number(config.soulseek_listen_port ?? 50000));
@@ -58,7 +73,21 @@ export default function SetupPage() {
       } else {
         toast("Soulseek settings saved");
       }
-      setStep(5);
+      setStep(6);
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveAi = async (advance: boolean) => {
+    setBusy(true);
+    try {
+      await api.saveConfig({ ...config, ...ai, rym_links_auto: rymLinksAuto });
+      qc.invalidateQueries({ queryKey: ["config"] });
+      toast.success("Saved");
+      if (advance) setStep(5);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -120,12 +149,12 @@ export default function SetupPage() {
           />
           <div>
             <div className="font-bold tracking-wide">la musica</div>
-            <div className="text-xs text-zinc-500">First-run setup</div>
+            <div className="text-xs text-zinc-500">{config?.first_run_done ? "Setup" : "First-run setup"}</div>
           </div>
         </div>
 
         <div className="flex items-center gap-2 text-[11px] text-zinc-500 mb-4">
-          {([1, 2, 3, 4, 5] as Step[]).map((s) => (
+          {([1, 2, 3, 4, 5, 6] as Step[]).map((s) => (
             <div key={s} className="flex items-center gap-2">
               <span
                 className={`h-5 w-5 rounded-sm flex items-center justify-center text-[10px] border ${
@@ -135,7 +164,7 @@ export default function SetupPage() {
                 {step > s ? <Check className="h-3 w-3" /> : s}
               </span>
               <span className={step === s ? "text-zinc-200" : "text-zinc-600"}>
-                {s === 1 ? "Music folder" : s === 2 ? "Dependencies" : s === 3 ? "Sources" : s === 4 ? "Soulseek" : "Done"}
+                {s === 1 ? "Music folder" : s === 2 ? "Dependencies" : s === 3 ? "Sources" : s === 4 ? "AI & RYM" : s === 5 ? "Soulseek" : "Done"}
               </span>
             </div>
           ))}
@@ -209,9 +238,9 @@ export default function SetupPage() {
                     <tr key={t.key} className="table-row cursor-default">
                       <td className="td font-medium">{t.name}</td>
                       <td className="td">
-                        {t.state === "ok" && <span className="chip bg-emerald-900/50 text-emerald-300 border border-emerald-800">ready</span>}
-                        {t.state === "update" && <span className="chip bg-amber-900/50 text-amber-300 border border-amber-900">update</span>}
-                        {t.state === "missing" && <span className="chip bg-red-900/50 text-red-300 border border-red-900">missing</span>}
+                        {t.state === "ok" && <span className="chip bg-emerald-900/50 text-emerald-300 border border-emerald-800">Ready</span>}
+                        {t.state === "update" && <span className="chip bg-amber-900/50 text-amber-300 border border-amber-900">Update</span>}
+                        {t.state === "missing" && <span className="chip bg-red-900/50 text-red-300 border border-red-900">Missing</span>}
                       </td>
                       <td className="td text-zinc-500">{t.installed_version ?? t.detected_version ?? "—"}</td>
                     </tr>
@@ -259,6 +288,156 @@ export default function SetupPage() {
 
         {step === 4 && (
           <div className="panel p-6 space-y-4">
+            <div>
+              <div className="flex items-center gap-2 text-sm font-semibold">
+                <Sparkles className="h-4 w-4 text-accent" /> AI lyric transliteration &amp; translation
+              </div>
+              <p className="text-xs text-zinc-400 mt-1 leading-relaxed">
+                Optional, and the only model in the app. Script 17 romanizes non-Latin lyrics and
+                translates them into your languages, storing the results as
+                <code className="font-mono"> TRANSLITERATION-*</code> /
+                <code className="font-mono"> TRANSLATION-*</code> tags (the player shows them as
+                sub-lines under each lyric line). Any OpenAI-compatible endpoint works — OpenAI,
+                OpenRouter, LM Studio, llama.cpp, or Google Gemini's OpenAI-compatible endpoint.
+                Leave the URL or model empty and the script simply skips.
+              </p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="block">
+                <span className="text-xs text-zinc-500 uppercase">Base URL</span>
+                <input
+                  className="input mt-1"
+                  value={String(ai.ai_base_url ?? "")}
+                  onChange={(e) => setAi({ ...ai, ai_base_url: e.target.value })}
+                  placeholder="https://api.openai.com/v1"
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs text-zinc-500 uppercase">API key</span>
+                <input
+                  className="input mt-1"
+                  type="password"
+                  value={String(ai.ai_api_key ?? "")}
+                  onChange={(e) => setAi({ ...ai, ai_api_key: e.target.value })}
+                  placeholder="leave empty for a local server"
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs text-zinc-500 uppercase">Model</span>
+                <input
+                  className="input mt-1"
+                  value={String(ai.ai_model ?? "")}
+                  onChange={(e) => setAi({ ...ai, ai_model: e.target.value })}
+                  placeholder="gpt-4o-mini · gemini-2.5-flash · local-model"
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs text-zinc-500 uppercase">Translate into</span>
+                <input
+                  className="input mt-1"
+                  value={String(ai.lyrics_translation_langs ?? "en")}
+                  onChange={(e) => setAi({ ...ai, lyrics_translation_langs: e.target.value })}
+                  placeholder="en,de"
+                />
+                <span className="text-[10px] text-zinc-600">
+                  The first language is yours — it decides when romanizing is worth doing.
+                </span>
+              </label>
+              <label className="block">
+                <span className="text-xs text-zinc-500 uppercase">Reasoning effort</span>
+                <select
+                  className="input mt-1"
+                  value={String(ai.ai_effort ?? "high")}
+                  onChange={(e) => setAi({ ...ai, ai_effort: e.target.value })}
+                >
+                  <option value="high">High — best quality</option>
+                  <option value="medium">Medium</option>
+                  <option value="low">Low</option>
+                  <option value="minimal">Minimal — no thinking, fastest</option>
+                </select>
+              </label>
+              <div className="flex flex-col justify-end gap-1.5 pb-1">
+                <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer">
+                  <input type="checkbox" className="accent-[var(--accent)]"
+                    checked={ai.lyrics_xlit_enabled !== false}
+                    onChange={(e) => setAi({ ...ai, lyrics_xlit_enabled: e.target.checked })} />
+                  Transliterate non-Latin lyrics
+                </label>
+                <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer">
+                  <input type="checkbox" className="accent-[var(--accent)]"
+                    checked={ai.lyrics_translate_enabled !== false}
+                    onChange={(e) => setAi({ ...ai, lyrics_translate_enabled: e.target.checked })} />
+                  Translate lyrics
+                </label>
+                <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer">
+                  <input type="checkbox" className="accent-[var(--accent)]"
+                    checked={ai.lyrics_xlit_sidecars !== false}
+                    onChange={(e) => setAi({ ...ai, lyrics_xlit_sidecars: e.target.checked })} />
+                  Write .romaji.lrc / .&lt;lang&gt;.lrc sidecars
+                </label>
+              </div>
+            </div>
+            <AiTestButton value={ai} />
+
+            <div className="pt-3 border-t border-border space-y-2">
+              <div className="flex items-center gap-2 text-sm font-semibold">
+                <Music2 className="h-4 w-4 text-accent" /> RateYourMusic links
+              </div>
+              <p className="text-xs text-zinc-400 leading-relaxed">
+                RYM states the album and artist page for a release, and every import stamps that pair
+                onto its tracks. MusicBrainz answers for well-known releases with no setup; for the rest
+                RYM has to be scraped, and it only answers a signed-in browser session.
+              </p>
+              <ol className="text-xs text-zinc-400 leading-relaxed list-decimal pl-5 space-y-0.5">
+                <li>Sign in to rateyourmusic.com in your browser (the login is what the scraper borrows).</li>
+                <li>Press <code className="font-mono">F12</code> → <b>Network</b> → reload the page.</li>
+                <li>
+                  Click any request to <code className="font-mono">rateyourmusic.com</code> → <b>Headers</b> →{" "}
+                  <b>Request Headers</b>.
+                </li>
+                <li>
+                  Copy everything after <code className="font-mono">Cookie:</code> and paste it in the field
+                  under <b>RateYourMusic links</b> below (newlines and a stray{" "}
+                  <code className="font-mono">Cookie:</code> label are handled — the whole value is fine).
+                </li>
+                <li>
+                  Press <b>Save &amp; test</b>: it resolves a real album+artist pair, so "did my cookie work?"
+                  has a yes/no answer. Keep the value to yourself — it is your session — and paste a fresh one
+                  if RYM later starts refusing (signing out invalidates it).
+                </li>
+              </ol>
+              <SourcesPanel only="links" />
+              <label className="flex items-start gap-2 text-xs text-zinc-300 cursor-pointer pt-1">
+                <input type="checkbox" className="mt-0.5 accent-[var(--accent)]"
+                  checked={rymLinksAuto}
+                  onChange={(e) => setRymLinksAuto(e.target.checked)} />
+                <span>
+                  Look the links up automatically during imports
+                  <span className="block text-[10px] text-zinc-600">
+                    An existing link is never overwritten, and a blocked RYM leaves the import untouched.
+                  </span>
+                </span>
+              </label>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <button className="btn-ghost" onClick={() => setStep(3)} disabled={busy}>
+                <ArrowLeft className="h-3.5 w-3.5" /> Back
+              </button>
+              <div className="flex gap-2">
+                <button className="btn-ghost" onClick={() => setStep(5)} disabled={busy}>
+                  Skip for now
+                </button>
+                <button className="btn-primary" onClick={() => saveAi(true)} disabled={busy}>
+                  {busy ? "Saving…" : "Save & continue"} <ArrowRight className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {step === 5 && (
+          <div className="panel p-6 space-y-4">
             <div className="flex items-center gap-2 text-sm font-semibold">
               <Users className="h-4 w-4 text-accent" /> Share your library on Soulseek
             </div>
@@ -294,11 +473,11 @@ export default function SetupPage() {
               </div>
             </div>
             <div className="flex items-center justify-between">
-              <button className="btn-ghost" onClick={() => setStep(3)} disabled={busy}>
+              <button className="btn-ghost" onClick={() => setStep(4)} disabled={busy}>
                 <ArrowLeft className="h-3.5 w-3.5" /> Back
               </button>
               <div className="flex gap-2">
-                <button className="btn-ghost" onClick={() => setStep(5)} disabled={busy}>
+                <button className="btn-ghost" onClick={() => setStep(6)} disabled={busy}>
                   Skip for now
                 </button>
                 <button className="btn-primary" disabled={busy || !ssShare} onClick={() => saveSoulseek(true)}
@@ -310,7 +489,7 @@ export default function SetupPage() {
           </div>
         )}
 
-        {step === 5 && (
+        {step === 6 && (
           <div className="panel p-6 space-y-4">
             <div className="flex items-center gap-2 text-sm font-semibold">
               <Check className="h-4 w-4 text-emerald-400" /> You're all set
@@ -319,8 +498,8 @@ export default function SetupPage() {
               Library: <code className="font-mono text-zinc-200">{musicFolder || "(none)"}</code>
               <br />
               {deps ? `${deps.tools.filter((t) => t.state === "ok" || t.state === "update").length}/${deps.tools.length} tools ready` : "Dependency check skipped"}.
-              Sources can be tested and keyed anytime in Settings → Sources.
-              Scripts that need missing tools will tell you when you run them.
+              Sources and AI keys can be tested and changed anytime in Settings → Sources and Settings → AI.
+              This wizard stays available from Settings → General. Scripts that need missing tools will tell you when you run them.
             </p>
             <div className="flex justify-end">
               <button className="btn-primary" disabled={busy} onClick={finish}>

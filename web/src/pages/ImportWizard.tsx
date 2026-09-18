@@ -4,22 +4,36 @@ import { useSearchParams, Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   UploadCloud, ExternalLink, Check, ChevronLeft, ChevronRight, ChevronDown, Wand2,
-  Plus, Trash2, Disc3, FolderOpen, X,
+  Plus, Trash2, Disc3, FolderOpen, X, Search, Loader2, Image as ImageIcon,
 } from "lucide-react";
-import { api } from "../api";
-import { toast } from "../store";
+import { api, answerSources, replyFor } from "../api";
+import type { AdvisoryFetchResult, MetadataFetchItem, MetadataItemKind } from "../api";
+import { toast, useStore } from "../store";
+import { advisoryLine } from "../components/Badges";
+import { LinkValidChip } from "../components/Links";
 import LyricsViewer, { parseLrc } from "../components/LyricsViewer";
 import CoverSearchModal from "../components/CoverSearchModal";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import PageHeader from "../components/PageHeader";
 import MetadataReviewModal from "../components/MetadataReviewModal";
 import type {
-  AcoustidAlbumMatch, AcoustidMatch, ImportBulkJob, ImportScriptsPreview,
-  LyricsAutoResult, MBRelease, MatchSuggestion, Track,
+  AcoustidAlbumMatch, AcoustidMatch, CoverResult, ImportBulkJob, ImportScriptsPreview,
+  LyricsAutoResult, MBRelease, MatchSuggestion, ScriptRunResult, Track,
 } from "../types";
-import { SCRIPTS } from "../lib/scripts";
+import { SCRIPTS, DEFAULT_RUN_ALL, SCRIPT_LABEL, isScriptId } from "../lib/scripts";
+import { fmtCounts } from "../lib/fmt";
 
 const STEPS = ["Select & separate", "Links", "Match", "Covers", "Genres", "Lyrics", "Advisory", "Finish"];
+
+/** The lyrics step's status words. The provider chain reports "ok"/"skipped"/
+ *  "failed"; a chip is a label and reads as one. */
+const LYR_STATUS_LABEL: Record<string, string> = { ok: "OK", skipped: "Skipped", failed: "Failed" };
+
+/** The queue panel's per-album state words. The bulk job reports lowercase
+ *  machine states; a chip is a label and reads as one. */
+const QUEUE_STATE_LABEL: Record<string, string> = {
+  queued: "Queued", running: "Running", imported: "Imported", skipped: "Skipped", failed: "Failed",
+};
 
 // Everything the importer accepts: audio, all common image formats, and the
 // sidecars the optimizer understands (.lrc, .cue, .log, .accurip).
@@ -38,6 +52,31 @@ interface AlbumGroup {
   files: ImportFile[];
 }
 
+/** One track of `/api/album/scan-tracks` — the folder-scan payload the wizard
+ *  falls back on for an album the library tree does not list yet. */
+interface ScanTrackRow {
+  path: string;
+  file: string;
+  tracknumber?: number | null;
+  discnumber?: number | null;
+  lyrics_embedded?: boolean;
+  lyrics_lrc?: boolean;
+  lyrics_present?: boolean;
+  tech?: Track["tech"];
+  tags?: Track["tags"];
+}
+
+/** One script's outcome in the Finish step's report — a failing or skipped
+ *  script is a row, not a toast that has already faded. */
+interface RunRow {
+  id: number;
+  label: string;
+  ok: boolean;
+  skipped: boolean;
+  error?: string;
+  note?: string;
+}
+
 function dirOf(relPath: string): string {
   const i = relPath.lastIndexOf("/");
   return i === -1 ? "" : relPath.slice(0, i);
@@ -46,6 +85,16 @@ function dirOf(relPath: string): string {
 function baseName(p: string): string {
   const parts = p.split("/").filter(Boolean);
   return parts[parts.length - 1] ?? "";
+}
+
+/** Is `p` inside the configured music folder? Compared the way the server
+ *  compares it — normalized separators, case-insensitively, at directory
+ *  boundaries. The wizard asks the server for its own album folder either
+ *  way; this only decides whether that needs the staged allowance. */
+function inMusicFolder(p: string, folder: unknown): boolean {
+  const f = String(folder ?? "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  const q = p.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return !!f && (q === f || q.startsWith(`${f}/`));
 }
 
 /** Extract a MusicBrainz ID from an ID or a musicbrainz.org URL. */
@@ -184,6 +233,18 @@ export default function ImportWizard() {
   const [mbLink, setMbLink] = useState("");
   const [rymLink, setRymLink] = useState("");
   const [rymValid, setRymValid] = useState<boolean | null>(null);
+  // Which page /api/rym/validate recognized: only an album page belongs in
+  // RATEYOURMUSIC_ALBUM (a song/artist page stored there looks resolved
+  // forever and blocks the automatic album lookup).
+  const [rymKind, setRymKind] = useState<string | null>(null);
+  const [rymNote, setRymNote] = useState("");
+  const [rymArtistLink, setRymArtistLink] = useState("");
+  // The artist field's own verdict, the same way the album field keeps one:
+  // only an ARTIST page may be written as RATEYOURMUSIC_ARTIST.
+  const [rymArtistValid, setRymArtistValid] = useState<boolean | null>(null);
+  const [rymArtistKind, setRymArtistKind] = useState<string | null>(null);
+  const [rymArtistNote, setRymArtistNote] = useState("");
+  const [findingLinks, setFindingLinks] = useState(false);
   const [detectedFromTags, setDetectedFromTags] = useState(false);
   const [mbSearch, setMbSearch] = useState("");
   const [searchHits, setSearchHits] = useState<any[]>([]);
@@ -194,22 +255,59 @@ export default function ImportWizard() {
   const [discGenres, setDiscGenres] = useState<Record<number, string>>({});
   const [genreAddValues, setGenreAddValues] = useState<Record<string, string>>({});
   const [genreLimit, setGenreLimit] = useState<number | null>(null); // null = all
-  const [genreSource, setGenreSource] = useState<string | null>(null);
+  /** What the last per-source genre import answered: how many tracks that
+   *  source updated, the names it wrote, and its own note when it stayed
+   *  silent (a blocked RateYourMusic says so here). */
+  const [genreJobResult, setGenreJobResult] = useState<{
+    updated: number;
+    genres: string[];
+    per_source: Record<string, string[]>;
+    notes: Record<string, string>;
+  } | null>(null);
+  // Last MusicBrainz genre import failure — the 400 that names the missing
+  // MBID, kept in the step instead of only in a toast.
+  const [genreError, setGenreError] = useState<string | null>(null);
   const [collapsedDiscs, setCollapsedDiscs] = useState<Set<number | null>>(new Set());
   const [advisory, setAdvisory] = useState<Record<string, string>>({});
+  // Outcome of the Advisory step's own auto-import: the per-track value and
+  // who stated it (`values`/`sources`/`answers`), or the server's error text.
+  const [advReply, setAdvReply] = useState<AdvisoryFetchResult | null>(null);
+  const [advError, setAdvError] = useState<string | null>(null);
   const [instrumental, setInstrumental] = useState<Record<string, string>>({});
   const [lyricsDrafts, setLyricsDrafts] = useState<Record<string, string>>({});
+  /** Tracks whose lyrics editor is open. One row per track stays one line;
+   *  the editor is behind an explicit Edit. */
+  const [lyrOpen, setLyrOpen] = useState<Set<string>>(new Set());
+  const toggleLyricsRow = (path: string) =>
+    setLyrOpen((s) => {
+      const next = new Set(s);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
   // Covers step: album/per-track cover feedback + the per-track selection.
   const [coverNotice, setCoverNotice] = useState<string | null>(null);
   const [lyricsNotice, setLyricsNotice] = useState<string | null>(null);
   const [coverSel, setCoverSel] = useState<Set<string>>(new Set());
   const [coverUrl, setCoverUrl] = useState("");
   const [trackCoverUrl, setTrackCoverUrl] = useState("");
-  const [coverSearchOpen, setCoverSearchOpen] = useState(false);
+  // Cover finder in the Covers step: null = closed, else the candidates it
+  // opens on (empty = search from scratch, staged rows = the import's picks).
+  const [coverSearch, setCoverSearch] = useState<{ results?: CoverResult[]; provider?: string | null } | null>(null);
   const albumCoverInput = useRef<HTMLInputElement>(null);
   const trackCoverInput = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [fetchStatus, setFetchStatus] = useState<string | null>(null);
+  // ---- progress for EVERY action in the wizard --------------------------
+  // `busy` alone disabled the buttons and left the step looking frozen. The
+  // relay's own frame (the websocket the header bar draws, fed by script and
+  // import runs) covers what the engine publishes; `act` names what is running
+  // and, when the action counts its own steps, its count. An action that
+  // reports neither still gets a moving indeterminate bar plus the clock.
+  // A per-slice selector, like the library page: a bare useStore() would
+  // re-render every step of the wizard on playback/queue/toast writes too.
+  const progress = useStore((s) => s.progress);
+  const [act, setAct] = useState<{ label: string; kind?: "metadata"; done?: number; total?: number } | null>(null);
   const qc = useQueryClient();
 
   // ---- Bulk queue (several albums at once) ------------------------------
@@ -248,13 +346,126 @@ export default function ImportWizard() {
 
   // Metadata review is off unless the config explicitly turns it on.
   const { data: cfg } = useQuery({ queryKey: ["config"], queryFn: api.config });
+  /** The album is NOT in the library yet (a finished download, a folder the
+   *  user pointed the wizard at). Every path-taking call below passes this, so
+   *  the server's opt-in staged allowance covers this album — and only it. */
+  const staged = !!albumPath && !inMusicFolder(albumPath, cfg?.music_folder);
   /** Album folder whose metadata review modal is open (metadata_review only). */
   const [reviewPath, setReviewPath] = useState<string | null>(null);
+
+  // ---- artist image / artist description / album description -----------
+  // What an import owes besides the audio; the artwork step accounts for all
+  // three. The artist is resolved by NAME exactly like the fetch route does
+  // (mlo.artistdata.artist_dir), so a row and a fetch can never disagree about
+  // which folder they mean; the payload's `path` says where it landed. Album
+  // description comes from the album payload's own `artwork` block. The key
+  // matches the artist page's data, so both share one cache entry.
+  const { data: albumDetail, refetch: refetchAlbumDetail } = useQuery({
+    queryKey: ["album", albumPath],
+    queryFn: () => api.album(albumPath!, staged),
+    enabled: !!albumPath && step === 3,
+  });
+  const artistName =
+    albumDetail?.album_artist ||
+    (release?.artists ?? []).map((a) => a.name).join(", ").trim() ||
+    "";
+  const { data: artistArt, refetch: refetchArtistArt } = useQuery({
+    queryKey: ["artistArtwork", artistName],
+    queryFn: () => api.artistArtwork(artistName),
+    enabled: !!artistName && step === 3,
+    // An artist the library does not have a folder for yet is "missing", not
+    // an error worth retrying three times.
+    retry: false,
+  });
+  // Per-item outcome of the last fetch in this step (null = none yet),
+  // keyed by item kind: the route answers one entry per item asked for.
+  const [metaReply, setMetaReply] = useState<Partial<Record<MetadataItemKind, MetadataFetchItem>> | null>(null);
+  const [metaError, setMetaError] = useState<string | null>(null);
+
+  /** The three rows the artwork step accounts for, from the payloads the
+   *  artist and album pages already read (`present` + who supplied it). The
+   *  Settings toggles that gate the two artist items come from the config the
+   *  wizard already holds, so a row a fetch may not touch says why. */
+  const metaRows: {
+    kind: MetadataItemKind;
+    label: string;
+    present: boolean;
+    source?: string | null;
+    enabled: boolean;
+  }[] = [
+    {
+      kind: "artist_image",
+      label: "Artist image",
+      present: !!artistArt?.image.present,
+      source: artistArt?.image.source,
+      enabled: cfg?.artist_image_enabled !== false,
+    },
+    {
+      kind: "artist_description",
+      label: "Artist description",
+      present: !!artistArt?.description.present,
+      source: artistArt?.description.source,
+      enabled: cfg?.artist_description_enabled !== false,
+    },
+    {
+      kind: "album_description",
+      label: "Album description",
+      present: !!albumDetail?.artwork?.description,
+      source: albumDetail?.artwork?.description_source,
+      enabled: true,
+    },
+  ];
+
+  /** Fetch whatever of those three is missing, for this album folder — one
+   *  request per item, so the bar advances 1/3 → 3/3 and the reply says what
+   *  happened to each (`fetched`, `present`, `disabled`, `not-found`,
+   *  `error`). The rows are re-read afterwards, so a fetched image or
+   *  description shows up as present and a click never lands on nothing. */
+  const fetchArtistMeta = async () => {
+    if (!albumPath) {
+      toast("Open the wizard on an album folder first");
+      return;
+    }
+    setBusy(true);
+    setMetaError(null);
+    const out: Partial<Record<MetadataItemKind, MetadataFetchItem>> = {};
+    try {
+      for (const [i, row] of metaRows.entries()) {
+        setAct({
+          kind: "metadata",
+          label: `Metadata: ${row.label} (${i + 1}/${metaRows.length})`,
+          done: i,
+          total: metaRows.length,
+        });
+        const res = await api.albumMetadataFetch({ path: albumPath, items: [row.kind], staged });
+        Object.assign(out, res.items);
+      }
+      setMetaReply({ ...out });
+      const got = Object.entries(out).filter(([, it]) => it.state === "fetched");
+      const rest = Object.entries(out).filter(([, it]) => it.state !== "fetched" && it.state !== "present");
+      toast(
+        got.length
+          ? `Fetched ${got.map(([k]) => k.replace(/_/g, " ")).join(", ")}`
+          : rest.length
+            ? `Nothing fetched — ${rest.map(([k, it]) => `${k.replace(/_/g, " ")}: ${it.state}${it.detail ? ` (${it.detail})` : ""}`).join("; ")}`
+            : "Everything was already present"
+      );
+      await Promise.all([refetchArtistArt(), refetchAlbumDetail()]);
+      qc.invalidateQueries({ queryKey: ["artist"] });
+    } catch (e) {
+      setMetaReply({ ...out });
+      setMetaError(String(e));
+      toast.error(String(e));
+    } finally {
+      setAct(null);
+      setBusy(false);
+    }
+  };
 
   // Real dimensions of the album cover, re-read whenever a cover changes.
   const { data: coverInfo } = useQuery({
     queryKey: ["coverInfo", albumPath],
-    queryFn: () => api.coverInfo(albumPath!),
+    queryFn: () => api.coverInfo(albumPath!, null, staged),
     enabled: !!albumPath && step >= 3,
   });
 
@@ -287,7 +498,7 @@ export default function ImportWizard() {
     if (fromPayload) return fromPayload;
     if (!albumPath) return null;
     try {
-      const r = await api.mbDetect(albumPath);
+      const r = await api.mbDetect(albumPath, staged);
       return r.mbid ?? null;
     } catch {
       return null;
@@ -363,22 +574,82 @@ export default function ImportWizard() {
     pickRelease(id);
   };
 
-  // Debounced RYM link validation.
+  // Debounced RYM link validation. The server reports WHICH page it is, so an
+  // artist paste is routed to the artist field instead of being written as the
+  // album link, and a song page is refused with the reason.
   useEffect(() => {
     if (!rymLink.trim()) {
       setRymValid(null);
+      setRymKind(null);
       return;
     }
     const t = setTimeout(async () => {
       try {
-        const r = await api.rymValidate(rymLink.trim());
-        setRymValid(r.valid);
+        const r = (await api.rymValidate(rymLink.trim())) as { valid: boolean; kind?: string | null };
+        if (r.kind === "artist") {
+          // Not a wrong paste, just the wrong field — move it, say so, and
+          // leave the album field empty so auto-find can fill it.
+          setRymArtistLink(rymLink.trim());
+          setRymLink("");
+          setRymValid(null);
+          setRymKind(null);
+          setRymNote("That is a RateYourMusic artist page — moved to the artist link");
+          return;
+        }
+        // `valid` from the server just means "a RYM URL"; for the ALBUM field
+        // only an album page counts, so a song/other page reads as invalid
+        // here (the chip and the note say which).
+        setRymValid(r.valid && (r.kind == null || r.kind === "album"));
+        setRymKind(r.kind ?? null);
+        setRymNote(
+          r.kind === "song"
+            ? "That is a RateYourMusic song page, not an album"
+            : r.kind === "other"
+              ? "That is a RateYourMusic page, but not an album"
+              : ""
+        );
       } catch {
         setRymValid(false);
+        setRymKind(null);
+        setRymNote("Could not check the link");
       }
     }, 400);
     return () => clearTimeout(t);
   }, [rymLink]);
+
+  // The artist field validates through the same call, and accepts only an
+  // artist page: a song or album paste here would be written to every track as
+  // RATEYOURMUSIC_ARTIST and never resolve to the artist.
+  useEffect(() => {
+    if (!rymArtistLink.trim()) {
+      setRymArtistValid(null);
+      setRymArtistKind(null);
+      setRymArtistNote("");
+      return;
+    }
+    const t = setTimeout(async () => {
+      try {
+        const r = (await api.rymValidate(rymArtistLink.trim())) as { valid: boolean; kind?: string | null };
+        const kind = r.kind ?? null;
+        setRymArtistValid(r.valid && (kind == null || kind === "artist"));
+        setRymArtistKind(kind);
+        setRymArtistNote(
+          kind === "artist" || kind == null
+            ? ""
+            : kind === "album"
+              ? "That is a RateYourMusic album page — paste the artist page"
+              : kind === "song"
+                ? "That is a RateYourMusic song page, not an artist"
+                : "That is a RateYourMusic page, but not an artist"
+        );
+      } catch {
+        setRymArtistValid(false);
+        setRymArtistKind(null);
+        setRymArtistNote("Could not check the link");
+      }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [rymArtistLink]);
 
   const defaultTrackName = (p: string) => {
     const base = p.split("/").pop() ?? "";
@@ -393,17 +664,64 @@ export default function ImportWizard() {
   // directly (nested/multi-album structures).
   // Third fallback: direct folder scan — always reflects what's on disk.
   const [scannedTracks, setScannedTracks] = useState<Track[]>([]);
+
+  /** One row of /api/album/scan-tracks as a Track. The scan reports the
+   *  track's REAL lyrics state (`lyrics_embedded`/`lyrics_lrc`, computed by
+   *  the grader's own detection) — hardcoding "no lyrics" here made every
+   *  track of a staged album claim lyrics it already carried. */
+  const scanRow = (t: ScanTrackRow): Track => ({
+    path: t.path,
+    file: t.file,
+    tracknumber: t.tracknumber ?? null,
+    discnumber: t.discnumber ?? null,
+    issues: [],
+    values: {},
+    audit: null,
+    log_grade: null,
+    lyrics_embedded: !!t.lyrics_embedded,
+    lyrics_lrc: !!t.lyrics_lrc,
+    unreadable: false,
+    tech: t.tech ?? {},
+    tags: t.tags ?? {},
+    grade_pass: false,
+    lyrics_present: !!t.lyrics_present,
+  });
+
+  /** Re-read the folder a step works on — the wizard's own source of truth
+   *  for an album the library tree does not list (a staged import). Called
+   *  after a fetch so the step shows what just landed instead of the state
+   *  it had before. */
+  const rescanTracks = async (): Promise<Track[]> => {
+    if (!albumPath) return [];
+    const rows = (await api.scanTracks(albumPath, staged)).tracks.map(scanRow);
+    setScannedTracks(rows);
+    return rows;
+  };
+
   useEffect(() => {
     setScannedTracks([]);
-    if (trackList.length || suggestions.length || !albumPath) return;
+    // Library rows already carry the real lyrics state; everything else (a
+    // matched-but-unlinked or staged album) needs the scan for it.
+    if (trackList.length || !albumPath) return;
     let cancelled = false;
-    api.scanTracks(albumPath)
+    api.scanTracks(albumPath, staged)
       .then((r) => {
-        if (cancelled) return;
-        setScannedTracks(
-          r.tracks.map((t) => ({
-            path: t.path,
-            file: t.file,
+        if (!cancelled) setScannedTracks(r.tracks.map(scanRow));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [albumPath, trackList.length]);
+
+  const stepTracks: Track[] = useMemo(() => {
+    const base: Track[] = trackList.length
+      ? trackList
+      : suggestions.length
+        ? suggestions.map((s) => ({
+            path: s.local,
+            file: s.file,
             issues: [],
             values: {},
             audit: null,
@@ -411,39 +729,27 @@ export default function ImportWizard() {
             lyrics_embedded: false,
             lyrics_lrc: false,
             unreadable: false,
-            tech: t.tech ?? {},
-            tags: t.tags ?? {},
+            tech: {},
+            tags: {},
             grade_pass: false,
             lyrics_present: false,
-          })) as Track[]
-        );
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [albumPath, trackList.length, suggestions.length]);
-
-  const stepTracks: Track[] = useMemo(() => {
-    if (trackList.length) return trackList;
-    if (suggestions.length) {
-      return suggestions.map((s) => ({
-        path: s.local,
-        file: s.file,
-        issues: [],
-        values: {},
-        audit: null,
-        log_grade: null,
-        lyrics_embedded: false,
-        lyrics_lrc: false,
-        unreadable: false,
-        tech: {},
-        tags: {},
-        grade_pass: false,
-        lyrics_present: false,
-      }));
-    }
-    return scannedTracks;
+          }))
+        : scannedTracks;
+    // Suggestion rows carry no lyrics of their own: the folder scan knows
+    // what these files actually hold, so it fills the state in.
+    if (!scannedTracks.length || base === scannedTracks) return base;
+    const onDisk = new Map(scannedTracks.map((t) => [t.path, t]));
+    return base.map((t) => {
+      const s = onDisk.get(t.path);
+      return s
+        ? {
+            ...t,
+            lyrics_embedded: s.lyrics_embedded,
+            lyrics_lrc: s.lyrics_lrc,
+            lyrics_present: s.lyrics_present,
+          }
+        : t;
+    });
   }, [trackList, suggestions, scannedTracks]);
 
   // ---- per-disc grouping helpers (shared by Match and Genres steps) ----
@@ -732,7 +1038,7 @@ export default function ImportWizard() {
       setRelease(rel);
       setReleaseId(id);
       setFetchStatus("Matching local tracks to the release…");
-      const matched = await api.mbMatch(target!, id);
+      const matched = await api.mbMatch(target!, id, staged);
       setSuggestions(matched.suggestions);
       if (!matched.suggestions.length) {
         toast("No audio tracks found in this folder — check the album folder contains the music files");
@@ -747,37 +1053,110 @@ export default function ImportWizard() {
     }
   };
 
-  // Genres are imported manually in the Genres step — never auto-fetched.
-  const importGenres = async () => {
-    const rid = releaseId || extractMbid(mbLink) || "";
-    if (!rid) {
-      toast("Fetch the MusicBrainz release first (Links step)");
+  /** ONE genre source, written straight to the files.
+   *
+   *  The wizard has exactly two of these — "Genres from MusicBrainz" and
+   *  "Genres from RateYourMusic" — each asking that source alone, so a
+   *  blocked or empty one is never hidden behind the other's answer. The
+   *  server reports what the source wrote (`updated`, the names, and its own
+   *  reason for staying silent) and the step re-reads the files, so what
+   *  Continue would save is what actually landed. */
+  const importGenresFrom = async (source: "musicbrainz" | "rateyourmusic") => {
+    const targets = albumTargets();
+    if (!targets.length) {
+      toast("Nothing to import genres for yet");
       return;
     }
+    const label = source === "musicbrainz" ? "MusicBrainz" : "RateYourMusic";
     setBusy(true);
-    setFetchStatus("Importing genres from MusicBrainz…");
+    setGenreError(null);
+    setGenreJobResult(null);
+    setAct({ label: `Importing genres from ${label}…` });
     try {
-      const cascade = await withRetry(() => api.mbGenres(rid, genreLimit ?? undefined));
-      const byPos = new Map(cascade.per_track.map((t) => [`${t.disc}-${t.position}`, t.genres.join("; ")]));
-      const g: Record<string, string> = {};
-      let src: string | null = null;
-      for (const s of suggestions) {
-        const m = s.release_track;
-        const key = m ? `${m.disc}-${m.position}` : "";
-        g[s.local] = byPos.get(key) ?? "";
-        const s2 = cascade.per_track.find((t) => t.title === m?.title)?.source;
-        if (s2) src = s2;
+      const res = await api.genresImport(targets, genreLimit ?? undefined, [source], staged);
+      setGenreJobResult(res);
+      const perSource = Object.entries(res.per_source ?? {})
+        .filter(([, names]) => names.length)
+        .map(([name, names]) => `${name} ${names.length}`)
+        .join(", ");
+      // The source wrote the files: re-read them so the step shows what
+      // landed instead of the state it had before.
+      if (albumPath && stepTracks.length) {
+        try {
+          const rows = await rescanTracks();
+          const onDisk = new Map(rows.map((r) => [r.path, r.tags?.GENRE ?? ""]));
+          setGenres((g) => {
+            const next = { ...g };
+            for (const t of stepTracks) if (onDisk.has(t.path)) next[t.path] = onDisk.get(t.path)!;
+            return next;
+          });
+        } catch {
+          /* the step keeps what it had; the report below still says what ran */
+        }
       }
-      setGenres(g);
-      setGenreSource(src ?? "MusicBrainz");
-      toast("Genres imported — review and edit below");
+      qc.invalidateQueries({ queryKey: ["library"] });
+      const note = res.notes?.[source];
+      toast(
+        res.updated
+          ? `${label}: ${res.updated} track(s) updated${perSource ? ` — ${perSource}` : ""}${note ? ` (${note})` : ""}`
+          : `${label} had no genres to write${note ? ` — ${note}` : ""}`
+      );
     } catch (e) {
+      setGenreError(String(e));
       toast.error(String(e));
     } finally {
+      setAct(null);
       setBusy(false);
-      setFetchStatus(null);
     }
   };
+
+  /** Album paths the wizard's own actions act on: the staged batch when files
+   *  were just imported, else the album the wizard was opened on (?album=). */
+  const albumTargets = (): string[] =>
+    uploaded.length ? uploaded.map((a) => a.path) : albumPath ? [albumPath] : [];
+
+  /** Ask RYM for this album's and this artist's pages and PREFILL both fields.
+   *  Nothing is written here: an empty field is filled for review, and a field
+   *  the user already typed in is left alone. False = nothing to look up yet. */
+  const findRymLinks = async (): Promise<boolean> => {
+    // Who and what RYM is asked about: the fetched release first, else the
+    // album's own tags — the only source an auto-imported album has.
+    const artist =
+      (release?.artists ?? []).map((a) => a.name).join(", ").trim() ||
+      (stepTracks.length ? trackArtist(stepTracks[0].path) : "");
+    const album = trackAlbum ?? currentAlbumName;
+    if (!artist && !album) return false;
+    setFindingLinks(true);
+    try {
+      const r = await api.rymResolve(artist, album);
+      const foundAlbum = r.album;
+      const foundArtist = r.artist;
+      if (foundAlbum) setRymLink((cur) => (cur.trim() ? cur : foundAlbum));
+      if (foundArtist) setRymArtistLink((cur) => (cur.trim() ? cur : foundArtist));
+      setRymNote(
+        foundAlbum || foundArtist
+          ? "found on RateYourMusic — review, then Continue saves it"
+          : r.note || "nothing found on RateYourMusic — paste the URLs"
+      );
+    } catch {
+      setRymNote("Lookup failed — paste the URLs instead");
+    } finally {
+      setFindingLinks(false);
+    }
+    return true;
+  };
+
+  // Once per album on entering the Links step: an auto-imported album lands
+  // here with no links at all, so the lookup waits for the tags/release that
+  // give it a name, then runs itself.
+  const linksAutoFound = useRef<string | null>(null);
+  useEffect(() => {
+    if (step !== 1 || !albumPath || linksAutoFound.current === albumPath) return;
+    findRymLinks().then((ran) => {
+      if (ran) linksAutoFound.current = albumPath;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, albumPath, stepTracks, release]);
 
   const nextFromLinks = async () => {
     const rid = releaseId || extractMbid(mbLink) || "";
@@ -786,13 +1165,33 @@ export default function ImportWizard() {
       return;
     }
     setBusy(true);
+    setAct({ label: "Saving links…" });
     try {
-      await api.importCommit(albumPath, mbLink || `https://musicbrainz.org/release/${rid}`, rymValid ? rymLink : undefined);
+      // Only an ALBUM page may be stored as the album link — rymValid is
+      // already false for a song/other page, and an artist paste never lands
+      // in this field at all.
+      const albumLink = rymValid ? rymLink.trim() : undefined;
+      await api.importCommit(albumPath, mbLink || `https://musicbrainz.org/release/${rid}`, albumLink, staged);
+      // The artist page is artist-level, so it goes on every track as
+      // RATEYOURMUSIC_ARTIST — the same tag the artist page's editor writes.
+      // Only a link the server confirmed as an ARTIST page is stored: a song
+      // or album paste in this field would be a wrong artist link forever.
+      const artistLink = rymArtistValid ? rymArtistLink.trim() : "";
+      if (artistLink) {
+        if (!stepTracks.length) {
+          toast("Artist link needs the album's tracks — finish matching first");
+        } else {
+          const writes: Record<string, Record<string, string>> = {};
+          for (const t of stepTracks) (writes[t.path] ??= {}).RATEYOURMUSIC_ARTIST = artistLink;
+          await api.mbAssign(writes, staged);
+        }
+      }
       toast("Links saved to album");
       setStep(2);
     } catch (e) {
       toast.error(String(e));
     } finally {
+      setAct(null);
       setBusy(false);
     }
   };
@@ -808,13 +1207,15 @@ export default function ImportWizard() {
       return;
     }
     setAcoustidBusy(true);
+    setAct({ label: `Fingerprinting ${paths.length} album(s) with AcoustID…` });
     try {
-      const res = await api.importAcoustid(paths);
+      const res = await api.importAcoustid(paths, false, staged);
       setAcoustid(res);
       if (!res.available) toast(`Fingerprinting unavailable — ${res.note}`);
     } catch (e) {
       toast.error(String(e));
     } finally {
+      setAct(null);
       setAcoustidBusy(false);
     }
   };
@@ -841,6 +1242,7 @@ export default function ImportWizard() {
     const index = uploaded.findIndex((a) => a.path === row.path);
     if (index >= 0 && index !== albumIndex) switchAlbum(index);
     setAcoustidBusy(true);
+    setAct({ label: "Resolving the AcoustID match on MusicBrainz…" });
     setFetchStatus("Resolving the release group on MusicBrainz…");
     try {
       const rid = await releaseForRow(row);
@@ -855,7 +1257,7 @@ export default function ImportWizard() {
       // Accepting the match: keep the fingerprint on the album, so the
       // on-disk check agrees with what was just matched.
       try {
-        const applied = await api.importAcoustid([row.path], true);
+        const applied = await api.importAcoustid([row.path], true, staged);
         const tagged = applied.albums?.find((a) => a.path === row.path)?.tagged ?? 0;
         toast(
           tagged
@@ -868,6 +1270,7 @@ export default function ImportWizard() {
     } catch (e) {
       toast.error(String(e));
     } finally {
+      setAct(null);
       setAcoustidBusy(false);
       setFetchStatus(null);
     }
@@ -884,13 +1287,14 @@ export default function ImportWizard() {
       return;
     }
     setMatchAllBusy(true);
+    setAct({ label: `Matching ${uploaded.length} album(s) to the release…` });
     const failed: string[] = [];
     let matched = 0;
     try {
       for (const a of uploaded) {
         setFetchStatus(`Matching ${a.name} to the release…`);
         try {
-          const res = await api.mbMatch(a.path, rid);
+          const res = await api.mbMatch(a.path, rid, staged);
           if (!res.suggestions.length) {
             failed.push(`${a.name}: no audio files`);
             continue;
@@ -908,6 +1312,7 @@ export default function ImportWizard() {
       );
       qc.invalidateQueries({ queryKey: ["library"] });
     } finally {
+      setAct(null);
       setMatchAllBusy(false);
       setFetchStatus(null);
     }
@@ -958,7 +1363,7 @@ export default function ImportWizard() {
         LABEL: release?.label || null,
       };
     }
-    await api.mbAssign(writes);
+    await api.mbAssign(writes, staged);
     // Record the RELEASE's own tracklist on the folder. A partial import
     // (some of these tracks never brought in) leaves no other trace of what
     // is absent, so the album page diffs against this list and greys out
@@ -973,7 +1378,8 @@ export default function ImportWizard() {
           position: m.position,
           title: m.title,
           recording_mbid: m.recording_mbid ?? null,
-        }))
+        })),
+        staged
       );
     } catch (e) {
       toast(`Metadata saved, but the release tracklist could not be recorded: ${e}`);
@@ -986,6 +1392,7 @@ export default function ImportWizard() {
       return;
     }
     setBusy(true);
+    setAct({ label: `Writing MusicBrainz metadata to ${suggestions.length} track(s)…` });
     setFetchStatus("Writing MusicBrainz metadata to files…");
     try {
       await assignTracks(albumPath, release, suggestions);
@@ -994,6 +1401,7 @@ export default function ImportWizard() {
     } catch (e) {
       toast.error(String(e));
     } finally {
+      setAct(null);
       setBusy(false);
       setFetchStatus(null);
     }
@@ -1014,6 +1422,24 @@ export default function ImportWizard() {
     qc.invalidateQueries({ queryKey: ["library"] });
     qc.invalidateQueries({ queryKey: ["coverInfo", albumPath] });
   };
+
+  // Candidates the import already fetched and staged for a cover-less album
+  // (`cover_review` on) — the same set the album page offers as one pick.
+  // Asked only while there is no cover file, never for a covered album.
+  const stagedCovers = useQuery({
+    queryKey: ["stagedCovers", albumPath],
+    queryFn: async () => {
+      const c = await api.metadataCandidates(
+        release?.artists.map((a) => a.name).join(", ") || trackArtist(stepTracks[0]?.path ?? ""),
+        albumPath!,
+        staged
+      );
+      return c.staged?.covers ?? null;
+    },
+    enabled: !!albumPath && !coverInfo?.file,
+    retry: false,
+  });
+  const stagedCoverRows = stagedCovers.data?.results ?? null;
 
   /** Cover results: amber banner when the image is under the minimum size
    *  (the backend writes it anyway and says so), toast for the outcome.
@@ -1054,8 +1480,8 @@ export default function ImportWizard() {
     setBusy(true);
     try {
       const res = tracks?.length
-        ? await api.cover(albumPath, file, undefined, tracks)
-        : await api.cover(albumPath, file);
+        ? await api.cover(albumPath, file, undefined, tracks, staged)
+        : await api.cover(albumPath, file, undefined, undefined, staged);
       reportCover(res, tracks?.length ? `Cover assigned to ${tracks.length} track(s)` : "Album cover");
       refreshCovers();
     } catch (e) {
@@ -1071,8 +1497,8 @@ export default function ImportWizard() {
     setBusy(true);
     try {
       const res = tracks?.length
-        ? await api.coverFromUrl(albumPath, u, undefined, tracks)
-        : await api.coverFromUrl(albumPath, u);
+        ? await api.coverFromUrl(albumPath, u, undefined, tracks, undefined, staged)
+        : await api.coverFromUrl(albumPath, u, undefined, undefined, undefined, staged);
       reportCover(res, tracks?.length ? `Cover assigned to ${tracks.length} track(s)` : "Album cover");
       refreshCovers();
     } catch (e) {
@@ -1086,7 +1512,7 @@ export default function ImportWizard() {
     if (!albumPath || !coverSel.size) return;
     setBusy(true);
     try {
-      await api.coverClear(albumPath, [...coverSel]);
+      await api.coverClear(albumPath, [...coverSel], staged);
       toast(`Per-track cover cleared for ${coverSel.size} track(s)`);
       refreshCovers();
     } catch (e) {
@@ -1200,15 +1626,17 @@ export default function ImportWizard() {
 
   const saveGenres = async () => {
     setBusy(true);
+    setAct({ label: `Saving genres for ${Object.keys(genres).length} track(s)…` });
     try {
       const writes: Record<string, Record<string, string | null>> = {};
       for (const [p, g] of Object.entries(genres)) writes[p] = { GENRE: g || null };
-      await api.mbAssign(writes);
+      await api.mbAssign(writes, staged);
       toast("Genres saved");
       setStep(5);
     } catch (e) {
       toast.error(String(e));
     } finally {
+      setAct(null);
       setBusy(false);
     }
   };
@@ -1298,8 +1726,14 @@ export default function ImportWizard() {
       return;
     }
     setBusy(true);
+    setAct({
+      label:
+        targets.length === 1
+          ? `Fetching lyrics for ${displayTitle(targets[0])}…`
+          : `Fetching lyrics for ${targets.length} track(s)…`,
+    });
     try {
-      const res = await api.lyricsAuto(targets);
+      const res = await api.lyricsAuto(targets, false, staged);
       setLyrResults((m) => {
         const next = { ...m };
         for (const r of res.results) next[r.path] = r;
@@ -1312,8 +1746,8 @@ export default function ImportWizard() {
       }
       const got = [...byProvider].map(([label, n]) => `${label} ${n}`).join(", ");
       const rest = [
-        res.skipped ? `${res.skipped} skipped` : "",
-        res.failed ? `${res.failed} failed` : "",
+        res.skipped ? `${res.skipped} Skipped` : "",
+        res.failed ? `${res.failed} Failed` : "",
       ].filter(Boolean).join(", ");
       toast(
         res.ok
@@ -1321,15 +1755,20 @@ export default function ImportWizard() {
           : `No new lyrics found${rest ? ` — ${rest}` : ""}`
       );
       qc.invalidateQueries({ queryKey: ["library"] });
+      // The files changed on disk: re-read them so the step's "Lyrics" marks
+      // come from what the fetch actually wrote.
+      await rescanTracks();
     } catch (e) {
       toast.error(String(e));
     } finally {
+      setAct(null);
       setBusy(false);
     }
   };
 
   const saveLyricsStep = async () => {
     setBusy(true);
+    setAct({ label: `Saving lyrics & INSTRUMENTAL for ${stepTracks.length} track(s)…` });
     try {
       // Write what the config asks for — the wizard used to always write .lrc.
       const cfg = await api.config();
@@ -1349,28 +1788,76 @@ export default function ImportWizard() {
           continue;
         }
         if (fmt === "LRC" || fmt === "BOTH") {
-          await api.lyricsWrite(t.path, lrc);
+          await api.lyricsWrite(t.path, lrc, staged);
           sidecars++;
         }
         if (fmt === "EMBEDDED" || fmt === "BOTH") {
-          await api.lyricsEmbed(t.path, lrc);
+          await api.lyricsEmbed(t.path, lrc, staged);
           embedded++;
         }
       }
-      await api.mbAssign(writes);
+      await api.mbAssign(writes, staged);
       setLyricsNotice(
         untimed ? `${untimed} track(s) have lyrics without timestamps — not saved as .lrc` : null
       );
-      toast(`lyrics_format=${fmt}: ${embedded} embedded, ${sidecars} .lrc — INSTRUMENTAL saved`);
+      toast(`Lyrics format ${fmt}: ${embedded} Embedded, ${sidecars} .lrc — INSTRUMENTAL saved`);
       setStep(6);
     } catch (e) {
       toast.error(String(e));
     } finally {
+      setAct(null);
       setBusy(false);
     }
   };
 
   // ---------------- Step 6: advisory ----------------
+  /** Fetch the advisory rating for EVERY track of this album, now.
+
+   *  One call for the whole album, through the same advisory source path the
+   *  album page's Check button uses (`/api/mb/advisory/fetch`): the server
+   *  keys Apple's explicit-edition album route on the folder's track count,
+   *  so a per-track loop would degrade the answers it can get. The reply's
+   *  per-track `values`/`sources`/`answers` are the outcome rows below, and a
+   *  failure is shown rather than swallowed. */
+  const fetchAdvisoryAll = async () => {
+    const targets = stepTracks.map((t) => t.path);
+    if (!targets.length) {
+      toast("No tracks to fetch an advisory for");
+      return;
+    }
+    setBusy(true);
+    setAdvError(null);
+    setAct({ label: `Asking the advisory sources for ${targets.length} track(s)…` });
+    try {
+      const res = await api.mbAdvisoryFetch({ paths: targets, staged });
+      setAdvReply(res);
+      // The server wrote what it found — mirror it into the step's buttons so
+      // they show the fetched value, not the pre-fetch tag.
+      setAdvisory((a) => {
+        const next = { ...a };
+        for (const p of targets) {
+          const v = replyFor(res.values, p);
+          if (v !== undefined) next[p] = String(v);
+        }
+        return next;
+      });
+      const answered = targets.filter((p) => replyFor(res.answers, p)).length;
+      toast(
+        res.updated
+          ? `Advisory written for ${res.updated} track(s) — ${answered} had a source answer`
+          : `Nothing written — ${answered} of ${targets.length} track(s) had an answer`
+      );
+      qc.invalidateQueries({ queryKey: ["library"] });
+      qc.invalidateQueries({ queryKey: ["album"] });
+    } catch (e) {
+      setAdvError(String(e));
+      toast.error(String(e));
+    } finally {
+      setAct(null);
+      setBusy(false);
+    }
+  };
+
   const applyAdvisoryToAll = (v: string) => {
     setAdvisory((a) => {
       const next = { ...a };
@@ -1381,6 +1868,7 @@ export default function ImportWizard() {
 
   const saveAdvisory = async () => {
     setBusy(true);
+    setAct({ label: `Saving advisory for ${stepTracks.length} track(s)…` });
     try {
       // Only write tracks the user explicitly changed — untouched tracks keep
       // their existing ITUNESADVISORY tags instead of being wiped.
@@ -1396,12 +1884,13 @@ export default function ImportWizard() {
         setStep(7);
         return;
       }
-      await api.mbAssign(writes);
+      await api.mbAssign(writes, staged);
       toast("Advisory ratings saved");
       setStep(7);
     } catch (e) {
       toast.error(String(e));
     } finally {
+      setAct(null);
       setBusy(false);
     }
   };
@@ -1421,39 +1910,126 @@ const [runAfterImport, setRunAfterImport] = useState<number[]>(
   POST_IMPORT_SCRIPTS.filter((s) => s.defaultOn).map((s) => s.id)
 );
 const [scriptsRunning, setScriptsRunning] = useState(false);
+const [runningAll, setRunningAll] = useState(false);
+// Last action's outcome, shown in the step: a toast is gone by the time you
+// look back at a chain that took a minute to run.
+const [finishMsg, setFinishMsg] = useState<string | null>(null);
+// One row per chain id of the last run (null = nothing run here yet). A
+// failing script is a row with its own error text, not just a count.
+const [runRows, setRunRows] = useState<RunRow[] | null>(null);
+
+/** A run's per-script results as report rows — the chain's own labels when it
+ *  reports them, the wizard's script list otherwise. */
+const rowsFromResults = (results: ScriptRunResult[]): RunRow[] =>
+  results.map((r) => ({
+    id: r.id,
+    label: r.label ?? r.name ?? SCRIPT_LABEL[r.id] ?? `Script ${r.id}`,
+    ok: !r.error && !r.skipped,
+    skipped: !!r.skipped,
+    error: r.error ? String(r.error) : undefined,
+    note: r.reason,
+  }));
+
+/** The user's own Run All — config.run_all_order, the same order the
+ *  Optimization page runs — aimed at this wizard's album(s) only. */
+const runAllHere = async () => {
+  const targets = albumTargets();
+  if (!targets.length) {
+    toast("Nothing imported yet");
+    return;
+  }
+  setRunningAll(true);
+  setFinishMsg("Running all scripts…");
+  setRunRows(null);
+  try {
+    const order = Array.isArray(cfg?.run_all_order) && (cfg.run_all_order as number[]).length
+      ? (cfg.run_all_order as number[]).filter(isScriptId)
+      : DEFAULT_RUN_ALL;
+    setAct({ label: `Run all scripts — ${order.length} script(s) on ${targets.length} album(s)` });
+    const res = await api.run(order, targets);
+    const rows = rowsFromResults(res.results ?? []);
+    setRunRows(rows);
+    const failed = rows.filter((r) => !r.ok && !r.skipped);
+    if (failed.length) toast.error(`${failed.length} script(s) failed — see the step`);
+    else toast.success("Run All finished");
+    setFinishMsg(
+      failed.length
+        ? `Run all: ${failed.length} of ${order.length} script(s) failed — ${failed[0].error}`
+        : `Run all: ${order.length} script(s) finished on ${targets.length} album${targets.length > 1 ? "s" : ""}`
+    );
+  } catch (e) {
+    setFinishMsg(`Run all failed — ${String(e)}`);
+    toast.error(String(e));
+  } finally {
+    setAct(null);
+    setRunningAll(false);
+    qc.invalidateQueries({ queryKey: ["library"] });
+    qc.invalidateQueries({ queryKey: ["album"] });
+    qc.invalidateQueries({ queryKey: ["coverInfo", albumPath] });
+  }
+};
 
 /** Run every configured post-import script on the new album(s) right now,
  *  without leaving the wizard: api.importFinish is the same chain the bulk
  *  queue and the Soulseek import run, and reports per-script errors. The
- *  checkboxes stay the "on Done" shortcut for a chosen subset. */
+ *  checkboxes stay the "on Done" shortcut for a chosen subset.
+ *
+ *  Targets the album the wizard was opened on too (?album=), which is exactly
+ *  the album an auto-import drops you into with nothing "uploaded". */
 const runAllScripts = async () => {
-  if (!uploaded.length) {
-    toast("Nothing imported yet");
+  const targets = albumTargets();
+  if (!targets.length) {
+    toast("Import the files first — the chain runs on an imported album");
     return;
   }
   setScriptsRunning(true);
+  setFinishMsg("Running the import chain…");
+  setRunRows(null);
   try {
-    const res = await api.importFinish(uploaded.map((a) => a.path));
+    setAct({ label: `Import chain — ${scriptChain?.chain?.length ?? 0} script(s) on ${targets.length} album(s)` });
+    const res = await api.importFinish(targets, {}, staged);
+    // The chain reports one result per chain id per album; the album is kept
+    // in the label so a multi-album queue stays readable.
+    const rows = res.albums.flatMap((a) =>
+      rowsFromResults((a.scripts ?? []) as ScriptRunResult[]).map((r) => ({
+        ...r,
+        label: res.albums.length > 1 ? `${baseName(a.path) || a.path} · ${r.label}` : r.label,
+      }))
+    );
+    setRunRows(rows);
     const errors = res.albums.flatMap((a) =>
       a.errors.map((e) => `${baseName(a.path) || a.path}: ${String(e)}`)
     );
+    const failed = rows.filter((r) => !r.ok && !r.skipped).length;
     toast(
+      errors.length || failed
+        ? `Import chain finished with ${failed || errors.length} script error(s): ${errors.slice(0, 3).join("; ") || rows.find((r) => r.error)?.error}`
+        : `Import chain finished on ${targets.length} album(s) — progress shows at the top of the window`
+    );
+    setFinishMsg(
       errors.length
-        ? `Import chain finished with ${errors.length} script error(s): ${errors.slice(0, 3).join("; ")}`
-        : `Import chain finished on ${uploaded.length} album(s) — progress shows at the top of the window`
+        ? `Import chain: ${errors.length} script error(s) — ${errors.slice(0, 3).join("; ")}`
+        : `Import chain finished on ${targets.length} album${targets.length > 1 ? "s" : ""}`
     );
     qc.invalidateQueries({ queryKey: ["library"] });
+    qc.invalidateQueries({ queryKey: ["album"] });
+    qc.invalidateQueries({ queryKey: ["coverInfo", albumPath] });
   } catch (e) {
+    setFinishMsg(`Import chain failed — ${String(e)}`);
     toast.error(String(e));
   } finally {
+    setAct(null);
     setScriptsRunning(false);
   }
 };
 
 const finish = async () => {
   try {
-    if (runAfterImport.length && uploaded.length) {
-      await api.run(runAfterImport, uploaded.map((a) => a.path));
+    // Same targets as the chain: an album opened via ?album= is just as real
+    // an import, it simply has nothing "uploaded".
+    const targets = albumTargets();
+    if (runAfterImport.length && targets.length) {
+      await api.run(runAfterImport, targets);
     }
   } catch (e) {
     toast.error(String(e));
@@ -1473,9 +2049,16 @@ const finish = async () => {
     setSuggestions([]);
     setGenres({});
     setDiscGenres({});
-    setGenreSource(null);
     setMbLink("");
     setRymLink("");
+    setRymValid(null);
+    setRymKind(null);
+    setRymArtistValid(null);
+    setRymArtistKind(null);
+    setRymArtistNote("");
+    setLyrOpen(new Set());
+    setRymNote("");
+    setRymArtistLink("");
     setSearchHits([]);
     // reset per-track drafts so album B never inherits album A's data
     setLyricsDrafts({});
@@ -1487,7 +2070,7 @@ const finish = async () => {
     setCoverSel(new Set());
     setCoverUrl("");
     setTrackCoverUrl("");
-    setCoverSearchOpen(false);
+    setCoverSearch(null);
   };
 
   const totalFiles = albums.reduce((n, g) => n + g.files.length, 0);
@@ -1565,6 +2148,22 @@ const finish = async () => {
         ))}
       </div>
 
+      {/* ---- the wizard's one progress strip -------------------------------
+          Every action below reports here: the action's own step count when it
+          has one, else the relay frame a script/import run publishes (the same
+          websocket the header bar draws), else an indeterminate, ticking bar.
+          A disabled button with nothing moving is what "looks stuck" was. */}
+      {(busy || act) && (
+        <div className="panel px-3 py-2">
+          <ActionBar
+            active
+            label={act?.label ?? progress?.desc ?? fetchStatus ?? "Working…"}
+            done={act?.done ?? progress?.done}
+            total={act?.total ?? progress?.total}
+          />
+        </div>
+      )}
+
       {/* ---------------- Queue mode: several albums at once ---------------- */}
       {queueMode && (
         <div className="panel p-3 space-y-2">
@@ -1577,13 +2176,13 @@ const finish = async () => {
                 <span className="h-3 w-3 rounded-full border-2 border-zinc-700 border-t-accent-soft animate-spin shrink-0" />
                 <span className="truncate max-w-[16rem]" title={bulkJob.label}>{bulkJob.label || "Importing…"}</span>
                 <span className="font-mono tabular-nums shrink-0">
-                  {bulkJob.done ?? 0}/{bulkJob.total ?? queueItems.length}
+                  {fmtCounts(bulkJob.done ?? 0, bulkJob.total ?? queueItems.length)}
                 </span>
               </span>
             )}
             {bulkJob?.status === "done" && (
               <span className="chip bg-emerald-900/50 text-emerald-300 border border-emerald-800">
-                <Check className="h-3 w-3" /> queue done — {bulkJob.done ?? 0}/{bulkJob.total ?? queueItems.length}
+                <Check className="h-3 w-3" /> queue done — {fmtCounts(bulkJob.done ?? 0, bulkJob.total ?? queueItems.length)}
               </span>
             )}
             {bulkJob?.status === "failed" && (
@@ -1635,7 +2234,7 @@ const finish = async () => {
                             : "text-zinc-500"
                     }`}
                   >
-                    {state}
+                    {QUEUE_STATE_LABEL[state] ?? state}
                   </span>
                 </div>
               );
@@ -1846,10 +2445,10 @@ const finish = async () => {
               />
               {releaseId ? (
                 <span className="chip bg-emerald-900/60 text-emerald-300 border border-emerald-800 shrink-0">
-                  <Check className="h-3 w-3" /> {detectedFromTags ? "detected from track tags" : "recognized"}
+                  <Check className="h-3 w-3" /> {detectedFromTags ? "Detected from track tags" : "Recognized"}
                 </span>
               ) : mbLink.trim() ? (
-                <span className="chip bg-amber-900/50 text-amber-300 border border-amber-900 shrink-0">no MBID found</span>
+                <span className="chip bg-amber-900/50 text-amber-300 border border-amber-900 shrink-0">No MusicBrainz ID found</span>
               ) : null}
             </div>
             {detectStatus !== "idle" && !releaseId && (
@@ -1935,23 +2534,45 @@ const finish = async () => {
                 <span className="font-semibold text-zinc-200">{release.title}</span> · {release.artists.map((a) => a.name).join(", ")} · {release.date} · {release.medium_count} disc(s) · {release.media.length} tracks
               </div>
             )}
-            <div className="text-sm font-semibold text-zinc-300 pt-2">RateYourMusic album link (optional)</div>
+            <div className="text-sm font-semibold text-zinc-300 pt-2">RateYourMusic links (optional)</div>
             <div className="flex items-center gap-2">
               <input
                 className={`input flex-1 ${rymValid === true ? "!border-emerald-700" : rymValid === false ? "!border-red-800" : ""}`}
-                placeholder="https://rateyourmusic.com/release/…"
+                placeholder="Album: https://rateyourmusic.com/release/…"
                 value={rymLink}
-                onChange={(e) => setRymLink(e.target.value)}
+                onChange={(e) => {
+                  setRymLink(e.target.value);
+                  setRymNote(""); // a stale "That is an artist page" must not outlive the paste it described
+                }}
               />
-              {rymValid === true && (
-                <span className="chip bg-emerald-900/60 text-emerald-300 border border-emerald-800 shrink-0">
-                  <Check className="h-3 w-3" /> valid
-                </span>
-              )}
-              {rymValid === false && (
-                <span className="chip bg-red-900/50 text-red-300 border border-red-900 shrink-0">not a RYM URL</span>
-              )}
+              <LinkValidChip state={rymValid} kind={rymKind} />
+              <button
+                className="btn-ghost shrink-0"
+                onClick={findRymLinks}
+                disabled={findingLinks || busy}
+                title="Ask RateYourMusic for this album's and this artist's pages and fill both fields for review"
+              >
+                {findingLinks ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}{" "}
+                Find links
+              </button>
             </div>
+            {rymNote && <div className="text-[10px] text-amber-300/80">{rymNote}</div>}
+            <div className="flex items-center gap-2">
+              <input
+                className={`input flex-1 ${rymArtistValid === true ? "!border-emerald-700" : rymArtistValid === false ? "!border-red-800" : ""}`}
+                placeholder="Artist: https://rateyourmusic.com/artist/…"
+                value={rymArtistLink}
+                onChange={(e) => {
+                  setRymArtistLink(e.target.value);
+                  setRymArtistNote("");
+                }}
+              />
+              <LinkValidChip state={rymArtistValid} kind={rymArtistKind} />
+            </div>
+            <div className="text-[10px] text-zinc-600">
+              Written to every track as RATEYOURMUSIC_ARTIST — only an artist page is accepted.
+            </div>
+            {rymArtistNote && <div className="text-[10px] text-amber-300/80">{rymArtistNote}</div>}
           </div>
           <div className="flex items-center gap-2">
             <button className="btn-primary" onClick={handleFetch} disabled={busy}>
@@ -2029,6 +2650,74 @@ const finish = async () => {
             </div>
           )}
 
+          {/* What an import owes besides the cover: the artist's image and
+              description, and the album's own description. Each row states
+              whether it is already there and who supplied it; one button
+              fetches whatever is missing and the rows are re-read after. */}
+          <div className="panel px-3 py-2 space-y-1.5">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm font-semibold text-zinc-300">Artist &amp; album metadata</span>
+              <span className="text-[11px] text-zinc-500">
+                artist: {artistName || "—"}
+                {artistArt?.path ? <span className="font-mono"> · {artistArt.path}</span> : null}
+              </span>
+              {metaReply && (
+                <button className="btn-ghost !py-0.5 !px-1.5 text-[11px] ml-auto" onClick={() => setMetaReply(null)}>
+                  Clear result
+                </button>
+              )}
+              <button
+                className={`btn-ghost !py-1 text-xs ${metaReply ? "" : "ml-auto"}`}
+                onClick={fetchArtistMeta}
+                disabled={busy || !albumPath}
+                title="Ask the configured sources for the missing artist image, artist description and album description; what is already present is left alone"
+              >
+                <CloudDownloadIcon /> Fetch missing
+              </button>
+            </div>
+            {act?.kind === "metadata" && (
+              <ActionBar active label={act.label} done={act.done} total={act.total} />
+            )}
+            {metaRows.map((row) => {
+              const item = metaReply?.[row.kind];
+              return (
+                <div key={row.kind} className="flex items-center gap-2 text-[11px]">
+                  <span className="w-40 shrink-0 text-zinc-400">{row.label}</span>
+                  <span
+                    className={`chip border shrink-0 ${
+                      row.present
+                        ? "bg-emerald-900/40 text-emerald-300 border-emerald-800"
+                        : "bg-raise text-zinc-500 border-border"
+                    }`}
+                  >
+                    {row.present ? "present" : "missing"}
+                  </span>
+                  <span className="text-zinc-500 truncate" title={row.source ?? undefined}>
+                    {row.present ? (row.source ?? "source unknown") : ""}
+                  </span>
+                  {!row.enabled && (
+                    <span className="text-amber-300/90 shrink-0">
+                      fetching switched off in Settings (Artist images &amp; descriptions)
+                    </span>
+                  )}
+                  {item && (
+                    <span
+                      className={`ml-auto shrink-0 ${item.state === "error" ? "text-red-300" : "text-zinc-400"}`}
+                      title={item.detail ?? undefined}
+                    >
+                      {item.state === "fetched" ? `fetched · ${item.source ?? "?"}` : `${item.state}${item.detail ? ` — ${item.detail}` : ""}`}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+            {metaError && (
+              <div className="text-[11px] text-red-300" role="alert">
+                Metadata fetch failed — {metaError}
+              </div>
+            )}
+          </div>
+
           <div className="grid md:grid-cols-2 gap-3">
             <div className="panel p-4 space-y-2">
               <div className="text-sm font-semibold text-zinc-300">Current album cover</div>
@@ -2046,10 +2735,23 @@ const finish = async () => {
                 <button className="btn-ghost !py-1 text-xs" onClick={() => albumCoverInput.current?.click()} disabled={busy}>
                   <UploadCloud className="h-3.5 w-3.5" /> Upload image
                 </button>
-                <button className="btn-ghost !py-1 text-xs" onClick={() => setCoverSearchOpen(true)} disabled={busy}>
+                <button className="btn-ghost !py-1 text-xs" onClick={() => setCoverSearch({})} disabled={busy}>
                   Search covers
                 </button>
               </div>
+              {/* The import staged covers for this album but the pick is the
+                  user's — same one-click affordance as the album page. */}
+              {!coverInfo?.file && !!stagedCoverRows?.length && (
+                <button
+                  className="btn-primary !py-1.5 text-xs"
+                  onClick={() =>
+                    setCoverSearch({ results: stagedCoverRows, provider: stagedCovers.data?.provider ?? null })
+                  }
+                  title="Covers fetched during import, waiting for you to pick one"
+                >
+                  <ImageIcon className="h-3.5 w-3.5" /> Choose a cover ({stagedCoverRows.length})
+                </button>
+              )}
             </div>
 
             <div className="panel p-4 space-y-2">
@@ -2260,15 +2962,21 @@ const finish = async () => {
             }}
           />
 
-          {coverSearchOpen && (
+          {coverSearch && (
             <CoverSearchModal
               albumPath={albumPath}
               artist={release?.artists.map((a) => a.name).join(", ") || trackArtist(stepTracks[0]?.path ?? "")}
               album={trackAlbum || currentAlbumName}
               releaseGroupMbid={release?.release_group_id ?? undefined}
               tracks={coverSel.size ? selectedCoverFiles() : undefined}
-              onClose={() => setCoverSearchOpen(false)}
-              onApplied={refreshCovers}
+              initialResults={coverSearch.results}
+              initialProvider={coverSearch.provider}
+              onClose={() => setCoverSearch(null)}
+              onApplied={() => {
+                refreshCovers();
+                qc.invalidateQueries({ queryKey: ["stagedCovers", albumPath] });
+                qc.invalidateQueries({ queryKey: ["album"] });
+              }}
             />
           )}
         </div>
@@ -2278,12 +2986,22 @@ const finish = async () => {
       {step === 4 && (
         <div className="space-y-3">
           <div className="flex items-center gap-2 flex-wrap">
-            <button className="btn-ghost" onClick={importGenres} disabled={busy || !(releaseId || extractMbid(mbLink))}>
-              <CloudDownloadIcon /> Import genres from MusicBrainz
+            <button
+              className="btn-ghost"
+              onClick={() => importGenresFrom("musicbrainz")}
+              disabled={busy || !albumTargets().length}
+              title="Ask MusicBrainz for this album's genres (recording → release → release group → artist) and write what it states"
+            >
+              <CloudDownloadIcon /> Genres from MusicBrainz
             </button>
-            {busy && fetchStatus && (
-              <span className="text-xs text-accent-soft animate-pulse">{fetchStatus}</span>
-            )}
+            <button
+              className="btn-ghost"
+              onClick={() => importGenresFrom("rateyourmusic")}
+              disabled={busy || !albumTargets().length}
+              title="Ask RateYourMusic for this album's genres and write what its page states — a blocked RYM says so instead of writing a guess"
+            >
+              <CloudDownloadIcon /> Genres from RateYourMusic
+            </button>
             <label className="flex items-center gap-1.5 text-xs text-zinc-400 ml-auto">
               Max genres / track
               <select
@@ -2301,10 +3019,45 @@ const finish = async () => {
               </select>
             </label>
           </div>
+          {/* What the last source wrote — one source at a time, so a blocked
+              or empty one is never hidden behind the other's answer. */}
+          {genreError && (
+            <div className="text-xs text-red-300" role="alert">
+              {genreError}
+            </div>
+          )}
+          {genreJobResult && (
+            <div className="panel px-3 py-2 space-y-1" role="status">
+              <div className="text-xs text-zinc-300">
+                {genreJobResult.updated} track(s) updated
+                {genreJobResult.genres.length
+                  ? ` — ${genreJobResult.genres.join(", ")}`
+                  : " — no genres returned"}
+              </div>
+              {Object.entries(genreJobResult.per_source).filter(([, names]) => names.length).length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {Object.entries(genreJobResult.per_source)
+                    .filter(([, names]) => names.length)
+                    .map(([name, names]) => (
+                      <span key={name} className="chip bg-raise border border-border text-zinc-300" title={names.join(", ")}>
+                        {name} <span className="tabular-nums">{names.length}</span>
+                      </span>
+                    ))}
+                </div>
+              )}
+              {Object.entries(genreJobResult.notes).length > 0 && (
+                <ul className="text-[11px] text-zinc-500 space-y-0.5">
+                  {Object.entries(genreJobResult.notes).map(([name, note]) => (
+                    <li key={name}>
+                      <span className="text-zinc-400">{name}</span>: {note}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
           <span className="text-xs text-zinc-500 -mt-1 block">
-            {genreSource
-              ? `Fetched via ${genreSource} fallback (track → release → release-group → artist). Edit freely.`
-              : "Genres are not fetched automatically — set the per-track limit, then click to import."}
+            Genres are not fetched automatically — set the per-track limit, then ask MusicBrainz, RateYourMusic, or both.
           </span>
           {stepTracks.length === 0 && <div className="text-xs text-zinc-500">No tracks — go back and fetch the release.</div>}
           {/* Album-wide cleanup: every genre currently on any track, one click
@@ -2425,13 +3178,13 @@ const finish = async () => {
           {Object.keys(lyrResults).length > 0 && (
             <div className="panel px-3 py-2 text-xs space-y-0.5">
               <div className="flex items-center gap-3 text-zinc-400 flex-wrap">
-                {(["ok", "skipped", "failed"] as const).map((status) => {
+                {Object.entries(LYR_STATUS_LABEL).map(([status, label]) => {
                   const rows = Object.values(lyrResults).filter((r) => r.status === status);
                   if (!rows.length) return null;
                   const labels = [...new Set(rows.map((r) => r.provider_label).filter(Boolean))];
                   return (
                     <span key={status}>
-                      <b className="text-zinc-200">{rows.length}</b> {status}
+                      <b className="text-zinc-200">{rows.length}</b> {label}
                       {status === "ok" && labels.length > 0 && ` — ${labels.join(", ")}`}
                     </span>
                   );
@@ -2442,22 +3195,25 @@ const finish = async () => {
               </div>
             </div>
           )}
+          {/* One compact row per track, like every other step: badge, title and
+              the chips on a single line, the editor behind Edit. */}
           {stepTracks.map((t) => {
             const inst = instrumental[t.path] ?? t.tags.INSTRUMENTAL;
             const hasDraft = hasLyrics(t);
+            const open = lyrOpen.has(t.path);
             return (
-              <details key={t.path} className="panel open:pb-3">
-                <summary className="px-3 py-2 text-sm font-medium cursor-pointer flex items-center gap-2">
+              <div key={t.path} className="panel px-3 py-2 space-y-2">
+                <div className="flex items-center gap-2">
                   <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
-                  <span className="flex-1 truncate">{displayTitle(t.path)}</span>
+                  <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
                   {hasDraft && (
-                    <span className="chip bg-emerald-900/60 text-emerald-300 border border-emerald-800">
+                    <span className="chip bg-emerald-900/60 text-emerald-300 border border-emerald-800 shrink-0">
                       <Check className="h-3 w-3" /> Lyrics
                     </span>
                   )}
                   {lyrResults[t.path] && (
                     <span
-                      className={`chip border ${
+                      className={`chip border shrink-0 ${
                         lyrResults[t.path].status === "ok"
                           ? "bg-emerald-900/50 text-emerald-300 border-emerald-800"
                           : lyrResults[t.path].status === "failed"
@@ -2466,10 +3222,15 @@ const finish = async () => {
                       }`}
                       title={lyrResults[t.path].reason || lyrResults[t.path].error || ""}
                     >
-                      {lyrResults[t.path].status === "ok" ? lyrResults[t.path].provider_label : lyrResults[t.path].status}
+                      {lyrResults[t.path].status === "ok"
+                        ? lyrResults[t.path].provider_label
+                        : LYR_STATUS_LABEL[lyrResults[t.path].status] ?? lyrResults[t.path].status}
                     </span>
                   )}
-                  <label className="flex items-center gap-1.5 text-xs text-zinc-400 select-none" onClick={(e) => e.stopPropagation()}>
+                  {inst === "1" && (
+                    <span className="chip bg-raise text-zinc-400 border border-border shrink-0">Instrumental</span>
+                  )}
+                  <label className="flex items-center gap-1.5 text-xs text-zinc-400 select-none shrink-0">
                     <input
                       type="checkbox"
                       checked={inst === "1"}
@@ -2478,9 +3239,17 @@ const finish = async () => {
                     />
                     INSTRUMENTAL
                   </label>
-                </summary>
-                {inst !== "1" ? (
-                  <div className="px-3 space-y-1.5">
+                  <button
+                    className="btn-ghost !py-0.5 text-[11px] shrink-0"
+                    onClick={() => toggleLyricsRow(t.path)}
+                    disabled={inst === "1"}
+                    title={inst === "1" ? "Marked instrumental — uncheck INSTRUMENTAL to edit lyrics" : "Open the lyrics editor for this track"}
+                  >
+                    {open ? "Hide" : "Edit"}
+                  </button>
+                </div>
+                {open && inst !== "1" && (
+                  <div className="space-y-1.5">
                     <button
                       className="btn-ghost !py-0.5 text-[11px]"
                       onClick={() => autoImportLyrics([t.path])}
@@ -2497,12 +3266,11 @@ const finish = async () => {
                       track={trackTitle(t.path)}
                       album={trackAlbum}
                       duration={trackDuration(t.path)}
+                      staged={staged}
                     />
                   </div>
-                ) : (
-                  <div className="px-3 text-xs text-zinc-500">Marked instrumental — lyrics skipped.</div>
                 )}
-              </details>
+              </div>
             );
           })}
           <div className="flex justify-end">
@@ -2527,6 +3295,47 @@ const finish = async () => {
                 {v === "0" ? "0 · clean" : v === "1" ? "1 · explicit" : "2 · safe"}
               </button>
             ))}
+          </div>
+          {/* Fetch the rating for the WHOLE album here: the wizard used to
+              have no way to run the advisory sources at all — this is the
+              album page's own Check, with the bar and the per-track outcome
+              the click deserves. */}
+          <div className="panel px-3 py-2 space-y-1.5">
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                className="btn-ghost !py-1 text-xs"
+                onClick={fetchAdvisoryAll}
+                disabled={busy || !stepTracks.length}
+                title="Ask the configured advisory sources (Deezer / Spotify by ISRC, Apple) for every track and write what they state"
+              >
+                <CloudDownloadIcon /> Auto-import advisory for all tracks
+              </button>
+              <span className="text-[11px] text-zinc-500">
+                Asks the same sources the album page's Check does, for all {stepTracks.length} track(s) at once.
+                {advReply ? ` ${advReply.updated} value(s) written.` : ""}
+              </span>
+            </div>
+            {advError && (
+              <div className="text-xs text-red-300" role="alert">
+                Advisory fetch failed — {advError}
+              </div>
+            )}
+            {advReply && (
+              <div className="space-y-0.5">
+                {stepTracks.map((t) => (
+                  <div key={t.path} className="flex items-center gap-2 text-[11px]">
+                    <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
+                    <span className="flex-1 truncate text-zinc-400">{displayTitle(t.path)}</span>
+                    <span className="text-zinc-300" title="what the sources said, and who said it">
+                      {advisoryLine(
+                        replyFor(advReply.values, t.path),
+                        answerSources(replyFor(advReply.answers, t.path), replyFor(advReply.sources, t.path))
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
           {stepTracks.map((t) => (
             <div key={t.path} className="flex items-center gap-3 panel px-3 py-2">
@@ -2602,17 +3411,65 @@ const finish = async () => {
             <div className="flex items-center gap-2 mt-3 flex-wrap">
               <button
                 className="btn-primary !py-1.5 text-xs"
+                onClick={runAllHere}
+                disabled={runningAll || scriptsRunning || (!albumPath && !uploaded.length)}
+                title="Run the scripts in the order set in Settings → Optimization, on this album only"
+              >
+                <Wand2 className={`h-3.5 w-3.5 ${runningAll ? "animate-spin" : ""}`} />
+                {runningAll ? "Running…" : "Run all scripts"}
+              </button>
+              <button
+                className="btn-ghost !py-1.5 text-xs"
                 onClick={runAllScripts}
-                disabled={scriptsRunning || !uploaded.length}
+                disabled={scriptsRunning || runningAll || (!albumPath && !uploaded.length)}
                 title="Run the configured import chain — the same scripts a bulk or Soulseek import runs"
               >
                 <Wand2 className={`h-3.5 w-3.5 ${scriptsRunning ? "animate-spin" : ""}`} />
                 {scriptsRunning ? "Running…" : "Run the import chain"}
               </button>
               <span className="text-[10px] text-zinc-500">
-                Runs the whole chain in its configured order; tick boxes above to run just those on Done.
+                Run all follows your Run All order; the chain runs the import chain in its configured order. Tick boxes
+                above to run just those on Done.
               </span>
             </div>
+            {/* The bar over the chain, plus one row per chain id: a script
+                error is text in the step, not a toast that has already gone. */}
+            {(runningAll || scriptsRunning) && (
+              <div className="mt-2">
+                <ActionBar
+                  active
+                  label={act?.label ?? (runningAll ? "Running all scripts…" : "Running the import chain…")}
+                  done={progress?.done}
+                  total={progress?.total}
+                />
+              </div>
+            )}
+            {runRows && runRows.length > 0 && (
+              <div className="mt-2 space-y-1" role="status">
+                {runRows.map((r, i) => (
+                  <div key={`${r.id}-${i}`} className="flex items-start gap-2 text-[11px]">
+                    <span
+                      className={`chip border shrink-0 ${
+                        r.ok
+                          ? "bg-emerald-900/40 text-emerald-300 border-emerald-800"
+                          : r.skipped
+                            ? "bg-raise text-zinc-400 border-border"
+                            : "bg-red-900/40 text-red-300 border-red-900"
+                      }`}
+                    >
+                      {r.ok ? "OK" : r.skipped ? "Skipped" : "Failed"}
+                    </span>
+                    <span className="text-zinc-300 shrink-0">{r.label}</span>
+                    <span className="text-zinc-500 min-w-0 break-words">{r.error ?? r.note ?? ""}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {finishMsg && (
+              <div className="text-[11px] text-accent-soft pt-1.5" role="status">
+                {finishMsg}
+              </div>
+            )}
           </div>
           <div className="flex justify-center gap-2 mt-5">
             {albumPath && (
@@ -2672,6 +3529,62 @@ const finish = async () => {
 
 function CloudDownloadIcon() {
   return <ExternalLink className="h-3.5 w-3.5" />;
+}
+
+/** Whole seconds since `on` went true. The clock is the half of the progress
+ *  strip that always moves: an action that can report no counts still shows
+ *  it is alive instead of looking stuck. */
+function useElapsed(on: boolean): number {
+  const [secs, setSecs] = useState(0);
+  useEffect(() => {
+    if (!on) {
+      setSecs(0);
+      return;
+    }
+    const t = setInterval(() => setSecs((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [on]);
+  return secs;
+}
+
+/** THE progress bar of the wizard — one component for every action.
+
+ *  Counts come from the action's own step (a genre chain's sources, a global
+ *  script run), else from the relay frame the engine publishes over the
+ *  websocket the header bar already draws. With neither, the bar is
+ *  indeterminate but never still: spinners, motion, and the elapsed clock. */
+function ActionBar({
+  label, done, total, active,
+}: {
+  label: string;
+  done?: number | null;
+  total?: number | null;
+  active: boolean;
+}) {
+  const secs = useElapsed(active);
+  if (!active) return null;
+  const known = !!total;
+  // Unrounded: a byte-weighted or sub-step fraction moves the bar between two
+  // whole percents, and rounding here would freeze it exactly like the readout
+  // it sits beside.
+  const pct = known ? Math.min(100, ((done ?? 0) / total!) * 100) : 0;
+  return (
+    <div className="flex items-center gap-2 min-w-0 w-full" role="status">
+      <span className="h-3 w-3 rounded-full border-2 border-zinc-700 border-t-accent-soft animate-spin shrink-0" />
+      <span className="text-[11px] text-zinc-300 truncate max-w-[24rem]" title={label}>
+        {label}
+      </span>
+      <div className="h-1 flex-1 min-w-[80px] rounded-sm bg-raise overflow-hidden">
+        <div
+          className={`h-full bg-accent-soft ${known ? "" : "animate-pulse"}`}
+          style={known ? { width: `${pct}%` } : { width: "35%" }}
+        />
+      </div>
+      <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap tabular-nums">
+        {known ? fmtCounts(done, total) : "…"} · {secs}s
+      </span>
+    </div>
+  );
 }
 
 /** Exactly which optimizer scripts the import chain runs — the same chain the

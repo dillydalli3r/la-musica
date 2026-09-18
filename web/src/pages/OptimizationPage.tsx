@@ -101,11 +101,12 @@ export default function OptimizationPage() {
   };
   const selLabel = (id: number) => SCRIPTS.find((s) => s.ids[0] === id)?.label ?? `#${id}`;
 
-  const runScripts = async (ids: number[], label: string, force?: boolean) => {
+  const runScripts = async (ids: number[], label: string) => {
     setBusy(true);
+    const force = forceRun ? forceDict(forceSel) : undefined;
     toast(`Running ${label}${force ? " (forced)" : ""}…`);
     try {
-      const res = await api.run(ids, undefined, force ? forceDict(forceSel) : undefined);
+      const res = await api.run(ids, undefined, force);
       const failed = (res.results ?? []).filter((r) => r.error);
       if (failed.length) toast.error(`${label} failed: ${failed[0].error}`);
       else toast.success(`${label} finished`);
@@ -188,7 +189,8 @@ export default function OptimizationPage() {
                     </button>
                   </div>
                   <div className="text-[10px] text-zinc-600 px-1 pt-1">
-                    Force is a one-shot switch — saved Settings are not changed.
+                    Force is a one-shot switch — saved Settings are not changed. It applies to every run
+                    started here: Run All, Run selected and the single-script buttons.
                   </div>
                 </div>
               </>

@@ -189,14 +189,14 @@ def _log_once(pid, message):
 # --------------------------------------------------------------------------- #
 # HTTP
 # --------------------------------------------------------------------------- #
-def _http(url, headers=None, data=None, timeout=15, retries=3):
-    """Rate-throttled GET (or POST when ``data``) with retry on 429/5xx.
-    Returns the response body, or None for any error / non-200.
+def _request(url, headers=None, data=None, timeout=15, retries=3):
+    """Rate-throttled request with retry on 429/5xx. Returns (status, body).
 
     The throttle lock only guards the timestamp bookkeeping: the request and
     the retry backoff happen OUTSIDE it, so one slow provider cannot block
     every other lyrics worker in the process (script 13, an import chain and a
-    manual lookup all share this module).
+    manual lookup all share this module). `data` turns the request into a POST
+    — used by the LRCLIB submission, which needs its 201 and its error body.
     """
     global _last_request, last_http_error
     for attempt in range(retries):
@@ -215,6 +215,10 @@ def _http(url, headers=None, data=None, timeout=15, retries=3):
                 status, body = r.status, r.read()
         except urllib.error.HTTPError as e:
             status = e.code
+            try:
+                body = e.read()
+            except Exception:
+                body = b""
         except Exception:
             status = 0
         if status in (429, 500, 502, 503, 504) and attempt < retries - 1:
@@ -222,8 +226,15 @@ def _http(url, headers=None, data=None, timeout=15, retries=3):
             continue
         if status != 200:
             last_http_error = status or "network"
-        return body if status == 200 else None
-    return None
+        return status, body
+    return 0, b""
+
+
+def _http(url, headers=None, data=None, timeout=15, retries=3):
+    """Rate-throttled GET (or POST when ``data``). The 200 body, or None."""
+    status, body = _request(url, headers=headers, data=data, timeout=timeout,
+                            retries=retries)
+    return body if status == 200 else None
 
 
 def _get_json(url, headers=None, timeout=15, retries=3):
@@ -274,7 +285,10 @@ def _match_score(hit_artists, hit_title, hit_duration, artist, title, duration):
     if t <= 0:
         return 0.0
     names = [n for n in (hit_artists or []) if n]
-    a = max([_name_score(n, artist) for n in names] or _MIN_ARTIST)
+    # default=: a hit that carries no artist at all scores the unknown-artist
+    # weight. (The old `max([...] or _MIN_ARTIST)` raised TypeError on exactly
+    # that case, which turned every artist-less hit into a provider error.)
+    a = max((_name_score(n, artist) for n in names), default=_MIN_ARTIST)
     if a < _MIN_ARTIST:
         return 0.0
     score = 0.65 * t + 0.35 * min(a, 1.0)
@@ -380,6 +394,50 @@ def lrclib_fetch(artist, track, album=None, duration=None):
                 pool = sorted(pool, key=lambda h: abs(int(h.get("duration") or 0) - int(duration)))
             return pool[0]
     return None
+
+
+def lrclib_publish(artist, track, album, duration, plain=None, synced=None):
+    """Submit lyrics to LRCLIB (POST /api/publish). Returns (ok, message).
+
+    The one implementation of the submission: script 18 (auto-publishing for
+    tracks LRCLIB does not have yet) and the manual "Publish to LRCLIB" panel
+    (through server.integrations) both land here, so the request body, the
+    required User-Agent and the error wording exist once. At least one of
+    plain/synced must carry text; a synced text is best sent with its plain
+    form beside it, which is what the script does."""
+    artist = (artist or "").strip()
+    track = (track or "").strip()
+    album = (album or "").strip()
+    plain = (plain or "").strip() or None
+    synced = (synced or "").strip() or None
+    if not artist or not track:
+        return False, "artist and track name are required"
+    if not plain and not synced:
+        return False, "nothing to publish — no lyrics text"
+    try:
+        duration = int(round(float(duration or 0)))
+    except (TypeError, ValueError):
+        duration = 0
+    if duration <= 0:
+        return False, "track duration is required for publishing"
+    params = urllib.parse.urlencode({
+        "artist_name": artist, "track_name": track,
+        "album_name": album or track, "duration": duration,
+    })
+    body = json.dumps({"plainLyrics": plain or "",
+                       "syncedLyrics": synced or ""}).encode("utf-8")
+    status, raw = _request(
+        f"{LRCLIB_BASE}/publish?{params}",
+        headers={"User-Agent": USER_AGENT, "Content-Type": "application/json"},
+        data=body, timeout=20)
+    if status in (200, 201):
+        return True, "published to LRCLIB — thank you for contributing!"
+    if status == 409:
+        return False, "LRCLIB already has this track"
+    if status == 429:
+        return False, "LRCLIB is rate-limiting this IP — try again in a minute"
+    detail = (raw or b"").decode("utf-8", "replace").strip()[:200]
+    return False, f"LRCLIB refused ({status or 'no answer'}): {detail or 'unknown error'}"
 
 
 def _lrclib(artist, title, album=None, duration=None, cfg=None, youtube_id=None):
@@ -864,13 +922,29 @@ def _accept(hit, allow_plain):
     return bool(synced) or bool(allow_plain)
 
 
+def hit_score(hit, artist, title, duration):
+    """0..1 confidence that *hit* is the track that was asked for.
+
+    The same measure the candidate ranking uses (_match_score), re-run on the
+    winning hit so a caller can refuse a weak match instead of writing it —
+    automatic fetching does (see mlo/lyrics_fetch)."""
+    try:
+        return _match_score([hit.get("matched_artist")], hit.get("matched_title"),
+                            hit.get("duration"), artist, title, duration)
+    except Exception:
+        return 0.0
+
+
 def fetch_lyrics(cfg, artist, title, album=None, duration=None, allow_plain=None,
-                 youtube_id=None):
+                 youtube_id=None, min_score=None):
     """First provider hit for a track, or None when none of them has it.
 
     ``allow_plain`` (default from ``cfg["lyrics_allow_plain"]``, False) is the
     opt-in for untimed lyrics: off — the default — a plain-only answer is
     rejected outright and the chain walks on to the next synced source.
+    ``min_score`` raises the bar above the search floor (_MIN_SCORE): a hit
+    below it is skipped and the next provider is tried, which is how the
+    automatic write path only accepts lyrics it is confident about.
     ``youtube_id`` (optional) is the video the file came from — the only thing
     that lets the YouTube provider answer, since it never searches. Providers
     never raise — a failure, a timeout or a parse error is just a miss."""
@@ -879,6 +953,7 @@ def fetch_lyrics(cfg, artist, title, album=None, duration=None, allow_plain=None
         allow_plain = bool(cfg.get("lyrics_allow_plain", False))
     if not (artist and title):
         return None
+    floor = _MIN_SCORE if min_score is None else max(_MIN_SCORE, float(min_score))
     for pid in provider_order(cfg):
         try:
             hit = _PROVIDERS[pid](artist, title, album, duration, cfg,
@@ -892,8 +967,12 @@ def fetch_lyrics(cfg, artist, title, album=None, duration=None, allow_plain=None
         if hit.get("matched_title") and not _variant_guard(title,
                                                           hit["matched_title"]):
             continue
+        score = hit_score(hit, artist, title, duration)
+        if score < floor:
+            continue
         hit = dict(hit)
         hit["provider"] = pid
         hit["provider_label"] = SOURCE_LABELS[pid]
+        hit["score"] = round(score, 3)
         return hit
     return None

@@ -135,8 +135,12 @@ def _process_cue_file(args):
             with open(filename, "r", encoding="utf-8-sig") as f:
                 original_content = f.read()
         except UnicodeDecodeError:
-            with open(filename, "r", encoding="latin-1") as f:
-                original_content = f.read()
+            # Non-UTF-8 sheets are left byte-for-byte untouched: the canonical
+            # text below is written back as UTF-8, so the old latin-1 fallback
+            # decoded a CP1252/Shift-JIS sheet to mojibake and persisted that
+            # mojibake, destroying the original encoding (latin-1 decodes ANY
+            # byte string, so it always "succeeded").
+            return (filename, False, "non-UTF-8 cue left untouched", 0, 0)
 
         # Keep the raw text for the "unchanged" comparison so CRLF-only
         # files still get normalized to LF.

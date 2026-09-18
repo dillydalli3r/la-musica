@@ -15,6 +15,7 @@ The vendored beets (see fetchdeps.PIP_PACKAGES) is configured so a plain
 import os
 import subprocess
 import sys
+import threading
 
 from mlo.config import load_config
 from mlo.fetchdeps import pip_package_path
@@ -169,11 +170,20 @@ def _env():
     return env
 
 
-def run_beets_import(paths, cfg=None, timeout=7200):
+def run_beets_import(paths, cfg=None, timeout=7200, on_line=None):
     """Run `beet import` over the given folders headlessly.
 
     Returns (ok, output). The generated config is rewritten first so the
     current naming script / plugin settings always apply.
+
+    The child's output is STREAMED, not buffered: beets is the longest step
+    of a Run All, and a run that prints nothing for half an hour is
+    indistinguishable from a hung one (the UI bar only moves on a tick, and
+    `capture_output` withheld every line until the process exited). Each line
+    goes to *on_line* for progress, and the tail is still returned for the
+    error message. stdin is /dev/null so a prompt can never block the import
+    for the whole timeout — the config's own `import.quiet` is what answers
+    beets' decisions (the `--quiet` FLAG only suppresses this output).
     """
     if not paths:
         return False, "no paths given"
@@ -182,26 +192,63 @@ def run_beets_import(paths, cfg=None, timeout=7200):
     cfg = cfg or load_config()
     conf = write_config(cfg)
     cmd = [
-        _python(), "-m", "beets",
+        _python(), "-u", "-m", "beets",
         "--config", conf,
-        "import", "--quiet", "--group-albums",
+        "import", "--group-albums",
         *paths,
     ]
+    tail: list[str] = []
+
+    def _reader(stream):
+        try:
+            for raw in stream:
+                line = raw.rstrip("\r\n")
+                tail.append(line)
+                del tail[:-80]           # only the tail is ever reported
+                if on_line:
+                    try:
+                        on_line(line)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     try:
         # CREATE_NO_WINDOW: the server runs windowed and owns no console, so
         # without this every beets import allocates one and a terminal flashes.
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             cmd, cwd=REPO_ROOT, env=_env(),
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=timeout,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+            errors="replace", bufsize=1,
             creationflags=0x08000000 if os.name == "nt" else 0,
         )
+    except OSError as e:
+        return False, f"beets could not start: {e}"
+    pump = threading.Thread(target=_reader, args=(proc.stdout,), daemon=True)
+    pump.start()
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        return False, "beets import timed out"
-    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+        timed_out = True
+        try:
+            proc.kill()
+            proc.wait(timeout=15)
+        except Exception:
+            pass
+    finally:
+        try:
+            proc.stdout.close()
+        except Exception:
+            pass
+        pump.join(timeout=5)
+    output = "\n".join(tail).strip()
+    if timed_out:
+        return False, f"beets import timed out after {timeout}s"
     if proc.returncode != 0:
-        tail = "\n".join(output.splitlines()[-15:])
-        return False, f"beets import failed (rc={proc.returncode}):\n{tail}"
+        t = "\n".join(output.splitlines()[-15:])
+        return False, f"beets import failed (rc={proc.returncode}):\n{t}"
     return True, output
 
 
@@ -342,7 +389,41 @@ def run_beets_tagging(config=None):
 
     log(f"importing: {paths[0]}" + (f" (+{len(paths) - 1} more)" if len(paths) > 1 else ""))
     cutoff = time.time()
-    ok, output = run_beets_import(paths, config)
+    # Progress: beets prints one line per item it processes, and that is the
+    # only signal a headless import emits. Counting the items up front turns
+    # the header's bar into real numbers, so a long MB-lookup phase reads as
+    # slow rather than hung (the bar used to sit on the step's name for the
+    # whole import — the single biggest step of a Run All).
+    import mlo.stats as _stats
+    from mlo.paths import LIB_AUDIO_EXTS
+    hook = getattr(_stats, "progress_hook", None)
+    total_items = 0
+    try:
+        for d in (list(pre) or paths):
+            total_items += sum(1 for f in os.listdir(d)
+                               if f.lower().endswith(LIB_AUDIO_EXTS))
+    except OSError:
+        total_items = 0
+    done_items = [0]
+
+    def _tick(line):
+        low = line.strip().lower()
+        if not low or not low.endswith(LIB_AUDIO_EXTS):
+            return
+        done_items[0] += 1
+        if callable(hook):
+            try:
+                hook(min(done_items[0], total_items or done_items[0]),
+                     total_items or done_items[0], "Beets tagging")
+            except Exception:
+                pass
+
+    if callable(hook) and total_items:
+        try:
+            hook(0, total_items, "Beets tagging")
+        except Exception:
+            pass
+    ok, output = run_beets_import(paths, config, on_line=_tick)
     if not ok:
         stats["error_count"] += 1
         stats["errors"].append(output[-500:])
@@ -374,11 +455,12 @@ def run_beets_tagging(config=None):
 
     log(c(f"beets import finished — {len(fresh)} album(s) written", Color.GREEN))
 
-    # Organize after beets: beets relocates audio but keeps original file
-    # names, so re-apply the naming script to the albums it actually touched
-    # — this also gathers sidecars / covers beets left behind. Idempotent:
-    # already-compliant folders are rewritten 0 bytes. Only fresh (touched)
-    # dirs are organized — never reorganize compliant folders speculatively.
+    # Organize after beets: beets places audio on the naming script's path
+    # (mloplugin's %mlo_dir{$mlo_file}) but leaves videos / CUE / LOG / cover
+    # behind, so re-apply the script to the albums it actually touched —
+    # this also gathers those sidecars. Idempotent: already-compliant folders
+    # are rewritten 0 bytes. Only fresh (touched) dirs are organized — never
+    # reorganize compliant folders speculatively.
     if config.get("beets_organize_after", True) and fresh:
         try:
             from server.main import OrganizeRequest, organize

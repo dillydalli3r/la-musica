@@ -9,15 +9,32 @@ from .paths import (CONFIG_FILE, DEFAULT_DIGITAL_SOURCE, app_data_dir, downloads
 from .naming import DEFAULT_NAMING_SCRIPT
 from .ui import c, Color
 
-# Shipped default naming scripts from BEFORE 2.4.0 (only ever one). A config
-# that saved the old default still pins the old layout — normalize_config
-# swaps a stored legacy default for the current one, so the new default takes
-# effect without ever touching a script the user actually edited.
+# Shipped default naming scripts from BEFORE the current one. A config that
+# saved the old default still pins the old layout — normalize_config swaps a
+# stored legacy default for the current one, so the new default takes effect
+# without ever touching a script the user actually edited.
+#   [0] pre-2.4.0 layout ("Artist [id]/Album {country - media - cat}/01 - Title")
+#   [1] the 2.4.0 default, retired when the track id moved into the file name
+#       — Settings writes the script into config.json, so every install that
+#       never edited it holds this string verbatim
 LEGACY_DEFAULT_NAMING_SCRIPTS = (
     "%albumartist% [%musicbrainz_albumartistid%]/$if(%releasetype%,[%releasetype%] ,)"
     "$if(%originaldate%,%originaldate% - ,)$if(%date%,%date% - ,)"
     "%album% {$if(%releasecountry%,%releasecountry% - )%media%$if(%catalognumber%, - %catalognumber%)}/"
     "%discnumber%-$num(%tracknumber%,2) %title%",
+    "%albumartist% [%musicbrainz_albumartistid%]/%album%"
+    "$if(%releasetype%,$if(%year%, (%releasetype%, %year%), (%releasetype%)),"
+    "$if(%year%, (%year%),))"
+    "$if(%label%, [%label%])$if(%releasecountry%, [%releasecountry%])/"
+    "%discnumber%-$num(%tracknumber%,2) %title%",
+    #   [2] the dated default, retired when the media type moved back into
+    #       the album folder's brace group ("{US - CD - 6095-2}")
+    "%albumartist% [%musicbrainz_albumartistid%]/$if(%releasetype%,[%releasetype%] ,)"
+    "$if(%originaldate%,%originaldate% - ,)$if(%date%,%date% - ,)"
+    "%album% {$if(%releasecountry%,%releasecountry%)"
+    "$if(%catalognumber%,$if(%releasecountry%, - ,)%catalognumber%)}"
+    "$if(%label%, [%label%])$if(%musicbrainz_albumid%, [%musicbrainz_albumid%])/"
+    "%discnumber%-$num(%tracknumber%,2) %title%$if(%musicbrainz_trackid%, [%musicbrainz_trackid%])",
 )
 
 # The genre chains previous releases shipped (Settings writes the whole list
@@ -39,13 +56,34 @@ LEGACY_DEFAULT_GENRE_SOURCES = (
     ],
 )
 
+# The auto-import query templates previous releases shipped. Settings writes
+# the whole list into the config, so an untouched install holds a copy — and
+# would keep searching with three broad templates after the default narrowed
+# to the catalog number alone. A list the user actually edited is theirs and is
+# kept; the exact old defaults are swapped for the current ones.
+LEGACY_DEFAULT_CD_QUERIES = (
+    ["catalognumber", "artist album catalognumber", "artist album"],
+)
+LEGACY_DEFAULT_DIGITAL_QUERIES = (
+    ["artist album year", "artist album"],
+)
+
 # Run All order — strict pipeline v1.7.0: 1 Lyrics → 2 CUEs → 8 Auto Tagging → 3 FLAC → 5 Images → 9 AccurateRip → 6 Audit → 4 Grade → 7 DR/ReplayGain → 10 Format All.
 # AccurateRip must run before Audit/Grade so the .accurip is present for real-time AUDIT; Grade after Audit so AUDIT tags are fresh; Format All at end does final canonical trims.
 # User's strict config default as of v1.6.0; reorder via Settings → Run All Order.
-# Run All pipeline: remux first, then beets tagging (MusicBrainz), then
-# formatting/tagging scripts, lyric fetching (before grade sees it), and
-# analysis/audit/grade at the end.
-DEFAULT_RUN_ALL_ORDER = [11, 14, 1, 2, 8, 13, 12, 3, 5, 9, 6, 4, 7, 10]
+# Run All pipeline: remux first, then beets tagging (MusicBrainz), then the
+# release tracklist manifest (15 — it reads the release id beets just wrote,
+# and grading requires the manifest), then formatting/tagging scripts, lyric
+# fetching and the AI transforms that read those lyrics (before grade sees
+# them), and analysis/audit/grade at the end.
+DEFAULT_RUN_ALL_ORDER = [11, 14, 15, 1, 2, 8, 13, 18, 17, 12, 16, 3, 5, 9, 6, 4, 7, 10]
+
+# The genre-source order that shipped before the two-source default: recognizing
+# it lets normalize_config treat it as "never customized" (see below).
+LEGACY_GENRE_SOURCES = [
+    "rateyourmusic", "listenbrainz", "musicbrainz", "itunes", "lastfm",
+    "theaudiodb", "wikidata", "bandcamp", "discogs", "deezer", "spotify",
+]
 
 # Audio tag families that can be toggled per filetype.
 # Each family groups related TAG_MAP keys that are written together.
@@ -234,6 +272,11 @@ DEFAULT_CONFIG = {
     "artist_description_enabled": True,
     "album_description_enabled": True,
     "description_sources": [],        # ordered provider ids; [] = built-in order
+    # Store the provider's FULL prose — the whole Wikipedia article, not its
+    # lead paragraph — as the description. OFF keeps the short summary form.
+    # Default ON: a lead paragraph is a teaser, and the UI has Read more for
+    # the long form.
+    "description_full": True,
 
     # Embedded cover art in audio files (applied by script 10 and the FLAC
     # optimizer). Default OFF: optimization REMOVES embedded art — covers
@@ -304,6 +347,9 @@ DEFAULT_CONFIG = {
     # when a file already looks canonical.
     "force_lyrics": False,
     "force_cue": False,
+    # 15 rewrites an .mlo_expected.json that is already there (see the script
+    # 15 runner); without the flag an existing manifest is left alone.
+    "force_tracklist": False,
 
     # Music-file tag writes
     "fix_instrumental_from_lyrics": True,
@@ -368,6 +414,20 @@ DEFAULT_CONFIG = {
     "grade_check_cover": True,
     "grade_check_cue_format": True,
     "grade_check_disallowed": True,
+    # A library folder with nothing at all beneath it (no file anywhere in
+    # its subtree) counts against grading as an EMPTY_FOLDER failure. Albums
+    # are derived from audio files, so without this walk such a folder is
+    # invisible to grading (the "no audio files" skip) — a half-finished
+    # import or a stale folder would never show up as a problem.
+    "grade_check_empty_folders": True,
+    # Every album must carry the MusicBrainz release's own tracklist
+    # (.mlo_expected.json, written by the import and by script 15). Files on
+    # disk only describe themselves, so without the manifest a partially
+    # imported album (3 of 12 tracks) is indistinguishable from a complete
+    # one and would grade PASS — the release's tracklist is the only source
+    # that knows what is missing. A manifest that IS present is diffed
+    # against the files as before (this check never fails such an album).
+    "grade_check_expected_tracks": True,
     # Images that are neither the album cover (cover.*) nor a per-track
     # sidecar ("01 - Song.jpg") fail grading — strays must move with the
     # album (organize sweeps them to the album root) or be removed.
@@ -546,6 +606,12 @@ DEFAULT_CONFIG = {
     "audiometa_key_notation": "musical",  # musical | camelot | openkey
     "force_audiometa": False,
 
+    # Mood & Energy detection (script 16). MOOD/ENERGY are already derived by
+    # script 8 (Auto tagging) as part of its pass; script 16 is the same
+    # classifier on its own, and this flag re-analyses every track whether or
+    # not it already carries the tags.
+    "force_mood": False,
+
     # Lyrics sources, tried in order until one has the song — each provider
     # falls back to the next, and every one of them answers with TIMESTAMPS.
     # Empty = the built-in order (LRCLIB, NetEase, Kugou, QQ Music, Kuwo,
@@ -559,6 +625,40 @@ DEFAULT_CONFIG = {
     # the "[<id>]" the video download leaves in the file name). Never searches
     # YouTube on its own. Off = that provider is simply not in the chain.
     "lyrics_youtube_captions": True,
+
+    # AI-assisted lyric transforms (script 17). Any OpenAI-compatible
+    # /chat/completions endpoint works (OpenAI, OpenRouter, LM Studio,
+    # llama.cpp, Google Gemini's OpenAI-compatible endpoint). The app never
+    # needs it: with no base URL + model the script logs one line and returns.
+    "ai_base_url": "",
+    "ai_api_key": "",
+    "ai_model": "",
+    # Reasoning effort for AI calls: HIGH is the default — maximum thinking
+    # budget for transliteration/translation quality; MINIMAL disables
+    # thinking entirely for speed.
+    "ai_effort": "high",
+    # Script 17 — persistent lyric transforms. Enabled, so Run All writes
+    # TRANSLITERATION / TRANSLATION tags (and sidecars) for every track that
+    # needs them; answers are disk-cached, so re-runs only pay for new or
+    # changed lyrics.
+    "lyrics_xlit_enabled": True,
+    "lyrics_translate_enabled": True,
+    # Target languages for translation, comma separated ("en,de"). The first
+    # language is the reader's own script for the romanization rule and names
+    # the TRANSLATION tag; every language also gets its own "<stem>.<lang>.lrc"
+    # sidecar.
+    "lyrics_translation_langs": "en",
+    # Also write "<stem>.romaji.lrc" / "<stem>.<lang>.lrc" next to the audio
+    # (tags-only lyrics formats never write stray sidecars).
+    "lyrics_xlit_sidecars": True,
+    "force_xlit": False,
+
+    # Auto-publish to LRCLIB (script 18): this library's own lyrics are
+    # submitted for tracks the community database does not answer for yet.
+    # Outward-facing and public, so it is a setting; a track LRCLIB already
+    # has is never touched (force_publish re-submits anyway).
+    "lrclib_auto_publish": True,
+    "force_publish": False,
 
     # Managed beets tagging (Picard parity).
     "beets_locale": "en",
@@ -618,25 +718,34 @@ DEFAULT_CONFIG = {
     "soulseek_share_library": True,
     # Auto-import (MusicBrainz release → Soulseek). Each template is a
     # space-separated list of release fields: artist album year date country
-    # catalognumber barcode label. CD rips are searched by catalog number
-    # (the only trait usually present in rip folder names); digital media
-    # by title + year.
-    "soulseek_auto_cd_queries": [
-        "catalognumber", "artist album catalognumber", "artist album"],
-    "soulseek_auto_digital_queries": ["artist album year", "artist album"],
+    # catalognumber barcode label.
+    # Query templates per release kind. A CD is identified by its catalog
+    # number and nothing else — that is the one trait that appears in rip
+    # folder names, and searching for anything broader drowns the result list
+    # in other pressings. Digital Media has no catalog number, so it uses the
+    # most specific trait it does have. Add templates (Settings → Auto-import)
+    # to widen a search again.
+    "soulseek_auto_cd_queries": ["catalognumber"],
+    "soulseek_auto_digital_queries": ["artist album year"],
     # Every disc's .log must score at least this (Logchecker 0-100) before
     # the full album is downloaded.
     "soulseek_auto_log_min_score": 100,
     # Fraction of the release track list a candidate folder must contain.
     "soulseek_auto_complete_ratio": 1.0,
-    # How many candidates may be rejected before the search gives up on the
-    # release (the first candidate that verifies is imported immediately).
-    "soulseek_auto_max_attempts": 3,
-    # How long to let a Soulseek search collect responses before scoring the
-    # candidates (seconds). Longer = more peers + better chance of a match.
-    # The real cap is this plus the search's grace tail; the no-results prompt
-    # (below) fires exactly when that window ends with nothing usable.
-    "soulseek_auto_search_wait": 15,
+    # Every candidate the search turns up is tried in score order (there is no
+    # rejection cap: a rejected peer costs only its own attempt, and stopping
+    # early throws away candidates that would have verified).
+    # Quiet seconds before slskd ends a search with too few replies to score.
+    "soulseek_auto_search_wait": 10,
+    # Peers that must answer before the search is scored instead of waiting on
+    # slskd's quiet timer: a popular album never goes quiet, and slskd only
+    # hands back its responses once a search has ENDED — this is what stops a
+    # good copy from sitting behind a full search window. Measured through this
+    # client: a popular query with a 10 s quiet window and no limit became
+    # readable after 32 s; with a 5-response limit after 0.5 s, with 40 after
+    # ~11 s (peers arrive in a burst, then trickle). 15 keeps the wait to a
+    # few seconds while still scoring fifteen whole folders.
+    "soulseek_auto_response_limit": 15,
     # Park an interactive job that found no usable folder and ask the user
     # whether to add the release to the wishes list, instead of failing the job
     # outright: a rare album is worth watching for, and the background wishes
@@ -645,11 +754,27 @@ DEFAULT_CONFIG = {
     "soulseek_auto_wish_prompt": True,
     # Release-choice policy for auto-import (single release, release group or
     # an artist's whole catalogue): prefer status=Official, never auto-pick a
-    # Promotion / Bootleg / Pseudo-Release while avoid-promo is on, and order
-    # the remaining editions by medium (MusicBrainz format), earliest date
-    # breaking ties.
+    # Promotion / Bootleg / Pseudo-Release while avoid-promo is on, require a
+    # RELEASECOUNTRY while require-country is on, and order the remaining
+    # editions by medium (MusicBrainz format), earliest date breaking ties.
+    # Country matters because it is the one trait that proves the edition was
+    # actually sold somewhere: a country-less MusicBrainz release is usually an
+    # unsorted import, and the folder-name query templates are built around it.
     "auto_import_avoid_promo": True,
+    "auto_import_require_country": True,
     "auto_import_medium_order": ["CD", "Digital Media", "Vinyl", "Cassette", "Other"],
+    # Covers: fetch and write cover art during import when the album has none.
+    # On by default — a downloaded album without a cover grades as incomplete,
+    # and the finder's provider chain (Cover Art Archive → Deezer → Apple) can
+    # fill it in while the import is still running.
+    "cover_auto_fetch": True,
+    # With cover_auto_fetch on, stage the candidates for the user to PICK
+    # instead of writing the first hit: a found cover is not necessarily the
+    # right cover (a compilation, a reissue, the wrong pressing all answer to
+    # the same names), and the one that gets written is what grading and the
+    # library are stuck with. Off = the old behaviour, the best candidate is
+    # saved during the import with no question asked.
+    "cover_review": True,
     # Explicit shared folders (empty = share the whole music folder).
     "soulseek_share_dirs": [],
     # Extra share filters — substrings/paths slskd must NOT share.
@@ -672,9 +797,12 @@ DEFAULT_CONFIG = {
     # `server/integrations.py` above GENRE_SOURCES. `soulseek` is deliberately
     # absent (peers advertise folders, not genres).
     "mb_genre_count": 3,
+    # Genre sources, in priority order. Two by default — MusicBrainz (open
+    # data, keyless) and RateYourMusic (what the release page itself says) —
+    # because they are the two the library actually agrees with; the rest of
+    # the registry is still available to add back in Settings → Discovery.
     "genre_sources": [
-        "rateyourmusic", "listenbrainz", "musicbrainz", "itunes", "lastfm",
-        "theaudiodb", "wikidata", "bandcamp", "discogs", "deezer", "spotify",
+        "musicbrainz", "rateyourmusic",
     ],
     # Optional keys for the genre sources that need one. Left empty the source
     # is skipped instead of guessed (Discogs' search endpoint requires a
@@ -717,30 +845,15 @@ DEFAULT_CONFIG = {
     # Script 3/10 removes tags outside the canonical set while optimizing.
     "strip_unknown_tags": True,
 
-    # Home — album recommendations loaded on the sidebar's Home section.
-    "home_recommendations": True,
-    "home_rec_count": 18,
+    # Home — the library highlight shelves on the sidebar's Home section.
     "home_recent_count": 12,
-    # What drives "Recommended for you": the discovery chain (popularity-ranked
-    # from Deezer + ListenBrainz, resolved to MusicBrainz release groups),
-    # ListenBrainz's sitewide charts, or the plain MusicBrainz release-group
-    # search.
-    "home_rec_source": "discovery",
-    # Size of the "Popular right now" shelf (ListenBrainz sitewide listens).
-    "home_popular_count": 12,
-    # Discovery — the external music APIs behind recommendations, catalogue
-    # search, artist artwork and descriptions (Deezer, ListenBrainz, iTunes,
-    # TheAudioDB, Wikipedia). Empty source lists = the built-in order; every
-    # feature walks its list and falls back to the next provider, and
-    # MusicBrainz stays the final fallback so results keep their MBIDs.
+    # Discovery — the external music APIs behind artist artwork and
+    # descriptions (Deezer, ListenBrainz, iTunes, TheAudioDB, Wikipedia).
+    # Empty source lists = the built-in order; every feature walks its list and
+    # falls back to the next provider, and MusicBrainz stays the final fallback
+    # so results keep their MBIDs.
     "discovery_enabled": True,
-    "discovery_rec_sources": [],
-    "discovery_search_sources": [],
     "discovery_timeout_s": 8,
-    # MusicBrainz browse page search: "auto" queries discovery first and falls
-    # back to MusicBrainz, "discovery" never falls back, "musicbrainz" keeps
-    # the plain MusicBrainz search.
-    "mb_search_source": "auto",
 
     # Misc
     "auto_advance": True,
@@ -795,13 +908,11 @@ _INT_RANGES = {
     "cover_png_target_size": (0, 4000),
     "cover_jxl_target_size": (0, 4000),
     "soulseek_auto_log_min_score": (0, 100),
-    "soulseek_auto_max_attempts": (1, 50),
-    "soulseek_auto_search_wait": (5, 300),
+    "soulseek_auto_search_wait": (2, 300),
+    "soulseek_auto_response_limit": (5, 500),
     "wishes_interval_hours": (1, 168),
     "wishes_max_attempts": (0, 1000),
-    "home_rec_count": (4, 60),
     "home_recent_count": (4, 60),
-    "home_popular_count": (4, 60),
     "artist_image_target_size": (0, 4000),
     "discovery_timeout_s": (3, 30),
     "import_bulk_concurrency": (1, 8),
@@ -814,13 +925,11 @@ _CHOICES = {
     # SYLLABLE = glued per-syllable ELRC tags, WORD = per-word ELRC tags,
     # LINE = plain [mm:ss.xx] line timestamps only.
     "lrc_sync_level": {"SYLLABLE", "WORD", "LINE"},
+    "ai_effort": {"minimal", "low", "medium", "high"},
     "cue_file_type": {"WAVE", "MP3"},
     "audiometa_key_notation": {"musical", "camelot", "openkey"},
     "video_preset": {"ultrafast", "superfast", "veryfast", "faster", "fast",
                      "medium", "slow", "slower", "veryslow"},
-    # Discovery: which source drives recommendations / the MB-page search.
-    "home_rec_source": {"discovery", "listenbrainz", "musicbrainz"},
-    "mb_search_source": {"auto", "discovery", "musicbrainz"},
     "mood_source": {"audio", "provider", "hybrid"},
     "replaygain_mode": {"track", "album", "off"},
 }
@@ -956,12 +1065,40 @@ def normalize_config(user=None) -> dict:
     if not isinstance(v, (list, tuple)):
         v = []
     saved = [str(t).strip().lower() for t in v if str(t).strip()][:16]
+    # The shipped order used to be all eleven sources. A saved list that is
+    # byte-for-byte that old default was never a user decision, so it follows
+    # the new default (MusicBrainz + RateYourMusic); a list the user actually
+    # edited is kept exactly as saved.
+    if saved == LEGACY_GENRE_SOURCES:
+        saved = []
     # An untouched install holds a copy of one of the OLD shipped defaults,
     # which is not a choice: swap it for the current one (a customised list is
     # kept as written).
     if saved in LEGACY_DEFAULT_GENRE_SOURCES:
         saved = []
     cfg["genre_sources"] = saved or list(DEFAULT_CONFIG["genre_sources"])
+
+    # Auto-import query templates: the old shipped defaults narrow to the
+    # catalog-number-only (CD) / artist-album-year (digital) wording.
+    for key, legacy in (("soulseek_auto_cd_queries", LEGACY_DEFAULT_CD_QUERIES),
+                        ("soulseek_auto_digital_queries", LEGACY_DEFAULT_DIGITAL_QUERIES)):
+        stored = cfg.get(key)
+        if isinstance(stored, str):
+            stored = [t for t in stored.replace("\n", ";").split(";") if t.strip()]
+        if isinstance(stored, (list, tuple)) and [str(t).strip() for t in stored] in [
+                [str(t) for t in old] for old in legacy]:
+            stored = list(DEFAULT_CONFIG[key])
+        if isinstance(stored, (list, tuple)):
+            cfg[key] = [str(t).strip() for t in stored if str(t).strip()]
+
+    # Keys that no longer drive anything (the recommendation shelves, the
+    # catalogue-search source order, the MusicBrainz browser's search mode):
+    # dropped here so a saved config stops carrying them around.
+    for dead in ("home_recommendations", "home_rec_count", "home_popular_count",
+                 "home_rec_source", "discovery_rec_sources",
+                 "discovery_search_sources", "mb_search_source",
+                 "soulseek_auto_max_attempts"):
+        cfg.pop(dead, None)
 
     # Shared-folder lists (Settings → Soulseek, Soulseek → Sharing). Accept a
     # ";"/newline separated string from hand-edited config files.
@@ -976,8 +1113,7 @@ def normalize_config(user=None) -> dict:
     # Provider preference lists (discovery, lyrics, artist images, artwork
     # text). Empty means "use the built-in order"; unknown ids are dropped so
     # a hand-edited config can never wedge a feature.
-    for k in ("discovery_rec_sources", "discovery_search_sources",
-              "lyrics_sources", "artist_image_sources", "description_sources"):
+    for k in ("lyrics_sources", "artist_image_sources", "description_sources"):
         v = cfg.get(k)
         if isinstance(v, str):
             v = [t for t in v.replace("\n", ";").split(";") if t.strip()]
@@ -1051,8 +1187,12 @@ def normalize_config(user=None) -> dict:
                 script_id = int(value)
             except (TypeError, ValueError):
                 continue
-            # ids run 1..14: script 15 (lyrics xlit/translate) was removed, so
-            # a saved order still naming it sheds it right here
+            # A saved order keeps scripts 1..14 in the user's sequence. The
+            # ids added later (15 tracklist, 16 mood, 17 AI transforms) are
+            # shed and re-inserted at their canonical anchors below: a saved
+            # "15" predates the tracklist script (it was the lyrics
+            # xlit/translate script when the id last moved), and the anchor
+            # rule puts every later id where the pipeline wants it.
             if 1 <= script_id <= 14 and script_id not in clean_order:
                 clean_order.append(script_id)
     # Migrate legacy sequential default [1..8] to systematic pipeline
@@ -1072,6 +1212,7 @@ def normalize_config(user=None) -> dict:
     #   14 beets tagging   — right after the remux (writes tags, places files)
     #   13 lyric fetching  — after autotag (needs final ARTIST/TITLE), before grade
     #   12 Key & BPM       — after 13 (grading wants its tags)
+    #   15 tracklist       — after beets (needs its MusicBrainz match)
     def _insert_script(order, sid, anchors):
         if sid in order:
             return
@@ -1085,6 +1226,15 @@ def normalize_config(user=None) -> dict:
         _insert_script(clean_order, 14, [11])
         _insert_script(clean_order, 13, [8, 14, 11])
         _insert_script(clean_order, 12, [13, 8])
+        _insert_script(clean_order, 15, [14, 12, 13, 8])
+        # 16 mood & energy — with the other librosa pass (12), after the
+        # tagging that gives its genre prior something to work with
+        _insert_script(clean_order, 16, [12, 13, 8])
+        # 18 publish — right after the lyrics it submits (13); 17 AI
+        # transforms — after the lyrics it reads, before the analysis passes
+        # and grading
+        _insert_script(clean_order, 18, [13, 12, 16])
+        _insert_script(clean_order, 17, [18, 13, 12, 16])
     cfg["run_all_order"] = clean_order or list(DEFAULT_RUN_ALL_ORDER)
     return cfg
 
@@ -1213,6 +1363,40 @@ def _is_empty_db(path):
         return False
 
 
+def _merge_state_dir(src, dst, copy=False):
+    """Fill *dst* in from *src*, recursive, never overwriting a file.
+
+    Used for the directory entries of a state move: a plain "the destination
+    exists, skip it whole" is wrong for a tree, because an interrupted move
+    (or a copy that was killed) leaves a partial one there. Files keep the
+    no-clobber rule — only what is missing is filled in — so a merge can
+    never replace live data, only complete it. Emptied source directories are
+    removed as the recursion unwinds, which is what lets the caller's final
+    ``os.rmdir(src)`` succeed.
+    """
+    import shutil
+
+    try:
+        os.makedirs(dst, exist_ok=True)
+        for name in os.listdir(src):
+            s, d = os.path.join(src, name), os.path.join(dst, name)
+            if os.path.isdir(s):
+                _merge_state_dir(s, d, copy)
+                continue
+            if os.path.exists(d):
+                continue
+            if copy:
+                shutil.copy2(s, d)
+            else:
+                shutil.move(s, d)
+        try:
+            os.rmdir(src)
+        except OSError:
+            pass
+    except Exception as e:
+        print(f"WARNING: could not merge app state: {e}")
+
+
 def _move_state_dir(src, dst, copy=False):
     """Move (or copy) app state files from one dir to another (never clobber).
 
@@ -1239,13 +1423,19 @@ def _move_state_dir(src, dst, copy=False):
             if name == "tray.lock":  # runtime lock, not data
                 continue
             s, d = os.path.join(src, name), os.path.join(dst, name)
+            if os.path.isdir(s):
+                # A directory at the destination is MERGED into, never skipped
+                # whole: an interrupted move/copy leaves a partial (or empty)
+                # tree there, and skipping it stranded the rest of the data —
+                # the half-written .beets library stayed half-written and the
+                # app opened an empty library. Files still never clobber
+                # files, so live data is safe; the merge only fills gaps.
+                _merge_state_dir(s, d, copy)
+                continue
             if os.path.exists(d) and not (os.path.isfile(s) and _is_empty_db(d)):
                 continue
             if copy:
-                if os.path.isdir(s):
-                    shutil.copytree(s, d)
-                else:
-                    shutil.copy2(s, d)
+                shutil.copy2(s, d)
             else:
                 shutil.move(s, d)
         if not copy:

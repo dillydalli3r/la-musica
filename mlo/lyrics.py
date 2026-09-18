@@ -35,6 +35,33 @@ LRC_META_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A provider's contributor block is not a lyric. Netease/QQ/Kugou hand the
+# credits back as the first "line" — usually at [00:00.00], once per label
+# ("作词 : Byrne, Eno, Talking Heads" / "Lyrics: Byrne, Eno, Talking Heads") —
+# and stored verbatim they became the track's first lyric line.
+#   * the CJK labels (作词/作曲/编曲…) always take a colon;
+#   * the English ones need a "by" or a colon, so a real lyric that merely
+#     starts with the word "Lyrics" or "Music" survives;
+#   * anchored at the start of the line's TEXT, so "and the lyrics by heart"
+#     is a lyric.
+CREDIT_LINE_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:作词|作詞|作词人|作曲|編曲|编曲|词曲|詞曲|歌詞|歌词|词|詞|曲)\s*[:：]"
+    r"|(?:lyrics?|lyricist|music|composition|words|written|composed|composer|"
+    r"producer|produced|arranged|arrangement|mix|mixed|vocal|vocals|performer|"
+    r"translated|translation|translator)\s+by\b\s*[:：]?"
+    r"|(?:lyrics?|lyricist|composer|producer|arranger)\s*[:：]"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _is_credit_line(line):
+    """True for a credits line ("Lyrics by X", "作词 : X") — never a lyric."""
+    body = TIMESTAMP_RE.sub("", line or "")
+    body = WORD_TS_RE.sub("", body).strip()
+    return bool(body) and bool(CREDIT_LINE_RE.match(body))
+
 
 # A line carrying two or more timestamps. ESLyrics on foobar2000 cannot
 # parse "[a]text[b]more" on one line (it shows a duplicated line), and the
@@ -191,6 +218,17 @@ def format_lyrics_text(text, precision=2, strip_metadata=True,
             if not (lrc_enhanced_enabled and WORD_TS_RE.search(s)):
                 continue
 
+        # Credits are not lyrics. The line is replaced by a blank one, and its
+        # stamps die with it: lending a credit's [00:00.00] to the first real
+        # lyric would time that lyric at zero. Real lyrics that share the
+        # stamp are untouched — only the credit line goes. A file that held
+        # nothing but credits now has no lyrics at all, which is what
+        # has_lyrics_text reports and what the fetch chain skips.
+        if _is_credit_line(s):
+            lines.append("")
+            pending_stamps = []
+            continue
+
         # Split merged "[a][b]text" lines — respect Extended flag
         if lrc_extended_enabled:
             parts = [s]
@@ -313,6 +351,24 @@ def format_lyrics_text(text, precision=2, strip_metadata=True,
 
 def _lrc_for(audio_path):
     return os.path.splitext(audio_path)[0] + ".lrc"
+
+
+# Non-blank is not the same as "has lyrics". An aborted run leaves a 0-byte
+# sidecar, a metadata-only write leaves "[ar:…]" / "[offset:…]" headers, and
+# a synced provider with empty text leaves bare "[00:00.00]" / "<00:00.00>"
+# stubs — all of which made a lyric-less track report (and grade as) having
+# lyrics. Presence therefore means "something survives stripping the tags and
+# the timestamps that only LABEL the words".
+def has_lyrics_text(text):
+    """True when `text` really holds lyrics: not blank, not LRC metadata
+    headers only, and at least one timestamp-free text line."""
+    if not text or not str(text).strip():
+        return False
+    for line in str(text).splitlines():
+        body = TIMESTAMP_RE.sub("", WORD_TS_RE.sub("", line))
+        if LRC_META_RE.sub("", body).strip():
+            return True
+    return False
 
 
 def _canonical_lyrics(text, append_final_newline=False):
@@ -500,7 +556,7 @@ def _process_lyrics_for_audio(audio_path, cfg):
 
     lrc_canonical = (
         _format_for_storage(lrc_raw, cfg, optimize=True, is_for_lrc=True)
-        if lrc_raw and lrc_raw.strip() else None
+        if lrc_raw and has_lyrics_text(lrc_raw) else None
     )
 
     # Conversion between LRC and embedded lyrics.
@@ -590,7 +646,16 @@ def _process_lyrics_for_audio(audio_path, cfg):
             and can_write_instr
             and inst is not None and str(inst).strip() == "1"):
         embedded_now = bool(af.get_lyrics() and str(af.get_lyrics()).strip())
-        lrc_now = os.path.exists(lrc_path)
+        # The sidecar counts only when it really carries lyrics: a stub or
+        # metadata-only .lrc is not "vocals", and clearing INSTRUMENTAL=1 for
+        # one would make the track lie in the other direction (see
+        # has_lyrics_text).
+        lrc_now = False
+        try:
+            with open(lrc_path, "r", encoding="utf-8", errors="replace") as f:
+                lrc_now = has_lyrics_text(f.read())
+        except OSError:
+            lrc_now = False
 
         if embedded_now or lrc_now:
             if af.set_tag("INSTRUMENTAL", "0"):

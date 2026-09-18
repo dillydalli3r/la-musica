@@ -369,6 +369,12 @@ export default function PlayerBar() {
     // the near-end preload overwrite the audio that was playing.
     activeIsA.current = el === aRef.current;
     el.playbackRate = speed; // fresh <src> resets the rate
+    // Attach here, not only in the play handler: the analyser must be live
+    // for the FIRST play (a later onPlay still re-attaches the gapless
+    // handover), and a track change must re-point `current` at this element
+    // rather than leaving the paused one of the pair as the meter source.
+    attachAnalyser(el);
+    applyReplayGain(el, rgDb.current);
     el.play().catch(() => {});
     try { videoRef.current?.pause(); } catch { /* ignore */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -408,6 +414,16 @@ export default function PlayerBar() {
     if (el) el.volume = vol;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [vol, current?.path, isVideo]);
+
+  // A music video plays through the popout <video> (the only decoder), so
+  // that element owns the analyser while a video is current. Re-attached per
+  // track and per probe decision: the element is keyed on path/live, so each
+  // of those is a NEW element needing its own source node.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (isVideo && v) attachAnalyser(v);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isVideo, current?.path, preferTranscode]);
 
   // ReplayGain: fetched per track for the mode saved in the config (album
   // mode asks for the album gain, off means unity) and applied to the WebAudio
@@ -724,11 +740,12 @@ export default function PlayerBar() {
     <div className="shrink-0 px-3 pb-3 pt-1 relative z-10">
       <div className="h-[4.75rem] rounded-lg border border-border bg-panel shadow-lg shadow-black/40">
         {/* crossOrigin keeps the streams CORS-clean so the WebAudio visualizer
-            can read them; attaching happens on the play gesture */}
+            can read them; attachAnalyser resumes the context it opens, so the
+            very first play is not read from a suspended (all-zero) graph */}
         <audio ref={aRef} hidden crossOrigin="anonymous" onTimeUpdate={onTime} onLoadedMetadata={onMeta} onEnded={handleEnded}
-          onPlay={(e) => { resumeAnalyser(); attachAnalyser(e.currentTarget); applyReplayGain(e.currentTarget, rgDb.current); }} />
+          onPlay={(e) => { attachAnalyser(e.currentTarget); applyReplayGain(e.currentTarget, rgDb.current); }} />
         <audio ref={bRef} hidden crossOrigin="anonymous" onTimeUpdate={onTime} onLoadedMetadata={onMeta} onEnded={handleEnded}
-          onPlay={(e) => { resumeAnalyser(); attachAnalyser(e.currentTarget); applyReplayGain(e.currentTarget, rgDb.current); }} />
+          onPlay={(e) => { attachAnalyser(e.currentTarget); applyReplayGain(e.currentTarget, rgDb.current); }} />
 
         {/* full layout from tablet width up: cover+title / centered seek /
             actions+volume, balanced 1fr-auto-1fr so the seek bar sits dead
@@ -1272,9 +1289,11 @@ export default function PlayerBar() {
               onTime={onVideoTime}
               onMeta={(e) => {
                 // A transcode-fallback remount creates a fresh element with
-                // default volume/rate — re-apply the stored ones.
+                // default volume/rate — re-apply the stored ones, and attach
+                // it to the analyser (the visible meter is the video's).
                 e.currentTarget.volume = vol;
                 e.currentTarget.playbackRate = speed;
+                attachAnalyser(e.currentTarget);
                 onVideoMeta(e);
               }}
               onEnded={handleEnded}

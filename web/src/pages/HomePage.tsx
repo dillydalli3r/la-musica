@@ -1,37 +1,17 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { useState } from "react";
-import { AlertTriangle, ArrowDownUp, Clock, Disc3, Flame, Heart, RefreshCw, Sparkles, Star, Users } from "lucide-react";
+import { AlertTriangle, ArrowDownUp, Clock, Disc3, Heart, RefreshCw, Sparkles, Star, Users } from "lucide-react";
 import { api } from "../api";
-import { toast } from "../store";
 import { EmptyState, PageLoading } from "../components/Badges";
 import PageHeader from "../components/PageHeader";
 import CoverImg from "../components/CoverImg";
-import type { HomeAlbum, HomeArtist, HomeRecSource } from "../types";
+import type { HomeAlbum, HomeArtist } from "../types";
 
-/** Which provider chain actually built `recommended` (see `rec_source`). */
-const REC_SOURCE_LABEL: Record<HomeRecSource, string> = {
-  discovery: "Deezer / ListenBrainz",
-  listenbrainz: "ListenBrainz",
-  musicbrainz: "MusicBrainz",
-};
-
-function ccaUrl(mbid: string, kind = "rg") {
-  const entity = kind === "release" ? "release" : "release-group";
-  return `https://coverartarchive.org/${entity}/${mbid}/front-250`;
-}
-
-function mbUrl(a: HomeAlbum) {
-  return `/mb/${a.mb_kind === "release" ? "release" : "rg"}/${a.mbid}`;
-}
-
-/** Shelf chip: the reason a row is recommended, or its popularity label. */
-function Chip({ text, title, tone = "accent" }: { text: string; title?: string; tone?: "accent" | "zinc" }) {
+/** Shelf chip: why a row is here (a wish's status, a favorite's origin). */
+function Chip({ text, title }: { text: string; title?: string }) {
   return (
     <span
-      className={`truncate rounded-full px-1.5 py-0.5 text-[10px] leading-tight ${
-        tone === "accent" ? "bg-accent/10 text-accent-soft" : "bg-raise text-zinc-400"
-      }`}
+      className="truncate rounded-full px-1.5 py-0.5 text-[10px] leading-tight bg-accent/10 text-accent-soft"
       title={title ?? text}
     >
       {text}
@@ -39,34 +19,10 @@ function Chip({ text, title, tone = "accent" }: { text: string; title?: string; 
   );
 }
 
+/** One Home shelf card. Every shelf is library-derived now, so an owned album
+ *  links to its page and the rest (a wish being hunted) renders inert. */
 function HomeCard({ a }: { a: HomeAlbum }) {
-  const qc = useQueryClient();
-  const [fails, setFails] = useState(0);
-  const wish = useMutation({
-    mutationFn: () => api.discoveryWish({ artist: a.artist, title: a.album, year: a.year ?? undefined }),
-    onSuccess: (res) => {
-      toast(`Wish added — ${res.resolved?.title ?? a.album}`);
-      qc.invalidateQueries({ queryKey: ["wishes"] });
-    },
-    onError: (e) => toast.error(String(e)),
-  });
-
-  const to = a.owned && a.path ? `/album/${encodeURIComponent(a.path)}` : a.mbid ? mbUrl(a) : null;
-  // Provider artwork first, then the Cover Art Archive for MBID-native rows —
-  // both served by the app (`api.artUrl`): the CDN behind `cover_url` refuses
-  // the browser on some networks, and the backend answers with a provider that
-  // does not.
-  const candidates = a.owned
-    ? []
-    : [a.cover_url, a.mbid ? ccaUrl(a.mbid, a.mb_kind) : null].filter((u): u is string => !!u);
-  const raw = candidates[fails] ?? null;
-  const src = api.artUrl(raw, {
-    artist: a.artist,
-    album: a.album,
-    // `rg` takes a release-group MBID only.
-    rg: a.mb_kind === "release" ? null : a.mbid,
-  });
-  const wishable = !a.owned && !a.mbid && !!a.album && !!a.artist;
+  const to = a.owned && a.path ? `/album/${encodeURIComponent(a.path)}` : null;
 
   const art =
     a.owned && a.path ? (
@@ -75,17 +31,6 @@ function HomeCard({ a }: { a: HomeAlbum }) {
         coverFile={a.cover}
         wrapperClass="aspect-square w-full rounded-xl shadow-lg ring-1 ring-black/40 overflow-hidden"
       />
-    ) : src ? (
-      <div className="aspect-square w-full rounded-xl shadow-lg ring-1 ring-black/40 overflow-hidden bg-raise">
-        <img
-          src={src}
-          alt=""
-          loading="lazy"
-          decoding="async"
-          onError={() => setFails((f) => f + 1)}
-          className="h-full w-full object-cover"
-        />
-      </div>
     ) : (
       <div className="aspect-square w-full rounded-xl shadow-lg ring-1 ring-black/40 overflow-hidden bg-raise flex items-center justify-center text-zinc-700">
         <Disc3 className="h-1/3 w-1/3" />
@@ -95,11 +40,7 @@ function HomeCard({ a }: { a: HomeAlbum }) {
   return (
     <div className="group flex h-full flex-col rounded-xl p-2 transition-all duration-200 hover:bg-panel/70 hover:-translate-y-0.5">
       {to ? (
-        <Link
-          to={to}
-          className="block"
-          title={a.owned ? "Open album page" : "Open on MusicBrainz"}
-        >
+        <Link to={to} className="block" title="Open album page">
           <div className="relative">{art}</div>
         </Link>
       ) : (
@@ -130,30 +71,6 @@ function HomeCard({ a }: { a: HomeAlbum }) {
             </span>
           )}
         </div>
-        {(a.popularity_label || wishable) && (
-          <div className="mt-auto flex items-center gap-1 min-w-0">
-            {a.popularity_label && (
-              <Chip tone="zinc" text={a.popularity_label} title="Provider popularity" />
-            )}
-            {wishable && (
-              <button
-                className="ml-auto shrink-0 rounded-full p-1 text-zinc-500 hover:text-accent-soft hover:bg-raise disabled:opacity-50 transition-colors"
-                title={
-                  wish.isSuccess
-                    ? "On the wishlist — the Soulseek worker is hunting it"
-                    : "Wish for this album — the Soulseek worker will hunt it down"
-                }
-                onClick={() => wish.mutate()}
-                disabled={wish.isPending || wish.isSuccess}
-              >
-                <Heart
-                  className={`h-3.5 w-3.5 ${wish.isSuccess ? "text-emerald-400" : ""}`}
-                  fill={wish.isSuccess ? "currentColor" : "none"}
-                />
-              </button>
-            )}
-          </div>
-        )}
         {a.reason && <Chip text={a.reason} />}
       </div>
     </div>
@@ -239,7 +156,7 @@ export default function HomePage() {
   if (isLoading) {
     return (
       <div className="p-6 mx-auto max-w-6xl">
-        <PageLoading label="Loading recommendations…" />
+        <PageLoading label="Loading your library…" />
       </div>
     );
   }
@@ -255,7 +172,6 @@ export default function HomePage() {
   }
 
   const { stats } = data;
-  const recLabel = data.rec_source ? REC_SOURCE_LABEL[data.rec_source] : null;
   return (
     <div className="p-6 space-y-5 mx-auto max-w-6xl">
       {/* hero — the gradient and its glow stay; the title block is the shared
@@ -288,7 +204,7 @@ export default function HomePage() {
                 className="btn-ghost !py-1.5 text-xs"
                 onClick={() => refetch()}
                 disabled={isFetching}
-                title="Rebuild recommendations"
+                title="Reload the shelves"
               >
                 <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} /> Refresh
               </button>
@@ -297,19 +213,6 @@ export default function HomePage() {
         </div>
       </div>
 
-      <Shelf
-        title="Recommended for you"
-        icon={Sparkles}
-        items={data.recommended}
-        blurb={recLabel ? `source: ${recLabel}` : "New releases from artists and genres you collect"}
-        empty="Nothing new from your artists and genres right now — discovery needs a reachable provider and some tagged genres."
-      />
-      <Shelf
-        title="Popular right now"
-        icon={Flame}
-        items={data.popular ?? []}
-        blurb="What people are actually listening to"
-      />
       <Shelf title="Recently added" icon={Clock} items={data.recent} />
       <Shelf
         title="Wanted on Soulseek"

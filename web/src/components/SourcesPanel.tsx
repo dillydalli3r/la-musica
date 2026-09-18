@@ -5,7 +5,7 @@ import { api } from "../api";
 import { toast } from "../store";
 import type { SourceHealth, SourceKind, SourcesHealth } from "../types";
 
-/** The four provider families, in the order the panel lists them. The rows
+/** The provider families, in the order the panel lists them. The rows
  *  themselves come from `/api/sources/health` — nothing here is a source
  *  list, so a provider added on the backend shows up on its own. */
 const KIND_LABEL: Record<SourceKind, string> = {
@@ -13,6 +13,7 @@ const KIND_LABEL: Record<SourceKind, string> = {
   advisory: "Advisory sources — release ratings & parental flags",
   genre: "Genre sources",
   metadata: "Metadata providers — images & descriptions",
+  links: "Link sources — where the album's rating links come from",
 };
 
 /** What each config key a source may need is called and where it is issued.
@@ -46,7 +47,11 @@ const KEY_INFO: Record<string, { label: string; hint: string; url?: string; link
   },
   rym_cookie: {
     label: "RateYourMusic cookie",
-    hint: "Signed in: dev tools → Network → any rym request → Request Headers → Cookie.",
+    hint:
+      "How to get it: sign in to rateyourmusic.com in your browser → F12 (dev tools) → Network → reload the page → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\". " +
+      "Paste the whole value (newlines and a stray \"Cookie:\" label are handled). " +
+      "It is a session credential: keep it to yourself, and paste a fresh one when RYM starts refusing — signing out or clearing cookies invalidates it. " +
+      "MusicBrainz already states the RYM page for many releases, so this is only needed for the rest.",
     url: "https://rateyourmusic.com",
     link: "rateyourmusic.com",
     secret: true,
@@ -73,13 +78,19 @@ function StatusChip({ row }: { row: SourceHealth }) {
       : row.status === "skipped"
         ? "bg-white/5 text-zinc-400 border-white/15"
         : "bg-red-900/50 text-red-300 border-red-900";
-  return <span className={`chip border ${cls}`}>{row.status}</span>;
+  // Capitalised for display: the payload's enum value is `fail`, the label
+  // the user reads is "Failed".
+  const label = { ok: "OK", skipped: "Skipped", fail: "Failed" }[row.status] ?? row.status;
+  return <span className={`chip border ${cls}`}>{label}</span>;
 }
 
 /** Every source the app can talk to, grouped by kind, each row testable on
  *  its own and carrying the key fields it needs. Shared by the setup wizard
- *  (step 3) and Settings → Sources. */
-export default function SourcesPanel() {
+ *  (step 3, and its RateYourMusic card) and Settings → Sources.
+ *
+ *  `only` narrows the panel to one family — the wizard's RateYourMusic card
+ *  shows just the link rows instead of the whole source list. */
+export default function SourcesPanel({ only }: { only?: SourceKind } = {}) {
   const qc = useQueryClient();
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   const { data, isLoading, error } = useQuery({
@@ -151,8 +162,9 @@ export default function SourcesPanel() {
 
   if (isLoading) return <div className="text-xs text-zinc-500">Checking sources…</div>;
   if (error) return <div className="text-xs text-red-300">{String(error)}</div>;
-  const rows = data?.sources ?? [];
+  const rows = (data?.sources ?? []).filter((r) => !only || r.kind === only);
   const groups = (Object.keys(KIND_LABEL) as SourceKind[])
+    .filter((kind) => !only || kind === only)
     .map((kind) => [kind, rows.filter((r) => r.kind === kind)] as const)
     .filter(([, list]) => list.length > 0);
 

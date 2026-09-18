@@ -37,11 +37,15 @@ Albums / tracks that already carry the correct values are skipped unless
 the run is forced.
 """
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .audio import AudioFile
 from .config import should_write_audio_tag
-from .paths import AUDIO_EXTS
+# the app's RELEASETYPE spelling ("album+live" -> "Album; Live"), shared with
+# the organizer and the grader so one release_type reads the same everywhere
+from .naming import mb_style_release_type
+from .paths import AUDIO_EXTS, load_expected_tracks
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _collect_targets,
     _find_albums, is_audio_file, worker_count,
@@ -102,6 +106,220 @@ def set_genre_lookup(fn):
 
 
 # ----------------------------------------------------------------------
+# Album-level MusicBrainz release identity (LABEL / CATALOGNUMBER / …)
+# ----------------------------------------------------------------------
+# These are ALBUM facts the naming script reads per track, so an album that
+# carries a release id must end up with them whichever way it arrived: the
+# importer's own stamper (server.soulseek_auto._stamp_mb_tags) covers the
+# download it verified, and this stage covers every other album (hand-matched
+# in the wizard, or dropped into the library by hand).
+#
+# tag -> the key of the release payload server.integrations.release_lookup
+# returns (the same payload shape the importer's stamper consumes).
+_RELEASE_TAGS = (
+    ("MUSICBRAINZ_ALBUMID", "id"),
+    ("MUSICBRAINZ_RELEASEGROUPID", "release_group_id"),
+    ("MUSICBRAINZ_ALBUMARTISTID", "album_artist_mbid"),
+    ("LABEL", "label"),
+    # the release's FIRST catalog number: a release can carry one per
+    # label/pressing and a tag holds a single value
+    ("CATALOGNUMBER", "catalog_number"),
+    ("RELEASECOUNTRY", "country"),
+    ("RELEASETYPE", "release_type"),
+    ("ORIGINALDATE", "originaldate"),
+    ("MEDIA", "medium"),
+)
+
+# Per-track slots this stage matches against the release (or the manifest):
+# the recording id of the track's own position, and the artist it credits.
+_PER_TRACK_TAGS = ("MUSICBRAINZ_TRACKID", "MUSICBRAINZ_ARTISTID")
+
+# release_lookup's own `inc` list, so the album's release comes back with its
+# label-info (label + catalog numbers) and the release group's types in ONE
+# request that the browser cache then holds for every later album.
+_RELEASE_INC = ("artists+recordings+media+release-groups+artist-credits"
+                "+genres+labels+isrcs")
+
+
+def _cached_release(mbid):
+    """`release_lookup`'s payload for *mbid* over the app's CACHED MB access.
+
+    `mb_get_cached` is the cache the whole server browses through (30-minute
+    TTL, single-flight, one request per album at most) — never a fresh
+    per-track lookup, and never the uncached `release_lookup`. Returns None
+    when there is no release id, the server is not importable (plain CLI), or
+    MusicBrainz cannot answer: the caller then writes NOTHING rather than
+    inventing a label.
+    """
+    if not mbid:
+        return None
+    try:
+        from server.integrations import mb_get_cached
+    except Exception:
+        return None
+    try:
+        data = mb_get_cached(f"release/{mbid}",
+                             {"inc": _RELEASE_INC, "fmt": "json"})
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    rg = data.get("release-group") or {}
+    types = [str(rg.get("primary-type") or "").lower()]
+    types += [str(s).lower() for s in (rg.get("secondary-types") or [])]
+    label = ""
+    catalogs = []
+    for lab in data.get("label-info") or []:
+        if not label:
+            label = str(((lab.get("label") or {}).get("name")) or "").strip()
+        cn = str(lab.get("catalog-number") or "").strip()
+        if cn and cn not in catalogs:
+            catalogs.append(cn)
+    # The release's own tracks, keyed by (disc, position) — the ONLY key this
+    # stage matches on. A title is never compared: two tracks of one album can
+    # share a title and a differently-punctuated one must not become a miss.
+    tracks = {}
+    for medium in data.get("media") or []:
+        disc = int(medium.get("position") or 1)
+        for trk in medium.get("tracks") or []:
+            pos = trk.get("position")
+            if not pos:
+                continue
+            rec = trk.get("recording") or {}
+            artists = [ac["artist"]["id"] for ac in trk.get("artist-credit") or []
+                       if ac.get("artist")]
+            tracks[(disc, int(pos))] = {
+                "recording_mbid": str(rec.get("id") or ""),
+                "artist_mbid": str(artists[0] if artists else ""),
+            }
+    album_artists = [ac["artist"]["id"] for ac in data.get("artist-credit") or []
+                     if ac.get("artist")]
+    return {
+        "id": str(data.get("id") or ""),
+        "release_group_id": str(rg.get("id") or ""),
+        # the release's artist credit IS the album artist (Picard semantics)
+        "album_artist_mbid": str(album_artists[0] if album_artists else ""),
+        "tracks": tracks,
+        "label": label,
+        "catalog_number": catalogs[0] if catalogs else "",
+        "country": str(data.get("country") or ""),
+        # the spelling the app's writers use ("album+live" -> "Album; Live")
+        "release_type": mb_style_release_type("+".join(t for t in types if t)),
+        "originaldate": str(rg.get("first-release-date") or ""),
+        # the first medium (CD / Vinyl / Digital Media) — the naming script's
+        # %media%
+        "medium": next((str(m.get("format") or "")
+                        for m in data.get("media") or []), ""),
+    }
+
+
+def _track_position(af, path):
+    """(disc, position) of one file — the key every MB match here uses.
+
+    Its own DISCNUMBER/TRACKNUMBER tags first ("3/12" reads as 3), then the
+    naming script's own "D-PP " file-name prefix, which is authoritative when
+    the tags are missing (the script wrote that name from the tags).
+    """
+    def _num(value):
+        m = re.match(r"\s*(\d+)", str(value or ""))
+        return int(m.group(1)) if m else 0
+
+    disc = _num(af.get_tag("DISCNUMBER")) or 1
+    pos = _num(af.get_tag("TRACKNUMBER"))
+    if not pos:
+        m = re.match(r"(\d+)\s*-\s*(\d+)", os.path.basename(path))
+        if m:
+            disc, pos = int(m.group(1)), int(m.group(2))
+    return disc, pos
+
+
+def _fill_release_tags(info, config, album_dir):
+    """Fill each track's EMPTY MusicBrainz release identity tags.
+
+    Album-level facts the naming script reads per track (label, catalog
+    number, country, type, original date, medium + the release's own ids) are
+    written to EVERY file of the album; the per-track ones (recording id, and
+    the credited artist id) come from a POSITION match — the album's own
+    `.mlo_expected.json` manifest first (it records the release the wizard
+    matched), then the release payload's tracklist. A track with no
+    counterpart is left alone and counted.
+
+    A tag that already holds a value is never touched: another pressing's
+    label, or ids another tagger wrote, are the album's own business. Returns
+    (written, note) — the album's report line, including the "nothing
+    written" cases.
+    """
+    manifest = load_expected_tracks(album_dir)
+    mbid = ""
+    for d in info:
+        mbid = str(d["af"].get_tag("MUSICBRAINZ_ALBUMID") or "").strip()
+        if mbid:
+            break
+    if not mbid:
+        # the album's own manifest still names the release the wizard matched
+        mbid = str(manifest.get("release_id") or "").strip()
+    if not mbid:
+        # No release id: whatever the tags say is all there is. Never guess.
+        return 0, "release tags: no musicbrainz_albumid"
+
+    # Prescan: an album that already carries every tag this stage could write
+    # is finished, so it never costs a request. A library-wide run must not
+    # ask MusicBrainz about albums that are already complete.
+    slots = [tag for tag, _key in _RELEASE_TAGS] + list(_PER_TRACK_TAGS)
+    if not any(not str(d["af"].get_tag(tag) or "").strip()
+               for d in info for tag in slots):
+        return 0, "release tags: nothing to fill"
+
+    release = _cached_release(mbid)
+    if not release:
+        return 0, "release tags: MusicBrainz had no answer"
+
+    values = [(tag, str(release.get(key) or "").strip())
+              for tag, key in _RELEASE_TAGS]
+    values = [(tag, value) for tag, value in values if value]
+
+    # recording id per (disc, position): the manifest wins — its release_id is
+    # the one the album was matched against
+    manifest_ids = {t["disc"] * 1000 + t["position"]: t["recording_mbid"]
+                    for t in manifest["tracks"] if t.get("recording_mbid")}
+    if not values and not release["tracks"] and not manifest_ids:
+        return 0, "release tags: release carries none"
+
+    written = 0
+    unmatched = 0
+    for d in info:
+        af = d["af"]
+        key = _track_position(af, af.path)
+        slot = release["tracks"].get(key) or {}
+        track_mbid = (manifest_ids.get(key[0] * 1000 + key[1])
+                      or slot.get("recording_mbid") or "")
+        if not track_mbid and not slot:
+            unmatched += 1
+        per_track = [
+            ("MUSICBRAINZ_TRACKID", track_mbid),
+            ("MUSICBRAINZ_ARTISTID",
+             slot.get("artist_mbid") or release["album_artist_mbid"]),
+        ]
+        for tag, value in values + per_track:
+            try:
+                if str(af.get_tag(tag) or "").strip():
+                    continue          # already has a value — never overwrite
+                if not should_write_audio_tag(config, tag, filepath=af.path):
+                    continue          # the same gate every write here honours
+                if af.set_tag(tag, value):
+                    written += 1
+            except Exception:
+                continue
+    if not written:
+        return 0, "release tags: nothing to fill"
+    note = f"release tags={written}"
+    if unmatched:
+        note += f" ({unmatched} track(s) not in the release)"
+    return written, note
+
+
+# ----------------------------------------------------------------------
 # Script 8 runner
 # ----------------------------------------------------------------------
 def run_auto_tagging(config):
@@ -113,6 +331,10 @@ def run_auto_tagging(config):
     if config.get("auto_advisory", True):
         log("  ALBUMITUNESADVISORY: from per-track ITUNESADVISORY "
             "(any explicit -> 1, else any safe -> 2, else 0)")
+    log("  MUSICBRAINZ release identity: label, catalog number, country, type, "
+        "original date, medium + missing MBIDs (release id, release-group id, "
+        "artist ids, per-track recording id) filled from the cached release — "
+        "only where a tag is EMPTY")
     if config.get("auto_zero_advisory_for_instrumental", False):
         log("  ITUNESADVISORY: zeroed on instrumentals (auto_zero_advisory_for_instrumental)")
     if config.get("auto_instrumental", True):
@@ -153,6 +375,11 @@ def run_auto_tagging(config):
     if not album_dirs:
         log("No albums found.")
         return stats
+
+    # Per-album MusicBrainz release-tag writes, for the run summary. Albums
+    # run on a thread pool, so the count is collected per album here rather
+    # than incremented into shared state.
+    release_written = []
 
     def process_album(album):
         files = _album_files(album)
@@ -215,6 +442,15 @@ def run_auto_tagging(config):
                             d["advisory"] = stripped
             except Exception:
                 pass
+
+        # 0) MusicBrainz release identity (album-level facts + ids). Fill-only,
+        # so it runs FIRST — the stages below derive values from what is on the
+        # file and must see the tags this one just settled.
+        release_modified, release_note = _fill_release_tags(info, config, album)
+        release_written.append(release_modified)
+        modified += release_modified
+        if release_note:
+            notes.append(release_note)
 
         # 1) Fix INSTRUMENTAL first (correct order): the external
         # cross-reference (LRCLIB, Spotify when configured, the track's own
@@ -378,5 +614,13 @@ def run_auto_tagging(config):
 
     if pbar:
         pbar.close()
+    # The runner's own summary: how many release-identity tags this pass
+    # filled, or that there was nothing to fill.
+    release_total = sum(release_written)
+    filled_albums = sum(1 for n in release_written if n)
+    stats["release_tags_written"] = release_total
+    log("  MusicBrainz release identity: " + (
+        f"{release_total} tag(s) filled across {filled_albums} album(s)"
+        if release_total else "nothing to fill"))
     stats["is_grader"] = False
     return stats

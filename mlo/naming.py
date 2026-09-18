@@ -18,8 +18,10 @@ MULTI-VALUE RULE (the "does a tag hold a list?" problem):
   below is built from $if() conditionals, never from literal brackets that
   could survive as a dangling "[]" (sanitize_path also removes empty []/{}).
 
-Example (the default):
-  %albumartist% [%musicbrainz_albumartistid%]/%album% ($if(%releasetype%,%releasetype%)...) [%label%][%releasecountry%]/%discnumber%-$num(%tracknumber%,2) %title%
+Example (the default): the ARTIST folder ends with the artist id, the ALBUM
+folder ends with the release id, and the FILE name ends with the track id —
+every level is identifiable without reading tags:
+  Slowdive [a16371b9-…]/$if(%releasetype%,[%releasetype%] ,)$if(%date%,%date% - ,)%album% {…}[%label%] [%musicbrainz_albumid%]/1-01 Title [trackid].flac
 """
 import os
 import re
@@ -31,12 +33,25 @@ import re
 UNKNOWN_RELEASE_TYPE = "\x00releasetype\x00"
 
 DEFAULT_NAMING_SCRIPT = (
+    # artist folder: name + artist id (a bracket group, like the album
+    # folder's release id, so the two levels read alike)
     "%albumartist% [%musicbrainz_albumartistid%]/"
-    "%album%"
-    "$if(%releasetype%,$if(%year%, (%releasetype%, %year%), (%releasetype%)),"
-    "$if(%year%, (%year%),))"
-    "$if(%label%, [%label%])$if(%releasecountry%, [%releasecountry%])/"
+    "$if(%releasetype%,[%releasetype%] ,)"
+    # Original (release group) date first, then the release's own — both
+    # spelled in full when the tags carry more than a year.
+    "$if(%originaldate%,%originaldate% - ,)"
+    "$if(%date%,%date% - ,)"
+    # country - media - catalog number, each joined only when the one before
+    # it is present, so a missing tag never leaves a dangling " - "
+    "%album% {$if(%releasecountry%,%releasecountry%)"
+    "$if(%media%,$if(%releasecountry%, - ,)%media%)"
+    "$if(%catalognumber%,$if(%media%, - ,$if(%releasecountry%, - ,))%catalognumber%)}"
+    # label then the release id, each its own optional bracket group
+    "$if(%label%, [%label%])"
+    "$if(%musicbrainz_albumid%, [%musicbrainz_albumid%])/"
+    # file name carries the track's own id (%musicbrainz_trackid% = recording)
     "%discnumber%-$num(%tracknumber%,2) %title%"
+    "$if(%musicbrainz_trackid%, [%musicbrainz_trackid%])"
 )
 
 _ILLEGAL = '<>:"\\|?*'
@@ -267,6 +282,14 @@ def track_variables(tags, release_type=None):
     release with several countries or labels produces one deterministic
     path. RELEASECOUNTRY is preferred; beets' own COUNTRY is the fallback
     (some importers stamp only that spelling).
+
+    Two track ids — different things, both usable in a script:
+      musicbrainz_trackid      MUSICBRAINZ_TRACKID      the RECORDING id:
+                               the same audio on every release that carries it.
+      musicbrainz_releasetrackid MUSICBRAINZ_RELEASETRACKID  the id of this
+                               track's position ON THIS release (unique per
+                               release, so it is the one that names a file
+                               unambiguously inside one album).
     """
     tags = tags or {}
     date = tags.get("DATE") or ""
@@ -277,6 +300,8 @@ def track_variables(tags, release_type=None):
         "musicbrainz_albumartistid": tags.get("MUSICBRAINZ_ALBUMARTISTID") or "",
         "musicbrainz_artistid": tags.get("MUSICBRAINZ_ARTISTID") or "",
         "musicbrainz_albumid": tags.get("MUSICBRAINZ_ALBUMID") or "",
+        "musicbrainz_trackid": tags.get("MUSICBRAINZ_TRACKID") or "",
+        "musicbrainz_releasetrackid": tags.get("MUSICBRAINZ_RELEASETRACKID") or "",
         "releasetype": release_type or tags.get("RELEASETYPE") or "",
         "originaldate": tags.get("ORIGINALDATE") or "",
         "date": date,

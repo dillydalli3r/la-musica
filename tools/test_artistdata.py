@@ -61,6 +61,33 @@ try:
     check("artist_dir refuses '/'", ad.artist_dir(CFG, "Some/Artist") is None)
     check("artist_dir refuses '..'", ad.artist_dir(CFG, "..") is None)
     check("artist_dir refuses 'a\\\\b'", ad.artist_dir(CFG, "Some\\Artist") is None)
+    # The naming script names an artist folder after their MBID ("Slowdive
+    # [uuid]", or [...] the 8-char short form); a lookup by NAME must still
+    # find it or nothing can store an artist image/description.
+    mbid_dir = os.path.join(MUSIC, "Artists", "Mbid Only [a16371b9-2c4f-4d3a-9f0e-2b7a5c1d8e3f]")
+    short_dir = os.path.join(MUSIC, "Artists", "Short Name [a16371b9]")
+    os.makedirs(mbid_dir)
+    os.makedirs(short_dir)
+    check("artist_dir finds an MBID-suffixed folder",
+          ad.artist_dir(CFG, "Mbid Only") == mbid_dir, ad.artist_dir(CFG, "Mbid Only"))
+    check("artist_dir strips the MBID off the queried name",
+          ad.artist_dir(CFG, os.path.basename(mbid_dir)) == mbid_dir)
+    check("artist_dir finds a short-id folder",
+          ad.artist_dir(CFG, "Short Name") == short_dir, ad.artist_dir(CFG, "Short Name"))
+    # The same strip has to happen to the QUERIED name: a caller handing back the
+    # folder's own name (the UI does) must resolve it even when the id it carries
+    # is spelled differently from the one on disk, and when the case differs.
+    check("artist_dir strips the queried name's own id form",
+          ad.artist_dir(CFG, "Short Name [a16371b9-2c4f-4d3a-9f0e-2b7a5c1d8e3f]") == short_dir,
+          ad.artist_dir(CFG, "Short Name [a16371b9-2c4f-4d3a-9f0e-2b7a5c1d8e3f]"))
+    check("artist_dir matches a differently-cased MBID folder",
+          ad.artist_dir(CFG, "Mbid Only [A16371B9-2C4F-4D3A-9F0E-2B7A5C1D8E3F]") == mbid_dir)
+    check("strip_mbid_suffix", ad.strip_mbid_suffix("Slowdive [a16371b9-2c4f-4d3a-9f0e-2b7a5c1d8e3f]") == "Slowdive"
+          and ad.strip_mbid_suffix("Slowdive [a16371b9]") == "Slowdive"
+          and ad.strip_mbid_suffix("Slowdive") == "Slowdive"
+          and ad.strip_mbid_suffix("[Live] Slowdive") == "[Live] Slowdive")
+    shutil.rmtree(mbid_dir)
+    shutil.rmtree(short_dir)
 
     # --- save_image: crop 2:1 -> square, then target 400 ---------------------
     cfg400 = dict(CFG, artist_image_crop=True, artist_image_target_size=400)
@@ -135,19 +162,24 @@ try:
     check("delete_description twice -> False", ad.delete_description(ARTIST, cfg=CFG) is False)
 
     # --- provenance -----------------------------------------------------------
+    # The description's provider lives under `description_source`: the entry is
+    # shared with the folder's artist image, whose own `source` it must not
+    # rename.
     ad.write_description(ALBUM, "A record.", cfg=CFG, source="rym", kind="album")
     prov = ad.read_provenance(ALBUM, cfg=CFG)
     check("album provenance kind", prov.get("kind") == "album", prov)
-    check("album provenance source", prov.get("source") == "rym", prov)
+    check("album provenance source", prov.get("description_source") == "rym", prov)
+    check("description did not rename the image source",
+          "source" not in prov, prov)
     check("provenance has updated stamp", bool(prov.get("updated")), prov)
     path = os.path.join(MUSIC, ".mlo", "data", "artwork.json")
     with open(path, encoding="utf-8") as fh:
         raw = json.load(fh)
     key = ad._norm_key(ALBUM)
     check("artwork.json holds the lowercased folder key", key in raw, sorted(raw))
-    check("artwork.json entry matches", raw[key]["source"] == "rym", raw[key])
+    check("artwork.json entry matches", raw[key]["description_source"] == "rym", raw[key])
     check("cfg-less read finds the same map",
-          ad.read_provenance(ALBUM).get("source") == "rym",
+          ad.read_provenance(ALBUM).get("description_source") == "rym",
           ad.read_provenance(ALBUM))
     ad.delete_description(ALBUM, kind="album", cfg=CFG)
     check("delete_description drops provenance",

@@ -11,6 +11,10 @@ export const FORCE_SCRIPTS: { key: string; label: string }[] = [
   { key: "autotag", label: "8 · AutoTag re-run" },
   { key: "accurip", label: "9 · AccurateRip re-generate" },
   { key: "audiometa", label: "12 · Key & BPM re-analysis" },
+  { key: "tracklist", label: "15 · Release tracklist rewrite" },
+  { key: "mood", label: "16 · Mood & Energy re-analysis" },
+  { key: "xlit", label: "17 · Lyrics re-transliterate / re-translate" },
+  { key: "publish", label: "18 · Lyrics re-publish to LRCLIB" },
 ];
 
 const KEY = "mlo.force.sel";

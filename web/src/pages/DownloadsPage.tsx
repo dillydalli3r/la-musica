@@ -8,6 +8,7 @@ import { toast } from "../store";
 import { EmptyState } from "../components/Badges";
 import PageHeader from "../components/PageHeader";
 import type { DownloadEntry, ImportBulkJob } from "../types";
+import { fmtCounts } from "../lib/fmt";
 
 /** Human byte size. Local deliberately: the player bar's formatter is tuned for
  *  audio readouts, and these are multi-GB folder totals. */
@@ -173,7 +174,7 @@ export default function DownloadsPage() {
               {bulkJob.label || "Importing…"}
             </span>
             <span className="text-zinc-500 font-mono tabular-nums shrink-0">
-              {bulkJob.done ?? 0}/{bulkJob.total ?? 0}
+              {fmtCounts(bulkJob.done ?? 0, bulkJob.total ?? 0)}
             </span>
           </div>
           <div className="h-1.5 rounded-sm bg-raise overflow-hidden">

@@ -83,10 +83,42 @@ cases = {
     "intro bit[00:10.00]timed": "intro bit[00:10.00]timed",
     # zero marker stacked is dropped, standalone zero-with-text kept
     "[00:00.00]first line": "[00:00.00]first line",
+    # provider credit blocks are not lyrics: the line is replaced by a blank
+    # one (trimmed here, it is the file's first line) and its stamp dies with
+    # it — the first real lyric keeps its own time
+    "[00:00.00] 作词 : Byrne, Eno, Talking Heads\n"
+    "[00:00.00] Lyrics: Byrne, Eno, Talking Heads\n"
+    "[00:12.00] Once in a lifetime": "[00:12.00]Once in a lifetime",
+    # …and a real lyric AT the credit's stamp is kept, credits removed
+    "[00:00.00]Lyrics by：Thom Yorke\n"
+    "[00:00.00]Once in a lifetime\n"
+    "[00:12.00]And the days go by":
+        "[00:00.00]Once in a lifetime\n[00:12.00]And the days go by",
+    # a file that held nothing but credits has no lyrics left
+    "[00:00.00]作词 : X\n[00:00.00]作曲 : Y": "",
+    # a lyric that merely mentions the words is a lyric
+    "[00:01.00]and the lyrics by heart": "[00:01.00]and the lyrics by heart",
+    "[00:01.00]Music: what a racket": "[00:01.00]Music: what a racket",
 }
 for src, want in cases.items():
     got = format_lyrics_text(src, lrc_extended_enabled=False, lrc_add_zero_timestamp=False)
     assert got == want, f"{src!r}: got {got!r}, want {want!r}"
     assert format_lyrics_text(got, lrc_extended_enabled=False, lrc_add_zero_timestamp=False) == got
+
+# Automatic writes need a CONFIDENT match; manual search keeps the loose floor.
+from mlo import lyrics_providers as lp  # noqa: E402
+
+_orig = lp._PROVIDERS["lrclib"]
+# title exact, artist unknown to the provider → 0.65 + 0.35*0.4 = 0.79
+lp._PROVIDERS["lrclib"] = (
+    lambda artist, title, album, duration, cfg, yt:
+    lp._hit("[00:01.00]Hello", "Hello", None, title, None, None))
+try:
+    loose = lp.fetch_lyrics({"lyrics_sources": ["lrclib"]}, "Artist", "Song")
+    assert loose and loose["score"] == 0.79, loose
+    assert lp.fetch_lyrics({"lyrics_sources": ["lrclib"]}, "Artist", "Song",
+                           min_score=0.85) is None
+finally:
+    lp._PROVIDERS["lrclib"] = _orig
 
 print("ALL LYRICS TESTS PASSED")

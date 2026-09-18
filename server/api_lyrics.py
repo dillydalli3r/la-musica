@@ -21,6 +21,7 @@ router = APIRouter(tags=["lyrics"])
 class LyricsAutoRequest(BaseModel):
     paths: list[str] = []
     force: bool = False
+    staged: bool = False  # the import wizard's not-yet-imported album
 
 
 # Each path runs the whole provider chain (up to six providers, each with
@@ -70,7 +71,7 @@ def lyrics_auto(req: LyricsAutoRequest):
     that already has lyrics is left alone unless *force* is set, and an
     INSTRUMENTAL track is never touched.
     """
-    from server.main import _in_music_folder, _music_folder
+    from server.main import _allow_staged, _in_music_folder, _music_folder
     cfg = load_config()
     folder = _music_folder(cfg)
     if len(req.paths) > MAX_PATHS:
@@ -80,7 +81,8 @@ def lyrics_auto(req: LyricsAutoRequest):
     results = []
     for path in req.paths:
         full = os.path.normpath(path)
-        if not folder or not _in_music_folder(full, folder):
+        if not folder or not (_in_music_folder(full, folder)
+                              or _allow_staged(full, req.staged)):
             results.append({"path": path, "status": "failed",
                             "error": "path outside music folder"})
             continue

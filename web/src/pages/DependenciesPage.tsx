@@ -117,7 +117,10 @@ export default function DependenciesPage() {
             <tr>
               <th className="th">Tool</th>
               <th className="th">Status</th>
-              <th className="th">Version</th>
+              <th className="th">Installed</th>
+              <th className="th" title="The version the installer fetches for this tool — on Linux a distro-provided tool shows its system package instead">
+                Latest
+              </th>
               <th className="th">Location</th>
             </tr>
           </thead>
@@ -127,20 +130,20 @@ export default function DependenciesPage() {
                 <td className="td font-medium">{t.name}</td>
                 <td className="td">
                   {t.state === "ok" && (
-                    <span className="chip bg-emerald-900/50 text-emerald-300 border border-emerald-800">ready</span>
+                    <span className="chip bg-emerald-900/50 text-emerald-300 border border-emerald-800">Ready</span>
                   )}
                   {t.state === "update" && (
-                    <span className="chip bg-amber-900/50 text-amber-300 border border-amber-900">update</span>
+                    <span className="chip bg-amber-900/50 text-amber-300 border border-amber-900">Update</span>
                   )}
                   {t.state === "missing" && (
-                    <span className="chip bg-red-900/50 text-red-300 border border-red-900">missing</span>
+                    <span className="chip bg-red-900/50 text-red-300 border border-red-900">Missing</span>
                   )}
                 </td>
                 <td className="td text-zinc-500">
                   {t.installed_version ?? t.detected_version ?? "—"}
-                  {t.state === "update" && t.latest_version && (
-                    <span className="text-amber-400/80"> → {t.latest_version}</span>
-                  )}
+                </td>
+                <td className="td text-zinc-500">
+                  {t.latest_version || <span className="text-zinc-600 italic">Unknown</span>}
                 </td>
                 <td className="td text-[11px] text-zinc-600 font-mono truncate" title={t.path ?? ""}>
                   {t.path ? shortPath(t.path) : "—"}
@@ -149,7 +152,7 @@ export default function DependenciesPage() {
             ))}
             {!isLoading && tools.length === 0 && (
               <tr>
-                <td className="td text-zinc-500" colSpan={4}>
+                <td className="td text-zinc-500" colSpan={5}>
                   Could not read the tool list — is the backend running?
                 </td>
               </tr>

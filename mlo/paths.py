@@ -62,6 +62,24 @@ TRASH_DIR_NAME = "trash"
 LEGACY_MLO_DATA_DIR_NAME = ".mlo_data"
 
 
+def _warn_if_temp_folder(mf):
+    """A music folder inside the OS temp dir is never a real library.
+
+    Tests redirect the music folder with MLO_MUSIC_FOLDER or by rewriting the
+    stub config.json; when either leaks into a real run, the app happily
+    stages downloads, imports and grading inside a throwaway directory and
+    nothing says so. One line on stderr beats debugging where the bytes went."""
+    try:
+        temp = os.path.realpath(tempfile.gettempdir())
+        if os.path.commonpath([temp, os.path.realpath(mf)]) == temp:
+            sys.stderr.write(
+                f"warning: music folder {mf!r} is inside the OS temp directory — "
+                "downloads, imports and grading would run on a throwaway folder "
+                "(a test redirect left in config.json?)\n")
+    except (OSError, ValueError):
+        pass
+
+
 def read_music_folder_guess():
     """Best-effort music folder from whichever config file exists.
 
@@ -70,11 +88,13 @@ def read_music_folder_guess():
     move a stub remains behind at the legacy path for the same purpose."""
     mf = os.environ.get("MLO_MUSIC_FOLDER")
     if mf:
+        _warn_if_temp_folder(mf)
         return mf
     try:
         with open(CONFIG_FILE, encoding="utf-8") as f:
             mf = (json.load(f) or {}).get("music_folder")
         if mf:
+            _warn_if_temp_folder(mf)
             return str(mf)
     except Exception:
         pass
@@ -352,17 +372,37 @@ def _album_file(album_dir, filename):
     return None
 
 
+# album dir -> (stamp, mapping). The grader asks for the same album's map once
+# per track (sidecar cover check + stray-image scan), so without this an
+# n-track album parsed the same JSON n+1 times; the stamp makes a write by this
+# process — or another one — visible immediately.
+_TRACK_COVERS_CACHE = {}
+
+
 def load_track_covers(album_dir):
     """The album's track -> image filename map; {} when missing or malformed."""
+    path = _track_covers_path(album_dir)
     try:
-        with open(_track_covers_path(album_dir), "r", encoding="utf-8") as fh:
+        stat = os.stat(path)
+        stamp = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        stamp = None
+    cached = _TRACK_COVERS_CACHE.get(path)
+    if cached and cached[0] == stamp:
+        return dict(cached[1])
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
         tracks = data.get("tracks")
     except Exception:
+        _TRACK_COVERS_CACHE[path] = (stamp, {})
         return {}
     if not isinstance(tracks, dict):
+        _TRACK_COVERS_CACHE[path] = (stamp, {})
         return {}
-    return {str(k): str(v) for k, v in tracks.items() if k and v}
+    out = {str(k): str(v) for k, v in tracks.items() if k and v}
+    _TRACK_COVERS_CACHE[path] = (stamp, out)
+    return dict(out)
 
 
 def save_track_covers(album_dir, mapping):
@@ -370,6 +410,7 @@ def save_track_covers(album_dir, mapping):
     album with no per-track art leaves nothing behind."""
     mapping = {str(k): str(v) for k, v in (mapping or {}).items() if k and v}
     dest = _track_covers_path(album_dir)
+    _TRACK_COVERS_CACHE.pop(dest, None)
     if not mapping:
         try:
             os.remove(dest)
@@ -686,6 +727,41 @@ def clear_track_covers(album_dir, tracks=None):
 # listed so an install that has not migrated yet is hidden too.
 SKIP_DIRS = {".dependencies", ".mlo", ".mlo_data", ".mlo_trash", ".data", "data", "__pycache__", "$RECYCLE.BIN",
              "System Volume Information", ".git", ".thumbnails", ".tmp"}
+
+
+def prune_empty_dirs(root):
+    """Delete every directory under *root* that holds nothing at all.
+
+    Organize and removal empty folders and never remove them, so the library
+    grows artist/album/disc shells that only the layout report complains about.
+    `rmdir` bottom-up is the whole rule: it succeeds only on a directory that
+    holds NOTHING — a stray file, a cover or a dot-dir keeps itself and every
+    parent alive — and *root* itself is never touched, so a caller can hand
+    over the library without losing the folder it starts from. SKIP_DIRS
+    entries (app state) and dot-dirs are left standing, and that includes
+    everything below them: the walk is pruned top-down so it never even looks
+    inside.
+
+    Returns the removed paths, deepest first, so the caller can log a count.
+    A directory that cannot be listed or removed is skipped rather than
+    raised: housekeeping must not fail the run that triggered it.
+    """
+    if not root or not os.path.isdir(root):
+        return []
+    # topdown keeps the walk out of dot-dirs/SKIP_DIRS; the list is built
+    # parents-first, so it is walked in REVERSE to empty a chain bottom-up
+    empties = []
+    for base, dirs, _files in os.walk(root):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS]
+        empties += [os.path.join(base, d) for d in dirs]
+    removed = []
+    for path in reversed(empties):
+        try:
+            os.rmdir(path)
+        except OSError:
+            continue
+        removed.append(path)
+    return removed
 
 
 JPEG_QUALITY_MARKER = 1

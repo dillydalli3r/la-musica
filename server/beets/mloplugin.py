@@ -23,6 +23,7 @@ interpreter with the repo root on sys.path (set up below).
 """
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -91,6 +92,38 @@ def _locale_alias(entity_type, mbid, locale):
     return best[0], best[1]
 
 
+# Scripts that are not Latin: CJK, Hangul, Kana, Cyrillic, Greek, Hebrew,
+# Arabic, Devanagari, Thai.
+_NON_LATIN_RE = re.compile(
+    "[\u0370-\u03ff\u0400-\u04ff\u0590-\u05ff\u0600-\u06ff\u0900-\u097f"
+    "\u0e00-\u0e7f\u1100-\u11ff\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff"
+    "\uf900-\ufaff\uac00-\ud7af]")
+# Locales whose own names are written in Latin script.
+_LATIN_LOCALES = {
+    "en", "de", "fr", "es", "it", "pt", "nl", "sv", "no", "da", "fi", "is",
+    "pl", "cs", "sk", "hu", "ro", "tr", "vi", "id", "ms", "tl", "hr", "sl",
+    "lt", "lv", "et", "ca", "gl", "eu", "af", "sq",
+}
+
+
+def _locale_lookup_needed(value, locale):
+    """False when a locale-alias lookup cannot change *value* anyway.
+
+    The alias lookup exists to TRANSLATE a name into the reader's locale
+    (Picard's "translate titles/names to preferred locale"). A name already
+    written in that locale's script has nothing to translate, but the lookup
+    still costs one of MusicBrainz' rate-limited requests — and this stage ran
+    three of them per track, so a Latin-script library spent more MB time in
+    the plugin than beets' own import did. Beets itself fills the sort tags
+    from MB's sort-names, so skipping loses nothing there either.
+    """
+    if not value:
+        return False
+    if locale.split("-")[0].lower() in _LATIN_LOCALES and not _NON_LATIN_RE.search(value):
+        return False
+    return True
+
+
 def _work_for_recording(recording_mbid):
     """(work_title, work_type) from the recording's performance->work rel."""
     if not recording_mbid:
@@ -130,16 +163,44 @@ def _date_str(y, m, d):
 
 
 def _first(value):
-    """Flatten beets list fields (releasetype, artists...) to a scalar."""
+    """Flatten beets list fields (label, country, artists...) to a scalar."""
     if isinstance(value, (list, tuple)):
         return value[0] if value else ""
     return value or ""
 
 
+def _multi(value):
+    """MLO's own spelling of a multi-value field: entries joined with '; '.
+
+    mlo.naming reads ARTIST / ALBUMARTIST / RELEASETYPE as the stored
+    string (the tag layer joins several comments with '; '), so taking only
+    beets' first entry would make the two sides compute DIFFERENT folder
+    names for a release with several artists or types.
+    """
+    if isinstance(value, (list, tuple)):
+        return "; ".join(str(v).strip() for v in value if str(v).strip())
+    return value or ""
+
+
+def _multi_first(value):
+    """First entry of a field MLO reduces to one value (RELEASECOUNTRY,
+    LABEL — see mlo.naming._first_multi, whose rule is reused here so both
+    sides split "US; GB", "EU / UK" and "A + B" identically)."""
+    from mlo.naming import _first_multi
+
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else ""
+    return _first_multi(value)
+
+
 def _item_track_file(item):
     """Track filename in MLO's D-TT convention: '1-01 Song.flac'-style
     (unpadded disc, zero-padded track) - beets' own $disc pads the disc
-    to two digits, which the MLO grader/library don't expect."""
+    to two digits, which the MLO grader/library don't expect.
+
+    Only used when the naming script has no filename segment of its own
+    (see _item_mlo_file); the shipped default does have one.
+    """
     try:
         disc = int(item.disc or 1)
     except (TypeError, ValueError):
@@ -153,24 +214,38 @@ def _item_track_file(item):
 
 
 def _item_naming_vars(item):
-    """MLO naming-script variables from a beets item's (denormalized) tags."""
+    """MLO naming-script variables from a beets item's (denormalized) tags.
+
+    Key-for-key the map mlo.naming.track_variables builds from a file's
+    tags, and with the same multi-value rules — the two are evaluated
+    against the same naming script and must agree on every variable.
+    """
     return {
-        "albumartist": _first(item.albumartist) or "",
-        "artist": _first(item.artist) or "",
-        "albumartistsort": _first(item.albumartist_sort) or "",
+        "albumartist": _multi(item.albumartist),
+        "artist": _multi(item.artist),
+        "albumartistsort": _multi(item.albumartist_sort),
         "musicbrainz_albumartistid": _first(item.mb_albumartistid) or "",
         "musicbrainz_artistid": _first(item.mb_artistid) or "",
         "musicbrainz_albumid": _first(item.mb_albumid) or "",
-        "releasetype": _first(getattr(item, "albumtypes", None)) or "",
+        # The two track ids the script may name a file with: the RECORDING
+        # (mb_trackid) and this release's track (mb_releasetrackid).
+        "musicbrainz_trackid": _first(item.mb_trackid) or "",
+        "musicbrainz_releasetrackid": _first(item.mb_releasetrackid) or "",
+        # Capitalized exactly as the plugin's own release_type_caps pass
+        # writes the tag, so the name beets computes now still matches the
+        # tag the next run reads (and the MLO organizer evaluates).
+        "releasetype": "; ".join(
+            _cap_releasetypes(getattr(item, "albumtypes", None)
+                              or getattr(item, "releasetype", None))),
         "originaldate": _date_str(item.original_year, item.original_month, item.original_day),
         "date": _date_str(item.year, item.month, item.day),
         "year": f"{item.year:04d}" if item.year else "",
         "originalyear": f"{item.original_year:04d}" if item.original_year else "",
         "album": _first(item.album) or "",
-        "releasecountry": _first(item.country) or "",
+        "releasecountry": _multi_first(item.country),
         "media": _first(item.media) or "",
         "catalognumber": _first(item.catalognum) or "",
-        "label": _first(item.label) or "",
+        "label": _multi_first(item.label),
         "discnumber": str(item.disc or 1),
         "disctotal": str(item.disctotal or ""),
         "tracknumber": str(item.track or ""),
@@ -180,27 +255,48 @@ def _item_naming_vars(item):
     }
 
 
-def _item_mlo_dir(item):
-    """Album folder (all but the filename segment) computed with MLO's
-    actual Picard naming script via server.naming."""
+def _item_mlo_path(item):
+    """Full relative path (album folder + filename) from MLO's naming script.
+
+    The script is the single source of truth for file structure: evaluating
+    it here is what makes a beets import land exactly where the MLO
+    organizer and the grader's naming check expect — ids, brackets and all.
+    """
     try:
         from server.naming import DEFAULT_NAMING_SCRIPT, eval_script
         from mlo.config import load_config
         cfg = load_config()
         script = (cfg.get("naming_script") or "").strip() or DEFAULT_NAMING_SCRIPT
         shorter = bool(cfg.get("short_folder_names", False))
-        text = eval_script(script, _item_naming_vars(item), shorter_ids=shorter)
-        parts = [p for p in text.split("/") if p]
-        if len(parts) > 1:
-            return "/".join(parts[:-1])
-        if parts:
-            return parts[0]
+        return eval_script(script, _item_naming_vars(item), shorter_ids=shorter)
     except Exception as e:  # noqa: BLE001 - never break an import over paths
         print(f"[mloplugin] naming-script evaluation failed: {e}", file=sys.stderr)
+        return ""
+
+
+def _item_mlo_dir(item):
+    """Album folder: every segment the naming script produces but the last."""
+    parts = [p for p in _item_mlo_path(item).split("/") if p]
+    if len(parts) > 1:
+        return "/".join(parts[:-1])
+    if parts:
+        return parts[0]
     # Fallback: beets' classic artist/album layout.
     artist = _first(item.albumartist) or "Unknown Artist"
     name = _first(item.album) or "Unknown Album"
     return f"{artist}/{name}"
+
+
+def _item_mlo_file(item):
+    """Track filename: the naming script's last segment.
+
+    Taken from the script (not rebuilt here) so the ids, padding and
+    brackets a beets import writes are the ones the MLO grader verifies.
+    """
+    parts = [p for p in _item_mlo_path(item).split("/") if p]
+    if len(parts) > 1:
+        return parts[-1]
+    return _item_track_file(item)
 
 
 # The item currently being routed; set by the $mlo_file field evaluation,
@@ -210,7 +306,7 @@ _current_item = {"item": None}
 
 def _mlo_file_field(item):
     _current_item["item"] = item
-    return _item_track_file(item)
+    return _item_mlo_file(item)
 
 
 def _mlo_dir_func(*args):
@@ -258,19 +354,22 @@ class MloPlugin(BeetsPlugin):
             return
         for item in task.imported_items():
             try:
-                alias = _locale_alias("recording", str(item.mb_trackid or ""), locale)
-                if alias and item.title != alias[0]:
-                    self._log.debug("title alias: {0} -> {1}", item.title, alias[0])
-                    item.title = alias[0]
-                    item.title_sort = alias[1] or alias[0]
-                alias = _locale_alias("artist", str(item.mb_artistid or ""), locale)
-                if alias and item.artist != alias[0]:
-                    item.artist = alias[0]
-                    item.artist_sort = alias[1] or alias[0]
-                alias = _locale_alias("artist", str(item.mb_albumartistid or ""), locale)
-                if alias and item.albumartist != alias[0]:
-                    item.albumartist = alias[0]
-                    item.albumartist_sort = alias[1] or alias[0]
+                if _locale_lookup_needed(item.title, locale):
+                    alias = _locale_alias("recording", str(item.mb_trackid or ""), locale)
+                    if alias and item.title != alias[0]:
+                        self._log.debug("title alias: {0} -> {1}", item.title, alias[0])
+                        item.title = alias[0]
+                        item.title_sort = alias[1] or alias[0]
+                if _locale_lookup_needed(item.artist, locale):
+                    alias = _locale_alias("artist", str(item.mb_artistid or ""), locale)
+                    if alias and item.artist != alias[0]:
+                        item.artist = alias[0]
+                        item.artist_sort = alias[1] or alias[0]
+                if _locale_lookup_needed(item.albumartist, locale):
+                    alias = _locale_alias("artist", str(item.mb_albumartistid or ""), locale)
+                    if alias and item.albumartist != alias[0]:
+                        item.albumartist = alias[0]
+                        item.albumartist_sort = alias[1] or alias[0]
             except Exception as e:  # noqa: BLE001
                 self._log.error("alias lookup failed for {0}: {1}", item.path, e)
 

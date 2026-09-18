@@ -1,23 +1,24 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useParams } from "react-router-dom";
-import { useState, type MouseEvent } from "react";
+import { useNavigate, useParams } from "react-router-dom";
+import { useState } from "react";
 import {
   BarChart3, BookmarkPlus, ChevronDown, ChevronRight, Disc3, Download, FileDown, ImagePlus,
   ListChecks, Loader2, Music2, Pencil, Play, RefreshCw, Square, SquareCheck, Trash2,
 } from "lucide-react";
 import { api } from "../api";
 import { LinkChips, LinkEditorButton } from "../components/Links";
-import { EmptyState, GradeBadge, GradeBar, PageLoading } from "../components/Badges";
-import CoverImg from "../components/CoverImg";
+import { EmptyState, GradeBadge, PageLoading } from "../components/Badges";
+import AlbumCard from "../components/AlbumCard";
+import Description from "../components/Description";
 import FavHeart from "../components/FavHeart";
 import ArtistImageModal from "../components/ArtistImageModal";
 import MetadataReviewModal from "../components/MetadataReviewModal";
-import MoreLikeThis from "../components/MoreLikeThis";
 import PageHeader from "../components/PageHeader";
 import TagActionsMenu from "../components/TagActionsMenu";
 import type { Album } from "../types";
-import { albumRef, artistMbid } from "../lib/refs";
+import { artistMbid } from "../lib/refs";
 import { auditFails } from "../lib/status";
+import { GRID_SIZE_MIN } from "../lib/fmt";
 import { invalidateLibrary } from "../lib/invalidate";
 import StatsPanel from "../components/StatsPanel";
 import { toast, useStore } from "../store";
@@ -89,6 +90,9 @@ export default function ArtistPage() {
   if (isLoading || !data) return <PageLoading label="Loading artist…" />;
 
   const name = data.display_name || data.name;
+  // The releases grid follows the library's own cover-size setting, so the
+  // two grids read as one viewer.
+  const gridSize = (localStorage.getItem("mlo.gridSize") as "s" | "m" | "l" | null) ?? "m";
   const allTracks = data.albums.flatMap((a) =>
     a.tracks.map((t) => ({
       path: t.path, file: t.file, albumPath: a.path,
@@ -268,24 +272,6 @@ export default function ArtistPage() {
     }
   };
 
-  /** "Download best per group" / "Download all": the artist's whole discography
-   *  through the MusicBrainz artist id, one queue call for the lot. */
-  const downloadArtist = async (mode: "best" | "all") => {
-    if (!artistMb) return;
-    setBusy(`download-${mode}`);
-    try {
-      const r = await api.mbAutoImport({ mbid: artistMb, kind: "artist", mode });
-      toast(
-        `Queued ${r.queued} release${r.queued === 1 ? "" : "s"}${r.skipped.length ? ` · ${r.skipped.length} skipped` : ""}`
-      );
-      refresh();
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(null);
-    }
-  };
-
   return (
     <div className="p-6 space-y-5 mx-auto max-w-6xl">
       <div className="hero-flat relative overflow-hidden">
@@ -301,11 +287,13 @@ export default function ArtistPage() {
         )}
         <div className="absolute inset-0 bg-gradient-to-t from-bg via-bg/70 to-bg/30" />
         <div className="relative flex flex-col sm:flex-row items-start gap-5">
-          <div className="h-40 w-40 rounded-xl overflow-hidden border border-border bg-gradient-to-br from-accent/30 to-accent/5 flex items-center justify-center shrink-0 shadow-2xl ring-1 ring-black/40">
+          {/* Same cover geometry as the album hero: one square tile, the
+              stored image or a plain monogram when there is none. */}
+          <div className="h-40 w-40 shrink-0 mx-auto sm:mx-0 rounded-xl overflow-hidden border border-border bg-gradient-to-br from-accent/30 to-accent/5 flex items-center justify-center shadow-2xl ring-1 ring-black/40">
             {imageUrl ? (
               <img src={imageUrl} alt={`${name} artist image`} className="h-full w-full object-cover" />
             ) : monogram ? (
-              <span className="text-4xl font-bold tracking-tight text-zinc-300 select-none" title="No artist image stored yet">
+              <span className="text-4xl font-semibold tracking-tight text-zinc-500 select-none" title="No artist image stored yet">
                 {monogram}
               </span>
             ) : (
@@ -319,12 +307,12 @@ export default function ArtistPage() {
               title={name}
               subtitle={
                 <span className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-zinc-400">
-                  <span>
+                  <span className="whitespace-nowrap">
                     {data.aggregate.album_count} album{data.aggregate.album_count === 1 ? "" : "s"} · {data.aggregate.track_count} track{data.aggregate.track_count === 1 ? "" : "s"}
                   </span>
                   {/* two different verdicts, labeled: the aggregate of the album
                       checks vs. the artist folder's own image/description checks */}
-                  <span className="inline-flex items-center gap-1.5" title="Grading of this artist's albums">
+                  <span className="inline-flex items-center gap-1.5 whitespace-nowrap" title="Grading of this artist's albums">
                     <GradeBadge
                       pass={(data.aggregate.grade_pct ?? 0) >= 100 && !auditFails(data.aggregate.audit_summary)}
                       score={data.aggregate.grade_pct}
@@ -339,17 +327,19 @@ export default function ArtistPage() {
                       artist checks off
                     </span>
                   ) : grade ? (
-                    <span className="inline-flex items-center gap-1.5" title={artistGradeTitle}>
+                    <span className="inline-flex items-center gap-1.5 whitespace-nowrap" title={artistGradeTitle}>
                       <GradeBadge pass={!!grade.pass} score={grade.pct ?? null} size="sm" />
                       <span className="text-xs text-zinc-500">
                         artist artwork{grade.checks ? ` ${grade.pass_count}/${grade.checks}` : ""}
                       </span>
                     </span>
                   ) : null}
+                  {/* the failing artist checks, in the app's standard chip —
+                      inside the row, so they can never spill out of the hero */}
                   {gradeIssues.map((i) => (
                     <span
                       key={i.code}
-                      className="text-[10px] text-red-300/90 bg-red-950/30 border border-red-900/40 rounded px-1.5 py-0.5"
+                      className="chip bg-red-950/40 text-red-300/90 border border-red-900/50"
                       title={i.where ? `${i.label} — ${i.where}` : i.label}
                     >
                       {i.label}
@@ -357,81 +347,8 @@ export default function ArtistPage() {
                   ))}
                 </span>
               }
-              actions={
-                <>
-                  {/* beside the title, but out of its truncating span so a long
-                      name can never clip the heart */}
-                  <FavHeart kind="artist" id={data.path} mbid={artistMb} />
-                  <button className="btn-primary" onClick={() => playNow(allTracks)} title={`Play all ${allTracks.length} tracks`}>
-                    <Play className="h-4 w-4 fill-current" /> Play all
-                  </button>
-                  <TagActionsMenu
-                    paths={allTracks.map((t) => t.path)}
-                    artist={decoded}
-                    onDone={refresh}
-                    buttonTitle="Tag actions on every track of this artist"
-                  />
-                  <button
-                    className="btn-ghost"
-                    onClick={() => setReviewOpen(true)}
-                    title="Review candidate artist images and descriptions"
-                  >
-                    Metadata review
-                  </button>
-                  <button
-                    className="btn-ghost"
-                    onClick={() => downloadArtist("best")}
-                    disabled={!artistMb || !!busy}
-                    title={
-                      artistMb
-                        ? "Queue the best edition of every release group not in the library yet"
-                        : "No MusicBrainz artist ID on this folder — match an album first"
-                    }
-                  >
-                    {busy === "download-best" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-                    Download best per group
-                  </button>
-                  <button
-                    className="btn-ghost"
-                    onClick={() => downloadArtist("all")}
-                    disabled={!artistMb || !!busy}
-                    title={
-                      artistMb
-                        ? "Queue every eligible edition of every release group not in the library yet"
-                        : "No MusicBrainz artist ID on this folder — match an album first"
-                    }
-                  >
-                    {busy === "download-all" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-                    Download all
-                  </button>
-                  <button
-                    className="btn-ghost"
-                    onClick={() => setImageOpen(true)}
-                    title={imageUrl ? "Pick a different artist image" : "Find an artist image online, or upload your own"}
-                  >
-                    <ImagePlus className="h-4 w-4" /> {imageUrl ? "Change image" : "Find image"}
-                  </button>
-                  {imageUrl && (
-                    <button
-                      className="btn-ghost !px-2.5 text-red-300/80 hover:text-red-200"
-                      onClick={removeImage}
-                      disabled={busy === "image-clear"}
-                      title="Delete artist.jpg from the artist folder"
-                    >
-                      {busy === "image-clear" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-                    </button>
-                  )}
-                  <LinkEditorButton mode="artist" paths={allTracks.map((t) => t.path)} current={artistTags} artist={data.name} />
-                  <button className="btn-ghost" onClick={() => setStatsOpen(true)}>
-                    <BarChart3 className="h-4 w-4" /> Stats
-                  </button>
-                </>
-              }
             >
-              <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                {data.display_name && data.display_name !== data.name && (
-                  <span className="text-xs text-zinc-600" title={data.name}>{data.name}</span>
-                )}
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                 <LinkChips tags={artistTags} />
                 {!imageUrl && (
                   <span className="text-xs text-zinc-500">
@@ -442,7 +359,53 @@ export default function ArtistPage() {
                     .
                   </span>
                 )}
-              </span>
+              </div>
+              {/* The actions sit in their OWN wrapping row under the title: a
+                  header row of ten buttons sharing a line with the identity
+                  block squeezes the title and the counts into a column at
+                  1024-1568px. Out of that row they just wrap. */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                  {/* beside the title, but out of its truncating span so a long
+                    name can never clip the heart */}
+                <FavHeart kind="artist" id={data.path} mbid={artistMb} />
+                <button className="btn-primary" onClick={() => playNow(allTracks)} title={`Play all ${allTracks.length} tracks`}>
+                  <Play className="h-4 w-4 fill-current" /> Play all
+                </button>
+                <TagActionsMenu
+                  paths={allTracks.map((t) => t.path)}
+                  artist={decoded}
+                  onDone={refresh}
+                  buttonTitle="Tag actions on every track of this artist"
+                />
+                <button
+                  className="btn-ghost"
+                  onClick={() => setReviewOpen(true)}
+                  title="Review candidate artist images and descriptions"
+                >
+                  Metadata review
+                </button>
+                <button
+                  className="btn-ghost"
+                  onClick={() => setImageOpen(true)}
+                  title={imageUrl ? "Pick a different artist image" : "Find an artist image online, or upload your own"}
+                >
+                  <ImagePlus className="h-4 w-4" /> {imageUrl ? "Change image" : "Find image"}
+                </button>
+                {imageUrl && (
+                  <button
+                    className="btn-ghost !px-2.5 text-red-300/80 hover:text-red-200"
+                    onClick={removeImage}
+                    disabled={busy === "image-clear"}
+                    title="Delete artist.jpg from the artist folder"
+                  >
+                    {busy === "image-clear" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                  </button>
+                )}
+                <LinkEditorButton mode="artist" paths={allTracks.map((t) => t.path)} current={artistTags} artist={data.name} />
+                <button className="btn-ghost" onClick={() => setStatsOpen(true)}>
+                  <BarChart3 className="h-4 w-4" /> Stats
+                </button>
+              </div>
             </PageHeader>
           </div>
         </div>
@@ -466,7 +429,7 @@ export default function ArtistPage() {
                 <a
                   href={art.description_url}
                   target="_blank"
-                  rel="noreferrer"
+                  rel="noopener noreferrer"
                   className="hover:text-accent-soft underline decoration-dotted"
                   title={art.description_url}
                 >
@@ -535,9 +498,7 @@ export default function ArtistPage() {
             </div>
           </div>
         ) : descText ? (
-          <p className="mt-2 text-sm text-zinc-300 leading-relaxed whitespace-pre-line max-h-72 overflow-y-auto" title={`${descText.length} characters`}>
-            {descText}
-          </p>
+          <Description key={decoded} text={descText} />
         ) : (
           <div className="mt-2 text-xs text-zinc-500">
             No description yet —{" "}
@@ -654,62 +615,36 @@ export default function ArtistPage() {
                   </span>
                 </button>
                 {!isCollapsed && (
-                  <div className="stagger space-y-1">
-                    {albums.map((al) => {
-                      const albumName = al.meta?.ALBUM ?? al.path.split("/").pop() ?? "";
-                      const href = albumRef(al);
-                      const isSel = selected.has(al.path);
-                      // In select mode a link selects instead of navigating —
-                      // otherwise the album page opens instead of the checkbox.
-                      const linkClick = (e: MouseEvent) => {
-                        if (!selectMode) return;
-                        e.preventDefault();
-                        toggleSel(al.path);
-                      };
-                      return (
-                        <div
-                          key={al.path}
-                          className={`px-3 py-3 rounded-lg transition-colors flex items-center gap-4 group ${
-                            isSel ? "bg-accent/15" : "hover:bg-white/[0.06]"
-                          } ${selectMode ? "cursor-pointer" : ""}`}
-                          onClick={selectMode ? () => toggleSel(al.path) : undefined}
-                        >
-                          {selectMode && (
-                            <input
-                              type="checkbox"
-                              className="shrink-0"
-                              checked={isSel}
-                              onChange={() => toggleSel(al.path)}
-                              onClick={(e) => e.stopPropagation()}
-                              aria-label={`Select ${albumName}`}
+                  <div
+                    className="grid gap-x-4 gap-y-5 stagger"
+                    style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${GRID_SIZE_MIN[gridSize] ?? GRID_SIZE_MIN.m}px, 1fr))` }}
+                  >
+                    {albums.map((al) => (
+                      // the library's own album card (cover, title, artist,
+                      // year, verdict dot, play, heart) plus the two facts
+                      // this page states per release: folder track count and
+                      // the album grade verdict
+                      <AlbumCard
+                        key={al.path}
+                        al={al}
+                        selectable={selectMode}
+                        selected={selected.has(al.path)}
+                        onSelect={toggleSel}
+                        extraMeta={
+                          <>
+                            <span className="shrink-0 tabular-nums" title={`${al.track_count} track${al.track_count === 1 ? "" : "s"} in this folder`}>
+                              {al.track_count} tr
+                            </span>
+                            <GradeBadge
+                              pass={!!al.pass && !auditFails(al.audit_summary)}
+                              score={al.grade_pct}
+                              audit={al.audit_summary}
+                              size="sm"
                             />
-                          )}
-                          <Link to={href} className="shrink-0" title={`Open ${albumName}`} onClick={linkClick}>
-                            <CoverImg
-                              albumPath={al.path}
-                              coverFile={al.cover_file}
-                              wrapperClass="h-14 w-14 rounded-md bg-raise border border-border overflow-hidden shrink-0 group-hover:border-zinc-600 transition-colors"
-                            />
-                          </Link>
-                          <GradeBar pct={al.grade_pct} />
-                          <div className="flex-1 min-w-0">
-                            <Link
-                              to={href}
-                              className="font-semibold hover:text-accent-soft transition-colors break-words"
-                              title={albumName}
-                              onClick={linkClick}
-                            >
-                              {albumName}
-                            </Link>
-                            <div className="text-xs text-zinc-500 mt-0.5 break-words">
-                              {al.meta?.DATE ?? "—"} · {al.media} · {al.track_count} tracks
-                              {al.meta?.["ALBUM DYNAMIC RANGE"] ? ` · DR${al.meta["ALBUM DYNAMIC RANGE"]}` : ""}
-                            </div>
-                          </div>
-                          <GradeBadge pass={!!al.pass && !auditFails(al.audit_summary)} score={al.grade_pct} audit={al.audit_summary} />
-                        </div>
-                      );
-                    })}
+                          </>
+                        }
+                      />
+                    ))}
                   </div>
                 )}
               </section>
@@ -717,8 +652,6 @@ export default function ArtistPage() {
           })
         )}
       </section>
-
-      <MoreLikeThis kind="artist" artist={name} mbid={artistMb} />
 
       {imageOpen && (
         <ArtistImageModal

@@ -8,12 +8,13 @@ import {
   MessageSquare,
 } from "lucide-react";
 import { api } from "../api";
-import type { SlskAutoFile, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskSearchProgress, SlskTransfer } from "../api";
+import type { SlskAutoFile, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskSearchProgress, SlskTransfer, StagingEntry, StagingRoot, StagingRootId } from "../api";
 import { toast } from "../store";
 import { EmptyState, PageLoading } from "../components/Badges";
 import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
 import type { Wish } from "../types";
+import { fmtCounts, fmtPercent } from "../lib/fmt";
 
 interface SlskFile {
   username: string;
@@ -44,8 +45,12 @@ const fmtSize = (n: number) => {
 };
 const fmtDur = (s: number | null) => {
   if (!s) return "—";
-  const m = Math.floor(s / 60);
-  return `${m}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+  // Seconds everywhere (slskd's remainingTime, track lengths): mm:ss, with the
+  // hour field only once a long download's ETA actually needs it.
+  const h = Math.floor(s / 3600);
+  const m = Math.floor(s / 60) % 60;
+  const sec = String(Math.floor(s % 60)).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
 };
 const fileName = (p: string) => p.replace(/^.*[\\/]/, "");
 const dirName = (p: string) => p.replace(/[^\\/]*$/, "");
@@ -368,33 +373,18 @@ function LoginCard({ onDone, initialUsername, initialPassword, initialError }: {
   );
 }
 
-/** Live progress for the auto-import search stage: how far into the current
- *  query's response window it is, and how much the network has answered. */
+/** Live view of the auto-import search stage: which query is out and how much
+ *  the network has answered. Deliberately indeterminate — slskd's window is a
+ *  ceiling a good candidate ends early, so a countdown or a filling bar
+ *  promised a deadline that does not exist. */
 function SearchProgress({ s }: { s: SlskSearchProgress }) {
-  const wait = Math.max(0, s.wait || 0);
-  // The readout never runs past the window: the server clamps `elapsed` and
-  // sends `remaining`, and when an older server sends neither the elapsed
-  // being printed is clamped here — that is what produced "16s / 15s".
-  const elapsed = Math.min(Math.max(0, s.elapsed || 0), wait);
-  const left = typeof s.remaining === "number" ? Math.max(0, s.remaining) : Math.max(0, wait - elapsed);
-  const pct = wait > 0 ? Math.min(100, Math.round((elapsed / wait) * 100)) : 0;
   return (
-    <div className="mt-2">
-      <div className="flex items-center gap-2 text-[11px] text-zinc-500">
-        <span className="truncate" title={s.query}>
-          query “{s.query}” ·{" "}
-          {typeof s.remaining === "number" ? `${left}s left` : `${elapsed}s / ${wait}s`}
-        </span>
-        <span className="ml-auto shrink-0 text-zinc-400">
-          {s.responses} responses · {s.files} files
-        </span>
-      </div>
-      <div className="mt-1 h-1.5 rounded-sm bg-border/70 overflow-hidden">
-        <div
-          className="h-full bg-accent transition-[width] duration-500 ease-linear"
-          style={{ width: `${pct}%` }}
-        />
-      </div>
+    <div className="mt-2 flex items-center gap-2 text-[11px] text-zinc-500">
+      <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent-soft" />
+      <span className="min-w-0 truncate" title={s.query}>searching “{s.query}”</span>
+      <span className="ml-auto shrink-0 text-zinc-400">
+        {s.responses} responses · {s.files} files
+      </span>
     </div>
   );
 }
@@ -402,22 +392,30 @@ function SearchProgress({ s }: { s: SlskSearchProgress }) {
 /** One file of the running download — the same row markup the Downloads tab
  *  uses, so both views of a transfer read alike. */
 function ProgressFileRow({ f }: { f: SlskAutoFile }) {
-  const p = Math.max(0, Math.min(100, Math.round(f.percent ?? 0)));
-  const ok = f.done === true || /succeed|complet/i.test(f.state ?? "");
+  // Server-side fractional completion: the bar tracks the byte share slskd
+  // reports at one decimal, so a big file moves between two whole percents
+  // instead of appearing frozen — and the two flags are read as they come
+  // rather than re-derived from the state string (a queued file that has been
+  // accepted earlier would read as done forever).
+  const p = Math.max(0, Math.min(100, Number(f.percent ?? 0)));
+  const complete = f.complete === true; // slskd says the transfer finished
+  const arrived = f.done === true; // the pipeline accepted it onto disk
   return (
     <div className="flex items-center gap-3 px-2 py-1.5 rounded hover:bg-white/[0.04] text-xs">
       <div className="flex-1 min-w-0 truncate text-zinc-200" title={f.name}>{fileName(f.name ?? "")}</div>
       <div className="w-28 shrink-0 h-1.5 rounded-sm bg-border/70 overflow-hidden">
-        <div className={`h-full ${ok ? "bg-emerald-500" : "bg-accent"}`} style={{ width: `${p}%` }} />
+        <div className={`h-full ${complete ? "bg-emerald-500" : "bg-accent"}`} style={{ width: `${p}%` }} />
       </div>
       <span className="text-zinc-500 w-24 text-right shrink-0">
         {fmtSize(f.bytes ?? 0)} / {fmtSize(f.size ?? 0)}
       </span>
       <span className="w-16 text-right shrink-0">
-        {ok ? (
-          <span className="chip text-[9px] bg-emerald-900/40 text-emerald-300 border border-emerald-800">done</span>
-        ) : /inprogress/i.test(f.state ?? "") ? (
-          <span className="chip text-[9px] bg-sky-900/40 text-sky-300 border border-sky-800">{p}%</span>
+        {arrived ? (
+          <span className="chip text-[9px] bg-emerald-900/40 text-emerald-300 border border-emerald-800">arrived</span>
+        ) : complete ? (
+          <span className="chip text-[9px] bg-emerald-900/40 text-emerald-300 border border-emerald-800">complete</span>
+        ) : p > 0 ? (
+          <span className="chip text-[9px] bg-sky-900/40 text-sky-300 border border-sky-800">{fmtPercent(p)}</span>
         ) : (
           <span className="chip text-[9px] bg-raise border border-border text-zinc-400">
             {(f.state ?? "").toLowerCase() || "queued"}
@@ -431,11 +429,16 @@ function ProgressFileRow({ f }: { f: SlskAutoFile }) {
 /** What the download stage is actually doing: files/bytes done, live speed,
  *  ETA, the peer it is pulling from, and a collapsible per-file list. */
 function AutoProgress({ p }: { p: SlskAutoProgress }) {
-  const done = p.files_done ?? 0;
+  // Two file counts sit side by side and mean different things: `files_done` is
+  // slskd's own view of the transfers, `files_arrived` is what the pipeline has
+  // accepted onto disk. The percentage is neither — it is byte-weighted — so
+  // each gets its own label instead of reading as one measure.
+  const complete = p.files_done ?? 0;
+  const arrived = p.files_arrived ?? 0;
   const total = p.files_total ?? 0;
   // Server percentage when present, derived from bytes otherwise — clamped either way.
   const raw = p.percent ?? (p.size ? (100 * (p.bytes ?? 0)) / p.size : 0);
-  const pct = Math.max(0, Math.min(100, Math.round(raw)));
+  const pct = Math.max(0, Math.min(100, Number(raw) || 0));
   const files = p.files ?? [];
   const shown = files.slice(0, 8);
   return (
@@ -443,15 +446,17 @@ function AutoProgress({ p }: { p: SlskAutoProgress }) {
       <div className="flex items-center gap-2 text-[11px]">
         <span className="font-medium text-zinc-300">{p.phase || "download"}</span>
         {p.username && <span className="text-zinc-500 truncate" title={p.dir}>· {p.username}</span>}
-        <span className="ml-auto shrink-0 text-zinc-400">{done} / {total} files · {pct}%</span>
+        <span className="ml-auto shrink-0 text-zinc-400">
+          {fmtCounts(complete, total)} files complete · {arrived} arrived · {fmtPercent(pct)} of bytes
+        </span>
       </div>
       <div className="mt-1 h-1.5 rounded-sm bg-border/70 overflow-hidden">
         <div className="h-full bg-accent transition-[width] duration-500 ease-linear" style={{ width: `${pct}%` }} />
       </div>
       <div className="mt-1 flex items-center gap-3 text-[10px] text-zinc-500">
         <span>{fmtSize(p.bytes ?? 0)} / {fmtSize(p.size ?? 0)}</span>
-        <span>{fmtRate(p.speed)}</span>
-        <span>ETA {fmtDur(p.eta_s ?? null)}</span>
+        <span title="Instantaneous rate over the last poll — not the lifetime average">{fmtRate(p.speed)}</span>
+        <span title="Remaining bytes at the current rate">ETA {fmtDur(p.eta_s ?? null)}</span>
       </div>
       {files.length > 0 && (
         <details className="mt-1.5">
@@ -511,18 +516,23 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
     }
   };
 
-  /** Answer the confirm prompt. Both variants share this endpoint: for a lossy
-   *  downgrade accept downloads the lossy copy, for an empty search accept
-   *  parks the release in the wish list (the background worker keeps looking,
-   *  so declining is the only way to actually stop). */
+  /** Answer the confirm prompt. Every variant shares this endpoint: for a lossy
+   *  downgrade accept downloads the lossy copy, for an album without rip logs
+   *  accept downloads it unverified, for an empty search accept parks the
+   *  release in the wish list (the background worker keeps looking, so declining
+   *  is the only way to actually stop). */
   const answer = async (accept: boolean) => {
     setAnswering(true);
-    const noResults = job?.confirm?.reason === "no_results";
+    const reason = job?.confirm?.reason;
     try {
       await api.soulseekAutoConfirm(accept);
-      toast(noResults
-        ? (accept ? "Moving it to wishes — the search keeps running" : "Stopping — nothing was downloaded")
-        : (accept ? "Downloading the lossy copy" : "Stopped — waiting for a lossless copy"));
+      toast(
+        reason === "no_results"
+          ? (accept ? "Moving it to wishes — the search keeps running" : "Stopping — nothing was downloaded")
+          : reason === "no_logs"
+            ? (accept ? "Downloading without rip logs — it imports unverified" : "Stopped — waiting for a CD rip with logs")
+            : (accept ? "Downloading the lossy copy" : "Stopped — waiting for a lossless copy")
+      );
       refetch();
     } catch (e) {
       toast.error(String(e));
@@ -690,6 +700,35 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
                 </button>
               </div>
             </div>
+          ) : job.confirm.reason === "no_logs" ? (
+            // Lossless and complete, but no rip log to verify it: the album is
+            // still worth having, it just grades as what it is (a digital
+            // release, or a rip nobody documented).
+            <div className="mt-2 rounded-lg border border-amber-700/60 bg-amber-950/30 p-2.5">
+              <div className="text-xs font-semibold text-amber-300 mb-1">
+                No CD rip with logs found
+              </div>
+              <div className="text-[11px] text-zinc-400 mb-2">
+                The complete album is available as {job.confirm.media || "a digital release"} (no
+                .log/.cue). Download it anyway? It imports as {job.confirm.media || "that media"}
+                and is graded accordingly.
+              </div>
+              <div className="space-y-1 mb-2">
+                {(job.confirm.candidates ?? []).map((c) => (
+                  <div key={`${c.username}\u0000${c.dir}`} className="text-[11px] text-zinc-500 truncate" title={c.dir}>
+                    {c.format || "?"} · {c.matched}/{c.expected} tracks · {fmtSize(c.size)} · {c.username} · …{c.dir.slice(-40)}
+                  </div>
+                ))}
+              </div>
+              <div className="flex items-center gap-2">
+                <button className="btn-primary !py-1 text-xs" onClick={() => answer(true)} disabled={answering}>
+                  <Download className="h-3.5 w-3.5" /> Download without logs
+                </button>
+                <button className="btn-ghost !py-1 text-xs" onClick={() => answer(false)} disabled={answering}>
+                  No, wait for a CD rip
+                </button>
+              </div>
+            </div>
           ) : (
             <div className="mt-2 rounded-lg border border-amber-700/60 bg-amber-950/30 p-2.5">
               <div className="text-xs font-semibold text-amber-300 mb-1">
@@ -716,7 +755,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
               </div>
             </div>
           ))}
-          <div className="mt-1.5 max-h-44 overflow-auto font-mono text-[10px] leading-relaxed text-zinc-500 space-y-0.5">
+          <div className="mt-1.5 max-h-44 overflow-auto font-mono text-[10px] leading-relaxed text-zinc-500 space-y-0.5 break-words">
             {(job?.log ?? []).map((l: any, i: number) => (
               <div key={i} className={l.msg.startsWith("ERROR") ? "text-red-400" : l.msg.startsWith("  ✕") ? "text-red-300" : undefined}>
                 <span className="text-zinc-700 mr-1.5">{l.t}</span>{l.msg}
@@ -725,10 +764,19 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
           </div>
           {(job?.attempts ?? []).length > 0 && (
             <details className="mt-1.5 text-[11px] text-zinc-500">
-              <summary className="cursor-pointer">{job?.attempts?.length} rejected candidate(s)</summary>
+              <summary className="cursor-pointer">{job?.attempts?.length} rejected candidate(s) — the next candidate was tried</summary>
               <div className="mt-1 space-y-0.5">
+                {/* slskd's own words ("User notfire appears to be offline") are
+                    the whole point of this list, and there is no attempt cap any
+                    more — so the reason is never cut short: it wraps in the row,
+                    the peer carries the tail of the path, and the hover title
+                    has the full path plus the reason. */}
                 {(job?.attempts ?? []).map((a, i) => (
-                  <div key={i} title={a.dir}>…{String(a.dir).slice(-40)} — {a.reason}</div>
+                  <div key={i} className="flex items-baseline gap-1.5" title={`${a.username} — ${a.dir}\n${a.reason}`}>
+                    <span className="shrink-0 text-zinc-600">{a.username || "?"}</span>
+                    <span className="min-w-0 truncate text-zinc-700">…{String(a.dir).slice(-40)}</span>
+                    <span className="min-w-0 break-words text-zinc-400">{a.reason}</span>
+                  </div>
                 ))}
               </div>
             </details>
@@ -1844,7 +1892,7 @@ function WishesPanel() {
           </button>
         </div>
         <div className="text-[11px] text-zinc-600 mt-1.5">
-          Tip: open any release in the MusicBrainz browser and press “Add to wishes”, or paste its URL here.
+          Tip: paste a musicbrainz.org release URL (or its MBID) — the release is resolved from MusicBrainz when it is hunted.
         </div>
       </div>
 
@@ -1908,6 +1956,9 @@ export default function SoulseekPage() {
     ?? (messages?.conversations ?? []).reduce((n, c) => n + (c?.unread ?? 0), 0);
 
   const running = !!status?.running;
+  // Whoever slskd is really signed in as — the saved `username` drifts from it
+  // the moment the login is corrected on slskd's own page.
+  const account = String(status?.account ?? "").trim();
 
   // Start/stop transitions poll status once a second (instead of waiting for
   // the 10s background refresh) so pressing the button feels immediate.
@@ -1979,7 +2030,6 @@ export default function SoulseekPage() {
   const [visibleLimit, setVisibleLimit] = useState(60);
   const [logTest, setLogTest] = useState<Record<string, { ok: boolean; text: string } | "busy">>({});
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const autoRan = useRef(false); // ?q= handoff runs once per page visit
   const releaseParam = params.get("release") ?? undefined;
 
   // Page tabs — Search is the default; the badge on Downloads counts active
@@ -2123,22 +2173,6 @@ export default function SoulseekPage() {
     }
   };
 
-  // MusicBrainz browser handoff: /soulseek?q=… pre-fills and fires a search
-  // once slskd is confirmed running (retried via the status poll otherwise).
-  const handoff = params.get("q");
-  useEffect(() => {
-    if (!handoff || autoRan.current) return;
-    if (status?.running) {
-      autoRan.current = true;
-      runSearch(handoff);
-    } else if (status && !status.running) {
-      autoRan.current = true;
-      setQuery(handoff);
-      toast("Start slskd to run the search");
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [handoff, status?.running]);
-
   const downloadFile = async (f: SlskFile, group: boolean) => {
     // Lossless is the expectation; a lossy-only folder is a deliberate
     // downgrade, so it is confirmed rather than silently queued.
@@ -2229,7 +2263,12 @@ export default function SoulseekPage() {
             ) : status?.conflict ? (
               <span className="text-red-400">port {status?.web_port ?? ""} in use by another app</span>
             ) : running ? (
-              <span className="text-emerald-400">running{status?.logged_in ? " · logged in" : status?.logged_in === false ? " · not logged in" : ""}</span>
+              <span className="text-emerald-400">
+                running
+                {status?.logged_in
+                  ? ` · ${account ? `signed in as ${account}` : "logged in"}`
+                  : status?.logged_in === false ? " · not logged in" : ""}
+              </span>
             ) : "stopped"}
             {" · downloads: "}{status?.download_dir ?? "—"}
             {running && status?.server?.uploadSpeed != null && (
@@ -2571,6 +2610,7 @@ export default function SoulseekPage() {
         <>
           <ReviewPanel />
           <DownloadsPanel downloads={downloads} status={status} />
+          <StagingPanel />
         </>
       )}
 
@@ -2842,7 +2882,8 @@ type TransferRow = SlskTransfer & { username: string; dir: string };
 /** Transfer statuses for the Downloads tab: active transfers with progress
  * bars, plus queued / completed / failed buckets so the history is
  * browsable instead of one flat list. Cancel drops a queued/running transfer,
- * Retry re-queues a failed one, and "Clear finished" empties the history. */
+ * Retry re-queues a failed one, and the Clear buttons sweep the history per
+ * scope — the incomplete one also deletes the partial bytes it stops. */
 function DownloadsPanel({ downloads, status }: {
   downloads: SlskDownloads | undefined;
   /** daemon state — an empty list means different things running vs stopped */
@@ -2853,9 +2894,12 @@ function DownloadsPanel({ downloads, status }: {
   const [busy, setBusy] = useState<string | null>(null);
   const files: TransferRow[] = (downloads?.downloads ?? []).flatMap((u) =>
     u.directories.flatMap((d) => d.files.map((f) => ({ ...f, username: u.username, dir: d.directory }))));
+  // The share slskd reports, kept fractional: the bar and the chip are the
+  // same number, and a big file has to be able to move between two whole
+  // percents.
   const pct = (f: SlskTransfer) => {
-    if (typeof f.percentComplete === "number") return Math.round(f.percentComplete);
-    if (f.size) return Math.min(100, Math.round(((f.bytesTransferred ?? 0) / f.size) * 100));
+    if (typeof f.percentComplete === "number") return Math.max(0, Math.min(100, f.percentComplete));
+    if (f.size) return Math.max(0, Math.min(100, (100 * (f.bytesTransferred ?? 0)) / f.size));
     return 0;
   };
   // slskd reports transfer states as compound strings — "Completed,
@@ -2875,11 +2919,11 @@ function DownloadsPanel({ downloads, status }: {
     has(f, "Succeeded") ? (
       <span className="chip text-[9px] bg-emerald-900/40 text-emerald-300 border border-emerald-800">done</span>
     ) : has(f, "InProgress") ? (
-      <span className="chip text-[9px] bg-sky-900/40 text-sky-300 border border-sky-800">{pct(f)}%</span>
+      <span className="chip text-[9px] bg-sky-900/40 text-sky-300 border border-sky-800">{fmtPercent(pct(f))}</span>
     ) : has(f, "Queued") ? (
       <span className="chip text-[9px] bg-raise border border-border text-zinc-400">queued</span>
     ) : (
-      <span className="chip text-[9px] bg-red-950/60 text-red-300 border border-red-900">{f.state.toLowerCase() || "failed"}</span>
+      <span className="chip text-[9px] bg-red-950/60 text-red-300 border border-red-900">{f.state.toLowerCase() || "Failed"}</span>
     );
 
   /** Cancel one or many transfers — slskd takes a transfer_id list, but only
@@ -2932,11 +2976,17 @@ function DownloadsPanel({ downloads, status }: {
     }
   };
 
-  const clearFinished = async () => {
+  /** One handler for every bulk clear. The scope picks what slskd drops, and
+   *  `incomplete` also deletes the partial bytes already on disk — that one is
+   *  confirmed by name first, because those bytes cannot be resumed. */
+  const clear = async (scope: "finished" | "failed" | "incomplete" | "all", what?: string) => {
+    if (what && !window.confirm(`Delete ${what}?\n\nThe partial bytes already on disk go with them and cannot be resumed.`)) return;
     setBusy("*");
     try {
-      const r = await api.soulseekDownloadsClear();
-      toast(r.cleared ? `Cleared ${r.cleared} finished transfer(s)` : "Nothing to clear");
+      const r = await api.soulseekDownloadsClear(scope);
+      const freed = r.bytes_freed ? ` · ${fmtSize(r.bytes_freed)} freed` : "";
+      const refused = r.failed?.length ? ` · ${r.failed.length} refused` : "";
+      toast(r.cleared ? `${r.cleared} cleared${freed}${refused}` : `Nothing to clear${refused}`);
       qc.invalidateQueries({ queryKey: ["soulseekDownloads"] });
     } catch (e) {
       toast.error(String(e));
@@ -2959,10 +3009,33 @@ function DownloadsPanel({ downloads, status }: {
             <button
               className="btn-ghost !py-0.5 !px-2 text-[11px] ml-1"
               disabled={busy !== null}
-              onClick={clearFinished}
+              onClick={() => clear("finished")}
               title="Remove finished / failed transfers from this list (in-progress and queued transfers are kept)"
             >
               <Trash2 className="h-3 w-3" /> Clear finished
+            </button>
+          )}
+          {active.length + queued.length > 0 && (
+            <button
+              className="btn-ghost !py-0.5 !px-2 text-[11px]"
+              disabled={busy !== null}
+              onClick={() => clear(
+                "incomplete",
+                `${active.length + queued.length} in-flight transfer(s) and the partial bytes already downloaded`,
+              )}
+              title="Stop what is still in flight and delete the partial bytes it left on disk — as destructive as it sounds, and it asks first"
+            >
+              <Trash2 className="h-3 w-3" /> Clear incomplete ({active.length + queued.length})
+            </button>
+          )}
+          {failed.length > 0 && (
+            <button
+              className="btn-ghost !py-0.5 !px-2 text-[11px]"
+              disabled={busy !== null}
+              onClick={() => clear("failed")}
+              title="Remove only the failed transfers from this list (completed ones stay, nothing on disk is touched)"
+            >
+              <Trash2 className="h-3 w-3" /> Clear failed
             </button>
           )}
           {active.length + queued.length > 0 && (
@@ -3073,6 +3146,195 @@ function DownloadsPanel({ downloads, status }: {
             )}
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+/** Rendered rows per staging root. The totals above the list always describe
+ *  EVERYTHING on disk, so a long root is capped with a "+N more" line rather
+ *  than painting thousands of rows. */
+const STAGING_ROWS = 50;
+
+const stagingTotals = (count: number, bytes: number) =>
+  `${count} ${count === 1 ? "entry" : "entries"} · ${fmtSize(bytes)}`;
+
+/** One staging root. The two are independent — either may not exist yet, and a
+ *  name only means something inside its own root — so nothing here is shared
+ *  between them but the row markup. */
+function StagingCard({ id, root, busy, onDelete, onClear }: {
+  id: StagingRootId;
+  root: StagingRoot;
+  busy: boolean;
+  onDelete: (e: StagingEntry) => void;
+  onClear: () => void;
+}) {
+  const navigate = useNavigate();
+  const shown = root.entries.slice(0, STAGING_ROWS);
+  const holdsAudio = root.entries.some((e) => e.album);
+
+  return (
+    <div className="rounded-md border border-border bg-panel/60 p-3 space-y-2">
+      <div className="flex items-start justify-between gap-2 flex-wrap">
+        <div className="min-w-0">
+          <div className="text-xs font-semibold text-zinc-300">
+            {id === "downloads" ? "Downloads" : "Incomplete"}
+          </div>
+          <div className="text-[10px] text-zinc-600 truncate" title={root.folder}>{root.folder}</div>
+          <div className="text-[10px] text-zinc-500 mt-0.5">
+            {!root.exists
+              ? "folder not created yet"
+              : root.count === 0
+                ? "empty"
+                : stagingTotals(root.count, root.bytes)}
+            {/* the incomplete root holds slskd's in-flight leftovers, so its
+                bytes are partial files — worth saying out loud before deleting */}
+            {root.exists && id === "incomplete" && root.count > 0 && (
+              <span className="text-zinc-600"> · partial bytes, not resumable</span>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          {id === "downloads" && holdsAudio && (
+            <button
+              className="btn-ghost !py-0.5 !px-2 text-[11px]"
+              onClick={() => navigate("/downloads")}
+              title="Tag, review and import the finished albums there — the import lives on the Downloads page"
+            >
+              <Link2 className="h-3 w-3" /> Import to library
+            </button>
+          )}
+          {root.count > 0 && (
+            <button
+              className="btn-ghost !py-0.5 !px-2 text-[11px]"
+              disabled={busy}
+              onClick={onClear}
+              title={`Delete every entry in ${root.folder} — the folder itself stays`}
+            >
+              <Trash2 className="h-3 w-3" /> Clear all
+            </button>
+          )}
+        </div>
+      </div>
+      {root.entries.length > 0 && (
+        <div className="space-y-0.5 max-h-[320px] overflow-auto stagger">
+          {shown.map((e) => (
+            <div key={e.name} className="flex items-center gap-2 px-2 py-1 rounded hover:bg-white/[0.04] text-xs">
+              <div className="flex-1 min-w-0 truncate text-zinc-200" title={e.name}>{e.name}</div>
+              {e.partial && (
+                <span className="chip text-[9px] bg-amber-950/60 text-amber-300 border border-amber-900" title="slskd is still writing this one — a leftover, not a finished result">partial</span>
+              )}
+              {e.album && (
+                <span className="chip text-[9px] bg-raise border border-border text-zinc-400" title="Holds audio, so it can be imported into the library">album</span>
+              )}
+              <span className="text-zinc-500 w-8 text-right shrink-0" title={`${e.files} file(s)`}>{e.files} f</span>
+              <span className="text-zinc-500 w-16 text-right shrink-0">{fmtSize(e.bytes)}</span>
+              <button
+                className="btn-ghost !px-1.5 !py-0.5 text-[11px] shrink-0"
+                disabled={busy}
+                onClick={() => onDelete(e)}
+                title={`Delete ${e.name} from ${root.folder}`}
+              >
+                <Trash2 className="h-3 w-3" /> Delete
+              </button>
+            </div>
+          ))}
+          {root.entries.length > shown.length && (
+            <div className="text-[10px] text-zinc-600 px-2 py-1">
+              +{root.entries.length - shown.length} more — the totals above cover everything
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** "Staging on disk" — the two folders slskd writes into, with their real
+ *  contents. Deliberately separate from DownloadsPanel above: that one lists
+ *  slskd's transfer HISTORY (empty while the daemon is stopped), this one lists
+ *  the bytes on disk, which is what has to be cleaned up. */
+function StagingPanel() {
+  const qc = useQueryClient();
+  const [busy, setBusy] = useState(false);
+  // No refetch interval: the server sizes every entry recursively, so polling
+  // would walk the whole staging tree on a timer. Mount + every action is
+  // enough — this panel is the thing that changes it.
+  const { data } = useQuery({
+    queryKey: ["soulseekStaging"],
+    queryFn: api.soulseekStaging,
+  });
+
+  /** The same caches the existing download routes bust — the transfer list and
+   *  the Downloads page both describe the same bytes, so a delete here that
+   *  left them stale would show a folder that no longer exists. */
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["soulseekStaging"] });
+    qc.invalidateQueries({ queryKey: ["soulseekDownloads"] });
+    qc.invalidateQueries({ queryKey: ["downloads"] });
+  };
+
+  const remove = async (id: StagingRootId, root: StagingRoot, e: StagingEntry) => {
+    if (!window.confirm(
+      `Delete ${e.name} from ${root.folder}?\n\n` +
+      `${fmtSize(e.bytes)} · ${e.files} file(s), permanently.`
+    )) return;
+    setBusy(true);
+    try {
+      const r = await api.soulseekStagingDelete(id, e.name);
+      toast(`${e.name} deleted${r.freed ? ` · ${fmtSize(r.freed)} freed` : ""}`);
+      refresh();
+    } catch (err) {
+      toast.error(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clear = async (id: StagingRootId, root: StagingRoot) => {
+    if (!window.confirm(
+      `Delete ${stagingTotals(root.count, root.bytes)} from ${root.folder}?\n\n` +
+      (id === "incomplete"
+        ? "These are partial bytes slskd left behind — they cannot be resumed after this."
+        : "The whole staging folder goes; the folder itself stays.")
+    )) return;
+    setBusy(true);
+    try {
+      const r = await api.soulseekStagingClear(id);
+      const freed = r.freed ? ` · ${fmtSize(r.freed)} freed` : "";
+      const refused = r.failed.length ? ` · ${r.failed.length} refused` : "";
+      toast(`Cleared ${r.cleared} ${r.cleared === 1 ? "entry" : "entries"}${freed}${refused}`);
+      refresh();
+    } catch (err) {
+      toast.error(String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="panel">
+      <div className="flex items-center gap-2 flex-wrap mb-2">
+        <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Staging on disk</div>
+        <span className="text-[10px] text-zinc-600">
+          what is actually in slskd's two staging folders — deleting here touches the disk, not the transfer list
+        </span>
+      </div>
+      {!data ? (
+        <PageLoading />
+      ) : (
+        <div className="grid gap-2 lg:grid-cols-2">
+          {(["downloads", "incomplete"] as const).map((id) => (
+            <StagingCard
+              key={id}
+              id={id}
+              root={data[id]}
+              busy={busy}
+              onDelete={(e) => remove(id, data[id], e)}
+              onClear={() => clear(id, data[id])}
+            />
+          ))}
+        </div>
       )}
     </div>
   );

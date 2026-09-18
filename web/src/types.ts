@@ -430,7 +430,7 @@ export interface WishesPayload {
   log: { t: number; level: string; msg: string }[];
 }
 
-/** Home page payload: album recommendations + library highlights. */
+/** Home page payload: library highlights. */
 export interface HomeData {
   stats: {
     artists: number;
@@ -440,17 +440,12 @@ export interface HomeData {
     grade_pct: number | null;
   };
   recent: HomeAlbum[];
-  recommended: HomeAlbum[];
   top_rated: HomeAlbum[];
   favorites: HomeAlbum[];
   discover: HomeAlbum[];
   top_artists: HomeArtist[];
   wanted: HomeAlbum[];
   needs_attention: HomeAlbum[];
-  /** Sitewide popularity chart (ListenBrainz) — what people actually play. */
-  popular?: HomeAlbum[];
-  /** Which provider drove `recommended` (see home_rec_source). */
-  rec_source?: HomeRecSource;
 }
 
 export interface HomeArtist {
@@ -483,14 +478,12 @@ export interface HomeAlbum {
   popularity_label?: string | null;
   /** Raw provider popularity, for sorting. */
   popularity?: number | null;
-  /** Provider catalogue id, used to open the discovery detail view. */
+  /** Provider catalogue id behind the row. */
   deezer_id?: number | null;
-  /** Remote artwork URL (discovery rows) — `cover` is the local cover file. */
+  /** Remote artwork URL — `cover` is the local cover file. */
   cover_url?: string | null;
 }
 
-/** Which provider set the recommendation shelf was built from. */
-export type HomeRecSource = "discovery" | "listenbrainz" | "musicbrainz";
 /* ---------------------------------------------------------------------- *
  * Discovery — provider chain (server/discovery.py)                        *
  * ---------------------------------------------------------------------- */
@@ -505,61 +498,12 @@ export interface DiscoverySource {
 /** Provider catalogue + the per-feature orders the settings page edits. */
 export interface DiscoveryCatalog {
   sources: DiscoverySource[];
-  /** Built-in order per feature: discovery_rec_sources, discovery_search_sources,
-   *  artist_image_sources, description_sources. */
+  /** Built-in order per feature: artist_image_sources, description_sources. */
   defaults: Record<string, string[]>;
   enabled: boolean;
   /** The user's saved orders (empty = built-in). */
   saved: Record<string, string[]>;
   mb_search_source: "auto" | "discovery" | "musicbrainz";
-}
-
-/** A row from any discovery provider. Album/artist/track rows share one shape
- *  so the UI can render them in a single list; fields only apply to the kind
- *  they belong to. */
-export interface DiscoveryRow {
-  kind: "album" | "artist" | "track";
-  /** Album/track title; `name` for artists. */
-  title?: string;
-  name?: string;
-  artist?: string;
-  album?: string;
-  year?: string | null;
-  release_date?: string;
-  /** Provider artwork URL (Deezer cover_xl / iTunes 3000px / CAA front-250). */
-  cover?: string | null;
-  image?: string | null;
-  /** MusicBrainz id — release group for albums, artist for artists. Absent
-   *  until the row has been resolved (see `discoveryWish`). */
-  mbid?: string | null;
-  source: string;
-  popularity?: number | null;
-  popularity_label?: string | null;
-  reason?: string | null;
-  record_type?: string;
-  secondary_types?: string[];
-  disambiguation?: string;
-  tracks?: number | null;
-  duration?: number | null;
-  link?: string | null;
-  deezer_id?: number | null;
-  artist_id?: number | null;
-  itunes_id?: number | null;
-  /** Library path when the album is already owned (""/undefined otherwise). */
-  owned_path?: string | null;
-  /** Artist this row is "similar to". */
-  similar_to?: string;
-  tags?: string[];
-  country?: string;
-  genre?: string;
-}
-
-export interface DiscoverySearch {
-  query: string;
-  type: "album" | "artist";
-  /** Which mode answered: auto | discovery | musicbrainz. */
-  mode: string;
-  rows: DiscoveryRow[];
 }
 
 /** Candidate artist image for the picker. */
@@ -783,8 +727,8 @@ export interface ScriptRunResult {
  * Source health (/api/sources/health) — the setup wizard + Settings panel   *
  * ---------------------------------------------------------------------- */
 
-/** The four provider families the backend reports on. */
-export type SourceKind = "lyrics" | "advisory" | "genre" | "metadata";
+/** The provider families the backend reports on (`server.sources_health.KINDS`). */
+export type SourceKind = "lyrics" | "advisory" | "genre" | "metadata" | "links";
 
 /** One provider row. `needs` are config keys this source reads; `configured`
  *  says whether they are all set, and `status`/`detail`/`ms` come from the
@@ -811,12 +755,3 @@ export interface SourcesHealth {
   sources: SourceHealth[];
 }
 
-/** Album detail from `/api/discovery/album`: a discovery row plus the
- *  provider's own track list, genre names and (when resolved) the
- *  MusicBrainz release group behind it. */
-export interface DiscoveryAlbumDetail extends DiscoveryRow {
-  genres?: string[];
-  label?: string;
-  track_list?: { title: string; duration: number | null; rank: number | null }[];
-  mb_release_group?: DiscoveryRow | null;
-}

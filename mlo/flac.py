@@ -1,6 +1,7 @@
 """Lossless FLAC re-encoding via the reference flac.exe toolchain."""
 import json
 import os
+import re
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -52,30 +53,56 @@ def is_alac(path):
     except Exception:
         return False
 
-# ffprobe metadata key -> semantic tag name (uppercased for Vorbis comments).
+# ffprobe metadata key -> semantic tag name. ffprobe echoes an ID3 TXXX
+# frame as its description verbatim ("MusicBrainz Album Id") and a Vorbis
+# comment as stored ("MUSICBRAINZ_ALBUMID"), so the table is matched through
+# _ffprobe_key, which ignores case, spaces and underscores.
 _FFPROBE_TAG_MAP = {
     "title": "TITLE",
     "artist": "ARTIST",
     "album": "ALBUM",
     "album_artist": "ALBUMARTIST",
     "date": "DATE",
+    "originaldate": "ORIGINALDATE",
     "genre": "GENRE",
     "track": "TRACKNUMBER",
     "disc": "DISCNUMBER",
     "composer": "COMPOSER",
     "comment": "COMMENT",
-    "publisher": "PUBLISHER",
+    # TPUB (the ID3 label frame, "publisher" to ffprobe) and LABEL name the
+    # same thing in this app — the record label the naming script uses.
+    "publisher": "LABEL",
+    "label": "LABEL",
     "copyright": "COPYRIGHT",
     "isrc": "ISRC",
     "bpm": "BPM",
     "initialkey": "INITIALKEY",
     "media": "MEDIA",
+    "script": "SCRIPT",
     "source": "SOURCE",
     "catalognumber": "CATALOGNUMBER",
+    "barcode": "BARCODE",
+    # Loudness measurement tags. Their names contain a SPACE, so the
+    # pass-through (which upper-cases a key into a container key) would
+    # invent "DYNAMIC_RANGE" — a tag no reader of this app finds.
+    "dynamic range": "DYNAMIC RANGE",
+    "album dynamic range": "ALBUM DYNAMIC RANGE",
+    # Release identity. Both spellings appear above — the Vorbis names and
+    # the MusicBrainz ID3 TXXX descriptions — so a source tagged by either
+    # this app or Picard converts with its release data intact.
+    "releasetype": "RELEASETYPE",
+    "musicbrainz_albumtype": "RELEASETYPE",
+    "releasestatus": "RELEASESTATUS",
+    "musicbrainz_albumstatus": "RELEASESTATUS",
+    "releasecountry": "RELEASECOUNTRY",
+    "musicbrainz_album_release_country": "RELEASECOUNTRY",
     "musicbrainz_trackid": "MUSICBRAINZ_TRACKID",
     "musicbrainz_albumid": "MUSICBRAINZ_ALBUMID",
     "musicbrainz_artistid": "MUSICBRAINZ_ARTISTID",
     "musicbrainz_albumartistid": "MUSICBRAINZ_ALBUMARTISTID",
+    "musicbrainz_releasetrackid": "MUSICBRAINZ_RELEASETRACKID",
+    "musicbrainz_releasegroupid": "MUSICBRAINZ_RELEASEGROUPID",
+    "musicbrainz_workid": "MUSICBRAINZ_WORKID",
     "replaygain_track_gain": "REPLAYGAIN_TRACK_GAIN",
     "replaygain_track_peak": "REPLAYGAIN_TRACK_PEAK",
     "replaygain_album_gain": "REPLAYGAIN_ALBUM_GAIN",
@@ -83,8 +110,51 @@ _FFPROBE_TAG_MAP = {
 }
 
 
+def _ffprobe_key(key):
+    """Normalized ffprobe metadata key (case/space/underscore-insensitive)."""
+    return re.sub(r"[\s_]+", "", str(key)).upper()
+
+
+_FFPROBE_TAG_LOOKUP = {_ffprobe_key(k): v for k, v in _FFPROBE_TAG_MAP.items()}
+
+# TAG_MAP's own spelling per normalized name, filled on first use: the
+# pass-through builds a container key from an ffprobe key, but a semantic
+# name is not always that key's upper form (a name with a space in it).
+_TAG_NAME_CACHE = {}
+
+
+def _canonical_tag_name(name):
+    """TAG_MAP's spelling of *name* when it is one of its names, else *name*."""
+    if not _TAG_NAME_CACHE:
+        try:
+            from .audio import TAG_MAP
+            _TAG_NAME_CACHE.update({_ffprobe_key(k): k for k in TAG_MAP})
+        except Exception:
+            _TAG_NAME_CACHE[""] = ""
+    return _TAG_NAME_CACHE.get(_ffprobe_key(name), name)
+
+
+def _set_semantic_tag(af, name, value):
+    """Write one semantic tag onto a conversion output.
+
+    set_tag maps *name* onto the target container's own frame (Vorbis
+    comment, ID3 frame, MP4 atom/freeform). set_any_tag takes the name as a
+    RAW container key, and an MP4 target silently truncates anything longer
+    than four characters to an atom of its first four — losing the value —
+    so it is only the fallback for names that have no mapping.
+    """
+    if af.set_tag(name, value):
+        return True
+    key = name
+    if af.kind == "mp4" and not name.startswith("----:"):
+        # Still this app's own tag: keep an unmapped name in the freeform
+        # space rather than writing a truncated 4-char atom.
+        key = f"----:com.apple.iTunes:{name}"
+    return af.set_any_tag(key, value)
+
+
 def _ffprobe_tags(ffprobe_exe, path):
-    """Metadata dict from ffprobe (lowercase keys) or {}."""
+    """Metadata dict from ffprobe (keys as the source stores them) or {}."""
     try:
         proc = run_tool(
             [ffprobe_exe, "-v", "error", "-print_format", "json",
@@ -177,7 +247,7 @@ def _convert_lossless_source(args):
             seen = set()
             out_af.defer_save(True)
             for k, v in raw_tags.items():
-                name = _FFPROBE_TAG_MAP.get(str(k).lower())
+                name = _FFPROBE_TAG_LOOKUP.get(_ffprobe_key(k))
                 if not name or name in seen:
                     continue
                 if v is None or not str(v).strip():
@@ -185,17 +255,22 @@ def _convert_lossless_source(args):
                 val = str(v).strip()
                 if name in ("TRACKNUMBER", "DISCNUMBER") and "/" in val:
                     val = val.split("/")[0].strip()
-                if out_af.set_any_tag(name, val):
+                if _set_semantic_tag(out_af, name, val):
                     seen.add(name)
             # Unknown keys that look intentional (uppercase-able) pass through
             for k, v in raw_tags.items():
                 name = str(k).upper().replace(" ", "_")
-                if (str(k).lower() in _FFPROBE_TAG_MAP or not name.replace("_", "").isalnum()
+                if (_ffprobe_key(k) in _FFPROBE_TAG_LOOKUP
+                        or not name.replace("_", "").isalnum()
                         or name in seen or not str(v or "").strip()):
                     continue
                 if len(name) > 40:
                     continue
-                out_af.set_any_tag(name, str(v).strip())
+                # The built name is a container key; write it under this
+                # app's own name when TAG_MAP has one (the two differ for
+                # names that contain a space).
+                _set_semantic_tag(out_af, _canonical_tag_name(name),
+                                  str(v).strip())
                 seen.add(name)
             out_af.defer_save(False)
         except Exception:
@@ -280,7 +355,10 @@ def _should_reencode_flac(filepath, target_quality, target_version, force,
         except (ValueError, TypeError):
             return True, f"quality not numeric: {q}", False
 
-    if _version_is_older(v, target_version):
+    if _enabled(enabled, "ENCODER_VERSION") and _version_is_older(v, target_version):
+        # Like the quality compare above: with ENCODER_VERSION switched off the
+        # marker is never rewritten (containers._identity_missing), so an old
+        # version tag would re-encode this file on every run and never converge.
         return True, f"encoder {v} older than {target_version}", False
 
     ours = str(program or "").strip() == "FLAC reference encoder"

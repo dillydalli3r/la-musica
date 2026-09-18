@@ -13,6 +13,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from server import soulseek
 
+# The REAL client call, captured before the stub below replaces it: the
+# error-mapping checks further down (slskd's own message, the 429 retry,
+# refused files) exercise `_request` itself and need the genuine function.
+_real_request = soulseek._request
+
 calls = []
 
 
@@ -588,7 +593,6 @@ class _FakeClient:
         return _FakeStatus(self.queued.pop(0))
 
 
-_real_request = soulseek._request
 _real_http_client = soulseek._http_client
 
 
@@ -689,6 +693,64 @@ except httpx.HTTPStatusError as exc:
 else:
     raise AssertionError("send_message swallowed a 500")
 soulseek._request = _real_request
+
+# --------------------------------------------------------------------------- #
+# `_request` itself: slskd's own words must reach the caller. httpx's message
+# is only "Server error '500 Internal Server Error' for url …", which is what
+# hid "User <name> appears to be offline" from the auto-import job log.
+# --------------------------------------------------------------------------- #
+class _RealRespClient:
+    """Pooled-client stand-in answering with real httpx responses."""
+
+    def __init__(self, *responses):
+        self.queued = list(responses)
+        self.calls = []
+
+    def request(self, method, path, json=None, headers=None, timeout=None, **kw):
+        self.calls.append((method, path, json))
+        status, body = self.queued.pop(0)
+        req = httpx.Request(method, "http://slskd" + path)
+        if isinstance(body, str):
+            return httpx.Response(status, text=body, request=req,
+                                  headers={"content-type": "text/plain"})
+        return httpx.Response(status, json=body, request=req)
+
+def _client_for(*responses):
+    client = _RealRespClient(*responses)
+    soulseek._http_client = lambda cfg=None, _c=client: _c
+    return client
+
+# an offline peer: 500 + the reason in the body, still an HTTPStatusError so
+# every existing `except httpx.HTTPStatusError` handler keeps working
+_client_for((500, "User notfire appears to be offline"))
+try:
+    soulseek.enqueue_download("notfire", [{"filename": "Music/x.flac", "size": 1}])
+except httpx.HTTPStatusError as exc:
+    assert exc.response.status_code == 500, exc.response
+    assert "appears to be offline" in str(exc), str(exc)
+    assert "for url" in str(exc), str(exc)        # which call, like httpx says
+else:
+    raise AssertionError("enqueue_download swallowed slskd's 500")
+
+# slskd's download-request limiter (429, a global two-slot semaphore) is
+# transient: the request was not accepted, so it is retried once and succeeds
+_client = _client_for((429, "busy"), (201, {"Enqueued": [], "Failed": []}))
+assert soulseek.enqueue_download("peer", [{"filename": "Music/a.flac", "size": 1}]) is True
+assert len(_client.calls) == 2, _client.calls
+
+# an accepted call whose Failed list is non-empty did NOT queue those files:
+# the caller must not wait out a timeout for transfers that never started
+_client_for((201, {"Enqueued": [{"filename": "Music/a.flac"}],
+                   "Failed": [{"filename": "Music/one.flac"},
+                              {"filename": "Music/two.flac"}]}))
+try:
+    soulseek.enqueue_download("peer", [{"filename": "Music/a.flac", "size": 1}])
+except soulseek.SlskdError as exc:
+    assert "2 file(s) refused" in str(exc), str(exc)
+    assert "one.flac" in str(exc) and "two.flac" in str(exc), str(exc)
+else:
+    raise AssertionError("enqueue_download ignored slskd's Failed list")
+
 soulseek._http_client = _real_http_client
 
 # --------------------------------------------------------------------------- #
@@ -821,6 +883,218 @@ for _meth, _url, _body in (("get", "/api/soulseek/messages", None),
 for _name, _orig in _real_wrappers.items():
     setattr(soulseek, _name, _orig)
 
+# --------------------------------------------------------------------------- #
+# clear_transfer_files (§A): the partials ONE transfer staged, and the size
+# test that keeps a FINISHED download's own bytes out of the delete
+# --------------------------------------------------------------------------- #
+CLR = tempfile.mkdtemp(prefix="mlo_clear_files_")
+CLR_DD = os.path.join(CLR, "downloads")          # slskd's download dir
+CLR_INC = os.path.join(CLR, "incomplete")        # its SIBLING staging dir
+CLR_LEG = os.path.join(CLR_DD, ".incomplete")    # pre-migration staging
+os.makedirs(CLR_DD)
+
+
+def clr_put(root, rel, size):
+    p = os.path.join(root, rel.replace("/", os.sep))
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    with open(p, "wb") as f:
+        f.write(b"\0" * size)
+    return p
+
+
+# a staged partial is unfinished by definition: the file IS deleted even when
+# it already reached the peer's reported size (slskd stages at o size until it
+# moves the finished transfer into place)
+_staged = clr_put(CLR_INC, "Some User/Music/Album/01 - a.flac", 4096)
+_legacy = clr_put(CLR_LEG, "Some User/Music/Legacy/01 - b.flac", 999)
+# (staged there at the same size slskd reports, so this is the full-size case)
+_res = soulseek.clear_transfer_files(CLR_DD, "Some User",
+                                     "Music\\Album\\01 - a.flac", 4096)
+assert _res["files_deleted"] == 1, _res
+assert _res["bytes_freed"] == 4096, _res
+assert _res["problems"] == [], _res
+assert not os.path.exists(_staged), "a staged partial at full size survived"
+# the empty trees it left are pruned bottom-up — the staging ROOT survives
+assert not os.path.exists(os.path.join(CLR_INC, "Some User")), "empty tree kept"
+assert os.path.isdir(CLR_INC), "the incomplete root itself was removed"
+# an install that has not migrated still stages under <downloads>/.incomplete,
+# and there the reported size is not the whole story: still a partial, deleted
+_res = soulseek.clear_transfer_files(CLR_DD, "Some User",
+                                     "Music\\Legacy\\01 - b.flac", 999)
+assert _res["files_deleted"] == 1, _res
+assert not os.path.exists(_legacy), "legacy .incomplete partial survived"
+assert os.path.isdir(CLR_LEG), "the .incomplete root itself was removed"
+
+# a file that is simply not there is not an error (slskd already moved it)
+_res = soulseek.clear_transfer_files(CLR_DD, "Some User",
+                                     "Music\\Ghost\\01 - g.flac", 4096)
+assert _res == {"files_deleted": 0, "bytes_freed": 0, "problems": []}, _res
+
+# in the DOWNLOAD dir the only honest test is size: a SHORT file is a truncated
+# leftover, one at/above the reported size may be the album itself, and with no
+# reported size (slskd said 0) nothing may be deleted at all
+_short = clr_put(CLR_DD, "Album Short/01 - s.flac", 500)
+_full = clr_put(CLR_DD, "Album Full/01 - f.flac", 4096)
+_over = clr_put(CLR_DD, "Album Over/01 - o.flac", 8192)
+_unknown = clr_put(CLR_DD, "Album Unknown/01 - u.flac", 512)
+_res = soulseek.clear_transfer_files(
+    CLR_DD, "Some User", "Music\\Album Short\\01 - s.flac", 4096)
+assert _res["files_deleted"] == 1 and _res["bytes_freed"] == 500, _res
+assert not os.path.exists(_short), "a truncated partial was kept"
+for _kept, _remote, _size in (
+        (_full, "Music\\Album Full\\01 - f.flac", 4096),
+        (_over, "Music\\Album Over\\01 - o.flac", 4096),
+        (_unknown, "Music\\Album Unknown\\01 - u.flac", 0)):
+    _res = soulseek.clear_transfer_files(CLR_DD, "Some User", _remote, _size)
+    assert _res["files_deleted"] == 0 and _res["problems"] == [], (_remote, _res)
+    assert os.path.isfile(_kept), f"{_kept} was deleted ({_res})"
+shutil.rmtree(CLR, ignore_errors=True)
+
+# --------------------------------------------------------------------------- #
+# POST /api/soulseek/downloads/clear (§C): the scope decides BOTH what slskd
+# drops and whose local bytes go with it
+# --------------------------------------------------------------------------- #
+_real_dl_state = soulseek.downloads_state
+_real_dl_dir = soulseek.download_dir
+_real_cancel = soulseek.cancel_downloads
+_real_is_running = soulseek.is_running
+_real_web_up = soulseek.web_up
+
+_cancel_log = []
+_refuse = []
+_clear_roots = []
+
+
+def _fake_cancel(username, ids, cfg=None, failed=None):
+    """Stand in for slskd: record the DELETE set, honour a refusal."""
+    _cancel_log.append((username, [str(i) for i in ids]))
+    if failed is not None:
+        for tid in ids:
+            if str(tid) in _refuse:
+                failed.append(str(tid))
+    return True
+
+
+soulseek.cancel_downloads = _fake_cancel
+soulseek.is_running = lambda *a, **k: True
+soulseek.web_up = lambda *a, **k: True
+
+
+def _clear_scene():
+    """One succeeded, one errored, one in-flight transfer + their local bytes."""
+    root = tempfile.mkdtemp(prefix="mlo_clear_scope_")
+    dd = os.path.join(root, "downloads")
+    inc = os.path.join(root, "incomplete")
+    os.makedirs(dd)
+    paths = {
+        # slskd says Succeeded: its bytes ARE the album and are never deleted,
+        # even when the local copy is short (the size test alone would call
+        # this a truncated partial)
+        "s1": clr_put(dd, "Album One/01.flac", 500),
+        # a failed transfer left a truncated partial in the download dir
+        "e1": clr_put(dd, "Album Two/01.flac", 500),
+        # a live transfer stages under the sibling incomplete/
+        "i1": clr_put(inc, "peer/Music/Album Three/01.flac", 500),
+    }
+    tree = [{"username": "peer", "directories": [{"files": [
+        {"id": "s1", "filename": "Music\\Album One\\01.flac",
+         "state": "Completed, Succeeded", "size": 4096},
+        {"id": "e1", "filename": "Music\\Album Two\\01.flac",
+         "state": "Completed, Errored", "size": 4096},
+        {"id": "i1", "filename": "Music\\Album Three\\01.flac",
+         "state": "InProgress", "size": 4096},
+    ]}]}]
+    return root, dd, tree, paths
+
+
+def _clear_request(body, refuse=()):
+    _cancel_log[:] = []
+    _refuse[:] = [str(x) for x in refuse]
+    root, dd, tree, paths = _clear_scene()
+    _clear_roots.append(root)
+    soulseek.downloads_state = lambda cfg=None, _t=tree: _t
+    soulseek.download_dir = lambda cfg=None, _d=dd: _d
+    r = _client.post("/api/soulseek/downloads/clear", json=body)
+    return r, paths
+
+
+# finished: ONLY the terminal successes are dropped — a live transfer must not
+# be cancelled, a failed one is not this scope's business, and no local byte is
+# touched (the succeeded transfer's file IS the album)
+r, _p = _clear_request({"scope": "finished"})
+assert r.status_code == 200, r.text
+body = r.json()
+assert body["cleared"] == 1, body
+assert body["files_deleted"] == 0 and body["bytes_freed"] == 0, body
+assert body["failed"] == [], body
+assert _cancel_log == [("peer", ["s1"])], _cancel_log
+assert all(os.path.isfile(p) for p in _p.values()), _p
+
+# failed: the terminal failures go, and so do the partial bytes they staged —
+# the succeeded transfer's own file and the live one's staging are untouched
+r, _p = _clear_request({"scope": "failed"})
+assert r.status_code == 200, r.text
+body = r.json()
+assert body["cleared"] == 1, body
+assert body["files_deleted"] == 1 and body["bytes_freed"] == 500, body
+assert body["failed"] == [], body
+assert _cancel_log == [("peer", ["e1"])], _cancel_log
+assert not os.path.exists(_p["e1"]), "a failed transfer's partial survived"
+assert os.path.isfile(_p["s1"]), "a succeeded transfer's bytes were deleted"
+assert os.path.isfile(_p["i1"]), _p
+
+# incomplete: what is still in flight is dropped in slskd (?remove=true, so it
+# does not re-request the files) and its staged bytes go with it
+r, _p = _clear_request({"scope": "incomplete"})
+assert r.status_code == 200, r.text
+body = r.json()
+assert body["cleared"] == 1, body
+assert body["files_deleted"] == 1, body
+assert _cancel_log == [("peer", ["i1"])], _cancel_log
+assert not os.path.exists(_p["i1"]), "a live transfer's staged partial survived"
+assert os.path.isfile(_p["s1"]) and os.path.isfile(_p["e1"]), _p
+
+# all: every transfer, and with it the failed + in-flight partials
+r, _p = _clear_request({"scope": "all"})
+assert r.status_code == 200, r.text
+body = r.json()
+assert body["cleared"] == 3, body
+assert body["files_deleted"] == 2 and body["bytes_freed"] == 1000, body
+assert _cancel_log == [("peer", ["s1", "e1", "i1"])], _cancel_log
+assert os.path.isfile(_p["s1"]), "a succeeded transfer's bytes were deleted"
+
+# an unknown scope is refused instead of guessing
+r, _p = _clear_request({"scope": "everything"})
+assert r.status_code == 400, (r.status_code, r.text)
+assert "unknown scope" in r.json()["detail"], r.text
+
+# a body with NO scope keeps the old contract exactly: every FINISHED transfer
+# (failures included), the old {"ok", "cleared"} shape, and not one local file
+r, _p = _clear_request({})
+assert r.status_code == 200, r.text
+assert r.json() == {"ok": True, "cleared": 2}, r.json()
+assert _cancel_log == [("peer", ["s1", "e1"])], _cancel_log
+assert all(os.path.isfile(p) for p in _p.values()), _p
+
+# one transfer slskd refuses to drop is REPORTED (failed[]) — the scope still
+# clears the rest and the request is still a 200
+r, _p = _clear_request({"scope": "incomplete"}, refuse=("i1",))
+assert r.status_code == 200, r.text
+body = r.json()
+assert body["cleared"] == 1, body
+assert len(body["failed"]) == 1, body
+assert body["failed"][0]["username"] == "peer", body["failed"]
+assert body["failed"][0]["filename"] == "Music\\Album Three\\01.flac", body["failed"]
+assert "did not confirm" in body["failed"][0]["reason"], body["failed"]
+
+soulseek.cancel_downloads = _real_cancel
+soulseek.downloads_state = _real_dl_state
+soulseek.download_dir = _real_dl_dir
+soulseek.is_running = _real_is_running
+soulseek.web_up = _real_web_up
+for _root in _clear_roots:
+    shutil.rmtree(_root, ignore_errors=True)
+
 shutil.rmtree(L3, ignore_errors=True)
 
 os.environ.pop("MLO_MUSIC_FOLDER", None)
@@ -828,5 +1102,44 @@ shutil.rmtree(LAYOUT, ignore_errors=True)
 shutil.rmtree(MF2, ignore_errors=True)
 shutil.rmtree(REDIRECT, ignore_errors=True)
 assert not os.path.exists(LAYOUT) and not os.path.exists(MF2)
+
+# --------------------------------------------------------------------------- #
+# The Soulseek status push (server/main.py)
+# --------------------------------------------------------------------------- #
+# The tab's dot is drawn from /api/soulseek/status; these pin the rule that a
+# change to anything the dot reads pushes a frame, so a login that lands (or a
+# slskd that dies) repaints the browser without a poll or a reload.
+from server import main as srv_main  # noqa: E402
+
+_state = {"installed": True, "running": True, "logged_in": False,
+          "error": "INVALIDPASS", "conflict": None, "account": ""}
+srv_main.soulseek_status_payload = lambda: dict(_state)
+pushed = []
+srv_main._broadcast = lambda frame: pushed.append(frame)
+
+srv_main.progress_clients.add("dummy-watcher-client")
+srv_main._SLSK_SIG = None
+assert srv_main._soulseek_check() is True, "first look must push"
+assert pushed == [{"type": "soulseek"}], pushed
+assert srv_main._soulseek_check() is False, "an unchanged status must not re-push"
+
+# …and the login landing is exactly what the dot is waiting for
+_state["logged_in"] = True
+_state["error"] = None
+_state["account"] = "dillydallier07"
+assert srv_main._soulseek_check() is True, "a login must push"
+assert len(pushed) == 2, pushed
+assert srv_main._soulseek_check() is False, pushed
+
+# …as is the daemon going away
+_state["running"] = False
+_state["logged_in"] = None
+assert srv_main._soulseek_check() is True and len(pushed) == 3, pushed
+
+# With nobody connected the daemon is not queried at all
+srv_main.progress_clients.clear()
+_state["running"] = True
+srv_main._SLSK_SIG = None
+assert srv_main._soulseek_check() is False, "no clients → no push"
 
 print("ok")

@@ -4,12 +4,10 @@
 app that *manages, optimizes, audits, grades and plays* your music library.
 Built on the proven `mlo` engine with a React UI: playback of music **and**
 music videos (with karaoke-synced lyrics), manual + smart playlists,
-favorites, a discovery-driven recommendation engine (Deezer, ListenBrainz,
-iTunes, TheAudioDB, Wikipedia) that always falls back to MusicBrainz, a
-multi-source lyrics chain, a MusicBrainz browser whose download path stays
-MusicBrainz, an offline player cache, multi-format export, and a Soulseek
-client with an automatic MusicBrainz-driven importer that can verify what it
-downloaded with AcoustID.
+favorites, artist artwork and biographies pulled from Deezer, TheAudioDB,
+iTunes and Wikipedia, a multi-source lyrics chain, an offline player cache,
+multi-format export, and a Soulseek client with an automatic
+MusicBrainz-driven importer that can verify what it downloaded with AcoustID.
 
 All app state (config, playlists, favourites, the beets library, the
 Soulseek config) lives in a single hidden `.mlo` folder inside your music
@@ -19,15 +17,12 @@ machines.
 
 ## Highlights
 
-- **Home** — a sidebar landing page that loads album recommendations from a
-  popularity-aware discovery API (Deezer's related-artist graph and fan
-  counts, ListenBrainz's sitewide charts, resolved back to MusicBrainz
-  release groups), seeded from your own taste (most-collected artists +
-  most-tagged genres) and de-duplicated against what you already own. A
-  "Popular right now" shelf shows what people are actually listening to,
-  and any recommendation that isn't in the library can be wished for
-  straight from its card. Recently added, best-graded, rediscover and
-  favourite shelves sit beside it, with a skeleton loading state.
+- **Home** — a sidebar landing page of library highlights: recently added,
+  best-graded, rediscover, top-artist, favourite, wanted and
+  needs-attention shelves with a skeleton loading state, plus the library's
+  own stats header. Everything on it is derived from the library itself —
+  no provider is consulted, so it loads from the same cached payload the
+  rest of the app uses.
 - **Wishes** — save any MusicBrainz release to the library *without*
   downloading it. A background worker re-searches Soulseek for every open
   wish on a configurable interval and auto-imports a release the moment a
@@ -42,8 +37,8 @@ machines.
   first-class tracks.
 - **Artist pages** — a real artist page: hero image, its own grade (only the
   checks that apply to an artist folder — the image and the description),
-  the stored description with its source and a Fetch/Edit/Clear flow,
-  a similar-artists row, and the album list. Artist images are fetched
+  the stored description with its source and a Fetch/Edit/Clear flow, and
+  the album list. Artist images are fetched
   automatically from four providers when you ask for one, and the picker
   offers every candidate (plus a manual upload) when the automatic pick is
   wrong or missing. See *Artist pages* below.
@@ -51,13 +46,25 @@ machines.
   links (MusicBrainz + RateYourMusic logo buttons on each link's own
   metadata row), the link paste-editor, album + per-track cover upload and
   online cover search, album/artist descriptions fetched from Wikipedia,
-  TheAudioDB or MusicBrainz, a **More like this** row on album and track
-  pages, manual tag editing, per-track video tag editing, and a full lyrics
-  editor (synced/word-synced ELRC, translations, transliterations, hotkeys).
+  TheAudioDB or MusicBrainz, manual tag editing, per-track video tag
+  editing, and a full lyrics editor (synced/word-synced ELRC, translations,
+  transliterations, hotkeys). A **Credits** view (the track detail modal and
+  the album's overflow menu) lists who actually played on the record —
+  MusicBrainz `artist-rels` grouped by role (performer with its instrument,
+  vocals, producer, engineer, mix, mastering, arranger, conductor, remixer,
+  plus the work a classical track belongs to), loaded only when you open it;
+  when MusicBrainz has nothing (or the file carries no MBID) it falls back to
+  the file's own PERFORMER/COMPOSER/LYRICIST/… tags and says so with a
+  *file tags* badge instead of passing them off as catalogue data.
 - **Player** — persistent player bar (queue, drag-reorder, shuffle,
   repeat-one, speed, sleep timer, ReplayGain, visualizer, volume shared
   app-wide) plus a **fullscreen player** with animated karaoke lyrics,
-  queue and display options. ReplayGain is applied through the WebAudio gain
+  queue and display options. The spectrum (fullscreen strip and the background
+  ambience) is drawn on a perceptual dB scale with reserved headroom and a
+  per-band rolling reference, so a loud master shows shape instead of pinning
+  every bar at full height, and it meters both audio and music videos —
+  starting on the first play, surviving track changes, seeks and buffering.
+  ReplayGain is applied through the WebAudio gain
   stage in track, album or off mode with a preamp, and a track whose file
   carries no ReplayGain tags is measured on the fly (ffmpeg EBU R128,
   cached) instead of silently playing loud. Music videos play fullscreen
@@ -82,19 +89,7 @@ machines.
 - **Favorites** — liked tracks / albums / artists / playlists, consistent
   with the library views (ctrl-click a track title anywhere to open its
   track page for editing; the player bar title opens it too).
-- **MusicBrainz browser** — the sidebar's *MusicBrainz* entry (and Enter in
-  the global search box) opens a catalogue browser: search albums and
-  artists through the discovery chain (covers, years, popularity) with a
-  source toggle — *auto* (discovery first, MusicBrainz fallback),
-  *discovery*, or *MusicBrainz only*. Rows that MusicBrainz knows drill into
-  the release-group / release views and can be added to *Wishes*,
-  auto-imported (one best edition per group, or every eligible edition —
-  queued in about a second and resolved/downloaded in the background), or
-  matched against the library; rows that only Deezer/iTunes know open an in-page
-  detail panel (cover, label, genres, track list) whose *Add to wishes*
-  button resolves the release group on MusicBrainz first — so **search is
-  discovery, download is still MusicBrainz**. Pasting a musicbrainz.org link
-  or a bare MBID anywhere jumps straight to that entity.
+
 - **Import** — drag & drop uploads, a watched import folder, or the
   Downloads/Soulseek paths: MusicBrainz release matching, **AcoustID
   fingerprint matching** (it tells you which release the audio actually is,
@@ -118,11 +113,33 @@ machines.
   instead of half-tagged. The chain is configurable (Settings → *Import*) and
   can run over several albums at once: **bulk import** queues them, imports
   with a configurable concurrency and reports per-album and per-script
-  results.
+  results. **An album the Soulseek auto-importer fetched is deliberately NOT
+  tagged by itself**: it is placed in the library, its MusicBrainz identity,
+  album+artist RYM links, artist metadata and cover candidates are resolved and
+  the app then walks you into the wizard (see *Soulseek*) — every tag write
+  after that is yours, in the wizard's steps or the tag-action menus.
   The artist image, artist description and album description are fetched by
   the same chain (`metadata_auto_fetch`) — with `metadata_review` on, the
   candidates are staged instead of written and you apply the one you want
   (see *Artist pages*).
+  The wizard's eight steps are **Select & separate → Links → Match → Covers →
+  Genres → Lyrics → Advisory → Finish**, and each one now offers what the rest
+  of the app can do:
+  - **Links** resolves the album's RateYourMusic page *and* its artist page
+    automatically (one button, nothing written until you save) and reads the
+    URL you paste — an `/artist/…` URL fills the artist field, a `/song/…`
+    page is refused instead of being stored as the album link, which used to
+    block the automatic lookup forever.
+  - **Covers** offers the candidates the import fetched when `cover_review` is
+    on (*Choose a cover (N)* opens the picker pre-loaded, same as the album
+    page), plus upload / URL / MusicBrainz / finder.
+  - **Genres** keeps the MusicBrainz import and adds the RYM-first genre
+    *chain* the rest of the app uses.
+  - **Finish** keeps the script checkboxes and the *Run the import chain*
+    button (now enabled for an album opened by path, not just uploads) and adds
+    **Run all scripts**, which runs your configured `run_all_order` over the
+    album — the same pipeline Optimization → *Run All* runs, right where the
+    import ends.
 - **MusicBrainz auto-import** — a release, a release group or an artist can
   be downloaded without picking an edition by hand: *best* takes one release
   per release group, *all* takes every eligible edition of that group (an
@@ -140,23 +157,116 @@ machines.
   ("MusicBrainz is busy — try again") while every Auto-import button shows a
   spinner and *Queuing…*. The pick is the auto-import policy below: Official
   first, promotional/bootleg editions dropped while
-  `auto_import_avoid_promo` is on, then the medium order
+  `auto_import_avoid_promo` is on, editions with no RELEASECOUNTRY dropped
+  while `auto_import_require_country` is on (default), then the medium order
   `CD → Digital Media → Vinyl → Cassette → Other`
-  (`auto_import_medium_order`), earliest date breaking ties.
+  (`auto_import_medium_order`), earliest date breaking ties. Negative traits
+  are ranked, not merely ignored: a withdrawn/expired/cancelled edition sorts
+  below a plain release, a promo/bootleg below that, and an edition carrying a
+  release country above one that does not — so a group whose only edition
+  lacks a country is reported as ineligible instead of being downloaded on a
+  guess.
 - **Soulseek** — managed slskd instance (autostart, shares = music folder),
-  search & download UI with a live status dot in the sidebar, and an
-  **auto-importer** that searches releases by catalog number / artist +
-  album, verifies rip logs (minimum logchecker score) and download
-  completeness, then imports and organizes the album automatically.
-  The query list runs most-specific-first — catalog number, then artist +
-  album — and stops the moment one query returns a folder that is both
-  complete and lossless, instead of waiting out every template. Each query
-  gets a **search window** (`soulseek_auto_search_wait`, Settings →
-  *Auto-import*, default 15 s) counted as quiet time since the network's
-  last response, and a transfer that moves no bytes for 3 min is abandoned
+  search & download UI with a live status dot in the sidebar (the backend
+  pushes a frame the moment the login state, the daemon or a port conflict
+  changes, so the dot turns green on login — or red on an unexpected logout —
+  without waiting for a poll or a reload), and an
+  **auto-importer** that searches each release by its own most specific
+  trait, verifies rip logs (minimum logchecker score) and download
+  completeness, then imports and organizes the album automatically. A CD is
+  searched by its catalog number alone; the search stops the moment a folder
+  is both complete and lossless, instead of waiting out a window. Each query
+  gets a **fallback search window** (`soulseek_auto_search_wait`, Settings →
+  *Auto-import*, default 10 s) counted as quiet time since the network's
+  last response — a rare album ends there, and a transfer that moves no bytes for 3 min is abandoned
   rather than tying up the job. While a job runs, the Soulseek page shows
-  live per-query progress: elapsed against the window, plus response and
-  file counts.
+  live response and file counts for the running query — no countdown, since
+  the window is a ceiling a usable candidate ends early and a timer would
+  promise a duration the search does not serve. It carries a **response
+  limit** too (`soulseek_auto_response_limit`, default 15 peers): slskd only
+  hands a search's results back once it has ENDED, so without the limit a
+  popular album — peers replying for a minute straight — never went quiet and
+  nothing was readable until the whole window had elapsed. Measured through
+  the app's own client: no limit ⇒ 32 s before the first result; 5 responses
+  ⇒ 0.5 s; 40 ⇒ 11 s. A search still running when the window closes is
+  cancelled instead of left occupying slskd.
+  **Every candidate the search scored is tried** in rank order — there is no
+  rejection cap, each refused peer costs only its own attempt and everything
+  it left behind is removed before the next one starts: the transfers are
+  cancelled in slskd and confirmed, then the candidate's files are swept from
+  the download folder (including slskd's `<name>_<ticks>` partial writes and
+  anything the .log gate had already fetched) and from the staging dir, with
+  the sweep repeated until a pass deletes nothing; the scope is the rejected
+  candidate's own album folder, so a same-named file of another peer or of
+  the same peer's other album is never touched. A job whose candidates all
+  fail now offers the same *Wishes* handoff as an empty search, so a release
+  whose peers never deliver a usable rip keeps being watched for instead of
+  ending in a bare error. A failure to
+  queue names slskd's own reason (`User <name> appears to be offline` for a
+  peer that left between search and enqueue) instead of an opaque "500
+  Internal Server Error". A peer whose transfers are all **queued** is held
+  for its own queue budget (its reported queue length at its advertised rate,
+  floored at 3 min) instead of being abandoned at the first stall, and a
+  transfer that moved bytes and then froze is still dropped at 3 min.
+  When the catalog number finds nothing usable, ONE broader `artist album
+  year` query follows it — never in parallel, never when the first found a
+  candidate — and a CD whose peers hold only WEB rips (all 23 tracks,
+  lossless, no `.log`/`.cue`) parks on a **"No CD rip with logs found"**
+  prompt offering those folders instead of dead-ending: accepting downloads
+  one and stamps the album as *Digital Media* up front, so verification,
+  tagging and grading all match what actually arrived. Declining falls back
+  to the wishes offer.
+  A CD candidate is **gated on its rip log before any album byte is
+  requested**: the `.log` (one per disc) is queued alone, waited for and
+  scored with Logchecker, and only a log that passes the configured minimum
+  (`soulseek_auto_log_min_score`, default 100) triggers the second call that
+  queues the album — so a peer whose log scores 60 costs a few kB and one
+  queue join instead of a partial album that then has to be swept. The
+  rejection names the score and the required bar, and the next candidate is
+  tried; a log that never arrives is reported with the seconds it waited.
+  The folder a download lands in is decided by the job, not by the peer: the
+  app points slskd's destination template at a per-download folder under
+  `.mlo/downloads`, so two peers offering the same album never collide in one
+  top-level folder and a multi-disc peer keeps its disc folders *inside* the
+  album folder (which is what used to get multi-disc candidates rejected).
+  Emptied directories are pruned after every rejected candidate, cancelled
+  job and successful import.
+  A release the library already holds is refused everywhere it can be
+  queued — the bulk routes skip it with `already in the library`, and the
+  interactive job refuses with the same reason — so a finished import cannot
+  be downloaded a second time; two jobs for one release are deduplicated
+  against the running job and the queue as well.
+  Download completion is judged on slskd's verdict AND the file itself: a
+  transfer slskd reports succeeded must have landed at the expected size, and
+  a file that is complete on disk with a stable mtime counts as arrived even
+  when slskd has pruned the transfer record (cleared history, restart) —
+  which is what used to make a finished album look unfinished and re-download
+  it. Progress reports the **instantaneous** rate (byte delta between polls,
+  never slskd's lifetime average), an ETA from remaining bytes at that rate,
+  and three separate counts that are not the same thing: files slskd calls
+  complete, files the pipeline has accepted, and the byte-weighted
+  percentage. Candidates are
+  ranked towards the copy that arrives **fastest**: complete and lossless
+  first, then logs/cues, a free upload slot, the shortest queue and the
+  **peer's advertised upload rate** — the folder's slowest file decides, worth
+  up to 4.5 points (1 MiB/s each), so speed breaks ties between equally
+  complete folders but can never buy an incomplete one. Search terms are as
+  specific as the release allows: a **CD is searched by its catalog number
+  and nothing else** (`soulseek_auto_cd_queries`), the trait rip folders
+  actually carry and the one query that does not drag in every other
+  pressing; Digital Media, which has no catalog number, uses
+  `artist album year`. A release that carries **several catalog numbers**
+  (MusicBrainz keeps every label-info number — a reissue under two labels, or
+  the same number spelled `XLCD 324` and `XLCD324`) is searched once per
+  number, all of them in flight together and their results merged before
+  scoring, capped at four so a release with a dozen numbers cannot spam the
+  network; wishes inherit the same set (a wish stores no query list, so the
+  worker derives it from the release). A CD whose release carries no catalog number falls back
+  to that wording once (and says so in the job log) instead of failing with
+  nothing to search by. The tab names the account slskd is **actually signed
+  in as**, and an auto-import that finishes with an album on disk takes the
+  app straight to `/import?album=…` so tagging starts without hunting for the
+  job.
   Search returns every codec the network offers, grouped per shared folder
   and ordered CD rip (log + cue) → lossless → free slot / shortest queue,
   with All / CD rips (log + cue) / Lossless / Lossy chips plus a codec
@@ -182,8 +292,13 @@ machines.
   toasts every terminal auto-import state, including "added to wishes", and
   every wish that flips to **Imported** or **Failed**. The *Downloads* tab
   buckets transfers into active, queued, completed and failed, with
-  per-transfer **Cancel**, **Retry** on the failed ones and **Clear finished**
-  to empty the history.
+  per-transfer **Cancel**, **Retry** on the failed ones and three clearing
+  actions: **Clear finished** (history only), **Clear failed** and **Clear
+  incomplete** — the last cancels every in-flight transfer in slskd *and*
+  deletes the partial bytes it had staged, then prunes the emptied
+  directories, so an abandoned download stops occupying the staging area.
+  Each reports `N cleared · X freed` and lists anything slskd refused to
+  drop.
   The sidebar dot is green when logged into the
   Soulseek network (tooltip names the account), amber when slskd runs but
   isn't logged in (tooltip carries the daemon's own error, e.g.
@@ -219,7 +334,7 @@ machines.
 - **Desktop + Web** — served by FastAPI (browser or Docker); a Tauri v2
   desktop shell lives in `desktop/`.
 
-## Optimization: the 14 scripts
+## Optimization: the 17 scripts
 
 Run All executes a configurable order (default shown in parentheses where
 it differs). Every script can run individually, on selected albums, or be
@@ -240,7 +355,29 @@ forced to redo work.
 | 11 | Remux videos | Any video container (VOB/AVI/WMV/TS/MOV/FLV…) → MKV, video copied bit-exact when possible, every audio stream re-encoded to FLAC, subtitles copied, chapters preserved (MP4/M4V are scanned but only remuxed while `video_process_mp4` is on — they already play natively) |
 | 12 | Key & BPM | librosa-backed INITIALKEY + BPM (musical/camelot/openkey notation) |
 | 13 | Fetch lyrics | The configurable synced lyrics chain (default LRCLIB → NetEase → QQ Music → Kuwo → Kugou → YouTube captions) into the configured format (embedded / .lrc / both) |
-| 14 | Beets tagging | Managed beets (Picard parity) with the naming script, genre import, work/movement tags |
+| 14 | Beets tagging | Managed beets (Picard parity) with the naming script, genre import, work/movement tags. Its output is streamed to the progress bar (one tick per item, so the longest step of a run is no longer a static label) and the plugin skips the locale-alias lookups a Latin-script library cannot use — measured on one 8-track CD album: 42 s → 14 s |
+| 15 | Release tracklist | Records the MusicBrainz release's own tracklist as `.mlo_expected.json` in the album folder (release id + disc/position/title/recording MBID per track) — the only way a PARTIAL import can name what never arrived. Grading requires it (`grade_check_expected_tracks`), the album page greys out the missing tracks from it, and `finish_album` runs it on every import path (after tagging, since it needs the release id the match wrote). An album with no MusicBrainz id is reported and skipped, never given a fabricated manifest |
+| 16 | Mood & Energy | The mood classifier on its own: decodes each track's audio (librosa; videos through ffmpeg) and writes **MOOD** plus **ENERGY** — the 0-100 arousal the verdict was scored from. Script 8 runs the same stage as part of its pass; this is the one to run when only the mood work is wanted (a genre rewritten since, `mood_source` changed, ENERGY backfilled onto a library tagged before it existed). Already-tagged tracks are skipped unless the script is forced (`force_mood`), and `mood_enabled` off skips it entirely |
+| 17 | Lyrics transliterate (AI) | The one optional model in the app: romanizes non-Latin lyrics and translates them into every language in `lyrics_translation_langs`, writing `TRANSLITERATION-JA-LATN` / `TRANSLATION-EN` tags (and `.romaji.lrc` / `.<lang>.lrc` sidecars for LRC/BOTH lyric formats). Line structure and timings are preserved and re-synced at `lrc_sync_level`, so the transforms stay karaoke-aligned with the original; blank lines pass through, already-Latin lyrics are skipped (romanizing them is a no-op) and a "translation" that mirrors its source is not stored. Any OpenAI-compatible endpoint works (Settings → AI, or the setup wizard); answers are disk-cached per track so re-runs only pay for changed lyrics, and with no AI configured the script logs one line and does nothing |
+| 18 | Publish lyrics (LRCLIB) | Gives back: for every track that carries lyrics (embedded `LYRICS` or an `.lrc` sidecar) it asks LRCLIB whether it already knows that recording — artist, title, album and duration, the same exact-then-search lookup the fetch chain uses — and, when it does not, submits this library's own text (`POST /api/publish`). A synced text goes with its plain form beside it, because LRCLIB wants both. LRCLIB is the app's first lyrics provider, so a hand-tagged library is exactly what the database is missing. Default ON (`lrclib_auto_publish`; off skips the script everywhere), and a per-track rule the script can never override: a track LRCLIB already answers for is never touched (`force_publish` re-submits anyway). Skips are counted apart — `already on LRCLIB`, `no lyrics`, `instrumental`, `no duration` — and a 409 duplicate is a skip, not a failure. The manual *Publish to LRCLIB* button on the lyrics editor is unchanged and shares the same client. |
+
+### Tag actions: re-running a script on a selection
+
+Every selection (a track, an album, an artist's folder, or a checked batch)
+carries the same menu, and its **Re-run & overwrite** section is the way to
+redo work the files already carry — each entry sets the script's own force
+flag, which is the only thing that makes it look at a file again:
+
+| Entry | Runs | Force flag |
+| --- | --- | --- |
+| Force re-audit (rewrite AUDIT tags) | 6 | `force_audit` |
+| Force AccurateRip (.accurip rewrite) | 9 | `force_accurip` |
+| Force DR & ReplayGain (rewrite tags) | 7 | `force_dr_replaygain` |
+| Force re-encode FLACs | 3 | `force_reencode_flac` |
+| Re-grade | 4 | — (grading always re-reads) |
+
+The same flags are on the Optimization page's Force panel; the menu is the
+short path when you are looking at the one album that needs it.
 
 ### Embedded covers (new in 2.1.0)
 
@@ -259,6 +396,31 @@ which every player can read. Settings → *Embedded covers* flips the policy:
 
 The pass is idempotent — it only rewrites files whose embedded art actually
 changes.
+
+### Missing covers (fetched at import, and YOU pick by default)
+
+An import that finds no cover art does not decide for you any more
+(`imports.run_cover_step`). Two switches in Settings → *Images*:
+
+- **`cover_auto_fetch`** (on) — fetch candidates for a missing cover during
+  the import. Off means nothing is fetched: the cover finder, the wizard's
+  *Covers* step and the grader's *Missing cover* verdict are the only cover
+  paths.
+- **`cover_review`** (on, the default) — the fetched candidates are **staged,
+  not written**: the album page shows *Choose a cover (N)* next to the empty
+  cover slot, opening the finder pre-loaded with exactly those candidates, and
+  your pick is written. Turn it off for the old automatic behaviour (the best
+  candidate is applied as part of the import).
+
+Either way the chain is the same as the finder's: the album's own
+`MUSICBRAINZ_RELEASEGROUPID` asks the Cover Art Archive by id, otherwise the
+COV meta-search runs on artist + album and falls back to the Cover Art
+Archive → Deezer → iTunes. Whatever is finally accepted goes through the
+upload writer, so the file is cropped/resized/re-encoded to the library's
+settings (`cover_target_size`, `cover_jpeg_quality`, …). An album that
+already has a cover is skipped without a single request, a provider failure
+leaves the album exactly as it arrived (the reason lands in the import
+result), and nothing is ever fatal.
 
 ### Cover compression
 
@@ -290,16 +452,33 @@ The app now enforces canonical file naming in all three ways:
   sidecars, and leftover files like covers/logs). Case-only renames work on
   case-insensitive filesystems too.
 
-#### The default naming script (new in 2.4.0)
+#### The default naming script (current)
 
 ```
-%albumartist% [%musicbrainz_albumartistid%]/%album%$if(%releasetype%,$if(%year%, (%releasetype%, %year%), (%releasetype%)),$if(%year%, (%year%),))$if(%label%, [%label%])$if(%releasecountry%, [%releasecountry%])/%discnumber%-$num(%tracknumber%,2) %title%
+%albumartist% [%musicbrainz_albumartistid%]/$if(%releasetype%,[%releasetype%] ,)$if(%originaldate%,%originaldate% - ,)$if(%date%,%date% - ,)%album% {$if(%releasecountry%,%releasecountry%)$if(%media%,$if(%releasecountry%, - ,)%media%)$if(%catalognumber%,$if(%media%, - ,$if(%releasecountry%, - ,))%catalognumber%)}$if(%label%, [%label%])$if(%musicbrainz_albumid%, [%musicbrainz_albumid%])/%discnumber%-$num(%tracknumber%,2) %title%$if(%musicbrainz_trackid%, [%musicbrainz_trackid%])
 ```
 
-It produces `Artist [mbid]/Album (Album, 2020) [Label] [US]/1-01 Song.flac`,
-and degrades cleanly: an album with nothing but album/date came out as
-`Artist/Album (2020)/1-01 Song.flac`, because every optional segment is an
-`$if` — no dangling `[]`.
+Every level is identifiable without reading tags, and the segments are all
+`$if`-guarded — no dangling `[]` or ` - `:
+
+```
+System of a Down [cc0b7089-…]/[Album] 2001-08-27 - 2001-09-04 - Toxicity {US - CD - CK 62240} [American Recordings] [f8a44d0f-…]/1-04 Psycho [4f0e7e10-…].flac
+```
+
+- the album folder: name + release id, the artist folder: name + artist id
+- `[Release type]` uses the tag's own spelling; **both dates are written in
+  full** — the original (release-group) date first, then the release's own —
+  whenever the tags carry more than a year
+- the brace group is `country - media - catalog number`, each segment joined
+  only when the one before it is present (a rip with no catalog number keeps
+  its `CD`, and one with nothing to say keeps no braces at all)
+- the optional ` [label]` / ` [release id]` groups follow the braces, and the
+  file name ends with the recording id (`%musicbrainz_trackid%`)
+- with nothing but album/title the same script degrades to
+  `Artist/Album/1-01 Song.flac`
+
+Scripts from before this one are migrated on load: a stored default is
+swapped for the current one, a script you actually edited is kept.
 
 - **Multi-value tags keep the first value** (new in 2.4.0) —
   `%releasecountry%` (or its `%country%` fallback) and `%label%` may hold a
@@ -314,69 +493,48 @@ and degrades cleanly: an album with nothing but album/date came out as
   as *Missing RELEASETYPE tag* — never as an invented path, and never with a
   network call.
 
-## Home & recommendations (rewritten in 2.4.0)
+## Home
 
-The sidebar opens on **Home**: library stats plus shelves of albums.
+The sidebar opens on **Home**: library stats plus shelves of owned albums —
+**Recently added**, **Best graded**, **Rediscover** (a random library slice),
+**Favorites**, **Top artists**, **Wanted** (open Soulseek wishes) and
+**Needs attention**. Every card is an album you already have and clicks
+through to the album page.
 
-- **Recommended for you** — seeded from the artists you collect most and the
-  genres tagged most across your tracks, then expanded through a
-  **popularity-aware discovery chain**: Deezer's "fans also like" graph gives
-  the similar artists, their albums are ranked by Deezer's own fan counts,
-  and ListenBrainz's sitewide charts stand in when Deezer has nothing for a
-  seed. Recommendations the library already owns link to the album page;
-  the rest carry their provider cover art, a popularity chip
-  ("82k fans", "287k listens") and a **Wish** button that resolves the
-  release group on MusicBrainz and hands it to the Soulseek worker.
-- **Popular right now** — ListenBrainz's sitewide top releases (MBID-native,
-  cover art from the Cover Art Archive), i.e. what people are actually
-  playing this week.
-- **Recently added**, **Best graded**, **Rediscover** (random library slice),
-  **Favorites**, **Top artists**, **Wanted** and **Needs attention** — all
-  owned albums, click-through to the album page.
-
-Settings → *Home* controls the shelf sizes and which provider drives
-*Recommended for you* (`home_rec_source`: the discovery chain, ListenBrainz
-only, or the plain MusicBrainz release-group search). Results are TTL-cached
-and never re-hit the network on repeat views; a settings change invalidates
-them.
+Nothing on Home asks a provider anything: the shelves are built from the same
+cached library payload the rest of the app reads, so the page never waits on
+a network call. Settings → *Home* controls how many albums each shelf shows
+(`home_recent_count`).
 
 ## Discovery — the provider chain (new in 2.4.0)
 
-Every "what should I listen to / what is this / what does it look like"
-question goes through one keyless provider layer (`server/discovery.py`):
+The keyless provider layer (`server/discovery.py`) now serves one thing:
+**artist artwork and biographies**, walked in the order set under
+Settings → *Artist images & descriptions*.
 
 | Provider | What it gives |
 | --- | --- |
-| **Deezer** | Catalogue search, "fans also like" similarity, artist albums/tracks, real popularity (`nb_fan`/`fans`/`rank`), 1000px artist photos |
-| **ListenBrainz** | Sitewide listening charts (MBID-native, CAA cover ids) — the popularity signal with no identity resolution needed |
-| **iTunes** | Catalogue fallback and 3000px artwork (its URLs are templates) |
-| **TheAudioDB** | Artist biographies, album notes, press photos/banners |
+| **Deezer** | Artist photos (1000px) |
+| **iTunes** | High-resolution artwork |
+| **TheAudioDB** | Artist biographies and press photos/banners |
 | **Wikipedia** | Artist and album descriptions (lead-paragraph summaries) |
-| **MusicBrainz** | The identity anchor: release-group MBIDs, and the final fallback for every chain |
+| **MusicBrainz** | The identity anchor: release-group/artist MBIDs, and the final fallback |
 
 - **Fallbacks everywhere.** Each feature walks its configured source list in
-  order and falls back to the next provider; MusicBrainz is always last, so
-  a provider going dark degrades to "fewer, plainer results", never to
+  order and falls back to the next provider; MusicBrainz is always last, so a
+  provider going dark degrades to "fewer, plainer results", never to
   "no results". Order and on/off switches live in Settings → *Discovery*.
-- **Downloads stay MusicBrainz.** A discovery row that has no MBID is
-  resolved through MusicBrainz the moment you act on it (wish / match), so
-  the download path is unchanged — search is where the nicer APIs live.
-- **Cached.** 30 minutes for metadata, 15 for charts and recommendations,
-  with per-host politeness (MetaBrainz and Wikimedia get 1 req/s and a
-  contactable User-Agent).
-
-## More like this
-
-Album and track pages end with a **More like this** row: the album's artist
-expands into similar artists (Deezer's graph, MusicBrainz tag search as the
-fallback), and their most popular albums (or tracks) are ranked by the
-provider's own numbers. Rows the library already owns link straight to the
-album page; the rest offer *Wish* and a MusicBrainz link.
+- **Cached.** 30 minutes for metadata, with per-host politeness (MetaBrainz
+  and Wikimedia get 1 req/s and a contactable User-Agent).
 
 ## Artist pages (new in 2.4.0)
 
 - **Image** — fetched automatically from Deezer → TheAudioDB → iTunes →
-  Wikipedia on request. When the automatic pick is wrong or nothing is
+  Wikipedia on request, **by MusicBrainz id when the folder carries one**
+  (TheAudioDB's exact `artist-mb.php` record first): a bare name picks the
+  wrong subject often enough to matter ("Nirvana" is a 1960s UK band on
+  Deezer, whose album cover was stored as the Seattle band's photo). When the
+  automatic pick is wrong or nothing is
   found, the picker lists every candidate from every provider (plus a manual
   upload), so "no image" is a prompt, not a dead end. Images are stored in
   the artist folder (`artist.jpg`, provenance in
@@ -384,13 +542,27 @@ album page; the rest offer *Wish* and a MusicBrainz link.
   ratio at the configured JPEG quality — **no resolution requirement by
   default** (`artist_image_target_size` 0 keeps the provider's native size;
   small images are never rejected, and nothing is upscaled).
-- **Description** — Wikipedia's lead paragraph, TheAudioDB's biography, or a
-  MusicBrainz annotation, saved as `description.txt` in the artist folder,
-  with the source shown and a Fetch / Edit / Clear flow.
+- **Description** — the **full article**, not the lead paragraph: Wikipedia's
+  whole page as text, its in-text links kept as markdown and its section
+  headings kept in wiki form (`== History ==`, one `=` per heading level, the
+  viewer hides the markers), fetched from MediaWiki's `action=parse` (the
+  link-free `prop=extracts&explaintext` is the fallback), TheAudioDB's
+  complete biography, or a MusicBrainz annotation, saved as `description.txt` in
+  the artist folder, with the source shown and a Fetch / Edit / Clear flow. For
+  an artist with a MusicBrainz id the Wikipedia *title* is resolved through the
+  entity itself (MusicBrainz → Wikidata QID → the `enwiki` sitelink), so
+  "Nirvana" reads as `Nirvana (band)` and never as the Buddhist concept;
+  `description_full` (on by default) can be switched off to store just the lead
+  paragraph again. Long text is clamped to a few lines with a **Read more /
+  Show less** control (the same component on album pages), so a 36,000-character
+  article never pushes the page around.
 - **Fetched on import too** (new in 2.4.0) — the import chain's metadata step
   runs the same providers for the artist image, the artist description and the
   album description (`metadata_auto_fetch`, on by default) and saves the best
-  candidate, never overwriting something you already stored.
+  candidate, never overwriting something you already stored. The artist folder
+  is now matched even when its name carries the naming script's `[mbid]`
+  suffix — the lookup that, before 2.6.x, silently skipped every artist folder
+  and made this step look like it had run when it had written nothing.
   **Manual review mode** (`metadata_review`, off by default) stops the
   writing: the candidates are staged in
   `<music>/.mlo/data/metadata_review.json`, the album/artist page shows them
@@ -401,6 +573,11 @@ album page; the rest offer *Wish* and a MusicBrainz link.
   *Artist image stored* and *Artist description stored*. Album checks stay
   album-level; the page shows the album aggregate next to it so the two are
   never confused.
+- **Releases as a grid** — the artist page lists releases with the same card
+  grid as the library page (`AlbumCard`, the shared grid-size setting, cover /
+  year / track count / grade badge / play overlay), grouped by the type tags
+  the tracks carry (Album, EP, Single, Live, Compilation, Other) with the
+  search box and selection bar unchanged.
 
 ## Lyrics — six synced sources, in the order you choose (new in 2.4.0)
 
@@ -427,6 +604,31 @@ answers with timestamps — the order is a ranking, and each step is a reason:
 `GET /api/lyrics/providers` returns that ranking with each provider's notes,
 the saved order and the plain-lyrics policy.
 
+- **"Has lyrics" means lyrics, not a file.** A `.lrc` sidecar counts only
+  when real text survives stripping: a 0-byte file, a lone `[00:00.00]` stub or
+  a metadata-only header (`[ar:…]`, `[ti:…]`, `[offset:…]`) is *absent*, so the
+  wizard stops claiming lyrics a track does not have and the fetch overwrites
+  the stub instead of skipping it. A sidecar shared by two same-stem files
+  (`01 Song.flac` + `01 Song.mp3`) is credited to neither — one file's lyrics
+  never make another file look finished. The same rule gates the
+  INSTRUMENTAL=1 → 0 flip, so a stub cannot silently mark a track as having
+  vocals.
+
+- **Credits are not lyrics.** NetEase, QQ and Kugou hand the contributor
+  block back as the first "line" — usually at `[00:00.00]`, once per label
+  (`作词 : Byrne, Eno, Talking Heads` / `Lyrics: Byrne, Eno, Talking Heads`).
+  Script 1 and script 13 drop those lines: the credit becomes a blank line and
+  its stamp dies with it, so the first real lyric keeps its own time. A real
+  lyric that shares the stamp is kept — only the credit line goes — and a file
+  that held nothing but credits is left with no lyrics at all, which is what
+  "has lyrics" and the fetch chain then report. A lyric that merely mentions
+  the words ("and the lyrics by heart") is untouched: the rule is anchored at
+  the start of the line and needs a label or a `… by`.
+- **Automatic fetches need a confident match.** The chain's search floor
+  (0.6) is deliberately loose — it is what a person browsing candidates
+  wants — but a hit is only *written* unattended at 0.85, which a same-title
+  answer from a different artist cannot reach. The manual search box keeps the
+  loose floor and never writes on its own.
 - **Synced or nothing.** An answer without timestamps is thrown away as if
   the provider had none. LRCLIB's untimed records can be allowed back with
   `lyrics_allow_plain` — off by default, and the only opt-in that lets plain
@@ -463,12 +665,17 @@ requires them:
   switching ENERGY on for one format backfills exactly that format and
   leaves its MOOD untouched. Music videos get both tags too — the mood
   writer covers video containers, in one write per file.
-- **GENRE** — filled only when the tags carry none, from the configurable
-  **genre chain** (`genre_sources`), merged per track: the source order, then
-  each source's names, then a case-insensitive de-duplication, Title Case, and
-  a cap of `mb_genre_count` (default 3) **per track**. The default order is
-  **RateYourMusic → ListenBrainz → MusicBrainz → iTunes → Last.fm →
-  TheAudioDB → Wikidata → Bandcamp → Discogs → Deezer → Spotify**:
+- **GENRE** — filled only when the tags carry none, from `genre_sources`,
+  merged per track: the source order, then each source's names, then a
+  case-insensitive de-duplication, Title Case, and a cap of
+  `mb_genre_count` (default 3) **per track**. The default is **MusicBrainz →
+  RateYourMusic** — the two the library actually agrees with; the other nine
+  providers stay in the registry and can be added back in Settings →
+  Discovery (a saved list is used exactly as saved, so an old eleven-source
+  config is migrated to the new default only when it is byte-for-byte the
+  shipped order). In the import wizard the two run as **separate buttons**
+  (*From MusicBrainz* / *From RateYourMusic*), one source each, so a failing
+  provider can never look like a slow one:
   - **Every source is asked on every track**, at the best level that API
     allows. Per-track sources come first: RateYourMusic's release page (per
     track where the page states one, else the release's own list), ListenBrainz
@@ -478,14 +685,20 @@ requires them:
     artist-wide sources — Bandcamp's album tags, Discogs styles, Deezer's album
     genres, Spotify's *artist* genres — are marked `level: album`/`artist` in
     the provenance and are never promoted to a track answer.
-  - **RateYourMusic** is a real scrape of the release page (with a `/search`
-    fallback): browser-like headers (it sits behind Cloudflare), **1 request
-    per second under a lock**, and a **30-day on-disk cache**
-    (`<music>/.mlo/data/rym_cache`) so repeat work is paid for once. The
-    optional `rym_cookie` setting carries your own Cloudflare cookie; without
-    it RYM contributes nothing (Cloudflare answers the scrape instead) and the
-    chain falls through to the next source (a datacenter IP is blocked
-    regardless). Charts are *not* scraped — nothing in the app consumes them.
+  - **RateYourMusic** is asked **through MusicBrainz first**: the release
+    group's (or the artist's) `url-rels` already carry the RYM page — `type:
+    other databases` — so the Links button resolves
+    `…/release/album/nirvana/mtv_unplugged_in_new_york/` and
+    `…/artist/nirvana` with no scrape at all. Scraping is the fallback for
+    what MusicBrainz does not state: browser-like headers (RYM sits behind
+    Cloudflare), **1 request per second under a lock**, and a **30-day on-disk
+    cache** (`<music>/.mlo/data/rym_cache`) so repeat work is paid for once.
+    The optional `rym_cookie` setting carries your own Cloudflare cookie;
+    without it **one** probe is made per run — not a slug-by-slug walk — and
+    the note says so (`blocked by Cloudflare; set rym_cookie in Settings, or
+    MusicBrainz links are used`), with the whole lookup capped at 20 s so an
+    import can never hang on it. A datacenter IP is blocked regardless, and
+    charts are *not* scraped — nothing in the app consumes them.
   - **Provenance, not guesses.** Every ask is throttled per host and cached for
     30 days, and the response says who answered: per-track `sources` and
     `levels`, per-source counts, and `notes` naming every source that stayed
@@ -505,6 +718,39 @@ requires them:
 
 The import paths share one pipeline now (`server/imports.py`):
 
+- **No button is a dead click.** Every action in the wizard — the two genre
+  buttons, the advisory fetch, the artist/album metadata fetch, lyrics,
+  format/cue/image/optimize/DR/key&BPM/beets steps and *run all scripts* —
+  shows a progress bar: a real count where the work counts steps (the
+  metadata fetch `1/3…3/3`), the websocket relay's own `done/total` for the
+  long script runs (during *Run All* that reads as `step.fraction/total`,
+  e.g. `4.4/18`, and it no longer resets between scripts), and an
+  indeterminate bar plus a ticking clock for anything that cannot count.
+  Every HTTP error — including "no MusicBrainz album/release-group ID on the
+  track" — is shown verbatim next to the button. *Run all scripts* ends with
+  one row per chain id and its ok/error text, so a failing script is visible
+  instead of silent.
+- **Advisory has its own button** — one call fetches the advisory rating for
+  the whole album (Apple's album route answers per album), with per-track
+  outcome rows and a progress bar.
+- **Artist image, artist description and album description** get the same
+  treatment: a card with one row per item, its current state
+  (present/missing), a fetch button and a progress bar. The same step runs
+  unattended after a Soulseek auto-import, honouring
+  `artist_image_enabled`/`artist_description_enabled`, skipping what is
+  already there, and logging one line per item (`present — artist.jpg`,
+  `not-found — no source had a description`) so the job account is complete.
+  When the artist folder carries a MusicBrainz id the providers are asked
+  **by that id** (TheAudioDB's `artist-mb.php`), because a name alone picks
+  the wrong subject — "Nirvana" returned the 1960s UK band's album cover
+  from Deezer and the Buddhist concept from Wikipedia.
+- **Lyrics state is the file's own.** The wizard's track rows carry
+  `lyrics_embedded`/`lyrics_lrc`/`lyrics_present` from the grader's own
+  detection, so an album that arrived with embedded `LYRICS` reads as having
+  them (staged albums under `.mlo/downloads` included, which the library
+  tree never lists), and the editor opens the file's stored lyrics instead
+  of claiming none.
+
 1. **AcoustID matching** — with a free AcoustID application key
    (Settings → *Import*) and `fpcalc` installed (Dependencies →
    *Chromaprint*), the wizard can fingerprint an album's tracks and ask
@@ -518,7 +764,7 @@ The import paths share one pipeline now (`server/imports.py`):
 2. **The script chain** — every import path (wizard, downloads, Soulseek
    manual and auto) runs the same configurable chain afterwards:
    **2 CUEs → 3 FLACs → 11 videos → 1 lyrics format → 13 fetch lyrics →
-   8 auto tagging (mood/energy/genre/advisory) → 5 images → 6 audit →
+   18 publish lyrics → 8 auto tagging (mood/energy/genre/advisory) → 5 images → 6 audit →
    7 DR & ReplayGain → 9 AccurateRip → 12 key & BPM → 14 beets →
    10 format all → 4 grade**. Before the chain runs, the advisory step resolves
    each track's `ITUNESADVISORY` by ISRC — every applicable source asked on
@@ -569,8 +815,9 @@ Some albums simply aren't on Soulseek right now. A **wish** records a
 MusicBrainz release identity without downloading anything, so it can be
 filled in automatically later:
 
-1. Open a release in the MusicBrainz browser and press **Add to wishes** (or
-   paste a release ID/URL under Soulseek → *Wishes*).
+1. Paste a release ID or musicbrainz.org URL under Soulseek → *Wishes* (or
+   use **Add to wishes** on a library artist page's bulk bar, which queues
+   every album you select that carries a MusicBrainz id).
 2. A background worker re-searches Soulseek for every open wish on the
    configured interval (default every 6 h), running the same
    find → verify-logs → download → audit → import pipeline as the one-shot
@@ -595,7 +842,7 @@ whether to move the job to wishes. Accepting creates a wish carrying the same
 search queries, so the background worker keeps looking with no further input;
 declining keeps the old *no candidate folder contained every track* failure.
 The prompt appears after the configured time — the search window
-(`soulseek_auto_search_wait`, default 15 s) plus the 45 s grace tail, about a
+(`soulseek_auto_search_wait`, default 10 s) plus the 45 s grace tail, about a
 minute by default — and there is deliberately no second timer.
 `soulseek_auto_wish_prompt` (default on) switches the prompt off; searches the
 wishes worker itself started never prompt.
@@ -684,6 +931,39 @@ track back to AudioAuditor. The override wins over every derived verdict — it
 is applied last, so the album-level all-real gate agrees with it, and a forced
 re-audit reproduces the user's call instead of erasing it.
 
+### CD rips: verified integrity outranks the spectrogram detectors
+
+A CD rip is graded on its own evidence, in this order:
+
+1. **Its rip log's CRCs.** Script 6 decodes each track and compares it against
+   the `Copy CRC` lines of the album's `.log`. A match is `AUDIT=REAL`, written
+   immediately — it does not wait for AudioAuditor, which is a Windows-only
+   tool a Docker or Linux install does not even have. A track whose CRC just
+   matched is also exempt from every *log-file* gate — a log with no
+   verifiable EAC SHA256 (older EAC, a log edited after the rip), a log the
+   tool cannot score, or one below `audit_log_score_threshold`: those measure
+   the log's documentation, not the audio, and they no longer turn a proven
+   track `FAKE`.
+2. **Its `.accurip`.** A REAL AccurateRip verdict stands on its own: a disc
+   whose rip matches the database passes even when its log's EAC checksum is
+   unverifiable (XLD, older EAC, a log the tool cannot score).
+3. **AudioAuditor, only when neither applies.** Its fake-lossless / MQA /
+   clipping detectors are *spectral* evidence: on a provably intact CD rip a
+   disagreement is recorded as a **warning** (clipping flags survive), never as
+   a `FAKE` verdict, and a missing `.accurip` no longer fails a rip whose log
+   verifies. `audit_cd_require_both` (Settings → Audit) decides whether
+   AudioAuditor is run over `MEDIA=CD` at all; it can no longer downgrade a
+   verified disc.
+
+Grading follows the same rule: with `grade_check_audit` on, a CD track whose
+log checksum or `.accurip` verifies satisfies the AUDIT requirement even when
+the stored tag still says `FAKE` from an earlier run, and the album's live
+audit readout reports `REAL` (the track's `audit_verified` names which source
+proved it). **The live readout applies with the check off too**: the library,
+album and track pages show the verdict derived from the rip's own evidence, so
+a provably intact disc never renders red off a stale tag written by an older
+run.
+
 ## Library layout — a read-only report
 
 `GET /api/library/layout`, surfaced on the **Optimization** page, walks the
@@ -697,6 +977,20 @@ old `.mlo_data` layout.
 The scan never moves, renames or deletes anything; acting on the report is
 what **Organize** and the scripts are for.
 
+- **A completely empty folder is a grading failure, not a footnote.** A folder
+  with no files anywhere beneath it can never become an album (albums are
+  derived from audio paths), so grading used to *skip* it silently; the
+  `grade_check_empty_folders` check (on by default) now walks the library and
+  reports every such folder as an `Empty folder` problem of its own, so an
+  empty artist/disc folder shows up in the counts instead of hiding. Toggle it
+  on the Grading page with the other checks.
+- **The scripts clean up after themselves.** At the end of every chain run
+  (`/api/run`, an import, the bulk queue, the Soulseek importer) the folders a
+  step may have emptied are pruned bottom-up: a disc folder or album folder
+  with nothing left in it is removed, never a folder holding anything, never
+  the music root, and the run reports how many were removed. Organize does the
+  same for the folders it moves files out of.
+
 New in 2.3.0 it also reports **`wrong_case`** — an artist folder, album folder
 or file name whose stored capitalization differs from the naming script's
 expectation. The comparison is case-sensitive, which works because
@@ -708,7 +1002,12 @@ renames.
 
 The album/track online cover search is a meta-search over the musichoarders
 providers, and it falls back to **Cover Art Archive → Deezer → iTunes** when
-they have nothing — every result row says which provider answered. Results
+they have nothing — every result row says which provider answered. The modal
+also shows a **MusicBrainz reference**: when the album's release group has
+Cover Art Archive art, its front cover appears as a small labelled thumbnail
+(with a hover enlargement) so a candidate can be compared against it — and
+nothing at all when there is no release-group id or the archive has no image.
+Results
 carry the image's **real pixel dimensions** (`width`/`height`, probed from the
 file's own header bytes, `null` when unknown — never a guess) and a storefront
 **region**. The finder's source list and region pickers are **per-search**,
@@ -726,6 +1025,18 @@ by `GET /api/downloads` (newest first); `POST /api/downloads/import` moves
 entries into the library as albums and `POST /api/downloads/delete` removes
 them. The Soulseek page's *Downloads* tab shows the same entries as transfers
 bucketed into active, queued, completed and failed.
+
+That tab also manages **what is actually on disk** in both staging folders -
+`GET /api/soulseek/staging` reports slskd's download dir (default
+`<music>/.mlo/downloads`, or `soulseek_download_dir` when set) and its sibling
+`incomplete` dir with per-entry size, file count and the `partial`/`album`
+flags, and `POST /api/soulseek/staging/delete` / `.../clear` remove one entry
+or empty a whole root (name guard: basename only, nothing that resolves
+outside the root; the roots themselves are never removed, and an entry that
+cannot be deleted is reported instead of aborting the rest). This is the half
+of the picture transfer-level clearing cannot see: a rejected candidate that
+left an empty folder chain, or partial bytes whose transfer record is already
+gone, has no row in the transfer list at all.
 
 ## Getting started
 
@@ -763,23 +1074,89 @@ The UI walks you through the first-run setup.
 ### Sources & setup
 
 Every provider the app can ask — the six lyrics sources, the six advisory
-routes, the eleven genre sources and the four metadata providers, 27 rows —
-lives behind `GET /api/sources/health` (with `?probe=1` to run one cheap live
-lookup per configured source, `kind=lyrics|advisory|genre|metadata` to filter,
-and `GET /api/sources/health/{id}` for a single row). Each row says what it
-needs, whether that is configured, and — when probed — what actually answered.
+routes, the eleven genre sources, the four metadata providers and the
+RateYourMusic link source, 28 rows — lives behind `GET /api/sources/health`
+(with `?probe=1` to run one cheap live lookup per configured source,
+`kind=lyrics|advisory|genre|metadata|links` to filter, and
+`GET /api/sources/health/{id}` for a single row). Each row says what it needs,
+whether that is configured, and — when probed — what actually answered.
 
-The first-run wizard's step 3 **Sources** and the Settings → *Sources* panel
-are the same panel: every row has a **Test** button, and the keyed providers
-collect their free credentials right there — Spotify client ID/secret,
-Discogs token, Last.fm API key and the RateYourMusic cookie. Nothing blocks
-finishing setup: a provider without its key is skipped like any other
-unavailable source, and `needs` is what says which key is missing.
+The wizard's step 3 **Sources** and the Settings → *Sources* panel are the same
+panel: every row has a **Test** button, and the keyed providers collect their
+free credentials right there — Spotify client ID/secret, Discogs token,
+Last.fm API key and the RateYourMusic cookie. Nothing blocks finishing setup: a
+provider without its key is skipped like any other unavailable source, and
+`needs` is what says which key is missing.
+
+Wizard step 4 **AI & RYM** is where the two optional integrations are set up,
+and it stays re-runnable from Settings → General (*Run the setup wizard
+again*):
+
+- **AI lyric transforms** (Settings → *AI*) — base URL, API key, model and
+  reasoning effort for any OpenAI-compatible `/chat/completions` endpoint
+  (OpenAI, OpenRouter, LM Studio, llama.cpp, or Google Gemini's
+  OpenAI-compatible endpoint: pasting the bare `generativelanguage.googleapis.com`
+  host is routed for you), plus the translation languages and the
+  transliterate/translate switches. **Test connection** sends one tiny prompt
+  and shows the provider's own answer — or its own error — before anything is
+  saved. Script 17 is the only thing that needs it.
+- **RateYourMusic links** — the same link row the Sources panel shows, with the
+  cookie hint (dev tools → Network → any rym request → Cookie) and a Test that
+  really resolves an album + artist pair, so "is my cookie good?" has an
+  answer. *Look the links up automatically during imports* (`rym_links_auto`)
+  sits beside it. MusicBrainz states the RYM page for well-known releases with
+  no cookie at all; RYM is only scraped for the rest.
 
 The keyless sources (LRCLIB, the CJK lyrics APIs, MusicBrainz, ListenBrainz,
 iTunes, TheAudioDB, Wikidata, Bandcamp, Deezer, Cover Art Archive, Apple's
 routes) work as-is; yt-dlp is the only *installed* requirement, for YouTube
 captions and the 18+ advisory gate.
+
+### Getting a RateYourMusic cookie
+
+RYM has no API and answers an automated client with a Cloudflare challenge, so
+the app borrows a signed-in browser session. It is needed only for the *scrape*
+fallback — MusicBrainz states the RYM album/artist page as a URL relation for
+well-known releases, which needs no cookie at all.
+
+1. Sign in to rateyourmusic.com in your browser.
+2. Press `F12` → **Network** → reload the page.
+3. Click any request to `rateyourmusic.com` → **Headers** → **Request Headers**.
+4. Copy everything after `Cookie:` (in Firefox: right-click the request → *Copy*
+   → *Copy Request Headers*, then take the `Cookie` line).
+5. Paste it into **Settings → Discovery → RateYourMusic cookie**, or the wizard's
+   *AI & RYM* step, and press **Save & test**.
+
+The paste is normalised on the way in: the `Cookie:` label, wrapped lines and
+stray whitespace are all handled, so the whole copied value works. The value is
+a session credential — it is stored in your local config only, never sent
+anywhere but rateyourmusic.com, and you should not share it. Signing out or
+clearing cookies invalidates it; when RYM starts refusing, paste a fresh one.
+`GET /api/rym/validate` (the link editor's Valid/Invalid check) and the Sources
+panel's **Test** (one live album+artist resolve) both say whether the cookie
+works right now.
+
+Without a cookie the source is `skipped` — never an error — and imports simply
+leave the links for you to paste by hand.
+
+### Dependencies: latest versions & updates
+
+`GET /api/dependencies` reports, for every tool the installer knows, the
+version that is installed, the platform's target (`latest_version`) and its
+state (`ok` / `update` / `missing`). Settings → Dependencies and the sidebar
+page both show that pair — **Installed** and **Latest** — so a tool that is
+behind is visible without running anything. Latest means *the version this
+app would fetch*, not the newest thing upstream: the installer pins reviewed
+releases on purpose, and a newer upstream tag is a release decision, not a
+runtime one.
+
+Updates are one click (*Install / update all*, or per tool) and land in
+`<app>/.dependencies`. In Docker that is the `lamusica-dependencies` volume,
+so updates survive a container rebuild; pip-based tools (beets, librosa)
+install into the same folder at runtime, and distro-provided tools (ffmpeg,
+flac, libjxl, …) are reported ready from the image's own packages. Only the
+Windows-only tools (AudioAuditor, CUETools, Logchecker+php, slskd) cannot be
+fetched on Linux — their rows say so instead of failing an install.
 
 ### Terminal entry point
 
@@ -787,7 +1164,7 @@ captions and the 18+ advisory gate.
 python -m mlo
 ```
 
-That is the classic console menu (scripts 1–14, Run All, config editor), and
+That is the classic console menu (scripts 1–17, Run All, config editor), and
 it is **not** stdlib-only: `mlo` imports `mutagen` for every tag operation, so
 run it from the same environment that has `server/requirements.txt` installed
 (script 14 additionally needs `server/beetscfg` plus a vendored beets, and
@@ -888,7 +1265,7 @@ Where the app stores what it fetches:
 | --- | --- |
 | `GET /api/library` | tag-rich library tree (grades, audits, tags, tech info; gzipped) |
 | `GET /api/library/layout` | read-only layout scan: misplaced audio, unexpected folders, empty albums, stray files, hidden folders, `wrong_case` |
-| `GET /api/home` | Home page: stats, recommendations, recent/top/favorite shelves |
+| `GET /api/home` | Home page: stats plus the library-only shelves (recent, top-rated, favorites, discover, top artists, wanted, needs attention) |
 | `GET/POST/PATCH/DELETE /api/wishes` | release wishlist CRUD; `POST …/{id}/search`, `…/search-all`, `…/reconcile` |
 | `GET /api/album` `GET /api/artist` | entity details |
 | `GET /api/stream` `GET /api/videos/stream` | audio/video streaming (Range; `?transcode=1` pipes fragmented MP4) |
@@ -897,7 +1274,7 @@ Where the app stores what it fetches:
 | `GET /api/tags` | per-track tag/lyrics/cover read view |
 | `POST /api/tags/bulk` `POST /api/videos/tag` | bulk tag surgery; music-video tag writes |
 | `POST /api/lyrics/embed` `POST /api/lyrics/write` | embedded LYRICS / .lrc sidecar writes |
-| `POST /api/run` | run any of scripts 1–14 on targets |
+| `POST /api/run` | run any of scripts 1–17 on targets |
 | `POST /api/organize` | apply the naming script (dry-run supported) |
 | `POST /api/export` | multi-format export with codec/bitrate config |
 | `GET/POST /api/playlists…` | manual + smart playlists, .m3u8 |
@@ -906,17 +1283,12 @@ Where the app stores what it fetches:
 | `POST /api/mb/auto-import` | enqueue a release / release group / artist for download: `mode=best` (one edition per group) or `all` (every eligible edition). Returns in about a second — `{queued, items: [{mbid, title, status}], skipped: [{mbid, reason}]}` — with `status` `queued` (waiting behind a running job), `running` (started at once) or `queued (resolving)` when MusicBrainz did not answer inside the inline budget and the job resolves the ID itself; nothing to queue is `queued: 0` plus a `skipped` reason, never a 404 |
 | `POST /api/mb/advisory/fetch` | resolve `ITUNESADVISORY` for tracks (or a release): every applicable source is asked on every track (Deezer and Spotify by ISRC, Apple's explicit-edition album route, Apple's song search, Discogs' parental-advisory format when a token is set, yt-dlp's `age_limit` for a track with a YouTube id) and merged — explicit anywhere is 1, else clean is 0, else 0 — returning `sources` (who stated each path's value) and `answers` (what every source said, `{path: {source: 0\|1}}`) |
 | `POST /api/instrumental/fetch` | resolve and write `INSTRUMENTAL` (0/1) cross-referencing LRCLIB's `instrumental`, Spotify audio-features `instrumentalness` (when configured), the file's own name and lyrics evidence: an "instrumental" answer anywhere is 1, else a "not instrumental" answer is 0, else nothing is written; every name-based match passes the shared variant guard (an instrumental/karaoke/cover/tribute hit is never accepted as the track); returns `values` and `evidence` (`{path: {source: 0\|1}}`) |
-| `POST /api/genres/import` `GET /api/genres/facets` | import genres for paths through the genre chain (RYM-first priority list, per-track answers with `level` fallbacks, per-source counts + notes); facet list with category cards for the Genres page |
+| `POST /api/genres/import` `GET /api/genres/facets` | import genres for paths from the named `sources` (default: MusicBrainz + RateYourMusic; per-track answers with `level` fallbacks, per-source counts + notes); facet list with category cards for the Genres page. The wizard calls it once per source, one button each |
 | `GET /api/metadata/candidates` `POST /api/metadata/apply` | artist image / artist description / album description candidates (staged when `metadata_review` is on) and the write of the chosen one |
 | `POST /api/videos/download-youtube` `POST /api/videos/match` | download a music video from YouTube for an artist+title (best candidate by duration); assign downloaded video files to tracks |
 | `POST /api/soulseek/download-bulk` `…/download-user` `…/search/cancel` | queue the selected search files, take everything a user shares through a fresh browse (already-queued transfers skipped), or cancel a running search |
-| `GET /api/discovery/sources` | discovery providers + the per-feature source orders (Settings → Discovery) |
-| `GET /api/sources/health` `GET /api/sources/health/{id}` | every external source (lyrics, advisory, genre, metadata) with its `needs`/`configured` state; `probe=1` runs one cheap lookup per configured source against a fixed sample (`kind=` filters, the single-source route returns the bare row) |
-| `GET /api/discovery/search` | catalogue search (albums/artists) through the provider chain; `source=musicbrainz` keeps the old search |
-| `GET /api/discovery/album` | provider album detail (genres, label, track list); `?resolve=1` also resolves the MusicBrainz release group |
-| `GET /api/discovery/similar` | "more like this" albums / tracks / artists, owned rows flagged with their library path |
-| `GET /api/discovery/popular` | ListenBrainz sitewide top releases (the "Popular right now" shelf) |
-| `POST /api/discovery/wish` | turn a discovery row into a wish (MusicBrainz-resolves the MBID first) |
+| `GET /api/discovery/sources` | the provider catalogue behind the artist-image / description order pickers (Settings → *Artist images & descriptions*) |
+| `GET /api/sources/health` `GET /api/sources/health/{id}` | every external source (lyrics, advisory, genre, metadata, links) with its `needs`/`configured` state; `probe=1` runs one cheap lookup per configured source against a fixed sample (`kind=` filters, the single-source route returns the bare row) |
 | `GET /api/artist/artwork` | stored artist image + description + provenance + the artist's own grade |
 | `GET /api/artist/image` `…/candidates` `POST /api/artist/image` `…/upload` `DELETE …` | serve / list candidates / save a chosen or automatic image / upload / remove |
 | `POST /api/artist/description` `DELETE …` | store (fetched or supplied) / remove the artist description |
@@ -935,6 +1307,7 @@ Where the app stores what it fetches:
 | `POST /api/import/bulk` `GET /api/import/bulk/status` | bulk import queue: start a multi-album import, poll its per-item progress |
 | `POST /api/import/scripts/preview` | exactly which scripts will run after an import |
 | `POST /api/lyrics/wordsync` | deterministic line→word/syllable ELRC for a track's stored lyrics |
+| `POST /api/ai/test` | one tiny round trip to the configured AI endpoint (settings/wizard overrides allowed) — a refused provider is a `{ok:false, error}` payload, never a 500 |
 | `WS /ws/progress` | live progress |
 
 ## Tests
@@ -942,6 +1315,8 @@ Where the app stores what it fetches:
 ```bash
 python tools/make_test_library.py   # synthetic library for end-to-end runs
 python tools/test_remux.py          # video remux suite (VOB/MKV/AVI/WebM fixtures)
+python tools/test_lyrics_xlit.py    # script 17: line alignment, the romanization
+                                    # rules, and the on-disk cache (offline)
 python tools/test_script_menus.py   # every script menu agrees (numbers, labels,
                                     # Run All order, force switches) — the gate
                                     # for adding a script anywhere

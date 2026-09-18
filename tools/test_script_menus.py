@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Menu-consistency gate: every surface that lists the 14 scripts must agree.
+"""Menu-consistency gate: every surface that lists the 18 scripts must agree.
 
 Sources checked:
   * ``EXPECTED_SCRIPTS`` below — the frozen expected registry (number + name)
   * ``server/main.py``       RUNNERS      — the numbers /api/run accepts
   * ``web/src/lib/scripts.ts`` SCRIPTS    — the UI's single source of truth
-  * ``README.md``            the 14-script table
+  * ``README.md``            the 15-script table
   * ``web/src/lib/force.ts`` FORCE_SCRIPTS, ``SettingsPage`` FORCE_KEYS —
     the one-shot force switches must map onto /api/run's force dict keys
 
@@ -36,6 +36,18 @@ EXPECTED_SCRIPTS = {
     12: "Key & BPM",
     13: "Fetch Lyrics",
     14: "Beets Tagging",
+    # 15 took over the id the removed lyrics xlit/translate script had — it
+    # writes each album's .mlo_expected.json release tracklist.
+    15: "Release tracklist",
+    # 16 is the mood/energy classifier on its own — script 8 runs the same
+    # code as one of its stages.
+    16: "Mood & Energy",
+    # 17 is the AI pass: the lyric transliteration / translation script the
+    # no-AI core removed, back under a fresh id (15 stayed with the tracklist).
+    17: "Lyrics transliterate (AI)",
+    # 18 gives back: this library's lyrics are submitted to LRCLIB for
+    # recordings the database does not have yet.
+    18: "Publish lyrics (LRCLIB)",
 }
 
 
@@ -111,9 +123,12 @@ def force_defaults_are_false():
 
 
 def check_run_all_migration(check):
-    """A saved Run All order from before script 15 was removed must shed it
-    on load — 15 is not a runner any more, and a chain entry for it would
-    come back as an error entry."""
+    """A saved Run All order must not keep ids that mean something else now.
+
+    The legacy order below names 15 where the REMOVED lyrics xlit/translate
+    script sat (before beets). Loading it must shed that stale entry — 15 is
+    the Tracklist script today — and put the current 15 where the pipeline
+    wants it (right after beets), which is the shipped default."""
     sys.path.insert(0, ROOT)
     import mlo.config as cfg  # noqa: PLC0415 - needs ROOT on sys.path first
 
@@ -122,18 +137,54 @@ def check_run_all_migration(check):
         "run_all_order": [11, 14, 1, 2, 8, 13, 15, 12, 3, 5, 9, 6, 4, 7, 10],
     }
     got = cfg.normalize_config(legacy)["run_all_order"]
-    check("a saved order naming the removed script 15 drops it", 15 not in got, str(got))
-    check("the sanitised order matches DEFAULT_RUN_ALL_ORDER",
-          got == list(cfg.DEFAULT_RUN_ALL_ORDER), str(got))
+    check("a saved order's stale script-15 entry is shed and 15 is re-inserted "
+          "at its canonical position (after beets)",
+          got == list(cfg.DEFAULT_RUN_ALL_ORDER)
+          and got.index(15) == got.index(14) + 1, str(got))
+    # 17/18 were never in a saved order before they existed; the same
+    # shed-and-anchor rule has to place them after the fetch they read from.
+    check("18 (publish) lands after 13 (fetch lyrics) in a normalized order",
+          got.index(18) == got.index(13) + 1, str(got))
+    check("17 (AI transforms) lands after 18 (publish) in a normalized order",
+          got.index(17) == got.index(18) + 1, str(got))
 
     junk = cfg.normalize_config({"music_folder": "X", "run_all_order": [99, "a", 4, 4, -1]})
     check("unknown / duplicate run-all ids are dropped",
-          all(1 <= n <= 14 for n in junk["run_all_order"]) and len(set(junk["run_all_order"])) == len(junk["run_all_order"]),
+          all(1 <= n <= 18 for n in junk["run_all_order"]) and len(set(junk["run_all_order"])) == len(junk["run_all_order"]),
           str(junk["run_all_order"]))
 
     twice = cfg.normalize_config(cfg.normalize_config({"music_folder": "X"}))
     check("normalize_config is idempotent",
           twice["run_all_order"] == list(cfg.DEFAULT_RUN_ALL_ORDER), str(twice["run_all_order"]))
+
+
+def check_import_chain(check):
+    """The import chain's id filter is the registry, not a literal.
+
+    Every id the chain returns has to exist in RUNNERS — which is what a
+    hardcoded upper bound silently breaks (a bound that still advertised the
+    removed script 15 let a saved "15" come back as an error row in the import
+    report). 15 is a real runner again, so a saved 15 is KEPT now; anything
+    outside the registry is dropped."""
+    sys.path.insert(0, ROOT)
+    from server import imports, script_runners  # noqa: PLC0415 - needs ROOT first
+
+    runners = set(script_runners.RUNNERS)
+    check("SCRIPT_ID_MAX is the registry's own last id",
+          imports.SCRIPT_ID_MAX == max(runners),
+          f"{imports.SCRIPT_ID_MAX} vs {max(runners)}")
+    got = imports.chain_for({"import_scripts": [15, 4, 17, 3, 8, 99]})
+    check("chain_for keeps the real scripts 15 and 17 and drops the unknown 99",
+          got == [15, 4, 17, 3, 8], str(got))
+    check("every id the chain returns exists in RUNNERS",
+          bool(got) and set(got) <= runners,
+          f"{got} vs {sorted(runners)}")
+    check("the built-in chain is all real runners",
+          set(imports.DEFAULT_CHAIN) <= runners, str(imports.DEFAULT_CHAIN))
+    check("the built-in chain writes the tracklist after the tagging step",
+          imports.DEFAULT_CHAIN.index(15) > imports.DEFAULT_CHAIN.index(14)
+          and imports.DEFAULT_CHAIN.index(15) < imports.DEFAULT_CHAIN.index(4),
+          str(imports.DEFAULT_CHAIN))
 
 
 def main():
@@ -151,8 +202,8 @@ def main():
             fail += 1
 
     print("scripts registry")
-    check("canonical registry has 14 scripts", len(canon) == 14, str(sorted(canon)))
-    check("canonical numbers are 1..14", sorted(canon) == list(range(1, 15)))
+    check("canonical registry has 18 scripts", len(canon) == 18, str(sorted(canon)))
+    check("canonical numbers are 1..18", sorted(canon) == list(range(1, 19)))
     check("server RUNNERS == canonical numbers", runners == set(canon), f"server={sorted(runners)}")
     check("web SCRIPTS == canonical numbers", set(web) == set(canon), f"web={sorted(web)}")
     check("README table == canonical numbers", readme == set(canon), f"readme={sorted(readme)}")
@@ -171,10 +222,10 @@ def main():
 
     print("run-all order")
     py_run_all = python_default_run_all()
-    check("DEFAULT_RUN_ALL covers every script", sorted(run_all) == list(range(1, 15)), str(sorted(run_all)))
+    check("DEFAULT_RUN_ALL covers every script", sorted(run_all) == list(range(1, 19)), str(sorted(run_all)))
     check("DEFAULT_RUN_ALL has no duplicates", len(run_all) == len(set(run_all)), str(run_all))
     check("mlo/config.py DEFAULT_RUN_ALL_ORDER covers every script",
-          sorted(py_run_all) == list(range(1, 15)), str(sorted(py_run_all)))
+          sorted(py_run_all) == list(range(1, 19)), str(sorted(py_run_all)))
     check("python and web run-all order agree", py_run_all == run_all,
           f"python={py_run_all} web={run_all}")
 
@@ -189,6 +240,9 @@ def main():
 
     print("run-all migration")
     check_run_all_migration(check)
+
+    print("import chain")
+    check_import_chain(check)
 
     print(f"\n{'PASS' if not fail else 'FAIL'} — {fail} problem(s)")
     return 1 if fail else 0

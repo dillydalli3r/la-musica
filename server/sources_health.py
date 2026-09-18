@@ -1,8 +1,9 @@
 """Which external sources work right now — one payload for the setup wizard.
 
-Four kinds of source, one row shape: the lyrics providers, the advisory
-(ITUNESADVISORY) routes, the genre sources and the metadata (artist image)
-providers. Every row says what it needs, whether that is configured here, and —
+Five kinds of source, one row shape: the lyrics providers, the advisory
+(ITUNESADVISORY) routes, the genre sources, the metadata (artist image)
+providers and the LINK sources (the RateYourMusic album/artist links an import
+stamps). Every row says what it needs, whether that is configured here, and —
 when asked to probe — what actually answered.
 
 `probe=False` (the default) answers from the config alone: NO request leaves
@@ -36,7 +37,10 @@ SAMPLE_TRACK = "Creep"
 SAMPLE_ALBUM = "Pablo Honey"
 SAMPLE_ISRC = "GBAYE9200070"
 
-KINDS = ("lyrics", "advisory", "genre", "metadata")
+# RYM links are their own row rather than a second reading of the genre
+# source that shares the cookie: the genre probe asks for genres, this one
+# resolves the sample album's links, which is the thing the import writes.
+KINDS = ("lyrics", "advisory", "genre", "metadata", "links")
 
 # The ask order of the advisory routes — `resolve_advisory_route`'s own order.
 _ADVISORY_ORDER = ["deezer-isrc", "spotify-isrc", "apple-album", "itunes-song",
@@ -303,6 +307,34 @@ def _probe_metadata(pid, cfg):
 
 
 # --------------------------------------------------------------------------- #
+# Link sources — the RYM album/artist links an import stamps
+# --------------------------------------------------------------------------- #
+_RYM_LABELS = {"rateyourmusic": "RateYourMusic links (album + artist)"}
+
+
+def _probe_links(pid, cfg):
+    from server import integrations as intg
+
+    if pid != "rateyourmusic":
+        return "skipped", "unknown source"
+    # MusicBrainz states the RYM page for well-known releases, so a missing
+    # cookie is not automatically a failure — the note says which half of the
+    # ladder answered (or that RYM refused the client).
+    fails_before = intg._rym_failures
+    got = intg.rym_links(SAMPLE_ARTIST, SAMPLE_ALBUM, cfg) or {}
+    album, artist = got.get("album"), got.get("artist")
+    note = str(got.get("note") or "").strip()
+    if album or artist:
+        parts = [x for x in (("album" if album else ""),
+                             ("artist" if artist else "")) if x]
+        return "ok", " · ".join(parts) + " link resolved" + (f" · {note}" if note else "")
+    if intg._rym_failures > fails_before:
+        return "fail", note or ("RYM did not answer — paste a logged-in "
+                                "Cookie header to get past Cloudflare")
+    return "fail", note or "no link could be verified"
+
+
+# --------------------------------------------------------------------------- #
 # The registry: one spec per source, in a stable order
 # --------------------------------------------------------------------------- #
 def _specs(kind=None):
@@ -346,6 +378,14 @@ def _specs(kind=None):
                       "label": discovery.SOURCE_LABELS.get(pid, pid),
                       "needs": [],
                       "probe": lambda cfg, p=pid: _probe_metadata(p, cfg)})
+
+    # Links: the RYM pair an import writes onto the album's tracks. It needs
+    # the same cookie the genre row prompts for — that is the point: the
+    # wizard shows one place to paste it and one button that proves it works.
+    for pid in ("rateyourmusic",):
+        specs.append({"id": pid, "kind": "links",
+                      "label": _RYM_LABELS[pid], "needs": ["rym_cookie"],
+                      "probe": lambda cfg, p=pid: _probe_links(p, cfg)})
 
     return [s for s in specs if kind is None or s["kind"] == kind]
 

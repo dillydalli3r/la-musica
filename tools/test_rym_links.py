@@ -3,17 +3,27 @@
 
 What this pins, with the HTTP layer stubbed (no network at all):
 
+  * MusicBrainz is asked FIRST and a rateyourmusic.com url relation it states
+    is accepted as the link — for the album (release group) and the artist —
+    with no RYM request, and only what MB could not state is scraped;
   * the slug candidates a name produces (accents, `&` → `and`, `The …`,
     punctuation, collapsed dashes);
   * the FIRST candidate that RYM confirms wins — exact slug, then the
     de-`the`-ed one, then RYM's own search page;
   * a Cloudflare interstitial, a 404, and a 200 that landed somewhere else
     are all rejected and fall through — never accepted as a link;
+  * a blocked RYM costs ONE probe for the whole process: the ladder is not
+    walked, later lookups make no request at all, and the note says what the
+    user can do (set rym_cookie, or rely on the MusicBrainz links);
   * a lookup that resolves nothing writes NO link (imports.stamp_rym_links),
     reports "could not resolve" and raises nothing;
   * a link already on the album is never looked up and never overwritten,
     and an unreachable RYM is not an exception;
-  * the 30-day cache answers the second call instead of the network.
+  * the 30-day cache answers the second call instead of the network;
+  * what a pasted URL points at (integrations.rym_url_kind): the release
+    album/single/song and /song/ paths, /artist/, a label page ("other"),
+    and — the one the UI must refuse — a URL that only MENTIONS
+    rateyourmusic.com inside its query string (None).
 
 Run:  python tools/test_rym_links.py
 """
@@ -92,9 +102,48 @@ def elsewhere(text):
     return lambda url, params: (200, text, BASE + "/search?searchterm=x")
 
 
-def run(routes, boom=False, cache=None):
-    """Point integrations at the stub for one scenario; fresh cache dir."""
+def mb_payload(rym_url="", artist_mbid=""):
+    """One MusicBrainz entity payload: its `url-rels` as MB sends them
+    (rateyourmusic.com is the "other databases" relation), and the artist
+    credit a release group carries."""
+    rels = ([{"type": "other databases", "url": {"resource": rym_url}}]
+            if rym_url else [])
+    credit = [{"artist": {"id": artist_mbid}}] if artist_mbid else []
+    return {"relations": rels, "artist-credit": credit}
+
+
+class FakeMusicBrainz:
+    """MusicBrainz stub: `entities` keyed "<entity>/<mbid>", `search` keyed by
+    entity name. Every other call raises — a case that expects MB to have
+    nothing to say is also a case where MB answers nothing."""
+
+    KEYS = {"artist": "artists", "release-group": "release-groups",
+            "release": "releases", "recording": "recordings"}
+
+    def __init__(self, entities=None, search=None):
+        self.entities = dict(entities or {})
+        self.search = dict(search or {})
+        self.calls = []
+
+    def get(self, endpoint, params=None, **kwargs):
+        self.calls.append(endpoint)
+        if (params or {}).get("query"):
+            rows = self.search.get(endpoint)
+            if rows is None:
+                raise intg.MusicBrainzError(f"nothing stubbed: {endpoint} search")
+            return {self.KEYS[endpoint]: list(rows)}
+        if endpoint in self.entities:
+            return self.entities[endpoint]
+        raise intg.MusicBrainzError(f"nothing stubbed: {endpoint}")
+
+
+def run(routes, boom=False, cache=None, mb=None):
+    """Point integrations at the stubs for one scenario; fresh cache dir.
+
+    MusicBrainz defaults to a stub that answers NOTHING, so every case that
+    is about the RYM ladder is asked no network at all."""
     intg.httpx = FakeHttpx(routes, boom=boom)
+    intg.mb_get_cached = (mb or FakeMusicBrainz()).get
     intg._rym_cache_dir = lambda: cache or tempfile.mkdtemp(prefix="mlo_rym_")
     intg.RYM_MIN_INTERVAL = 0.0
     intg._rym_cookie = lambda cfg=None: ""
@@ -103,6 +152,7 @@ def run(routes, boom=False, cache=None):
 
 
 _real_httpx = intg.httpx
+_real_mb_get_cached = intg.mb_get_cached
 _real_cache_dir = intg._rym_cache_dir
 _real_cookie = intg._rym_cookie
 _real_interval = intg.RYM_MIN_INTERVAL
@@ -184,10 +234,17 @@ try:
     log = io.StringIO()
     with contextlib.redirect_stdout(log):
         got = intg.rym_links("Rihanna", "Loud", cfg=CFG)
+    # the note is what the user acts on: a blocked RYM says what to do about it
     assert got == {"album": None, "artist": None,
-                   "note": "could not resolve on RateYourMusic"}, got
+                   "note": intg._RYM_BLOCKED_NOTE}, got
+    assert got["note"].startswith("could not resolve"), got
+    assert "Cloudflare" in got["note"] and "rym_cookie" in got["note"], got
     assert "challenge" in log.getvalue(), log.getvalue()
     assert len(fake.calls) == 1, fake.calls      # blocked is not retried
+    # …and the refusal sticks for the process: the next lookup costs no
+    # request at all (RYM used to walk its slug set for every album again)
+    assert intg.rym_links("Rihanna", "Loud", cfg=CFG) == got
+    assert len(fake.calls) == 1, fake.calls
 
     fake = run({})          # every candidate 404s
     log = io.StringIO()
@@ -327,8 +384,85 @@ try:
     for path in files:
         assert "RATEYOURMUSIC_ALBUM" not in FakeAudio.written[path], FakeAudio.written[path]
         assert "RATEYOURMUSIC_ARTIST" not in FakeAudio.written[path], FakeAudio.written[path]
+    # ----------------------------------------------------------------------- #
+    # 9) what a pasted URL points at — the field the link editor writes to
+    # ----------------------------------------------------------------------- #
+    assert intg.rym_url_kind(f"{BASE}/release/album/rihanna/loud/") == "album"
+    assert intg.rym_url_kind(f"{BASE}/release/single/rihanna/loud/") == "album"
+    assert intg.rym_url_kind(f"{BASE}/release/song/rihanna/loud/") == "song"
+    assert intg.rym_url_kind(f"{BASE}/song/rihanna/loud/") == "song"
+    assert intg.rym_url_kind(f"{BASE}/artist/rihanna") == "artist"
+    # a real page that is none of the three link fields
+    assert intg.rym_url_kind(f"{BASE}/label/def-jam/") == "other"
+    assert intg.rym_url_kind(f"{BASE}/list/user/123/") == "other"
+    # the case matters: /release/album/... is an album, /release/song/... a song
+    assert intg.rym_url_kind(f"{BASE}/release/album/rihanna/loud/") != \
+        intg.rym_url_kind(f"{BASE}/release/song/rihanna/loud/")
+    # formatting the user's paste carries: www, a trailing query, case
+    assert intg.rym_url_kind("https://www.rateyourmusic.com/artist/rihanna") == "artist"
+    assert intg.rym_url_kind(f"{BASE}/artist/rihanna?spotlight=1") == "artist"
+    assert intg.rym_url_kind("HTTPS://RATEYOURMUSIC.COM/artist/rihanna") == "artist"
+    # NOT rateyourmusic.com: refused, never "other" — and a URL that merely
+    # MENTIONS rateyourmusic.com in its query string is still not a RYM URL
+    assert intg.rym_url_kind("https://example.com/artist/rihanna") is None
+    assert intg.rym_url_kind("https://notrateyourmusic.com/artist/rihanna") is None
+    assert intg.rym_url_kind(
+        "https://example.com/?u=https://rateyourmusic.com/artist/rihanna") is None
+    assert intg.rym_url_kind("rateyourmusic.com/artist/rihanna") is None
+    assert intg.rym_url_kind("") is None and intg.rym_url_kind(None) is None
+    # ----------------------------------------------------------------------- #
+    # 10) MusicBrainz is the FIRST source: the RYM page it states as a url
+    #     relation IS the link — no RYM request, no cookie, nothing confirmed.
+    #     The MBIDs and URLs are the real ones, verified live.
+    # ----------------------------------------------------------------------- #
+    NIRVANA_GROUP = "fb3770f6-83fb-32b7-85c4-1f522a92287e"
+    NIRVANA = "5b11f4ce-a62d-471e-81fc-a69a8278c7da"
+    UNPLUGGED = ("https://rateyourmusic.com/release/album/nirvana/"
+                 "mtv_unplugged_in_new_york/")
+    fake = run({}, mb=FakeMusicBrainz(entities={
+        f"release-group/{NIRVANA_GROUP}": mb_payload(UNPLUGGED, artist_mbid=NIRVANA),
+        f"artist/{NIRVANA}": mb_payload(f"{BASE}/artist/nirvana"),
+    }))
+    got = intg.rym_links("Nirvana", "MTV Unplugged in New York", cfg=CFG,
+                         mbid=NIRVANA_GROUP)
+    assert got == {"album": UNPLUGGED, "artist": f"{BASE}/artist/nirvana",
+                   "note": ""}, got
+    assert fake.calls == [], fake.calls          # not one request to RYM
+
+    # the release group is found with MB's own search when the caller has no
+    # MBID, and only a hit whose TITLE is this album is used — a same-titled
+    # release by someone else never contributes a link
+    fake = run({}, mb=FakeMusicBrainz(
+        search={"release-group": [
+            {"id": "aaaaaaaa-0000-0000-0000-000000000001",
+             "title": "MTV Unplugged in New York: Tribute"},
+            {"id": NIRVANA_GROUP, "title": "MTV Unplugged in New York"}]},
+        entities={
+            f"release-group/{NIRVANA_GROUP}": mb_payload(UNPLUGGED,
+                                                         artist_mbid=NIRVANA),
+            f"artist/{NIRVANA}": mb_payload(f"{BASE}/artist/nirvana")}))
+    got = intg.rym_links("Nirvana", "MTV Unplugged in New York", cfg=CFG)
+    assert got == {"album": UNPLUGGED, "artist": f"{BASE}/artist/nirvana",
+                   "note": ""}, got
+    assert fake.calls == [], fake.calls
+
+    # ----------------------------------------------------------------------- #
+    # 11) only what MB could not state is scraped: MB gives the album, RYM's
+    #     own artist page (cookie configured) gives the artist
+    # ----------------------------------------------------------------------- #
+    fake = run({"/artist/nirvana": ok(artist_page("Nirvana"))},
+               mb=FakeMusicBrainz(entities={
+                   f"release-group/{NIRVANA_GROUP}": mb_payload(
+                       UNPLUGGED, artist_mbid=NIRVANA)}))
+    intg._rym_cookie = lambda cfg=None: "cf_clearance=abc"
+    got = intg.rym_links("Nirvana", "MTV Unplugged in New York", cfg=CFG,
+                         mbid=NIRVANA_GROUP)
+    assert got == {"album": UNPLUGGED, "artist": f"{BASE}/artist/nirvana",
+                   "note": ""}, got
+    assert fake.calls == [f"{BASE}/artist/nirvana"], fake.calls
 finally:
     intg.httpx = _real_httpx
+    intg.mb_get_cached = _real_mb_get_cached
     intg._rym_cache_dir = _real_cache_dir
     intg._rym_cookie = _real_cookie
     intg.RYM_MIN_INTERVAL = _real_interval

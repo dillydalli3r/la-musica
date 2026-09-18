@@ -794,7 +794,11 @@ finally:
 # 9) The default priority list is the documented one, both old defaults migrate
 # --------------------------------------------------------------------------- #
 assert list(intg.GENRE_SOURCES) == DOCUMENTED_SOURCES, intg.GENRE_SOURCES
-assert list(mcfg.DEFAULT_CONFIG["genre_sources"]) == DOCUMENTED_SOURCES, \
+# The provider REGISTRY stays the full priority list — every source is still
+# selectable in Settings → Discovery and listed in Sources health. The SHIPPED
+# default asks only the two the app grades genres from.
+SHIPPED_DEFAULT = ["musicbrainz", "rateyourmusic"]
+assert list(mcfg.DEFAULT_CONFIG["genre_sources"]) == SHIPPED_DEFAULT, \
     mcfg.DEFAULT_CONFIG["genre_sources"]
 # Every per-track source sits above every album-only one, so a track's own
 # answer can never be outranked by an album-wide guess on a default install.
@@ -802,13 +806,13 @@ assert (max(intg.GENRE_SOURCES.index(s) for s in PER_TRACK_SOURCES)
         < min(intg.GENRE_SOURCES.index(s) for s in WIDE_SOURCES)), intg.GENRE_SOURCES
 # The two chains earlier releases shipped are not a choice the user made: both
 # are swapped for the current default. A list they actually edited is theirs.
-for legacy in mcfg.LEGACY_DEFAULT_GENRE_SOURCES:
+for legacy in list(mcfg.LEGACY_DEFAULT_GENRE_SOURCES) + [mcfg.LEGACY_GENRE_SOURCES]:
     assert list(mcfg.normalize_config(
-        {"genre_sources": list(legacy)})["genre_sources"]) == DOCUMENTED_SOURCES, legacy
+        {"genre_sources": list(legacy)})["genre_sources"]) == SHIPPED_DEFAULT, legacy
 custom = ["musicbrainz", "itunes"]
 assert mcfg.normalize_config({"genre_sources": list(custom)})["genre_sources"] == custom
 # No saved list at all is the same "no choice" case.
-assert list(mcfg.normalize_config({})["genre_sources"]) == DOCUMENTED_SOURCES
+assert list(mcfg.normalize_config({})["genre_sources"]) == SHIPPED_DEFAULT
 # And a saved list is what the chain runs — the config default is not forced
 # over a hand-picked order.
 clear()
@@ -988,5 +992,113 @@ assert got["sources"][FILE_ONE] == ["rateyourmusic", "listenbrainz",
                                     "musicbrainz", "itunes", "wikidata"], got["sources"]
 assert got["per_track"][(1, 1)][0] == "Heavy Metal", got["per_track"]
 assert "Space Rock" in got["per_track"][(1, 1)], got["per_track"]
+
+# --------------------------------------------------------------------------- #
+# 15) The route surface — the background job, and the inline call it replaces
+# --------------------------------------------------------------------------- #
+# The chain is minutes of provider traffic, so the wizard starts it as a job
+# and polls. Everything below runs the REAL routes against a temp music folder
+# with the chain itself stubbed: what is pinned here is the job's state machine
+# (`running` → `done`/`error`), the 409 guard, and the verbatim error text — the
+# chain's own answers are covered above.
+import shutil as _shutil
+import tempfile as _tempfile
+import threading as _threading
+import time as _time
+
+from fastapi.testclient import TestClient  # noqa: E402  (heavy import)
+
+from server import main as mlo_main  # noqa: E402
+
+JOB_MUSIC = _tempfile.mkdtemp(prefix="mlo-genre-job-")
+JOB_ALBUM = os.path.join(JOB_MUSIC, "Artists", "Job Artist", "2020 - Job Album")
+JOB_EMPTY = os.path.join(JOB_MUSIC, "Artists", "Empty Album")
+JOB_OUTSIDE = _tempfile.mkdtemp(prefix="mlo-genre-outside-")
+os.makedirs(JOB_ALBUM)
+os.makedirs(JOB_EMPTY)
+# A real (if silent) MP3 frame sequence: the routes name audio by extension and
+# open the first file, and a junk byte string would be an unreadable track.
+_MP3_FRAME = bytes([0xFF, 0xFB, 0x90, 0x00]) + b"\x00" * 413
+
+
+def _write_mp3(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(_MP3_FRAME * 40)
+    return path
+
+
+JOB_TRACK = _write_mp3(os.path.join(JOB_ALBUM, "1-01 One.mp3"))
+_write_mp3(os.path.join(JOB_ALBUM, "1-02 Two.mp3"))
+OUTSIDE_TRACK = _write_mp3(os.path.join(JOB_OUTSIDE, "1-01 Out.mp3"))
+
+mlo_main.load_config = lambda *a, **k: {"music_folder": JOB_MUSIC,
+                                        "mb_genre_count": 3}
+_client = TestClient(mlo_main.app)   # no lifespan: no workers, no slskd boot
+
+JOB_SOURCES = ("rateyourmusic", "listenbrainz", "musicbrainz")
+JOB_NOTES = {"rateyourmusic": "no data", "musicbrainz": "answered"}
+JOB_RESULT = {"updated": 2, "genres": ["Shoegaze"],
+              "per_source": {"musicbrainz": ["Shoegaze"]}, "notes": JOB_NOTES,
+              "per_track": {(1, 1): ["Shoegaze"]}, "sources": {}, "levels": {}}
+_asked = []
+_real_genre_chain = intg.genre_chain
+
+
+def _fake_chain(sources=None, **kw):
+    """The chain stand-in: it records which sources it was asked for.
+
+    There is no genre CHAIN in the import wizard any more — its two buttons
+    each ask ONE source — so what this suite has to hold is that `sources`
+    reaches the chain as given, and that omitting it still means "every
+    configured source" (the album/track menu's call)."""
+    _asked.append(None if sources is None else list(sources))
+    return dict(JOB_RESULT)
+
+
+intg.genre_chain = _fake_chain
+try:
+    # One source per call: the wizard's "Genres from MusicBrainz" and
+    # "Genres from RateYourMusic" buttons, each answered by the ONE source.
+    for source in ("musicbrainz", "rateyourmusic"):
+        one = _client.post("/api/genres/import",
+                           json={"paths": [JOB_ALBUM], "sources": [source]})
+        assert one.status_code == 200, one.text
+        body = one.json()
+        assert _asked[-1] == [source], _asked
+        assert body["genres"] == ["Shoegaze"], body
+        assert body["notes"] == JOB_NOTES, body
+        assert body["per_source"] == {"musicbrainz": ["Shoegaze"]}, body
+        assert set(body) >= {"updated", "genres", "per_source", "notes", "per_track",
+                             "sources", "levels"}, sorted(body)
+
+    # No `sources` at all still means every configured source, in order.
+    every = _client.post("/api/genres/import", json={"paths": [JOB_ALBUM]})
+    assert every.status_code == 200, every.text
+    assert _asked[-1] is None, _asked
+
+    # The chain JOB is gone: the wizard polls nothing, so nothing answers.
+    assert _client.get("/api/genres/import/job").status_code in (404, 405)
+    assert _client.post("/api/genres/import/job",
+                        json={"paths": [JOB_ALBUM]}).status_code in (404, 405)
+
+    # A folder with no audio is the SERVER's own message, verbatim.
+    empty = _client.post("/api/genres/import", json={"paths": [JOB_EMPTY]})
+    assert empty.status_code == 400, empty.text
+    assert empty.json()["detail"] == "no audio files found", empty.text
+
+    # A path outside the music folder is named — and accepted only when the
+    # import wizard says this is the album it is editing (staged), which is
+    # how its two buttons work on a folder that is not in the library yet.
+    outside = _client.post("/api/genres/import", json={"paths": [OUTSIDE_TRACK]})
+    assert outside.status_code == 400, outside.text
+    assert outside.json()["detail"] == f"path outside music folder: {OUTSIDE_TRACK}", outside.text
+    staged = _client.post("/api/genres/import",
+                          json={"paths": [OUTSIDE_TRACK], "staged": True})
+    assert staged.status_code == 200, staged.text
+finally:
+    intg.genre_chain = _real_genre_chain
+    _shutil.rmtree(JOB_MUSIC, ignore_errors=True)
+    _shutil.rmtree(JOB_OUTSIDE, ignore_errors=True)
 
 print("genres: all assertions passed")

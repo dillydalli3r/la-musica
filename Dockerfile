@@ -23,12 +23,18 @@ ENV PYTHONUNBUFFERED=1 \
 # Debian release the base image is based on (bookworm), and the pipeline
 # degrades without them, so the image must not fail to build over them
 # (README says the same about oxipng).
+# libsndfile1 / libgomp1 back the pip-vendored tools Settings -> Dependencies
+# installs at runtime (PIP_PACKAGES: librosa imports soundfile -> libsndfile,
+# and numba/llvmlite -> libgomp); without them the pip install "succeeds" and
+# the import dies.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         flac \
         libjxl-tools \
         libjpeg-progs \
         libchromaprint-tools \
+        libsndfile1 \
+        libgomp1 \
         ca-certificates \
     && (apt-get install -y --no-install-recommends oxipng || true) \
     && (apt-get install -y --no-install-recommends rsgain || true) \

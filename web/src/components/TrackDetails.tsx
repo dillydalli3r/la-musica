@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ShieldCheck, CircleAlert, Info, ExternalLink, Loader2, RefreshCw } from "lucide-react";
+import { ShieldCheck, CircleAlert, Info, ExternalLink, Loader2, RefreshCw, ChevronDown, ChevronRight, Users } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api, answerSources, checkTrackValues, replyFor } from "../api";
 import { toast } from "../store";
-import type { AdvisoryFetchResult, InstrumentalFetchResult } from "../api";
+import type { AdvisoryFetchResult, CreditRow, InstrumentalFetchResult } from "../api";
 import type { Track } from "../types";
 import { fmtDuration, fmtTech } from "../lib/fmt";
 import { trackRef } from "../lib/refs";
@@ -56,6 +56,9 @@ export default function TrackDetails({
   const tech = [fmtTech(track.tech), track.tech.length ? fmtDuration(track.tech.length) : ""].filter(Boolean).join(" · ");
   const lyricsState = track.lyrics_embedded ? "embedded" : track.lyrics_lrc ? ".lrc sidecar" : "missing";
   const trackPath = track.path ?? "";
+  // Credits are looked up only once the section is opened — the panel below
+  // mounts on open, so the modal never waits on MusicBrainz.
+  const [creditsOpen, setCreditsOpen] = useState(false);
 
   // Provenance exists only in the check endpoints' reply (they report which
   // provider stated each value); it is not readable off the file afterwards,
@@ -146,6 +149,20 @@ export default function TrackDetails({
             </tbody>
           </table>
         </div>
+      </div>
+
+      {/* ---- credits: performers & roles, looked up only when opened ---- */}
+      <div>
+        <button
+          className="flex items-center gap-1.5 w-full text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5"
+          onClick={() => setCreditsOpen((v) => !v)}
+          aria-expanded={creditsOpen}
+          title="Performers, instruments and studio roles for this track"
+        >
+          <Users className="h-3.5 w-3.5" /> Credits
+          {creditsOpen ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+        </button>
+        {creditsOpen && <CreditsPanel path={trackPath || undefined} tags={tags} />}
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
@@ -283,6 +300,127 @@ function AuditOverride({ path, current }: { path: string; current: string | null
           ? `Forced ${stored} — overrides AudioAuditor${current ? ` (it reports ${current})` : ""}`
           : "AudioAuditor decides. Force it if you have verified this rip yourself."}
       </div>
+    </div>
+  );
+}
+
+/** The file's own credit tags the fallback line reads — PERFORMER is not in
+ *  the shared TrackTags type, so the panel accepts just what it shows. */
+type CreditTags = { PERFORMER?: string | null; COMPOSER?: string | null };
+
+/** Role-grouped credits for one track (`path`) or a whole album (`album`),
+ *  labelled with the source they came from.
+ *
+ *  Mounted only when its caller opens it — that is what keeps the lookup off
+ *  the modal's own mount — and it never blocks: while waiting it renders one
+ *  line, and a failed or empty lookup still shows the file's own credit tags
+ *  rather than an empty box. */
+export function CreditsPanel({ path, album, tags }: { path?: string; album?: string; tags?: CreditTags }) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["credits", path ?? album ?? ""],
+    queryFn: () => api.credits({ path, album }),
+    enabled: !!(path || album),
+    // 502 means MusicBrainz is unavailable — retrying only stalls the panel.
+    retry: false,
+  });
+  if (isLoading)
+    return (
+      <div className="flex items-center gap-1.5 text-xs text-zinc-500">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" /> Looking up credits…
+      </div>
+    );
+  const rows = data?.rows ?? [];
+  return (
+    <div className="space-y-2.5">
+      {data && <CreditSource source={data.source} />}
+      {rows.length ? (
+        <RoleGroups rows={rows} />
+      ) : (
+        <div className="space-y-1">
+          <div className="text-xs text-zinc-500">
+            No credits found{error ? ` — ${error instanceof Error ? error.message : String(error)}` : ""}.
+          </div>
+          <CreditTagLines tags={tags} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Where the rows came from: a tag fallback must never read as MB data. */
+function CreditSource({ source }: { source: "musicbrainz" | "tags" }) {
+  return source === "musicbrainz" ? (
+    <span className="chip bg-raise border border-border text-zinc-300" title="Roles and performers from MusicBrainz artist relations">
+      MusicBrainz
+    </span>
+  ) : (
+    <span
+      className="chip bg-amber-950/30 border border-amber-900/40 text-amber-300/90"
+      title="MusicBrainz states no relations for this (or the file carries no MBID) — these are the file's own credit tags"
+    >
+      file tags
+    </span>
+  );
+}
+
+/** Rows grouped under their role, in the order the server sent them. */
+function RoleGroups({ rows }: { rows: CreditRow[] }) {
+  const byRole = new Map<string, CreditRow[]>();
+  for (const r of rows) {
+    const list = byRole.get(r.role);
+    if (list) list.push(r);
+    else byRole.set(r.role, [r]);
+  }
+  return (
+    <div className="space-y-2.5">
+      {[...byRole].map(([role, list]) => (
+        <div key={role}>
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500 mb-0.5">{role}</div>
+          <ul className="space-y-0.5">
+            {list.map((r, i) => (
+              <li key={`${r.artist}-${i}`} className="flex flex-wrap items-center gap-1.5 text-xs">
+                {r.mbid ? (
+                  <a
+                    href={`https://musicbrainz.org/artist/${r.mbid}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-zinc-200 hover:text-accent-soft underline decoration-dotted"
+                    title="Open the artist on MusicBrainz"
+                  >
+                    {r.artist}
+                  </a>
+                ) : (
+                  <span className="text-zinc-200">{r.artist}</span>
+                )}
+                {(r.attributes ?? []).map((a, j) => (
+                  <span key={j} className="chip bg-raise border border-border text-zinc-400 text-[10px]">
+                    {a}
+                  </span>
+                ))}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/** The file's own PERFORMER / COMPOSER tags — shown when the lookup found
+ *  nothing, so an empty answer still says what is on the file. */
+function CreditTagLines({ tags }: { tags?: CreditTags }) {
+  const rows = ([["PERFORMER", tags?.PERFORMER], ["COMPOSER", tags?.COMPOSER]] as const)
+    .map(([k, v]) => [k, typeof v === "string" ? v.trim() : ""] as const)
+    .filter(([, v]) => v);
+  if (!rows.length) return null;
+  return (
+    <div className="text-xs space-y-0.5">
+      {rows.map(([k, v]) => (
+        <div key={k}>
+          <span className="text-zinc-500">{k} </span>
+          <span className="text-zinc-300 break-all">{v}</span>
+        </div>
+      ))}
     </div>
   );
 }

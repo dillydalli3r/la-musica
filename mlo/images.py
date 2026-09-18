@@ -4,6 +4,7 @@ import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from .config import DEFAULT_CONFIG
 from .containers import (
     _read_jxl_tags, _write_jxl_tags, _read_jpeg_xmp_tags, _insert_jpeg_xmp,
     _read_png_text, _strip_png_metadata, _inject_png_text, _encoder_dict,
@@ -17,7 +18,7 @@ except ImportError:
 from .subproc import run_tool
 from .paths import (
     VALID_EXTENSIONS, ALL_IMAGE_EXTS, LOSSLESS_IMAGE_EXTS, CONVERTIBLE_EXTENSIONS,
-    JPEG_QUALITY_MARKER, PNG_OPTIMIZATION_LEVEL, DEPS_DIR,
+    JPEG_QUALITY_MARKER, PNG_OPTIMIZATION_LEVEL, DEPS_DIR, LIB_AUDIO_EXTS,
 )
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _diff_bytes,
@@ -246,10 +247,10 @@ def _prepare_image_streamlined(src_path, dst_path, config, remove_alpha=False):
                 elif ext == ".jxl":
                     per_enabled = bool(config.get("cover_jxl_enabled", True))
                 if per_enabled:
-                    re_en = bool(config.get("cover_resize_enabled", False))
-                    cr_en = bool(config.get("cover_crop_enabled", False))
+                    re_en = bool(config.get("cover_resize_enabled", DEFAULT_CONFIG["cover_resize_enabled"]))
+                    cr_en = bool(config.get("cover_crop_enabled", DEFAULT_CONFIG["cover_crop_enabled"]))
                     try:
-                        thr = float(config.get("cover_crop_threshold", 0.05) or 0.05)
+                        thr = float(config.get("cover_crop_threshold", DEFAULT_CONFIG["cover_crop_threshold"]) or 0.05)
                     except (TypeError, ValueError):
                         thr = 0.05
                     thr = max(0.0, min(0.5, thr))
@@ -267,7 +268,7 @@ def _prepare_image_streamlined(src_path, dst_path, config, remove_alpha=False):
                                     need_crop = True
                             except Exception:
                                 need_crop = False
-                        force_exact = bool(config.get("cover_force_exact_size", False))
+                        force_exact = bool(config.get("cover_force_exact_size", DEFAULT_CONFIG["cover_force_exact_size"]))
                         if force_exact and re_en and tgt > 0 and w != h:
                             try:
                                 if abs(w / h - 1.0) > thr:
@@ -331,9 +332,9 @@ def _prepare_image_streamlined(src_path, dst_path, config, remove_alpha=False):
                     except Exception:
                         pass
                     if (did_cover or is_cover_file) and config and "cover_jpeg_quality" in config:
-                        q = int(config.get("cover_jpeg_quality", 100))
+                        q = int(config.get("cover_jpeg_quality", DEFAULT_CONFIG["cover_jpeg_quality"]))
                     else:
-                        q = int(config.get("images_jpeg_quality", 95)) if config else 95
+                        q = int(config.get("images_jpeg_quality", DEFAULT_CONFIG["images_jpeg_quality"])) if config else 95
                     q = max(70, min(100, q))
                 except Exception:
                     q = 95
@@ -364,7 +365,7 @@ def _get_cover_target_size(ext, config):
         config = {}
     ext = (ext or "").lower()
     try:
-        global_size = int(config.get("cover_target_size", 0) or 0)
+        global_size = int(config.get("cover_target_size", DEFAULT_CONFIG["cover_target_size"]) or 0)
     except (TypeError, ValueError):
         global_size = 0
     global_size = max(0, min(4000, global_size))
@@ -439,7 +440,7 @@ def _resize_and_crop_image(src_path, dst_path, target_size, crop_enabled, crop_t
         tsize = max(0, min(4000, tsize))
         # Respect global toggle inside helper as well
         resize_enabled = tsize > 0
-        if config is not None and not config.get("cover_resize_enabled", False):
+        if config is not None and not config.get("cover_resize_enabled", DEFAULT_CONFIG["cover_resize_enabled"]):
             resize_enabled = False
             # still allow crop even when resize disabled
         try:
@@ -466,7 +467,7 @@ def _resize_and_crop_image(src_path, dst_path, target_size, crop_enabled, crop_t
                 # automatically to 1:1; crop just enough to bring deviation
                 # within thr (user request: crop to threshold, not to square).
                 # The threshold already controls how square it must be.
-                force_exact = bool(config.get("cover_force_exact_size", False)) if config else False
+                force_exact = bool(config.get("cover_force_exact_size", DEFAULT_CONFIG["cover_force_exact_size"])) if config else False
                 if force_exact and resize_enabled and tsize > 0 and w != h:
                     # Only force crop if still outside threshold (not unconditional to square)
                     try:
@@ -576,9 +577,9 @@ def _resize_and_crop_image(src_path, dst_path, target_size, crop_enabled, crop_t
                         try:
                             # For cover resize, use cover_jpeg_quality if present, else images_jpeg_quality
                             if config and "cover_jpeg_quality" in config:
-                                q = int(config.get("cover_jpeg_quality", 100))
+                                q = int(config.get("cover_jpeg_quality", DEFAULT_CONFIG["cover_jpeg_quality"]))
                             else:
-                                q = int(config.get("images_jpeg_quality", 95)) if config else 95
+                                q = int(config.get("images_jpeg_quality", DEFAULT_CONFIG["images_jpeg_quality"])) if config else 95
                             q = max(70, min(100, q))
                         except Exception:
                             q = 95
@@ -621,16 +622,20 @@ def _rename_to_cover(filepath, new_ext=None):
     ext = new_ext if new_ext else os.path.splitext(filepath)[1]
     cover_path = os.path.join(out_dir, "cover" + ext)
 
-    if os.path.normcase(os.path.normpath(filepath)) == os.path.normcase(os.path.normpath(cover_path)):
+    if filepath == cover_path:
         return filepath
 
-    if os.path.exists(cover_path):
-        try:
-            os.remove(cover_path)
-        except OSError:
-            pass
-
-    os.rename(filepath, cover_path)
+    # os.replace, not "remove the old cover, then rename": the delete-then-
+    # rename pair lost the existing cover whenever the rename itself failed
+    # (a player holding cover.jpg open, a read-only file), leaving the album
+    # with no cover at all. os.replace overwrites atomically, and it is also
+    # what makes a case-only rename (COVER.jpg -> cover.jpg) work on a
+    # case-insensitive filesystem. A failed replace keeps the source where it
+    # is — the caller carries on with the path it already had.
+    try:
+        os.replace(filepath, cover_path)
+    except OSError:
+        return filepath
     return cover_path
 
 
@@ -711,18 +716,18 @@ def _process_image_to_jxl(args):
                     elif ext == ".jxl":
                         per_en = bool(config.get("cover_jxl_enabled", True))
                     if per_en:
-                        re_en = bool(config.get("cover_resize_enabled", False))
-                        cr_en = bool(config.get("cover_crop_enabled", False))
+                        re_en = bool(config.get("cover_resize_enabled", DEFAULT_CONFIG["cover_resize_enabled"]))
+                        cr_en = bool(config.get("cover_crop_enabled", DEFAULT_CONFIG["cover_crop_enabled"]))
                         tgt = _get_cover_target_size(ext, config) if re_en else 0
                         if (re_en and tgt > 0) or cr_en:
                             # Need to inspect actual dimensions to decide if update needed
                             try:
                                 with Image.open(src_path) as _im:
                                     _w, _h = _im.size
-                                    force_exact = bool(config.get("cover_force_exact_size", False))
+                                    force_exact = bool(config.get("cover_force_exact_size", DEFAULT_CONFIG["cover_force_exact_size"]))
                                     if cr_en:
                                         _ratio = _w / _h if _h else 1.0
-                                        if abs(_ratio - 1.0) > float(config.get("cover_crop_threshold", 0.05) or 0.05):
+                                        if abs(_ratio - 1.0) > float(config.get("cover_crop_threshold", DEFAULT_CONFIG["cover_crop_threshold"]) or 0.05):
                                             _cover_needs = True
                                     if force_exact and re_en and tgt > 0 and _w != _h:
                                         _cover_needs = True
@@ -788,7 +793,7 @@ def _process_image_to_jxl(args):
                         try:
                             with Image.open(src_path) as _im:
                                 _w, _h = _im.size
-                                if config.get("cover_crop_enabled") and abs(_w/_h - 1.0) > float(config.get("cover_crop_threshold", 0.05) or 0.05):
+                                if config.get("cover_crop_enabled") and abs(_w/_h - 1.0) > float(config.get("cover_crop_threshold", DEFAULT_CONFIG["cover_crop_threshold"]) or 0.05):
                                     cover_needed = True
                                 if config.get("cover_resize_enabled") and _get_cover_target_size(ext, config) > 0 and (_w > _get_cover_target_size(ext, config) or _h > _get_cover_target_size(ext, config)):
                                     cover_needed = True
@@ -919,9 +924,9 @@ def _process_image_to_jxl(args):
                 elif ext_for_cover == ".jxl":
                     per_enabled = bool(config.get("cover_jxl_enabled", True))
                 if per_enabled:
-                    resize_enabled_cfg = bool(config.get("cover_resize_enabled", False))
-                    crop_enabled_cfg = bool(config.get("cover_crop_enabled", False))
-                    crop_thr_cfg = float(config.get("cover_crop_threshold", 0.05) or 0.05)
+                    resize_enabled_cfg = bool(config.get("cover_resize_enabled", DEFAULT_CONFIG["cover_resize_enabled"]))
+                    crop_enabled_cfg = bool(config.get("cover_crop_enabled", DEFAULT_CONFIG["cover_crop_enabled"]))
+                    crop_thr_cfg = float(config.get("cover_crop_threshold", DEFAULT_CONFIG["cover_crop_threshold"]) or 0.05)
                     target_for_cover = _get_cover_target_size(ext_for_cover, config) if resize_enabled_cfg else 0
                     # Also handle fallback to src ext target if input is decoded temp with different ext
                     if target_for_cover == 0 and resize_enabled_cfg and ext_for_cover != ext:
@@ -1053,17 +1058,17 @@ def _process_jpeg_in_place(args):
             elif ext_cov == ".jxl":
                 per_en = bool(config.get("cover_jxl_enabled", True))
             if per_en:
-                re_en = bool(config.get("cover_resize_enabled", False))
-                cr_en = bool(config.get("cover_crop_enabled", False))
+                re_en = bool(config.get("cover_resize_enabled", DEFAULT_CONFIG["cover_resize_enabled"]))
+                cr_en = bool(config.get("cover_crop_enabled", DEFAULT_CONFIG["cover_crop_enabled"]))
                 tgt_cov = _get_cover_target_size(ext_cov, config) if re_en else 0
                 if (re_en and tgt_cov > 0) or cr_en:
                     try:
                         with Image.open(filepath) as _im:
                             _w, _h = _im.size
-                            force_exact_j = bool(config.get("cover_force_exact_size", False))
+                            force_exact_j = bool(config.get("cover_force_exact_size", DEFAULT_CONFIG["cover_force_exact_size"]))
                             if cr_en:
                                 _ratio = _w / _h if _h else 1.0
-                                if abs(_ratio - 1.0) > float(config.get("cover_crop_threshold", 0.05) or 0.05):
+                                if abs(_ratio - 1.0) > float(config.get("cover_crop_threshold", DEFAULT_CONFIG["cover_crop_threshold"]) or 0.05):
                                     _cover_needs = True
                             if force_exact_j and re_en and tgt_cov > 0 and _w != _h:
                                 _cover_needs = True
@@ -1104,9 +1109,9 @@ def _process_jpeg_in_place(args):
             elif ext_cov == ".jxl":
                 per_en = bool(config.get("cover_jxl_enabled", True))
             if per_en:
-                re_en = bool(config.get("cover_resize_enabled", False))
-                cr_en = bool(config.get("cover_crop_enabled", False))
-                thr_cov = float(config.get("cover_crop_threshold", 0.05) or 0.05)
+                re_en = bool(config.get("cover_resize_enabled", DEFAULT_CONFIG["cover_resize_enabled"]))
+                cr_en = bool(config.get("cover_crop_enabled", DEFAULT_CONFIG["cover_crop_enabled"]))
+                thr_cov = float(config.get("cover_crop_threshold", DEFAULT_CONFIG["cover_crop_threshold"]) or 0.05)
                 tgt_cov = _get_cover_target_size(ext_cov, config) if re_en else 0
                 if (re_en and tgt_cov > 0) or cr_en:
                     _cover_resized_tmp = filepath + ".cover_resized.tmp.jpg"
@@ -1248,17 +1253,17 @@ def _process_png_in_place(args):
             elif ext_cov == ".jxl":
                 per_en = bool(config.get("cover_jxl_enabled", True))
             if per_en:
-                re_en = bool(config.get("cover_resize_enabled", False))
-                cr_en = bool(config.get("cover_crop_enabled", False))
+                re_en = bool(config.get("cover_resize_enabled", DEFAULT_CONFIG["cover_resize_enabled"]))
+                cr_en = bool(config.get("cover_crop_enabled", DEFAULT_CONFIG["cover_crop_enabled"]))
                 tgt_cov = _get_cover_target_size(ext_cov, config) if re_en else 0
                 if (re_en and tgt_cov > 0) or cr_en:
                     try:
                         with Image.open(filepath) as _im:
                             _w, _h = _im.size
-                            force_exact_j = bool(config.get("cover_force_exact_size", False))
+                            force_exact_j = bool(config.get("cover_force_exact_size", DEFAULT_CONFIG["cover_force_exact_size"]))
                             if cr_en:
                                 _ratio = _w / _h if _h else 1.0
-                                if abs(_ratio - 1.0) > float(config.get("cover_crop_threshold", 0.05) or 0.05):
+                                if abs(_ratio - 1.0) > float(config.get("cover_crop_threshold", DEFAULT_CONFIG["cover_crop_threshold"]) or 0.05):
                                     _cover_needs = True
                             if force_exact_j and re_en and tgt_cov > 0 and _w != _h:
                                 _cover_needs = True
@@ -1318,9 +1323,9 @@ def _process_png_in_place(args):
             elif ext_cov == ".jxl":
                 per_en = bool(config.get("cover_jxl_enabled", True))
             if per_en:
-                re_en = bool(config.get("cover_resize_enabled", False))
-                cr_en = bool(config.get("cover_crop_enabled", False))
-                thr_cov = float(config.get("cover_crop_threshold", 0.05) or 0.05)
+                re_en = bool(config.get("cover_resize_enabled", DEFAULT_CONFIG["cover_resize_enabled"]))
+                cr_en = bool(config.get("cover_crop_enabled", DEFAULT_CONFIG["cover_crop_enabled"]))
+                thr_cov = float(config.get("cover_crop_threshold", DEFAULT_CONFIG["cover_crop_threshold"]) or 0.05)
                 tgt_cov = _get_cover_target_size(ext_cov, config) if re_en else 0
                 if (re_en and tgt_cov > 0) or cr_en:
                     _cover_resized_tmp = filepath + ".cover_resized.tmp.png"
@@ -1494,17 +1499,17 @@ def _process_jxl_in_place(args):
                 elif ext_cov == ".jxl":
                     per_en = bool(config.get("cover_jxl_enabled", True))
                 if per_en:
-                    re_en = bool(config.get("cover_resize_enabled", False))
-                    cr_en = bool(config.get("cover_crop_enabled", False))
+                    re_en = bool(config.get("cover_resize_enabled", DEFAULT_CONFIG["cover_resize_enabled"]))
+                    cr_en = bool(config.get("cover_crop_enabled", DEFAULT_CONFIG["cover_crop_enabled"]))
                     tgt_cov = _get_cover_target_size(ext_cov, config) if re_en else 0
                     if (re_en and tgt_cov > 0) or cr_en:
                         try:
                             with Image.open(src_path) as _im:
                                 _w, _h = _im.size
-                                force_exact = bool(config.get("cover_force_exact_size", False))
+                                force_exact = bool(config.get("cover_force_exact_size", DEFAULT_CONFIG["cover_force_exact_size"]))
                                 if cr_en:
                                     _ratio = _w / _h if _h else 1.0
-                                    if abs(_ratio - 1.0) > float(config.get("cover_crop_threshold", 0.05) or 0.05):
+                                    if abs(_ratio - 1.0) > float(config.get("cover_crop_threshold", DEFAULT_CONFIG["cover_crop_threshold"]) or 0.05):
                                         _cover_needs = True
                                 if force_exact and re_en and tgt_cov > 0 and _w != _h:
                                     _cover_needs = True
@@ -1608,9 +1613,9 @@ def _process_jxl_in_place(args):
                 elif src_ext == ".jxl":
                     src_per_en = bool(config.get("cover_jxl_enabled", True))
                 if per_en or src_per_en:
-                    re_en = bool(config.get("cover_resize_enabled", False))
-                    cr_en = bool(config.get("cover_crop_enabled", False))
-                    thr_cov = float(config.get("cover_crop_threshold", 0.05) or 0.05)
+                    re_en = bool(config.get("cover_resize_enabled", DEFAULT_CONFIG["cover_resize_enabled"]))
+                    cr_en = bool(config.get("cover_crop_enabled", DEFAULT_CONFIG["cover_crop_enabled"]))
+                    thr_cov = float(config.get("cover_crop_threshold", DEFAULT_CONFIG["cover_crop_threshold"]) or 0.05)
                     tgt_cov = _get_cover_target_size(ext_for_cover, config) if re_en else 0
                     if tgt_cov == 0 and re_en:
                         # fallback to src target
@@ -1784,9 +1789,9 @@ def _process_jxl_back_to_original(args):
                     # also check src JXL per-format as fallback
                     src_per_en = bool(config.get("cover_jxl_enabled", True))
                     if per_en or src_per_en:
-                        re_en = bool(config.get("cover_resize_enabled", False))
-                        cr_en = bool(config.get("cover_crop_enabled", False))
-                        thr_cov = float(config.get("cover_crop_threshold", 0.05) or 0.05)
+                        re_en = bool(config.get("cover_resize_enabled", DEFAULT_CONFIG["cover_resize_enabled"]))
+                        cr_en = bool(config.get("cover_crop_enabled", DEFAULT_CONFIG["cover_crop_enabled"]))
+                        thr_cov = float(config.get("cover_crop_threshold", DEFAULT_CONFIG["cover_crop_threshold"]) or 0.05)
                         tgt_cov = _get_cover_target_size(out_ext, config) if re_en else 0
                         if tgt_cov == 0 and re_en:
                             # fallback to src JXL target if output per-format not set
@@ -1931,9 +1936,9 @@ def _process_jxl_back_to_original(args):
                     per_en = bool(config.get("cover_jxl_enabled", True))
                 src_per_en = bool(config.get("cover_jxl_enabled", True))
                 if per_en or src_per_en:
-                    re_en = bool(config.get("cover_resize_enabled", False))
-                    cr_en = bool(config.get("cover_crop_enabled", False))
-                    thr_cov = float(config.get("cover_crop_threshold", 0.05) or 0.05)
+                    re_en = bool(config.get("cover_resize_enabled", DEFAULT_CONFIG["cover_resize_enabled"]))
+                    cr_en = bool(config.get("cover_crop_enabled", DEFAULT_CONFIG["cover_crop_enabled"]))
+                    thr_cov = float(config.get("cover_crop_threshold", DEFAULT_CONFIG["cover_crop_threshold"]) or 0.05)
                     tgt_cov = _get_cover_target_size(out_ext, config) if re_en else 0
                     if tgt_cov == 0 and re_en:
                         tgt_cov = _get_cover_target_size(".jxl", config)
@@ -2115,7 +2120,7 @@ def _process_convert_image(args):
         enc = config.get("encoder_tags") or {} if config else {}
         if target_ext == ".jpg":
             try:
-                q = int(config.get("images_jpeg_quality", 95)) if config else 95
+                q = int(config.get("images_jpeg_quality", DEFAULT_CONFIG["images_jpeg_quality"])) if config else 95
                 q = max(70, min(100, q))
             except Exception:
                 q = 95
@@ -2185,12 +2190,14 @@ def _process_convert_image(args):
 
 
 def run_process_images(config):
-    effort = config["jpegxl_effort"]
-    target_dir = config["music_folder"]
+    # `.get` with the shipped default, like every other option below: a
+    # partial cfg (a test, a helper scoping one album) must not KeyError here.
+    effort = config.get("jpegxl_effort", DEFAULT_CONFIG["jpegxl_effort"])
+    target_dir = config.get("music_folder", "")
 
     reencode_images = config.get("reencode_images", True)
-    reencode_to_jxl = config.get("reencode_to_jxl", True)
-    convert_jxl_back = config.get("convert_jxl_back", False)
+    reencode_to_jxl = config.get("reencode_to_jxl", DEFAULT_CONFIG["reencode_to_jxl"])
+    convert_jxl_back = config.get("convert_jxl_back", DEFAULT_CONFIG["convert_jxl_back"])
     rename_to_cover = config.get("rename_to_cover", True)
     remove_alpha = config.get("remove_alpha", True)
     progressive = config.get("jpeg_progressive", True)
@@ -2245,7 +2252,7 @@ def run_process_images(config):
         mode = f"JPEG XL conversion (effort {effort})"
     elif config.get("images_convert_to_jpeg"):
         try:
-            q = int(config.get("images_jpeg_quality", 95))
+            q = int(config.get("images_jpeg_quality", DEFAULT_CONFIG["images_jpeg_quality"]))
             q = max(70, min(100, q))
         except Exception:
             q = 95
@@ -2259,7 +2266,7 @@ def run_process_images(config):
     log(f"target: {target_dir}")
 
     # Determine extensions to scan — include convertible types when conversion is enabled
-    convert_to_jpeg = bool(config.get("images_convert_to_jpeg", False))
+    convert_to_jpeg = bool(config.get("images_convert_to_jpeg", DEFAULT_CONFIG["images_convert_to_jpeg"]))
     convert_to_png = bool(config.get("images_convert_lossless_to_png", False))
     scan_exts = VALID_EXTENSIONS
     if convert_to_jpeg or convert_to_png:
@@ -2448,7 +2455,7 @@ def run_process_images(config):
             else:
                 # Other convertible types (BMP, GIF, TIFF, WEBP, AVIF, etc.)
                 # Handle convert-to-JPEG (lossy) and convert-lossless-to-PNG per config
-                convert_to_jpeg = bool(config.get("images_convert_to_jpeg", False))
+                convert_to_jpeg = bool(config.get("images_convert_to_jpeg", DEFAULT_CONFIG["images_convert_to_jpeg"]))
                 convert_to_png = bool(config.get("images_convert_lossless_to_png", False))
                 # Determine if this file should be converted
                 is_lossless_src = ext in LOSSLESS_IMAGE_EXTS
@@ -2593,13 +2600,28 @@ def run_process_images(config):
             if os.path.exists(f):
                 by_folder[os.path.dirname(f)].append(f)
         for folder, group in by_folder.items():
+            names = os.listdir(folder)
             # Never overwrite an existing cover.* — it may be a different
             # image the workers already renamed into place.
             has_cover = any(
                 os.path.splitext(n.lower())[0] == "cover"
-                for n in os.listdir(folder)
+                for n in names
             )
             if has_cover:
+                continue
+
+            # A per-track sidecar ("01 - Song.jpg" beside "01 - Song.flac")
+            # is that track's art: renaming it to cover.* makes
+            # get_track_cover() fall back to the album cover and silently
+            # lose the per-track mapping. Its stem matching a track's means
+            # it is never a candidate, so a folder holding only sidecars
+            # (the common single-track release) keeps every one of them.
+            track_stems = {os.path.splitext(n)[0].lower() for n in names
+                           if n.lower().endswith(LIB_AUDIO_EXTS)}
+            group = [f for f in group
+                     if os.path.splitext(os.path.basename(f))[0].lower()
+                     not in track_stems]
+            if not group:
                 continue
 
             def _pick(f):

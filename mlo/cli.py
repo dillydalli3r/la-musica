@@ -53,13 +53,19 @@ SCRIPTS = (
     (12, "Key & BPM", "musical key + tempo tags"),
     (13, "Fetch lyrics", "LRCLIB synced/plain"),
     (14, "Beets tagging", "MusicBrainz via beets"),
+    (15, "Release tracklist", ".mlo_expected.json manifests"),
+    (16, "Mood & Energy", "MOOD/ENERGY from the track's audio"),
+    (17, "Lyrics transliterate (AI)", "TRANSLITERATION/TRANSLATION tags + sidecars"),
+    (18, "Publish lyrics (LRCLIB)", "submit missing lyrics to the community DB"),
 )
 SCRIPT_LABELS = {sid: name for sid, name, _ in SCRIPTS}
 
 # Scripts whose feature has its own on/off switch (mirror of the server's
 # _DISABLED): with the switch off the runner is a no-op at best, so the CLI
 # skips the script instead of reporting an empty run.
-SCRIPT_GATES = {7: "dr_replaygain_enabled", 12: "audiometa_enabled"}
+SCRIPT_GATES = {7: "dr_replaygain_enabled", 12: "audiometa_enabled",
+                16: "mood_enabled", 17: ("lyrics_xlit_enabled", "lyrics_translate_enabled"),
+                18: "lrclib_auto_publish"}
 
 
 def _print_script_list(with_desc=True):
@@ -73,8 +79,13 @@ def _print_script_list(with_desc=True):
 def _gate_reason(config, script_id):
     """Why *script_id* is skipped, or '' when it can run."""
     gate = SCRIPT_GATES.get(script_id)
-    if gate and not config.get(gate, True):
-        return f"{SCRIPT_LABELS[script_id]}: {gate} is off (see Configuration)"
+    if not gate:
+        return ""
+    keys = gate if isinstance(gate, tuple) else (gate,)
+    if not any(config.get(k, True) for k in keys):
+        joined = " and ".join(keys)
+        return (f"{SCRIPT_LABELS[script_id]}: {joined} "
+                f"{'are' if len(keys) > 1 else 'is'} off (see Configuration)")
     return ""
 
 
@@ -546,6 +557,12 @@ def build_script_runners():
         12: _optional_runner("mlo.audiometa", "run_analyze_audiometa"),
         13: _optional_runner("mlo.lyrics_fetch", "run_fetch_lyrics"),
         14: _optional_runner("server.beetscfg", "run_beets_tagging"),
+        # 15 was missing from this map (the CLI could list it and not run it):
+        # labels come from SCRIPTS, so every id the menu shows has a runner.
+        15: _optional_runner("server.script_runners", "run_release_tracklist"),
+        16: _optional_runner("mlo.moods", "run_detect_mood_energy"),
+        17: _optional_runner("mlo.lyrics_xlit", "run_lyrics_xlit"),
+        18: _optional_runner("mlo.lyrics_publish", "run_publish_lyrics"),
     }
     return {sid: (SCRIPT_LABELS[sid], runner) for sid, runner in runners.items()}
 

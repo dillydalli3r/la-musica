@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { ExternalLink, Link2, Loader2, Search } from "lucide-react";
+import { Check, ExternalLink, Link2, Loader2, Search } from "lucide-react";
 import { api } from "../api";
 import { toast } from "../store";
 import mbLogo from "../assets/musicbrainz.png";
@@ -55,6 +55,16 @@ const FIELDS: Record<"artist" | "album" | "track", FieldDef[]> = {
 const RYM_FIELD: Record<string, "album" | "artist"> = {
   RATEYOURMUSIC_ALBUM: "album",
   RATEYOURMUSIC_ARTIST: "artist",
+};
+
+/** The page each RateYourMusic field wants. An artist URL pasted into the
+ *  album field is a wrong paste, not an album link — the server's
+ *  `/api/rym/validate` says which page a URL is, and this is what each field
+ *  accepts from it. */
+const RYM_PAGE: Record<string, string> = {
+  RATEYOURMUSIC_ALBUM: "album",
+  RATEYOURMUSIC_ARTIST: "artist",
+  RATEYOURMUSIC_TRACK: "song",
 };
 
 const MB_URL: Record<string, (v: string) => string> = {
@@ -151,6 +161,52 @@ export function LinkChips({ tags, only }: { tags: Record<string, unknown>; only?
   );
 }
 
+/** The one chip every link field shows: Valid, or why the paste is not the
+ *  page that field wants.
+ *
+ *  Used by the wizard's Links step and by this file's link editor, so the
+ *  album link, the artist link and the MusicBrainz IDs are worded identically
+ *  wherever they are entered. `kind` is the page the server recognized
+ *  (`/api/rym/validate`) and is what words the Invalid case; a MusicBrainz
+ *  field passes `service="mb"` instead. */
+export function LinkValidChip({
+  state,
+  kind,
+  service = "rym",
+}: {
+  state: boolean | null;
+  kind?: string | null;
+  service?: "rym" | "mb";
+}) {
+  if (state === true) {
+    return (
+      <span className="chip bg-emerald-900/60 text-emerald-300 border border-emerald-800 shrink-0">
+        <Check className="h-3 w-3" /> Valid
+      </span>
+    );
+  }
+  if (state !== false) return null;
+  const label = service === "mb"
+    ? "Not a MusicBrainz link or ID"
+    : kind === "song"
+      ? "Song page"
+      : kind === "album"
+        ? "Album page"
+        : kind === "artist"
+          ? "Artist page"
+          : kind === "other"
+            ? "Other RateYourMusic page"
+            : "Not a RateYourMusic URL";
+  return (
+    <span
+      className="chip bg-red-900/50 text-red-300 border border-red-900 shrink-0"
+      title={service === "mb" ? "Paste a musicbrainz.org link or a bare MBID" : "Paste the page's full rateyourmusic.com URL"}
+    >
+      {label}
+    </span>
+  );
+}
+
 /** "Links" button + popover editor. Writes go to EVERY path given, which is
  * what makes album/artist level linking one paste per field. */
 export function LinkEditorButton({
@@ -185,6 +241,38 @@ export function LinkEditorButton({
     (typeof current?.ARTIST === "string" ? current.ARTIST.trim() : "");
   const albumName = typeof current?.ALBUM === "string" ? current.ALBUM.trim() : "";
 
+  // Validate each field as it is typed, through the same /api/rym/validate the
+  // wizard's Links step uses: a paste that is the WRONG page (an artist URL in
+  // the album field, a song page in either) reads as Invalid here instead of
+  // being written as a link that will never resolve. A MusicBrainz field needs
+  // no round trip — the MBID is what makes it valid.
+  const [checks, setChecks] = useState<Record<string, { valid: boolean; kind: string | null }>>({});
+  useEffect(() => {
+    const filled = FIELDS[mode].filter((f) => (values[f.key] ?? "").trim());
+    if (!filled.length) return;
+    const t = setTimeout(async () => {
+      const out: Record<string, { valid: boolean; kind: string | null }> = {};
+      for (const f of filled) {
+        const raw = (values[f.key] ?? "").trim();
+        if (f.kind === "mb") {
+          out[f.key] = { valid: !!mbidFrom(raw), kind: null };
+          continue;
+        }
+        try {
+          const r = (await api.rymValidate(raw)) as { valid: boolean; kind?: string | null };
+          out[f.key] = {
+            valid: r.valid && (r.kind == null || r.kind === RYM_PAGE[f.key]),
+            kind: r.kind ?? null,
+          };
+        } catch {
+          out[f.key] = { valid: false, kind: null };
+        }
+      }
+      setChecks((c) => ({ ...c, ...out }));
+    }, 400);
+    return () => clearTimeout(t);
+  }, [values, mode]);
+
   /** Fill an empty RYM field from rateyourmusic.com — never saves, so the
    *  result stays editable; a miss shows the server's note instead. */
   const autoFind = async (f: FieldDef) => {
@@ -194,9 +282,9 @@ export function LinkEditorButton({
       const r = await api.rymResolve(artistName, kind === "album" ? albumName : "");
       const found = r[kind];
       setValues((v) => ({ ...v, [f.key]: found ?? "" }));
-      setNotes((n) => ({ ...n, [f.key]: found ? "" : r.note || "could not resolve on RateYourMusic" }));
+      setNotes((n) => ({ ...n, [f.key]: found ? "" : r.note || "Could not resolve on RateYourMusic" }));
     } catch (e) {
-      setNotes((n) => ({ ...n, [f.key]: "lookup failed — paste the URL instead" }));
+      setNotes((n) => ({ ...n, [f.key]: "Lookup failed — paste the URL instead" }));
       toast.error(String(e));
     } finally {
       setFinding(null);
@@ -208,11 +296,20 @@ export function LinkEditorButton({
     for (const f of FIELDS[mode]) {
       const raw = (values[f.key] ?? "").trim();
       if (!raw) continue;
+      const check = checks[f.key];
+      if (check && !check.valid) {
+        toast(
+          f.kind === "mb"
+            ? `${f.label}: not a MusicBrainz URL or ID`
+            : `${f.label}: that is not the ${RYM_PAGE[f.key]} page this field wants`
+        );
+        return;
+      }
       let value = raw;
       if (f.kind === "mb") {
         const id = mbidFrom(raw);
         if (!id) {
-          toast(`${f.label}: not a MusicBrainz URL or MBID`);
+          toast(`${f.label}: not a MusicBrainz URL or ID`);
           return;
         }
         value = id;
@@ -293,16 +390,29 @@ export function LinkEditorButton({
                       </button>
                     )}
                   </label>
-                  <input
-                    className="input !py-1 !px-2 text-xs mt-0.5"
-                    placeholder={f.placeholder}
-                    value={values[f.key] ?? ""}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setValues((s) => ({ ...s, [f.key]: v }));
-                      setNotes((n) => (n[f.key] ? { ...n, [f.key]: "" } : n));
-                    }}
-                  />
+                  <div className="flex items-center gap-1.5 mt-0.5">
+                    <input
+                      className={`input !py-1 !px-2 text-xs flex-1 ${
+                        checks[f.key]?.valid === true
+                          ? "!border-emerald-700"
+                          : checks[f.key]?.valid === false
+                            ? "!border-red-800"
+                            : ""
+                      }`}
+                      placeholder={f.placeholder}
+                      value={values[f.key] ?? ""}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setValues((s) => ({ ...s, [f.key]: v }));
+                        setNotes((n) => (n[f.key] ? { ...n, [f.key]: "" } : n));
+                      }}
+                    />
+                    <LinkValidChip
+                      state={checks[f.key]?.valid ?? null}
+                      kind={checks[f.key]?.kind}
+                      service={f.kind === "mb" ? "mb" : "rym"}
+                    />
+                  </div>
                   {notes[f.key] && <div className="text-[10px] text-amber-300/80 mt-0.5">{notes[f.key]}</div>}
                 </div>
               );

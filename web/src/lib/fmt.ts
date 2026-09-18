@@ -145,6 +145,7 @@ export function fmtDateCell(value: string | null | undefined, full: boolean): st
 }
 
 /** mm:ss (h:mm:ss past an hour). Non-finite (Infinity / NaN) comes from
+
  * live-transcoded video streams — callers fall back to the probed duration,
  * and "—" keeps Infinity:NaN off the screen in the meantime. */
 export function fmtDuration(sec: number | undefined): string {
@@ -156,4 +157,26 @@ export function fmtDuration(sec: number | undefined): string {
   return h
     ? `${h}:${String(m).padStart(2, "0")}:${String(ss).padStart(2, "0")}`
     : `${m}:${String(ss).padStart(2, "0")}`;
+}
+
+/** A progress count: a whole number reads as itself, a measured fraction keeps
+ *  one decimal ("12.4") — so a bar can show the sub-unit part of the work
+ *  slskd/bytes/an LLM chunk actually reported instead of rounding it away.
+ *  Guards a float that arrives as a long expansion (0.30000000000000004). */
+export function fmtCount(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "0";
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+
+/** "<done>/<total>" for a bar's readout — the pair every progress surface
+ *  prints, fractional half included. */
+export function fmtCounts(done: number | null | undefined, total: number | null | undefined): string {
+  return `${fmtCount(done)}/${fmtCount(total)}`;
+}
+
+/** A percentage readout: whole percent when it is one, one decimal when the
+ *  measurement carries it (slskd's byte share does). */
+export function fmtPercent(p: number | null | undefined): string {
+  const v = Math.max(0, Math.min(100, Number(p ?? 0) || 0));
+  return `${fmtCount(v)}%`;
 }

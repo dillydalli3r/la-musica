@@ -26,11 +26,20 @@ export default function OverflowMenu({
   buttonTitle = "More actions",
   buttonClass = "btn-ghost !px-2.5",
   align = "right",
+  icon: Icon = Ellipsis,
+  label,
 }: {
   sections: OverflowMenuSection[];
   buttonTitle?: string;
   buttonClass?: string;
   align?: "left" | "right";
+  /** Trigger glyph. Defaults to the "…" a generic menu wears; a menu with a
+   *  specific job (the tag actions) passes its own so two menus side by side
+   *  are not two identical ellipses. */
+  icon?: LucideIcon;
+  /** Optional text next to the glyph — what makes a specialist menu read as a
+   *  labelled action instead of a generic overflow. */
+  label?: string;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -48,7 +57,8 @@ export default function OverflowMenu({
         aria-haspopup="menu"
         aria-expanded={open}
       >
-        <Ellipsis className="h-4 w-4" />
+        <Icon className="h-4 w-4" />
+        {label ? <span className="text-xs">{label}</span> : null}
       </button>
       <Popover
         open={open}

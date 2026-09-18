@@ -299,7 +299,10 @@ with Patch(lp, _get_json=fake_api([LRCLIB_PLAIN_ONLY])):
     hit = lp.fetch_lyrics(dict(CFG, lyrics_allow_plain=True),
                           "Slowdive", "Alison", "Souvlaki", 230.295)
 assert set(hit) == {"provider", "provider_label", "synced", "plain", "instrumental",
-                    "duration", "matched_artist", "matched_title", "matched_album"}, hit
+                    "duration", "matched_artist", "matched_title", "matched_album",
+                    "score"}, hit
+# the score is the match confidence the caller gates automatic writes on
+assert 0.0 <= hit["score"] <= 1.2, hit["score"]
 assert isinstance(hit["instrumental"], bool), hit
 json.dumps(hit)  # the run report serializes a hit as-is
 

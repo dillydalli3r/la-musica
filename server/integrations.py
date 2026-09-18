@@ -304,17 +304,20 @@ def release_lookup(mbid):
     secondary = [s.lower() for s in (rg_obj.get("secondary-types") or [])]
     release_type = "+".join([primary] + secondary) if primary else ""
 
-    # labels -> label name + first catalog number
-    catalog_number = ""
+    # labels -> label name + every catalog number. A release can carry several
+    # (one per label/pressing) and auto-import searches each as its OWN query,
+    # so keeping only the first lost every other pressing's number. Order is
+    # MusicBrainz's own; blanks and duplicates dropped. `catalog_number` stays
+    # the first one for the callers that only ever wanted one.
     label_name = ""
+    catalog_numbers = []
     for lab in data.get("label-info", []) or []:
         if not label_name:
             label_name = str(((lab.get("label") or {}).get("name")) or "").strip()
         cn = (lab.get("catalog-number") or "").strip()
-        if cn and not catalog_number:
-            catalog_number = cn
-        if label_name and catalog_number:
-            break
+        if cn and cn not in catalog_numbers:
+            catalog_numbers.append(cn)
+    catalog_number = catalog_numbers[0] if catalog_numbers else ""
     country = data.get("country") or ""
 
     return {
@@ -332,6 +335,9 @@ def release_lookup(mbid):
         "status": data.get("status") or "",
         "medium": next((m.get("format") or "" for m in data.get("media", [])), ""),
         "catalog_number": catalog_number,
+        # All of them, in MusicBrainz order — the auto-import search expands
+        # this into one query per number.
+        "catalog_numbers": catalog_numbers,
         "label": label_name,
         "release_group_id": (data.get("release-group") or {}).get("id"),
         # `release_type` keeps its historical lowercase "+"-joined spelling —
@@ -1248,6 +1254,14 @@ def genre_cascade(release, limit=None):
 # cache under <music>/.mlo/data/rym_cache so repeat imports never re-fetch.
 # (Deezer and Apple, by contrast, are keyless public APIs and their advisory
 # routes are verified working — see ADVISORY_SOURCES.)
+#
+# That ONE line is also the whole cost: the first refusal in a process sets
+# `_rym_warned`, and every later request returns "no answer" without going
+# out (see `_rym_get`), so a blocked RYM costs the import ONE probe instead
+# of a walk through every slug candidate of every album. And the LINKS the
+# app tags from RYM come from MusicBrainz, which states the same pages as url
+# relations — a blocked RYM no longer costs them at all (see "RYM link
+# resolution" below).
 RYM_BASE = "https://rateyourmusic.com"
 # What a normal Chrome window sends. A bare library UA gets a challenge, so
 # these are the cheapest thing that can make an allowed request succeed.
@@ -1264,9 +1278,16 @@ RYM_HEADERS = {
 }
 RYM_MIN_INTERVAL = 1.0        # seconds between requests, per their etiquette
 RYM_CACHE_TTL = 30 * 86400.0  # genre data moves slowly
+# A whole RYM lookup — the slug ladder included — never runs longer than this.
+# One hung socket (each request carries a 20s timeout) or a long run of
+# candidates must not hold an import behind a source that is not answering.
+RYM_MAX_WALL = 20.0
 _rym_lock = threading.Lock()
 _rym_last = 0.0
-_rym_warned = False           # one concise line per process, not per album
+_rym_warned = False           # RYM refused once this process — the one line
+                              # was printed, and every later request returns
+                              # "no answer" at once (the latch `_rym_get`
+                              # reads; the test harnesses reset it)
 _rym_failures = 0             # how often RYM failed to answer at all
 # Cloudflare's interstitial instead of a release page. Cached or parsed it
 # would be an empty page at best, so it counts as unreachable.
@@ -1340,14 +1361,30 @@ def _rym_cookie(cfg=None):
 
     Read from the live config on every request so pasting one into Settings
     takes effect without a restart. An empty cookie is not an error: it is
-    the documented "RYM is skipped" state."""
+    the documented "RYM is skipped" state.
+
+    The paste is normalised: people copy the value from wherever their
+    browser shows it, so a leading "Cookie:" (the devtools row label), a
+    wrapped line, or the newlines a terminal adds must not silently produce a
+    header RYM refuses. Every separator is re-emitted as the single "; " the
+    header grammar wants."""
     try:
         if cfg is None:
             from mlo.config import load_config
             cfg = load_config()
-        return str((cfg or {}).get("rym_cookie") or "").strip()
+        raw = str((cfg or {}).get("rym_cookie") or "")
     except Exception:
         return ""
+    raw = raw.replace("\r", "\n")
+    if "\n" in raw:
+        # A copied header wraps: keep the pairs, drop the line breaks.
+        lines = [ln.strip() for ln in raw.split("\n") if ln.strip()]
+        raw = "; ".join(ln.rstrip(";") for ln in lines)
+    raw = raw.strip()
+    if raw.lower().startswith("cookie:"):
+        raw = raw.split(":", 1)[1].strip()
+    pairs = [p.strip() for p in raw.split(";") if p.strip()]
+    return "; ".join(pairs)
 
 
 def _rym_headers(cfg=None):
@@ -1366,7 +1403,9 @@ def _rym_unreachable(reason):
     simply unavailable, so this is logged once and the chain moves on. The
     counter is what lets a caller tell "RYM is not answering" (stop asking —
     the next candidate cannot do better) from "that slug was wrong" (try the
-    next one)."""
+    next one); `_rym_warned`, set here, is the same "stop asking": one refused
+    request this process and `_rym_get` answers None without going out again,
+    which is what keeps a blocked RYM off the import's critical path."""
     global _rym_warned, _rym_failures
     _rym_failures += 1
     if _rym_warned:
@@ -1409,6 +1448,11 @@ def _rym_cache_write(key, text):
         pass
 
 
+def _rym_expired(started):
+    """Whether a lookup that began at *started* has spent its whole budget."""
+    return time.time() - started > RYM_MAX_WALL
+
+
 def _rym_get(path, params=None, cfg=None, expect=None):
     """Polite GET: 1 req/s, disk-cached, browser-like headers, None on any
     failure (a blocked RYM is logged once — see `_rym_unreachable`).
@@ -1426,6 +1470,12 @@ def _rym_get(path, params=None, cfg=None, expect=None):
     hit = _rym_cache_read(key, RYM_CACHE_TTL)
     if hit is not None:
         return hit
+    if _rym_warned:
+        # RYM refused an earlier request this process (a challenge, a 403, no
+        # connection, no cookie). The candidates left cannot do better, and
+        # asking them at 1 req/s is how an import of a few dozen albums used
+        # to burn minutes on a source that was never going to answer.
+        return None
     with _rym_lock:
         wait = RYM_MIN_INTERVAL - (time.time() - _rym_last)
         if wait > 0:
@@ -1513,11 +1563,16 @@ def rym_genres(artist, album):
                 "source_url": f"{RYM_BASE}{url}", "source": "rym"}
 
     url = f"/release/album/{_rym_slug(artist)}/{_rym_slug(album)}/"
+    started = time.time()
     html = _rym_get(url)
     if html:
         got = answer(html, url)
         if got:
             return got
+    # Two more requests at most, and only inside the wall clock: a blocked RYM
+    # answers the FIRST one with a challenge, so the rest are spent misses.
+    if _rym_expired(started) or _rym_warned:
+        return None
     html = _rym_get("/search", {"searchterm": f"{artist} {album}", "type": "a"})
     if not html:
         return None
@@ -1526,6 +1581,8 @@ def rym_genres(artist, album):
     if not m2:
         return None
     rel_url = m2.group(1)
+    if _rym_expired(started):
+        return None
     page = _rym_get(rel_url)
     got = answer(page or "", rel_url)
     if not got:
@@ -1550,8 +1607,18 @@ def rym_artist_genres(artist):
 # --------------------------------------------------------------------------- #
 # RYM link resolution (album + artist)
 # --------------------------------------------------------------------------- #
-# RYM's URLs are derived from the names, so a link can usually be resolved
-# without scraping anything but the page that proves it exists:
+# MusicBrainz is the FIRST source: it holds the rateyourmusic.com page as a
+# `url` relation ("other databases") on the release GROUP and on the artist —
+# VERIFIED live: release-group/6e335887… (In Rainbows) →
+# /release/album/radiohead/in_rainbows/, artist/a74b1b7f… (Radiohead) →
+# /artist/radiohead, and the same for Nirvana / MTV Unplugged in New York. A
+# link MusicBrainz states IS that page, so it costs no RYM request, needs no
+# cookie, and nothing has to be confirmed or guessed.
+#
+# Only what MusicBrainz could not state is scraped, and only with a
+# `rym_cookie` configured: rateyourmusic.com refuses an automated client
+# (see RYM_BASE), so its URLs are derived from the names and a candidate is
+# fetched once to prove it exists:
 #
 #   /release/album/<artist-slug>/<album-slug>/     /artist/<artist-slug>
 #
@@ -1561,7 +1628,13 @@ def rym_artist_genres(artist):
 # page states the artist — and for a release, the album too. Nothing is
 # guessed from a partial page, so a candidate that cannot be confirmed yields
 # NO link and the user pastes their own (the manual editor is unchanged).
+# Without a cookie, and after the first refusal inside a process, the ladder
+# is not walked at all: RYM costs ONE probe at most, never minutes.
 _RYM_RELEASE_LINK_RE = re.compile(r'href="(/release/album/[^"]+)"', re.I)
+# What the user can act on when nothing resolved because RYM would not answer.
+_RYM_BLOCKED_NOTE = ("could not resolve on RateYourMusic — blocked by "
+                     "Cloudflare; set rym_cookie in Settings, or MusicBrainz "
+                     "links are used")
 
 
 def _rym_slug_candidates(name):
@@ -1602,12 +1675,115 @@ def _rym_verified(path, cfg, *names):
     return page
 
 
-def rym_links(artist="", album="", cfg=None):
+# A rateyourmusic.com page anywhere in MusicBrainz's relations. `www.` and the
+# http scheme are accepted because MB stores whatever the editor typed.
+_MB_RYM_URL_RE = re.compile(r"^https?://(?:www\.)?rateyourmusic\.com/", re.I)
+
+
+def _mb_query(value):
+    """A name as a MusicBrainz Lucene term: a quote or backslash inside the
+    quoted phrase would otherwise break the whole query."""
+    return re.sub(r'["\\]', " ", str(value or "")).strip()
+
+
+def _mb_rym_relations(entity, mbid, inc="url-rels"):
+    """(RYM urls, entity data) for one MusicBrainz MBID.
+
+    ([], {}) when MusicBrainz cannot answer — this is a source that may be
+    busy, never a reason to fail the lookup."""
+    try:
+        data = mb_get_cached(f"{entity}/{mbid}", {"inc": inc, "fmt": "json"})
+    except Exception:
+        return [], {}
+    data = data or {}
+    urls = []
+    for rel in data.get("relations") or []:
+        url = str((rel.get("url") or {}).get("resource") or "").strip()
+        if _MB_RYM_URL_RE.match(url):
+            urls.append(url)
+    # A release-group carries the /release/ page; prefer it over anything else
+    # (a /label/ or /artist/ relation) when MB states both.
+    urls.sort(key=lambda u: "/release/" not in u)
+    return urls, data
+
+
+def _mb_credit_id(entity):
+    """The first credited artist's MBID of a release/release-group payload."""
+    credit = (entity or {}).get("artist-credit") or [{}]
+    return ((credit[0].get("artist") or {}).get("id") or "")
+
+
+def _mb_release_group_ids(artist, album, limit=5):
+    """Release-group MBIDs MusicBrainz's own search returns for this album.
+
+    Only a row whose TITLE is the album asked for is kept: a same-titled
+    release by another artist must never contribute a link."""
+    q = f'releasegroup:"{_mb_query(album)}"'
+    if artist:
+        q += f' AND artist:"{_mb_query(artist)}"'
+    try:
+        rows = (search_mb("release-group", q, limit=limit) or {}).get("rows") or []
+    except Exception:
+        return []
+    return [r["id"] for r in rows
+            if r.get("id") and _rym_ref(r.get("title")) == _rym_ref(album)]
+
+
+def _mb_rym_links(artist="", album="", mbid=None):
+    """The RYM pages MusicBrainz itself states: ``{"album", "artist"}``.
+
+    A link MusicBrainz states needs no confirmation — it IS the canonical
+    page — so this is the resolver's first source and the one that works with
+    no `rym_cookie` at all. `mbid` is the caller's own MusicBrainz ID: the
+    release GROUP's where the caller has one (`release["release_group_id"]`),
+    a release's otherwise (a release usually carries no RYM relation where its
+    group does, so the group is asked first). Without an MBID the group is
+    found with MusicBrainz's search. Either key of the result may be missing.
+    """
+    out, group = {}, {}
+    if mbid:
+        for entity in ("release-group", "release"):
+            urls, data = _mb_rym_relations(entity, mbid,
+                                           "url-rels+artist-credits")
+            if data:
+                group = data
+            if urls:
+                out["album"] = urls[0]
+                break
+    if not out.get("album") and album:
+        for group_mbid in _mb_release_group_ids(artist, album):
+            urls, data = _mb_rym_relations("release-group", group_mbid,
+                                           "url-rels+artist-credits")
+            if urls:
+                out["album"], group = urls[0], data
+                break
+    if artist and not out.get("artist"):
+        artist_mbid = _mb_credit_id(group)
+        if not artist_mbid:
+            try:
+                from server import discovery
+                artist_mbid = discovery.resolve_artist_mbid(artist) or ""
+            except Exception:
+                artist_mbid = ""
+        if artist_mbid:
+            urls, _data = _mb_rym_relations("artist", artist_mbid)
+            if urls:
+                out["artist"] = urls[0]
+    return out
+
+
+def rym_links(artist="", album="", cfg=None, mbid=None):
     """Verified RateYourMusic links for an album:
     ``{"album", "artist", "note"}``.
 
-    The album link is tried first (its page also names the artist's own URL),
-    as `/release/album/<artist>/<album>/` with the exact slugs, then with the
+    MusicBrainz is asked FIRST (see `_mb_rym_links`): it states the RYM page
+    as a url relation on the release group and on the artist, which resolves
+    both links with no cookie and no scraping on an install where
+    rateyourmusic.com refuses an automated client (RYM_BASE).
+
+    Only a link MusicBrainz did not state is scraped, and only with a
+    `rym_cookie` configured: the album as
+    `/release/album/<artist>/<album>/` with the exact slugs, then with the
     de-`the`-ed ones, then from RYM's own search page — each candidate
     confirmed before it is accepted. The artist link comes from the album
     page's own `/artist/` link when it is one of the artist's slugs, else from
@@ -1615,8 +1791,10 @@ def rym_links(artist="", album="", cfg=None):
 
     Either link is None when it could not be confirmed, and `note` says so
     ("could not resolve …") — that is the user-pastes-the-URL state, never an
-    error. Gated by `rym_links_auto` (mlo.config, default True): off means no
-    request at all.
+    error: when the reason is a blocked RYM the note says what to do about it.
+    Gated by `rym_links_auto` (mlo.config, default True): off means no request
+    at all. `mbid` (optional) is the release group's MusicBrainz ID, or a
+    release's.
     """
     if cfg is None:
         try:
@@ -1634,23 +1812,38 @@ def rym_links(artist="", album="", cfg=None):
         out["note"] = "nothing to look up"
         return out
 
-    artist_slugs = _rym_slug_candidates(artist)
-    page = None
-    # A failure that is not a miss (no connection, a challenge) is counted:
-    # once RYM has refused to answer, the remaining candidates cannot do
-    # better, so this album costs ONE request and the ladder stops.
+    # 1) MusicBrainz, which states the RYM page itself.
+    try:
+        stated = _mb_rym_links(artist, album, mbid)
+    except Exception:
+        stated = {}
+    out["album"] = stated.get("album")
+    out["artist"] = stated.get("artist")
+
+    # 2) Scrape only what MB could not state. A failure that is not a miss (no
+    # connection, a challenge) is counted, and `_rym_get` refuses everything
+    # after the first one: RYM costs ONE probe, never a slug walk.
+    started = time.time()
     fails = _rym_failures
-    if artist and album:
-        for a in artist_slugs:
+    page = None
+
+    def stop():
+        """Whether RYM has already answered for this lookup — a refusal
+        (`_rym_warned`/`_rym_failures`, the latch `_rym_get` reads) or the
+        wall clock."""
+        return _rym_warned or _rym_failures != fails or _rym_expired(started)
+
+    if artist and album and not out["album"]:
+        for a in _rym_slug_candidates(artist):
             for b in _rym_slug_candidates(album):
                 path = f"/release/album/{a}/{b}/"
                 page = _rym_verified(path, cfg, artist, album)
                 if page:
                     out["album"] = f"{RYM_BASE}{path}"
                     break
-            if out["album"] or _rym_failures != fails:
+            if out["album"] or stop():
                 break
-        if not out["album"] and _rym_failures == fails:
+        if not out["album"] and not stop():
             # RYM's own search: the first release hits for the query, each
             # confirmed the same way (so a cover version cannot slip through).
             index = _rym_get("/search", {"searchterm": f"{artist} {album}",
@@ -1660,13 +1853,13 @@ def rym_links(artist="", album="", cfg=None):
                 if page:
                     out["album"] = f"{RYM_BASE}{rel}"
                     break
-                if _rym_failures != fails:
+                if stop():
                     break
 
-    if artist and _rym_failures == fails:
+    if artist and not out["artist"] and not stop():
         # The album page links its own artist: try RYM's own answer first,
         # but only inside the slug set this name can legitimately produce.
-        slugs = list(artist_slugs)
+        slugs = list(_rym_slug_candidates(artist))
         if page:
             m = _RYM_ARTIST_LINK_RE.search(page)
             slug = m.group(1).rstrip("/").rsplit("/", 1)[-1] if m else ""
@@ -1678,12 +1871,19 @@ def rym_links(artist="", album="", cfg=None):
             if _rym_verified(path, cfg, artist):
                 out["artist"] = f"{RYM_BASE}{path}"
                 break
-            if _rym_failures != fails:
+            if stop():
                 break
 
     if not out["album"] and not out["artist"]:
-        out["note"] = ("no artist name to look up" if not artist
-                       else "could not resolve on RateYourMusic")
+        if not artist:
+            out["note"] = "no artist name to look up"
+        elif _rym_failures != fails or _rym_warned or not _rym_cookie(cfg):
+            # RYM refused (this call, or earlier in the process) and nothing
+            # on MusicBrainz either: say what the user can do instead of
+            # "no link found".
+            out["note"] = _RYM_BLOCKED_NOTE
+        else:
+            out["note"] = "could not resolve on RateYourMusic"
     elif artist and album and not out["album"]:
         out["note"] = "could not resolve the album link on RateYourMusic"
     elif artist and not out["artist"]:
@@ -2094,6 +2294,144 @@ def _mb_recording_ids(recording_mbid):
     return {"qid": _mb_wikidata_qid_in(relations), "work": work}
 
 
+# --------------------------------------------------------------------------- #
+# Credits / performers
+# --------------------------------------------------------------------------- #
+# MusicBrainz keeps the players on the RECORDING: `artist-rels` returns one
+# relation per person — the relation TYPE is the role (performer, instrument,
+# vocal, producer, engineer, mix, mastering, arranger, composer, lyricist,
+# conductor, remixer, …), the instrument or vocal part rides in `attributes`
+# ("double bass", "lead vocals"), and the person's name + MBID come along in
+# the same relation, so no second request is needed to name them. `work-rels`
+# says which WORK the recording performs. ONE request per recording, ONE per
+# release (`recording-level-rels` + `work-level-rels` bring each track's own
+# relations with the release, VERIFIED against MB while writing this), both
+# through mb_get_cached so the cache and the 1 req/s etiquette apply like any
+# other MB call.
+CREDITS_MAX_RECORDINGS = 200   # a box set must not become 200 requests' worth
+CREDITS_MAX_ROWS = 500         # …and the UI gets a capped list either way
+# The tags a tagger writes when MB has nothing (Vorbis PERFORMER is the
+# common one, per player, as "Name (instrument)").
+CREDIT_TAG_ROLES = ("PERFORMER", "COMPOSER", "LYRICIST", "ARRANGER",
+                    "CONDUCTOR", "REMIXER", "ENGINEER", "PRODUCER")
+
+
+def _credit_rows(relations, rows=None):
+    """Append one row per MusicBrainz relation to *rows*:
+    ``{role, attributes, artist, mbid}``.
+
+    Every artist-target relation is kept whatever its type — MB reports the
+    role itself, and a release's players are split across `performer` (Vorbis
+    era) and `instrument` (current schema), so filtering by type would drop
+    half of them. A relation pointing at a WORK becomes a `work` row whose
+    `artist` is the work's title (its own type, usually "performance", rides
+    in `attributes`), which is how the recording's work stays visible.
+    """
+    rows = [] if rows is None else rows
+    for rel in relations or []:
+        if len(rows) >= CREDITS_MAX_ROWS:
+            break
+        attributes = [str(a).strip() for a in (rel.get("attributes") or [])
+                      if str(a).strip()]
+        if rel.get("target-type") == "work":
+            work = rel.get("work") or {}
+            title = str(work.get("title") or "").strip()
+            if title:
+                rows.append({"role": "work", "attributes": attributes or
+                             [str(rel.get("type") or "").strip()],
+                             "artist": title, "mbid": work.get("id") or ""})
+            continue
+        artist = rel.get("artist") or {}
+        name = str(artist.get("name") or rel.get("target-credit") or "").strip()
+        if not name:
+            continue
+        rows.append({"role": str(rel.get("type") or "credit").lower(),
+                     "attributes": attributes, "artist": name,
+                     "mbid": artist.get("id") or ""})
+    return rows
+
+
+def tidy_credit_rows(rows):
+    """De-duplicated, role-grouped, capped credit rows — what the UI renders.
+
+    Albums repeat the same player on every track and the fallback repeats the
+    same tag on every file, so the same (role, person, instrument) is kept
+    once; sorting by role groups the list the way it is displayed.
+    """
+    seen = set()
+    out = []
+    for row in rows or []:
+        key = (row.get("role"), row.get("artist", "").lower(), row.get("mbid"),
+               tuple(row.get("attributes") or []))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    out.sort(key=lambda r: (r.get("role") or "", r.get("artist", "").lower()))
+    return out[:CREDITS_MAX_ROWS]
+
+
+def credit_rows_from_tags(tags):
+    """Credit rows from a file's OWN tags, for when MusicBrainz has nothing.
+
+    `tags` is a raw tag dump (mlo.audio all_tags, keys already canonicalised to
+    PERFORMER/COMPOSER/… when the container maps them). Vorbis writes
+    `PERFORMER=Name (instrument)` once per player and some taggers join several
+    names with "; ", so both shapes are split back apart. ponytail: a
+    multi-value Vorbis tag collapses to its first value in all_tags — enough
+    for a fallback, read af.audio.tags directly if every player must show.
+    """
+    rows = []
+    if not isinstance(tags, dict):
+        return rows
+    by_key = {str(k).upper(): v for k, v in tags.items()}
+    for role in CREDIT_TAG_ROLES:
+        for part in re.split(r"\s*;\s*", str(by_key.get(role) or "")):
+            part = part.strip()
+            if not part:
+                continue
+            m = re.match(r"^(.*?)\s*\(([^()]*)\)$", part)
+            name, attributes = ((m.group(1).strip(), [m.group(2).strip()])
+                                if m else (part, []))
+            if name:
+                rows.append({"role": role.lower(), "attributes": attributes,
+                             "artist": name, "mbid": ""})
+    return tidy_credit_rows(rows)
+
+
+def recording_credits(recording_mbid):
+    """Credit rows for ONE recording (its players, plus its work).
+
+    Raises MusicBrainzError (or httpx's own error) when MB cannot answer — the
+    caller reports that reason rather than an empty result.
+    """
+    data = mb_get_cached(f"recording/{recording_mbid}",
+                         {"inc": "artist-rels+work-rels", "fmt": "json"})
+    return tidy_credit_rows(_credit_rows((data or {}).get("relations")))
+
+
+def release_credits(release_mbid):
+    """Credit rows for a whole RELEASE — every track's recording.
+
+    The release request carries each track's own relations, so this stays ONE
+    request per album; only the aggregate is capped, not the request count.
+    """
+    data = mb_get_cached(
+        f"release/{release_mbid}",
+        {"inc": "recordings+artist-rels+recording-level-rels+work-rels"
+                "+work-level-rels", "fmt": "json"})
+    rows = _credit_rows((data or {}).get("relations"))
+    recordings = 0
+    for medium in (data or {}).get("media") or []:
+        for track in medium.get("tracks") or []:
+            if (recordings >= CREDITS_MAX_RECORDINGS
+                    or len(rows) >= CREDITS_MAX_ROWS):
+                break
+            recordings += 1
+            _credit_rows((track.get("recording") or {}).get("relations"), rows)
+    return tidy_credit_rows(rows)
+
+
 def _itunes_track_genres(artist, album, cfg=None):
     """{"disc:position": [genre]} from Apple's per-track `primaryGenreName`.
 
@@ -2424,7 +2762,7 @@ def _answer_by_title(answers, title):
 
 
 def genre_chain(artist="", album="", release=None, limit=None, sources=None,
-                cfg=None, files=None):
+                cfg=None, files=None, progress=None):
     """Per-track genres for a release, merged from the configured sources.
 
     Every source is asked for EVERY track; the default order (the priority
@@ -2456,6 +2794,10 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
     statement, a timeout) contributes nothing and is reported in `notes` — it
     is never filled in from a guess.
 
+    `progress` (optional) is called as ``progress(i, total, source)`` before
+    each source is asked, so a caller can show which source the chain is
+    waiting on; a hook that raises is ignored.
+
     Returns {"genres": [...], "per_track": {(disc, position): [...]},
     "per_track_sources": {...}, "per_track_levels": {...},
     "sources": {path: [source, ...]}, "levels": {path: "track"|"album"|
@@ -2481,7 +2823,15 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
     tracks = list((release or {}).get("media") or [])
 
     answers_by_source, per_source, notes = {}, {}, {}
-    for source in order:
+    for i, source in enumerate(order, 1):
+        if progress is not None:
+            # "source i/N", for a caller that shows a live bar: a source can
+            # spend seconds on the network, and the hook must never be able
+            # to break the chain.
+            try:
+                progress(i, len(order), source)
+            except Exception:
+                pass
         try:
             answers = _genre_source_answers(source, artist, album, release,
                                             cfg, tracks) or {}
@@ -2817,18 +3167,13 @@ def search_mb(entity, query, limit=100, mode="free", offset=0,
     return {"rows": rows, "total": data.get("count") or len(rows)}
 
 
-def artist_browse(mbid, limit=300, offset=0):
-    """Artist page: identity + genres + full discography (release groups).
+def artist_identity(mbid):
+    """An artist's identity: name, area, life span, genres, tags.
 
-    Discography comes from the *browse* endpoint (release-group?artist=…)
-    rather than a lookup's inc= subquery — lookups silently cap the related
-    list. Pages are collected (up to `limit`) so type filters and the
-    chronological order are honest across MusicBrainz's unsorted pages."""
+    Deliberately split from the discography: MusicBrainz answers one request
+    per second, so the artist page paints this header while the release
+    groups are still being collected."""
     data = mb_get_cached(f"artist/{mbid}", {"inc": "genres", "fmt": "json"})
-    rgs, total = _browse_collect(
-        "release-group", {"artist": mbid}, "release-groups", "release-group-count",
-        limit=limit, offset=offset,
-    )
     area = data.get("area") or {}
     return {
         "id": data.get("id"),
@@ -2842,6 +3187,22 @@ def artist_browse(mbid, limit=300, offset=0):
         ],
         "genres": _title_genres(data),
         "tags": [t.get("name") for t in (data.get("tags") or [])[:8]],
+    }
+
+
+def artist_release_groups(mbid, limit=100, offset=0):
+    """One page of an artist's release groups, oldest first.
+
+    The discography comes from the *browse* endpoint (release-group?artist=…)
+    rather than a lookup's inc= subquery — lookups silently cap the related
+    list. It has NO server-side sort, so a single arbitrary 100-row slice
+    misrepresents a discography: `_browse_collect` walks the pages (still
+    1 req/s) up to `limit` rows so the caller sorts an honest window."""
+    rgs, total = _browse_collect(
+        "release-group", {"artist": mbid}, "release-groups", "release-group-count",
+        limit=limit, offset=offset,
+    )
+    return {
         "total": total,
         "offset": offset,
         "release_groups": [
@@ -2860,21 +3221,31 @@ def artist_browse(mbid, limit=300, offset=0):
     }
 
 
+def artist_browse(mbid, limit=300, offset=0):
+    """Identity + a page of release groups together — the auto-import path
+    wants both at once, the artist page does not (see artist_identity)."""
+    return {**artist_identity(mbid), **artist_release_groups(mbid, limit, offset)}
+
+
 def _release_policy():
-    """(avoid_promo, medium_order) from config, with safe defaults."""
+    """(avoid_promo, medium_order, require_country) from config, safe defaults."""
     from mlo.config import DEFAULT_CONFIG, load_config
     try:
         cfg = load_config()
     except Exception:
         cfg = {}
     avoid = bool(cfg.get("auto_import_avoid_promo", True))
+    country = bool(cfg.get("auto_import_require_country", True))
     order = cfg.get("auto_import_medium_order") or DEFAULT_CONFIG["auto_import_medium_order"]
-    return avoid, [str(x).strip().lower() for x in order if str(x).strip()]
+    return avoid, [str(x).strip().lower() for x in order if str(x).strip()], country
 
 
 # MusicBrainz release statuses that must never be auto-picked while
 # avoid-promo is on: a promo/bootleg/pseudo edition is not the album.
 _PROMO_STATUSES = {"promotion", "bootleg", "pseudo-release", "pseudo release"}
+# Withdrawn/expired/cancelled editions still exist on MusicBrainz, but the
+# label pulled them: they sort below a plain release and above a promo.
+_NEGATIVE_STATUSES = {"withdrawn", "expired", "cancelled", "canceled"}
 
 
 def _medium_names(rel):
@@ -2912,33 +3283,50 @@ def release_medium_rank(rel, medium_order):
 def release_choice_key(rel, avoid_promo=True, medium_order=None):
     """Sort key: Official first, then medium preference, then earliest date.
 
-    Promotional editions sort last (and `pick_releases` drops them entirely)
-    when avoid-promo is on."""
+    Negative traits are counted against a release instead of being invisible
+    to the sort: `official` ranks 0, a release whose status MusicBrainz does
+    not state ranks 1, a withdrawn/expired/cancelled edition ranks 2, and a
+    promotional/bootleg/pseudo edition ranks 3 (`pick_releases` drops those
+    entirely while avoid-promo is on). An edition carrying a RELEASECOUNTRY
+    beats one that does not, whichever status the two share."""
     status = str(rel.get("status") or "").strip().lower()
     if status == "official":
         rank = 0
     elif status in _PROMO_STATUSES and avoid_promo:
+        rank = 3
+    elif status in _NEGATIVE_STATUSES:
         rank = 2
     else:
         rank = 1
-    return (rank, release_medium_rank(rel, medium_order or []),
+    return (rank, 0 if str(rel.get("country") or "").strip() else 1,
+            release_medium_rank(rel, medium_order or []),
             rel.get("date") or "9999")
 
 
 def pick_releases(releases, cfg=None):
     """Releases ordered by the auto-import release policy (best first).
 
-    Promotional / bootleg / pseudo editions are dropped entirely while
-    mlo.config `auto_import_avoid_promo` is on, so no auto-import path can
-    queue one."""
+    The ineligible are dropped rather than ranked so no auto-import path can
+    queue one: promotional / bootleg / pseudo editions while mlo.config
+    `auto_import_avoid_promo` is on, and editions with no RELEASECOUNTRY while
+    `auto_import_require_country` is on."""
     if cfg is None:
-        avoid, order = _release_policy()
+        avoid, order, country = _release_policy()
     else:
         avoid = bool(cfg.get("auto_import_avoid_promo", True))
+        country = bool(cfg.get("auto_import_require_country", True))
         order = [str(x).strip().lower()
                  for x in (cfg.get("auto_import_medium_order") or []) if str(x).strip()]
-    kept = [r for r in (releases or [])
-            if not (avoid and str(r.get("status") or "").strip().lower() in _PROMO_STATUSES)]
+
+    def usable(rel):
+        status = str(rel.get("status") or "").strip().lower()
+        if avoid and status in _PROMO_STATUSES:
+            return False
+        if country and not str(rel.get("country") or "").strip():
+            return False
+        return True
+
+    kept = [r for r in (releases or []) if usable(r)]
     kept.sort(key=lambda r: release_choice_key(r, avoid, order))
     return kept
 
@@ -2953,7 +3341,7 @@ def resolve_release(mbid):
     """(release, release_mbid) for a release id, a release-group id or a URL.
 
     Auto-import works on a *release* — a concrete pressing with a track list
-    — but the links discovery, MoreLikeThis and Home hand out are release
+    — while the ids pasted into a wish or an import are usually release
     GROUPS, and a group id passed to the release endpoint 404s. Group ids
     are resolved to their best edition via the release-choice policy so no
     caller (HTTP route, wishes worker, bulk import) can queue a group job.
@@ -2988,7 +3376,9 @@ def resolve_release(mbid):
 
 
 _NO_EDITION = ("no edition eligible for auto-import (promotional/bootleg "
-               "editions are skipped while auto_import_avoid_promo is on)")
+               "editions are skipped while auto_import_avoid_promo is on, and "
+               "editions with no release country while "
+               "auto_import_require_country is on)")
 # Release groups one bulk call expands: each costs a MusicBrainz browse
 # (1 req/s), so an artist with hundreds of groups would take minutes — the
 # remainder is reported as skipped instead of silently dropped or wedging.
@@ -3036,6 +3426,12 @@ def auto_import_targets(mbid, kind=None, mode="best"):
     kind = str(kind or "auto").strip().lower()
     if kind in ("", "auto"):
         kind = _kind_for(mbid) or "release"
+    # "Already in the library" is checked for every kind, not just artists:
+    # queuing a release or a group the library already holds downloaded the
+    # same album a second time, and the duplicate then landed beside it.
+    from mlo.config import load_config
+    from server import wishes
+    owned = wishes.owned_mbids(load_config())
     if kind == "release":
         rel, rid = resolve_release(mbid)
         if not rid:
@@ -3043,21 +3439,23 @@ def auto_import_targets(mbid, kind=None, mode="best"):
                                                  "release group matches this ID"}]
         if not rel:
             return [], [{"mbid": rid, "reason": _NO_EDITION}]
+        rg = str(rel.get("release_group_id") or "").strip().lower()
+        if rg and rg in owned:
+            return [], [{"mbid": rid, "reason": "already in the library"}]
         return [{"mbid": rid, "title": rel.get("title") or ""}], []
     if kind == "release_group":
+        if str(_mbid(mbid) or "").lower() in owned:
+            return [], [{"mbid": mbid, "reason": "already in the library"}]
         rows, err = group_targets(mbid, mode)
         return rows, ([{"mbid": mbid, "reason": err}] if err else [])
     if kind != "artist":
         return [], [{"mbid": mbid, "reason": f"unknown MusicBrainz kind {kind!r}"}]
-    from mlo.config import load_config
-    from server import wishes
 
     artist = artist_browse(mbid, limit=500, offset=0)
     groups = artist.get("release_groups") or []
     if not groups:
         return [], [{"mbid": mbid,
                      "reason": "this artist has no release groups on MusicBrainz"}]
-    owned = wishes.owned_mbids(load_config())
     rows, skipped, done = [], [], 0
     for g in groups:
         gid = str(g.get("id") or "")
@@ -3095,7 +3493,7 @@ def release_group_browse(mbid, limit=300, offset=0):
         limit=limit, offset=offset,
     )
     releases = []
-    avoid, medium_order = _release_policy()
+    avoid, medium_order, _require_country = _release_policy()
     for r in sorted(rel_rows,
                     key=lambda r: release_choice_key(r, avoid, medium_order)):
         track_count, track_breakdown = _release_counts(r)
@@ -3124,62 +3522,6 @@ def release_group_browse(mbid, limit=300, offset=0):
         "secondary_types": data.get("secondary-types") or [],
         "genres": _title_genres(data),
         "first_release_date": data.get("first-release-date") or "",
-        "total": total,
-        "offset": offset,
-        "releases": releases,
-    }
-
-
-def recording_browse(mbid, limit=300, offset=0):
-    """Recording ('track') page: identity + releases carrying it (browsed,
-    with media, for the same reasons as the release-group page)."""
-    data = mb_get_cached(
-        f"recording/{mbid}",
-        {"inc": "artist-credits+isrcs+genres", "fmt": "json"},
-    )
-    rel_rows, total = _browse_collect(
-        "release",
-        {"recording": mbid, "inc": "media+artist-credits+release-groups"},
-        "releases", "release-count",
-        limit=limit, offset=offset,
-    )
-    releases = []
-    for r in sorted(
-        rel_rows,
-        key=lambda r: r.get("date") or "9999",
-    ):
-        track_count, track_breakdown = _release_counts(r)
-        rg_primary, rg_secondary = _rg_types(r)
-        releases.append({
-            "id": r.get("id"),
-            "title": r.get("title"),
-            "date": r.get("date") or "",
-            "country": r.get("country") or "",
-            "status": r.get("status") or "",
-            "formats": _media_summary(r),
-            "disc_count": len(r.get("media") or []),
-            "track_count": track_count,
-            "track_breakdown": track_breakdown,
-            # the release group's full type: primary (Album/EP/Single/...) plus
-            # secondary (Soundtrack/Live/Compilation/...), so a score album
-            # reads "Album + Soundtrack" instead of a bare "Album".
-            "primary_type": rg_primary,
-            "secondary_types": rg_secondary,
-        })
-    return {
-        "id": data.get("id"),
-        "title": data.get("title"),
-        "disambiguation": data.get("disambiguation") or "",
-        "artist": _credit(data),
-        "artist_mbid": next(
-            (ac["artist"]["id"] for ac in data.get("artist-credit") or [] if "artist" in ac), None
-        ),
-        "length": data.get("length"),
-        "genres": _title_genres(data),
-        # a recording lookup returns bare ISRC strings ("USRC17607839") while
-        # some other entities wrap them in {"isrc": ...} — .get() on a string
-        # raised AttributeError and 502'd the whole recording page.
-        "isrcs": [v for v in (_isrc(i) for i in data.get("isrcs") or []) if v],
         "total": total,
         "offset": offset,
         "releases": releases,
@@ -3310,42 +3652,15 @@ def lrclib_get(artist, track, album=None, duration=None):
 def lrclib_publish(artist, track, album, duration, plain=None, synced=None):
     """Submit lyrics to LRCLIB (POST /api/publish).
 
-    At least one of plain/synced must be non-empty; both may be sent.
-    Returns (ok, message). The public API requires a descriptive
-    User-Agent, which _LRCLIB_HEADERS already carries."""
-    artist = (artist or "").strip()
-    track = (track or "").strip()
-    album = (album or "").strip()
-    plain = (plain or "").strip() or None
-    synced = (synced or "").strip() or None
-    if not artist or not track:
-        return False, "artist and track name are required"
-    if not plain and not synced:
-        return False, "nothing to publish — add plain or synced lyrics"
-    try:
-        duration = int(duration or 0)
-    except (TypeError, ValueError):
-        duration = 0
-    if duration <= 0:
-        return False, "track duration is required for publishing"
-    params = {
-        "artist_name": artist,
-        "track_name": track,
-        "album_name": album or track,
-        "duration": duration,
-    }
-    body = {"plainLyrics": plain or "", "syncedLyrics": synced or ""}
-    try:
-        r = httpx.post(f"{LRCLIB_BASE}/publish", params=params, json=body,
-                       headers=_LRCLIB_HEADERS, timeout=20)
-    except Exception as e:
-        return False, f"publish failed: {e}"
-    if r.status_code in (200, 201):
-        return True, "published to LRCLIB — thank you for contributing!"
-    if r.status_code == 429:
-        return False, "LRCLIB is rate-limiting this IP — try again in a minute"
-    detail = (r.text or "").strip()[:200]
-    return False, f"LRCLIB refused ({r.status_code}): {detail or 'unknown error'}"
+    Delegates to `mlo.lyrics_providers.lrclib_publish` — the engine client
+    script 18 publishes with — so the request body, the required User-Agent
+    and the throttle that keeps this IP out of LRCLIB's rate limit exist once
+    for both the automatic and the manual path. Returns (ok, message);
+    "LRCLIB already has this track" is the duplicate answer, not an error.
+    """
+    from mlo.lyrics_providers import lrclib_publish as _publish
+
+    return _publish(artist, track, album, duration, plain=plain, synced=synced)
 
 
 
@@ -3363,6 +3678,38 @@ def parse_rym_album_url(url):
     if RYM_RE.match(url):
         return url
     return None
+
+
+# What a RYM URL points AT. Every one of these is a valid URL, but only an
+# album page belongs in RATEYOURMUSIC_ALBUM: a pasted artist or song page
+# stored there would look like a resolved link forever (the import stamp never
+# overwrites an existing one) and would block the automatic album lookup.
+# `/release/song/` is matched before `/release/`, or a song page would pass as
+# an album; every other release type (single, EP, comp…) IS an album.
+_RYM_KIND_RES = (
+    ("song", re.compile(r"^/(?:release/)?song/", re.I)),
+    ("album", re.compile(r"^/release/[^/]+/", re.I)),
+    ("artist", re.compile(r"^/artist/", re.I)),
+)
+
+
+def rym_url_kind(url):
+    """What a RYM URL points at: "album", "artist", "song" or "other".
+
+    None means it is not a rateyourmusic.com URL at all — the caller's signal
+    to refuse it outright; "other" is a real page (a label, a list, a genre)
+    that is simply not one of the three link fields the UI writes.
+    """
+    url = (url or "").strip()
+    if not RYM_RE.match(url):
+        return None
+    path = re.split(r"[?#]", re.sub(r"^https?://(?:www\.)?rateyourmusic\.com",
+                                    "", url, count=1, flags=re.I))[0]
+    for kind, rx in _RYM_KIND_RES:
+        if rx.match(path):
+            return kind
+    return "other"
+
 
 # --------------------------------------------------------------------------- #
 # covers.musichoarders.xyz (COV) — album cover meta-search

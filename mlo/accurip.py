@@ -40,7 +40,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from .audio import AudioFile
 from .discs import album_discs, _disc_pattern_for, _disc_expected_name, disc_of_filename, CUE_FILE_RE
 from .paths import AUDIO_EXTS
-from .stats import is_audio_file, _collect_targets, _walk_files, new_stats, _make_pbar, worker_count
+from .stats import (is_audio_file, _collect_targets, _walk_files, new_stats,
+                    _make_pbar, _pbar_skip, _pbar_update, worker_count)
 from .subproc import run_tool
 from .ui import log, c, Color, print_header
 
@@ -555,6 +556,11 @@ def run_generate_accurip(config):
     log(f"found {len(cd_albums)} CD album(s) for AccurateRip (CUETools)")
 
     pattern = _disc_pattern_for(config)
+    # One tick per album: the CUETools pass is this script's slow part and the
+    # UI header follows this bar — without one the header sat frozen on the
+    # previous script's numbers for the whole run.
+    counts = {"ok": 0, "skip": 0, "fail": 0}
+    pbar = _make_pbar(len(cd_albums), "AccurateRip", unit="album")
     for album_dir in cd_albums:
         discs = album_discs(album_dir)
         if not discs:
@@ -567,9 +573,11 @@ def run_generate_accurip(config):
                     discs = {1: aud}
                 else:
                     stats["skipped_count"] += 1
+                    _pbar_skip(pbar, counts)
                     continue
             except OSError:
                 stats["skipped_count"] += 1
+                _pbar_skip(pbar, counts)
                 continue
 
         # Automatic rename for .accurip to CD-{n}.accurip (per user: CD-$(n) scheme applies)
@@ -695,5 +703,10 @@ def run_generate_accurip(config):
                         os.remove(tmp)
                 except OSError:
                     pass
+        _pbar_update(pbar, counts)
 
+    try:
+        pbar.close()
+    except Exception:
+        pass
     return stats

@@ -64,8 +64,13 @@ import math
 import os
 import warnings
 
+from .audio import AudioFile
 from .audiometa import _detect_bpm, _detect_key, _ensure_librosa, _load_signal
 from .config import should_write_audio_tag
+from .paths import LIB_AUDIO_EXTS
+from .stats import (_collect_targets, _make_pbar, _pbar_skip, _pbar_update,
+                    _walk_files, new_stats, worker_count)
+from .ui import Color, c, log, print_header
 
 MOODS = ["happy", "energetic", "aggressive", "sad", "calm", "dreamy", "dark", "party"]
 
@@ -360,3 +365,128 @@ def apply_mood_tags(audio, path, cfg, genre=None):
         return wrote
     except Exception:
         return False
+
+
+# ----------------------------------------------------------------------
+# Script 16 — Mood & Energy detection
+# ----------------------------------------------------------------------
+def _track_paths(config):
+    """Every track this run covers: the run's targets, else the whole library.
+
+    LIB_AUDIO_EXTS (not the audio-only AUDIO_EXTS script 12 walks): a music
+    video is a first-class library track and carries MOOD/ENERGY too —
+    apply_mood_tags writes both through the video tag writer.
+    """
+    config = config or {}
+    folder = str(config.get("music_folder") or "")
+    if config.get("targets") is not None:
+        return sorted(_collect_targets(config["targets"], LIB_AUDIO_EXTS))
+    if not os.path.isdir(folder):
+        return []
+    return sorted(_walk_files(folder, LIB_AUDIO_EXTS))
+
+
+def needs_mood(path, config, force=False):
+    """True when *path* still needs a verdict (or the run forces one).
+
+    The same short-circuit script 8 uses: the librosa decode is the expensive
+    part, so an already-tagged track is left alone — except one that carries
+    MOOD but predates ENERGY, which is analysed once more to backfill it
+    (only while ENERGY writes are still on for its filetype).
+    """
+    if force:
+        return True
+    try:
+        af = AudioFile(path)
+        if not str(af.get_tag("MOOD") or "").strip():
+            return True
+        if should_write_audio_tag(config, "ENERGY", filepath=path):
+            return not str(af.get_tag("ENERGY") or "").strip()
+        return False
+    except Exception:
+        return True
+
+
+def _apply_one(path, config):
+    """(changed, error) for one track — one handle, one classification."""
+    try:
+        af = AudioFile(path)
+        genre = str(af.get_tag("GENRE") or "").strip()
+        return bool(apply_mood_tags(af, path, config, genre=genre)), None
+    except Exception as e:          # unreadable container: report, keep going
+        return False, str(e)
+
+
+def run_detect_mood_energy(config):
+    """Script 16 — MOOD + ENERGY for every track, from its own audio.
+
+    Script 8 derives both while it is already open for the advisory /
+    instrumental / genre pass; this is the same classifier on its own, for a
+    library that only wants the mood work (a genre rewritten since, a changed
+    mood_source, a backfill after ENERGY was added). Same gates, same tags,
+    same outcome as script 8's stage — the difference is only the scope.
+    """
+    config = config or {}
+    stats = new_stats()
+    if not config.get("mood_enabled", True):
+        print_header("Mood & Energy (skipped - disabled in settings)")
+        return stats
+
+    print_header("Mood & Energy Detection")
+    log(f"music folder: {config.get('music_folder') or ''}")
+
+    version = _ensure_librosa()
+    if not version:
+        log(c("ERROR: librosa is not installed. Use Dependencies to install it.",
+              Color.RED))
+        stats["error_count"] += 1
+        stats["errors"].append(("librosa", "not installed"))
+        return stats
+
+    force = bool(config.get("force_mood", False))
+    log(f"librosa v{version} · source={config.get('mood_source') or 'hybrid'}")
+
+    paths = [p for p in _track_paths(config) if needs_mood(p, config, force)]
+    if not paths:
+        log("Nothing to analyse (every track already carries MOOD/ENERGY).")
+        return stats
+
+    workers = worker_count(config, default=4, maximum=8, items=len(paths))
+    counts = {"ok": 0, "skip": 0, "fail": 0}
+    pbar = _make_pbar(len(paths), "Mood & Energy", unit="file")
+
+    def _finish(path, changed, err):
+        stats["total_scanned"] += 1
+        if err is not None:
+            stats["error_count"] += 1
+            stats["errors"].append((os.path.basename(path), err))
+            _pbar_update(pbar, counts, kind="fail")
+        elif changed:
+            stats["modified_count"] += 1
+            _pbar_update(pbar, counts, kind="ok")
+        else:
+            # classify() returns nothing for an undecodable or too-short
+            # track, and nothing when the tags already say the same thing —
+            # both are a skip, not a failure.
+            stats["skipped_count"] += 1
+            _pbar_skip(pbar, counts)
+
+    try:
+        if len(paths) == 1 or workers == 1:
+            for path in paths:
+                _finish(path, *_apply_one(path, config))
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futures = {ex.submit(_apply_one, p, config): p for p in paths}
+                for fut in as_completed(futures):
+                    _finish(futures[fut], *fut.result())
+    finally:
+        if pbar:
+            pbar.close()
+
+    log(c(f"mood & energy: {stats['modified_count']} written · "
+          f"{stats['skipped_count']} skipped · "
+          f"{stats['error_count']} failed",
+          Color.GREEN if not stats["error_count"] else Color.YELLOW))
+    return stats

@@ -101,8 +101,8 @@ def _run_one(wish, cfg):
     wishes.mark_searching(wid)
     _set(current=label)
     wishes.log("info", f"Wish search: {label}")
-    # A wish normally stores the release GROUP id (that is what discovery,
-    # MoreLikeThis and Home hand out), and the release endpoint 404s on a
+    # A wish normally stores the release GROUP id (that is what a
+    # musicbrainz.org album link carries), and the release endpoint 404s on a
     # group — resolve it exactly like the HTTP route does, so no wish is
     # permanently unfillable.
     from server import integrations as intg

@@ -1,5 +1,5 @@
-"""Discovery routes — recommendations, catalogue search, artist artwork and
-artist/album descriptions, all served through `server.discovery`.
+"""Discovery routes — the provider catalogue, artist artwork and artist/album
+descriptions, all served through `server.discovery`.
 
 These live in their own router (rather than inline in `server/main.py`) so the
 provider layer, its caches and its fallback chains stay testable on their own;
@@ -8,6 +8,7 @@ against the music folder exactly like `main.py` does.
 """
 import os
 import re
+import traceback
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
@@ -16,7 +17,6 @@ from mlo import artistdata, load_config
 from server import artcache
 from server import discovery
 from server import integrations as intg
-from server import library as lib_mod
 from server import tagcache
 
 router = APIRouter(tags=["discovery"])
@@ -24,14 +24,6 @@ router = APIRouter(tags=["discovery"])
 # An artist folder that is nothing but an MBID ("Artists/<uuid>") has no name
 # to give a provider; _artist_name falls back to the album tags then.
 _MBID_ONLY_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
-
-
-class WishRequest(BaseModel):
-    artist: str = ""
-    title: str = ""
-    year: str = ""
-    note: str = ""
-    mbid: str = ""
 
 
 class ImageRequest(BaseModel):
@@ -52,25 +44,40 @@ class AlbumTextRequest(BaseModel):
     text: str = ""
 
 
-def _guard(path, cfg=None):
-    """Path containment, mirroring main.py's shared guard."""
-    from server.main import _in_music_folder, _music_folder
+class AlbumMetadataRequest(BaseModel):
+    path: str = ""
+    # Which of artist_image / artist_description / album_description to run;
+    # empty = all three. A caller with a progress bar drives them one by one.
+    items: list = []
+    force: bool = False
+    staged: bool = False  # the import wizard's not-yet-imported album
+
+
+def _guard(path, cfg=None, staged=False):
+    """Path containment, mirroring main.py's shared guard — including the
+    import wizard's opt-in `staged` allowance for its own album folder, which
+    is not in the library yet."""
+    from server.main import _allow_staged, _in_music_folder, _music_folder
     folder = _music_folder(cfg)
     if not folder:
         raise HTTPException(400, "music folder is not configured")
-    if not path or not _in_music_folder(path, folder):
+    if not path or not (_in_music_folder(path, folder)
+                        or _allow_staged(path, staged)):
         raise HTTPException(400, "path outside music folder")
 
 
 def _artist_folder(artist, cfg):
     """Resolve the API's `artist` parameter.
 
-    Two shapes are accepted because two callers exist: the artist page sends
-    the folder path it already has (folder names carry MBID suffixes, so a
-    name lookup would miss), while a hand-written call may send a plain
-    artist name. A path must sit inside the music folder; a name is resolved
-    under <music>/Artists by `mlo.artistdata`, which refuses separators — the
-    containment guard for the name form.
+    Three shapes are accepted because three callers exist: the artist page
+    sends the folder path it already has (folder names carry MBID suffixes, so
+    a name lookup would miss), its links carry `mb:<artist MBID>` — the form
+    the album page links with, so on that route every provider lookup used to
+    search for the literal string "mb:…" and find nothing — and a hand-written
+    call may send a plain artist name. A path must sit inside the music folder;
+    an MBID resolves through the same index `main.py`'s artist route uses; a
+    name is resolved under <music>/Artists by `mlo.artistdata`, which refuses
+    separators — the containment guard for the name form.
     """
     if not artist or not artist.strip():
         raise HTTPException(400, "artist is required")
@@ -79,6 +86,12 @@ def _artist_folder(artist, cfg):
     if looks_like_path and os.path.isdir(candidate):
         _guard(candidate, cfg)
         return candidate
+    if not looks_like_path and artist.strip().lower().startswith("mb:"):
+        from server import mbresolve
+        resolved = mbresolve.resolve_artist(artist.strip())
+        if resolved and os.path.isdir(resolved):
+            _guard(resolved, cfg)
+            return os.path.normpath(resolved)
     folder = artistdata.artist_dir(cfg, artist)
     if not folder:
         raise HTTPException(404, f"artist folder not found: {artist}")
@@ -91,10 +104,21 @@ def _artist_name(folder, artist=""):
     Folder names carry an MBID suffix ("Slowdive [a16371b9-…]"), so a raw path
     cannot be handed to Deezer/Wikipedia/TheAudioDB. Strip the suffix; when the
     folder is nothing but an MBID, read the name from the album tags inside.
+    An `mb:<MBID>` that no library folder owns falls back to MusicBrainz, so a
+    provider call still gets a real name instead of the raw reference.
     """
+    ref = next((str(v).strip() for v in (folder, artist)
+                if str(v or "").strip().lower().startswith("mb:")), "")
+    if ref:
+        try:
+            payload = intg.mb_get_cached(f"artist/{ref[3:].strip()}", {"fmt": "json"})
+            name = str((payload or {}).get("name") or "").strip()
+            if name:
+                return name
+        except Exception:
+            pass
     name = os.path.basename(str(folder or artist or "").rstrip("\\/"))
-    name = re.sub(r"\s*[\[(][0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}[\])]\s*$",
-                  "", name, flags=re.I).strip()
+    name = artistdata.strip_mbid_suffix(name)
     if name and not _MBID_ONLY_RE.match(name):
         return name
     try:
@@ -127,40 +151,175 @@ def _feature_gate(cfg, key, what):
         raise HTTPException(403, f"{what} is turned off in Settings")
 
 
-def _owned_album_keys(cfg):
-    """{normalized "artist|title": album path} for the current library.
+# --------------------------------------------------------------------------- #
+# The metadata step: artist image + artist/album descriptions
+# --------------------------------------------------------------------------- #
+# The three things an import has to find and account for. ONE implementation,
+# called by the auto-import chain (server.soulseek_auto) and by the import
+# menu's own route below: a second one would drift from this within a day.
+META_ITEMS = ("artist_image", "artist_description", "album_description")
 
-    Uses the same 5-second library cache the rest of the app reads, so a
-    "more like this" request never walks the tree itself. A library that
-    fails to build degrades to "nothing owned", which only means suggestions
-    may repeat an album you already have.
-    """
+META_LABELS = {
+    "artist_image": "Artist image",
+    "artist_description": "Artist description",
+    "album_description": "Album description",
+}
+
+
+def meta_line(item, res):
+    """One log line for one item's result: what happened, and from where."""
+    detail = f" — {res.get('detail')}" if res.get("detail") else ""
+    return f"{META_LABELS.get(item, item)}: {res.get('state')}{detail}"
+
+
+def _meta(state, source=None, detail=None):
+    return {"state": state, "source": source, "detail": detail}
+
+
+def ensure_artist_album_metadata(album_dir, cfg=None, force=False, progress=None,
+                                 items=None):
+    """Fetch and store an album's artist image and artist/album descriptions.
+
+    THE step both the auto-import chain and the import menu's route call
+    (``server.soulseek_auto``, ``POST /api/album/metadata/fetch``): one place
+    decides what "already there" means, which provider answers, and what the
+    honest outcome was.
+
+    Returns one entry per requested item (``artist_image``,
+    ``artist_description``, ``album_description``), each
+    ``{"state", "source", "detail"}`` with state:
+
+      ``present``    already stored — nothing was fetched (``force`` refetches)
+      ``disabled``   switched off in Settings, so nothing was fetched
+      ``not-found``  no folder or provider could answer; nothing was written
+      ``fetched``    a provider answered and the content was stored
+      ``error``      the fetch or the write failed; ``detail`` says why
+
+    ``progress`` is called ``progress(done, total, label)`` (the house progress
+    convention), ``items`` restricts the run to some of the three so a caller
+    with a progress bar can drive them one at a time. Never raises: an import
+    must not fail because a provider is down."""
+    cfg = cfg or load_config()
+    album_dir = os.path.normpath(str(album_dir or ""))
+    wanted = [i for i in (items or META_ITEMS) if i in META_ITEMS]
+    if not os.path.isdir(album_dir):
+        return {i: _meta("error", detail="album folder not found") for i in wanted}
+
+    artist, album = _album_identity(album_dir)
+    folder = artistdata.artist_dir(cfg, artist)
+    if not artist and folder:
+        # Tags carry nothing (a folder nobody tagged): the artist folder's own
+        # name is the artist, MBID suffix stripped.
+        artist = _artist_name(folder)
+
+    out = {}
+    fetched = False
+    for done, item in enumerate(wanted, 1):
+        if progress:
+            try:
+                progress(done, len(wanted), META_LABELS[item])
+            except Exception:
+                pass
+        if item == "artist_image":
+            out[item] = _artist_image_item(folder, artist, cfg, force)
+        elif item == "artist_description":
+            out[item] = _artist_description_item(folder, artist, cfg, force)
+        else:
+            out[item] = _album_description_item(album_dir, artist, album, cfg, force)
+        fetched = fetched or out[item]["state"] == "fetched"
+    if fetched:
+        # The album's folder and the artist's folder both just changed.
+        tagcache.invalidate_all()
+    return out
+
+
+def _artist_image_item(folder, artist, cfg, force):
+    """Artist photo: what is stored, or the best one a provider has."""
+    if not force and folder and artistdata.has_image(folder):
+        # "present — deezer": who stored it is part of accounting for it.
+        return _meta("present", source=artistdata.read_provenance(folder).get("source"),
+                     detail=os.path.basename(artistdata.image_path(folder) or "") or None)
+    if not cfg.get("artist_image_enabled", True):
+        return _meta("disabled", detail="automatic artist images are off in Settings")
+    if not folder or not artist:
+        return _meta("not-found", detail="no artist folder in the library yet")
+    source = None
     try:
-        payload = tagcache.get_library(
-            lib_mod.library_cache_key(cfg),
-            lambda: lib_mod.build_library(cfg),
-        )
-    except Exception:
-        return {}
-    keys = {}
-    for artist in (payload or {}).get("artists") or []:
-        for album in artist.get("albums") or []:
-            name = album.get("album_artist") or album.get("artist") or artist.get("name")
-            key = f"{discovery._norm(name)}|{discovery._norm(album.get('title'))}"
-            keys[key] = album.get("path")
-    return keys
+        hit = discovery.artist_image(artist, mbid=artistdata.folder_mbid(folder) or artistdata.folder_mbid(artist), cfg=cfg) or {}
+        url = hit.get("url")
+        if not url:
+            return _meta("not-found", detail="no source had an image")
+        source = hit.get("source")
+        # Same fetcher the artist page's own Fetch button uses, so the
+        # automatic pick and the manual one can never disagree.
+        data, _ctype, _src = artcache.fetch_art(url, artist=artist, cfg=cfg)
+        if not data:
+            return _meta("not-found", source=source, detail="the image could not be downloaded")
+        path = artistdata.save_image(folder, data, cfg, source=source or "auto",
+                                     source_url=url, kind="artist",
+                                     label=hit.get("label"))
+        if not path:
+            return _meta("error", source=source, detail="what the source served is not a usable image")
+        return _meta("fetched", source=source, detail=os.path.basename(path))
+    except Exception as e:
+        traceback.print_exc()
+        return _meta("error", source=source, detail=str(e))
 
 
-def _effective_cfg(cfg, override_source=None):
-    """Config copy that forces one search source (used by the MusicBrainz
-    page's "MusicBrainz only" mode and its discovery-first default)."""
-    if not override_source:
-        return cfg
-    forced = dict(cfg)
-    forced["discovery_search_sources"] = [override_source]
-    if override_source == "musicbrainz":
-        forced["mb_search_source"] = "musicbrainz"
-    return forced
+def _artist_description_item(folder, artist, cfg, force):
+    if not force and folder and artistdata.has_description(folder):
+        return _meta("present", source=_stored_description_source(folder))
+    if not cfg.get("artist_description_enabled", True):
+        return _meta("disabled", detail="automatic artist descriptions are off in Settings")
+    if not folder or not artist:
+        return _meta("not-found", detail="no artist folder in the library yet")
+    try:
+        found = discovery.artist_description(artist, mbid=artistdata.folder_mbid(folder) or artistdata.folder_mbid(artist), cfg=cfg) or {}
+    except Exception as e:
+        traceback.print_exc()
+        return _meta("error", detail=str(e))
+    text = str(found.get("text") or "").strip()
+    if not text:
+        return _meta("not-found", detail="no source had a description")
+    return _store_description(folder, text, found, cfg, kind="artist")
+
+
+def _album_description_item(album_dir, artist, album, cfg, force):
+    if not force and artistdata.has_description(album_dir):
+        return _meta("present", source=_stored_description_source(album_dir))
+    if not cfg.get("album_description_enabled", True):
+        return _meta("disabled", detail="automatic album descriptions are off in Settings")
+    if not album:
+        return _meta("not-found", detail="no album name to look up")
+    try:
+        found = discovery.album_description(artist, album, cfg=cfg) or {}
+    except Exception as e:
+        traceback.print_exc()
+        return _meta("error", detail=str(e))
+    text = str(found.get("text") or "").strip()
+    if not text:
+        return _meta("not-found", detail="no source had a description")
+    return _store_description(album_dir, text, found, cfg, kind="album")
+
+
+def _stored_description_source(folder):
+    """Which provider a stored description came from (None when unrecorded)."""
+    prov = artistdata.read_provenance(folder)
+    return prov.get("description_source") or prov.get("source")
+
+
+def _store_description(folder, text, found, cfg, kind):
+    """Write a description plus its provenance; the ``_meta`` result for it."""
+    source = found.get("source")
+    path = artistdata.write_description(folder, text, cfg=cfg, source=source,
+                                       source_url=found.get("source_url"), kind=kind)
+    if not path:
+        return _meta("error", source=source, detail="the description could not be written")
+    artistdata.write_provenance(folder, {
+        "description_source": source,
+        "description_source_url": found.get("source_url"),
+        "description_title": found.get("title")}, kind=kind, cfg=cfg)
+    return _meta("fetched", source=source, detail=found.get("title"))
 
 
 # --------------------------------------------------------------------------- #
@@ -168,145 +327,22 @@ def _effective_cfg(cfg, override_source=None):
 # --------------------------------------------------------------------------- #
 @router.get("/api/discovery/sources")
 def discovery_sources():
+    """The provider catalogue the Settings order pickers read.
+
+    Only the sources that still have a feature behind them are reported: the
+    artist-image and description chains (Settings → *Artist images &
+    descriptions*, and the genre picker's own list).
+    """
     cfg = load_config()
     cat = discovery.sources_catalog()
     return {
         **cat,
         "enabled": bool(cfg.get("discovery_enabled", True)),
         "saved": {
-            "discovery_rec_sources": cfg.get("discovery_rec_sources") or [],
-            "discovery_search_sources": cfg.get("discovery_search_sources") or [],
             "artist_image_sources": cfg.get("artist_image_sources") or [],
             "description_sources": cfg.get("description_sources") or [],
         },
-        "mb_search_source": cfg.get("mb_search_source", "auto"),
     }
-
-
-@router.get("/api/discovery/search")
-def discovery_search(q: str = Query(""), type: str = Query("album"),
-                     limit: int = Query(25, ge=1, le=100),
-                     artist: str = Query(""), album: str = Query(""),
-                     source: str = Query("")):
-    """Catalogue search for the MusicBrainz browser and the global search box.
-
-    `source` forces one provider ("musicbrainz" keeps the old behaviour);
-    otherwise the configured `mb_search_source` decides: discovery-first with
-    a MusicBrainz fallback (auto), discovery only, or MusicBrainz only.
-    """
-    cfg = load_config()
-    mode = source or cfg.get("mb_search_source", "auto")
-    if mode == "musicbrainz":
-        cfg = _effective_cfg(cfg, "musicbrainz")
-    rows = []
-    if type == "artist":
-        rows = discovery.search_artists(q, limit=limit, cfg=cfg)
-    else:
-        rows = discovery.search_albums(q, limit=limit, cfg=cfg,
-                                       artist=artist, album=album or q)
-        owned = _owned_album_keys(cfg)
-        for row in rows:
-            row["owned_path"] = owned.get(
-                f"{discovery._norm(row.get('artist'))}|{discovery._norm(row.get('title'))}")
-    return {"query": q, "type": type, "mode": mode, "rows": rows}
-
-
-@router.get("/api/discovery/album")
-def discovery_album(deezer_id: int = Query(0), artist: str = Query(""),
-                    album: str = Query(""), resolve: int = Query(0)):
-    """Full album detail from the discovery providers, with the MusicBrainz
-    release-group resolved on demand (`resolve=1`) so the page can offer
-    "add to wishes" without a second round trip."""
-    detail = discovery.deezer_album(deezer_id) if deezer_id else None
-    if not detail and (artist or album):
-        hits = discovery.deezer_search_album(f'artist:"{artist}" album:"{album}"', limit=3) \
-            if artist else []
-        match = next((h for h in hits if discovery._norm(h["title"]) == discovery._norm(album)), None) \
-            or (hits[0] if hits else None)
-        if match:
-            detail = discovery.deezer_album(match["deezer_id"])
-    if not detail:
-        raise HTTPException(404, "album not found in the discovery providers")
-    if resolve:
-        rg = discovery.resolve_release_group(detail.get("artist"), detail.get("title"))
-        if rg:
-            detail["mbid"] = rg.get("mbid")
-            detail["mb_release_group"] = rg
-    return detail
-
-
-@router.get("/api/discovery/similar")
-def discovery_similar(kind: str = Query("album"), artist: str = Query(""),
-                      title: str = Query(""), album: str = Query(""),
-                      mbid: str = Query(""), limit: int = Query(12, ge=1, le=40)):
-    """\"More like this\" rows for an album, track or artist page.
-
-    Rows the library already owns are flagged (`owned_path`) rather than
-    dropped, so the UI can link straight to the album it already has.
-    """
-    cfg = load_config()
-    artist = artist.strip()
-    if not artist:
-        raise HTTPException(400, "artist is required")
-    owned = _owned_album_keys(cfg)
-    if kind == "track":
-        rows = discovery.similar_tracks(artist, title or None, limit=limit, cfg=cfg)
-    elif kind == "artist":
-        rows = [{**r, "kind": "artist"} for r in
-                discovery.similar_artists(artist, mbid=mbid or None, limit=limit, cfg=cfg)]
-    else:
-        rows = discovery.similar_albums(artist, album or title or None, mbid=mbid or None,
-                                        limit=limit, cfg=cfg)
-    for row in rows:
-        key = f"{discovery._norm(row.get('artist'))}|{discovery._norm(row.get('title'))}"
-        row["owned_path"] = owned.get(key)
-    return {"kind": kind, "artist": artist, "rows": rows}
-
-
-@router.get("/api/discovery/popular")
-def discovery_popular(limit: int = Query(12, ge=1, le=40),
-                      range: str = Query("week")):
-    """What the world is listening to right now (ListenBrainz sitewide)."""
-    cfg = load_config()
-    rows = discovery.popular_albums(limit=limit, cfg=cfg, range_=range)
-    owned = _owned_album_keys(cfg)
-    for row in rows:
-        row["owned_path"] = owned.get(
-            f"{discovery._norm(row.get('artist'))}|{discovery._norm(row.get('title'))}")
-    return {"rows": rows, "range": range}
-
-
-@router.post("/api/discovery/wish")
-def discovery_wish(req: WishRequest):
-    """Turn a discovery row into a wish — the bridge from "popular album"
-    to something the Soulseek worker can actually download.
-
-    A row without a MusicBrainz id (Deezer/iTunes rows never carry one) is
-    resolved against MusicBrainz first; if nothing matches there is nothing
-    to download by identity, so the caller gets a clear 404 instead of a wish
-    that can never fill.
-    """
-    from server import wishes
-    cfg = load_config()
-    artist = req.artist.strip()
-    title = req.title.strip()
-    if not title:
-        raise HTTPException(400, "title is required")
-    mbid = req.mbid.strip()
-    resolved = None
-    if not mbid:
-        resolved = discovery.resolve_release_group(artist, title, cfg)
-        if not resolved or not resolved.get("mbid"):
-            raise HTTPException(404, "no MusicBrainz release found for this album")
-        mbid = resolved["mbid"]
-    wish = wishes.add_wish(
-        mbid,
-        title=title,
-        artist=artist or (resolved or {}).get("artist", ""),
-        year=req.year or (resolved or {}).get("year", ""),
-        note=req.note or "Added from discovery",
-    )
-    return {"ok": True, "wish": wish, "resolved": resolved}
 
 
 # --------------------------------------------------------------------------- #
@@ -397,10 +433,13 @@ def artist_image_candidates(artist: str = Query(...)):
         rows.append({"url": url, "source": source, "label": label, "kind": kind})
 
     name = _artist_name(artist)
-    auto = discovery.artist_image(name, cfg=cfg)
+    mbid = artistdata.folder_mbid(artist)
+    auto = discovery.artist_image(name, mbid=mbid, cfg=cfg)
     if auto:
         add(auto.get("url"), auto.get("source"), auto.get("label") or "Automatic pick")
-    db = discovery.audiodb_artist(name)
+    db = discovery.audiodb_artist_mbid(mbid) if mbid else None
+    if not db:
+        db = discovery.audiodb_artist(name)
     if db:
         for key, label in (("thumb", "TheAudioDB thumb"), ("banner", "TheAudioDB banner"),
                            ("wide_thumb", "TheAudioDB wide thumb"),
@@ -429,7 +468,7 @@ def artist_image_save(req: ImageRequest):
     label = None
     if not url:
         _feature_gate(cfg, "artist_image_enabled", "Automatic artist images")
-        auto = discovery.artist_image(_artist_name(folder, req.artist), cfg=cfg)
+        auto = discovery.artist_image(_artist_name(folder, req.artist), mbid=artistdata.folder_mbid(folder) or artistdata.folder_mbid(req.artist), cfg=cfg)
         if not auto:
             raise HTTPException(404, "no artist image found in any configured source")
         url, source, label = auto["url"], auto["source"], auto.get("label")
@@ -483,7 +522,7 @@ def artist_description_save(req: TextRequest):
     source = source_url = title = None
     if not text:
         _feature_gate(cfg, "artist_description_enabled", "Automatic artist descriptions")
-        found = discovery.artist_description(_artist_name(folder, req.artist), cfg=cfg)
+        found = discovery.artist_description(_artist_name(folder, req.artist), mbid=artistdata.folder_mbid(folder) or artistdata.folder_mbid(req.artist), cfg=cfg)
         if not found:
             raise HTTPException(404, "no description found in any configured source")
         text = found["text"]
@@ -556,6 +595,31 @@ def album_description_clear(path: str = Query(...)):
     removed = artistdata.delete_description(album_dir, kind="album", cfg=cfg)
     tagcache.invalidate_all()
     return {"ok": removed}
+
+
+@router.post("/api/album/metadata/fetch")
+def album_metadata_fetch(req: AlbumMetadataRequest):
+    """Find and account for an album's artist image and descriptions.
+
+    The import menu's own way into the auto-import's metadata step
+    (``ensure_artist_album_metadata`` above) — same callable, so the menu can
+    never do something the unattended import would not. ``items`` runs a
+    subset (one call per item keeps a progress bar honest), ``force`` refetches
+    what is already stored.
+
+    A switched-off feature is reported per item as ``disabled`` instead of
+    refused with a 403: one call accounts for all three, and one toggle being
+    off must not hide the state of the others."""
+    cfg = load_config()
+    if not req.path:
+        raise HTTPException(400, "path is required")
+    album_dir = os.path.normpath(req.path)
+    _guard(album_dir, cfg, staged=req.staged)
+    if not os.path.isdir(album_dir):
+        raise HTTPException(404, "album not found")
+    items = ensure_artist_album_metadata(album_dir, cfg, force=req.force,
+                                         items=[str(i) for i in req.items] or None)
+    return {"ok": True, "path": album_dir.replace("\\", "/"), "items": items}
 
 
 def _album_identity(album_dir, artist="", album=""):

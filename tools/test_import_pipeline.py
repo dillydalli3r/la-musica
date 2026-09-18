@@ -68,13 +68,15 @@ CFG = {"music_folder": MF, "import_auto_scripts": False, "import_scripts": [],
 # --------------------------------------------------------------------------- #
 # The chain a config describes
 # --------------------------------------------------------------------------- #
-assert imports.DEFAULT_CHAIN == [2, 3, 11, 1, 13, 8, 5, 6, 7, 9, 12, 14, 10, 4], \
+assert imports.DEFAULT_CHAIN == [2, 3, 11, 1, 13, 18, 8, 5, 6, 7, 9, 12, 14, 15, 10, 4], \
     imports.DEFAULT_CHAIN
 assert imports.chain_for({}) == imports.DEFAULT_CHAIN
 assert imports.chain_for({"import_auto_scripts": True, "import_scripts": []}) \
     == imports.DEFAULT_CHAIN
 # an explicit list replaces it: junk ids dropped, duplicates dropped, order kept
-assert imports.chain_for({"import_scripts": [4, 99, 4, 0, 16, -3, 3]}) == [4, 3]
+# (17 is a real script since the AI transforms returned, so it is KEPT; 99 / 0
+# / -3 are the junk)
+assert imports.chain_for({"import_scripts": [4, 99, 4, 0, 17, -3, 3]}) == [4, 17, 3]
 # the settings field can be the human-typed "4, 3;3" form
 assert imports.chain_for({"import_scripts": "4, 3;3"}) == [4, 3]
 assert imports.chain_for({"import_auto_scripts": False, "import_scripts": [1]}) == []
@@ -83,7 +85,7 @@ assert imports.chain_for({"import_auto_scripts": False}) == []
 # --------------------------------------------------------------------------- #
 # Registry + one script
 # --------------------------------------------------------------------------- #
-assert sorted(script_runners.RUNNERS) == list(range(1, 15)), sorted(script_runners.RUNNERS)
+assert sorted(script_runners.RUNNERS) == list(range(1, 19)), sorted(script_runners.RUNNERS)
 assert script_runners.RUNNERS[2][0] == "Format CUEs", script_runners.RUNNERS[2]
 assert script_runners.RUNNERS[2][1].__name__ == "run_format_cues", script_runners.RUNNERS[2]
 assert all(label for label, _ in script_runners.RUNNERS.values())
@@ -144,6 +146,105 @@ empty = imports.finish_album(album, CFG)
 assert empty == {"path": os.path.normpath(album), "scripts": [], "chain": [], "errors": []}, empty
 missing = imports.finish_album(os.path.join(ROOT, "nope"), {"import_scripts": [4]})
 assert missing["chain"] == [4] and missing["errors"] == ["album folder not found"], missing
+
+# --------------------------------------------------------------------------- #
+# defer_tagging: the auto-import stages and places, and does NOT tag
+# --------------------------------------------------------------------------- #
+# A non-empty chain, both auto fetches on: the default call must run all
+# three, the deferred one none of them — while the RYM stamp, the metadata
+# step and the cover step run either way.
+DF_CFG = {"music_folder": MF, "import_scripts": [4, 3],
+          "advisory_auto_fetch": True, "instrumental_auto_fetch": True,
+          "rym_links_auto": True}
+assert imports.chain_for(DF_CFG) == [4, 3], imports.chain_for(DF_CFG)
+
+defer_album = staging_album("Defer Album")
+DF_PATH = os.path.normpath(defer_album)
+_seen = {}
+_real_steps = {n: getattr(imports, n) for n in
+               ("stamp_rym_links", "fetch_advisories", "fetch_instrumentals",
+                "run_metadata_step", "run_cover_step")}
+_real_run_chain = script_runners.run_chain
+
+
+def _spy(name, value):
+    def fn(*a, **k):
+        _seen.setdefault(name, []).append((a, k))
+        return value
+    return fn
+
+
+try:
+    imports.stamp_rym_links = _spy("rym", {"album": None, "artist": None,
+                                           "note": "", "written": 0})
+    imports.fetch_advisories = _spy("advisory", {})
+    imports.fetch_instrumentals = _spy("instrumental", {})
+    imports.run_metadata_step = _spy("metadata", {})
+    imports.run_cover_step = _spy("cover", {})
+    script_runners.run_chain = _spy("chain", [])
+
+    staged = imports.finish_album(defer_album, DF_CFG, defer_tagging=True)
+    deferred_seen = {k: len(v) for k, v in _seen.items()}
+    deferred_args = {k: list(v) for k, v in _seen.items()}
+    _seen.clear()
+    full = imports.finish_album(defer_album, DF_CFG)
+    default_seen = {k: len(v) for k, v in _seen.items()}
+    default_args = {k: list(v) for k, v in _seen.items()}
+finally:
+    for _n, _fn in _real_steps.items():
+        setattr(imports, _n, _fn)
+    script_runners.run_chain = _real_run_chain
+
+# the three staging steps ran, on the album, exactly once
+assert deferred_seen == {"rym": 1, "metadata": 1, "cover": 1}, deferred_seen
+assert deferred_args["rym"][0][0] == (DF_PATH, DF_CFG), deferred_args["rym"]
+assert deferred_args["metadata"][0][0] == (DF_PATH, DF_CFG), deferred_args["metadata"]
+# the tag-writing work did NOT: no advisory, no instrumental, no chain
+assert "advisory" not in deferred_seen, deferred_seen
+assert "instrumental" not in deferred_seen, deferred_seen
+assert "chain" not in deferred_seen, deferred_seen
+
+# the returned dict is still the documented one, with an EMPTY chain/scripts
+assert staged["path"] == DF_PATH, staged
+assert staged["chain"] == [] and staged["scripts"] == [], staged
+assert staged["errors"] == [], staged
+for key in ("path", "scripts", "chain", "errors"):
+    assert key in staged, (key, staged)
+
+# …and the DEFAULT call (no flag) keeps today's behaviour: chain + both fetches
+assert full["chain"] == [4, 3], full
+assert default_seen == {"rym": 1, "metadata": 1, "cover": 1,
+                        "advisory": 1, "instrumental": 1, "chain": 1}, default_seen
+assert default_args["chain"][0][0][1] == [4, 3], default_args["chain"]
+assert default_args["chain"][0][1]["targets"] == [DF_PATH], default_args["chain"]
+assert full["scripts"] == [], full
+
+# the auto-import call site is the reason the flag exists: it must pass it
+from server import soulseek_auto as _auto
+
+_auto_calls = []
+_real_finish_album = imports.finish_album
+
+
+def _capture(album_dir, cfg=None, progress=None, force=None, *,
+             defer_tagging=False):
+    _auto_calls.append((os.path.normpath(album_dir), defer_tagging))
+    return {"path": os.path.normpath(album_dir), "scripts": [], "chain": [],
+            "errors": []}
+
+
+imports.finish_album = _capture
+try:
+    _auto._start_import_chain(DF_PATH, DF_CFG)
+    for t in threading.enumerate():          # it stages in a daemon thread
+        if t.name == "mlo-soulseek-import-chain":
+            t.join(30)
+finally:
+    imports.finish_album = _real_finish_album
+_deadline = time.time() + 10
+while not _auto_calls and time.time() < _deadline:
+    time.sleep(0.01)
+assert _auto_calls == [(DF_PATH, True)], _auto_calls
 
 # --------------------------------------------------------------------------- #
 # AcoustID: unusable says why, and says nothing about matching
@@ -310,6 +411,7 @@ import types
 
 _stub = types.ModuleType("server.main")
 _stub._music_folder = lambda cfg=None: MF
+_stub._allow_staged = lambda p, staged=False: bool(staged) and os.path.exists(p)
 _stub._in_music_folder = lambda p, folder: os.path.normcase(
     os.path.abspath(os.path.normpath(p))).startswith(
         os.path.normcase(os.path.abspath(os.path.normpath(folder)).rstrip(os.sep) + os.sep)) or \

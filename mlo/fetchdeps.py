@@ -344,9 +344,23 @@ def get_latest_release(key):
 
 
 def latest_versions():
-    """{tool key: pinned version string} for all tools (no network needed)."""
-    # Return pinned versions for every tool we track (REPOS + php/simpledrmeter)
-    out = {key: PINNED[key]["version"] for key in PINNED}
+    """{tool key: version the installer would fetch} for every tracked tool.
+
+    Keyed by DISPLAY_NAMES - the exact set `server.main` /api/dependencies
+    serves - so every row the UI can show has an entry. No network needed.
+
+    Off Windows the pinned Windows builds are not what a user runs and not
+    fetchable either (`_require_windows` refuses them): the install path is
+    LINUX_PACKAGES (distro package) or PIP_PACKAGES, so the target reported is
+    the distro package, and a tool with no Linux build at all reports None
+    (the UI shows "unknown" rather than a version nobody can install).
+    """
+    out = {}
+    for key in DISPLAY_NAMES:
+        out[key] = PINNED.get(key, {}).get("version")
+        if os.name != "nt" and key in LINUX_PACKAGES:
+            pkg = LINUX_PACKAGES[key]
+            out[key] = f"apt: {pkg}" if pkg else None
     return out
 
 

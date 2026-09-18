@@ -15,7 +15,7 @@ import type { Album } from "../types";
  * so favorites render with exactly the same layout. The library payload
  * enriches albums with an `artist` display name; elsewhere it falls back to
  * the album-artist tag. */
-export default function AlbumCard({ al, artistName, selectable, selected, onSelect, href, actions }: {
+export default function AlbumCard({ al, artistName, selectable, selected, onSelect, href, actions, extraMeta }: {
   al: Album & { artist?: string };
   artistName?: string;
   selectable?: boolean;
@@ -26,6 +26,10 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
   href?: string | null;
   /** Overrides the play button (top-left overlay); defaults to today's button. */
   actions?: ReactNode;
+  /** Extra bits for the caption's meta row (after the artist) — for pages
+   *  that state more than the shared grid does. The library grid passes
+   *  nothing and renders exactly as before. */
+  extraMeta?: ReactNode;
 }) {
   const st = statusFor(!!al.pass, al.audit_summary);
   const ref = href === undefined ? albumRef(al) : href;
@@ -140,6 +144,7 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
         <div className="text-[11px] text-zinc-500 truncate flex items-center gap-1.5 mt-0.5">
           <span className={`h-1.5 w-1.5 rounded-full ${st.edge} inline-block shrink-0`} title={st.label} />
           <span className="truncate" title={artist}>{artist}</span>
+          {extraMeta}
           {(() => {
             const y = originalYear(al.meta);
             return y ? (

@@ -304,3 +304,144 @@ print("ok  POST /api/mb/auto-import answers without waiting on a hung resolver "
 print("ok  an unusable item is skipped with a reason while the rest queue")
 print("ok  a MusicBrainz failure fails its job with a reason, frees the slot "
       "and lets the next queued release run")
+
+# --------------------------------------------------------------------------- #
+# 5. bulk auto-import never queues an album the library already holds
+# --------------------------------------------------------------------------- #
+# `wishes.owned_mbids` is the library's index of MusicBrainz release AND
+# release-group ids (from the album tags). A bulk import that ignores it
+# downloads the same album a second time, and the duplicate lands beside the
+# first in the library.
+_OWNED_GROUP = "3e4d5c6b-7a89-0123-cdef-23456789abcd"
+_REL_DATA = {
+    "id": MBID_RELEASE,
+    "title": "Some Album",
+    "status": "Official",
+    "country": "US",
+    "date": "2001-01-01",
+    "release-group": {"id": _OWNED_GROUP, "primary-type": "Album",
+                      "first-release-date": "2001-01-01"},
+    "media": [{"position": 1, "format": "CD",
+               "tracks": [{"position": 1, "title": "One",
+                           "recording": {"id": MBID_RELEASE}}]}],
+}
+
+# section 4 leaves its MusicBrainz-failure stub installed on
+# intg.auto_import_targets; the guard under test lives in the genuine function
+# (saved in section 2), so call that one.
+_auto_targets = _real_targets
+_real_owned_mbids = wishes.owned_mbids
+_real_rg_browse = intg.release_group_browse
+_real_httpx_get = intg.httpx.get
+_rg_calls = []
+
+
+def _rgb_one_album(rg_mbid, limit=100, offset=0):
+    """The group's single, importable edition (the MusicBrainz browse seam)."""
+    _rg_calls.append(rg_mbid)
+    return {"id": rg_mbid, "title": "Some Album", "releases": [
+        {"id": MBID_RELEASE, "title": "Some Album", "status": "Official",
+         "country": "US", "date": "2001-01-01", "format": "CD",
+         "media": [{"position": 1, "format": "CD"}]}]}
+
+
+def _owns(group_id):
+    return lambda cfg=None: {group_id: os.path.join(REDIRECT, "Artists", "Some Album")}
+
+
+try:
+    intg.release_group_browse = _rgb_one_album
+
+    # a RELEASE id whose release group the library already holds: resolved, then
+    # refused — never queued
+    wishes.owned_mbids = _owns(_OWNED_GROUP)
+    _patch_mb_transport([_Resp(200, dict(_REL_DATA))])
+    _rows, _skipped = _auto_targets(MBID_RELEASE, "release", "best")
+    assert _rows == [], _rows
+    assert _skipped == [{"mbid": MBID_RELEASE,
+                         "reason": "already in the library"}], _skipped
+
+    # a RELEASE GROUP id the library holds: refused BEFORE any MusicBrainz
+    # browse — nothing is fetched for an album that is already on disk
+    _rg_calls.clear()
+    _patch_mb_transport([_Resp(200, {"id": _OWNED_GROUP})])
+    wishes.owned_mbids = _owns(_OWNED_GROUP)
+    _rows, _skipped = _auto_targets(_OWNED_GROUP, "release_group", "best")
+    assert _rows == [], _rows
+    assert _skipped == [{"mbid": _OWNED_GROUP,
+                         "reason": "already in the library"}], _skipped
+    assert _rg_calls == [], _rg_calls
+
+    # nothing owned: BOTH paths queue exactly as before (the guard must never
+    # eat a legitimate import)
+    wishes.owned_mbids = lambda cfg=None: {}
+    _patch_mb_transport([_Resp(200, dict(_REL_DATA))])
+    _rows, _skipped = _auto_targets(MBID_RELEASE, "release", "best")
+    assert _rows == [{"mbid": MBID_RELEASE, "title": "Some Album"}], _rows
+    assert _skipped == [], _skipped
+
+    _rg_calls.clear()
+    _rows, _skipped = _auto_targets(_OWNED_GROUP, "release_group", "best")
+    assert _rows == [{"mbid": MBID_RELEASE, "title": "Some Album"}], _rows
+    assert _skipped == [], _skipped
+    assert _rg_calls == [_OWNED_GROUP], _rg_calls
+finally:
+    wishes.owned_mbids = _real_owned_mbids
+    intg.release_group_browse = _real_rg_browse
+    intg.httpx.get = _real_httpx_get
+
+print("ok  bulk auto-import skips a release/release-group whose MBID the "
+      "library already holds (both kinds, nothing queued) and still queues "
+      "everything it does not own")
+
+# --------------------------------------------------------------------------- #
+# 6. release_lookup keeps EVERY catalog number of the release, in MusicBrainz
+#    order, blanks and duplicates dropped — one per label/pressing — while
+#    `catalog_number` stays the first one, unchanged for every existing caller.
+#    A release with no label-info carries an EMPTY list, never None: callers
+#    iterate it.
+# --------------------------------------------------------------------------- #
+_CATNO_PAYLOAD = {
+    "id": MBID_RELEASE, "title": "Two Label Album", "date": "2001-03-04",
+    "country": "GB", "barcode": "5012345678900", "status": "Official",
+    "artist-credit": [{"name": "Some Artist", "artist": {"id": MBID_ARTIST}}],
+    "release-group": {"id": MBID_GROUP, "primary-type": "Album",
+                      "first-release-date": "2001"},
+    "media": [{"position": 1, "format": "CD", "tracks": []}],
+    "label-info": [
+        {"catalog-number": "CAT-1", "label": {"name": "First Label"}},
+        {"catalog-number": "   ", "label": {"name": "Blank Label"}},
+        {"catalog-number": "CAT-2", "label": {"name": "Second Label"}},
+        {"catalog-number": "CAT-1", "label": {"name": "Repress"}},
+    ],
+}
+
+_saved_mb_get = intg.httpx.get
+try:
+    _patch_mb_transport([_Resp(200, dict(_CATNO_PAYLOAD))])
+    _rel = intg.release_lookup(MBID_RELEASE)
+    assert _rel["catalog_numbers"] == ["CAT-1", "CAT-2"], _rel["catalog_numbers"]
+    assert _rel["catalog_number"] == "CAT-1", _rel["catalog_number"]   # unchanged
+    assert _rel["label"] == "First Label", _rel["label"]
+
+    # no label-info at all (and none of the labels named): both keys still there
+    _patch_mb_transport([_Resp(200, {"id": MBID_RELEASE, "title": "No Labels",
+                                     "media": []})])
+    _rel = intg.release_lookup(MBID_RELEASE)
+    assert _rel["catalog_numbers"] == [], _rel["catalog_numbers"]
+    assert _rel["catalog_number"] == "", repr(_rel["catalog_number"])
+
+    # every label-info entry blank: still an empty list, not [""]
+    _patch_mb_transport([_Resp(200, {"id": MBID_RELEASE, "title": "Blank Labels",
+                                     "media": [],
+                                     "label-info": [{"catalog-number": " "},
+                                                    {"label": {"name": "L"}}]})])
+    _rel = intg.release_lookup(MBID_RELEASE)
+    assert _rel["catalog_numbers"] == [], _rel["catalog_numbers"]
+    assert _rel["catalog_number"] == "", repr(_rel["catalog_number"])
+finally:
+    intg.httpx.get = _saved_mb_get
+
+print("ok  release_lookup keeps every catalog number (order, blanks and "
+      "duplicates dropped; catalog_number unchanged) and an empty list when "
+      "the release carries none")

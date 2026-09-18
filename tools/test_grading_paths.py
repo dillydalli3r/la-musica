@@ -14,8 +14,10 @@ import wave
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mlo.grader import (REPLAYGAIN_TAGS, _grade_album, _naming_mismatch,
-                        _release_type_candidates, tag_key_allowed)
+from mlo.grader import (EMPTY_FOLDER, EXPECTED_TRACKS_MISSING, REPLAYGAIN_TAGS,
+                        _grade_album, _naming_mismatch, _release_type_candidates,
+                        run_grade_library, tag_key_allowed)
+from mlo.paths import save_expected_tracks
 from mlo.naming import (DEFAULT_NAMING_SCRIPT, UNKNOWN_RELEASE_TYPE,
                         eval_script, track_variables)
 from server.beetscfg import generate_config
@@ -83,10 +85,33 @@ BASE_TAGS = {
     "INSTRUMENTAL": "0",
 }
 
+_MBID = "12345678-1234-1234-1234-123456789abc"
+
+
+def layout(tags, release_type=None, shorter=False):
+    """(artist dir, album dir, file stem) the SHIPPED naming script makes of
+    *tags*. The fixtures below are spelled this way instead of hand-typed:
+    the default layout is free to change, and a literal here would only pin
+    the spelling it had when this file was written."""
+    rel = eval_script(DEFAULT_NAMING_SCRIPT,
+                      track_variables(tags, release_type=release_type),
+                      shorter_ids=shorter)
+    return tuple(rel.split("/"))
+
+
+def album_path(root, tags, release_type=None, shorter=False):
+    """Where the shipped script puts *tags* under *root* (with extension)."""
+    return os.path.join(root, *layout(tags, release_type, shorter)) + ".flac"
+
+
 # isolate the two new checks from everything else
 ISO_CFG = {
     "music_folder": "",
     "grade_check_naming": True,
+    # No .mlo_expected.json in these fixtures: the expected-tracklist check is
+    # its own area (see grade_check_expected_tracks) and would fail every
+    # synthetic album here for a reason this file never set up.
+    "grade_check_expected_tracks": False,
     "grade_check_key_bpm": True,
     "grade_check_missing_tags": False,
     "grade_check_lyrics": False,
@@ -123,52 +148,57 @@ tmp = tempfile.mkdtemp(prefix="mlo_naming_test_")
 print("== _naming_mismatch ==")
 folder = tempfile.mkdtemp(prefix="mlo_naming_pure_")
 lib = os.path.join(folder, "Artists")
-os.makedirs(os.path.join(lib, "Artist", "Album (2020)"), exist_ok=True)
-good = os.path.join(lib, "Artist", "Album (2020)", "1-01 Song.flac")
+_a, _alb, _name = layout(BASE_TAGS)
+os.makedirs(os.path.join(lib, _a, _alb), exist_ok=True)
+good = os.path.join(lib, _a, _alb, _name + ".flac")
 ok(_naming_mismatch(good, folder, DEFAULT_NAMING_SCRIPT, "", BASE_TAGS) == ("ok", None),
    "exact match below <music>/Artists returns ('ok', None)")
-ok(_naming_mismatch(os.path.join(lib, "Wrong", "1-01 Song.flac"), folder,
+ok(_naming_mismatch(os.path.join(lib, "Wrong", _name + ".flac"), folder,
                     DEFAULT_NAMING_SCRIPT, "", BASE_TAGS)
-   == ("path", "Artist/Album (2020)/1-01 Song.flac"),
+   == ("path", f"{_a}/{_alb}/{_name}.flac"),
    "wrong folder returns expected path")
 # the SAME relative layout one level up (music folder root) is not a match
-ok(_naming_mismatch(os.path.join(folder, "Artist", "Album (2020)", "1-01 Song.flac"),
+ok(_naming_mismatch(os.path.join(folder, _a, _alb, _name + ".flac"),
                     folder, DEFAULT_NAMING_SCRIPT, "", BASE_TAGS)[0] == "path",
    "library layout in the music folder root fails (base is Artists/)")
-# label / country / release type land in the folder segment exactly as the
-# script spells them, and a missing one drops its segment (no dangling [])
-rich = dict(BASE_TAGS, RELEASETYPE="Album", LABEL="Label", RELEASECOUNTRY="US")
-rich_path = os.path.join(lib, "Artist", "Album (Album, 2020) [Label] [US]",
-                         "1-01 Song.flac")
+# label / country / release type / catalog number land in the folder segment
+# exactly as the script spells them, and a missing one drops its segment
+rich = dict(BASE_TAGS, RELEASETYPE="Album", LABEL="Label", RELEASECOUNTRY="US",
+            CATALOGNUMBER="CAT-1")
+rich_path = album_path(lib, rich)
 ok(_naming_mismatch(rich_path, folder, DEFAULT_NAMING_SCRIPT, "", rich) == ("ok", None),
    "release type, label and country join the folder segment")
 ok(_naming_mismatch(good, folder, DEFAULT_NAMING_SCRIPT, "", rich)[0] == "path",
    "dropping them from the folder fails (script defines the path)")
-ok(eval_script(DEFAULT_NAMING_SCRIPT, track_variables(BASE_TAGS)).count("[") == 0
-   and "/Album (2020)/" in eval_script(DEFAULT_NAMING_SCRIPT, track_variables(BASE_TAGS)),
+_bare_rel = eval_script(DEFAULT_NAMING_SCRIPT, track_variables(BASE_TAGS))
+ok("[" not in _bare_rel and "{" not in _bare_rel and f"/{_alb}/" in _bare_rel,
    "missing label/country/type leave NO dangling brackets")
 
-tags_m = dict(BASE_TAGS, MUSICBRAINZ_ALBUMARTISTID="12345678-1234-1234-1234-123456789abc")
+tags_m = dict(BASE_TAGS, MUSICBRAINZ_ALBUMARTISTID=_MBID)
 # the default script folds the MBID into ONE folder segment: "Artist [uuid]"
-full = os.path.join(lib, "Artist [12345678-1234-1234-1234-123456789abc]",
-                    "Album (2020)", "1-01 Song.flac")
-short = os.path.join(lib, "Artist [12345678]", "Album (2020)", "1-01 Song.flac")
+full = album_path(lib, tags_m)
+short = album_path(lib, tags_m, shorter=True)
+ok(full != short
+   and os.path.basename(os.path.dirname(short))
+   == os.path.basename(os.path.dirname(full)).replace(_MBID, _MBID[:8]),
+   f"the short form really is the truncated id, bracket intact ({short} vs {full})")
 ok(_naming_mismatch(full, folder, DEFAULT_NAMING_SCRIPT, "", tags_m) == ("ok", None),
    "full MBID path matches")
 ok(_naming_mismatch(short, folder, DEFAULT_NAMING_SCRIPT, "", tags_m) == ("ok", None),
    "short MBID accepted too (ID length can't cause false fails)")
 ok(_naming_mismatch(full, folder, DEFAULT_NAMING_SCRIPT, "", BASE_TAGS)[0] == "path",
    "MBID folder mismatches when the tag is absent")
-# RELEASETYPE feeds the script like the organizer does — "[album] 2020 - Album"
-# became "Album (album, 2020)" in the shipped default
-with_type = os.path.join(lib, "Artist [12345678-1234-1234-1234-123456789abc]",
-                         "Album (album, 2020)", "1-01 Song.flac")
+# RELEASETYPE feeds the script like the organizer does — the tag's own
+# spelling and the MusicBrainz spelling name the SAME album folder segment
+with_type = album_path(lib, tags_m, "album")
+capped_type = album_path(lib, tags_m, "Album; Live")
 ok(_naming_mismatch(with_type, folder, DEFAULT_NAMING_SCRIPT, "album", tags_m) == ("ok", None),
    "a lowercase release type joins the album folder segment")
-ok(_naming_mismatch(with_type.replace("(album,", "(Album; Live,"), folder,
-                    DEFAULT_NAMING_SCRIPT, "album+live", tags_m) == ("ok", None),
+ok(capped_type != with_type
+   and _naming_mismatch(capped_type, folder, DEFAULT_NAMING_SCRIPT, "album+live",
+                        tags_m) == ("ok", None),
    "the same type in MusicBrainz casing matches too (no false fail)")
-ok(_naming_mismatch(good.replace("Album (2020)", "ALBUM (2020)"), folder,
+ok(_naming_mismatch(good.replace(_alb, _alb.upper()), folder,
                     DEFAULT_NAMING_SCRIPT, "", BASE_TAGS)[0] == "case",
    "case-only difference reports 'case' (PATH_CASE check)")
 shutil.rmtree(folder, ignore_errors=True)
@@ -179,13 +209,13 @@ shutil.rmtree(folder, ignore_errors=True)
 print("== _grade_album naming + key/bpm ==")
 music = os.path.join(tmp, "Music")
 # The folder is spelled the way the shipped script lays it out when the
-# RELEASETYPE tag is present ("%album% (%releasetype%, %year%)"), so the
-# sections that assert a CLEAN album (no failed check at all) satisfy the
-# grader's identity-tag check too. Anything graded with the tag absent still
-# matches through the wildcard.
-album = os.path.join(music, "Artists", "Artist", "Album (Album, 2020)")
+# RELEASETYPE tag is present — the identity-tag check demands that tag, so a
+# clean album states it. Anything graded with the tag absent still matches
+# through the wildcard.
+flac = album_path(os.path.join(music, "Artists"),
+                  dict(BASE_TAGS, RELEASETYPE="Album"))
+album = os.path.dirname(flac)
 os.makedirs(album, exist_ok=True)
-flac = os.path.join(album, "1-01 Song.flac")
 make_flac(flac)
 set_tags(flac, dict(BASE_TAGS, INITIALKEY="B♭ min", BPM="120"))
 
@@ -259,11 +289,11 @@ print("== case-only naming (PATH_CASE) ==")
 # all.
 #
 # The folder carries the release type, exactly as the shipped script spells it
-# ("%album% (%releasetype%, %year%)") with the RELEASETYPE tag present — the
-# grader's identity-tag check demands that tag, so a clean album states it.
-ALBUM_DIR = "Album (Album, 2020)"
-BAD_ALBUM_DIR = "ALBUM (ALBUM, 2020)"
-EXPECTED_REL = f"Artist/{ALBUM_DIR}/1-01 Song.flac"
+# with the RELEASETYPE tag present — the grader's identity-tag check demands
+# that tag, so a clean album states it.
+_ca, ALBUM_DIR, _cname = layout(dict(BASE_TAGS, RELEASETYPE="Album"))
+BAD_ALBUM_DIR = ALBUM_DIR.upper()
+EXPECTED_REL = f"{_ca}/{ALBUM_DIR}/{_cname}.flac"
 
 
 def case_scenario(tag, album_name, file_name):
@@ -517,7 +547,8 @@ ok(_release_type_candidates(UNKNOWN_RELEASE_TYPE)[0] == UNKNOWN_RELEASE_TYPE
 # an album the organizer laid out ONLINE, graded with no tag and no network:
 # the folder is still accepted (the type token is a wildcard) and the missing
 # tag is REPORTED instead of turning into a bogus PATH failure.
-rt_dir = os.path.join(music, "Artists", "Artist", "Album (album, 2020)")
+rt_dir = os.path.join(music, "Artists",
+                      *layout(dict(BASE_TAGS, RELEASETYPE="album"))[:2])
 os.makedirs(rt_dir, exist_ok=True)
 rt_flac = os.path.join(rt_dir, "1-01 Song.flac")
 make_flac(rt_flac)
@@ -538,7 +569,8 @@ res = _grade_album(rt_wrong, "EMBEDDED", cfg)
 ok("PATH" in res["tracks"][0]["issues"],
    "an unknown type does not excuse a wrong album name")
 # an album organized under the OTHER spelling of the same type also matches
-rt_capped = os.path.join(music, "Artists", "Artist", "Album (Album; Live, 2020)")
+rt_capped = os.path.join(music, "Artists",
+                         *layout(dict(BASE_TAGS, RELEASETYPE="Album; Live"))[:2])
 os.makedirs(rt_capped, exist_ok=True)
 shutil.copy(rt_flac, os.path.join(rt_capped, "1-01 Song.flac"))
 set_tags(os.path.join(rt_capped, "1-01 Song.flac"),
@@ -569,14 +601,17 @@ ok(eval_script(DEFAULT_NAMING_SCRIPT, mc_vars)
                                        LABEL="Label A"))),
    "a multi-value album produces the SINGLE-value path (stable, not arbitrary)")
 
-mc_dir = os.path.join(music, "Artists", "Artist", "Album (Album, 2020) [Label A] [US]")
+mc_dir = os.path.join(music, "Artists",
+                      *layout(dict(BASE_TAGS, RELEASETYPE="Album",
+                                   RELEASECOUNTRY="US", LABEL="Label A",
+                                   CATALOGNUMBER="CAT-1"))[:2])
 os.makedirs(mc_dir, exist_ok=True)
 mc_flac = os.path.join(mc_dir, "1-01 Song.flac")
 make_flac(mc_flac)
 for sep in ("; ", " / ", "+"):
     # every separator spelling of the SAME countries yields the SAME path
     set_tags(mc_flac, dict(BASE_TAGS, INITIALKEY="B♭ min", BPM="120",
-                           RELEASETYPE="Album",
+                           RELEASETYPE="Album", CATALOGNUMBER="CAT-1",
                            RELEASECOUNTRY="US" + sep + "GB",
                            LABEL="Label A" + sep + "Label B"))
     res = _grade_album(mc_dir, "EMBEDDED", cfg)
@@ -585,7 +620,7 @@ for sep in ("; ", " / ", "+"):
     ok(res["pass_count"] == res["total_checks"],
        f"and cost no grade point ({res['pass_count']}/{res['total_checks']})")
 set_tags(mc_flac, dict(BASE_TAGS, INITIALKEY="B♭ min", BPM="120",
-                       RELEASETYPE="Album",
+                       RELEASETYPE="Album", CATALOGNUMBER="CAT-1",
                        RELEASECOUNTRY="GB; US", LABEL="Label A + Label B"))
 res = _grade_album(mc_dir, "EMBEDDED", cfg)
 ok("PATH" in res["tracks"][0]["issues"],
@@ -795,6 +830,184 @@ ok(f'directory: "{slashes}/Artists"' in beets_txt,
    "beets directory: points at <music>/Artists")
 ok(f'directory: "{slashes}"\n' not in beets_txt,
    "beets directory: is not the music folder itself")
+
+# ----------------------------------------------------------------------
+# Empty folders count against grading (grade_check_empty_folders)
+# ----------------------------------------------------------------------
+print("== empty folders ==")
+import mlo.grader as grader  # noqa: E402
+
+# One music root holding a real album plus every shape of emptiness the sweep
+# must tell apart: a folder with nothing at all, a folder whose only child is
+# empty, and one whose DEEPEST level holds a single file (not empty, however
+# bare). The music root itself, a dot-dir and a SKIP_DIRS subtree are here too:
+# none of them is ever a row.
+el_music = os.path.join(tmp, "EmptyLib", "Music")
+el_album = os.path.join(el_music, "Artists", "Artist", "Album (2020)")
+os.makedirs(el_album)
+_el_flac = os.path.join(el_album, "01 - Song.flac")
+make_flac(_el_flac)
+set_tags(_el_flac, BASE_TAGS)
+_bare = os.path.join(el_music, "Artists", "Nobody")
+os.makedirs(_bare)                                   # (a) nothing at all
+_holder = os.path.join(el_music, "Artists", "Holder")
+_inner = os.path.join(_holder, "Inner")
+os.makedirs(_inner)                                  # (b) only an empty child
+_deep = os.path.join(el_music, "Artists", "Deep", "Inner")
+os.makedirs(_deep)
+with open(os.path.join(_deep, "notes.txt"), "w", encoding="utf-8") as fh:
+    fh.write("x")                                    # (c) one file, no audio
+os.makedirs(os.path.join(el_music, ".hidden", "Inner"))
+os.makedirs(os.path.join(el_music, "data", "Inner"))
+
+# Everything but the sweep is off: these runs are about which folders become
+# rows, not about what the album's own checks say.
+EMPTY_CFG = dict(ISO_CFG, music_folder="", grade_check_naming=False,
+                 grade_check_key_bpm=False, grade_verbose=False)
+
+
+def graded(cfg):
+    """run_grade_library with its per-row log lines captured."""
+    lines = []
+    real_log = grader.log
+    grader.log = lambda msg, *a, **k: lines.append(str(msg))
+    try:
+        return run_grade_library(dict(cfg)), lines
+    finally:
+        grader.log = real_log
+
+
+def row_line(lines, where):
+    """The ONE summary line the run printed for `where` (None when it skipped)."""
+    hits = [l for l in lines if l.startswith(("✓ ", "✕ ")) and f" {where} " in l]
+    assert len(hits) <= 1, hits
+    return hits[0] if hits else None
+
+
+ALBUM_REL = os.path.join("Artists", "Artist", "Album (2020)")
+BARE_REL = os.path.join("Artists", "Nobody")
+HOLDER_REL = os.path.join("Artists", "Holder")
+INNER_REL = os.path.join("Artists", "Holder", "Inner")
+DEEP_REL = os.path.join("Artists", "Deep", "Inner")
+
+stats_on, lines_on = graded(dict(EMPTY_CFG, music_folder=el_music))
+_present_on = [l for l in lines_on if l.startswith(("✓ ", "✕ "))]
+ok(len(_present_on) == 4,
+   f"the album plus the three empty folders are the only rows ({_present_on})")
+ok(stats_on["issue_counts"].get(EMPTY_FOLDER) == 3,
+   f"each empty folder is one EMPTY_FOLDER issue ({stats_on['issue_counts']})")
+ok(stats_on["grade_dist"] == {"PASS": 1, "FAIL": 3},
+   f"an empty folder is a graded row, so it lands in grade_dist "
+   f"({stats_on['grade_dist']})")
+ok(stats_on["total_scanned"] == 4,
+   f"'graded N' stays in step with grade_dist ({stats_on['total_scanned']})")
+ok(sum(1 for l in lines_on if "issues: EMPTY_FOLDER" in l) == 3,
+   "all three empty rows report the EMPTY_FOLDER issue")
+for _rel in (BARE_REL, HOLDER_REL, INNER_REL):
+    _row = row_line(lines_on, _rel)
+    ok(_row is not None and "FAIL 0/1" in _row and "0 tr" in _row,
+       f"{_rel} is a failed row with no tracks ({_row})")
+ok(row_line(lines_on, ALBUM_REL) is not None, "the real album is still graded")
+ok(not any("EMPTY_FOLDER" in l for l in lines_on if ALBUM_REL in l),
+   "the real album's row carries no EMPTY_FOLDER issue")
+ok(not any(x in l for l in lines_on
+           for x in (os.path.join(".hidden", "Inner"), os.path.join("data", "Inner"))),
+   "a dot-dir and a SKIP_DIRS subtree are never reported")
+ok(row_line(lines_on, DEEP_REL) is None,
+   "a folder whose deepest level holds a file is not empty")
+
+# ...and with the key OFF the sweep does not run at all: no row, no issue, and
+# the album's own row is byte-for-byte the one it had with the key on.
+stats_off, lines_off = graded(dict(EMPTY_CFG, music_folder=el_music,
+                                   grade_check_empty_folders=False))
+ok(EMPTY_FOLDER not in stats_off["issue_counts"], stats_off["issue_counts"])
+ok(stats_off["grade_dist"] == {"PASS": 1, "FAIL": 0},
+   f"nothing is reported with the key off ({stats_off['grade_dist']})")
+ok(stats_off["total_scanned"] == 1, stats_off["total_scanned"])
+ok(row_line(lines_off, ALBUM_REL) == row_line(lines_on, ALBUM_REL),
+   "the album's row is unchanged by the empty-folder sweep")
+ok(not any(row_line(lines_off, r) for r in (BARE_REL, HOLDER_REL, INNER_REL)),
+   "no empty folder becomes a row with the key off")
+
+# A targeted run grades the selection, not the tree: no library-wide walk, so
+# no empty-folder sweep either.
+stats_targeted, lines_targeted = graded(dict(EMPTY_CFG, music_folder=el_music,
+                                             targets=[_el_flac]))
+ok(EMPTY_FOLDER not in stats_targeted["issue_counts"],
+   f"a targeted run reports no empty folders ({stats_targeted['issue_counts']})")
+ok(stats_targeted["total_scanned"] == 1, stats_targeted["total_scanned"])
+ok(row_line(lines_targeted, ALBUM_REL) is not None
+   and not any(row_line(lines_targeted, r)
+               for r in (BARE_REL, HOLDER_REL, INNER_REL)),
+   "the targeted run grades the album alone")
+
+# A music root holding NOTHING but empty folders: the folders are rows, the
+# root itself never is — an empty music folder is not a folder to clean up, and
+# reporting it would bury the real ones under a row for the library itself.
+only_empty = os.path.join(tmp, "OnlyEmpty", "Music")
+os.makedirs(os.path.join(only_empty, "Lonely"))
+stats_only, lines_only = graded(dict(EMPTY_CFG, music_folder=only_empty))
+_only_rows = [l for l in lines_only if l.startswith(("✓ ", "✕ "))]
+ok(stats_only["issue_counts"].get(EMPTY_FOLDER) == 1
+   and len(_only_rows) == 1
+   and row_line(lines_only, "Lonely") is not None,
+   f"the empty folder is the only row — the music folder root is not one "
+   f"({_only_rows})")
+
+# ----------------------------------------------------------------------
+# expected release tracklist (grade_check_expected_tracks)
+# ----------------------------------------------------------------------
+# ISO_CFG ships the key OFF (its synthetic albums have no manifest and the
+# check is not what those cases are about), so it doubles as the "toggled
+# off" case here; MAN_CFG turns it on over its own album tree.
+print("== grade_check_expected_tracks ==")
+mn_music = os.path.join(tmp, "Manifest", "Music")
+mn_tags = dict(BASE_TAGS)
+mn_flac = album_path(mn_music, mn_tags)
+os.makedirs(os.path.dirname(mn_flac), exist_ok=True)
+make_flac(mn_flac)
+set_tags(mn_flac, mn_tags)
+mn_dir = os.path.dirname(mn_flac)
+mn_rel = os.path.relpath(mn_dir, mn_music)
+
+MAN_CFG = dict(ISO_CFG, music_folder=mn_music, grade_check_naming=False,
+               grade_check_key_bpm=False, grade_verbose=False,
+               grade_check_expected_tracks=True)
+
+stats_man_no, lines_man_no = graded(dict(MAN_CFG))
+mn_row = row_line(lines_man_no, mn_rel)
+ok(stats_man_no["issue_counts"].get(EXPECTED_TRACKS_MISSING) == 1,
+   f"an album with no manifest reports one EXPECTED_TRACKS_MISSING "
+   f"({stats_man_no['issue_counts']})")
+ok(mn_row is not None and "✕" in mn_row and "FAIL" in mn_row,
+   f"the album is a FAILED row ({mn_row})")
+ok(any("issues: EXPECTED_TRACKS_MISSING" in l for l in lines_man_no),
+   "the row names the missing manifest")
+ok(stats_man_no["grade_dist"] == {"PASS": 0, "FAIL": 1},
+   f"the check costs the album its PASS ({stats_man_no['grade_dist']})")
+
+# The release's own tracklist — the files on disk match it exactly, so the
+# album is complete and the check has nothing to fail.
+save_expected_tracks(mn_dir, "11111111-1111-1111-1111-111111111111",
+                     [{"disc": 1, "position": 1, "title": "Song",
+                       "recording_mbid": "22222222-2222-2222-2222-222222222222"}])
+stats_man_yes, lines_man_yes = graded(dict(MAN_CFG))
+ok(EXPECTED_TRACKS_MISSING not in stats_man_yes["issue_counts"],
+   f"an album WITH a manifest is never failed by the check "
+   f"({stats_man_yes['issue_counts']})")
+ok(stats_man_yes["grade_dist"] == {"PASS": 1, "FAIL": 0},
+   f"it grades PASS ({stats_man_yes['grade_dist']})")
+
+# Key OFF: the same album (manifest deleted again) is not graded on it at all
+# — no issue, no row change, no extra check in the denominator.
+os.remove(os.path.join(mn_dir, ".mlo_expected.json"))
+stats_man_off, lines_man_off = graded(dict(MAN_CFG,
+                                           grade_check_expected_tracks=False))
+ok(EXPECTED_TRACKS_MISSING not in stats_man_off["issue_counts"],
+   f"nothing is reported with the key off ({stats_man_off['issue_counts']})")
+ok(row_line(lines_man_off, mn_rel) is not None
+   and "PASS" in row_line(lines_man_off, mn_rel),
+   "the album grades without the manifest while the check is off")
 
 print(f"\nAll {passed} checks passed.")
 shutil.rmtree(tmp, ignore_errors=True)

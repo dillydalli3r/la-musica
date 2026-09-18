@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { CloudDownload, PenLine, Play, Square, Plus, Trash2, Undo2, Keyboard, Upload } from "lucide-react";
 import { api } from "../api";
 import { toast, useStore } from "../store";
@@ -213,6 +214,7 @@ export default function LyricsViewer({
   album,
   duration,
   decimals = 2,
+  staged = false,
   onEnhancedEditor,
 }: {
   path: string;
@@ -224,6 +226,9 @@ export default function LyricsViewer({
   album?: string;
   duration?: number;
   decimals?: number;
+  /** The track is in an album the import wizard is editing that is not in the
+   *  library yet, so the read asks the server for its staged allowance. */
+  staged?: boolean;
   /** Opens the full-screen enhanced editor (syllable tap-sync, playback
    * speed) when provided. */
   onEnhancedEditor?: () => void;
@@ -263,6 +268,33 @@ export default function LyricsViewer({
     setRaw(initialLyrics);
     historyRef.current = [];
   }, [initialLyrics]);
+
+  // The host may know only that lyrics EXIST (the import wizard's rows carry
+  // the flags, not the text), so an empty initialLyrics means "ask the file".
+  // Without this the panel announced "No lyrics yet" for a track whose lyrics
+  // the chip next to it had just reported as present. Shares the ["tags", path]
+  // cache entry with the player bar / track page, so this is one request.
+  // A FAILED read is an error with its reason — never an empty pane that reads
+  // as "this file has no lyrics".
+  const { data: stored, isPending: storedPending, error: storedError } = useQuery({
+    queryKey: ["tags", path],
+    queryFn: () => api.tags(path, staged),
+    enabled: !!path && !initialLyrics.trim(),
+    retry: false,
+  });
+
+  useEffect(() => {
+    if (initialLyrics.trim() || !stored) return;
+    const text = typeof stored.lyrics === "string" ? stored.lyrics : "";
+    if (!text.trim()) return;
+    const parsed = parseLrc(text);
+    setLines(parsed);
+    setRaw(text);
+    // Plain-text lyrics carry no timestamps, so there is no line list to show.
+    // Open the raw editor rather than claiming the track has no lyrics.
+    if (!parsed.length) setRawMode(true);
+    historyRef.current = [];
+  }, [stored, initialLyrics]);
 
   // Active line derived from playback time (never conflated with the index).
   const activeLine = useMemo(() => {
@@ -763,9 +795,21 @@ export default function LyricsViewer({
         />
       ) : lines.length === 0 ? (
         <div className="text-sm text-zinc-500 py-10 text-center">
-          No lyrics yet. Press <kbd className="chip bg-raise border border-border">Play</kbd>, then select a line and
-          press <kbd className="chip bg-raise border border-border">{keys.stampLine}</kbd> on each line to stamp its
-          timestamp — or auto-import lyrics from a provider.
+          {storedPending && !initialLyrics.trim() ? (
+            "Reading the file's lyrics…"
+          ) : storedError ? (
+            <span className="text-red-300" role="alert">
+              Could not read this file's lyrics — {storedError instanceof Error ? storedError.message : String(storedError)}.
+              <br />
+              The file's own lyrics may still be fine; only this read failed.
+            </span>
+          ) : (
+            <>
+              No lyrics yet. Press <kbd className="chip bg-raise border border-border">Play</kbd>, then select a line and
+              press <kbd className="chip bg-raise border border-border">{keys.stampLine}</kbd> on each line to stamp its
+              timestamp — or auto-import lyrics from a provider.
+            </>
+          )}
         </div>
       ) : (
         <div

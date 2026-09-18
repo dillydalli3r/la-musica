@@ -89,6 +89,7 @@ def main():
     Image.new("RGB", (600, 600), (200, 60, 60)).save(os.path.join(album, "cover.jpg"), "JPEG")
 
     from mlo.config import DEFAULT_CONFIG
+    from mlo.tools import detect_all_tools
 
     base = {
         **DEFAULT_CONFIG,
@@ -99,6 +100,31 @@ def main():
         "audit_thorough": False,
     }
 
+    # The two FLACs are named like a CD rip ("1-01 …"), so script 1 marks them
+    # MEDIA=CD — and a CD album is audited on its own evidence: the .log CRCs.
+    # Give the fixture a REAL rip log (its Copy CRC lines computed from the
+    # actual audio), so this suite exercises the verified path instead of
+    # failing the CD gates for a fixture that has no log at all.
+    _ff = None
+    for _k in ("ffmpeg",):
+        _ff = (detect_all_tools().get(_k) or {}).get("ffmpeg_exe")
+    if _ff:
+        from mlo import discs as _discs
+
+        lines = ["Exact Audio Copy v1.6", "", "Track |  Start  |  Length  | Start sector | End sector",
+                 "---------------------------------------------------------"]
+        crcs = []
+        for _i, _name in enumerate(sorted(f for f in os.listdir(album)
+                                          if f.lower().endswith(".flac")), 1):
+            _crc = _discs._audio_crc32(_ff, os.path.join(album, _name))
+            crcs.append((_i, _crc))
+            lines.append(f"  {_i}  | 00:0{_i}.00 | 00:00.10 | 0 | 8")
+        lines.append("")
+        for _i, _crc in crcs:
+            lines += [f"Track  {_i}", f"     Copy CRC {str(_crc).upper()}", ""]
+        with open(os.path.join(album, "CD-1.log"), "w", encoding="utf-8") as _fh:
+            _fh.write("\n".join(lines))
+
     from mlo import (run_format_lyrics, run_format_cues, run_optimize_flacs,
                      run_grade_library, run_process_images, run_audit_library,
                      run_auto_tagging, run_format_all)
@@ -106,6 +132,7 @@ def main():
     from mlo.accurip import run_generate_accurip
     from mlo.remux import run_remux_videos
     from mlo.audiometa import run_analyze_audiometa
+    from mlo.moods import run_detect_mood_energy
 
     runners = [
         (1, "lyrics", run_format_lyrics),
@@ -117,6 +144,7 @@ def main():
         (6, "audit", run_audit_library),
         (7, "dr", run_calc_dr_replaygain),
         (12, "audiometa", run_analyze_audiometa),
+        (16, "mood", run_detect_mood_energy),
         (8, "autotag", run_auto_tagging),
         (4, "grade", run_grade_library),
         (10, "formatall", run_format_all),

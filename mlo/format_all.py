@@ -254,10 +254,13 @@ def _format_lrc_file(path, cfg, force=False):
             return (path, False, None)
         # Never errors="replace": this text is written back, so a mis-decode
         # would permanently corrupt a CP1252/Shift-JIS sidecar into U+FFFD.
+        # No latin-1 fallback either — latin-1 decodes ANY byte string, so a
+        # non-UTF-8 sidecar would decode to mojibake and be rewritten as UTF-8,
+        # destroying the original encoding. Leave such files untouched.
         try:
             original = data.decode("utf-8-sig")
         except UnicodeDecodeError:
-            original = data.decode("latin-1")
+            return (path, False, None)
         if not original.strip():
             return (path, False, None)
         expected = _lrc_expected(original, cfg, is_lrc_file=True)
@@ -303,6 +306,10 @@ def _format_audio_tags(path, cfg, force=False):
             if not should_write_audio_tag(cfg, key, filepath=path):
                 continue
             if key.upper() in ("LYRICS", "UNSYNCEDLYRICS"):
+                # Same gate script 1 uses (mlo/lyrics.py:465) — Format All runs
+                # last, so it must not override optimize_embedded_lyrics.
+                if not (force or cfg.get("optimize_embedded_lyrics", True)):
+                    continue
                 try:
                     expected = _lrc_expected(raw, cfg, is_lrc_file=False)
                     if force or expected != raw:
@@ -333,7 +340,9 @@ def _format_audio_tags(path, cfg, force=False):
         # AUDIOAUDITOR_OVERRIDE — is removed. The predicate comes from the
         # grader (mlo.grader.tag_key_allowed) so the strip pass and the
         # excess-tag grade can never disagree about what "excess" means.
-        if cfg.get("strip_unknown_tags", False):
+        # Default True to match DEFAULT_CONFIG (mlo/config.py:821) — a partial
+        # cfg (tests, smoke suites) must strip like the shipped app does.
+        if cfg.get("strip_unknown_tags", True):
             from .grader import tag_key_allowed
             for key in list(af.all_tags().keys()):
                 if tag_key_allowed(key):
@@ -398,6 +407,12 @@ def run_format_all(config):
         cue_files = sorted(_walk_files(folder, (".cue",)))
         lrc_files = sorted(_walk_files(folder, (".lrc",)))
         audio_to_check = sorted(_walk_files(folder, AUDIO_EXTS))
+
+    # Script 1 gates .lrc cleaning on optimize_lrc (mlo/lyrics.py:475) and
+    # Format All runs last, so the same key is honoured here — otherwise a
+    # "Optimize LRC = off" setting gets silently overridden.
+    if not (config.get("force_lyrics", False) or config.get("optimize_lrc", True)):
+        lrc_files = []
 
     total_tasks = len(accurip_files) + len(cue_files) + len(lrc_files) + 2 * len(audio_to_check)
     if total_tasks == 0:

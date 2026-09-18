@@ -1,9 +1,9 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowDownToLine, ArrowDownUp, ChevronLeft, ChevronRight, ClipboardCheck, Disc3, Gauge, HardDriveDownload, Heart, Home, Import,
-  Library, ListMusic, Menu, Music2, Music4, PanelLeftClose, Search, Tags, Trash2, User, X,
+  Library, ListMusic, Menu, Music2, PanelLeftClose, Search, Tags, Trash2, User, X,
   Settings as SettingsIcon, Wrench,
 } from "lucide-react";
 import { api } from "./api";
@@ -34,11 +34,6 @@ const OptimizationPage = lazy(() => import("./pages/OptimizationPage"));
 const DependenciesPage = lazy(() => import("./pages/DependenciesPage"));
 const GenrePage = lazy(() => import("./pages/GenrePage"));
 const ImportWizard = lazy(() => import("./pages/ImportWizard"));
-const MBSearchPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBSearchPage })));
-const MBArtistPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBArtistPage })));
-const MBReleaseGroupPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBReleaseGroupPage })));
-const MBReleasePage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBReleasePage })));
-const MBRecordingPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBRecordingPage })));
 
 import PlayerBar from "./components/PlayerBar";
 import { ProgressInline } from "./components/ProgressBar";
@@ -65,7 +60,6 @@ const NAV_GROUPS = [
     items: [
       { to: "/import", label: "Import", icon: Import, end: false },
       { to: "/soulseek", label: "Soulseek", icon: ArrowDownUp, end: false },
-      { to: "/mb/search", label: "MusicBrainz", icon: Music4, end: false },
       { to: "/export", label: "Export", icon: HardDriveDownload, end: false },
     ],
   },
@@ -112,7 +106,8 @@ function useSlskDot() {
     retry: false,
   });
   if (st?.logged_in) {
-    const name = String(st.username ?? "").trim() || null;
+    // The LIVE account, not the saved username — those drift apart.
+    const name = String(st.account || st.username || "").trim() || null;
     return {
       cls: "bg-emerald-500",
       tip: name ? `Soulseek — logged in as ${name}` : "Soulseek — connected",
@@ -181,6 +176,7 @@ function SearchHit({ to, icon: Icon, label, hint, onGo }: {
 
 export default function App() {
   const { progress, setProgress, toasts, dismissToast, query, setQuery } = useStore();
+  const qc = useQueryClient();
   const progressClear = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   const slskDot = useSlskDot();
@@ -228,27 +224,43 @@ export default function App() {
     }
   };
 
+  // A finished auto-import is a download the user asked for minutes ago and has
+  // long stopped watching, so it lands them in the tagging wizard whatever page
+  // they drifted to. Same query key as the auto panel — one poll, react-query
+  // keeps the more aggressive interval — and the panel's own toast is untouched.
+  const { data: autoJob } = useQuery({
+    queryKey: ["soulseekAuto"],
+    queryFn: api.soulseekAutoStatus,
+    refetchInterval: (q) => (q.state.data?.state === "running" || q.state.data?.state === "confirm" ? 2000 : 15000),
+  });
+  const autoState = useRef<string | null>(null);
+  useEffect(() => {
+    const st = autoJob?.state ?? null;
+    const prev = autoState.current;
+    autoState.current = st;
+    // Only the running/confirm → done EDGE navigates. The ref holds that edge
+    // to one firing, so a later poll, a re-render or a reload of an old
+    // finished job cannot yank the user back into the wizard.
+    if (st !== "done" || (prev !== "running" && prev !== "confirm")) return;
+    // A wish handoff also ends "done" — but nothing landed on disk to tag.
+    const album = autoJob?.result?.album_path ?? "";
+    if (!album) return;
+    navigate(`/import?album=${encodeURIComponent(album)}`);
+  }, [autoJob, navigate]);
+
   // Global search lives in the top bar and drives the library filter from
   // anywhere — typing on another page jumps to the library. The dropdown
-  // below the input offers the MusicBrainz browser (and recognizes pasted
-  // musicbrainz.org links).
+  // below the input offers the typed local hits.
   const [searchOpen, setSearchOpen] = useState(false);
   const onSearch = (q: string) => {
     setQuery(q);
     if (location.pathname !== "/library") navigate("/library");
   };
-  const goMbSearch = () => {
-    setSearchOpen(false);
-    navigate(`/mb/search?q=${encodeURIComponent(query.trim())}`);
-  };
-  const mbLink = /^(?:https?:\/\/)?(?:www\.)?musicbrainz\.org\/(artist|release-group|release|recording)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(
-    query.trim()
-  );
 
   // Typed local results for the top-bar dropdown: artists, albums and tracks
-  // with direct links, instead of only handing the query to MusicBrainz. The
-  // library payload is fetched ONLY while the dropdown is open — same query
-  // key as the library page, so an already-loaded library costs nothing.
+  // with direct links into the library. The library payload is fetched ONLY
+  // while the dropdown is open — same query key as the library page, so an
+  // already-loaded library costs nothing.
   const q = query.trim().toLowerCase();
   const { data: lib } = useQuery<LibraryData>({
     queryKey: ["library"],
@@ -272,8 +284,7 @@ export default function App() {
 
   /** Enter opens the artist page when the query IS an artist (exact match, or
    *  the one artist the query narrows to) — otherwise it leaves the already
-   *  applied library filter alone and the dropdown's MusicBrainz row is the
-   *  explicit jump. */
+   *  applied library filter alone. */
   const openOnEnter = () => {
     const exact = hits.artists.find((a) => (a.display_name || a.name).trim().toLowerCase() === q);
     const target = exact ?? (hits.artists.length === 1 ? hits.artists[0] : null);
@@ -307,6 +318,15 @@ export default function App() {
       ws.onmessage = (e) => {
         try {
           const p = JSON.parse(e.data);
+          if (p?.type === "soulseek") {
+            // The daemon's login/run state changed under us (a login that
+            // just landed, an unexpected logout, a port conflict): re-read
+            // the status both the tab and the nav dot derive from, so the
+            // dot repaints without waiting for the next poll or a reload.
+            qc.invalidateQueries({ queryKey: ["soulseek"] });
+            qc.invalidateQueries({ queryKey: ["soulseekStatus"] });
+            return;
+          }
           if (typeof p?.done !== "number") return; // ping / non-progress frame
           setProgress(p);
           // The relay never sends an explicit "finished" frame — clear the
@@ -543,74 +563,48 @@ export default function App() {
               onFocus={() => setSearchOpen(true)}
               onBlur={() => setTimeout(() => setSearchOpen(false), 150)}
               onKeyDown={(e) => {
-                // Enter prefers the artist the query names (a direct open),
-                // then a pasted musicbrainz.org link; otherwise it leaves the
-                // library filter that typing already applied.
+                // Enter prefers the artist the query names (a direct open);
+                // otherwise it leaves the library filter that typing already
+                // applied.
                 if (e.key !== "Enter" || !query.trim()) return;
                 e.preventDefault();
                 setSearchOpen(false);
                 const artistTo = openOnEnter();
-                if (artistTo) {
-                  navigate(artistTo);
-                } else if (mbLink) {
-                  navigate(`/mb/${mbLink[1] === "release-group" ? "rg" : mbLink[1]}/${mbLink[2]}`);
-                }
+                if (artistTo) navigate(artistTo);
               }}
             />
             {searchOpen && query.trim() && (
               <div className="anim-fade absolute left-0 right-0 top-full mt-1 z-40 rounded-lg border border-border bg-zinc-950/95 backdrop-blur shadow-xl overflow-hidden max-h-[70vh] overflow-y-auto">
-                {mbLink ? (
-                  <button
-                    className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-zinc-200 hover:bg-raise transition-colors text-left"
-                    onClick={() => {
-                      setSearchOpen(false);
-                      navigate(`/mb/${mbLink[1] === "release-group" ? "rg" : mbLink[1]}/${mbLink[2]}`);
-                    }}
-                  >
-                    <Music4 className="h-4 w-4 text-accent-soft shrink-0" />
-                    Open this MusicBrainz {mbLink[1].replace("-", " ")} in the browser
-                  </button>
-                ) : (
-                  <>
-                    {hits.artists.map((a) => (
-                      <SearchHit
-                        key={a.path}
-                        to={artistRef(a)}
-                        icon={User}
-                        label={a.display_name || a.name}
-                        hint="Artist"
-                        onGo={() => setSearchOpen(false)}
-                      />
-                    ))}
-                    {hits.albums.map((al) => (
-                      <SearchHit
-                        key={al.path}
-                        to={albumRef(al)}
-                        icon={Disc3}
-                        label={al.meta?.ALBUM ?? al.path}
-                        hint="Album"
-                        onGo={() => setSearchOpen(false)}
-                      />
-                    ))}
-                    {hits.tracks.map(({ al, t }) => (
-                      <SearchHit
-                        key={t.path}
-                        to={trackRef(t)}
-                        icon={Music2}
-                        label={t.tags?.TITLE ?? t.file}
-                        hint={al.album_artist || "Track"}
-                        onGo={() => setSearchOpen(false)}
-                      />
-                    ))}
-                    <button
-                      className="w-full flex items-center gap-2.5 px-3 py-2.5 text-xs text-zinc-200 hover:bg-raise transition-colors text-left border-t border-border/60"
-                      onClick={goMbSearch}
-                    >
-                      <Music4 className="h-4 w-4 text-accent-soft shrink-0" />
-                      Search MusicBrainz for “{query.trim()}”
-                    </button>
-                  </>
-                )}
+                {hits.artists.map((a) => (
+                  <SearchHit
+                    key={a.path}
+                    to={artistRef(a)}
+                    icon={User}
+                    label={a.display_name || a.name}
+                    hint="Artist"
+                    onGo={() => setSearchOpen(false)}
+                  />
+                ))}
+                {hits.albums.map((al) => (
+                  <SearchHit
+                    key={al.path}
+                    to={albumRef(al)}
+                    icon={Disc3}
+                    label={al.meta?.ALBUM ?? al.path}
+                    hint="Album"
+                    onGo={() => setSearchOpen(false)}
+                  />
+                ))}
+                {hits.tracks.map(({ al, t }) => (
+                  <SearchHit
+                    key={t.path}
+                    to={trackRef(t)}
+                    icon={Music2}
+                    label={t.tags?.TITLE ?? t.file}
+                    hint={al.album_artist || "Track"}
+                    onGo={() => setSearchOpen(false)}
+                  />
+                ))}
               </div>
             )}
           </div>
@@ -646,16 +640,12 @@ export default function App() {
             <Route path="/optimize" element={<OptimizationPage />} />
             <Route path="/grading" element={<GradingPage />} />
             <Route path="/dependencies" element={<DependenciesPage />} />
-            {/* MusicBrainz browser */}
-            <Route path="/mb" element={<Navigate to="/mb/search" replace />} />
-            <Route path="/mb/search" element={<MBSearchPage />} />
-            <Route path="/mb/artist/:id" element={<MBArtistPage />} />
-            <Route path="/mb/rg/:id" element={<MBReleaseGroupPage />} />
-            <Route path="/mb/release/:id" element={<MBReleasePage />} />
-            <Route path="/mb/recording/:id" element={<MBRecordingPage />} />
             <Route path="/import" element={<ImportWizard />} />
             <Route path="/settings" element={<SettingsPage />} />
-            <Route path="/setup" element={<Navigate to="/" replace />} />
+            {/* Re-runnable: the wizard is the app's setup surface, not a
+                one-shot gate — Settings → General opens it again. Every step
+                is skippable and it only writes what is entered there. */}
+            <Route path="/setup" element={<SetupPage />} />
             <Route
               path="*"
               element={

@@ -61,17 +61,23 @@ interface Props {
    *  identity the Cover Art Archive fallback is asked about. Without it that
    *  fallback can only answer for artist/album. */
   releaseGroupMbid?: string;
+  /** Candidates the import already fetched and staged (`cover_review` on):
+   *  the modal opens showing these instead of searching, which is what turns
+   *  "review" into a single pick. Absent → search as before. */
+  initialResults?: CoverResult[];
+  /** Who answered that staged fetch (the badge next to the grid). */
+  initialProvider?: string | null;
 }
 
-export default function CoverSearchModal({ albumPath, artist, album, onClose, onApplied, tracks, releaseGroupMbid }: Props) {
+export default function CoverSearchModal({ albumPath, artist, album, onClose, onApplied, tracks, releaseGroupMbid, initialResults, initialProvider }: Props) {
   const [qArtist, setQArtist] = useState(artist);
   const [qAlbum, setQAlbum] = useState(album);
-  const [results, setResults] = useState<CoverResult[] | null>(null);
+  const [results, setResults] = useState<CoverResult[] | null>(initialResults ?? null);
   // Who answered the last search: "cov" for the meta-search, a fallback id
   // ("deezer", "itunes", "coverartarchive") when it had nothing, null when
   // nobody did. Shown so a fallback answer is never silently passed off as
   // the meta-search's.
-  const [provider, setProvider] = useState<string | null>(null);
+  const [provider, setProvider] = useState<string | null>(initialProvider ?? null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<CoverResult | null>(null);
@@ -90,6 +96,9 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
   const [srcSel, setSrcSel] = useState<string[]>([]);
   const [country, setCountry] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
+  // A CAA reference URL that 404'd — kept as the URL, not a boolean, so a new
+  // album's own 404 can never hide the next album's cover.
+  const [refDead, setRefDead] = useState<string | null>(null);
 
   /** Every provider image on this screen goes through the app (`api.artUrl`):
    *  several cover CDNs — Deezer's above all — refuse the browser on some
@@ -102,6 +111,17 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
       album: own?.album || qAlbum.trim() || album,
       rg: releaseGroupMbid,
     });
+
+  /** Cover Art Archive's front cover for the album's release group — the one
+   *  image the candidates are judged against. Asked about through the app's
+   *  cached art proxy with NO artist/album identity on purpose: the proxy
+   *  falls back to Deezer/Apple when the URL it is given fails, and a Deezer
+   *  cover labelled "MusicBrainz reference" would be a lie. Without an MBID,
+   *  or when the proxied fetch 404s, there is no reference at all. */
+  const caaRef = releaseGroupMbid
+    ? `https://coverartarchive.org/release-group/${releaseGroupMbid}/front-500`
+    : null;
+  const showRef = caaRef != null && refDead !== caaRef;
 
   useEffect(() => {
     api
@@ -156,6 +176,10 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
   };
 
   useEffect(() => {
+    // Staged candidates are already the answer to this query — searching again
+    // would throw the user's own fetched set away. Same condition as the state
+    // seed: no `initialResults` prop at all keeps the old auto-search.
+    if (initialResults) return;
     search(artist, album);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -271,9 +295,41 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
       }
     >
 
-      <div className="px-4 py-2 border-b border-border text-[11px] text-zinc-500">
-        The MusicBrainz cover shown on the album may be wrong — open covers.musichoarders.xyz
-        above and pick the correct one there. Covers below {target}px are flagged.
+      <div className="px-4 py-2 border-b border-border text-[11px] text-zinc-500 flex items-center gap-3">
+        {showRef && (
+          <div
+            className="group relative shrink-0 flex items-center gap-2"
+            title="MusicBrainz reference — the album's own Cover Art Archive front cover"
+          >
+            <img
+              src={api.artUrl(caaRef)}
+              alt="MusicBrainz reference"
+              className="h-11 w-11 rounded border border-border object-cover bg-zinc-950"
+              referrerPolicy="no-referrer"
+              onError={() => setRefDead(caaRef)}
+            />
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400 leading-tight">
+              MusicBrainz
+              <br />
+              reference
+            </span>
+            {/* The enlarged copy — hover only, and purely a CSS one so no
+                state, no popover lib, and no layout shift for the grid. */}
+            <div className="pointer-events-none absolute left-0 top-full mt-2 z-50 hidden group-hover:block">
+              <img
+                src={api.artUrl(caaRef)}
+                alt=""
+                className="h-80 w-80 max-w-[70vw] rounded-lg border border-border object-contain bg-zinc-950 shadow-2xl"
+                referrerPolicy="no-referrer"
+              />
+              <div className="text-[10px] text-zinc-400 mt-1">Cover Art Archive front cover</div>
+            </div>
+          </div>
+        )}
+        <span>
+          The MusicBrainz cover shown on the album may be wrong — open covers.musichoarders.xyz
+          above and pick the correct one there. Covers below {target}px are flagged.
+        </span>
       </div>
 
       <div className="p-4 flex flex-wrap gap-2 items-center border-b border-border">

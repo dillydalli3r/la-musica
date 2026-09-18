@@ -357,10 +357,42 @@ def run_audit_library(config):
     # is otherwise never run on CD rips; it is reserved for every other
     # release type.
     # ------------------------------------------------------------------
-    require_both = bool(config.get("audit_cd_require_both", False))
+    # Default True, matching mlo.config.DEFAULT_CONFIG: a partial cfg must
+    # not audit a CD more leniently than the shipped app does.
+    require_both = bool(config.get("audit_cd_require_both", True))
     cd_files = set()
+    cd_canon = set()
     unverified_cd = {}
     checksum_verified = {}
+    checksum_verified_canon = {}
+    # Album dir -> the .accurip says the rip is accurately ripped. Parsing is
+    # a text read, so this runs even when the log CRC cannot be computed.
+    ar_verified_albums = {}
+
+    def _album_accurip_verified(album_dir):
+        if album_dir in ar_verified_albums:
+            return ar_verified_albums[album_dir]
+        verdict = False
+        try:
+            from .accurip import parse_accurip_status
+            for name in sorted(os.listdir(album_dir)):
+                if not name.lower().endswith(".accurip"):
+                    continue
+                try:
+                    with open(os.path.join(album_dir, name), "r",
+                              encoding="utf-8", errors="replace") as fh:
+                        status, _detail = parse_accurip_status(fh.read())
+                except OSError:
+                    continue
+                if status == "FAKE":
+                    verdict = False
+                    break
+                if status == "REAL":
+                    verdict = True
+        except Exception:
+            verdict = False
+        ar_verified_albums[album_dir] = verdict
+        return verdict
     if config.get("audit_verify_cd_checksums", True):
         # Reuse already-detected tools to avoid redundant GitHub cache lookup
         ffmpeg_exe_for_cd = (tools.get("ffmpeg") or {}).get("ffmpeg_exe")
@@ -389,6 +421,10 @@ def run_audit_library(config):
             cd_albums = {a: ps for a, ps in by_album.items()
                          if _is_cd(a, ps)}
             cd_files = {p for ps in cd_albums.values() for p in ps}
+            try:
+                cd_canon = {os.path.normcase(os.path.realpath(p)) for p in cd_files}
+            except OSError:
+                cd_canon = {os.path.normcase(p) for p in cd_files}
             cw = worker_count(config, default=4, maximum=8,
                               items=len(cd_albums))
             with ThreadPoolExecutor(max_workers=cw) as ex:
@@ -405,8 +441,12 @@ def run_audit_library(config):
                         stats["errors"].append((os.path.basename(album), f"checksum verify: {e}"))
                         continue
                     for path, verdict in res.items():
-                        # When bothrequired, defer tag write until after AA
-                        if not require_both and config.get("write_audit_tag", True) and should_write_audio_tag(config, "AUDIT", filepath=path):
+                        # The .log CRC is written as soon as it is known: a
+                        # verified rip must carry REAL even when AudioAuditor
+                        # is missing (it is a Windows-only tool) or its
+                        # spectrogram detectors disagree. AA can only ADD
+                        # warning flags to a file the log could not verify.
+                        if config.get("write_audit_tag", True) and should_write_audio_tag(config, "AUDIT", filepath=path):
                             changed, b_rem, b_add, err = _write_audit_tag(path, verdict)
                             if err:
                                 stats["errors"].append((os.path.basename(path), err))
@@ -415,9 +455,17 @@ def run_audit_library(config):
                                 stats["total_bytes_removed"] += b_rem
                                 stats["total_bytes_added"] += b_add
                         checksum_verified[path] = verdict
+                        try:
+                            checksum_verified_canon[os.path.normcase(os.path.realpath(path))] = verdict
+                        except OSError:
+                            checksum_verified_canon[os.path.normcase(path)] = verdict
                     unverified_cd.update(unver)
 
             if cd_files:
+                n_ar = sum(1 for a in cd_albums if _album_accurip_verified(a))
+                if n_ar:
+                    log(f"AccurateRip: {n_ar} album(s) verified — those discs "
+                        f"are REAL on that evidence alone")
                 n_real = sum(1 for v in checksum_verified.values()
                              if v == "REAL")
                 n_fake = len(checksum_verified) - n_real
@@ -489,11 +537,11 @@ def run_audit_library(config):
         else:
             log("Integrity: all files passed verification")
 
-    # When require_both is False, CD rips are excluded from AudioAuditor;
-    # when True, they are included and the final verdict is the AND of both
-    # sources (both must be REAL, otherwise FAKE). Checksum tags were already
-    # written above when not require_both; when require_both we deferred and
-    # will write the combined result per-file below.
+    # A CD rip's verdict comes from its OWN verification, never from the
+    # spectrogram detectors: the .log CRC (written above, as soon as it is
+    # known) or a REAL .accurip. `audit_cd_require_both` only decides whether
+    # AudioAuditor is ALSO run over MEDIA=CD — its verdict can add warning
+    # flags, and decides only for a disc neither source could verify.
 
     # Skip files that already carry a REAL/FAKE verdict (normalizing
     # legacy mixed-case values) unless the audit is forced.
@@ -512,9 +560,9 @@ def run_audit_library(config):
         todo = []
         for path, (verdict, changed) in zip(files, results):
             if verdict is not None:
-                # When bothrequired, CD files must be re-checked even if they
-                # already have a tag, because we need to AND the two sources.
-                if require_both and path in cd_files:
+                # CD files are re-checked even when a tag exists: they carry
+                # the log/AccurateRip verdict, which outranks the stored one.
+                if path in cd_files:
                     todo.append(path)
                     continue
                 skipped += 1
@@ -539,12 +587,12 @@ def run_audit_library(config):
                 f"checksums only - AudioAuditor not applied to MEDIA=CD "
                 f"({n_verified} verified, {n_unverified} unverified will be audited).")
     else:
-        # require_both: keep CD files in todo even if they were checksum-verified
-        # (we need to AND). Unverified CD files stay in todo as well — they'll
-        # be audited and then marked FAKE because the log side is not REAL.
+        # require_both: CD files stay in todo even when checksum-verified (the
+        # AA run is what adds warning flags); unverified ones stay too — for
+        # them AudioAuditor is the only verdict there is.
         if cd_files:
-            log(f"CD rips ({len(cd_files)} track(s)) will be verified via BOTH "
-                f".log checksums AND AudioAuditor (both must be REAL).")
+            log(f"CD rips ({len(cd_files)} track(s)): the .log CRC / .accurip "
+                f"decides the verdict; AudioAuditor adds warnings only.")
 
     # Integrity failures that were skipped due to already having an AUDIT tag
     # still need to be handled — if a file is corrupt, its AUDIT must be FAKE
@@ -634,13 +682,26 @@ def run_audit_library(config):
             # checksum must be REAL and AA must be Valid/REAL; otherwise FAKE.
             # .log CRC is authoritative, so an unverified log also means FAKE.
             # Preserve warning flags (Valid+clipping etc.) when both are REAL.
-            if require_both and path in cd_files:
-                chk = checksum_verified.get(path)
+            if require_both and canon(path) in cd_canon:
+                # Look every CD verdict up by its canonical path: the tool
+                # reports its own spelling of the same file (case, separator,
+                # 8.3 name), and a raw string compare silently missed it —
+                # which left the AA verdict standing on its own.
+                _ck = canon(path)
+                chk = checksum_verified_canon.get(_ck)
                 aa_real = (tag_value == "REAL" and severity != "fail")
                 orig_severity = severity
                 orig_reason = reason
-                # Normalize AA verdict: _audit_tag_value returns REAL only for Valid
-                if chk != "REAL":
+                # Integrity first: a rip whose .log CRC verifies is REAL, and
+                # so is one whose .accurip verifies. AudioAuditor's verdict is
+                # spectrogram evidence, not a fact — on a CD rip it can only
+                # add WARNING flags (clipping, MQA-style markers) to a rip the
+                # log or AccurateRip has already proven intact.
+                if chk == "REAL" or _album_accurip_verified(os.path.dirname(path)):
+                    tag_value = "REAL"
+                    severity = "warn" if orig_severity == "warn" else "ok"
+                    reason = orig_reason if severity == "warn" else ""
+                elif chk != "REAL":
                     tag_value = "FAKE"
                     severity = "fail"
                     reason = f"CD log not REAL ({unverified_cd.get(path, chk or 'no CRC')})"
@@ -910,6 +971,12 @@ def run_audit_library(config):
                     for fp in album_files:
                         if fp not in files:
                             continue
+                        # The log's GRADE measures how much of the rip the log
+                        # documents, not whether the audio is the audio that
+                        # was ripped: a track whose .log CRC just matched the
+                        # file is intact whatever the score says.
+                        if checksum_verified_canon.get(_canon2(fp)) == "REAL":
+                            continue
                         canon_fp = _canon2(fp)
                         prev_sev = file_severity_map.get(canon_fp)
                         prev_status = file_status_map.get(canon_fp)
@@ -1069,6 +1136,13 @@ def run_audit_library(config):
                          continue
                     for fp in affected:
                         if fp not in files:
+                            continue
+                        # A track whose .log CRC was verified against the audio
+                        # is intact by its own evidence: the log's per-track
+                        # checksum matched, so the missing/unverifiable SHA256
+                        # of the LOG FILE says nothing about the audio. Same
+                        # rule the AccurateRip gate below applies.
+                        if checksum_verified_canon.get(_canon2(fp)) == "REAL":
                             continue
                         canon_fp = _canon2(fp)
                         try:
@@ -1244,6 +1318,12 @@ def run_audit_library(config):
                         # REAL → pass, do not add
                     except Exception:
                         continue
+        # A rip whose .log CRC verified is intact by its own evidence:
+        # AccurateRip not knowing that pressing — an absent .accurip, a
+        # "not present in database" track — is not evidence against it.
+        for _fp in [p for p in ar_failed_per_file
+                    if checksum_verified.get(p) == "REAL"]:
+            ar_failed_per_file.pop(_fp, None)
         if ar_failed_per_file:
             # Group by album for log header
             by_album = {}
@@ -1302,9 +1382,9 @@ def run_audit_library(config):
     # --------------------------------------------------------------
     # Audit FAIL on Logchecker score below threshold
     # --------------------------------------------------------------
-    if int(config.get("audit_log_score_threshold", 0) or 0) > 0 and cd_candidate_dirs and log_scores:
+    if int(config.get("audit_log_score_threshold", 100) or 0) > 0 and cd_candidate_dirs and log_scores:
         try:
-            thr_a = int(config.get("audit_log_score_threshold", 0) or 0)
+            thr_a = int(config.get("audit_log_score_threshold", 100) or 0)
             thr_a = max(0, min(100, thr_a))
         except Exception:
             thr_a = 0
@@ -1344,6 +1424,11 @@ def run_audit_library(config):
                             continue
                         for fp in affected:
                             if fp not in files:
+                                continue
+                            # Same rule as the other log gates: a track whose
+                            # .log CRC matched the audio is intact, whatever
+                            # the log's completeness score says about the log.
+                            if checksum_verified_canon.get(_canon2(fp)) == "REAL":
                                 continue
                             canon_fp = _canon2(fp)
                             try:
