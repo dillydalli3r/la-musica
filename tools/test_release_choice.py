@@ -60,6 +60,22 @@ assert pick([rel("digital", status="Official", country="US", fmt="Digital Media"
              rel("cd", status="Official", country="US", fmt="CD", date="2010-01-01")]) == ["cd", "digital"]
 assert pick([rel("later", status="Official", country="US", date="2010-01-01"),
              rel("earlier", status="Official", country="US", date="1994-03-01")]) == ["earlier", "later"]
+# Same year, different precision: the edition that states the DAY wins over
+# the one stating only the year — the album folder is named after this date,
+# so a year-only edition would pin the folder to a year (a real library had
+# exactly that: one 1997 US CD "1997" over the 1983-09-13 US CD).
+assert pick([rel("year-only", status="Official", country="US", date="1983"),
+             rel("full", status="Official", country="US", date="1983-09-13")]) == ["full", "year-only"]
+assert pick([rel("ym", status="Official", country="US", date="1980-10"),
+             rel("y", status="Official", country="US", date="1980")]) == ["ym", "y"]
+# …but an earlier edition still beats a later, fuller one: the year is the
+# primary term and only a TIE on the year prefers precision.
+assert pick([rel("full-later", status="Official", country="US", date="1994-03-01"),
+             rel("year-earlier", status="Official", country="US", date="1983")]) == \
+    ["year-earlier", "full-later"]
+# An edition with no date at all ranks after every dated one.
+assert pick([rel("undated", status="Official", country="US", date=""),
+             rel("year", status="Official", country="US", date="1990")]) == ["year", "undated"]
 # An unknown format ranks after every configured one but still sorts by date.
 assert pick([rel("weird", status="Official", country="US", fmt="Minidisc"),
              rel("cd", status="Official", country="US", fmt="CD")]) == ["cd", "weird"]

@@ -340,11 +340,16 @@ def _run_with_progress(runner, cfg, label, chain=None):
     # runner tick at all" and grew once per file.
     last = [0, 0]
 
-    def hook(done, total, _desc):
+    def hook(done, total, detail):
         last[0], last[1] = done, total
+        # The runner's own description when it has one, behind the step's
+        # position in the run: "…· Beets tagging — MusicBrainz lookup". A long
+        # step that prints nothing (beets' lookup phase) then still shows the
+        # user WHERE in the run they are instead of only a step name.
+        text = f"#{index}/{count} · {detail}" if detail and chained else label
         if not chained:
             try:
-                prior(done, total, label)
+                prior(done, total, text)
             except Exception:
                 pass
             return
@@ -354,7 +359,7 @@ def _run_with_progress(runner, cfg, label, chain=None):
             frac = span[0]
         span[0] = frac = max(span[0], min(1.0, frac))
         try:
-            prior(index - 1 + frac, count, label)
+            prior(index - 1 + frac, count, text)
         except Exception:
             pass
 
@@ -364,7 +369,7 @@ def _run_with_progress(runner, cfg, label, chain=None):
             # Claim the bar at this script's slice — determinate from the very
             # first frame, so the header never falls back to the sweep between
             # two steps of a run that is still going.
-            prior(index - 1, count, label)
+            prior(index - 1, count, f"#{index}/{count} · {label}")
         else:
             # Claim the bar before the first file. Announced with NO total on
             # purpose: a runner that never ticks (AccurateRip's CUETools pass,
@@ -379,7 +384,7 @@ def _run_with_progress(runner, cfg, label, chain=None):
             # This script is done: its whole slice is behind us whatever it
             # reported on its own (a no-op script still consumed a step).
             try:
-                prior(index, count, label)
+                prior(index, count, f"#{index}/{count} · {label}")
             except Exception:
                 pass
         elif not last[1] or last[0] < last[1]:

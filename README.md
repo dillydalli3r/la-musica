@@ -501,6 +501,20 @@ System of a Down [cc0b7089-…]/[Album] 2001-08-27 - 2001-09-04 - Toxicity {US -
 Scripts from before this one are migrated on load: a stored default is
 swapped for the current one, a script you actually edited is kept.
 
+- **Long paths are handled** (new in 2.6.8) — the default layout spells the
+  artist id, both dates, the media type and the release id into the path, and
+  a real library reached **257-279 characters**, past Windows' 260-character
+  limit. Python reads those files fine (it uses the wide APIs) but the
+  bundled tools do not, and they failed QUIETLY: `flac` answered "No such
+  file or directory", so the FLAC pass did nothing, the audit could not read
+  the audio and stamped `AUDIT=FAKE`, and file listing (`glob`) skipped the
+  folder entirely. Every tool call now hands the child a path it can open —
+  the volume's 8.3 alias where one exists, otherwise a temporary junction on
+  the album's own folder (created on demand, removed when the app exits) — so
+  the optimizer, the audit, AccurateRip, the DR pass and the video paths work
+  on deep libraries too. Nothing about the naming script changes: the same
+  file is read and written either way.
+
 - **Multi-value tags keep the first value** (new in 2.4.0) —
   `%releasecountry%` (or its `%country%` fallback) and `%label%` may hold a
   list (`; `, ` / ` or `+`); the first non-empty entry wins and the rest are
@@ -744,8 +758,11 @@ The import paths share one pipeline now (`server/imports.py`):
   format/cue/image/optimize/DR/key&BPM/beets steps and *run all scripts* —
   shows a progress bar: a real count where the work counts steps (the
   metadata fetch `1/3…3/3`), the websocket relay's own `done/total` for the
-  long script runs (during *Run All* that reads as `step.fraction/total`,
-  e.g. `4.4/18`, and it no longer resets between scripts), and an
+  long script runs — during *Run All* the label reads
+  `#step/total · script name` (e.g. `#4/18 · Format lyrics`), the bar carries
+  that step's own fraction, and a step that reports what it is doing adds it
+  behind a dash (`#2/18 · Beets tagging — looking up on MusicBrainz`), so a
+  long silent phase still says where the run is — and an
   indeterminate bar plus a ticking clock for anything that cannot count.
   Every HTTP error — including "no MusicBrainz album/release-group ID on the
   track" — is shown verbatim next to the button. *Run all scripts* ends with

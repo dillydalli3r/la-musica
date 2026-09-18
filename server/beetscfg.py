@@ -405,22 +405,32 @@ def run_beets_tagging(config=None):
     except OSError:
         total_items = 0
     done_items = [0]
+    phase = ["MusicBrainz lookup"]
 
     def _tick(line):
         low = line.strip().lower()
-        if not low or not low.endswith(LIB_AUDIO_EXTS):
+        if not low:
             return
-        done_items[0] += 1
+        if low.endswith(LIB_AUDIO_EXTS):
+            done_items[0] += 1
+        else:
+            # beets prints nothing at all during its lookup phase, so the step
+            # name sat there alone for the whole import ("stuck on Beets
+            # tagging"). Whatever the child does print becomes the step's
+            # detail: the header then shows the album/file it is working on,
+            # and a run that is genuinely busy can never look hung.
+            phase[0] = line.strip()[:80]
         if callable(hook):
             try:
                 hook(min(done_items[0], total_items or done_items[0]),
-                     total_items or done_items[0], "Beets tagging")
+                     total_items or done_items[0],
+                     f"Beets tagging — {phase[0]}")
             except Exception:
                 pass
 
     if callable(hook) and total_items:
         try:
-            hook(0, total_items, "Beets tagging")
+            hook(0, total_items, "Beets tagging — looking up on MusicBrainz")
         except Exception:
             pass
     ok, output = run_beets_import(paths, config, on_line=_tick)

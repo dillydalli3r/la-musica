@@ -27,6 +27,7 @@ import tempfile
 from mlo.audio import AudioFile
 from mlo.naming import sanitize_path
 from mlo.stats import progress_hook
+from mlo.subproc import tool_path
 from mlo.tools import detect_all_tools
 
 # Codec table: ffmpeg audio arguments and the container extension each
@@ -412,7 +413,10 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                                            dir=os.path.dirname(dst))
                 os.close(fd)
                 try:
-                    cmd = [ffmpeg, "-y", "-v", "error", "-nostdin", "-i", path]
+                    # tool_path: a picker/source path past MAX_PATH is
+                    # unreadable to ffmpeg itself (see mlo.subproc)
+                    cmd = [ffmpeg, "-y", "-v", "error", "-nostdin", "-i",
+                           tool_path(path)]
                     cmd += args + [tmp]
                     # CREATE_NO_WINDOW: the app runs windowed and owns no
                     # console, so every console child (ffmpeg here) would

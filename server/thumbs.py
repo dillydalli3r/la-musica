@@ -22,6 +22,7 @@ import subprocess
 import tempfile
 
 from mlo.paths import app_data_dir, is_video_file
+from mlo.subproc import tool_path
 
 MAX_WIDTH = 1920
 MIN_WIDTH = 32
@@ -169,7 +170,7 @@ def thumb_file(path, t=0.0, w=DEFAULT_WIDTH, music_folder=None):
         # -ss BEFORE -i: keyframe seek. The frame is then decoded from there,
         # which is what makes dragging the scrubber affordable.
         "-ss", "%.3f" % t,
-        "-i", path,
+        "-i", tool_path(path),
         "-frames:v", "1",
         "-vf", "scale=%d:-2" % w,
         "-f", "image2", "-",

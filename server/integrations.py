@@ -3280,6 +3280,30 @@ def release_medium_rank(rel, medium_order):
     return best
 
 
+def _date_rank(date):
+    """(year, precision) for the edition sort — the earlier and the FULLER
+    date wins.
+
+    The album folder is named after the release's own date ("[Album]
+    1980-10-01 - 1983-09-13 - …"), so an edition MusicBrainz dates only to the
+    year leaves the folder with a year for good. Comparing the date STRING
+    put "1983" before "1983-09-13" (a prefix sorts first), which preferred
+    exactly the edition that cannot fill the folder in. The year stays the
+    primary term — an earlier pressing still wins — and precision breaks the
+    tie: full date, then year-month, then year, then an edition with no date
+    at all.
+    """
+    text = str(date or "").strip()
+    if not text:
+        return (9999, 3)
+    year = text.split("-")[0]
+    try:
+        y = int(year)
+    except ValueError:
+        return (9999, 3)
+    return (y, {10: 0, 7: 1}.get(len(text), 2))
+
+
 def release_choice_key(rel, avoid_promo=True, medium_order=None):
     """Sort key: Official first, then medium preference, then earliest date.
 
@@ -3288,7 +3312,9 @@ def release_choice_key(rel, avoid_promo=True, medium_order=None):
     not state ranks 1, a withdrawn/expired/cancelled edition ranks 2, and a
     promotional/bootleg/pseudo edition ranks 3 (`pick_releases` drops those
     entirely while avoid-promo is on). An edition carrying a RELEASECOUNTRY
-    beats one that does not, whichever status the two share."""
+    beats one that does not, whichever status the two share. The date term
+    prefers the earlier edition, and among editions of the same year the one
+    that states its date in full (see `_date_rank`)."""
     status = str(rel.get("status") or "").strip().lower()
     if status == "official":
         rank = 0
@@ -3298,9 +3324,10 @@ def release_choice_key(rel, avoid_promo=True, medium_order=None):
         rank = 2
     else:
         rank = 1
+    date = rel.get("date") or ""
     return (rank, 0 if str(rel.get("country") or "").strip() else 1,
             release_medium_rank(rel, medium_order or []),
-            rel.get("date") or "9999")
+            _date_rank(date), date or "9999")
 
 
 def pick_releases(releases, cfg=None):

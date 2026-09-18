@@ -695,7 +695,7 @@ export default function SettingsPage() {
         },
         {
           k: "auto_import_medium_order", label: "Medium preference (comma-separated, best first)", type: "csv",
-          help: "Editions are chosen by this media order first, then by earliest release date. Blank = the built-in order (CD, Digital Media, Vinyl, Cassette, Other).",
+          help: "Editions are chosen by this media order first, then by earliest release date — and among editions of the same year the one that states the full date, since the album folder is named after it. Blank = the built-in order (CD, Digital Media, Vinyl, Cassette, Other).",
         },
       ],
     },

@@ -10,7 +10,6 @@ import os
 import re
 import sys
 import asyncio
-import glob
 import inspect
 import json
 import threading
@@ -50,6 +49,7 @@ from server import artcache
 from mlo.paths import (SKIP_DIRS, clear_track_covers, downloads_dir,
                        is_video_file, library_root, load_track_covers, move_path,
                        save_track_covers, set_track_covers, trash_dir)
+from mlo.subproc import tool_path
 
 # Captured at startup — worker threads use run_coroutine_threadsafe against
 # this loop to relay script progress over the WebSocket (get_event_loop()
@@ -911,7 +911,7 @@ def videos_stream(path: str = Query(...), transcode: int = Query(0)):
         raise HTTPException(503, "ffmpeg not installed — install it under Dependencies for video playback")
     cmd = [
         ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
-        "-i", p,
+        "-i", tool_path(p),
         "-map", "0:v:0", "-map", "0:a:0?",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
         "-vf", "scale=-2:min(720\\,ih)",
@@ -1068,11 +1068,22 @@ def get_tags(path: str = Query(...), staged: bool = Query(False)):
     def _translation_sidecar():
         """First "<stem>.<lang>.lrc" next to the track. "<stem>.lrc" is the
         main lyrics file and "<stem>.romaji.lrc" the romanization, neither of
-        which is a translation."""
-        stem = os.path.splitext(p)[0]
-        for cand in sorted(glob.glob(glob.escape(stem) + ".*.lrc")):
+        which is a translation.
+
+        Listed, not globbed: `glob` silently yields nothing for a path past
+        MAX_PATH on Windows (it stats each joined name), so a deep library
+        would lose its translation sidecars with no error anywhere.
+        """
+        folder, name = os.path.split(p)
+        stem = os.path.splitext(name)[0].lower() + "."
+        try:
+            names = sorted(n for n in os.listdir(folder)
+                           if n.lower().startswith(stem) and n.lower().endswith(".lrc"))
+        except OSError:
+            return None
+        for cand in names:
             if not cand.lower().endswith(XLIT_SIDECAR):
-                return _read_text(cand)
+                return _read_text(os.path.join(folder, cand))
         return None
 
     # Language-specific transform tags (TRANSLITERATION-JA-LATN,
@@ -3916,7 +3927,7 @@ def soulseek_preview_stream(path: str = Query(...), native: int = Query(0)):
         raise HTTPException(503, "ffmpeg not installed — install it under Dependencies for video previews")
     cmd = [
         ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
-        "-i", p,
+        "-i", tool_path(p),
         "-map", "0:v:0", "-map", "0:a:0?",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "27",
         "-vf", "scale=-2:min(480\\,ih)",
