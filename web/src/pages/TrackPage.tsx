@@ -10,6 +10,7 @@ import { SubtitledVideo } from "../components/SubtitledVideo";
 import { useStore, toast } from "../store";
 import { AuditBadge, GradeBadge, IssueList, EmptyState, PageLoading } from "../components/Badges";
 import CoverImg from "../components/CoverImg";
+import DownloadButton from "../components/DownloadButton";
 import LyricsViewer from "../components/LyricsViewer";
 import LyricsManagerModal from "../components/LyricsManagerModal";
 import LyricsEditorModal from "./../components/LyricsEditorModal";
@@ -219,6 +220,7 @@ export default function TrackPage() {
             <button className="btn-ghost" onClick={() => playNow([queueTrack])} title="Play this track">
               <Play className="h-4 w-4 fill-current" /> Play
             </button>
+            <DownloadButton paths={[realPath]} size="md" />
             <LinkEditorButton mode="track" paths={[decoded]} current={tags} />
             {/* cover search for this track = the per-track cover upload below */}
             <TagActionsMenu

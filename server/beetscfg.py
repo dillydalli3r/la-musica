@@ -110,7 +110,15 @@ def generate_config(cfg=None):
         "",
         "musicbrainz:",
         "  enabled: yes",
-        "  genres: yes",
+        # Genres are NEVER beets' to write. The app has its own source-ordered
+        # genre chain (genre_sources) that FILLS a track's GENRE and never
+        # replaces one — the wizard's genre step, script 8 and the import
+        # stamp all go through it. beets fetches genres from MusicBrainz on
+        # every import and writes them back with import.write, so leaving this
+        # on silently overwrote genres the user had just entered in the
+        # wizard. Off: beets keeps the file's own GENRE (it reads existing
+        # tags into the item), and the chain remains the single writer.
+        "  genres: no",
         "",
         # Tag writes come from the plugin's own logic through MLO's tag
         # layer, so beets' own asis/autotag writes stay Picard-compatible.

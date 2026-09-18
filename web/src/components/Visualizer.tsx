@@ -17,6 +17,23 @@ const PEAK_REF = 0.55;
 const PEAK_DECAY = 0.9985;
 /** Idle redraw interval (ms) when no signal is live. */
 const IDLE_MS = 250;
+/** Per-frame height easing: fast attack, slower release. The attack is
+ * near-instant (~1.5 frames) so a kick lands on the frame it happens; the
+ * release is what makes the strip readable, and it must stay well under the
+ * idle rate so a bar does not shrink BETWEEN idle repaints. */
+const ATTACK = 0.72;
+const RELEASE = 0.12;
+/** Expansion around mid-height: the raw dB ratio packs every band into a
+ * narrow band of heights, so the strip reads as a silhouette only after a
+ * mild contrast stretch. Clamped, so it can never push a bar over full. */
+const CONTRAST = 1.25;
+/** Peak-cap gravity, as strip-heights per frame (~2.6 s to fall the full
+ * strip). With the bars releasing in ~20 frames the caps separate from them
+ * and read as falling, instead of riding the bar tops. */
+const PEAK_FALL = 0.0065;
+/** Level above which a bar gets its halo — the decorative motion that is
+ * skipped under prefers-reduced-motion. */
+const GLOW_AT = 0.55;
 
 /** Frequency-bar visualizer driven ONLY by the shared WebAudio analyser.
  * Bars use logarithmic band mapping — music's energy lives in the low
@@ -39,7 +56,10 @@ const IDLE_MS = 250;
  * inflation either: the dB scale is already perceptual.
  * A per-band rolling peak (PEAK_DECAY per frame, ~8 s half-life) then lifts
  * quiet bands by up to 2× and never attenuates, so a quiet master still
- * shows its shape while a sustained fortissimo keeps its raw height. */
+ * shows its shape while a sustained fortissimo keeps its raw height.
+ * Heights then ease asymmetrically (ATTACK/RELEASE) and the loudest bars get
+ * a faint halo — the one decorative touch, and the only thing dropped under
+ * prefers-reduced-motion: the bars themselves are the meter and keep moving. */
 export default function Visualizer({
   playing,
   bars = 56,
@@ -73,6 +93,9 @@ export default function Visualizer({
     const accentSoft = getComputedStyle(document.documentElement)
       .getPropertyValue("--accent-soft")
       .trim() || "212 212 216";
+    // Read once: a matchMedia change mid-session is not worth a listener for a
+    // halo this small (the ambient background re-reads its own on every open).
+    const motion = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     let raf = 0;
     let freq: Uint8Array | null = null;
@@ -145,6 +168,7 @@ export default function Visualizer({
           const db = MIN_DB + (acc / 255) * (MAX_DB - MIN_DB);
           const tilt = TILT_DB * (n > 1 ? i / (n - 1) : 0);
           target = Math.min(1, Math.max(0, (db + tilt - FLOOR_DB) / (CEIL_DB - FLOOR_DB)));
+          target = Math.min(1, Math.max(0, (target - 0.5) * CONTRAST + 0.5));
           // Per-band rolling peak → bounded lift (≤2×, never attenuation).
           const roll = Math.max(target, (norm.current[i] ?? 0) * PEAK_DECAY);
           norm.current[i] = roll;
@@ -155,18 +179,19 @@ export default function Visualizer({
           // audio — never synthesized motion or noise.
           target = 0.015;
         }
-        // Smooth rise, slower fall — reads as energy, not noise.
+        // Fast attack, slower release: the rise is what a kick is, the fall is
+        // what lets the eye follow one band instead of a wall.
         const cur = levels.current[i] ?? 0;
-        levels.current[i] = cur + (target - cur) * (target > cur ? 0.5 : 0.18);
-        // Peak caps with gravity. The 0.008/frame fall is PLAYBACK gravity:
+        levels.current[i] = cur + (target - cur) * (target > cur ? ATTACK : RELEASE);
+        // Peak caps with gravity. The 0.008/frame fall was PLAYBACK gravity:
         // idle frames only repaint at 4 Hz, so the same constant left the caps
         // hanging at half height above collapsed bars for ~20 s. With no signal
-        // they instead fall with the bars (same 18%/frame easing, the constant
-        // the rise/fall smooth above uses) until they meet the baseline.
+        // they instead fall with the bars (the same release easing) until they
+        // meet the baseline.
         const pk = peaks.current[i] ?? 0;
         peaks.current[i] = synthetic
-          ? Math.max(levels.current[i], pk + (levels.current[i] - pk) * 0.18)
-          : Math.max(levels.current[i], pk - 0.008);
+          ? Math.max(levels.current[i], pk + (levels.current[i] - pk) * RELEASE)
+          : Math.max(levels.current[i], pk - PEAK_FALL);
       }
 
       // ---- draw ------------------------------------------------------
@@ -177,11 +202,20 @@ export default function Visualizer({
         const v = Math.max(0.02, levels.current[i] ?? 0);
         const x = i * (bw + gap);
         const bh = Math.max(2, v * (mirror ? h / 2 - 2 : h - 2));
+        const r = Math.min(bw / 2, 2);
+        // Halo behind the loudest bars: a wider, faint rounded rect instead of
+        // shadowBlur, which would re-blur the whole strip every frame.
+        if (motion && v > GLOW_AT) {
+          const pad = gap * 1.2;
+          ctx.fillStyle = `rgb(${accent} / ${(0.08 + (v - GLOW_AT) * 0.4).toFixed(2)})`;
+          ctx.beginPath();
+          ctx.roundRect(x - pad, base - bh - pad, bw + pad * 2, bh + pad, r + pad);
+          ctx.fill();
+        }
         const grad = ctx.createLinearGradient(0, base - bh, 0, base);
         grad.addColorStop(0, `rgb(${accentSoft} / 0.95)`);
         grad.addColorStop(1, `rgb(${accent} / 0.35)`);
         ctx.fillStyle = grad;
-        const r = Math.min(bw / 2, 2);
         ctx.beginPath();
         ctx.roundRect(x, base - bh, bw, bh, r);
         ctx.fill();
@@ -192,10 +226,10 @@ export default function Visualizer({
         }
         // falling peak cap
         const pk = peaks.current[i] ?? 0;
-        if (pk > 0.03) {
+        if (pk > 0.02) {
           const py = base - Math.max(2, pk * (mirror ? h / 2 - 2 : h - 2)) - 2;
-          ctx.fillStyle = `rgb(${accent} / 0.8)`;
-          ctx.fillRect(x, py, bw, 1.5);
+          ctx.fillStyle = `rgb(${accent} / 0.9)`;
+          ctx.fillRect(x, py, bw, 2);
         }
       }
     };

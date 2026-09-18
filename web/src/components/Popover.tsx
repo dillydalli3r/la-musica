@@ -12,13 +12,19 @@ export default function Popover({
   onClose,
   children,
   align = "right",
+  placement = "bottom",
   panelClass = "w-56 p-1.5",
   shield = true,
 }: {
   open: boolean;
   onClose: () => void;
   children: ReactNode;
-  align?: "left" | "right";
+  /** `"top"` is for triggers pinned to the bottom of the window (the player
+   *  bar): a downward panel there would open off-screen. */
+  placement?: "bottom" | "top";
+  /** `"center"` centres the panel under a trigger that has no left or right
+   *  edge worth aligning to (the transport row's icon buttons). */
+  align?: "left" | "right" | "center";
   panelClass?: string;
   /** Off for popovers that live inside a dialog which already has its own
    *  click shield (a second shield would swallow the dialog's clicks). */
@@ -26,7 +32,9 @@ export default function Popover({
 }) {
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    // A handler that already claimed Escape (a host modal, a hotkey rebind)
+    // preventDefaults it; that claim wins, so this shield stands down.
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && !e.defaultPrevented && onClose();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
@@ -37,8 +45,8 @@ export default function Popover({
       {shield && <div className="fixed inset-0 z-40" onClick={onClose} />}
       <div
         role="menu"
-        className={`anim-fade absolute z-50 mt-1 rounded-xl shadow-2xl bg-zinc-950 border border-white/10 ${
-          align === "right" ? "right-0" : "left-0"
+        className={`anim-fade absolute z-50 ${placement === "top" ? "bottom-full mb-1" : "mt-1"} rounded-xl shadow-2xl bg-zinc-950 border border-white/10 ${
+          align === "right" ? "right-0" : align === "left" ? "left-0" : "left-1/2 -translate-x-1/2"
         } ${panelClass}`}
       >
         {children}

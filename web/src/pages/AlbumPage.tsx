@@ -9,6 +9,7 @@ import { EmptyState, AdvisoryMark, GradeBadge, PageLoading } from "../components
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import CoverSearchModal from "../components/CoverSearchModal";
 import Description from "../components/Description";
+import DownloadButton from "../components/DownloadButton";
 import FavHeart from "../components/FavHeart";
 import { trackRef, entityLinkClick } from "../lib/refs";
 import { invalidateLibrary } from "../lib/invalidate";
@@ -22,7 +23,7 @@ import TagActionsMenu from "../components/TagActionsMenu";
 import StatsPanel from "../components/StatsPanel";
 import TrackDetails, { CreditsPanel } from "../components/TrackDetails";
 import { SortHeader, sortRows, toggleSort, groupByDisc, type SortState } from "../lib/sort.tsx";
-import { ColumnsMenu, ColumnResizer, useColumnPrefs, useColumnWidths, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W } from "../lib/columns";
+import { ColumnsMenu, ColumnResizer, useColumnPrefs, useColumnWidths, useCustomColumns, customCols, customColValue, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, type Col } from "../lib/columns";
 import { toast, useStore } from "../store";
 import { fmtTech, albumTech } from "../lib/fmt";
 import { fmtDuration } from "../lib/fmt";
@@ -106,7 +107,17 @@ export default function AlbumPage() {
   const [descBusy, setDescBusy] = useState<string | null>(null);
   // tracklist columns: visible set + drag-resized widths, persisted under the
   // SAME key the library's expanded album rows use — one tracklist, one prefs
-  const [trackCols, toggleTrackCol] = useColumnPrefs("album-tracks", ALBUM_TRACK_COLS);
+  // set, and the tag columns the user adds here (mlo-customcols-album-tracks)
+  // are therefore the same columns there.
+  const [trackCustom, addTrackCustomCol, removeTrackCustomCol] = useCustomColumns("album-tracks");
+  const trackDefs: Col[] = [...ALBUM_TRACK_COLS, ...customCols(trackCustom, "tags")];
+  const [trackCols, toggleTrackCol] = useColumnPrefs("album-tracks", trackDefs);
+  /** A column the user just created should not start hidden (same rule the
+   *  library's track table follows). */
+  const addCustomTrackCol = (tag: string, label?: string) => {
+    const id = addTrackCustomCol(tag, label);
+    if (id) toggleTrackCol(id);
+  };
   const [trackW, setTrackW, resetTrackW] = useColumnWidths("album-tracks");
   const coverInput = useRef<HTMLInputElement>(null);
   const qc = useQueryClient();
@@ -655,6 +666,7 @@ export default function AlbumPage() {
                     >
                       <Play className="h-4 w-4 fill-current" />
                     </button>
+                    <DownloadButton paths={data.tracks.map((t) => t.path)} />
                     <LinkEditorButton
                       mode="album"
                       paths={data.tracks.map((t) => t.path)}
@@ -764,37 +776,45 @@ export default function AlbumPage() {
               needs a description
             </span>
           )}
-          <div className="ml-auto flex items-center gap-1.5">
-            <button
-              className="btn-ghost !py-1 text-xs"
-              onClick={fetchDescription}
-              disabled={!!descBusy}
-              title="Fetch the album description from the configured sources (Wikipedia first)"
-            >
-              {descBusy === "fetch" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-              Fetch
-            </button>
-            <button
-              className="btn-ghost !py-1 text-xs"
-              onClick={() => {
-                setDescDraft(desc?.description_text ?? "");
-                setDescEditing(true);
-              }}
-              title="Write or edit the description yourself"
-            >
-              <Pencil className="h-3.5 w-3.5" /> Edit
-            </button>
-            {desc?.description && (
-              <button
-                className="btn-ghost !py-1 text-xs text-red-300/80 hover:text-red-200"
-                onClick={clearDescription}
-                disabled={!!descBusy}
-                title="Remove the stored description"
-              >
-                {descBusy === "clear" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
-                Clear
-              </button>
-            )}
+          {/* Every description action sits in one boxed "…" at the block's
+              top right — the same square the columns chooser wears over a
+              table, so the header row stays two words and a chip. */}
+          <div className="ml-auto">
+            <OverflowMenu
+              buttonClass="p-1.5 rounded-lg border border-border bg-panel/60 text-zinc-500 hover:text-white hover:bg-raise transition-colors"
+              buttonTitle="Description actions"
+              sections={[
+                {
+                  items: [
+                    {
+                      label: descBusy === "fetch" ? "Fetching…" : "Fetch description",
+                      icon: RefreshCw,
+                      onClick: fetchDescription,
+                      disabled: !!descBusy,
+                      title: "Fetch the album description from the configured sources (Wikipedia first)",
+                    },
+                    {
+                      label: "Edit description",
+                      icon: Pencil,
+                      onClick: () => {
+                        setDescDraft(desc?.description_text ?? "");
+                        setDescEditing(true);
+                      },
+                      title: "Write or edit the description yourself",
+                    },
+                    {
+                      label: descBusy === "clear" ? "Removing…" : "Remove description",
+                      icon: Trash2,
+                      danger: true,
+                      hidden: !desc?.description,
+                      onClick: clearDescription,
+                      disabled: !!descBusy,
+                      title: "Remove the stored description",
+                    },
+                  ],
+                },
+              ]}
+            />
           </div>
         </div>
         {descEditing ? (
@@ -1027,7 +1047,7 @@ export default function AlbumPage() {
           <thead>
             <tr>
               {selectMode && <th className="th w-10"></th>}
-              {ALBUM_TRACK_COLS.filter((c) => trackCols.includes(c.id)).map((c) =>
+              {trackDefs.filter((c) => trackCols.includes(c.id)).map((c) =>
                 c.id === "cover" ? (
                   <th key={c.id} className={`th relative ${ALBUM_TRACK_COL_W[c.id] ?? ""}`} title="Cover art">
                     <span className="sr-only">Cover</span>
@@ -1061,10 +1081,12 @@ export default function AlbumPage() {
                   </button>
                   <ColumnsMenu
                     iconOnly
-                    cols={ALBUM_TRACK_COLS}
+                    cols={trackDefs}
                     visible={trackCols}
                     onToggle={toggleTrackCol}
                     title="Tracklist columns"
+                    onAddCustom={addCustomTrackCol}
+                    onRemoveCustom={removeTrackCustomCol}
                     onResetWidths={resetTrackW}
                     hasCustomWidths={Object.keys(trackW).length > 0}
                   />
@@ -1217,6 +1239,15 @@ export default function AlbumPage() {
                   <td className="td text-zinc-500 tabular-nums" title={`Dynamic range${tr.tags["ALBUM DYNAMIC RANGE"] ? ` · album ${tr.tags["ALBUM DYNAMIC RANGE"]}` : ""}`}>
                     {tr.tags["DYNAMIC RANGE"] ?? "—"}
                   </td>
+                )}
+                {/* user-added tag columns, in the order they were created —
+                    the same order their headers render in above */}
+                {trackCustom.map((c) =>
+                  trackCols.includes(c.id) ? (
+                    <td key={c.id} className="td text-zinc-500 break-words" title={c.label}>
+                      {customColValue(tr, c.tag) || "—"}
+                    </td>
+                  ) : null
                 )}
               </tr>
                   ))}

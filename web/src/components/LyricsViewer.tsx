@@ -4,6 +4,7 @@ import { CloudDownload, PenLine, Play, Square, Plus, Trash2, Undo2, Keyboard, Up
 import { api } from "../api";
 import { toast, useStore } from "../store";
 import LrclibPublishPanel from "./LrclibPublish";
+import Popover from "./Popover";
 import { nextSpeed, fmtSpeed } from "../lib/playback";
 import { useLyricsFollow } from "../lib/lyrScroll";
 import {
@@ -694,10 +695,7 @@ export default function LyricsViewer({
             <button className="btn-ghost !py-1 text-xs" onClick={() => setKeysMenu(!keysMenu)} title="Keyboard shortcuts">
               <Keyboard className="h-3.5 w-3.5" />
             </button>
-            {keysMenu && (
-              <>
-              <div className="fixed inset-0 z-20" onClick={() => setKeysMenu(false)} />
-              <div className="absolute right-0 top-full mt-1 z-30 bg-zinc-950 border border-border rounded-lg shadow-2xl p-1.5 w-80">
+            <Popover open={keysMenu} onClose={() => setKeysMenu(false)} panelClass="w-80 p-1.5">
                 <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500 px-1 pb-1">Hotkeys</div>
                 {LYRICS_ACTIONS.map((a) => (
                   <div key={a.id} className="flex items-center gap-2 py-0.5">
@@ -724,9 +722,7 @@ export default function LyricsViewer({
                   </button>
                   <span className="text-[10px] text-zinc-600 px-1">saved in this browser</span>
                 </div>
-              </div>
-              </>
-            )}
+            </Popover>
           </div>
           <button
             className="btn-ghost !py-1 text-xs"

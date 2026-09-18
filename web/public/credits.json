@@ -1,6 +1,34 @@
 {
   "groups": [
     {
+      "title": "Services & websites",
+      "items": [
+        { "name": "MusicBrainz", "license": "CC-BY-SA / CC0 (data)", "url": "https://musicbrainz.org", "use": "release, artist and recording metadata" },
+        { "name": "Cover Art Archive", "license": "CC-BY-SA / CC0 (data)", "url": "https://coverartarchive.org", "use": "release cover art" },
+        { "name": "LRCLIB", "license": "service", "url": "https://lrclib.net", "use": "synced lyrics (fetch and publish)" },
+        { "name": "RateYourMusic", "license": "service", "url": "https://rateyourmusic.com", "use": "genres and the album/artist links" },
+        { "name": "ListenBrainz", "license": "CC0 / CC-BY-SA (data)", "url": "https://listenbrainz.org", "use": "sitewide listening charts" },
+        { "name": "Deezer", "license": "service", "url": "https://developers.deezer.com/api", "use": "catalogue search, similarity, artist imagery" },
+        { "name": "iTunes Search API", "license": "service", "url": "https://performance-partners.apple.com/search-api", "use": "catalogue fallback and artwork" },
+        { "name": "TheAudioDB", "license": "service", "url": "https://www.theaudiodb.com", "use": "artist biographies, press images" },
+        { "name": "Wikipedia", "license": "CC BY-SA 4.0 (text)", "url": "https://www.wikipedia.org", "use": "artist and album descriptions" },
+        { "name": "Wikidata", "license": "CC0", "url": "https://www.wikidata.org", "use": "identity links behind those descriptions" },
+        { "name": "Discogs", "license": "service", "url": "https://www.discogs.com/developers", "use": "genre and release lookups (own API token)" },
+        { "name": "Last.fm", "license": "service", "url": "https://www.last.fm/api", "use": "genre and tag lookups (own API key)" },
+        { "name": "AcoustID", "license": "service (non-commercial)", "url": "https://acoustid.org", "use": "fingerprint lookups (own application key)" },
+        { "name": "Chromaprint", "license": "LGPL-2.1+", "url": "https://github.com/acoustid/chromaprint", "use": "the fpcalc fingerprints AcoustID reads" },
+        { "name": "NetEase Cloud Music", "license": "service", "url": "https://music.163.com", "use": "additional lyrics source" },
+        { "name": "QQ Music", "license": "service", "url": "https://y.qq.com", "use": "additional lyrics source" },
+        { "name": "Kugou", "license": "service", "url": "https://www.kugou.com", "use": "additional lyrics source" },
+        { "name": "Kuwo", "license": "service", "url": "https://www.kuwo.cn", "use": "additional lyrics source" },
+        { "name": "Spotify", "license": "service", "url": "https://developer.spotify.com", "use": "catalogue search (own client credentials)" },
+        { "name": "Bandcamp", "license": "service", "url": "https://bandcamp.com", "use": "release links" },
+        { "name": "Musichoarders covers", "license": "community service", "url": "https://covers.musichoarders.xyz", "use": "cover search" },
+        { "name": "YouTube", "license": "service", "url": "https://www.youtube.com", "use": "music videos and their captions" },
+        { "name": "Soulseek", "license": "trademark of Soulseek LLC", "url": "https://www.slsknet.org", "use": "the file-sharing network this app searches (via slskd)" }
+      ]
+    },
+    {
       "title": "Vendored tools",
       "items": [
         { "name": "slskd", "license": "AGPL-3.0", "url": "https://github.com/slskd/slskd", "use": "Soulseek client daemon (search / download / share)" },

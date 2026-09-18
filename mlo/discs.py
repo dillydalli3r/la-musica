@@ -27,6 +27,7 @@ import re
 import subprocess
 import tempfile
 import shutil
+import threading
 
 from .audio import AudioFile
 from .config import should_write_audio_tag
@@ -209,6 +210,16 @@ def _file_track_number(path):
 # full request is buffered, so asking for megabytes costs throughput).
 _CRC_CHUNK = 1 << 16
 
+# Decoded CRCs per (path, size, mtime_ns). Decoding a track is the most
+# expensive thing this module does, and the audit pass and the grader ask the
+# same question about the same unchanged file (grading a CD library would
+# otherwise decode every track a second time). Keyed on size+mtime, so a
+# re-ripped or edited file is never served a stale verdict. Bounded: a long
+# session over a churning library drops the map rather than growing forever.
+_CRC_MEMO = {}
+_CRC_MEMO_LOCK = threading.Lock()
+_CRC_MEMO_MAX = 20000
+
 
 def _audio_crc32(ffmpeg_exe, path):
     """CRC-32 of the file's decoded 16-bit PCM (the value EAC/XLD print in
@@ -217,8 +228,17 @@ def _audio_crc32(ffmpeg_exe, path):
     The decoder's PCM is fed to zlib.crc32 in _CRC_CHUNK-sized pieces as it
     arrives, so a track's samples are never held in memory — a 60-minute disc
     used to cost hundreds of MB of RSS for its single largest track."""
-    import threading
     import zlib
+
+    key = None
+    try:
+        st = os.stat(path)
+        key = (os.path.normcase(os.path.abspath(path)), st.st_size, st.st_mtime_ns)
+        with _CRC_MEMO_LOCK:
+            if key in _CRC_MEMO:
+                return _CRC_MEMO[key]
+    except OSError:
+        key = None
 
     crc = 0
     size = 0
@@ -251,7 +271,13 @@ def _audio_crc32(ffmpeg_exe, path):
     reader.join()
     if proc is None or proc.returncode != 0 or not size:
         return None
-    return format(crc & 0xFFFFFFFF, "08X")
+    got = format(crc & 0xFFFFFFFF, "08X")
+    if key is not None:
+        with _CRC_MEMO_LOCK:
+            if len(_CRC_MEMO) >= _CRC_MEMO_MAX:
+                _CRC_MEMO.clear()
+            _CRC_MEMO[key] = got
+    return got
 
 
 def verify_album_checksums(ffmpeg_exe, album_dir, paths, config=None):

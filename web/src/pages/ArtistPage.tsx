@@ -10,9 +10,11 @@ import { LinkChips, LinkEditorButton } from "../components/Links";
 import { EmptyState, GradeBadge, PageLoading } from "../components/Badges";
 import AlbumCard from "../components/AlbumCard";
 import Description from "../components/Description";
+import DownloadButton from "../components/DownloadButton";
 import FavHeart from "../components/FavHeart";
 import ArtistImageModal from "../components/ArtistImageModal";
 import MetadataReviewModal from "../components/MetadataReviewModal";
+import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
 import TagActionsMenu from "../components/TagActionsMenu";
 import type { Album } from "../types";
@@ -371,6 +373,7 @@ export default function ArtistPage() {
                 <button className="btn-primary" onClick={() => playNow(allTracks)} title={`Play all ${allTracks.length} tracks`}>
                   <Play className="h-4 w-4 fill-current" /> Play all
                 </button>
+                <DownloadButton paths={allTracks.map((t) => t.path)} size="md" label="Download all" />
                 <TagActionsMenu
                   paths={allTracks.map((t) => t.path)}
                   artist={decoded}
@@ -440,37 +443,44 @@ export default function ArtistPage() {
               )}
             </span>
           )}
-          <div className="ml-auto flex items-center gap-1.5">
-            <button
-              className="btn-ghost !py-1 text-xs"
-              onClick={fetchDescription}
-              disabled={!!busy}
-              title="Fetch the biography from the configured sources (Wikipedia first)"
-            >
-              {busy === "desc-fetch" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-              Fetch
-            </button>
-            <button
-              className="btn-ghost !py-1 text-xs"
-              onClick={() => {
-                setDescDraft(descText);
-                setDescEditing(true);
-              }}
-              title="Write or edit the description yourself"
-            >
-              <Pencil className="h-3.5 w-3.5" /> Edit
-            </button>
-            {descText && (
-              <button
-                className="btn-ghost !py-1 text-xs text-red-300/80 hover:text-red-200"
-                onClick={clearDescription}
-                disabled={!!busy}
-                title="Remove the stored description"
-              >
-                {busy === "desc-clear" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
-                Clear
-              </button>
-            )}
+          {/* Same boxed "…" as the album page: every description action in
+              one square at the block's top right. */}
+          <div className="ml-auto">
+            <OverflowMenu
+              buttonClass="p-1.5 rounded-lg border border-border bg-panel/60 text-zinc-500 hover:text-white hover:bg-raise transition-colors"
+              buttonTitle="Description actions"
+              sections={[
+                {
+                  items: [
+                    {
+                      label: busy === "desc-fetch" ? "Fetching…" : "Fetch description",
+                      icon: RefreshCw,
+                      onClick: fetchDescription,
+                      disabled: !!busy,
+                      title: "Fetch the biography from the configured sources (Wikipedia first)",
+                    },
+                    {
+                      label: "Edit description",
+                      icon: Pencil,
+                      onClick: () => {
+                        setDescDraft(descText);
+                        setDescEditing(true);
+                      },
+                      title: "Write or edit the description yourself",
+                    },
+                    {
+                      label: busy === "desc-clear" ? "Removing…" : "Remove description",
+                      icon: Trash2,
+                      danger: true,
+                      hidden: !descText,
+                      onClick: clearDescription,
+                      disabled: !!busy,
+                      title: "Remove the stored description",
+                    },
+                  ],
+                },
+              ]}
+            />
           </div>
         </div>
         {descEditing ? (

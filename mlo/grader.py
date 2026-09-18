@@ -2280,6 +2280,11 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     disc_by_path = {p: d for d, paths in (discs_map or {}).items()
                                     for p in paths}
                     single_log = len(log_paths) <= 1
+                    # (path, the CRC the log states for it) for the value
+                    # pass below, filled while the mapping is already resolved
+                    # here — the disc-to-log attribution must not be guessed
+                    # twice.
+                    stated = []
                     for ap in audio_paths:
                         tr_track = track_by_path.get(ap)
                         if tr_track is None or tr_track.get("unreadable"):
@@ -2309,12 +2314,59 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                             # because no disc was attributable at all.
                             crcs = unmapped_crc
                         covered = tn is not None and tn in (crcs or {})
+                        if covered:
+                            stated.append((ap, (crcs or {}).get(tn)))
                         total_checks += 1
                         if not covered:
                             failed_checks += 1
                             add_issue("Track not covered by .log CRC "
                                       "(unverifiable CD rip)", tr_track["file"])
                             tr_track["issues"].append("CRC")
+
+                    # ---- the CRC VALUES, not just their coverage ----------
+                    # A log states a CRC-32 per track and it must equal the
+                    # CRC-32 of that track's own decoded PCM. Coverage alone
+                    # let a log from a DIFFERENT rip (or audio altered after
+                    # the rip) grade PASS, while the check has always been
+                    # advertised as "checksums must match the audio". Tracks
+                    # the log cannot be compared against — a lossy encode,
+                    # which can never reproduce the WAV CRC — are not
+                    # verifiable here and are left to the coverage verdict.
+                    # ponytail: decoding is the cost of proof; the memo in
+                    # discs._audio_crc32 means an album grades on the same
+                    # decode the audit pass already paid for.
+                    try:
+                        from .discs import _audio_crc32 as _crc_of, \
+                            LOSSLESS_CRC_EXTS as _crc_exts
+                        from .tools import detect_all_tools as _detect
+                        ffmpeg_exe = (_detect().get("ffmpeg") or {}).get("ffmpeg_exe")
+                        pairs = [(ap, want) for ap, want in stated
+                                 if want and ffmpeg_exe
+                                 and os.path.splitext(ap)[1].lower() in _crc_exts]
+                        if pairs:
+                            from concurrent.futures import ThreadPoolExecutor
+                            with ThreadPoolExecutor(max_workers=min(4, len(pairs))) as ex:
+                                actuals = list(ex.map(
+                                    lambda pc: _crc_of(ffmpeg_exe, pc[0]), pairs))
+                            for (ap, want), actual in zip(pairs, actuals):
+                                if actual is None:
+                                    # undecodable: the coverage check speaks
+                                    # for this track, not a fabricated verdict
+                                    continue
+                                tr_track = track_by_path.get(ap)
+                                if tr_track is None:
+                                    continue
+                                total_checks += 1
+                                if str(actual).upper() != str(want).upper():
+                                    failed_checks += 1
+                                    add_issue(
+                                        f"Log CRC {str(want).upper()} does not match "
+                                        f"the track's audio CRC {actual} — the rip "
+                                        f"does not match its own log",
+                                        tr_track["file"])
+                                    tr_track["issues"].append("CRC_MISMATCH")
+                    except Exception as e:
+                        unavailable("CD rip-log CRC value check", e)
             except Exception as e:
                 unavailable("CD rip-log CRC coverage check", e)
 
@@ -2687,6 +2739,32 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 tr["accuraterip_status"] = ov
                 if ov == "REAL":
                     tr["checksum_status"] = "REAL"
+            # ---- the rip log's own checksums, GRADED ----------------------
+            # A log whose EAC SHA256 does not verify — or that claims none
+            # while one is required — describes a rip nobody can prove, so the
+            # album FAILS here. This verdict used to reach only the AUDIT
+            # column and the audit requirement (grade_check_audit, off by
+            # default): a provably bad log could grade PASS. The per-track
+            # statuses are read AFTER the manual override above, so a forced
+            # AUDIOAUDITOR_OVERRIDE=REAL still wins over the derived verdict.
+            # 'unsupported' (XLD, older EAC logs with no checksum concept)
+            # stays NONE and passes — nothing claimed, nothing refuted.
+            if cfg.get("grade_check_log_checksum", True):
+                try:
+                    suspect = [tr for tr in tracks
+                               if not _is_video_file(tr.get("file"))
+                               and tr.get("checksum_status") == "FAKE"]
+                    total_checks += 1
+                    if suspect:
+                        failed_checks += 1
+                        names = ", ".join(sorted({str(tr.get("file") or "") for tr in suspect}))
+                        add_issue("Rip .log checksum does not verify "
+                                  f"(EAC SHA256 invalid or missing) — {names}",
+                                  "album")
+                        for tr in suspect:
+                            tr["issues"].append("LOG_CHECKSUM")
+                except Exception as e:
+                    unavailable("Rip .log checksum check", e)
         except Exception:
             pass
 

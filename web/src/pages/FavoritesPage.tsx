@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Disc3, FileVideo, Heart, ListMusic, Mic2, Play } from "lucide-react";import { api } from "../api";
@@ -12,6 +12,8 @@ import AlbumCard from "../components/AlbumCard";
 import FavHeart from "../components/FavHeart";
 import { fmtDuration, GRID_SIZE_MIN } from "../lib/fmt";
 import Segmented from "../components/Segmented";
+import { sortRows, SortHeader, toggleSort, type SortState } from "../lib/sort.tsx";
+import { ColumnsMenu, useColumnPrefs, useCustomColumns, customColValue, customCols, type Col } from "../lib/columns";
 import { artistRef, artistMbid } from "../lib/refs";
 import type { Album, Artist, Playlist, Track } from "../types";
 
@@ -75,11 +77,45 @@ function displayArtist(al: Album, a: Artist) {
 // ------------------------------------------------------------------------ //
 // Liked tracks
 // ------------------------------------------------------------------------ //
+
+/** The liked-track table's columns — the library's track view, trimmed to
+ *  what a like row actually carries. The # and cover cells have no sort key:
+ *  the "#" is the row's own position, not a track number. */
+const LIKED_COLS: Col[] = [
+  { id: "num", label: "#", sortKey: "" },
+  { id: "cover", label: "", sortKey: "" },
+  { id: "title", label: "Title", sortKey: "title" },
+  { id: "artist", label: "Artist", sortKey: "artistName" },
+  { id: "album", label: "Album", sortKey: "albumName" },
+  { id: "duration", label: "Duration", sortKey: "dur" },
+];
+
+/** Fixed widths — the global `table-layout: fixed` needs one per column;
+ *  the title absorbs what is left. */
+const LIKED_COL_W: Record<string, string> = {
+  num: "w-12",
+  cover: "w-12",
+  title: "w-auto",
+  artist: "w-[16%]",
+  album: "w-[16%]",
+  duration: "w-[7%]",
+};
+
 function LikedTracks() {
   const { data: likes, isLoading } = useTrackLikes();
   const { tracks } = useLibraryMaps();
   const playNow = useStore((s) => s.playNow);
   const navigate = useNavigate();
+  // Same column machinery as the library's track table, on its own prefs key:
+  // the visible set and any tag columns are per-table.
+  const [likedCustom, addLikedCustomCol, removeLikedCustomCol] = useCustomColumns("fav-tracks");
+  const likedDefs: Col[] = [...LIKED_COLS, ...customCols(likedCustom, "tags")];
+  const [likedCols, toggleLikedCol] = useColumnPrefs("fav-tracks", likedDefs);
+  const [sort, setSort] = useState<SortState | null>(null);
+  const addLikedCustom = (tag: string, label?: string) => {
+    const id = addLikedCustomCol(tag, label);
+    if (id) toggleLikedCol(id);
+  };
 
   const rows = useMemo(() => {
     const paths = likes?.paths ?? [];
@@ -99,6 +135,9 @@ function LikedTracks() {
           albumPath: album.path,
           trackPath: track.path,
           dur: track.tech?.length,
+          // the file's own tag maps — what the tag columns read
+          tags: track.tags,
+          tech: track.tech,
           coverFile: track.cover_file ?? null,
           albumCover: album.cover_file ?? null,
           queue: {
@@ -130,12 +169,14 @@ function LikedTracks() {
     });
   }, [likes, tracks]);
 
+  const view = useMemo(() => sortRows(rows, sort), [rows, sort]);
+
   // `i` indexes the full rows array (missing files included); the queue only
   // holds playable tracks, so translate it before handing it to playNow.
   const play = (i: number) => {
-    const playable = rows.filter((r) => !r.missing).map((r) => r.queue);
+    const playable = view.filter((r) => !r.missing).map((r) => r.queue);
     if (!playable.length) return;
-    const idx = rows.slice(0, i).filter((r) => !r.missing).length;
+    const idx = view.slice(0, i).filter((r) => !r.missing).length;
     playNow(playable, Math.min(idx, playable.length - 1));
   };
 
@@ -154,9 +195,18 @@ function LikedTracks() {
         <span className="text-xs text-zinc-500">
           {rows.length} liked track{rows.length === 1 ? "" : "s"}
         </span>
-        <button className="btn-primary !py-1 text-xs ml-auto" onClick={() => play(0)}>
-          <Play className="h-3.5 w-3.5" /> Play all
-        </button>
+        <div className="ml-auto flex items-center gap-2">
+          <ColumnsMenu
+            cols={likedDefs}
+            visible={likedCols}
+            onToggle={toggleLikedCol}
+            onAddCustom={addLikedCustom}
+            onRemoveCustom={removeLikedCustomCol}
+          />
+          <button className="btn-primary !py-1 text-xs" onClick={() => play(0)}>
+            <Play className="h-3.5 w-3.5" /> Play all
+          </button>
+        </div>
       </div>
       {/* Same table language as the library's track view: identical columns,
           cell classes, cover chips and hover-revealed hearts. Click plays,
@@ -165,16 +215,26 @@ function LikedTracks() {
         <table className="w-full text-sm">
           <thead className="border-b border-border">
             <tr>
-              <th className="th w-12">#</th>
-              <th className="th w-12" title="Cover art"><span className="sr-only">Cover</span></th>
-              <th className="th">Title</th>
-              <th className="th w-[16%]">Artist</th>
-              <th className="th w-[16%]">Album</th>
-              <th className="th w-[7%]">Duration</th>
+              {likedDefs.filter((c) => likedCols.includes(c.id)).map((c) =>
+                c.sortKey ? (
+                  <SortHeader
+                    key={c.id}
+                    label={c.label}
+                    sort={sort}
+                    sortKey={c.sortKey}
+                    onSort={(k) => setSort(toggleSort(sort, k))}
+                    className={LIKED_COL_W[c.id] ?? (c.tag ? "w-[10%]" : "")}
+                  />
+                ) : (
+                  <th key={c.id} className={`th ${LIKED_COL_W[c.id] ?? ""}`} title={c.id === "cover" ? "Cover art" : undefined}>
+                    {c.id === "cover" ? <span className="sr-only">Cover</span> : c.label}
+                  </th>
+                )
+              )}
             </tr>
           </thead>
           <tbody className="stagger">
-            {rows.map((r, i) => (
+            {view.map((r, i) => (
               <tr
                 key={r.path}
                 className="table-row group cursor-pointer"
@@ -187,24 +247,27 @@ function LikedTracks() {
                   }
                 }}
               >
-                <td className="td cell-nowrap text-zinc-600 tabular-nums">{i + 1}</td>
+                {likedCols.includes("num") && <td className="td cell-nowrap text-zinc-600 tabular-nums">{i + 1}</td>}
+                {likedCols.includes("cover") && (
                 <td className="td cell-cover pr-0">
-                  {"coverFile" in r && !r.missing ? (
+                  {"coverFile" in r ? (
                     <TrackCover
                       albumPath={r.albumPath}
-                      trackCover={(r as { coverFile?: string | null }).coverFile}
-                      albumCover={(r as { albumCover?: string | null }).albumCover}
+                      trackCover={r.coverFile}
+                      albumCover={r.albumCover}
                       wrapperClass="h-9 w-9 rounded bg-raise border border-border overflow-hidden shrink-0"
                     />
                   ) : null}
                 </td>
+                )}
+                {likedCols.includes("title") && (
                 <td className="td">
                   <div className="flex items-center gap-1.5 min-w-0">
                     <span className={`break-words flex-1 min-w-0 ${r.missing ? "text-zinc-500" : "hover:text-accent-soft"}`} title={r.missing ? r.path : r.title}>
                       {r.title}
                     </span>
-                    {!r.missing && <AdvisoryMark value={(r as { advisory?: string | null }).advisory} />}
-                    {!r.missing && (r as { isVideo?: boolean }).isVideo && (
+                    {!r.missing && <AdvisoryMark value={r.advisory} />}
+                    {!r.missing && r.isVideo && (
                       <span title="Music video" className="shrink-0 inline-flex"><FileVideo className="h-3.5 w-3.5 text-zinc-500" /></span>
                     )}
                     <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
@@ -212,9 +275,19 @@ function LikedTracks() {
                     </span>
                   </div>
                 </td>
-                <td className="td text-zinc-400 break-words">{!r.missing ? (r as { artistName: string }).artistName : "—"}</td>
-                <td className="td text-zinc-500 break-words">{!r.missing ? (r as { albumName: string }).albumName : "—"}</td>
-                <td className="td text-zinc-500">{fmtDuration(r.dur)}</td>
+                )}
+                {likedCols.includes("artist") && (
+                  <td className="td text-zinc-400 break-words">{r.missing ? "—" : r.artistName}</td>
+                )}
+                {likedCols.includes("album") && (
+                  <td className="td text-zinc-500 break-words">{r.missing ? "—" : r.albumName}</td>
+                )}
+                {likedCols.includes("duration") && <td className="td text-zinc-500">{fmtDuration(r.dur)}</td>}
+                {likedCustom.filter((c) => likedCols.includes(c.id)).map((c) => (
+                  <td key={c.id} className="td text-zinc-500 break-words" title={`Tag: ${c.tag}`}>
+                    {customColValue(r, c.tag) || "—"}
+                  </td>
+                ))}
               </tr>
             ))}
           </tbody>

@@ -195,6 +195,8 @@ locally):
 
 - **ListenBrainz** — <https://listenbrainz.org> (MetaBrainz) — sitewide
   listening charts. Data **CC0 / CC-BY-SA**.
+- **Cover Art Archive** — <https://coverartarchive.org> — release cover art
+  (data CC-BY-SA / CC0, served by MetaBrainz).
 - **Deezer** — <https://developers.deezer.com/api> — catalogue search,
   similarity and artist imagery.
 - **iTunes Search API** — <https://performance-partners.apple.com/search-api> —
@@ -206,8 +208,25 @@ locally):
   link back to the source article.
 - **AcoustID** — <https://acoustid.org> — fingerprint lookups (requires your
   own free application key; the service is non-commercial use only).
-- **NetEase Cloud Music**, **Kugou**, **lyrics.ovh** — additional lyrics
-  sources in the provider chain; lyrics remain the property of their
+- **Discogs** — <https://www.discogs.com/developers> — genre and release
+  lookups (requires your own API token). **Last.fm** —
+  <https://www.last.fm/api> — genre and tag lookups (own API key).
+- **Spotify** — <https://developer.spotify.com> — catalogue search (requires
+  your own client credentials; optional). **Bandcamp** —
+  <https://bandcamp.com> — release links.
+- **covers.musichoarders.xyz** — <https://covers.musichoarders.xyz> — the
+  community cover search the app meta-searches.
+- **Soulseek** — <https://www.slsknet.org> — the file-sharing network this app
+  searches through slskd. Soulseek™ is a trademark of Soulseek LLC; this
+  project is not affiliated with it or with slskd.
+- **NetEase Cloud Music** (<https://music.163.com>), **QQ Music**
+  (<https://y.qq.com>), **Kugou** (<https://www.kugou.com>), **Kuwo**
+  (<https://www.kuwo.cn>), **lyrics.ovh** (<https://lyrics.ovh>) — additional
+  lyrics sources in the provider chain; lyrics remain the property of their
   respective rights holders.
+
+These same credits, with each entry's licence, are rendered inside the app
+(`web/public/credits.json` — the bottom-left corner of the window and Settings
+→ *Credits*), so the list is visible where it is used and not only here.
 
 If you believe a credit is missing or wrong, please open an issue.

@@ -7,6 +7,7 @@ import { api } from "../api";
 import { toast, useStore } from "../store";
 import { ProgressInline } from "../components/ProgressBar";
 import PageHeader from "../components/PageHeader";
+import Popover from "../components/Popover";
 import { FORCE_SCRIPTS, forceDict, loadForceSel, saveForceSel } from "../lib/force";
 import { SCRIPTS, DEFAULT_RUN_ALL, isScriptId } from "../lib/scripts";
 import type { LayoutIssue, LayoutReport } from "../types";
@@ -157,10 +158,7 @@ export default function OptimizationPage() {
             >
               <ChevronDown className="h-3.5 w-3.5" />
             </button>
-            {forceMenu && (
-              <>
-                <div className="fixed inset-0 z-40" onClick={() => setForceMenu(false)} />
-                <div className="absolute left-0 top-full mt-1 z-50 bg-zinc-950 border border-border rounded-lg p-1.5 w-60 shadow-2xl">
+            <Popover open={forceMenu} onClose={() => setForceMenu(false)} align="left" panelClass="w-60 p-1.5">
                   <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-1 pb-1.5">
                     Force when Force is on
                   </div>
@@ -192,9 +190,7 @@ export default function OptimizationPage() {
                     Force is a one-shot switch — saved Settings are not changed. It applies to every run
                     started here: Run All, Run selected and the single-script buttons.
                   </div>
-                </div>
-              </>
-            )}
+            </Popover>
           </div>
           <button
             className="btn-ghost text-xs"

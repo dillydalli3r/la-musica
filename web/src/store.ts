@@ -28,8 +28,11 @@ const TOAST_TTL_MS = 3000;
 const TOAST_TTL_ERROR_MS = 6000;
 
 interface Store {
-  progress: { done: number; total: number; desc: string } | null;
-  setProgress: (p: { done: number; total: number; desc: string } | null) => void;
+  /** Live progress frame from the engine relay. `steps` is the whole-step
+   *  pair a chained script run publishes ("script 3 of 18") — readouts print
+   *  that instead of the fractional done/total the bar is drawn from. */
+  progress: { done: number; total: number; desc: string; steps?: number[] } | null;
+  setProgress: (p: { done: number; total: number; desc: string; steps?: number[] } | null) => void;
   playing: string | null;
   setPlaying: (p: string | null) => void;
   queue: QueueTrack[];

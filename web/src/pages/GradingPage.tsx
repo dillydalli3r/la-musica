@@ -61,7 +61,7 @@ const GROUPS: Group[] = [
       { k: "grade_check_cd_log", label: "CD — .log present", desc: "Every CD disc needs an exact-match .log file." },
       { k: "grade_check_cd_cue", label: "CD — .cue present", desc: "Every CD disc needs a .cue sheet." },
       { k: "grade_check_cd_format", label: "CD — lossless format", desc: "CD tracks must be FLAC (lossless)." },
-      { k: "grade_check_crc", label: "CRC checksums", desc: "CUE sheet CRCs / embedded checksums must match the audio." },
+      { k: "grade_check_crc", label: "CRC checksums", desc: "Every track must be covered by a per-track CRC in its own disc's .log, and that CRC must match the CRC of the track's decoded audio — coverage alone is not enough (issue codes CRC / CRC_MISMATCH)." },
     ],
   },
   {
@@ -79,7 +79,7 @@ const GROUPS: Group[] = [
     desc: "Audio verification (script 6) and the log scores it produces. With 'Require audit tag' on, AUDIT must read REAL — a FAKE or MIX verdict fails the track; off, the verdict does not change the grade.",
     items: [
       { k: "grade_check_audit", label: "Require audit tag", desc: "Tracks must carry an AUDIT tag (run Audit Library). Off by default so unaudited libraries aren't auto-failed." },
-      { k: "grade_check_log_checksum", label: "Log checksum valid", desc: "When a .log with checksums exists, its checksums must verify." },
+      { k: "grade_check_log_checksum", label: "Log checksum valid", desc: "The rip .log's own EAC SHA256 must verify. A log that does not verify — or that states no checksum while 'verify log checksum' is on — fails grading (issue code LOG_CHECKSUM), independently of the audit tag. XLD and older EAC logs that carry no checksum concept pass." },
       { k: "grade_check_accuraterip", label: "AccurateRip verified", desc: ".accurip results must match the reference database." },
       { k: "grade_check_log_grade", label: "Log grade present & in range", desc: "LOG_GRADE tag must exist and be 0–100." },
     ],

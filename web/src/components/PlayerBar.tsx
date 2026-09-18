@@ -14,6 +14,7 @@ import { applyReplayGain, attachAnalyser, resumeAnalyser } from "../lib/analyser
 import NowPlayingView from "./NowPlayingView";
 import LyricsSidebar from "./LyricsSidebar";
 import TrackDownloadExport from "./TrackDownloadExport";
+import Popover, { MenuItem } from "./Popover";
 import { trackRef } from "../lib/refs";
 import useSubtitleTracks from "./SubtitledVideo";
 import { ASPECT_FIT, readAspect, writeAspect, type VideoAspect } from "../lib/video";
@@ -505,6 +506,31 @@ export default function PlayerBar() {
             : "from ReplayGain tags"
         }${rgRes?.source?.endsWith("+clamp") ? "; reduced to stop clipping" : ""}`;
 
+  // The fullscreen viewer opens from the player's own button AND from the
+  // app-wide "F" shortcut. The state lives here (this is where the decoders
+  // are), so the shortcut arrives as an event rather than reaching into it —
+  // and a stray press with nothing queued says so instead of opening an empty
+  // viewer.
+  const fullscreenRef = useRef(false);
+  useEffect(() => {
+    fullscreenRef.current = fullscreen;
+  }, [fullscreen]);
+  useEffect(() => {
+    const toggle = () => {
+      if (fullscreenRef.current) {
+        closeFullscreen();
+        return;
+      }
+      if (!current) {
+        toast("Play a track first — the fullscreen viewer shows what is playing");
+        return;
+      }
+      openFullscreen();
+    };
+    window.addEventListener("mlo:fullscreen-toggle", toggle);
+    return () => window.removeEventListener("mlo:fullscreen-toggle", toggle);
+  }, [current]);
+
   // Keyboard shortcuts: Space pause/play · [ / ] speed down/up · 0 reset ·
   // ← / → seek ±5s. Never hijacks typing or the lyrics editor (which owns
   // Space while stamping).
@@ -945,10 +971,12 @@ export default function PlayerBar() {
                 >
                   <ListMusic className="h-4 w-4" />
                 </button>
-                {queueOpen && (
-                  <>
-                    <div className="fixed inset-0 z-40" onClick={() => setQueueOpen(false)} />
-                    <div className="absolute right-0 bottom-full mb-2 z-50 w-80 rounded-lg border border-border bg-zinc-950 shadow-2xl p-1.5 max-h-80 overflow-auto">
+                <Popover
+                  open={queueOpen}
+                  onClose={() => setQueueOpen(false)}
+                  placement="top"
+                  panelClass="w-80 p-1.5 max-h-80 overflow-auto"
+                >
                       <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2 pt-1 pb-1 flex items-center justify-between gap-2">
                         <span>
                           Queue{queue.length > index + 1 ? ` · ${queue.length - index - 1} up next` : ""}
@@ -1032,9 +1060,7 @@ export default function PlayerBar() {
                       {queue.length <= index + 1 && (
                         <div className="text-[10px] text-zinc-600 px-2 py-1">Nothing up next — it ends after this track.</div>
                       )}
-                    </div>
-                  </>
-                )}
+                </Popover>
               </div>
 
               {/* sleep timer */}
@@ -1056,31 +1082,21 @@ export default function PlayerBar() {
                   )}
                   {sleepStopNext && <span className="text-[10px] font-mono">1t</span>}
                 </button>
-                {sleepOpen && (
-                  <>
-                    <div className="fixed inset-0 z-40" onClick={() => setSleepOpen(false)} />
-                    <div className="absolute right-0 bottom-full mb-2 z-50 w-48 rounded-lg border border-border bg-zinc-950 shadow-2xl p-1.5">
-                      <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2 pt-1 pb-1">Sleep timer</div>
-                      <button className="w-full text-left text-xs px-2 py-1.5 rounded-md hover:bg-white/10 text-zinc-300" onClick={armSleepEndOfTrack}>
-                        After this track
-                      </button>
-                      {SLEEP_CHOICES.map((m) => (
-                        <button
-                          key={m}
-                          className="w-full text-left text-xs px-2 py-1.5 rounded-md hover:bg-white/10 text-zinc-300 flex items-center justify-between"
-                          onClick={() => armSleep(m)}
-                        >
-                          <span>{m} minutes</span>
-                        </button>
-                      ))}
-                      {(sleepAt !== null || sleepStopNext) && (
-                        <button className="w-full text-left text-xs px-2 py-1.5 rounded-md hover:bg-white/10 text-red-300" onClick={cancelSleep}>
-                          Cancel timer
-                        </button>
-                      )}
-                    </div>
-                  </>
-                )}
+                <Popover
+                  open={sleepOpen}
+                  onClose={() => setSleepOpen(false)}
+                  placement="top"
+                  panelClass="w-48 p-1.5"
+                >
+                  <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2 pt-1 pb-1">Sleep timer</div>
+                  <MenuItem label="After this track" onClick={armSleepEndOfTrack} />
+                  {SLEEP_CHOICES.map((m) => (
+                    <MenuItem key={m} label={`${m} minutes`} onClick={() => armSleep(m)} />
+                  ))}
+                  {(sleepAt !== null || sleepStopNext) && (
+                    <MenuItem label="Cancel timer" danger onClick={cancelSleep} />
+                  )}
+                </Popover>
               </div>
 
               <div className="relative">
@@ -1095,10 +1111,12 @@ export default function PlayerBar() {
                 >
                   <ListPlus className="h-4 w-4" />
                 </button>
-                {plOpen && (
-                  <>
-                    <div className="fixed inset-0 z-40" onClick={() => setPlOpen(false)} />
-                    <div className="absolute right-0 bottom-full mb-2 z-50 w-56 rounded-lg border border-border bg-zinc-950 shadow-2xl p-1.5 max-h-64 overflow-auto">
+                <Popover
+                  open={plOpen}
+                  onClose={() => setPlOpen(false)}
+                  placement="top"
+                  panelClass="w-56 p-1.5 max-h-64 overflow-auto"
+                >
                       <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2 pt-1 pb-1">Add to playlist</div>
                       <button
                         className="w-full text-left text-xs px-2 py-1.5 rounded-md hover:bg-white/10 text-accent-soft"
@@ -1119,9 +1137,7 @@ export default function PlayerBar() {
                       {(playlists ?? []).length === 0 && (
                         <div className="text-[10px] text-zinc-600 px-2 py-1">No playlists yet — create one above.</div>
                       )}
-                    </div>
-                  </>
-                )}
+                </Popover>
               </div>
 
               <TrackDownloadExport path={current?.path ?? ""} iconOnly disabled={!current} up />

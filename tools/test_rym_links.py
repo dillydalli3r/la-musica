@@ -14,7 +14,15 @@ What this pins, with the HTTP layer stubbed (no network at all):
     are all rejected and fall through — never accepted as a link;
   * a blocked RYM costs ONE probe for the whole process: the ladder is not
     walked, later lookups make no request at all, and the note says what the
-    user can do (set rym_cookie, or rely on the MusicBrainz links);
+    user can do (set rym_cookie, or rely on the MusicBrainz links) — but the
+    refusal belongs to the cookie that earned it: a NEW cookie (the user
+    pasting a fresh one), a refusal older than RYM_BLOCK_TTL, or an explicit
+    probe (the Sources panel's Test) re-asks for real, which is what a stuck
+    latch used to prevent until the backend was restarted;
+  * a 429/5xx/timeout is transient: retried to the cap, and only then latched;
+  * the genre path verifies its candidates exactly like the link path: a page
+    that is not the release/artist asked about (a same-named cover version, a
+    200 that landed on search/home) supplies NO genres;
   * a lookup that resolves nothing writes NO link (imports.stamp_rym_links),
     reports "could not resolve" and raises nothing;
   * a link already on the album is never looked up and never overwritten,
@@ -147,7 +155,12 @@ def run(routes, boom=False, cache=None, mb=None):
     intg._rym_cache_dir = lambda: cache or tempfile.mkdtemp(prefix="mlo_rym_")
     intg.RYM_MIN_INTERVAL = 0.0
     intg._rym_cookie = lambda cfg=None: ""
+    # `_rym_warned` is the latch; the other two are the key it belongs to (the
+    # cookie it was found with, and when) — a stale pair would decide whether
+    # THIS case's first lookup goes out at all.
     intg._rym_warned = False
+    intg._rym_blocked_cookie = ""
+    intg._rym_blocked_at = 0.0
     return intg.httpx
 
 
@@ -241,7 +254,7 @@ try:
     assert "Cloudflare" in got["note"] and "rym_cookie" in got["note"], got
     assert "challenge" in log.getvalue(), log.getvalue()
     assert len(fake.calls) == 1, fake.calls      # blocked is not retried
-    # …and the refusal sticks for the process: the next lookup costs no
+    # …and the refusal sticks for that cookie: the next lookup costs no
     # request at all (RYM used to walk its slug set for every album again)
     assert intg.rym_links("Rihanna", "Loud", cfg=CFG) == got
     assert len(fake.calls) == 1, fake.calls
@@ -293,8 +306,9 @@ try:
     with contextlib.redirect_stdout(log):
         assert intg.rym_links("Rihanna", "Loud", cfg=CFG)["album"] is None
     assert "rateyourmusic" in log.getvalue(), log.getvalue()
-    # RYM is not answering: the rest of the ladder is not attempted
-    assert len(fake.calls) == 1, fake.calls
+    # a timeout is transient: it is retried to the cap, and only then is RYM
+    # counted as unreachable — and the rest of the ladder is not attempted
+    assert len(fake.calls) == 1 + intg.RYM_RETRIES, fake.calls
 
     # the gate: rym_links_auto off means no request at all
     fake = run({})
@@ -460,12 +474,148 @@ try:
     assert got == {"album": UNPLUGGED, "artist": f"{BASE}/artist/nirvana",
                    "note": ""}, got
     assert fake.calls == [f"{BASE}/artist/nirvana"], fake.calls
+
+    # ----------------------------------------------------------------------- #
+    # 12) the refusal latch belongs to the credential that earned it
+    # ----------------------------------------------------------------------- #
+    challenge = ok("<html><title>Just a moment...</title>")
+    fake = run({"/release/album/rihanna/loud/": challenge})
+    intg._rym_cookie = lambda cfg=None: "cf_clearance=stale"
+    log = io.StringIO()
+    with contextlib.redirect_stdout(log):
+        got = intg.rym_links("Rihanna", "Loud", cfg=CFG)
+    assert got["note"] == intg._RYM_BLOCKED_NOTE, got
+    assert len(fake.calls) == 1, fake.calls
+    # the SAME cookie is still refused: no second request (the latch's purpose)
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert intg.rym_links("Rihanna", "Loud", cfg=CFG) == got
+    assert len(fake.calls) == 1, fake.calls
+
+    # …but it is not a verdict on a cookie the user has since REPLACED:
+    # pasting a fresh one and testing it must reach RYM (pre-fix it never did
+    # again until the backend was restarted)
+    fake.routes["/release/album/rihanna/loud/"] = ok(release_page("Rihanna", "Loud"))
+    fake.routes["/artist/rihanna"] = ok(artist_page("Rihanna"))
+    intg._rym_cookie = lambda cfg=None: "cf_clearance=fresh"
+    got = intg.rym_links("Rihanna", "Loud", cfg=CFG)
+    assert got == {"album": f"{BASE}/release/album/rihanna/loud/",
+                   "artist": f"{BASE}/artist/rihanna", "note": ""}, got
+    assert fake.calls[-2:] == [f"{BASE}/release/album/rihanna/loud/",
+                               f"{BASE}/artist/rihanna"], fake.calls
+
+    # a refusal also ages out: the same cookie is asked again once the block
+    # is older than RYM_BLOCK_TTL
+    fake = run({"/release/album/rihanna/loud/": challenge})
+    with contextlib.redirect_stdout(io.StringIO()):
+        intg.rym_links("Rihanna", "Loud", cfg=CFG)
+    assert len(fake.calls) == 1, fake.calls
+    intg._rym_blocked_at -= intg.RYM_BLOCK_TTL + 1
+    with contextlib.redirect_stdout(io.StringIO()):
+        intg.rym_links("Rihanna", "Loud", cfg=CFG)
+    assert len(fake.calls) == 2, fake.calls
+
+    # the Sources panel's Test is a user-initiated probe: it clears the latch
+    # (`_rym_clear_block`, what sources_health does before its RYM probes) and
+    # asks RYM again with whatever cookie is saved now
+    fake = run({"/release/album/rihanna/loud/": challenge})
+    with contextlib.redirect_stdout(io.StringIO()):
+        intg.rym_links("Rihanna", "Loud", cfg=CFG)
+    assert len(fake.calls) == 1, fake.calls
+    intg._rym_clear_block()
+    with contextlib.redirect_stdout(io.StringIO()):
+        intg.rym_links("Rihanna", "Loud", cfg=CFG)
+    assert len(fake.calls) == 2, fake.calls
+
+    # ----------------------------------------------------------------------- #
+    # 13) 429/5xx are transient: retried at the same 1 req/s, not latched off
+    # ----------------------------------------------------------------------- #
+    seen = []
+
+    def flaky(url, params):
+        seen.append(url)
+        if len(seen) == 1:
+            return (429, "too many requests")
+        return (200, release_page("Rihanna", "Loud"))
+
+    run({"/release/album/rihanna/loud/": flaky,
+         "/artist/rihanna": ok(artist_page("Rihanna"))})
+    log = io.StringIO()
+    with contextlib.redirect_stdout(log):
+        got = intg.rym_links("Rihanna", "Loud", cfg=CFG)
+    assert got["album"] == f"{BASE}/release/album/rihanna/loud/", got
+    assert len(seen) == 2, seen                    # the 429 was retried
+    assert log.getvalue() == "", log.getvalue()    # and was not a refusal
+    assert intg._rym_warned is False, "a retried 429 must not latch RYM off"
+
+    # a 5xx that never clears is retried to the cap, and only THEN latches
+    fake = run({"/release/album/rihanna/loud/": status(503)})
+    log = io.StringIO()
+    with contextlib.redirect_stdout(log):
+        got = intg.rym_links("Rihanna", "Loud", cfg=CFG)
+    assert len(fake.calls) == 1 + intg.RYM_RETRIES, fake.calls
+    assert got["album"] is None and "HTTP 503" in log.getvalue(), log.getvalue()
+
+    # ----------------------------------------------------------------------- #
+    # 14) genres: only a page that IS the release asked about supplies them
+    # ----------------------------------------------------------------------- #
+
+    def genre_page(artist, album):
+        """A release page: the album and artist it states, plus genres."""
+        return ('<html><body>'
+                f'<h1 class="album_title">{album}</h1>'
+                f'<a href="/artist/{intg._rym_slug(artist)}">{artist}</a>'
+                '<a href="/genre/art-pop">Art Pop</a>'
+                '<a href="/genre/neo-soul">Neo Soul</a>'
+                '</body></html>')
+
+    fake = run({"/release/album/rihanna/loud/": ok(genre_page("Rihanna", "Loud"))})
+    got = intg.rym_genres("Rihanna", "Loud")
+    assert got and got["genres"] == ["Art Pop", "Neo Soul"], got
+
+    # the slug 200s, but the page is a DIFFERENT release: its genre anchors are
+    # not this album's, so nothing is returned (pre-fix they were handed to the
+    # import as Rihanna's genres)
+    fake = run({"/release/album/rihanna/loud/":
+                ok(genre_page("Cover Band", "Loud Cover"))})
+    log = io.StringIO()
+    with contextlib.redirect_stdout(log):
+        assert intg.rym_genres("Rihanna", "Loud") is None
+    assert "/search" in fake.calls[-1], fake.calls   # fell through, not taken
+    assert log.getvalue() == "", log.getvalue()
+
+    # the search fallback verifies every hit the same way: the cover version
+    # is passed over and the real release answers
+    fake = run({
+        "/release/album/rihanna/loud/": status(404),
+        "/search": ok(search_page("/release/album/cover-band/loud-cover/",
+                                  "/release/album/rihanna/loud-2/")),
+        "/release/album/cover-band/loud-cover/":
+            ok(genre_page("Cover Band", "Loud Cover")),
+        "/release/album/rihanna/loud-2/": ok(genre_page("Rihanna", "Loud")),
+    })
+    got = intg.rym_genres("Rihanna", "Loud")
+    assert got and got["genres"] == ["Art Pop", "Neo Soul"], got
+    assert got["source_url"] == f"{BASE}/release/album/rihanna/loud-2/", got
+
+    # a 200 that landed on RYM's search/home is not the release page asked for
+    fake = run({"/release/album/rihanna/loud/":
+                elsewhere(genre_page("Rihanna", "Loud"))})
+    log = io.StringIO()
+    with contextlib.redirect_stdout(log):
+        assert intg.rym_genres("Rihanna", "Loud") is None
+
+    # …and an artist page that is not that artist's supplies no genres either
+    fake = run({"/artist/rihanna": ok(genre_page("Cover Band", "Loud Cover"))})
+    assert intg.rym_artist_genres("Rihanna") is None
 finally:
     intg.httpx = _real_httpx
     intg.mb_get_cached = _real_mb_get_cached
     intg._rym_cache_dir = _real_cache_dir
     intg._rym_cookie = _real_cookie
     intg.RYM_MIN_INTERVAL = _real_interval
+    intg._rym_warned = False
+    intg._rym_blocked_cookie = ""
+    intg._rym_blocked_at = 0.0
     mlo_audio.AudioFile = _real_audiofile
 
 print("test_rym_links: OK")

@@ -1,15 +1,25 @@
 import { useEffect, useRef, useState } from "react";
-import { Columns3 } from "lucide-react";
+import { Columns3, X } from "lucide-react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 
 /** One table column definition: id for prefs/widths, header label, sort key.
  *  defHidden columns exist (sortable, toggleable via the columns chooser)
- *  but are not part of the default visible set. */
+ *  but are not part of the default visible set.
+ *  `tag` marks a user-added column backed by that tag (see useCustomColumns);
+ *  the columns chooser offers a remove control for exactly those. */
 export interface Col {
   id: string;
   label: string;
   sortKey: string;
   defHidden?: boolean;
+  tag?: string;
+}
+
+/** A user-added column: one file tag shown as its own table column. */
+export interface CustomCol {
+  id: string;
+  label: string;
+  tag: string;
 }
 
 /** Column layout shared by every album tracklist — the album page table and
@@ -67,6 +77,72 @@ export function useColumnPrefs(key: string, defs: Col[]): [string[], (id: string
   return [visible, toggle];
 }
 
+/** User-added tag columns per view, persisted in localStorage. The id
+ *  derives from the tag (`tag:MOOD`), so adding the same tag twice is a
+ *  no-op and the column survives a reload. `add` returns the new id ("" when
+ *  the tag is empty or already has a column) so callers can show it right
+ *  away — a column the user just created should not start hidden. */
+export function useCustomColumns(key: string): [CustomCol[], (tag: string, label?: string) => string, (id: string) => void] {
+  const storageKey = `mlo-customcols-${key}`;
+  const [customs, setCustoms] = useState<CustomCol[]>(() => {
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (raw) {
+        const parsed = JSON.parse(raw) as CustomCol[];
+        if (Array.isArray(parsed))
+          return parsed.filter((c) => c && typeof c.id === "string" && typeof c.tag === "string" && !!c.tag.trim());
+      }
+    } catch {
+      /* fall through to no custom columns */
+    }
+    return [];
+  });
+  const save = (next: CustomCol[]) => {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(next));
+    } catch {
+      /* ignore */
+    }
+  };
+  const add = (tag: string, label?: string) => {
+    const t = tag.trim().replace(/^tag:/i, "").toUpperCase();
+    if (!t) return "";
+    const id = `tag:${t}`;
+    if (customs.some((c) => c.id === id)) return "";
+    const next = [...customs, { id, label: (label ?? "").trim() || t, tag: t }];
+    setCustoms(next);
+    save(next);
+    return id;
+  };
+  const remove = (id: string) => {
+    const next = customs.filter((c) => c.id !== id);
+    setCustoms(next);
+    save(next);
+  };
+  return [customs, add, remove];
+}
+
+/** Cell text of a tag column: the row's tags first (case-insensitive key),
+ *  then its technical record, else "". Album rows pass their `meta` as
+ *  `tags` — it is the same tag map, one level up. `tag` is either the bare
+ *  tag or the column id (`tag:MOOD`) — callers hold one or the other. */
+export function customColValue(row: { tags?: unknown; tech?: unknown } | null | undefined, tag: string): string {
+  const want = tag.replace(/^tag:/i, "").toLowerCase();
+  for (const rec of [row?.tags, row?.tech]) {
+    if (!rec || typeof rec !== "object") continue;
+    const key = Object.keys(rec).find((k) => k.toLowerCase() === want);
+    const v = key ? (rec as Record<string, unknown>)[key] : null;
+    if (v !== null && v !== undefined && v !== "") return String(v);
+  }
+  return "";
+}
+
+/** Custom columns as table columns — `scope` picks the dotted sort key
+ *  rowValue resolves: "tags.X" on a track table, "meta.X" on an album one. */
+export function customCols(customs: CustomCol[], scope: "tags" | "meta"): Col[] {
+  return customs.map((c) => ({ id: c.id, label: c.label, sortKey: `${scope}.${c.tag}`, tag: c.tag }));
+}
+
 /** Drag-resized column widths per table view, persisted in localStorage.
  * Absent entries fall back to the fluid % classes; double-clicking a
  * handle (or the Columns menu reset) clears them. */
@@ -109,7 +185,8 @@ export function useColumnWidths(key: string): [Record<string, number>, (id: stri
  * second section (extraCols) covers a nested table that lives inside the same
  * view — e.g. the tracklist under an expanded album row. `iconOnly` renders
  * a small square icon button for placement inside a table's corner header
- * cell (where a labeled button would shout). */
+ * cell (where a labeled button would shout). With `onAddCustom` the menu also
+ * grows the tag-column form; columns carrying a `tag` get a remove control. */
 export function ColumnsMenu({
   cols,
   visible,
@@ -122,8 +199,11 @@ export function ColumnsMenu({
   extraCols,
   extraVisible,
   onExtraToggle,
+  extraOnRemoveCustom,
   extraTitle = "Tracklist columns",
   iconOnly = false,
+  onAddCustom,
+  onRemoveCustom,
 }: {
   cols: Col[];
   visible: string[];
@@ -136,10 +216,26 @@ export function ColumnsMenu({
   extraCols?: Col[];
   extraVisible?: string[];
   onExtraToggle?: (id: string) => void;
+  /** Removes a tag column from the nested table's list — the same list the
+   *  primary table's `onRemoveCustom` edits when the two share one customs
+   *  key (the album page and the library's expanded album rows do). */
+  extraOnRemoveCustom?: (id: string) => void;
   extraTitle?: string;
   iconOnly?: boolean;
+  /** Adds a tag-backed column (see useCustomColumns) — the menu shows the
+   *  "Add tag column" form only when this is wired. */
+  onAddCustom?: (tag: string, label?: string) => void;
+  onRemoveCustom?: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [tag, setTag] = useState("");
+  const [label, setLabel] = useState("");
+  const add = () => {
+    if (!tag.trim()) return;
+    onAddCustom?.(tag, label);
+    setTag("");
+    setLabel("");
+  };
   return (
     <div className="relative">
       <button
@@ -162,23 +258,74 @@ export function ColumnsMenu({
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full mt-1 z-50 bg-card border border-border rounded-lg p-2 w-48 shadow-2xl">
+          <div className={`absolute right-0 top-full mt-1 z-50 bg-card border border-border rounded-lg p-2 ${onAddCustom ? "w-56" : "w-48"} shadow-2xl`}>
             <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2 pt-1 pb-1.5">{title}</div>
             {cols.map((c) => (
-              <label key={c.id} className="flex items-center gap-2 px-2 py-1.5 text-xs cursor-pointer hover:bg-panel rounded">
-                <input type="checkbox" checked={visible.includes(c.id)} onChange={() => onToggle(c.id)} className="" />
-                {c.label || "Cover"}
-              </label>
+              <div key={c.id} className="flex items-center gap-2 px-2 py-1.5 text-xs hover:bg-panel rounded">
+                <label className="flex items-center gap-2 cursor-pointer min-w-0 flex-1">
+                  <input type="checkbox" checked={visible.includes(c.id)} onChange={() => onToggle(c.id)} className="" />
+                  <span className="truncate" title={c.tag ? `Tag: ${c.tag}` : undefined}>{c.label || "Cover"}</span>
+                </label>
+                {c.tag && onRemoveCustom && (
+                  <button
+                    className="shrink-0 text-zinc-600 hover:text-red-400"
+                    title={`Remove the ${c.label} column`}
+                    aria-label={`Remove the ${c.label} column`}
+                    onClick={() => onRemoveCustom(c.id)}
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
             ))}
+            {onAddCustom && (
+              <>
+                <div className="border-t border-border my-1.5" />
+                <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2 pt-1 pb-1.5">Add tag column</div>
+                <div className="flex gap-1 px-2">
+                  <input
+                    className="input !py-1 !px-2 text-xs min-w-0 flex-1"
+                    placeholder="TAG"
+                    title="Tag name — e.g. MOOD, COMPOSER, CATALOGNUMBER"
+                    value={tag}
+                    onChange={(e) => setTag(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && add()}
+                  />
+                  <input
+                    className="input !py-1 !px-2 text-xs min-w-0 flex-1"
+                    placeholder="Label"
+                    title="Optional header label — the tag name is used when empty"
+                    value={label}
+                    onChange={(e) => setLabel(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && add()}
+                  />
+                </div>
+                <button className="btn-ghost w-full !py-1 text-xs mt-1" onClick={add} disabled={!tag.trim()}>
+                  Add column
+                </button>
+              </>
+            )}
             {extraCols && onExtraToggle && extraVisible && (
               <>
                 <div className="border-t border-border my-1.5" />
                 <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2 pt-1 pb-1.5">{extraTitle}</div>
                 {extraCols.map((c) => (
-                  <label key={c.id} className="flex items-center gap-2 px-2 py-1.5 text-xs cursor-pointer hover:bg-panel rounded">
-                    <input type="checkbox" checked={extraVisible.includes(c.id)} onChange={() => onExtraToggle(c.id)} className="" />
-                    {c.label || "Cover"}
-                  </label>
+                  <div key={c.id} className="flex items-center gap-2 px-2 py-1.5 text-xs hover:bg-panel rounded">
+                    <label className="flex items-center gap-2 cursor-pointer min-w-0 flex-1">
+                      <input type="checkbox" checked={extraVisible.includes(c.id)} onChange={() => onExtraToggle(c.id)} className="" />
+                      <span className="truncate" title={c.tag ? `Tag: ${c.tag}` : undefined}>{c.label || "Cover"}</span>
+                    </label>
+                    {c.tag && extraOnRemoveCustom && (
+                      <button
+                        className="shrink-0 text-zinc-600 hover:text-red-400"
+                        title={`Remove the ${c.label} column`}
+                        aria-label={`Remove the ${c.label} column`}
+                        onClick={() => extraOnRemoveCustom(c.id)}
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    )}
+                  </div>
                 ))}
               </>
             )}

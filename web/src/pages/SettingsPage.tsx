@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Save, RotateCcw, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, Wand2, X } from "lucide-react";
+import { Save, RotateCcw, LayoutGrid, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, Wand2, X } from "lucide-react";
 import { api } from "../api";
 import ConfirmButton from "../components/ConfirmButton";
 import SourcesPanel from "../components/SourcesPanel";
@@ -1044,6 +1044,18 @@ export default function SettingsPage() {
     toast("Settings reset to defaults — click Save all settings to persist");
   };
 
+  /** Clear every UI preference this browser kept: accent, sidebar collapse,
+   *  grid sizes, table column layouts and widths, custom columns, the
+   *  fullscreen player's look, and the lyrics editor's key map. None of it
+   *  lives in the server config, so "Reset to defaults" above cannot reach
+   *  it — and a reload is what makes the built-in defaults apply again. */
+  const resetUiLayout = () => {
+    const keys = Object.keys(localStorage).filter((k) => k.startsWith("mlo"));
+    keys.forEach((k) => localStorage.removeItem(k));
+    toast(`Layout reset — ${keys.length} UI preference(s) cleared`);
+    setTimeout(() => window.location.reload(), 500);
+  };
+
   const save = async () => {
     try {
       await api.saveConfig({
@@ -1851,6 +1863,13 @@ export default function SettingsPage() {
               title="Restore factory defaults for every setting (music folder and first-run flag are kept)"
             >
               <RotateCcw className="h-4 w-4" /> Reset to defaults
+            </ConfirmButton>
+            <ConfirmButton
+              onConfirm={resetUiLayout}
+              confirmLabel="Reset layout"
+              title="Clear this browser's UI preferences — accent, sidebar, grid sizes, column layouts and widths, custom columns, viewer options — and reload"
+            >
+              <LayoutGrid className="h-4 w-4" /> Reset UI & layout
             </ConfirmButton>
             <button className="btn-primary" onClick={save}>
               <Save className="h-4 w-4" /> Save all settings

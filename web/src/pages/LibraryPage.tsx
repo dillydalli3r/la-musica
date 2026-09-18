@@ -13,8 +13,8 @@ import {
   sortRows, SortHeader, groupByDisc, byDiscThenTrack, type SortState,
 } from "../lib/sort.tsx";
 import {
-  ColumnResizer, ColumnsMenu, useColumnPrefs, useColumnWidths,
-  ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, type Col,
+  ColumnResizer, ColumnsMenu, useColumnPrefs, useColumnWidths, useCustomColumns,
+  customColValue, customCols, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, type Col, type CustomCol,
 } from "../lib/columns";
 import { gradeSliver, statusFor, auditFails } from "../lib/status";
 import { invalidateLibrary } from "../lib/invalidate";
@@ -271,12 +271,35 @@ export default function LibraryPage() {
   const [bulkTagsOpen, setBulkTagsOpen] = useState(false);
 
   const [fullDates, setFullDates] = useLocalPref("full-dates", false);
-  const [albumCols, toggleAlbumCol] = useColumnPrefs("albums", ALBUM_COLS);
+  // User-added tag columns ride in the same visible/width prefs as the
+  // built-ins: their Cols are appended to the view's defs (album rows read
+  // the album's `meta` tags, track rows the files' own tags). The artist
+  // table carries no tag record at all and the expanded album tracklist
+  // shares its prefs with the album page (which has no tag-column code), so
+  // both stay built-in-only.
+  const [albumCustom, addAlbumCustomCol, removeAlbumCustomCol] = useCustomColumns("albums");
+  const [trackCustom, addTrackCustomCol, removeTrackCustomCol] = useCustomColumns("tracks");
+  const albumDefs: Col[] = [...ALBUM_COLS, ...customCols(albumCustom, "meta")];
+  const trackDefs: Col[] = [...TRACK_COLS, ...customCols(trackCustom, "tags")];
+  const [albumCols, toggleAlbumCol] = useColumnPrefs("albums", albumDefs);
   const [artistCols, toggleArtistCol] = useColumnPrefs("artists", ARTIST_COLS);
-  const [trackCols, toggleTrackCol] = useColumnPrefs("tracks", TRACK_COLS);
+  const [trackCols, toggleTrackCol] = useColumnPrefs("tracks", trackDefs);
+  // A column the user just created should not start hidden.
+  const addAlbumCustom = (tag: string, label?: string) => {
+    const id = addAlbumCustomCol(tag, label);
+    if (id) toggleAlbumCol(id);
+  };
+  const addTrackCustom = (tag: string, label?: string) => {
+    const id = addTrackCustomCol(tag, label);
+    if (id) toggleTrackCol(id);
+  };
   // Album tracklists (the expanded album rows here share these prefs — and
-  // their widths — with the album page, since they are the same table).
-  const [alTrackCols, toggleAlTrackCol] = useColumnPrefs("album-tracks", ALBUM_TRACK_COLS);
+  // their widths and tag columns — with the album page, since they are the
+  // same table). New tag columns are added from the album page's own Columns
+  // menu, where the tracklist is the primary table; they appear here too.
+  const [alCustom, , removeAlCustomCol] = useCustomColumns("album-tracks");
+  const alTrackDefs: Col[] = [...ALBUM_TRACK_COLS, ...customCols(alCustom, "tags")];
+  const [alTrackCols, toggleAlTrackCol] = useColumnPrefs("album-tracks", alTrackDefs);
   const [alTrackW, setAlTrackW, resetAlTrackW] = useColumnWidths("album-tracks");
   // Drag-resized column widths, persisted per view ("Reset" in the Columns
   // menu — or double-click a handle — restores the fluid defaults).
@@ -706,9 +729,11 @@ export default function LibraryPage() {
 
         {view !== "compact" && view !== "grid" && (
           <ColumnsMenu
-            cols={view === "albums" ? ALBUM_COLS : view === "artists" ? ARTIST_COLS : TRACK_COLS}
+            cols={view === "albums" ? albumDefs : view === "artists" ? ARTIST_COLS : trackDefs}
             visible={view === "albums" ? albumCols : view === "artists" ? artistCols : trackCols}
             onToggle={view === "albums" ? toggleAlbumCol : view === "artists" ? toggleArtistCol : toggleTrackCol}
+            onAddCustom={view === "artists" ? undefined : view === "albums" ? addAlbumCustom : addTrackCustom}
+            onRemoveCustom={view === "albums" ? removeAlbumCustomCol : view === "artists" ? undefined : removeTrackCustomCol}
             fullDates={fullDates}
             onFullDates={setFullDates}
             onResetWidths={view === "albums" ? () => { resetAlbumW(); resetAlTrackW(); } : view === "artists" ? resetArtistW : resetTrackW}
@@ -716,9 +741,10 @@ export default function LibraryPage() {
               Object.keys(view === "albums" ? albumW : view === "artists" ? artistW : trackW).length > 0 ||
               (view === "albums" && Object.keys(alTrackW).length > 0)
             }
-            extraCols={view === "albums" ? ALBUM_TRACK_COLS : undefined}
+            extraCols={view === "albums" ? alTrackDefs : undefined}
             extraVisible={view === "albums" ? alTrackCols : undefined}
             onExtraToggle={view === "albums" ? toggleAlTrackCol : undefined}
+            extraOnRemoveCustom={view === "albums" ? removeAlCustomCol : undefined}
           />
         )}
 
@@ -1056,9 +1082,9 @@ export default function LibraryPage() {
                   )}
                   <th className="th w-10"></th>
                   <th className="th w-14"></th>
-                  {ALBUM_COLS.filter((c) => albumCols.includes(c.id)).map((c) => (
+                  {albumDefs.filter((c) => albumCols.includes(c.id)).map((c) => (
                     <SortHeader key={c.id} label={c.label} sort={albumSort} sortKey={c.sortKey} onSort={setAlbumSort}
-                      className={`relative ${ALBUM_COL_W[c.id] ?? ""}`}
+                      className={`relative ${ALBUM_COL_W[c.id] ?? (c.tag ? "w-[10%]" : "")}`}
                       style={albumW[c.id] ? { width: albumW[c.id] } : undefined} >
                       <ColumnResizer width={albumW[c.id]} onDrag={(w) => setAlbumW(c.id, w)} onReset={() => resetAlbumW()} />
                     </SortHeader>
@@ -1093,6 +1119,8 @@ export default function LibraryPage() {
                       fullDates={fullDates}
                       selectMode={selectMode}
                       trackCols={alTrackCols}
+                      trackCustom={alCustom}
+                      tagCols={albumCustom}
                       trackWidths={alTrackW}
                       onTrackWidth={(id, w) => setAlTrackW(id, w)}
                       onResetTrackWidths={resetAlTrackW}
@@ -1173,14 +1201,14 @@ export default function LibraryPage() {
                         onChange={() => setSelection({ tracks: allTracksSelected ? [] : sortedTracks.map((t) => t.path) })} />
                     </th>
                   )}
-                  {TRACK_COLS.filter((c) => trackCols.includes(c.id)).map((c) => (
+                  {trackDefs.filter((c) => trackCols.includes(c.id)).map((c) => (
                     c.id === "cover" ? (
                       <th key={c.id} className={`th relative ${TRACK_COL_W[c.id] ?? ""}`} title="Cover art">
                         <span className="sr-only">Cover</span>
                       </th>
                     ) : (
                     <SortHeader key={c.id} label={c.label} sort={trackSort} sortKey={c.sortKey} onSort={setTrackSort}
-                      className={`relative ${TRACK_COL_W[c.id] ?? ""}`}
+                      className={`relative ${TRACK_COL_W[c.id] ?? (c.tag ? "w-[10%]" : "")}`}
                       style={trackW[c.id] ? { width: trackW[c.id] } : undefined}>
                       <ColumnResizer width={trackW[c.id]} onDrag={(w) => setTrackW(c.id, w)} onReset={() => resetTrackW()} />
                     </SortHeader>
@@ -1294,6 +1322,11 @@ export default function LibraryPage() {
                       {trackCols.includes("composer") && <td className="td text-zinc-500 break-words" title="Composer">{tr.tags.COMPOSER ?? "—"}</td>}
                       {trackCols.includes("lyricist") && <td className="td text-zinc-500 break-words" title="Lyricist">{tr.tags.LYRICIST ?? "—"}</td>}
                       {trackCols.includes("remixer") && <td className="td text-zinc-500 break-words" title="Remixer">{tr.tags.REMIXER ?? "—"}</td>}
+                      {trackCustom.filter((c) => trackCols.includes(c.id)).map((c) => (
+                        <td key={c.id} className="td text-zinc-500 break-words" title={`Tag: ${c.tag}`}>
+                          {customColValue(tr, c.tag) || "—"}
+                        </td>
+                      ))}
                     </tr>
                   );
                 })}
@@ -1323,6 +1356,8 @@ function AlbumRowGroup({
   fullDates,
   selectMode,
   trackCols,
+  trackCustom = [],
+  tagCols,
   trackWidths,
   onTrackWidth,
   onResetTrackWidths,
@@ -1343,6 +1378,12 @@ function AlbumRowGroup({
   fullDates: boolean;
   selectMode: boolean;
   trackCols: string[];
+  /** Tag columns of the nested tracklist itself (shared with the album page
+   *  through the same customs key — see the caller). */
+  trackCustom?: CustomCol[];
+  /** Tag columns added in the Columns menu — appended after the built-ins,
+   *  in the same order as their headers. */
+  tagCols: CustomCol[];
   trackWidths: Record<string, number>;
   onTrackWidth: (id: string, px: number) => void;
   onResetTrackWidths: () => void;
@@ -1386,6 +1427,14 @@ function AlbumRowGroup({
       id: "inst", cls: "td text-zinc-500 tabular-nums", title: "Instrumental tracks in this album",
       node: album.inst_count || "—",
     });
+  // Tag columns last — the header renders them in this same order.
+  for (const c of tagCols) {
+    if (!visibleCols.includes(c.id)) continue;
+    cells.push({
+      id: c.id, cls: "td text-zinc-500 break-words", title: `Tag: ${c.tag}`,
+      node: customColValue({ tags: album.meta }, c.tag) || "—",
+    });
+  }
 
   return (
     <>
@@ -1422,7 +1471,7 @@ function AlbumRowGroup({
               <thead className="border-b border-border">
                 <tr>
                   {selectMode && <th className="th w-8"></th>}
-                  {ALBUM_TRACK_COLS.filter((c) => trackCols.includes(c.id)).map((c) =>
+                  {[...ALBUM_TRACK_COLS, ...customCols(trackCustom, "tags")].filter((c) => trackCols.includes(c.id)).map((c) =>
                     c.id === "cover" ? (
                       <th key={c.id} className={`th relative ${ALBUM_TRACK_COL_W[c.id] ?? ""}`} title="Cover art">
                         <span className="sr-only">Cover</span>
@@ -1530,6 +1579,15 @@ function AlbumRowGroup({
                             <td className="td text-zinc-500 tabular-nums" title={`Dynamic range${t.tags["ALBUM DYNAMIC RANGE"] ? ` · album ${t.tags["ALBUM DYNAMIC RANGE"]}` : ""}`}>
                               {t.tags["DYNAMIC RANGE"] ?? "—"}
                             </td>
+                          )}
+                          {/* the tracklist's own tag columns, after the
+                              built-ins (same order as their headers) */}
+                          {trackCustom.map((c) =>
+                            trackCols.includes(c.id) ? (
+                              <td key={c.id} className="td text-zinc-500 break-words" title={c.label}>
+                                {customColValue(t, c.tag) || "—"}
+                              </td>
+                            ) : null
                           )}
                         </tr>
                       ))}

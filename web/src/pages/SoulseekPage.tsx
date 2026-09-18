@@ -2,18 +2,19 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowDownUp, Download, Eye, EyeOff, FolderOpen, Loader2, Play, Power, RefreshCw, Search,
+  ArrowDownUp, Download, Disc3, Eye, EyeOff, FolderInput, FolderOpen, Loader2, Play, Power, RefreshCw, Search,
   User, Zap, Square, FileCheck2, FileVideo, Music2, Save, Tag, Trash2, PackageOpen,
   Star, Plus, CheckCircle2, CircleDashed, AlertTriangle, ExternalLink, RotateCw, ChevronDown, ChevronRight, Link2,
-  MessageSquare,
+  MessageSquare, X,
 } from "lucide-react";
 import { api } from "../api";
 import type { SlskAutoFile, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskSearchProgress, SlskTransfer, StagingEntry, StagingRoot, StagingRootId } from "../api";
 import { toast } from "../store";
 import { EmptyState, PageLoading } from "../components/Badges";
+import CachedTracksView from "../components/CachedTracksView";
 import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
-import type { Wish } from "../types";
+import type { DownloadEntry, ImportBulkJob, Wish } from "../types";
 import { fmtCounts, fmtPercent } from "../lib/fmt";
 
 interface SlskFile {
@@ -2034,12 +2035,13 @@ export default function SoulseekPage() {
 
   // Page tabs — Search is the default; the badge on Downloads counts active
   // transfers so progress is visible from any tab.
-  type TabId = "search" | "auto" | "wishes" | "downloads" | "messages" | "sharing" | "settings";
+  type TabId = "search" | "auto" | "wishes" | "downloads" | "cached" | "messages" | "sharing" | "settings";
   const TAB_LIST: { id: TabId; label: string }[] = [
     { id: "search", label: "Search" },
     { id: "auto", label: "Auto-import" },
     { id: "wishes", label: "Wishes" },
     { id: "downloads", label: "Downloads" },
+    { id: "cached", label: "Cached tracks" },
     { id: "messages", label: "Messages" },
     { id: "sharing", label: "Sharing" },
     { id: "settings", label: "Settings" },
@@ -2609,10 +2611,13 @@ export default function SoulseekPage() {
       {tab === "downloads" && (
         <>
           <ReviewPanel />
+          <StagingImportPanel />
           <DownloadsPanel downloads={downloads} status={status} />
           <StagingPanel />
         </>
       )}
+
+      {tab === "cached" && <CachedTracksView />}
 
       {tab === "messages" && <MessagesPanel running={running} />}
 
@@ -3169,9 +3174,7 @@ function StagingCard({ id, root, busy, onDelete, onClear }: {
   onDelete: (e: StagingEntry) => void;
   onClear: () => void;
 }) {
-  const navigate = useNavigate();
   const shown = root.entries.slice(0, STAGING_ROWS);
-  const holdsAudio = root.entries.some((e) => e.album);
 
   return (
     <div className="rounded-md border border-border bg-panel/60 p-3 space-y-2">
@@ -3195,15 +3198,6 @@ function StagingCard({ id, root, busy, onDelete, onClear }: {
           </div>
         </div>
         <div className="flex items-center gap-1 shrink-0">
-          {id === "downloads" && holdsAudio && (
-            <button
-              className="btn-ghost !py-0.5 !px-2 text-[11px]"
-              onClick={() => navigate("/downloads")}
-              title="Tag, review and import the finished albums there — the import lives on the Downloads page"
-            >
-              <Link2 className="h-3 w-3" /> Import to library
-            </button>
-          )}
           {root.count > 0 && (
             <button
               className="btn-ghost !py-0.5 !px-2 text-[11px]"
@@ -3388,6 +3382,306 @@ function UploadsPanel({ running }: { running: boolean }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/** `<music>/.mlo/downloads` — slskd's staging area as a triage list: pick the
+ *  entries worth keeping and import them (moving each into the library and
+ *  running the configured import chain on it), or delete them.
+ *
+ *  Everything Soulseek pulls down lands here and stays until one of those two
+ *  happens; entries are folders (usually one album each) or loose files, and
+ *  selecting several acts on all of them at once. The same bytes also show up
+ *  under "Staging on disk" below — that one clears the in-flight leftovers,
+ *  this one is where a finished album goes into the library. */
+function StagingImportPanel() {
+  const qc = useQueryClient();
+  const [sel, setSel] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  /** The bulk job an import of 2+ entries runs (null = none). */
+  const [bulkJob, setBulkJob] = useState<ImportBulkJob | null>(null);
+
+  const { data, isLoading, isFetching, refetch } = useQuery({
+    queryKey: ["downloads"],
+    queryFn: api.downloads,
+    refetchInterval: 15000,
+  });
+
+  // Poll the bulk queue while it runs; done/failed stops the poll.
+  useEffect(() => {
+    if (bulkJob?.status !== "running") return;
+    const timer = setInterval(() => {
+      api.importBulkStatus()
+        .then((job) => {
+          setBulkJob(job);
+          if (job.status !== "running") {
+            qc.invalidateQueries({ queryKey: ["downloads"] });
+            qc.invalidateQueries({ queryKey: ["library"] });
+          }
+        })
+        .catch(() => setBulkJob(null)); // server restarted: nothing to poll
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [bulkJob?.status, qc]);
+
+  const entries: DownloadEntry[] = data?.entries ?? [];
+  const totals = useMemo(
+    () => ({
+      albums: entries.filter((e) => e.album).length,
+      partial: entries.filter((e) => e.partial).length,
+    }),
+    [entries]
+  );
+
+  const toggle = (name: string) =>
+    setSel((s) => {
+      const next = new Set(s);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+
+  const selected = [...sel];
+  /** Entries that exist in the current listing — a stale selection (a file
+   *  that vanished between renders) must never be sent to the server. */
+  const liveSelection = selected.filter((n) => entries.some((e) => e.name === n));
+
+  const after = (msg: string) => {
+    setSel(new Set());
+    setConfirmDelete(false);
+    qc.invalidateQueries({ queryKey: ["downloads"] });
+    qc.invalidateQueries({ queryKey: ["library"] });
+    toast(msg);
+  };
+
+  const doImport = async () => {
+    if (!liveSelection.length || !data?.folder) return;
+    setBusy(true);
+    try {
+      // ONE entry or several: same route. The bulk queue moves each entry into
+      // the library AND runs the configured import chain on it — a single
+      // entry used to take the move-only route and silently skip the chain.
+      const job = await api.importBulk(
+        liveSelection.map((name) => ({ path: `${data.folder}/${name}`, move: true }))
+      );
+      if (job.ok && job.job) {
+        setBulkJob(job.job);
+        setSel(new Set());
+        toast(`Importing ${liveSelection.length} entr${liveSelection.length === 1 ? "y" : "ies"} — progress below`);
+      } else {
+        toast(`Queue import: ${job.error ?? "could not start"}`);
+      }
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const bulkFailed = (bulkJob?.items ?? []).filter((r) => r.status === "failed");
+
+  const doDelete = async () => {
+    if (!liveSelection.length) return;
+    setBusy(true);
+    try {
+      const res = await api.downloadsDelete(liveSelection);
+      after(
+        res.failed.length
+          ? `Deleted ${res.deleted.length} (${fmtSize(res.freed)}) — ${res.failed.length} failed: ${res.failed.map((f) => f.name).join(", ")}`
+          : `Deleted ${res.deleted.length} entr${res.deleted.length === 1 ? "y" : "ies"} — freed ${fmtSize(res.freed)}`
+      );
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const allSelected = entries.length > 0 && liveSelection.length === entries.length;
+
+  return (
+    <div className="panel">
+      <div className="flex items-center justify-between gap-2 flex-wrap mb-2">
+        <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500 flex items-center gap-1.5">
+          <FolderInput className="h-3.5 w-3.5" /> Import to library
+          <span className="text-[10px] font-mono normal-case text-zinc-400">
+            {data?.count ?? 0} entr{(data?.count ?? 0) === 1 ? "y" : "ies"} · {fmtSize(data?.bytes ?? 0)}
+            {totals.albums > 0 && ` · ${totals.albums} look like albums`}
+            {totals.partial > 0 && ` · ${totals.partial} in-flight`}
+          </span>
+        </div>
+        <button
+          className="btn-ghost !py-1 text-xs"
+          onClick={() => refetch()}
+          disabled={isFetching}
+          title="Re-read the downloads folder"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} /> Refresh
+        </button>
+      </div>
+
+      <div className="space-y-3">
+        {data?.folder && (
+          <div className="text-[11px] text-zinc-600 font-mono truncate" title={data.folder}>
+            {data.folder}
+          </div>
+        )}
+
+        {/* Bulk import (2+ entries): per-album progress of the queue. */}
+        {bulkJob?.status === "running" && (
+          <div className="rounded-md border border-border bg-panel/60 p-2.5 space-y-1.5">
+            <div className="flex items-center gap-2 text-xs">
+              <span className="flex-1 truncate text-zinc-300" title={bulkJob.label}>
+                {bulkJob.label || "Importing…"}
+              </span>
+              <span className="text-zinc-500 font-mono tabular-nums shrink-0">
+                {fmtCounts(bulkJob.done ?? 0, bulkJob.total ?? 0)}
+              </span>
+            </div>
+            <div className="h-1.5 rounded-sm bg-raise overflow-hidden">
+              <div
+                className="h-full bg-gradient-to-r from-accent to-indigo-500 transition-all duration-300"
+                style={{
+                  width: `${bulkJob.total ? Math.min(100, ((bulkJob.done ?? 0) / bulkJob.total) * 100) : 0}%`,
+                }}
+              />
+            </div>
+            <div className="text-[10px] text-zinc-500">
+              Importing moves each entry into the library and runs the configured import chain on it.
+            </div>
+          </div>
+        )}
+
+        {bulkFailed.length > 0 && (
+          <div className="rounded-md border border-red-900/60 bg-red-950/30 p-2.5 text-xs text-red-300 space-y-0.5">
+            {bulkFailed.map((r) => (
+              <div key={r.path} className="truncate" title={`${r.path} — ${r.error}`}>
+                {r.path.split(/[\\/]/).pop()} — {r.error}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Nothing to work with: the folder is created by the app on first use,
+            so an absent one is normal on a fresh install, not an error. */}
+        {!isLoading && !data?.exists && (
+          <EmptyState
+            title="No downloads folder yet"
+            hint="It is created the first time Soulseek saves something."
+          />
+        )}
+
+        {data?.exists && entries.length === 0 && (
+          <EmptyState
+            title="Nothing downloaded"
+            hint="Soulseek downloads land here, then you import or delete them from this tab."
+          />
+        )}
+
+        {entries.length > 0 && (
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              className="btn-ghost !py-1 text-xs"
+              onClick={() => setSel(allSelected ? new Set() : new Set(entries.map((e) => e.name)))}
+            >
+              {allSelected ? "Select none" : "Select all"}
+            </button>
+            {liveSelection.length > 0 && (
+              <span className="text-xs text-zinc-400">{liveSelection.length} selected</span>
+            )}
+            <div className="flex items-center gap-2 ml-auto">
+              <button
+                className="btn-primary !py-1 text-xs"
+                onClick={doImport}
+                disabled={busy || !liveSelection.length}
+                title={
+                  liveSelection.length > 1
+                    ? "Move the selected entries into the library and run the import chain on each"
+                    : "Move the selected entry into the library and run the import chain on it"
+                }
+              >
+                <FolderInput className="h-3.5 w-3.5" />{" "}
+                {liveSelection.length > 1 ? `Import ${liveSelection.length} (queue)` : "Import to library"}
+              </button>
+              {confirmDelete ? (
+                <>
+                  <span className="text-xs text-amber-300">Delete permanently?</span>
+                  <button className="btn-danger !py-1 text-xs" onClick={doDelete} disabled={busy}>
+                    <Trash2 className="h-3.5 w-3.5" /> Yes, delete
+                  </button>
+                  <button className="btn-ghost !py-1 text-xs" onClick={() => setConfirmDelete(false)} disabled={busy}>
+                    <X className="h-3.5 w-3.5" /> Cancel
+                  </button>
+                </>
+              ) : (
+                <button
+                  className="btn-danger !py-1 text-xs"
+                  onClick={() => setConfirmDelete(true)}
+                  disabled={busy || !liveSelection.length}
+                  title="Delete the selected entries from disk — this cannot be undone"
+                >
+                  <Trash2 className="h-3.5 w-3.5" /> Delete
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="space-y-1.5">
+          {entries.map((e) => {
+            const on = sel.has(e.name);
+            return (
+              <label
+                key={e.name}
+                className={`flex items-center gap-3 bg-card rounded-lg border px-3 py-2 cursor-pointer ${
+                  on ? "border-accent/60" : "border-border"
+                } ${e.partial ? "opacity-60" : ""}`}
+                title={e.partial ? "Still downloading or a scratch file — leave it alone" : e.name}
+              >
+                <input type="checkbox" checked={on} onChange={() => toggle(e.name)} />
+                {e.dir ? (
+                  <Disc3 className="h-4 w-4 text-zinc-500 shrink-0" />
+                ) : (
+                  <FolderOpen className="h-4 w-4 text-zinc-500 shrink-0" />
+                )}
+                <span className="flex-1 min-w-0">
+                  <span className="block truncate text-sm text-zinc-200">{e.name}</span>
+                  <span className="block text-[11px] text-zinc-500">
+                    {fmtSize(e.bytes)}
+                    {e.dir && ` · ${e.files} file(s)`}
+                    {e.audio > 0 && ` · ${e.audio} audio`}
+                    {e.images > 0 && ` · ${e.images} image(s)`}
+                    {!e.album && e.audio === 0 && " · no audio"}
+                  </span>
+                </span>
+                {e.partial && (
+                  <span className="chip bg-amber-950/40 text-amber-300 border border-amber-900 shrink-0">
+                    <AlertTriangle className="h-3 w-3" /> in-flight
+                  </span>
+                )}
+                {!e.partial && e.album && (
+                  <span className="chip bg-emerald-900/50 text-emerald-300 border border-emerald-800 shrink-0">
+                    importable
+                  </span>
+                )}
+                {!e.partial && !e.album && (
+                  <span className="chip bg-raise border border-border text-zinc-500 shrink-0">no audio</span>
+                )}
+              </label>
+            );
+          })}
+        </div>
+
+        {entries.length > 0 && (
+          <div className="text-[10px] text-zinc-600">
+            Import moves an entry into the library as its own album named after the folder and runs the
+            configured import chain on it (Settings → Import); several entries are just a queue of that.
+            Delete removes it from disk for good — nothing here is copied to the trash bin first.
+          </div>
+        )}
+      </div>
     </div>
   );
 }

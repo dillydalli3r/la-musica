@@ -10,6 +10,7 @@ import { toast, useStore } from "../store";
 import { fmtTech, fmtPair, isVideoFile } from "../lib/fmt";
 import { AdvisoryMark } from "./Badges";
 import CoverImg from "./CoverImg";
+import Popover, { MenuItem } from "./Popover";
 import ScrubSeek from "./ScrubSeek";
 import { MAX_DB, MIN_DB, activeAnalyser } from "../lib/analyser";
 import Visualizer from "./Visualizer";
@@ -38,11 +39,13 @@ const ZOOM_KEY = "mlo.np.lyrzoom.v2"; // lyrics zoom multiplier (persisted)
 const AMB_FLOOR_DB = -82;
 const AMB_CEIL_DB = -57;
 
-/** How often the ambience reads the analyser and updates --amb, in ms. Every
- * layer eases its own properties from that one value over seconds, so a
- * lower rate costs nothing visually — and a higher one is how the background
- * started strobing. */
-const AMB_TICK_MS = 120;
+/** How often the ambience reads the analyser and updates --amb, in ms. This
+ * has to keep up with `.amb-glow`'s own transitions in index.css: with the
+ * old 2.6/4 s easing a 120 ms tick was more than enough, but the two low-
+ * passes stacked into a layer that barely moved, so the CSS now eases in
+ * under a second and the tick follows it. Still a stepped write, never a
+ * per-frame paint — the smoothing below is what keeps a kick off the screen. */
+const AMB_TICK_MS = 70;
 
 /** How the player applies ReplayGain — mirrors the `replaygain_mode` config
  * options (mlo/config.py). */
@@ -246,12 +249,13 @@ export default function NowPlayingView(p: Props) {
 
   // ---- background ambience (Apple Music-style, layered) --------------------
   // One value comes from the audio — the shared WebAudio analyser's bass-
-  // weighted level, smoothed — and it is applied as a slow swell to ONE glow
-  // layer. Everything else (cover breathing, aurora sweep, drifting color
-  // fields) is CSS animation on its own long clock. Nothing is painted per
-  // frame: painting an opacity from the current level is what read as
-  // strobing, because a kick could brighten one frame and the next took it
-  // back. The layers themselves are described at the markup below.
+  // weighted level, smoothed — and it is applied as a breathing swell to ONE
+  // glow layer. Everything else (cover breathing, aurora sweep, drifting color
+  // fields) is CSS animation on its own long clock. The level is written as a
+  // stepped custom property, not painted per frame: an instant attack on this
+  // layer is what read as strobing, because a kick could brighten one frame and
+  // the next took it back. The layers themselves are described at the markup
+  // below.
   const ambRef = useRef<HTMLDivElement>(null);
   const eased = useRef({ energy: 0 });
   // Read through a ref, exactly like the bars do: the ambience loop already
@@ -305,12 +309,13 @@ export default function NowPlayingView(p: Props) {
         }
       }
       // Asymmetric smoothing here, CSS easing on the other side: this writes
-      // ONE custom property every AMB_TICK_MS and every layer eases its own
-      // opacity/scale over seconds (.amb-glow). Per-frame opacity writes with
-      // an instant attack are what read as strobing — a kick could paint a
-      // bright frame and the next frame took it away.
+      // ONE custom property every AMB_TICK_MS and .amb-glow eases its own
+      // opacity/scale from it. The old 0.12/0.03 per 120 ms stacked a ~1 s
+      // attack on top of multi-second CSS transitions and flattened the whole
+      // layer; these constants ride the beat (~0.16 s attack) while the
+      // release stays the slower half, so nothing flashes on a kick.
       const prev = eased.current.energy;
-      eased.current.energy = prev + (energy - prev) * (energy > prev ? 0.12 : 0.03);
+      eased.current.energy = prev + (energy - prev) * (energy > prev ? 0.34 : 0.1);
       el.style.setProperty("--amb", eased.current.energy.toFixed(3));
       timer = window.setTimeout(read, AMB_TICK_MS);
     };
@@ -736,26 +741,22 @@ export default function NowPlayingView(p: Props) {
         >
           <ListPlus className="h-[18px] w-[18px]" />
         </button>
-        {plOpen && (
-          <>
-            <div className="fixed inset-0 z-10" onClick={() => setPlOpen(false)} />
-            <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 z-20 rounded-lg shadow-2xl border border-border p-1.5 w-60 bg-zinc-950 max-h-72 flex flex-col">
-              <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2 pt-1 pb-1">Playlists</div>
-              <div className="overflow-y-auto min-h-0">
-                {(playlists ?? []).filter((pl) => pl.kind === "manual").map((pl) => (
-                  <button
-                    key={pl.id}
-                    className="w-full text-left px-2 py-1.5 rounded-lg text-xs text-zinc-300 hover:bg-white/10 hover:text-white truncate"
-                    onClick={() => addToPlaylist(pl)}
-                    title={`Add to ${pl.name}`}
-                  >
-                    {pl.name}
-                  </button>
-                ))}
-                {!(playlists ?? []).some((pl) => pl.kind === "manual") && (
-                  <div className="px-2 py-1.5 text-[11px] text-zinc-600">No manual playlists yet</div>
-                )}
-              </div>
+        <Popover
+          open={plOpen}
+          onClose={() => setPlOpen(false)}
+          align="center"
+          placement="top"
+          panelClass="w-60 p-1.5 max-h-72 flex flex-col"
+        >
+            <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2 pt-1 pb-1">Playlists</div>
+            <div className="overflow-y-auto min-h-0">
+              {(playlists ?? []).filter((pl) => pl.kind === "manual").map((pl) => (
+                <MenuItem key={pl.id} label={pl.name} title={`Add to ${pl.name}`} onClick={() => addToPlaylist(pl)} />
+              ))}
+              {!(playlists ?? []).some((pl) => pl.kind === "manual") && (
+                <div className="px-2 py-1.5 text-[11px] text-zinc-600">No manual playlists yet</div>
+              )}
+            </div>
               <div className="flex items-center gap-1.5 pt-1.5 mt-1 border-t border-white/10">
                 <input
                   className="input !py-1 !px-2 text-[11px] flex-1 min-w-0"
@@ -771,9 +772,7 @@ export default function NowPlayingView(p: Props) {
                   Create
                 </button>
               </div>
-            </div>
-          </>
-        )}
+        </Popover>
       </div>
     </div>
   );
@@ -873,9 +872,9 @@ export default function NowPlayingView(p: Props) {
       {/* ---- ambient background -------------------------------------------
           Five layers, all composed here and animated by CSS on long clocks:
           the cover's own colors blurred underneath, a slow aurora sweep,
-          drifting color fields, one glow the music swells (--amb, written a
-          few times a second), then grain and a vignette to settle it. The
-          layers never react per frame — that was the strobing. */}
+          drifting color fields, one glow the music swells (--amb, written
+          every 70 ms), then grain and a vignette to settle it. The layers
+          never react per frame — that was the strobing. */}
       <div ref={ambRef} className="absolute inset-0 overflow-clip" aria-hidden>
         <div className="amb-cover absolute inset-0 blur-3xl opacity-[0.34]">
           <CoverImg albumPath={p.current.albumPath} coverFile={coverFile} wrapperClass="w-full h-full" />
@@ -907,7 +906,7 @@ export default function NowPlayingView(p: Props) {
           </div>
         )}
         {/* the one music-driven layer: a wide soft glow behind the artwork.
-            .amb-glow eases opacity/scale from --amb over seconds, so the
+            .amb-glow eases opacity/scale from --amb over ~0.6-0.9 s, so the
             music reads as the light breathing, never as a flash */}
         <div
           className="amb-glow absolute inset-0"
@@ -1022,13 +1021,11 @@ export default function NowPlayingView(p: Props) {
               >
                 <Settings2 className="h-5 w-5" />
               </button>
-              {options && (
-                <>
-                  {/* click-away shield so the popover never lingers over the
-                      lyrics; the panel itself is opaque and layered above
-                      everything so it reads cleanly over moving text */}
-                  <div className="fixed inset-0 z-40" onClick={() => setOptions(false)} />
-                  <div className="absolute right-0 top-full mt-1 z-50 rounded-lg shadow-2xl p-1.5 w-72 max-w-[calc(100vw-1.5rem)] bg-zinc-950 border border-border">
+              <Popover
+                open={options}
+                onClose={() => setOptions(false)}
+                panelClass="w-72 max-w-[calc(100vw-1.5rem)] p-1.5"
+              >
                   <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2 pt-1 pb-1">Lyrics</div>
                 {[
                     { id: "xlit" as const, label: "Transliteration", on: showXlit, act: () => toggleOpt("xlit") },
@@ -1163,9 +1160,7 @@ export default function NowPlayingView(p: Props) {
                     <span className="w-14 text-right text-[10px] text-zinc-500 tabular-nums">{rgDb(preampDraft)}</span>
                   </div>
                   <div className="text-[10px] text-zinc-600 px-2 pb-1">{rgLine}</div>
-                </div>
-                </>
-              )}
+              </Popover>
             </div>
           </div>
         </div>

@@ -2,8 +2,8 @@ import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowDownToLine, ArrowDownUp, ChevronLeft, ChevronRight, ClipboardCheck, Disc3, Gauge, HardDriveDownload, Heart, Home, Import,
-  Library, ListMusic, Menu, Music2, PanelLeftClose, Search, Tags, Trash2, User, X,
+  ArrowDownUp, ChevronLeft, ChevronRight, ClipboardCheck, Disc3, Gauge, HardDriveDownload, Heart, Home, Import,
+  Keyboard, Library, ListMusic, Menu, Music2, PanelLeftClose, Search, Tags, Trash2, User, X,
   Settings as SettingsIcon, Wrench,
 } from "lucide-react";
 import { api } from "./api";
@@ -11,13 +11,14 @@ import type { Library as LibraryData } from "./types";
 import type { LucideIcon } from "lucide-react";
 import { albumRef, artistRef, trackRef } from "./lib/refs";
 import { useStore } from "./store";
+import CreditsFooter from "./components/Credits";
+import ShortcutsOverlay from "./components/Shortcuts";
 
 // Route-level code splitting: only the landing page ships in the initial
 // bundle, every other page is fetched on first visit. Without this the whole
 // app (library, player, soulseek, import wizard, settings) loads up front.
 const HomePage = lazy(() => import("./pages/HomePage"));
 const LibraryPage = lazy(() => import("./pages/LibraryPage"));
-const DownloadsPage = lazy(() => import("./pages/DownloadsPage"));
 const TrashPage = lazy(() => import("./pages/TrashPage"));
 const ArtistPage = lazy(() => import("./pages/ArtistPage"));
 const AlbumPage = lazy(() => import("./pages/AlbumPage"));
@@ -49,7 +50,6 @@ const NAV_GROUPS = [
       { to: "/", label: "Home", icon: Home, end: true },
       { to: "/library", label: "Library", icon: Library, end: false },
       { to: "/genres", label: "Genres", icon: Tags, end: true },
-      { to: "/downloads", label: "Downloads", icon: ArrowDownToLine, end: true },
       { to: "/trash", label: "Trash", icon: Trash2, end: true },
       { to: "/playlists", label: "Playlists", icon: ListMusic, end: false },
       { to: "/favorites", label: "Favorites", icon: Heart, end: false },
@@ -178,6 +178,39 @@ export default function App() {
   const { progress, setProgress, toasts, dismissToast, query, setQuery } = useStore();
   const qc = useQueryClient();
   const progressClear = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // The shortcut sheet: opened by "?" or the keyboard button in the top bar.
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
+
+  // Global keyboard shortcuts. The player owns its own transport keys
+  // (Space, arrows, brackets — see PlayerBar) and this layer deliberately adds
+  // only what belongs to the shell: the fullscreen viewer, the search box and
+  // this sheet. Never fires while a field has focus (typing "f" in a search
+  // field must type an f), nor under a modifier, nor while the lyrics editor
+  // is stamping (it owns the whole keyboard then).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement || t.isContentEditable)) return;
+      if (document.querySelector("[data-lrc-editor]")) return;
+      if (e.key === "f" || e.key === "F") {
+        e.preventDefault();
+        // The viewer's state lives in the player bar (it owns the decoders);
+        // an event keeps the two from fighting over it.
+        window.dispatchEvent(new CustomEvent("mlo:fullscreen-toggle"));
+      } else if (e.key === "?") {
+        e.preventDefault();
+        setShortcutsOpen((v) => !v);
+      } else if (e.key === "/") {
+        e.preventDefault();
+        searchRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   const slskDot = useSlskDot();
 
@@ -462,15 +495,11 @@ export default function App() {
             ))}
           </div>
         ))}
-        {!collapsed && (
-          <div className="mt-auto text-[10px] text-zinc-600 px-3 pb-2 leading-relaxed">
-            Grading · Auditing · Optimization
-            <br />
-            MusicBrainz · Deezer · ListenBrainz
-            <br />
-            LRCLIB · NetEase · Wikipedia
-          </div>
-        )}
+        {/* Credits live in the corner where the app can always show them:
+            every service it queries, as links out to the project. */}
+        <div className="mt-auto">
+          <CreditsFooter collapsed={collapsed} />
+        </div>
       </aside>
 
       {/* phone nav drawer: the rail's content as a full overlay, opened from
@@ -518,6 +547,9 @@ export default function App() {
                 ))}
               </div>
             ))}
+            <div className="mt-auto">
+              <CreditsFooter />
+            </div>
           </aside>
         </>
       )}
@@ -550,14 +582,23 @@ export default function App() {
             >
               <ChevronRight className="h-4 w-4" />
             </button>
+            <button
+              className="h-9 w-9 rounded-full border border-border bg-panel/60 backdrop-blur hidden sm:flex items-center justify-center text-zinc-300 hover:text-white hover:border-accent/50 transition-colors"
+              onClick={() => setShortcutsOpen(true)}
+              title="Keyboard shortcuts (?)"
+              aria-label="Keyboard shortcuts"
+            >
+              <Keyboard className="h-4 w-4" />
+            </button>
           </div>
           {/* the search input spans the rest of the bar */}
           <div className="relative flex-1 pointer-events-auto">
             <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-500" />
             <input
+              ref={searchRef}
               className="input !py-2 !pl-10 text-xs w-full !bg-panel/60 backdrop-blur"
               placeholder="Search for tracks, artists, albums…"
-              title="Tag-scoped search: composer:name · person:name (any credit) · genre:metal · tag:anything — quotes keep spaces"
+              title="Tag-scoped search: composer:name · person:name (any credit) · genre:metal · tag:anything — quotes keep spaces · press / to jump here"
               value={query}
               onChange={(e) => onSearch(e.target.value)}
               onFocus={() => setSearchOpen(true)}
@@ -626,7 +667,9 @@ export default function App() {
             <Route path="/" element={<HomePage />} />
             <Route path="/library" element={<LibraryPage />} />
             <Route path="/genres" element={<GenrePage />} />
-            <Route path="/downloads" element={<DownloadsPage />} />
+            {/* The staging/downloads page folded into the Soulseek page; the
+                redirect keeps old bookmarks and links from dead-ending. */}
+            <Route path="/downloads" element={<Navigate to="/soulseek" replace />} />
             <Route path="/trash" element={<TrashPage />} />
             <Route path="/artist/:path" element={<ArtistPage />} />
             <Route path="/album/:path" element={<AlbumPage />} />
@@ -664,6 +707,8 @@ export default function App() {
 
         <PlayerBar />
       </div>
+
+      {shortcutsOpen && <ShortcutsOverlay onClose={() => setShortcutsOpen(false)} />}
 
       {/* Toasts stack instead of overwriting each other; errors are red and
           announce as alerts, confirmations are green and polite. */}

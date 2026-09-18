@@ -589,8 +589,8 @@ finally:
 # 7) RateYourMusic: honest about being blocked
 # --------------------------------------------------------------------------- #
 class FakeResponse:
-    def __init__(self, status=200, text=""):
-        self.status_code, self.text = status, text
+    def __init__(self, status=200, text="", url=""):
+        self.status_code, self.text, self.url = status, text, url
 
 
 class FakeHttpx:
@@ -604,6 +604,10 @@ class FakeHttpx:
             follow_redirects=None):
         self.calls.append({"url": url, "params": dict(params or {}),
                            "headers": dict(headers or {})})
+        # The caller reads response.url back to confirm the page it landed on
+        # is the release it asked for — a stub that never states it makes
+        # every scrape look unverifiable.
+        self.response.url = url
         return self.response
 
 
@@ -642,7 +646,9 @@ try:
     # release page still parses
     intg._rym_warned = False
     intg._rym_cookie = lambda cfg=None: "cf_clearance=abc; session=xyz"
-    page = ('<html><body><a href="/genre/pop">Pop</a>'
+    page = ('<html><body><h1 class="album_title">Loud</h1>'
+            '<a href="/artist/rihanna">Rihanna</a>'
+            '<a href="/genre/pop">Pop</a>'
             '<a href="/genre/r&amp;b">R&amp;B</a></body></html>')
     fake = FakeHttpx(FakeResponse(200, page))
     intg.httpx = fake

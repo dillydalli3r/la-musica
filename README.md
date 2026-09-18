@@ -23,6 +23,28 @@ machines.
   own stats header. Everything on it is derived from the library itself —
   no provider is consulted, so it loads from the same cached payload the
   rest of the app uses.
+- **Keyboard shortcuts** (new in 2.6.9) — `F` opens (and closes) the fullscreen viewer,
+  `/` jumps to the search box, `?` (or the keyboard button in the top bar)
+  shows the sheet, and Space / ← → / `[` `]` / `0` drive playback. Nothing
+  fires while you are typing, and the lyrics editor keeps its own keys. The
+  full list lives in `web/src/components/Shortcuts.tsx` — the one place the
+  handler and the sheet read from.
+- **Credits where you can see them** (new in 2.6.9) — the bottom-left corner of the app names
+  the services and projects it is built on and links each one out; the popover
+  behind it carries the full list with licences, and
+  `THIRD-PARTY-NOTICES.md` has the legal text. The data is
+  `web/public/credits.json` (the same file Settings → *Credits* renders), so a
+  new provider is credited in one place.
+- **Your columns, everywhere** (new in 2.6.9) — every table that can carry one has a Columns
+  menu: the library's albums/artists/tracks views, the favourites track table
+  and the album tracklists (album page and the library's expanded album rows
+  share one set). Beyond the built-in columns you can add a **tag column** —
+  name a tag (`MOOD`, `COMPOSER`, `CATALOGNUMBER`…), give it a label, sort it
+  like any other — and it is stored per view. Settings → bottom bar has
+  **Reset UI & layout**, which clears this browser's UI preferences (accent,
+  sidebar, grid sizes, column layouts and widths, custom columns, viewer
+  options) and reloads; the server config has its own *Reset to defaults*
+  beside it.
 - **Wishes** — save any MusicBrainz release to the library *without*
   downloading it. A background worker re-searches Soulseek for every open
   wish on a configurable interval and auto-imports a release the moment a
@@ -680,6 +702,13 @@ the saved order and the plain-lyrics policy.
   overwritten unless you ask for a re-fetch.
 - The lyrics manager's search box can query the chain without writing
   anything (`GET /api/lyrics/find`).
+- **Publishing gives back, never overwrites.** "Publish to LRCLIB" (the lyric
+  editor and the manager) asks LRCLIB first, with the same exact-then-search
+  lookup the fetch chain uses, and refuses when the database already answers
+  for that recording — the community copy is not this app's to replace. Script
+  18 applies the same rule for a whole library, with `force_publish` as the
+  one documented exception. A lookup that cannot be reached does not block the
+  submission: only a *found* record does.
 
 ## Mood, energy & genre (rewritten in 2.4.0)
 
@@ -760,7 +789,10 @@ The import paths share one pipeline now (`server/imports.py`):
   metadata fetch `1/3…3/3`), the websocket relay's own `done/total` for the
   long script runs — during *Run All* the label reads
   `#step/total · script name` (e.g. `#4/18 · Format lyrics`), the bar carries
-  that step's own fraction, and a step that reports what it is doing adds it
+  that step's own fraction, the readout beside it prints the WHOLE step count
+  (`4/18`, never a spliced `3.9/18`: the fraction belongs to the bar, the
+  number to the scripts finished), and a step that reports what it is doing
+  adds it
   behind a dash (`#2/18 · Beets tagging — looking up on MusicBrainz`), so a
   long silent phase still says where the run is — and an
   indeterminate bar plus a ticking clock for anything that cannot count.
@@ -825,6 +857,22 @@ The import paths share one pipeline now (`server/imports.py`):
    (`import_scripts`), or turns it off entirely (`import_auto_scripts`). A
    script that fails is reported and the chain carries on — one bad script
    never costs the rest of the pipeline.
+
+   **What you typed in the wizard survives the chain.** The chain only ever
+   FILLS a tag: the import stamp and script 8 write `GENRE` only where the
+   track has none, lyrics are fetched only where there are none
+   (`force_lyrics` is the documented override), and beets no longer imports
+   genres at all (`musicbrainz.genres: no` in the generated config) — it used
+   to fetch them from MusicBrainz and write them back over the user's own
+   genres on every import, since `import.write` is on. The app's
+   source-ordered genre chain stays the single writer, and it fills.
+
+   **The finished screen points at where the album IS.** The chain's beets
+   tag/organize steps rename the folder to its canonical layout, so
+   `finish_album` re-resolves the album's path by its MusicBrainz id when the
+   folder it was handed no longer exists; the reply carries the current path
+   and the wizard adopts it. *Open album* additionally prefers the album's
+   `mb:` reference, which survives any later reorganization.
 3. **Bulk** — drop or stage several albums and the wizard imports them as a
    queue (`import_bulk_concurrency`, default 2 at a time, adjustable 1-8),
    with per-item state and per-album/per-script results. Downloads'
@@ -981,7 +1029,10 @@ A CD rip is graded on its own evidence, in this order:
    verifiable EAC SHA256 (older EAC, a log edited after the rip), a log the
    tool cannot score, or one below `audit_log_score_threshold`: those measure
    the log's documentation, not the audio, and they no longer turn a proven
-   track `FAKE`.
+   track `FAKE`. (That exemption is about the AUDIT verdict. The *grade* has
+   its own two checksum checks — see below — which the checksums must satisfy
+   on their own terms, and which the settings can switch off for a collection
+   whose logs predate EAC checksums.)
 2. **Its `.accurip`.** A REAL AccurateRip verdict stands on its own: a disc
    whose rip matches the database passes even when its log's EAC checksum is
    unverifiable (XLD, older EAC, a log the tool cannot score).
@@ -1001,6 +1052,28 @@ proved it). **The live readout applies with the check off too**: the library,
 album and track pages show the verdict derived from the rip's own evidence, so
 a provably intact disc never renders red off a stale tag written by an older
 run.
+
+### The rip's checksums are graded, not merely present (new in 2.6.9)
+
+Two checks make a rip's own numbers cost it the grade — independently of
+`grade_check_audit`, so a bad log cannot pass just because the AUDIT tag is
+not required:
+
+* **`grade_check_crc` — the CRC values.** Every track must be covered by a
+  per-track CRC in its own disc's `.log` (issue `CRC`), **and** that CRC must
+  equal the CRC-32 of the track's decoded PCM (issue `CRC_MISMATCH`). Coverage
+  alone let a log from a different rip, or audio edited after the rip, grade
+  PASS. Lossy encodes can never reproduce the uncompressed WAV CRC and are
+  judged on coverage alone; undecodable files likewise fall back to it.
+  Decoding is the cost of the proof, so the CRC of a file is memoized per
+  `(path, size, mtime)` — the audit pass and the grader share one decode.
+* **`grade_check_log_checksum` — the log's EAC SHA256.** A log whose stored
+  checksum does not verify, or that states none while
+  `audit_verify_log_checksum` requires one, fails the album (issue
+  `LOG_CHECKSUM`). XLD logs — and older EAC logs that carry no checksum
+  concept — pass: nothing claimed, nothing refuted. `AUDIOAUDITOR_OVERRIDE=REAL`
+  still wins, because the override is applied before this check reads the
+  per-track verdicts.
 
 ## Library layout — a read-only report
 
@@ -1056,13 +1129,17 @@ catalogue, `GET /api/cover/sources` lists the selectable sources, the regions
 and the saved defaults, and `POST /api/cover/fromurl` saves a chosen result to
 disk.
 
-## Downloads viewer
+## Downloads — the Soulseek page's Downloads and Cached tabs (new in 2.6.9)
+
+Everything download-related now lives on the **Soulseek** page; there is no
+separate *Downloads* page in the sidebar (an old `/downloads` link redirects
+there).
 
 Releases downloaded to the staging folder `<music>/.mlo/downloads` are listed
 by `GET /api/downloads` (newest first); `POST /api/downloads/import` moves
 entries into the library as albums and `POST /api/downloads/delete` removes
-them. The Soulseek page's *Downloads* tab shows the same entries as transfers
-bucketed into active, queued, completed and failed.
+them. The *Downloads* tab shows the same entries as transfers bucketed into
+active, queued, completed and failed.
 
 That tab also manages **what is actually on disk** in both staging folders -
 `GET /api/soulseek/staging` reports slskd's download dir (default
@@ -1075,6 +1152,14 @@ cannot be deleted is reported instead of aborting the rest). This is the half
 of the picture transfer-level clearing cannot see: a rejected candidate that
 left an empty folder chain, or partial bytes whose transfer record is already
 gone, has no row in the transfer list at all.
+
+The **Cached tracks** tab is the other half of "downloaded": the tracks held
+in the browser's offline cache — the copy the player keeps on this device so
+an album plays without the server or the network. It is laid out like the
+library viewer (album rows with covers, expandable tracklists, the same
+Columns menu and drag-resizable widths), groups by album, and offers play and
+"remove from cache" per track plus a two-step *Clear all*. The total size is
+read from the same cache the player uses.
 
 ## Getting started
 
@@ -1176,6 +1261,17 @@ works right now.
 
 Without a cookie the source is `skipped` — never an error — and imports simply
 leave the links for you to paste by hand.
+
+A refusal is never permanent. RYM blocking this network (or a Cloudflare
+challenge) makes the app stop asking for a **five-minute window** — it does not
+hammer a site that just refused it — and the refusal is remembered together
+with the exact cookie it was recorded against. Paste a new cookie (or press
+**Test** / **Save & test**, which clears the refusal first) and the very next
+request is real: no backend restart, which is what an older build required.
+Transient answers (429, 5xx, a timeout) are retried before a source is counted
+as unreachable, and a fetched RYM page must state the album/artist that was
+asked for before any genre from it is accepted. The shipped genre order asks
+RateYourMusic first, then MusicBrainz, matching the documented chain.
 
 ### Dependencies: latest versions & updates
 

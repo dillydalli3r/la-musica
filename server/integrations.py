@@ -1255,12 +1255,16 @@ def genre_cascade(release, limit=None):
 # (Deezer and Apple, by contrast, are keyless public APIs and their advisory
 # routes are verified working — see ADVISORY_SOURCES.)
 #
-# That ONE line is also the whole cost: the first refusal in a process sets
-# `_rym_warned`, and every later request returns "no answer" without going
+# That ONE line is also the whole cost: a refusal latches the source off
+# (`_rym_warned`), and every later request returns "no answer" without going
 # out (see `_rym_get`), so a blocked RYM costs the import ONE probe instead
-# of a walk through every slug candidate of every album. And the LINKS the
-# app tags from RYM come from MusicBrainz, which states the same pages as url
-# relations — a blocked RYM no longer costs them at all (see "RYM link
+# of a walk through every slug candidate of every album. The latch is keyed
+# to the credential that earned it and expires, though — see `_rym_blocked` —
+# so a cookie the user has since replaced (or a block that lifted on its own)
+# is asked again instead of looking blocked until the backend is restarted.
+# And the LINKS the app tags from RYM come from MusicBrainz, which states the
+# same pages as url relations — a blocked RYM no longer costs them at all
+# (see "RYM link
 # resolution" below).
 RYM_BASE = "https://rateyourmusic.com"
 # What a normal Chrome window sends. A bare library UA gets a challenge, so
@@ -1282,12 +1286,19 @@ RYM_CACHE_TTL = 30 * 86400.0  # genre data moves slowly
 # One hung socket (each request carries a 20s timeout) or a long run of
 # candidates must not hold an import behind a source that is not answering.
 RYM_MAX_WALL = 20.0
+# A refusal is a politeness guard for a run, never a verdict on the cookie:
+# it stops standing after this long, so a session that went stale, a transient
+# block, or a server that has been up for days all recover without a restart.
+RYM_BLOCK_TTL = 300.0
+# 429/5xx/timeout are transient — RYM is busy or rate-limiting, not refusing —
+# so each gets a retry, spaced by the same 1 req/s as any other request. A
+# Cloudflare interstitial is the refusal itself and is NOT retried.
+RYM_RETRIES = 2
 _rym_lock = threading.Lock()
 _rym_last = 0.0
-_rym_warned = False           # RYM refused once this process — the one line
-                              # was printed, and every later request returns
-                              # "no answer" at once (the latch `_rym_get`
-                              # reads; the test harnesses reset it)
+_rym_warned = False           # RYM refused since `_rym_blocked_at`, under
+_rym_blocked_cookie = ""      # this cookie — the latch `_rym_get` reads via
+_rym_blocked_at = 0.0         # `_rym_blocked` (the test harnesses reset these)
 _rym_failures = 0             # how often RYM failed to answer at all
 # Cloudflare's interstitial instead of a release page. Cached or parsed it
 # would be an empty page at best, so it counts as unreachable.
@@ -1396,21 +1407,50 @@ def _rym_headers(cfg=None):
     return headers
 
 
-def _rym_unreachable(reason):
-    """One concise line per process when RYM cannot answer.
+def _rym_blocked(cfg=None):
+    """Whether an earlier refusal still stands for the CURRENT credential.
+
+    The latch is what makes a blocked RYM cost an import one probe instead of
+    a walk through every slug candidate of every album. It must not outlive
+    its cause, though: a refusal found with a different cookie — the user
+    pasted a fresh one in Settings — or one older than RYM_BLOCK_TTL is
+    forgotten here, so the next lookup really asks RYM again instead of
+    answering "blocked" from a state the credential has moved past."""
+    global _rym_warned
+    if not _rym_warned:
+        return False
+    if _rym_blocked_cookie != _rym_cookie(cfg) or \
+            time.time() - _rym_blocked_at > RYM_BLOCK_TTL:
+        _rym_warned = False
+        return False
+    return True
+
+
+def _rym_clear_block():
+    """Forget a refusal — what a user-initiated probe does before it asks."""
+    global _rym_warned
+    _rym_warned = False
+
+
+def _rym_unreachable(reason, cfg=None):
+    """One concise line per refusal — not per album, not per candidate.
 
     A per-album traceback would bury the import log for a source that is
     simply unavailable, so this is logged once and the chain moves on. The
     counter is what lets a caller tell "RYM is not answering" (stop asking —
     the next candidate cannot do better) from "that slug was wrong" (try the
     next one); `_rym_warned`, set here, is the same "stop asking": one refused
-    request this process and `_rym_get` answers None without going out again,
-    which is what keeps a blocked RYM off the import's critical path."""
-    global _rym_warned, _rym_failures
+    request and `_rym_get` answers None without going out again, which is what
+    keeps a blocked RYM off the import's critical path. The refusal records
+    the cookie it was found with and when — `_rym_blocked` is what reads
+    those, and a cookie the user replaces clears the latch on the spot."""
+    global _rym_warned, _rym_failures, _rym_blocked_cookie, _rym_blocked_at
     _rym_failures += 1
     if _rym_warned:
         return
     _rym_warned = True
+    _rym_blocked_cookie = _rym_cookie(cfg)
+    _rym_blocked_at = time.time()
     print(f"[mlo] rateyourmusic: {reason} — skipping RYM (set rym_cookie in "
           "Settings with a logged-in browser session to enable it)")
 
@@ -1460,7 +1500,13 @@ def _rym_get(path, params=None, cfg=None, expect=None):
     *expect* is the path the caller asked for: a 404 or a redirect to
     somewhere else (RYM sends an unknown slug to search/home) then counts as
     "no such page" — a miss the caller can move on from, not a sign that RYM
-    is unreachable, so neither is logged as one."""
+    is unreachable, so neither is logged as one.
+
+    A 429, a 5xx or a timeout is RYM being busy, not refusing, so each gets a
+    retry (RYM_RETRIES of them) — spaced by the same 1 req/s as every other
+    request, and only then does the source count as unreachable. A user-
+    initiated Test clears the latch first (`_rym_clear_block`), because "does
+    this cookie work?" is a question the panel has to ask RYM for real."""
     global _rym_last
     import hashlib
     from urllib.parse import urlencode, urlsplit
@@ -1470,37 +1516,44 @@ def _rym_get(path, params=None, cfg=None, expect=None):
     hit = _rym_cache_read(key, RYM_CACHE_TTL)
     if hit is not None:
         return hit
-    if _rym_warned:
-        # RYM refused an earlier request this process (a challenge, a 403, no
-        # connection, no cookie). The candidates left cannot do better, and
+    if _rym_blocked(cfg):
+        # RYM refused an earlier request under this same cookie (a challenge,
+        # a 403, no connection). The candidates left cannot do better, and
         # asking them at 1 req/s is how an import of a few dozen albums used
         # to burn minutes on a source that was never going to answer.
         return None
-    with _rym_lock:
-        wait = RYM_MIN_INTERVAL - (time.time() - _rym_last)
-        if wait > 0:
-            time.sleep(wait)
-        _rym_last = time.time()
-        try:
-            r = httpx.get(
-                f"{RYM_BASE}{path}", params=params or {},
-                headers=_rym_headers(cfg),
-                timeout=20.0, follow_redirects=True,
-            )
-        except httpx.HTTPError as e:
-            _rym_unreachable(f"no connection ({type(e).__name__})")
-            return None
+    reason = ""
+    for attempt in range(RYM_RETRIES + 1):
+        with _rym_lock:
+            wait = RYM_MIN_INTERVAL - (time.time() - _rym_last)
+            if wait > 0:
+                time.sleep(wait)
+            _rym_last = time.time()
+            try:
+                r = httpx.get(
+                    f"{RYM_BASE}{path}", params=params or {},
+                    headers=_rym_headers(cfg),
+                    timeout=20.0, follow_redirects=True,
+                )
+            except httpx.HTTPError as e:
+                r, reason = None, f"no connection ({type(e).__name__})"
+        busy = r is None or r.status_code == 429 or r.status_code >= 500
+        if not busy or attempt >= RYM_RETRIES:
+            break
+    if r is None:
+        _rym_unreachable(reason, cfg)
+        return None
     if r.status_code != 200:
         # 404 is a slug that does not exist, not a blocked source: the caller
         # tries its next candidate instead of declaring RYM unreachable.
         if r.status_code != 404:
-            _rym_unreachable(f"HTTP {r.status_code}")
+            _rym_unreachable(f"HTTP {r.status_code}", cfg)
         return None
     if not r.text:
-        _rym_unreachable("empty response")
+        _rym_unreachable("empty response", cfg)
         return None
     if _RYM_CHALLENGE_RE.search(r.text[:4000]):
-        _rym_unreachable("Cloudflare challenge instead of a page")
+        _rym_unreachable("Cloudflare challenge instead of a page", cfg)
         return None
     if expect is not None:
         final = urlsplit(str(getattr(r, "url", "") or "")).path
@@ -1531,7 +1584,11 @@ def rym_genres(artist, album):
 
     Tries the release URL RYM derives from the artist+album slugs (its
     canonical `/release/album/<artist>/<album>/` shape) first and its search
-    page second, so a punctuation-heavy title still resolves. Returns
+    page second, so a punctuation-heavy title still resolves. Every candidate
+    is VERIFIED before it is read — the same rule the link resolver uses
+    (`_rym_verified`): the answer must have stayed on the path that was asked
+    for, and the page must state the artist AND the album. A genre list lifted
+    from a same-named cover version is worse than no genres at all. Returns
     {"genres": [...], "descriptors": [...], "level": "album", "tracks": [...],
     "source_url": ...} or None — see RYM_BASE's note on the blocked-by-RYM
     failure mode. Chart data is NOT scraped: nothing in the app consumes a RYM
@@ -1543,6 +1600,9 @@ def rym_genres(artist, album):
     `descriptors` are the page's /descriptor/ anchors, used only when the page
     carries no /genre/ anchor at all, and `tracks` carries the track list so a
     row that DOES state its own genre can be mapped by position, then title.
+    A user-initiated check (the Sources panel's Test) clears the refusal
+    latch first — `_rym_clear_block` — so the saved cookie is really put to
+    RYM instead of being answered "blocked" from an earlier run.
     """
     artist = str(artist or "").strip()
     album = str(album or "").strip()
@@ -1564,40 +1624,49 @@ def rym_genres(artist, album):
 
     url = f"/release/album/{_rym_slug(artist)}/{_rym_slug(album)}/"
     started = time.time()
-    html = _rym_get(url)
+    html = _rym_verified(url, None, artist, album)
     if html:
         got = answer(html, url)
         if got:
             return got
-    # Two more requests at most, and only inside the wall clock: a blocked RYM
-    # answers the FIRST one with a challenge, so the rest are spent misses.
-    if _rym_expired(started) or _rym_warned:
+    # A few more requests at most, and only inside the wall clock: a blocked
+    # RYM answers the FIRST one with a challenge, so the rest are spent misses.
+    if _rym_expired(started) or _rym_blocked():
         return None
-    html = _rym_get("/search", {"searchterm": f"{artist} {album}", "type": "a"})
+    html = _rym_get("/search", {"searchterm": f"{artist} {album}", "type": "a"},
+                    expect="/search")
     if not html:
         return None
     m = _RYM_ARTIST_LINK_RE.search(html)
-    m2 = re.search(r'href="(/release/album/[^"]+)"', html, re.I)
-    if not m2:
-        return None
-    rel_url = m2.group(1)
     if _rym_expired(started):
         return None
-    page = _rym_get(rel_url)
-    got = answer(page or "", rel_url)
-    if not got:
-        return None
-    got["artist_page"] = f"{RYM_BASE}{m.group(1)}" if m else ""
-    return got
+    # The search page answers a QUERY, not a question: each hit is confirmed
+    # as the release asked about (a cover version on the same query supplies
+    # no genres) before its genre anchors are read.
+    for rel_url in _RYM_RELEASE_LINK_RE.findall(html)[:3]:
+        page = _rym_verified(rel_url, None, artist, album)
+        if not page:
+            if _rym_expired(started) or _rym_blocked():
+                return None
+            continue
+        got = answer(page, rel_url)
+        if not got:
+            continue
+        got["artist_page"] = f"{RYM_BASE}{m.group(1)}" if m else ""
+        return got
+    return None
 
 
 def rym_artist_genres(artist):
-    """RateYourMusic genres for an artist (its /artist/ page), or None."""
+    """RateYourMusic genres for an artist (its /artist/ page), or None.
+
+    Confirmed as that artist's page before its genres are read, exactly like
+    the album path — a label or another act's page must not supply them."""
     artist = str(artist or "").strip()
     if not artist:
         return None
     url = f"/artist/{_rym_slug(artist)}"
-    html = _rym_get(url)
+    html = _rym_verified(url, None, artist)
     genres = _rym_genres_from(html or "")
     if not genres:
         return None
@@ -1615,10 +1684,11 @@ def rym_artist_genres(artist):
 # link MusicBrainz states IS that page, so it costs no RYM request, needs no
 # cookie, and nothing has to be confirmed or guessed.
 #
-# Only what MusicBrainz could not state is scraped, and only with a
-# `rym_cookie` configured: rateyourmusic.com refuses an automated client
-# (see RYM_BASE), so its URLs are derived from the names and a candidate is
-# fetched once to prove it exists:
+# Only what MusicBrainz could not state is scraped — with the `rym_cookie`
+# configured, if there is one: without a cookie rateyourmusic.com challenges
+# the request (there is no cookie gate, the source simply refuses), which
+# latches RYM off for a while — see `_rym_blocked`. Its URLs are derived from
+# the names and a candidate is fetched once to prove it exists:
 #
 #   /release/album/<artist-slug>/<album-slug>/     /artist/<artist-slug>
 #
@@ -1628,8 +1698,9 @@ def rym_artist_genres(artist):
 # page states the artist — and for a release, the album too. Nothing is
 # guessed from a partial page, so a candidate that cannot be confirmed yields
 # NO link and the user pastes their own (the manual editor is unchanged).
-# Without a cookie, and after the first refusal inside a process, the ladder
-# is not walked at all: RYM costs ONE probe at most, never minutes.
+# After a refusal the ladder is not walked again for a while — RYM costs ONE
+# probe at most, never minutes — but a new cookie (or the same one once the
+# refusal has aged out) re-asks, so a corrected credential is never stuck.
 _RYM_RELEASE_LINK_RE = re.compile(r'href="(/release/album/[^"]+)"', re.I)
 # What the user can act on when nothing resolved because RYM would not answer.
 _RYM_BLOCKED_NOTE = ("could not resolve on RateYourMusic — blocked by "
@@ -1781,8 +1852,10 @@ def rym_links(artist="", album="", cfg=None, mbid=None):
     both links with no cookie and no scraping on an install where
     rateyourmusic.com refuses an automated client (RYM_BASE).
 
-    Only a link MusicBrainz did not state is scraped, and only with a
-    `rym_cookie` configured: the album as
+    Only a link MusicBrainz did not state is scraped — the `rym_cookie` is
+    what makes that scrape answer, not a gate this function applies (there is
+    no cookie check here: with no cookie, or a stale one, RYM challenges the
+    request and the ladder stops, see `_rym_blocked`): the album as
     `/release/album/<artist>/<album>/` with the exact slugs, then with the
     de-`the`-ed ones, then from RYM's own search page — each candidate
     confirmed before it is accepted. The artist link comes from the album
@@ -1794,7 +1867,9 @@ def rym_links(artist="", album="", cfg=None, mbid=None):
     error: when the reason is a blocked RYM the note says what to do about it.
     Gated by `rym_links_auto` (mlo.config, default True): off means no request
     at all. `mbid` (optional) is the release group's MusicBrainz ID, or a
-    release's.
+    release's. A user-initiated check (the Sources panel's Test) clears the
+    refusal latch first — `_rym_clear_block` — so the configured cookie is
+    really put to RYM instead of being answered "blocked" from an earlier run.
     """
     if cfg is None:
         try:
@@ -1829,9 +1904,9 @@ def rym_links(artist="", album="", cfg=None, mbid=None):
 
     def stop():
         """Whether RYM has already answered for this lookup — a refusal
-        (`_rym_warned`/`_rym_failures`, the latch `_rym_get` reads) or the
-        wall clock."""
-        return _rym_warned or _rym_failures != fails or _rym_expired(started)
+        (`_rym_failures`, or `_rym_blocked`, the latch `_rym_get` reads) or
+        the wall clock."""
+        return _rym_blocked(cfg) or _rym_failures != fails or _rym_expired(started)
 
     if artist and album and not out["album"]:
         for a in _rym_slug_candidates(artist):
@@ -1877,7 +1952,7 @@ def rym_links(artist="", album="", cfg=None, mbid=None):
     if not out["album"] and not out["artist"]:
         if not artist:
             out["note"] = "no artist name to look up"
-        elif _rym_failures != fails or _rym_warned or not _rym_cookie(cfg):
+        elif _rym_failures != fails or _rym_blocked(cfg) or not _rym_cookie(cfg):
             # RYM refused (this call, or earlier in the process) and nothing
             # on MusicBrainz either: say what the user can do instead of
             # "no link found".

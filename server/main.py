@@ -163,13 +163,23 @@ def _broadcast(payload):
             pass
 
 
-def _relay(done, total, desc):
+def _relay(done, total, desc, steps=None):
+    """Push one progress frame to every UI socket.
+
+    ``steps`` is the whole-step pair a chained run also knows — "script 3 of
+    18" — sent beside the fractional ``done`` the bar is drawn from, so the
+    readout can print a whole number while the bar keeps moving inside the
+    step that is still running.
+    """
     try:
         if orig_hook:
             orig_hook(done, total, desc)
     except Exception:
         pass
-    _broadcast({"done": done, "total": total, "desc": desc})
+    payload = {"done": done, "total": total, "desc": desc}
+    if steps:
+        payload["steps"] = [int(steps[0]), int(steps[1])]
+    _broadcast(payload)
 
 
 stats_mod.progress_hook = _relay
@@ -2707,8 +2717,13 @@ async def lyrics_publish(req: LyricsPublishRequest):
     """Submit lyrics to LRCLIB on behalf of a library track.
 
     The editor sends the exact text it shows; plain vs synced is detected
-    from [mm:ss.xx] timestamps so pasting either form just works."""
-    from server.integrations import lrclib_publish
+    from [mm:ss.xx] timestamps so pasting either form just works.
+
+    A recording LRCLIB already answers for is NEVER submitted: that copy is
+    the community's, and this app only gives the database what it is missing
+    (the same rule script 18 enforces, checked with the same exact-then-search
+    match script 18 uses, through the app's own LRCLIB client)."""
+    from server.integrations import lrclib_get, lrclib_publish
 
     artist, track, album = req.artist.strip(), req.track.strip(), req.album.strip()
     duration = req.duration
@@ -2724,6 +2739,18 @@ async def lyrics_publish(req: LyricsPublishRequest):
                     duration = int(round(float(tech.get("length") or 0))) or None
                 except (TypeError, ValueError):
                     duration = None
+    if artist and track:
+        try:
+            existing = await asyncio.to_thread(
+                lrclib_get, artist, track, album or None, duration)
+        except Exception:
+            # An unreachable lookup is not an answer: let the submission
+            # itself be the thing that reports the network failure.
+            existing = None
+        if existing:
+            return {"ok": False, "exists": True,
+                    "message": "LRCLIB already has lyrics for this track — "
+                               "nothing was published"}
     synced = req.synced if req.synced.strip() else None
     plain = req.plain if req.plain.strip() else None
     if synced is None and plain is None and req.path:

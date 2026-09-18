@@ -21,7 +21,7 @@ import type {
   LyricsAutoResult, MBRelease, MatchSuggestion, ScriptRunResult, Track,
 } from "../types";
 import { SCRIPTS, DEFAULT_RUN_ALL, SCRIPT_LABEL, isScriptId } from "../lib/scripts";
-import { fmtCounts } from "../lib/fmt";
+import { fmtCounts, fmtSteps } from "../lib/fmt";
 
 const STEPS = ["Select & separate", "Links", "Match", "Covers", "Genres", "Lyrics", "Advisory", "Finish"];
 
@@ -1988,6 +1988,21 @@ const runAllScripts = async () => {
   try {
     setAct({ label: `Import chain — ${scriptChain?.chain?.length ?? 0} script(s) on ${targets.length} album(s)` });
     const res = await api.importFinish(targets, {}, staged);
+    // The chain's beets tagging / organize steps rename the album folder to
+    // its canonical layout, so the path this wizard holds can be gone by the
+    // time the reply lands. The reply carries the folder the album is in NOW
+    // (server-side re-resolution), and it is in the same order as `targets`:
+    // adopt it, or "Open album" and every later step points at a directory
+    // that no longer exists.
+    if (res.albums.length) {
+      setUploaded((prev) =>
+        prev.length === res.albums.length
+          ? prev.map((u, i) => (res.albums[i]?.path ? { ...u, path: res.albums[i].path } : u))
+          : prev
+      );
+      const mine = res.albums[Math.min(albumIndex, res.albums.length - 1)];
+      if (mine?.path) setAlbumPath(mine.path);
+    }
     // The chain reports one result per chain id per album; the album is kept
     // in the label so a multi-album queue stays readable.
     const rows = res.albums.flatMap((a) =>
@@ -2160,6 +2175,7 @@ const finish = async () => {
             label={act?.label ?? progress?.desc ?? fetchStatus ?? "Working…"}
             done={act?.done ?? progress?.done}
             total={act?.total ?? progress?.total}
+            steps={act ? null : progress?.steps}
           />
         </div>
       )}
@@ -3441,6 +3457,7 @@ const finish = async () => {
                   label={act?.label ?? (runningAll ? "Running all scripts…" : "Running the import chain…")}
                   done={progress?.done}
                   total={progress?.total}
+                  steps={progress?.steps}
                 />
               </div>
             )}
@@ -3473,7 +3490,14 @@ const finish = async () => {
           </div>
           <div className="flex justify-center gap-2 mt-5">
             {albumPath && (
-              <Link to={`/album/${encodeURIComponent(albumPath)}`} className="btn-ghost" onClick={finish}>
+              /* The album's MusicBrainz id first: it survives the rename the
+                 chain's beets/organize step performs, while a raw path only
+                 works until the next reorganization. */
+              <Link
+                to={releaseId ? `/album/mb:${encodeURIComponent(releaseId)}` : `/album/${encodeURIComponent(albumPath)}`}
+                className="btn-ghost"
+                onClick={finish}
+              >
                 Open album
               </Link>
             )}
@@ -3554,11 +3578,14 @@ function useElapsed(on: boolean): number {
  *  websocket the header bar already draws. With neither, the bar is
  *  indeterminate but never still: spinners, motion, and the elapsed clock. */
 function ActionBar({
-  label, done, total, active,
+  label, done, total, steps, active,
 }: {
   label: string;
   done?: number | null;
   total?: number | null;
+  /** The whole-step pair a chained script run publishes — printed instead of
+   *  a fractional count, so the readout says "3/18" (scripts). */
+  steps?: number[] | null;
   active: boolean;
 }) {
   const secs = useElapsed(active);
@@ -3568,6 +3595,7 @@ function ActionBar({
   // whole percents, and rounding here would freeze it exactly like the readout
   // it sits beside.
   const pct = known ? Math.min(100, ((done ?? 0) / total!) * 100) : 0;
+  const stepText = fmtSteps(steps);
   return (
     <div className="flex items-center gap-2 min-w-0 w-full" role="status">
       <span className="h-3 w-3 rounded-full border-2 border-zinc-700 border-t-accent-soft animate-spin shrink-0" />
@@ -3581,7 +3609,7 @@ function ActionBar({
         />
       </div>
       <span className="text-[10px] text-zinc-500 font-mono whitespace-nowrap tabular-nums">
-        {known ? fmtCounts(done, total) : "…"} · {secs}s
+        {known ? stepText ?? fmtCounts(done, total) : "…"} · {secs}s
       </span>
     </div>
   );

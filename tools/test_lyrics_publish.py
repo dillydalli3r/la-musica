@@ -197,6 +197,56 @@ else:
         pub.lrclib_fetch, pub.lrclib_publish = real_fetch, real_publish
         shutil.rmtree(TMP, ignore_errors=True)
 
+# --------------------------------------------------------------------------- #
+# The MANUAL path ("Publish to LRCLIB" in the lyric editor) enforces the same
+# rule: a track LRCLIB already answers for is never submitted. This is the
+# endpoint the editor's button posts to, so the rule has to hold there and not
+# only inside script 18 — the editor is the path a user drives by hand.
+# --------------------------------------------------------------------------- #
+print()
+print("== the manual publish endpoint ==")
+from fastapi.testclient import TestClient  # noqa: E402  (heavy import)
+
+from server import integrations as srv_intg  # noqa: E402
+from server import main as mlo_main  # noqa: E402
+
+_client = TestClient(mlo_main.app)          # no lifespan: no workers, no slskd
+_real_get, _real_pub = srv_intg.lrclib_get, srv_intg.lrclib_publish
+_submitted = []
+try:
+    srv_intg.lrclib_publish = lambda *a, **k: (_submitted.append(a) or (True, "published"))
+
+    srv_intg.lrclib_get = lambda *a, **k: {"syncedLyrics": "[00:01.00]Hello"}
+    r = _client.post("/api/lyrics/publish", json={
+        "artist": "Artist", "track": "Song", "album": "Album", "duration": 213,
+        "plain": "Hello there"})
+    body = r.json()
+    ok(r.status_code == 200 and body.get("ok") is False and body.get("exists") is True,
+       f"a track LRCLIB already has is refused ({body})")
+    ok(not _submitted, "and nothing was submitted")
+    ok("already has lyrics" in (body.get("message") or ""),
+       f"the refusal says why ({body.get('message')!r})")
+
+    srv_intg.lrclib_get = lambda *a, **k: None
+    r = _client.post("/api/lyrics/publish", json={
+        "artist": "Artist", "track": "Unknown Song", "duration": 213, "plain": "Hello there"})
+    body = r.json()
+    ok(body.get("ok") is True and len(_submitted) == 1,
+       f"a track LRCLIB lacks is submitted ({body})")
+    ok(_submitted[0][:4] == ("Artist", "Unknown Song", "", 213),
+       f"the submission carries the editor's own fields ({_submitted[0][:4]})")
+
+    def _boom(*a, **k):
+        raise RuntimeError("lrclib unreachable")
+    _submitted.clear()
+    srv_intg.lrclib_get = _boom
+    r = _client.post("/api/lyrics/publish", json={
+        "artist": "Artist", "track": "Unknown Song", "duration": 213, "plain": "Hello there"})
+    ok(len(_submitted) == 1,
+       "an unreachable existence check does not block the submission")
+finally:
+    srv_intg.lrclib_get, srv_intg.lrclib_publish = _real_get, _real_pub
+
 print()
 if FAILS:
     print("FAILED: %d check(s)" % len(FAILS))

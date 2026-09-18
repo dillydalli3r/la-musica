@@ -3,6 +3,7 @@ import { CheckCircle2, Download, FileOutput } from "lucide-react";
 import { api } from "../api";
 import { toast } from "../store";
 import { cacheTrack, isTrackCached, uncacheTrack } from "../lib/mediaCache";
+import Popover from "./Popover";
 
 /** Codec choices for per-track exports; lossy codecs expose a bitrate. */
 const CODECS = [
@@ -91,7 +92,6 @@ export default function TrackDownloadExport({ path, title, compact, iconOnly, di
   const btnCls = iconOnly
     ? `p-2 rounded-lg text-zinc-400 ${disabled ? "opacity-40" : "hover:bg-raise hover:text-white"}`
     : "btn-ghost !py-1 text-xs";
-  const posCls = up ? "bottom-full mb-2" : "top-full mt-1";
 
   return (
     <div className={compact || iconOnly ? "inline-flex items-center gap-1" : "flex items-center gap-1.5 flex-wrap"}>
@@ -116,10 +116,12 @@ export default function TrackDownloadExport({ path, title, compact, iconOnly, di
           <FileOutput className="h-4 w-4" />
           {!iconOnly && " Export"}
         </button>
-        {open && (
-          <>
-          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className={`absolute z-50 right-0 ${posCls} w-60 rounded-lg bg-zinc-950 border border-border shadow-2xl p-3 space-y-2.5`}>
+        <Popover
+          open={open}
+          onClose={() => setOpen(false)}
+          placement={up ? "top" : "bottom"}
+          panelClass="w-60 p-3 space-y-2.5"
+        >
             {title && <div className="text-[11px] text-zinc-400 truncate">{title}</div>}
             <label className="block text-[10px] uppercase tracking-wider text-zinc-500">Codec</label>
             <select className="input !py-1 text-xs" value={codec} onChange={(e) => {
@@ -144,9 +146,7 @@ export default function TrackDownloadExport({ path, title, compact, iconOnly, di
             <button className="btn-primary w-full !py-1.5 text-xs" onClick={exportTrack} disabled={busy}>
               {busy ? "Preparing…" : `Export ${chosen.label}${chosen.lossy ? ` · ${bitrate}k` : ""}`}
             </button>
-          </div>
-          </>
-        )}
+        </Popover>
       </div>
     </div>
   );

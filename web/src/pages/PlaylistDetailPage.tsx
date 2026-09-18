@@ -9,6 +9,7 @@ import { toast, useStore } from "../store";
 import { EmptyState, PageLoading } from "../components/Badges";
 import PageHeader from "../components/PageHeader";
 import { TrackCover } from "../components/CoverImg";
+import DownloadButton from "../components/DownloadButton";
 import FavHeart from "../components/FavHeart";
 import OverflowMenu from "../components/OverflowMenu";
 import { trackRef, entityLinkClick } from "../lib/refs";
@@ -297,6 +298,7 @@ export default function PlaylistDetailPage() {
                     >
                       <Play className="h-4 w-4 fill-current" />
                     </button>
+                    <DownloadButton paths={tracks} size="md" />
                     <FavHeart
                       kind="playlist"
                       id={String(pid)}

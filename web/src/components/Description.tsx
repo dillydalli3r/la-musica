@@ -7,9 +7,10 @@ import { ChevronDown } from "lucide-react";
 const PREVIEW_LINES = 5;
 
 /** A markdown inline link `[label](url)`, or a bare `http(s)://…` url. The
- *  link target may not contain whitespace or brackets, so half-written
- *  brackets stay plain text. */
-const LINK_RE = /\[([^\]\n]+)\]\(([^()\s]+)\)|https?:\/\/[^\s<>"']+/g;
+ *  target may not hold whitespace, but a BALANCED parenthesis run is part of
+ *  it — every disambiguated Wikipedia page is `/wiki/Foo_(bar)`, and the
+ *  fetcher writes exactly that link. Half-written brackets stay plain text. */
+const LINK_RE = /\[([^\]\n]+)\]\(([^()\s]*(?:\([^()\s]*\)[^()\s]*)*)\)|https?:\/\/[^\s<>"']+/g;
 
 /** Trailing sentence punctuation (and an unbalanced `)`, as in a url glued to
  *  a parenthetical) is not part of the url. */

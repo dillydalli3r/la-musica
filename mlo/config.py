@@ -45,6 +45,11 @@ LEGACY_DEFAULT_NAMING_SCRIPTS = (
 #   [0] the pre-per-track chain (one album-level pass, Soulseek included)
 #   [1] the first per-track chain (before Bandcamp/Spotify, Wikidata before
 #       TheAudioDB/Last.fm's own tier)
+#   [2] the two-source chain, MusicBrainz before RateYourMusic. The shipped
+#       default is RYM first (the order `server.integrations.GENRE_SOURCES`
+#       documents), and an untouched install holds a byte-for-byte copy of
+#       this list, so it follows the new order instead of keeping the old one
+#       as if it had been chosen.
 LEGACY_DEFAULT_GENRE_SOURCES = (
     [
         "rateyourmusic", "soulseek", "discogs", "lastfm", "theaudiodb",
@@ -53,6 +58,9 @@ LEGACY_DEFAULT_GENRE_SOURCES = (
     [
         "rateyourmusic", "listenbrainz", "musicbrainz", "itunes", "wikidata",
         "lastfm", "discogs", "theaudiodb", "deezer",
+    ],
+    [
+        "musicbrainz", "rateyourmusic",
     ],
 )
 
@@ -790,27 +798,32 @@ DEFAULT_CONFIG = {
 
     # Genres imported per release/track (top voted first). Sources are tried
     # in this order and merged, and EVERY source is asked for EVERY track
-    # (server.integrations._genre_source_answers). Keep this list identical to
-    # `server.integrations.GENRE_SOURCES`, which is what an empty saved list
-    # falls back to — the priority list, per-track sources before album-only
-    # ones, with the rationale for each position documented there and in
+    # (server.integrations._genre_source_answers). The registry of every
+    # source the app can ask is `server.integrations.GENRE_SOURCES`; this is
+    # the SHIPPED default (what an empty saved list falls back to) and it
+    # follows that list's own order — RateYourMusic first, MusicBrainz
+    # second — with the rationale for each position documented there and in
     # `server/integrations.py` above GENRE_SOURCES. `soulseek` is deliberately
-    # absent (peers advertise folders, not genres).
+    # absent (peers advertise folders, not genres). An install that never
+    # touched the Settings list follows this change: the previous two-source
+    # default is in `LEGACY_DEFAULT_GENRE_SOURCES` (see normalize_config).
     "mb_genre_count": 3,
-    # Genre sources, in priority order. Two by default — MusicBrainz (open
-    # data, keyless) and RateYourMusic (what the release page itself says) —
-    # because they are the two the library actually agrees with; the rest of
-    # the registry is still available to add back in Settings → Discovery.
+    # Genre sources, in priority order. Two by default — RateYourMusic (what
+    # the release page itself says, the user's own first preference) and
+    # MusicBrainz (open data, keyless) — because they are the two the library
+    # actually agrees with; the rest of the registry is still available to add
+    # back in Settings → Discovery.
     "genre_sources": [
-        "musicbrainz", "rateyourmusic",
+        "rateyourmusic", "musicbrainz",
     ],
     # Optional keys for the genre sources that need one. Left empty the source
     # is skipped instead of guessed (Discogs' search endpoint requires a
     # token; Last.fm requires an API key). RYM answers only a real browser
     # session: paste the Cookie header of a logged-in rateyourmusic.com tab
-    # (it carries Cloudflare's cf_clearance) — empty, RYM is skipped like any
-    # other unavailable source. Deezer/iTunes/TheAudioDB/MusicBrainz are
-    # keyless.
+    # (it carries Cloudflare's cf_clearance). There is no gate in the code —
+    # empty, RYM is simply asked and refuses, which latches it off for a few
+    # minutes (`integrations._rym_blocked`), so the genre chain falls through
+    # to the next source. Deezer/iTunes/TheAudioDB/MusicBrainz are keyless.
     "discogs_token": "",
     "lastfm_api_key": "",
     "rym_cookie": "",
@@ -1067,7 +1080,7 @@ def normalize_config(user=None) -> dict:
     saved = [str(t).strip().lower() for t in v if str(t).strip()][:16]
     # The shipped order used to be all eleven sources. A saved list that is
     # byte-for-byte that old default was never a user decision, so it follows
-    # the new default (MusicBrainz + RateYourMusic); a list the user actually
+    # the new default (RateYourMusic + MusicBrainz); a list the user actually
     # edited is kept exactly as saved.
     if saved == LEGACY_GENRE_SOURCES:
         saved = []

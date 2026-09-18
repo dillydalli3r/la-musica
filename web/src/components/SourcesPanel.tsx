@@ -50,7 +50,7 @@ const KEY_INFO: Record<string, { label: string; hint: string; url?: string; link
     hint:
       "How to get it: sign in to rateyourmusic.com in your browser → F12 (dev tools) → Network → reload the page → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\". " +
       "Paste the whole value (newlines and a stray \"Cookie:\" label are handled). " +
-      "It is a session credential: keep it to yourself, and paste a fresh one when RYM starts refusing — signing out or clearing cookies invalidates it. " +
+      "It is a session credential: keep it to yourself, and paste a fresh one when RYM starts refusing — signing out or clearing cookies invalidates it, and Test asks RYM again even after a refusal. " +
       "MusicBrainz already states the RYM page for many releases, so this is only needed for the rest.",
     url: "https://rateyourmusic.com",
     link: "rateyourmusic.com",
@@ -192,6 +192,13 @@ export default function SourcesPanel({ only }: { only?: SourceKind } = {}) {
           <div className="rounded-md border border-border divide-y divide-border/60">
             {list.map((row) => {
               const promptKeys = promptKeysOf(row);
+              // The RYM rows need exactly one key — the cookie — so the chip
+              // names it: "cookie missing" is what the fix (paste a logged-in
+              // Cookie header) hangs off. The live failure reason arrives in
+              // `row.detail` from the probe below.
+              const stateLabel = promptKeys.includes("rym_cookie")
+                ? row.configured ? "cookie set" : "cookie missing"
+                : row.configured ? "configured" : "not configured";
               return (
               <div key={busyId(row)} className="px-3 py-2 space-y-1.5">
                 <div className="flex items-center gap-2 flex-wrap">
@@ -208,7 +215,7 @@ export default function SourcesPanel({ only }: { only?: SourceKind } = {}) {
                           : "bg-amber-900/40 text-amber-300 border-amber-900"
                       }`}
                     >
-                      {row.configured ? "configured" : "not configured"}
+                      {stateLabel}
                     </span>
                   )}
                   {row.synced && <span className="chip border border-white/15 bg-white/5 text-zinc-400">synced</span>}

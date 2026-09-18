@@ -139,6 +139,14 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, *,
     if not os.path.isdir(path):
         out["errors"].append("album folder not found")
         return out
+    # The album's identity, read while it is still where the caller put it:
+    # the chain's beets/organize step renames the folder to its canonical
+    # layout, and after that the old path is the only handle this function has
+    # on the album (see the re-resolve at the end).
+    try:
+        album_mbid, album_rgid = _album_mbids(path)
+    except Exception:
+        album_mbid = album_rgid = ""
 
     # RateYourMusic album + artist links: resolved and written once, only for
     # the links the album does not carry yet. Deliberately BEFORE the chain
@@ -219,8 +227,43 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, *,
         return out
     out["errors"] = [f"script {r.get('id')}: {r['error']}"
                      for r in out["scripts"] if r.get("error")]
+    out["path"] = _resolve_moved_album(out["path"], album_mbid, album_rgid)
     _invalidate_caches()
     return out
+
+
+def _resolve_moved_album(path, album_mbid, album_rgid=""):
+    """The folder *path* points at NOW — itself while it still exists.
+
+    The chain's beets tagging / organize steps rename an album folder to its
+    canonical layout, so the path a caller handed in can be gone by the time
+    the chain returns. Callers build links from what they get back (the
+    wizard's "Open album", the bulk queue's row, the Soulseek importer's job
+    result), and a link to a folder that no longer exists is a dead end on a
+    page that cannot say why. Resolution follows the album's own MusicBrainz
+    id through the library index — the same self-repair the favorites and
+    playlists use — and falls back to the stored path when the id is unknown
+    (an album imported without a MusicBrainz link keeps its folder anyway).
+    """
+    if not path or os.path.isdir(path):
+        return path
+    ref = (album_mbid or album_rgid or "").strip().lower()
+    if not ref:
+        return path
+    try:
+        from server import mbresolve
+
+        # heal_row re-reads the index and forces a rescan (once per its own
+        # TTL window) when the stored path has vanished — no explicit
+        # invalidate here, so a bulk import of N moved albums cannot turn
+        # into N full library scans.
+        moved = mbresolve.heal_row("album", path, ref)
+    except Exception:
+        return path
+    if moved and os.path.isdir(moved) and os.path.normcase(moved) != os.path.normcase(path):
+        print(f"[mlo] album moved during import: {os.path.basename(path)} -> {moved}")
+        return os.path.normpath(moved)
+    return path
 
 # --------------------------------------------------------------------------- #
 # AcoustID release check
@@ -958,7 +1001,13 @@ def stamp_rym_links(album_dir, cfg=None):
         return out                      # nothing missing: no lookup at all
 
     artist, album = _album_identity(album_dir)
-    links = intg.rym_links(artist, album, cfg=cfg)
+    # With the album's MusicBrainz id the lookup is a url-relation read on
+    # MusicBrainz — no RYM scrape, no cookie, no guess — so the id is offered
+    # first and the slug/search ladder is only the fallback.
+    links = intg.rym_links(
+        artist, album, cfg=cfg,
+        mbid=(_tag(files[0], "MUSICBRAINZ_RELEASEGROUPID")
+              or _tag(files[0], "MUSICBRAINZ_ALBUMID")))
     out["note"] = links.get("note") or ""
     if not have_album:
         out["album"] = links.get("album")

@@ -111,6 +111,23 @@ export async function cachedUrls(): Promise<string[]> {
   }
 }
 
+/** Library-relative paths behind those keys — the cache key IS the stream URL,
+ *  so the path has to be read back out of its query string. Artwork keys carry
+ *  `album=`/`artist=` instead and are skipped; a video cached under both its
+ *  direct and its transcoded URL collapses to one path. */
+export async function cachedPaths(): Promise<string[]> {
+  const paths = new Set<string>();
+  for (const u of await cachedUrls()) {
+    try {
+      const p = new URL(u).searchParams.get("path");
+      if (p) paths.add(p);
+    } catch {
+      /* not a URL this module wrote */
+    }
+  }
+  return [...paths];
+}
+
 /** Total cached bytes (Content-Length sums), for a storage readout. */
 export async function cachedBytes(): Promise<number> {
   try {

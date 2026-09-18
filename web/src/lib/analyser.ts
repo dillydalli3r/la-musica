@@ -96,7 +96,11 @@ export function attachAnalyser(el: HTMLMediaElement): AnalyserNode | null {
     const gain = c.createGain();
     const analyser = c.createAnalyser();
     analyser.fftSize = 1024;
-    analyser.smoothingTimeConstant = 0.78;
+    // 0.68 rather than the old 0.78: the analyser's own frame-to-frame
+    // smoothing stacks with the visualizer's easing, and at 0.78 transients
+    // arrived already flattened. Still well above raw (0 = jitter), so the
+    // bars read as motion, not noise. The ambience reads the same node.
+    analyser.smoothingTimeConstant = 0.68;
     analyser.minDecibels = MIN_DB;
     analyser.maxDecibels = MAX_DB;
     source.connect(gain);

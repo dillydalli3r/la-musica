@@ -340,6 +340,23 @@ def _run_with_progress(runner, cfg, label, chain=None):
     # runner tick at all" and grew once per file.
     last = [0, 0]
 
+    def emit(done, total, text, steps=None):
+        """One frame out. *steps* is the chain's whole-script pair, sent
+        beside the fractional position: the bar draws the fraction, the
+        readout prints "3/18" with no decimal in it. A hook that takes only
+        the three-argument frame (a test double, a curl-era relay) still gets
+        its numbers."""
+        frames = [(done, total, text)] if steps is None else [
+            (done, total, text, steps), (done, total, text)]
+        for frame in frames:
+            try:
+                prior(*frame)
+                return
+            except TypeError:
+                continue
+            except Exception:
+                return
+
     def hook(done, total, detail):
         last[0], last[1] = done, total
         # The runner's own description when it has one, behind the step's
@@ -348,20 +365,16 @@ def _run_with_progress(runner, cfg, label, chain=None):
         # user WHERE in the run they are instead of only a step name.
         text = f"#{index}/{count} · {detail}" if detail and chained else label
         if not chained:
-            try:
-                prior(done, total, text)
-            except Exception:
-                pass
+            emit(done, total, text)
             return
         try:
             frac = float(done) / float(total) if total else span[0]
         except (TypeError, ValueError, ZeroDivisionError):
             frac = span[0]
         span[0] = frac = max(span[0], min(1.0, frac))
-        try:
-            prior(index - 1 + frac, count, text)
-        except Exception:
-            pass
+        # The bar follows the fraction; the readout prints #index/count, so a
+        # half-finished step never reads as "1.9 of 18".
+        emit(index - 1 + frac, count, text, (index, count))
 
     mlo_stats.progress_hook = hook
     try:
@@ -369,7 +382,7 @@ def _run_with_progress(runner, cfg, label, chain=None):
             # Claim the bar at this script's slice — determinate from the very
             # first frame, so the header never falls back to the sweep between
             # two steps of a run that is still going.
-            prior(index - 1, count, f"#{index}/{count} · {label}")
+            emit(index - 1, count, f"#{index}/{count} · {label}", (index, count))
         else:
             # Claim the bar before the first file. Announced with NO total on
             # purpose: a runner that never ticks (AccurateRip's CUETools pass,
@@ -377,25 +390,19 @@ def _run_with_progress(runner, cfg, label, chain=None):
             # empty bar for the whole run, which reads as hung. With total 0 the
             # header draws the indeterminate sweep instead, and the first real
             # tick (or the finally below) turns it into live numbers.
-            prior(0, 0, label)
+            emit(0, 0, label)
         return runner(cfg)
     finally:
         if chained:
             # This script is done: its whole slice is behind us whatever it
             # reported on its own (a no-op script still consumed a step).
-            try:
-                prior(index, count, f"#{index}/{count} · {label}")
-            except Exception:
-                pass
+            emit(index, count, f"#{index}/{count} · {label}", (index, count))
         elif not last[1] or last[0] < last[1]:
             # Whatever this runner reported, it is over: either it never
             # opened a bar (AccurateRip, Beets), or its own bar is still short
             # of its total (a run that stopped early, a sub-bar left open).
             # Both must finish the header rather than leave it looking hung.
-            try:
-                prior(1, 1, label)
-            except Exception:
-                pass
+            emit(1, 1, label)
         mlo_stats.progress_hook = prior
 
 

@@ -285,8 +285,8 @@ table td {
 /* Now-playing ambience: the fullscreen player's background, tinted    */
 /* with the cover's dominant color (Apple Music / Monochrome style).   */
 /* Every layer is animated by CSS on a long clock; the music only      */
-/* swells .amb-glow through --amb, which the component writes a few    */
-/* times a second (never per frame).                                   */
+/* drives .amb-glow through --amb, which the component writes every    */
+/* 70 ms (a stepped value, never a per-frame paint).                   */
 /* ------------------------------------------------------------------ */
 /* 1) the cover itself, blurred and breathing — 90 s, ±4% scale */
 .amb-cover {
@@ -340,14 +340,16 @@ table td {
   to   { transform: translate3d(-6vw, 8vh, 0) scale(1.12); }
 }
 
-/* 4) the only music-driven layer. --amb (0..1) is written by the ambience
-   tick; the transitions below turn those steps into a slow breath, and the
-   range is capped well inside "noticeable but never a flash". Both
-   properties are compositor-only, so this is also the cheap layer. */
+/* 4) the only music-driven layer. --amb (0..1) is written ~14x/s by the
+   ambience tick; the transitions below turn those steps into a breath that
+   follows the music instead of a slow swell. They must stay in the same
+   range as the tick (a transition much longer than the write cadence is what
+   left the old layer looking frozen), just long enough to smooth the steps.
+   Both properties are compositor-only, so this is also the cheap layer. */
 .amb-glow {
-  opacity: calc(0.12 + 0.18 * var(--amb, 0.45));
-  transform: scale(calc(1 + 0.07 * var(--amb, 0.45)));
-  transition: opacity 2.6s ease-out, transform 4s ease-out;
+  opacity: calc(0.06 + 0.4 * var(--amb, 0.45));
+  transform: scale(calc(0.98 + 0.11 * var(--amb, 0.45)));
+  transition: opacity 0.55s ease-out, transform 0.85s ease-out;
   will-change: opacity, transform;
   pointer-events: none;
 }

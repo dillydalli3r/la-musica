@@ -168,10 +168,28 @@ export function fmtCount(n: number | null | undefined): string {
   return Number.isInteger(n) ? String(n) : n.toFixed(1);
 }
 
-/** "<done>/<total>" for a bar's readout — the pair every progress surface
- *  prints, fractional half included. */
+/** A whole, non-negative count — a progress readout says how many things are
+ *  DONE, and "1.9 of 18" is not a number of anything (the fractional half is
+ *  the sub-step of whatever is still running, which the bar already draws).
+ *  Floors, so a value that would round up never claims work still in flight. */
+export function fmtWhole(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "0";
+  return String(Math.max(0, Math.floor(n)));
+}
+
+/** "<done>/<total>" for a bar's readout — both halves whole numbers. */
 export function fmtCounts(done: number | null | undefined, total: number | null | undefined): string {
-  return `${fmtCount(done)}/${fmtCount(total)}`;
+  return `${fmtWhole(done)}/${fmtWhole(total)}`;
+}
+
+/** The whole-step pair a chained run publishes beside its fractional position
+ *  — "script 3 of 18" — as "<at>/<of>". Null when the frame carries none, so
+ *  the caller falls back to its own counts. */
+export function fmtSteps(steps: number[] | null | undefined): string | null {
+  if (!steps || steps.length < 2) return null;
+  const [at, of] = steps;
+  if (!Number.isFinite(at) || !Number.isFinite(of) || !of) return null;
+  return `${fmtWhole(at)}/${fmtWhole(of)}`;
 }
 
 /** A percentage readout: whole percent when it is one, one decimal when the

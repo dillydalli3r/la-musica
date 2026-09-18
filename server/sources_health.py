@@ -188,10 +188,14 @@ def _probe_genre(pid, cfg):
 
     if pid == "rateyourmusic":
         before = intg._rym_failures
+        # This row IS a user's Test: forget the refusal latch first, so RYM is
+        # asked again with whatever cookie is saved now — otherwise the row
+        # would report an earlier run's block however fresh the cookie is.
+        intg._rym_clear_block()
         data = intg.rym_genres(SAMPLE_ARTIST, SAMPLE_ALBUM)
         if intg._rym_failures != before:
-            return "skipped", ("RYM refused the request (403/challenge) — "
-                               "refresh rym_cookie")
+            return "skipped", ("RYM refused the request (403/challenge) — the "
+                               "cookie is stale or this network is blocked")
         detail = _count_detail((data or {}).get("genres"))
         return ("ok", detail) if detail else ("fail", "no RYM genres for the sample")
 
@@ -319,8 +323,11 @@ def _probe_links(pid, cfg):
         return "skipped", "unknown source"
     # MusicBrainz states the RYM page for well-known releases, so a missing
     # cookie is not automatically a failure — the note says which half of the
-    # ladder answered (or that RYM refused the client).
+    # ladder answered (or that RYM refused the client). The latch is cleared
+    # first because this row IS a user's Test: it asks RYM for real whatever
+    # an earlier refusal left standing.
     fails_before = intg._rym_failures
+    intg._rym_clear_block()
     got = intg.rym_links(SAMPLE_ARTIST, SAMPLE_ALBUM, cfg) or {}
     album, artist = got.get("album"), got.get("artist")
     note = str(got.get("note") or "").strip()
@@ -329,8 +336,8 @@ def _probe_links(pid, cfg):
                              ("artist" if artist else "")) if x]
         return "ok", " · ".join(parts) + " link resolved" + (f" · {note}" if note else "")
     if intg._rym_failures > fails_before:
-        return "fail", note or ("RYM did not answer — paste a logged-in "
-                                "Cookie header to get past Cloudflare")
+        return "fail", note or ("RYM did not answer — the pasted Cookie header "
+                                "was refused (403/challenge); paste a fresh one")
     return "fail", note or "no link could be verified"
 
 

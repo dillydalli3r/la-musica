@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Check, ExternalLink, Link2, Loader2, Search } from "lucide-react";
+import Popover from "./Popover";
 import { api } from "../api";
 import { toast } from "../store";
 import mbLogo from "../assets/musicbrainz.png";
@@ -352,10 +353,7 @@ export function LinkEditorButton({
         <Link2 className="h-4 w-4" />
         {!iconOnly && " Links"}
       </button>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full mt-1 z-30 w-80 rounded-lg border border-border bg-zinc-950 shadow-2xl p-3 space-y-2.5">
+      <Popover open={open} onClose={() => setOpen(false)} panelClass="w-80 p-3 space-y-2.5">
             <div className="text-[10px] uppercase tracking-wider text-zinc-500">
               Identity links · {mode} level
             </div>
@@ -428,9 +426,7 @@ export function LinkEditorButton({
             <div className="text-[10px] text-zinc-600">
               Paste links (or bare MBIDs). Values are written as real tags so grading sees them.
             </div>
-          </div>
-        </>
-      )}
+      </Popover>
     </div>
   );
 }

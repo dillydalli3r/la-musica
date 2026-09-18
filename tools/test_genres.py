@@ -124,8 +124,12 @@ BARE_RELEASE = dict(RELEASE, genres=[], media=[
 
 # A release page: album genres in the header block, and a track list whose
 # SECOND row carries a genre of its own (which is the per-track signal).
+# The title/artist header is part of the stub because the fetch VERIFIES the
+# page is the release it asked for: an unverifiable page yields nothing.
 RYM_PAGE = (
-    '<html><body><div class="album_genres">'
+    '<html><body><h1 class="album_title">Test Album</h1>'
+    '<a href="/artist/test-artist">Test Artist</a>'
+    '<div class="album_genres">'
     '<a href="/genre/heavy-metal">Heavy Metal</a>'
     '<a href="/genre/groove-metal">Groove Metal</a>'
     '</div><table class="tracklist">'
@@ -138,7 +142,9 @@ RYM_PAGE = (
 # The same page with descriptors instead of genres: descriptors are the only
 # classification such a page carries, so they are the album-level answer.
 RYM_DESCRIPTOR_PAGE = (
-    '<html><body><div class="album_descriptors">'
+    '<html><body><h1 class="album_title">Test Album</h1>'
+    '<a href="/artist/test-artist">Test Artist</a>'
+    '<div class="album_descriptors">'
     '<a href="/descriptor/concept-album">Concept Album</a>'
     '</div><table class="tracklist">'
     '<tr class="tracklist_row"><td class="tracklist_track_num">1</td>'
@@ -797,7 +803,7 @@ assert list(intg.GENRE_SOURCES) == DOCUMENTED_SOURCES, intg.GENRE_SOURCES
 # The provider REGISTRY stays the full priority list — every source is still
 # selectable in Settings → Discovery and listed in Sources health. The SHIPPED
 # default asks only the two the app grades genres from.
-SHIPPED_DEFAULT = ["musicbrainz", "rateyourmusic"]
+SHIPPED_DEFAULT = ["rateyourmusic", "musicbrainz"]
 assert list(mcfg.DEFAULT_CONFIG["genre_sources"]) == SHIPPED_DEFAULT, \
     mcfg.DEFAULT_CONFIG["genre_sources"]
 # Every per-track source sits above every album-only one, so a track's own

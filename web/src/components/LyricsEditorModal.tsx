@@ -17,6 +17,7 @@ import {
 import { syllabifyLine } from "../lib/syllables";
 import { SPEEDS, fmtSpeed } from "../lib/playback";
 import Modal from "./Modal";
+import Popover from "./Popover";
 
 type StampMode = "line" | "word" | "syllable";
 
@@ -448,10 +449,11 @@ export default function LyricsEditorModal({
           <button className="btn-ghost !py-1.5 text-xs" onClick={() => setKeysMenu(!keysMenu)} title="Keyboard shortcuts">
             <Keyboard className="h-4 w-4" />
           </button>
-          {keysMenu && (
-            <>
-            <div className="fixed inset-0 z-30" onClick={() => setKeysMenu(false)} />
-            <div className="absolute right-0 top-full mt-1 z-40 bg-zinc-950 border border-border rounded-lg shadow-2xl p-1.5 w-80 max-h-[70vh] overflow-auto">
+          <Popover
+            open={keysMenu}
+            onClose={() => setKeysMenu(false)}
+            panelClass="w-80 p-1.5 max-h-[70vh] overflow-auto"
+          >
               <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500 px-1 pb-1">Hotkeys</div>
               {LYRICS_ACTIONS.map((a) => (
                 <div key={a.id} className="flex items-center gap-2 py-0.5">
@@ -478,9 +480,7 @@ export default function LyricsEditorModal({
                 </button>
                 <span className="text-[10px] text-zinc-600 px-1">saved in this browser</span>
               </div>
-            </div>
-            </>
-          )}
+          </Popover>
         </div>
       }
     >

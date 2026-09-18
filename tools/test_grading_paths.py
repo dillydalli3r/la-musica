@@ -771,10 +771,14 @@ ok(any("could not be evaluated" in i for i in res["issues"]),
 # CD .log must be USABLE, and CRC coverage is per DISC
 # ----------------------------------------------------------------------
 print("== CD log quality + multi-disc CRC ==")
+# grade_check_crc and grade_check_log_checksum are OFF here on purpose: this
+# block is about which logs COUNT as rip logs, and the two integrity rules
+# that read a real log's checksums are its own section below.
 log_cfg = dict(ISO_CFG, music_folder="", grade_check_naming=False,
                grade_check_log_grade=False,
                grade_check_cd_cue=False, grade_check_disc_naming=False,
                grade_check_cd_format=False, grade_check_crc=False,
+               grade_check_log_checksum=False,
                grade_check_cd_log=True)
 log_path = os.path.join(cd_dir, "CD-1.log")
 with open(log_path, "w", encoding="utf-8") as fh:
@@ -787,6 +791,85 @@ with open(log_path, "w", encoding="utf-8") as fh:
 res = _grade_album(cd_dir, "EMBEDDED", log_cfg)
 ok(res["pass_count"] == res["total_checks"],
    f"a real rip log does ({res['pass_count']}/{res['total_checks']})")
+
+# ---- the log's own checksums are GRADED -------------------------------
+# A log is the CD's only integrity evidence, so a checksum in it that does
+# not match the rip — or an EAC SHA256 that does not verify — has to cost the
+# album its PASS. Coverage alone ("a CRC exists for track N") let a log from a
+# different rip, or audio altered after the rip, grade clean.
+print("== log checksums are graded ==")
+from mlo.tools import detect_all_tools as _detect_all  # noqa: E402
+
+# Each rule gets its own config: the CRC value pass is graded in isolation
+# from the log's own SHA256, exactly like the rest of this file isolates a
+# check before asserting what it costs.
+_crc_cfg = dict(log_cfg, grade_check_crc=True)
+_ck_cfg = dict(log_cfg, grade_check_log_checksum=True)
+_FFMPEG = (_detect_all().get("ffmpeg") or {}).get("ffmpeg_exe")
+if not _FFMPEG:
+    print("  skipped: no ffmpeg — the CRC value pass cannot decode audio here")
+else:
+    _real_crc = _discs._audio_crc32(_FFMPEG, cd_flac)
+
+    def _write_log(crc):
+        with open(log_path, "w", encoding="utf-8") as fh:
+            fh.write("Exact Audio Copy v1.6\n\nTrack  1\n"
+                     f"     Copy CRC {crc}\n")
+
+    _write_log(_real_crc)
+    res = _grade_album(cd_dir, "EMBEDDED", _crc_cfg)
+    ok("CRC_MISMATCH" not in res["tracks"][0]["issues"],
+       f"a log CRC that matches the audio passes "
+       f"({res['tracks'][0]['issues']})")
+
+    _write_log("00000000")
+    res = _grade_album(cd_dir, "EMBEDDED", _crc_cfg)
+    ok("CRC_MISMATCH" in res["tracks"][0]["issues"],
+       f"a log CRC that does NOT match the audio fails the track "
+       f"({res['tracks'][0]['issues']})")
+    ok(any("does not match the track's audio CRC" in i for i in res["issues"]),
+       f"and the album issue says which values disagreed ({res['issues']})")
+    ok(res["pass_count"] < res["total_checks"],
+       f"so the album does not pass ({res['pass_count']}/{res['total_checks']})")
+    res = _grade_album(cd_dir, "EMBEDDED", dict(_crc_cfg, grade_check_crc=False))
+    ok("CRC_MISMATCH" not in res["tracks"][0]["issues"],
+       "grade_check_crc=False stops the value pass (check not counted)")
+    _write_log(_real_crc)
+
+# The EAC SHA256 the log carries (==== Log checksum … ====): an INVALID one is
+# a log that cannot be trusted about anything it says, including its CRCs.
+_ck_orig = _discs.check_log_checksum
+_discs.check_log_checksum = lambda _p: ("invalid", "expected 1111 computed 2222")
+try:
+    res = _grade_album(cd_dir, "EMBEDDED", _ck_cfg)
+    ok("LOG_CHECKSUM" in res["tracks"][0]["issues"],
+       f"an unverifiable log checksum fails the track "
+       f"({res['tracks'][0]['issues']})")
+    ok(any("Rip .log checksum does not verify" in i for i in res["issues"]),
+       f"the album names the failure ({res['issues']})")
+    ok(res["pass_count"] < res["total_checks"],
+       f"and costs the album its PASS ({res['pass_count']}/{res['total_checks']})")
+    _discs.check_log_checksum = lambda _p: ("ok", None)
+    res = _grade_album(cd_dir, "EMBEDDED", _ck_cfg)
+    ok("LOG_CHECKSUM" not in res["tracks"][0]["issues"],
+       "a verifying log checksum passes the same check")
+finally:
+    _discs.check_log_checksum = _ck_orig
+res = _grade_album(cd_dir, "EMBEDDED", dict(_ck_cfg, grade_check_log_checksum=False))
+ok("LOG_CHECKSUM" not in res["tracks"][0]["issues"],
+   "grade_check_log_checksum=False stops the check (not counted)")
+
+# An XLD / old-EAC log has no checksum concept at all: 'unsupported' must
+# never be read as "wrong" — nothing claimed, nothing refuted.
+_discs.check_log_checksum = lambda _p: ("unsupported", "XLD log has no EAC checksum")
+try:
+    res = _grade_album(cd_dir, "EMBEDDED", _ck_cfg)
+    ok("LOG_CHECKSUM" not in res["tracks"][0]["issues"],
+       f"a log with no checksum concept is not failed for having none "
+       f"({res['tracks'][0]['issues']})")
+finally:
+    _discs.check_log_checksum = _ck_orig
+
 os.remove(log_path)
 
 md_dir = os.path.join(music, "Artists", "Artist", "Two Discs (2020)")
