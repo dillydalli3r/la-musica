@@ -282,76 +282,89 @@ table td {
 }
 
 /* ------------------------------------------------------------------ */
-/* Now-playing ambience: animated color orbs behind the fullscreen     */
-/* player, tinted with the cover's dominant color (Apple Music /       */
-/* Monochrome style). The drift is pure CSS; the beat pulse is driven  */
-/* from JS off the shared analyser graph (crossOrigin keeps the        */
-/* streams readable there).                                            */
+/* Now-playing ambience: the fullscreen player's background, tinted    */
+/* with the cover's dominant color (Apple Music / Monochrome style).   */
+/* Every layer is animated by CSS on a long clock; the music only      */
+/* swells .amb-glow through --amb, which the component writes a few    */
+/* times a second (never per frame).                                   */
 /* ------------------------------------------------------------------ */
-.orb {
+/* 1) the cover itself, blurred and breathing — 90 s, ±4% scale */
+.amb-cover {
+  animation: amb-breathe 90s ease-in-out infinite alternate;
+  will-change: transform;
+}
+@keyframes amb-breathe {
+  from { transform: scale(1.08); }
+  to   { transform: scale(1.16); }
+}
+
+/* 2) aurora sweep: one conic band turning a full circle every 3 minutes.
+   Transform-only, so it costs nothing to keep running. */
+.amb-sweep {
+  opacity: 0.5;
+  animation: amb-sweep 180s linear infinite;
+  will-change: transform;
+}
+@keyframes amb-sweep {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* 3) drifting color fields. The blur has to READ through 70px, so each
+   field crosses a few viewport units — slowly, and with an easing turn at
+   each end (alternate), which is what keeps the backdrop from reading as
+   "moving on its own clock". */
+.amb-orb {
   position: absolute;
   border-radius: 9999px;
-  filter: blur(80px);
+  filter: blur(70px);
   /* additive color mixing: overlapping fields add light instead of turning
      muddy, which is what keeps the backdrop colorful rather than grey */
   mix-blend-mode: screen;
   will-change: transform;
   pointer-events: none;
 }
-.orb-a { opacity: 0.8; }
-.orb-b { opacity: 0.7; }
-.orb-c { opacity: 0.6; }
-.orb-d { opacity: 0.55; }
-/* Motion has to READ through an 80px blur, so each orb still crosses tens of
-   viewport units per loop — but slowly: a background that travels fast on its
-   own clock reads as "moving on its own", not as reacting to the music. The
-   bass-driven swell (JS, see the ambience tick) is the part that responds. */
-.orb-a {
-  animation: orb-drift-a 28s linear infinite;
+.amb-orb-a { opacity: 0.72; animation: amb-drift-a 62s ease-in-out infinite alternate; }
+.amb-orb-b { opacity: 0.64; animation: amb-drift-b 76s ease-in-out infinite alternate; }
+.amb-orb-c { opacity: 0.58; animation: amb-drift-c 88s ease-in-out infinite alternate; }
+@keyframes amb-drift-a {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to   { transform: translate3d(9vw, 7vh, 0) scale(1.18); }
 }
-.orb-b {
-  animation: orb-drift-b 34s linear infinite;
+@keyframes amb-drift-b {
+  from { transform: translate3d(0, 0, 0) scale(1.1); }
+  to   { transform: translate3d(-8vw, -6vh, 0) scale(0.94); }
 }
-.orb-c {
-  animation: orb-drift-c 23s linear infinite;
+@keyframes amb-drift-c {
+  from { transform: translate3d(0, 0, 0) scale(0.96); }
+  to   { transform: translate3d(-6vw, 8vh, 0) scale(1.12); }
 }
-.orb-d {
-  animation: orb-drift-d 30s linear infinite;
+
+/* 4) the only music-driven layer. --amb (0..1) is written by the ambience
+   tick; the transitions below turn those steps into a slow breath, and the
+   range is capped well inside "noticeable but never a flash". Both
+   properties are compositor-only, so this is also the cheap layer. */
+.amb-glow {
+  opacity: calc(0.12 + 0.18 * var(--amb, 0.45));
+  transform: scale(calc(1 + 0.07 * var(--amb, 0.45)));
+  transition: opacity 2.6s ease-out, transform 4s ease-out;
+  will-change: opacity, transform;
+  pointer-events: none;
 }
-/* The whole field slowly cycles its hue so the palette keeps evolving even
-   while every orb drifts on its own path. */
-.orb-field {
-  animation: orb-hue-cycle 40s ease-in-out infinite alternate;
+
+/* 5) grain + vignette: a static film grain (SVG turbulence, no animation)
+   and an edge darkening, so the color field settles into the corners
+   instead of looking like a flat wash. */
+.amb-grain {
+  opacity: 0.045;
+  mix-blend-mode: overlay;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='g'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='160' height='160' filter='url(%23g)'/></svg>");
+  background-size: 160px 160px;
 }
-@keyframes orb-hue-cycle {
-  from { filter: hue-rotate(-24deg) saturate(1.05); }
-  to   { filter: hue-rotate(30deg) saturate(1.3); }
-}
-@keyframes orb-drift-a {
-  0%   { transform: translate(-4vw, -3vh) scale(1) rotate(0deg); }
-  25%  { transform: translate(10vw, 4vh) scale(1.14) rotate(50deg); }
-  50%  { transform: translate(15vw, 13vh) scale(0.92) rotate(120deg); }
-  75%  { transform: translate(2vw, 9vh) scale(1.08) rotate(200deg); }
-  100% { transform: translate(-4vw, -3vh) scale(1) rotate(360deg); }
-}
-@keyframes orb-drift-b {
-  0%   { transform: translate(3vw, 4vh) scale(1.08) rotate(0deg); }
-  25%  { transform: translate(-6vw, -1vh) scale(0.9) rotate(-60deg); }
-  50%  { transform: translate(-11vw, -8vh) scale(1.15) rotate(-140deg); }
-  75%  { transform: translate(4vw, -11vh) scale(0.96) rotate(-230deg); }
-  100% { transform: translate(3vw, 4vh) scale(1.08) rotate(-360deg); }
-}
-@keyframes orb-drift-c {
-  0%   { transform: translate(0vw, 3vh) scale(0.95); }
-  33%  { transform: translate(-10vw, -5vh) scale(1.2); }
-  66%  { transform: translate(8vw, -10vh) scale(1); }
-  100% { transform: translate(0vw, 3vh) scale(0.95); }
-}
-@keyframes orb-drift-d {
-  0%   { transform: translate(0vw, 0vh) scale(1); }
-  33%  { transform: translate(9vw, 8vh) scale(1.1); }
-  66%  { transform: translate(-8vw, 11vh) scale(0.9); }
-  100% { transform: translate(0vw, 0vh) scale(1); }
+.amb-vignette {
+  pointer-events: none;
+  background: radial-gradient(ellipse 125% 100% at 50% 45%, transparent 46%, rgb(9 9 11 / 0.42) 100%);
 }
 /* gentle breathing on the artwork glow */
 @keyframes glow-pulse {
@@ -459,8 +472,9 @@ table td {
   .page-enter,
   .toast-in,
   .skeleton,
-  .orb,
-  .orb-field,
+  .amb-cover,
+  .amb-sweep,
+  .amb-orb,
   .artwork-glow,
   .title-marquee {
     animation: none !important;

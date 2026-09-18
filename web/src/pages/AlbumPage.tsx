@@ -854,7 +854,20 @@ export default function AlbumPage() {
       )}
 
       {detailTrack && (
-        <TrackDetails track={detailTrack} albumPath={data.path} onClose={() => setDetailTrack(null)} />
+        <TrackDetails
+          track={detailTrack}
+          albumPath={data.path}
+          onClose={() => setDetailTrack(null)}
+          /* The grader puts the MESSAGE on the album ("PATH: expected '…'
+             (run organize)") and only the check CODE on the track, so the
+             modal would otherwise list bare codes with nothing to act on.
+             These are that track's own messages, in the order its codes were
+             appended; the modal falls back to the codes if the counts ever
+             disagree. */
+          messages={issueEntries
+            .filter(([, files]) => files.includes(detailTrack.file))
+            .map(([text]) => text)}
+        />
       )}
 
       {videoOpen && (

@@ -32,11 +32,17 @@ const ZOOM_KEY = "mlo.np.lyrzoom.v2"; // lyrics zoom multiplier (persisted)
 
 /** Background-ambience energy window, in dBFS MEAN bin level (averaged over
  * every FFT bin, so it sits ~20 dB below the loudest band): below the floor
- * the bloom is closed, at the ceiling fully open. Measured on a real track
+ * the glow is closed, at the ceiling fully open. Measured on a real track
  * this mean swings around −70 dBFS. See the ambience tick for why the mean
  * is taken in dB and not in raw bytes. */
 const AMB_FLOOR_DB = -82;
 const AMB_CEIL_DB = -57;
+
+/** How often the ambience reads the analyser and updates --amb, in ms. Every
+ * layer eases its own properties from that one value over seconds, so a
+ * lower rate costs nothing visually — and a higher one is how the background
+ * started strobing. */
+const AMB_TICK_MS = 120;
 
 /** How the player applies ReplayGain — mirrors the `replaygain_mode` config
  * options (mlo/config.py). */
@@ -239,51 +245,37 @@ export default function NowPlayingView(p: Props) {
   const rgb = hexToRgbTriplet(colorData?.color) ?? [113, 113, 122];
 
   // ---- background ambience (Apple Music-style, layered) --------------------
-  // Driven by the ACTUAL audio signal, never a synthetic clock: each frame
-  // reads the shared WebAudio analyser's mean spectrum energy and eases it,
-  // so the bloom/background swell with the music that's really playing.
-  // With no signal (paused, idle, unobservable stream) everything settles
-  // into a barely-there breath — no beat pumping against silence.
-  //   * the blurred cover slowly breathes in scale,
-  //   * a colored bloom ring behind the artwork swells with real energy,
-  //   * each color orb waves with its own phase (CSS keyframes), so light
-  //     washes around.
-  const bgRef = useRef<HTMLDivElement>(null);
-  const bloomRef = useRef<HTMLDivElement>(null);
-  const orbsRef = useRef<HTMLDivElement>(null);
+  // One value comes from the audio — the shared WebAudio analyser's bass-
+  // weighted level, smoothed — and it is applied as a slow swell to ONE glow
+  // layer. Everything else (cover breathing, aurora sweep, drifting color
+  // fields) is CSS animation on its own long clock. Nothing is painted per
+  // frame: painting an opacity from the current level is what read as
+  // strobing, because a kick could brighten one frame and the next took it
+  // back. The layers themselves are described at the markup below.
+  const ambRef = useRef<HTMLDivElement>(null);
   const eased = useRef({ energy: 0 });
   // Read through a ref, exactly like the bars do: the ambience loop already
-  // handles silence internally (energy stays 0), so `p.playing` must not be an
-  // effect dependency. It was, and the teardown/rebuild on every pause reset
-  // the breathing phase `t` to 0 — the whole background snapped to another
-  // scale in a single frame (measured: 1.0814 → 1.1100 on the pause frame
-  // against ~0.0005 per frame normally), i.e. a visible twitch of the blurred
-  // cover on every pause and resume.
+  // handles silence internally (energy eases to 0), so `p.playing` must not be
+  // an effect dependency. It was, and the teardown/rebuild on every pause
+  // reset the phase to 0 — the whole background snapped to another scale in a
+  // single frame on every pause and resume.
   const playingRef = useRef(p.playing);
   useEffect(() => {
     playingRef.current = p.playing;
   }, [p.playing]);
   useEffect(() => {
-    if (!vis) {
-      // effect disabled → restore the static ambience
-      if (bgRef.current) {
-        bgRef.current.style.opacity = "";
-        bgRef.current.style.transform = "";
-      }
-      if (bloomRef.current) bloomRef.current.style.opacity = "";
-      if (orbsRef.current) {
-        orbsRef.current.style.transform = "";
-        orbsRef.current.style.filter = "";
-      }
+    const el = ambRef.current;
+    if (!el) return;
+    const calm = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (!vis || calm) {
+      // One steady value: the layers keep their colors and composition, and
+      // nothing moves on its own.
+      el.style.setProperty("--amb", "0.45");
       return;
     }
-    let raf = 0;
+    let timer = 0;
     let freq: Uint8Array | null = null;
-    const t0 = performance.now();
-    const tick = () => {
-      const t = (performance.now() - t0) / 1000;
-      // Real signal energy 0..1 from the shared analyser (same source the
-      // visualizer bars draw). Zero when paused or unobservable.
+    const read = () => {
       let energy = 0;
       if (playingRef.current) {
         try {
@@ -296,15 +288,11 @@ export default function NowPlayingView(p: Props) {
             let sum = 0;
             for (let i = 0; i < freq.length; i++) sum += freq[i];
             // Bytes are the analyser's dB window (lib/analyser.ts) squeezed
-            // into 0..255 — averaging them raw saturated the bloom on any
-            // loud master (every bin pinned at the old −30 dBFS ceiling), so
-            // the mean is taken in dB and mapped over the window above, the
-            // same way the bars read the same node.
+            // into 0..255, so the level is read back in dB — averaging raw
+            // bytes saturated on any loud master.
             const meanDb = MIN_DB + (sum / freq.length / 255) * (MAX_DB - MIN_DB);
-            // The LOW bands carry the beat — a mean over all 512 bins barely
-            // moves between a kick and a verse, which is why the ambience
-            // looked like a constant wash. 60% bass, 40% overall keeps the
-            // swell musical instead of either flat or strobe-like.
+            // The LOW bands carry the beat: 60% bass, 40% overall keeps the
+            // glow following the music instead of sitting flat.
             const lowBins = Math.max(1, freq.length >> 3);
             let low = 0;
             for (let i = 0; i < lowBins; i++) low += freq[i];
@@ -316,34 +304,18 @@ export default function NowPlayingView(p: Props) {
           energy = 0;
         }
       }
-      // Fast attack / slow release so swells follow transients, not noise.
+      // Asymmetric smoothing here, CSS easing on the other side: this writes
+      // ONE custom property every AMB_TICK_MS and every layer eases its own
+      // opacity/scale over seconds (.amb-glow). Per-frame opacity writes with
+      // an instant attack are what read as strobing — a kick could paint a
+      // bright frame and the next frame took it away.
       const prev = eased.current.energy;
-      eased.current.energy = energy > prev ? energy : prev + (energy - prev) * 0.06;
-      const env = eased.current.energy;
-      // Blurred cover: a very slow breathing zoom the music now clearly rides
-      // on. Opacity never changes — brightness pumping is what read as
-      // "flashing" before.
-      const breathe = 0.5 + 0.5 * Math.sin(t * 0.21);
-      if (bgRef.current) {
-        bgRef.current.style.transform = `scale(${(1.06 + 0.04 * breathe + 0.1 * env).toFixed(4)})`;
-      }
-      // Bloom: the energy-visible layer, eased so it swells rather than
-      // snaps, and capped well below flash territory.
-      if (bloomRef.current) {
-        bloomRef.current.style.opacity = String(0.1 + 0.34 * env);
-        bloomRef.current.style.transform = `scale(${(0.94 + 0.2 * env).toFixed(4)})`;
-      }
-      // Color field: the CSS keyframes give it a slow drift (a background
-      // has to live a little on its own), and the music drives the part a
-      // viewer actually reads as "reacting" — a visible swell with the
-      // bass. Never opacity or brightness, so nothing can flash.
-      if (orbsRef.current) {
-        orbsRef.current.style.transform = `scale(${(1 + 0.06 * env).toFixed(4)})`;
-      }
-      raf = requestAnimationFrame(tick);
+      eased.current.energy = prev + (energy - prev) * (energy > prev ? 0.12 : 0.03);
+      el.style.setProperty("--amb", eased.current.energy.toFixed(3));
+      timer = window.setTimeout(read, AMB_TICK_MS);
     };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
+    read();
+    return () => window.clearTimeout(timer);
   }, [vis]);
 
   // Persisted-toggle helper shared by the options menu and inline buttons.
@@ -895,51 +867,57 @@ export default function NowPlayingView(p: Props) {
           leave the view "stuck" half-rendered. Clip can never be scrolled. */}
       {/* Music videos own the whole screen: the picture fills the viewport
           (object-contain over black), controls overlay the bottom edge. The
-          cover/orb ambience is skipped — the video IS the background. */}
+          ambience below is skipped — the video IS the background. */}
       {!videoPath && (
       <>
-      {/* ---- ambient background: blurred cover + drifting color orbs,
-              swelling with the beat when the pulse effect is on ---- */}
-      <div ref={bgRef} className="absolute inset-0 blur-3xl" style={{ opacity: 0.25, transform: "scale(1.1)" }}>
-        <CoverImg albumPath={p.current.albumPath} coverFile={coverFile} wrapperClass="w-full h-full" />
-      </div>
-      {orbs && (
-        <div ref={orbsRef} className="absolute inset-0 pointer-events-none">
-          {/* .orb-field carries the slow hue-cycle CSS animation; the beat
-              pump (JS) stays on the outer container so the two never fight */}
-          <div className="orb-field absolute inset-0">
+      {/* ---- ambient background -------------------------------------------
+          Five layers, all composed here and animated by CSS on long clocks:
+          the cover's own colors blurred underneath, a slow aurora sweep,
+          drifting color fields, one glow the music swells (--amb, written a
+          few times a second), then grain and a vignette to settle it. The
+          layers never react per frame — that was the strobing. */}
+      <div ref={ambRef} className="absolute inset-0 overflow-clip" aria-hidden>
+        <div className="amb-cover absolute inset-0 blur-3xl opacity-[0.34]">
+          <CoverImg albumPath={p.current.albumPath} coverFile={coverFile} wrapperClass="w-full h-full" />
+        </div>
+        <div className="amb-sweep absolute -inset-1/2">
+          <div
+            className="absolute inset-0"
+            style={{
+              background: `conic-gradient(from 0deg at 50% 50%, transparent 0deg, rgb(${rgb.map((v) => Math.min(255, v + 30)).join(" ")} / 0.30) 70deg, transparent 150deg, rgb(${rgb.map((v) => Math.max(0, v - 25)).join(" ")} / 0.22) 250deg, transparent 330deg)`,
+            }}
+          />
+        </div>
+        {orbs && (
+          <div className="absolute inset-0">
+            {/* mix-blend-mode: screen adds light instead of turning muddy,
+                which is what keeps overlapping fields colorful */}
             <div
-              className="orb orb-a w-[55vw] h-[55vw] -top-[15vw] -left-[10vw]"
-              style={{ background: `radial-gradient(circle at 35% 35%, rgb(${rgb.join(" ")} / 0.9), transparent 65%)` }}
+              className="amb-orb amb-orb-a w-[62vw] h-[62vw] -top-[18vw] -left-[12vw]"
+              style={{ background: `radial-gradient(circle at 38% 34%, rgb(${rgb.join(" ")} / 0.85), transparent 66%)` }}
             />
             <div
-              className="orb orb-b w-[48vw] h-[48vw] bottom-[-14vw] right-[-8vw]"
-              style={{ background: `radial-gradient(circle at 38% 32%, rgb(${rgb.join(" ")} / 0.85), transparent 62%)`, filter: "blur(80px) hue-rotate(55deg)" }}
+              className="amb-orb amb-orb-b w-[54vw] h-[54vw] bottom-[-16vw] right-[-10vw]"
+              style={{ background: `radial-gradient(circle at 40% 30%, rgb(${rgb.map((v) => Math.min(255, v + 34)).join(" ")} / 0.75), transparent 64%)` }}
             />
             <div
-              className="orb orb-c w-[38vw] h-[38vw] top-[28%] left-[36%]"
-              style={{ background: `radial-gradient(circle at 62% 38%, rgb(${rgb.map((v) => Math.min(255, v + 40)).join(" ")} / 0.8), transparent 60%)`, filter: "blur(80px) hue-rotate(-65deg)" }}
-            />
-            <div
-              className="orb orb-d w-[30vw] h-[30vw] top-[-8vw] right-[12vw]"
-              style={{ background: `radial-gradient(circle at 30% 60%, rgb(${rgb.map((v) => Math.max(0, v - 20)).join(" ")} / 0.75), transparent 58%)`, filter: "blur(70px) hue-rotate(150deg)" }}
+              className="amb-orb amb-orb-c w-[44vw] h-[44vw] top-[26%] left-[34%]"
+              style={{ background: `radial-gradient(circle at 60% 40%, rgb(${rgb.map((v) => Math.max(0, v - 28)).join(" ")} / 0.7), transparent 62%)` }}
             />
           </div>
-        </div>
-      )}
-      {/* bloom ring behind the artwork — swells on the beat when the
-          ambience effect is on */}
-      <div
-        ref={bloomRef}
-        aria-hidden
-        className="absolute inset-0 pointer-events-none"
-        style={{
-          background: `radial-gradient(ellipse 62% 52% at 50% 55%, rgb(${rgb.join(" ")} / 0.5), transparent 70%)`,
-          opacity: 0.15,
-        }}
-      />
-      {/* legibility wash — deliberately light so the animated color field
-          stays visible; only the very top and bottom darken for the bars */}
+        )}
+        {/* the one music-driven layer: a wide soft glow behind the artwork.
+            .amb-glow eases opacity/scale from --amb over seconds, so the
+            music reads as the light breathing, never as a flash */}
+        <div
+          className="amb-glow absolute inset-0"
+          style={{ background: `radial-gradient(ellipse 58% 46% at 50% 52%, rgb(${rgb.join(" ")} / 0.42), transparent 72%)` }}
+        />
+        <div className="amb-grain absolute inset-0" />
+        <div className="amb-vignette absolute inset-0" />
+      </div>
+      {/* legibility wash — deliberately light so the color field stays
+          visible; only the very top and bottom darken for the bars */}
       <div className="absolute inset-0 bg-gradient-to-b from-zinc-950/55 via-zinc-950/20 to-zinc-950/80" />
       </>
       )}
@@ -1128,7 +1106,7 @@ export default function NowPlayingView(p: Props) {
                         persist(VIS_KEY, v ? "1" : "0");
                       }}
                     />
-                    Background pulse
+                    Background glow follows the music
                   </label>
                   {/* inert over a music video: <Visualizer> only renders in the
                       audio layout, so the toggle is hidden rather than a no-op */}

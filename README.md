@@ -64,6 +64,14 @@ machines.
   per-band rolling reference, so a loud master shows shape instead of pinning
   every bar at full height, and it meters both audio and music videos —
   starting on the first play, surviving track changes, seeks and buffering.
+  The fullscreen background is **layered, not beat-driven**: a blurred
+  cover, a slow aurora sweep and drifting color fields each run on their own
+  long clock (62-180 s), the cover's grain and vignette settle them, and the
+  music swells ONE soft glow — driven by a value written a few times a
+  second, eased over seconds by CSS, so the light breathes and can never
+  flash. Both halves are switchable under the player's *Background* options
+  (`mlo.np.orbs` color drift, `mlo.np.vis` music glow) and
+  `prefers-reduced-motion` freezes the lot.
   ReplayGain is applied through the WebAudio gain
   stage in track, album or off mode with a preamp, and a track whose file
   carries no ReplayGain tags is measured on the fly (ffmpeg EBU R128,

@@ -42,10 +42,17 @@ export default function TrackDetails({
   track,
   albumPath,
   onClose,
+  messages,
 }: {
   track: Track;
   albumPath: string;
   onClose: () => void;
+  /** The album's own problem text for THIS track's failed checks, in the
+   *  same order as `track.issues` — the grader reports the message on the
+   *  album ("PATH: expected '…' (run organize)") and only the check CODE on
+   *  the track, so the modal would otherwise list bare codes like "PATH"
+   *  with nothing to act on. Callers that have no messages keep the codes. */
+  messages?: string[];
 }) {
   const issues: string[] = track.issues ?? [];
   const values = track.values ?? {};
@@ -199,7 +206,7 @@ export default function TrackDetails({
           <ul className="space-y-1">
             {issues.map((iss, i) => (
               <li key={i} className="text-xs text-red-300/90 bg-red-950/30 border border-red-900/40 rounded px-2 py-1">
-                {iss}
+                {messages && messages.length === issues.length ? messages[i] : iss}
               </li>
             ))}
           </ul>

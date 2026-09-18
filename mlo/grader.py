@@ -1630,7 +1630,13 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             if kind == "path" and cfg.get("grade_check_naming", True):
                 total_checks += 1
                 failed_checks += 1
-                add_issue(f"PATH: expected '{expected}'", basename)
+                # The same pointer the case-only twin below carries: the
+                # expected path above IS the current naming script's own
+                # evaluation of this file's tags (see _naming_mismatch), so
+                # the way to satisfy it is the album's own Organize action —
+                # never a hand rename, which would drift again the next time
+                # MusicBrainz sharpens a date.
+                add_issue(f"PATH: expected '{expected}' (run organize)", basename)
                 track["issues"].append("PATH")
             elif kind == "case" and cfg.get("grade_check_filename_case", True):
                 total_checks += 1

@@ -262,6 +262,12 @@ export default function LibraryPage() {
   });
   const [statsOpen, setStatsOpen] = useState(false);
   const [detailTrack, setDetailTrack] = useState<{ track: Track; albumPath: string } | null>(null);
+  /** The album behind the open track dialog, when this payload has it: its
+   *  `issues` map is where the full problem text lives (the track carries
+   *  check codes only). */
+  const detailAlbum = detailTrack
+    ? (lib?.artists ?? []).flatMap((a) => a.albums).find((al) => al.path === detailTrack.albumPath)
+    : undefined;
   const [bulkTagsOpen, setBulkTagsOpen] = useState(false);
 
   const [fullDates, setFullDates] = useLocalPref("full-dates", false);
@@ -857,7 +863,17 @@ export default function LibraryPage() {
       )}
 
       {detailTrack && (
-        <TrackDetails track={detailTrack.track} albumPath={detailTrack.albumPath} onClose={() => setDetailTrack(null)} />
+        <TrackDetails
+          track={detailTrack.track}
+          albumPath={detailTrack.albumPath}
+          onClose={() => setDetailTrack(null)}
+          /* Same wiring as the album page: the full problem text lives on the
+             album, the track carries only the check codes. Empty when this
+             payload has no album for the track (the modal keeps the codes). */
+          messages={Object.entries(detailAlbum?.issues ?? {})
+            .filter(([, files]) => files.includes(detailTrack.track.file))
+            .map(([text]) => text)}
+        />
       )}
 
       {/* ---------------- Grid browse view (Apple Music style, default) ---------------- */}

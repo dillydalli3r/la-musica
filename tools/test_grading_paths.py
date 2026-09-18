@@ -250,8 +250,9 @@ _mis_kind, _mis_expected = _naming_mismatch(
     dict(BASE_TAGS, BPM="120"))
 ok(_mis_kind == "path", f"misplaced file is a real mismatch (got {_mis_kind})")
 ok([i for i in res["issues"] if i.startswith("PATH")] ==
-   [f"PATH: expected '{_mis_expected}'"],
-   f"the PATH issue names the script's expected path (got {res['issues']})")
+   [f"PATH: expected '{_mis_expected}' (run organize)"],
+   f"the PATH issue names the script's expected path and the fix "
+   f"(got {res['issues']})")
 
 # check disabled -> no PATH issue
 cfg_off = dict(cfg, grade_check_naming=False)
