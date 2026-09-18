@@ -57,21 +57,26 @@ def _job_running():
         return False
 
 
-def _wait_job(cancel_check):
+def _wait_job(cancel_check, timeout_s=3 * 3600 + 600):
     """Block until the current auto-import job settles; returns its state.
 
     The job carries its own per-candidate ceilings (up to 2 h for a download
     plus the log stage), so a fixed wait here would abandon a download that is
     still progressing and charge the wish a bogus attempt. `cancel_check` lets
-    a stop / disable break the wait instead."""
+    a stop / disable break the wait instead. The wait itself is still bounded
+    (default just past the longest job the pipeline can run): a wedged job
+    must not park the worker forever — the wish is re-marked wanted so the
+    next cycle retries it instead of rotting in 'searching'."""
     from server import soulseek_auto
     time.sleep(1.0)  # let the job transition to running first
+    deadline = time.time() + timeout_s
     while True:
         st = soulseek_auto.job_state()
         if st.get("state") != "running" or cancel_check():
             return st
+        if time.time() >= deadline:
+            return st  # still running past every pipeline ceiling: give up waiting
         time.sleep(2.0)
-
 
 def _run_one(wish, cfg):
     """Search + fill one wish. Returns 'imported' | 'pending' | 'skipped'."""
@@ -119,13 +124,29 @@ def _run_one(wish, cfg):
         queries=(wish.get("queries") or None),
     )
     if not r.get("ok"):
-        wishes.mark_wanted(wid, error=r.get("error", "job refused"),
+        err = str(r.get("error") or "job refused")
+        low = err.lower()
+        if "already in your library" in low:
+            # honey: trust start_job's owned check; reconcile pins the path.
+            resolved = wishes.reconcile_with_library(cfg)
+            if not resolved:
+                wishes.mark_imported(wid, "")
+            return "imported"
+        if "already queued" in low or "already running" in low or "being imported" in low:
+            # Transient pipeline contention, not a failed attempt: leave the
+            # wish open without burning an attempt.
+            wishes.mark_wanted(wid, error=err,
+                               attempts=int(wish.get("attempts") or 0))
+            return "skipped"
+        wishes.mark_wanted(wid, error=err,
                            attempts=int(wish.get("attempts") or 0) + 1)
         return "pending"
     st = _wait_job(_stopped)
     if st.get("state") == "running":
-        # Stopped by cancellation while the download is still going — leave the
-        # wish alone (the next cycle resets the stale 'searching' status).
+        # Stopped by cancellation, or the job outlived every pipeline ceiling
+        # (wedged) — re-mark wanted so the wish cannot rot in 'searching'.
+        wishes.mark_wanted(wid, error="search interrupted — will retry",
+                           attempts=int(wish.get("attempts") or 0))
         return "pending"
     result = st.get("result") or {}
     if st.get("state") == "done" and result.get("imported"):

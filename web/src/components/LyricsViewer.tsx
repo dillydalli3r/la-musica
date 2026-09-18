@@ -23,38 +23,58 @@ export interface LrcLine {
   time: number; // seconds
   text: string;
   words?: LrcWord[]; // ELRC inline word/syllable timestamps <mm:ss.xx>
+  /** Untimed line borrowed into a mixed file (inherits previous timestamp). */
+  untimed?: boolean;
   /** Syllable level: some word tags are glued together with no whitespace
    * ("<t>try<t>ing") — one tag per syllable instead of per word. */
   syl?: boolean;
 }
 
-const META_RE = /\[(?:ar|ti|al|by|re|ve|length|offset):[^\]]*\]/gi;
+const META_RE = /\[(?:ar|ti|al|au|la|by|re|ve|length|offset):[^\]]*\]/gi;
 const TIME_RE = /\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\]/g;
 const WORD_RE = /<(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?>/g;
 
 function tsToTime(mm: string, ss: string, frac?: string): number {
-  const f = (frac ?? "0").padEnd(2, "0").slice(0, 2);
-  return parseInt(mm, 10) * 60 + parseInt(ss, 10) + parseInt(f, 10) / 100;
+  const f = (frac ?? "0").padEnd(3, "0").slice(0, 3);
+  return parseInt(mm, 10) * 60 + parseInt(ss, 10) + parseInt(f, 10) / 1000;
 }
 
 export function fmtTs(t: number, decimals = 2): string {
-  const mm = Math.floor(t / 60);
-  const ss = Math.floor(t % 60);
-  const frac = Math.round((t - Math.floor(t)) * 10 ** decimals);
-  const fracStr = String(Math.min(frac, 10 ** decimals - 1)).padStart(decimals, "0");
-  return `[${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}.${fracStr}]`;
+  // ponytail: integer total avoids 59.999->00:59.99 clamp; overflow carries
+  const total = Math.max(0, Math.round(t * 10 ** decimals));
+  const perMin = 60 * 10 ** decimals;
+  const mm = Math.floor(total / perMin);
+  const ss = Math.floor((total % perMin) / 10 ** decimals);
+  const frac = total % 10 ** decimals;
+  return `[${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}.${String(frac).padStart(decimals, "0")}]`;
 }
+
+/** True when `text` really holds lyrics (mirrors backend has_lyrics_text):
+ * not blank, not metadata headers only, and at least one line keeps text
+ * after stripping tags + timestamps. A bare-[00:00.00]-only file is
+ * lyric-less, not a line reading "[00:00.00]". */
+export function hasLyricsText(text: string | null | undefined): boolean {
+  if (!text || !text.trim()) return false;
+  for (const line of text.split("\n")) {
+    const body = line.replace(TIME_RE, "").replace(WORD_RE, "");
+    if (body.replace(META_RE, "").trim()) return true;
+  }
+  return false;
+}
+
 
 export function parseLrc(lrc: string): LrcLine[] {
   let offsetMs = 0;
   const off = lrc.match(/\[offset:\s*([+-]?\d+)\s*\]/i);
   if (off) offsetMs = parseInt(off[1], 10) || 0;
+  const shift = offsetMs / 1000;
   const lines: LrcLine[] = [];
+  let hasTimed = false;
+  let lastTime = 0;
   for (const raw of lrc.split(/\r?\n/)) {
     // drop metadata tags like [ti:...] / [ar:...] (never lyric content)
     const cleaned = raw.replace(META_RE, "");
     const times = [...cleaned.matchAll(TIME_RE)];
-    if (!times.length) continue;
     const body = cleaned.replace(TIME_RE, "");
     // ELRC word-level timestamps: <mm:ss.xx>word <mm:ss.xx>word2
     const parts = body.split(WORD_RE);
@@ -63,7 +83,8 @@ export function parseLrc(lrc: string): LrcLine[] {
       const mm = parts[4 * k + 1];
       const ss = parts[4 * k + 2];
       if (mm === undefined || ss === undefined) break;
-      words.push({ time: tsToTime(mm, ss, parts[4 * k + 3]), text: parts[4 * k + 4] ?? "" });
+      // ponytail: negative [offset:] clamps at 0, no pre-echo seeks
+      words.push({ time: Math.max(0, tsToTime(mm, ss, parts[4 * k + 3]) + shift), text: parts[4 * k + 4] ?? "" });
     }
     const text = words.length
       ? words.map((w) => w.text).join("").replace(/\s+/g, " ").trim()
@@ -73,17 +94,28 @@ export function parseLrc(lrc: string): LrcLine[] {
     // previous word (glued syllable tags); canonical word-level tags always
     // end their piece with a space (except the final one of the line).
     const syl = words.some((_w, k) => k > 0 && !/\s$/.test(words[k - 1].text));
+    if (!times.length) {
+      // Untimed line in a mixed file: sing with the previous line (stable
+      // sort keeps file order within the cluster) instead of dropping it.
+      // Pure-plain files return [] below, so plain panes keep working.
+      // honey: inherits prev timestamp; per-line offsets need real stamps.
+      lines.push({ ts: fmtTs(lastTime, 2), time: lastTime, text, untimed: true });
+      continue;
+    }
+    hasTimed = true;
     for (const m of times) {
-      const time = tsToTime(m[1], m[2], m[3]) + offsetMs / 1000;
+      const time = Math.max(0, tsToTime(m[1], m[2], m[3]) + shift);
+      lastTime = time;
       lines.push({
         ts: fmtTs(time, 2),
         time,
         text,
         syl: syl || undefined,
-        words: words.length ? words.map((w) => ({ ...w, time: w.time + offsetMs / 1000 })) : undefined,
+        words: words.length ? words.map((w) => ({ ...w })) : undefined,
       });
     }
   }
+  if (!hasTimed) return [];
   // sort + drop exact duplicates (a provider may repeat lines)
   lines.sort((a, b) => a.time - b.time);
   const seen = new Set<string>();
@@ -106,6 +138,19 @@ export function parsePlayerLrc(text: string): LrcLine[] {
     parsed.unshift({ ts: "[00:00.00]", time: 0, text: "" });
   }
   return parsed;
+}
+
+/** Seed stored xlit/trans arrays so index `i` matches main `displayLines[i]`:
+ * synced transforms parse WITHOUT the time-0 leader (parseLrc, not
+ * parsePlayerLrc), then take the main's leader when it has one — a plain
+ * branch adds none either. Both panes share this, so no leader-shift. */
+export function splitStoredLines(s: string, withLeader = false): string[] {
+  // honey: blank-leader pad keeps xlit/trans 1:1; per-line realign if sources diverge.
+  const out = /\[\d{1,2}:\d{1,2}/.test(s)
+    ? parseLrc(s).map((l) => l.text)
+    : s.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+  if (withLeader && out.length) out.unshift("");
+  return out;
 }
 
 /** The active line range, background vocals included: lines stamped at the

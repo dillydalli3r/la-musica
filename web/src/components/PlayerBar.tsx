@@ -94,7 +94,17 @@ function ScrollingText({ text, className }: {
 }
 
 export default function PlayerBar() {
-  const { queue, index, setIndex, setQueue, queueRemoveAt, queueMove, playing, setPlaying, queueId, vol, setVol } = useStore();
+  const queue = useStore((s) => s.queue);
+  const index = useStore((s) => s.index);
+  const setIndex = useStore((s) => s.setIndex);
+  const setQueue = useStore((s) => s.setQueue);
+  const queueRemoveAt = useStore((s) => s.queueRemoveAt);
+  const queueMove = useStore((s) => s.queueMove);
+  const playing = useStore((s) => s.playing);
+  const setPlaying = useStore((s) => s.setPlaying);
+  const queueId = useStore((s) => s.queueId);
+  const vol = useStore((s) => s.vol);
+  const setVol = useStore((s) => s.setVol);
   // Gapless playback: two audio elements. The idle one preloads the next
   // sequential track while the current one plays; at `ended` the elements
   // swap roles, so the next track starts without a load gap.
@@ -199,19 +209,15 @@ export default function PlayerBar() {
     queryFn: api.library,
     staleTime: 5 * 60 * 1000,
   });
-  // Only re-scanned when the track or the library payload actually changes —
-  // this runs at 4 Hz with the time updates, and the triple loop is real work
-  // on a big library.
-  const libCover = useMemo(() => {
-    if (!current) return null;
-    if (current.coverFile || current.albumCover) return null; // queue already knows
+  // One Map per payload; track changes are O(1) lookups.
+  const coverByPath = useMemo(() => {
+    const m = new Map<string, { track: string | null; album: string | null }>();
     for (const a of libForCover?.artists ?? [])
       for (const al of a.albums)
-        for (const t of al.tracks)
-          if (t.path === current.path)
-            return { track: t.cover_file ?? null, album: al.cover_file ?? null };
-    return null;
-  }, [current, libForCover]);
+        for (const t of al.tracks) m.set(t.path, { track: t.cover_file ?? null, album: al.cover_file ?? null });
+    return m;
+  }, [libForCover]);
+  const libCover = current && !current.coverFile && !current.albumCover ? (coverByPath.get(current.path) ?? null) : null;
   const coverFile = current?.coverFile ?? libCover?.track ?? current?.albumCover ?? libCover?.album ?? null;
   const coverAlbumPath = current?.albumPath ?? "";
 
@@ -840,7 +846,7 @@ export default function PlayerBar() {
 
         {/* center of the grid: seek bar above the transport controls — the
             1fr tracks on both sides keep it dead center of the bar */}
-        <div className="min-w-0 flex flex-col items-center justify-center gap-0.5 w-[min(34cqw,40rem)]">
+        <div className="min-w-0 shrink flex flex-col items-center justify-center gap-0.5 w-[min(28cqw,32rem)] lg:w-[min(34cqw,40rem)]">
           <div className="flex items-center gap-2 w-full max-w-2xl mx-auto text-[10px] text-zinc-500 tabular-nums">
             <span className="w-10 text-right shrink-0">{fmtDuration(time)}</span>
             <input
@@ -855,7 +861,7 @@ export default function PlayerBar() {
                 a.currentTime = Number(e.target.value);
                 setTime(Number(e.target.value));
               }}
-              className="flex-1 seek-fat"
+              className="flex-1 min-w-0 seek-fat"
               disabled={idle}
               title="Seek — ← / → nudge 5s"
             />
@@ -920,8 +926,8 @@ export default function PlayerBar() {
 
         {/* right flank of the grid: actions row + volume, then lyrics /
             fullscreen stacked on the far right */}
-        <div className="flex items-center gap-2 shrink-0 justify-self-end w-full min-w-0 justify-end pr-4">
-          <div className="flex flex-col items-center gap-0.5 min-w-0">
+        <div className="flex items-center gap-2 shrink min-w-0 justify-self-end w-full justify-end pr-4">
+          <div className="flex flex-col items-center gap-0.5 min-w-0 shrink">
             <div className="flex items-center gap-0.5">
               {/* up next — mirrors the fullscreen player's top-bar readout;
                   opens the same queue popover. Always on the bar: inert
@@ -1143,8 +1149,9 @@ export default function PlayerBar() {
               <TrackDownloadExport path={current?.path ?? ""} iconOnly disabled={!current} up />
             </div>
 
-            {/* layer 2: the volume bar beneath the buttons */}
-            <div className="flex items-center gap-1.5 w-full px-2 text-zinc-400" title={`Volume — ${Math.round(vol * 100)}%`}>
+            {/* layer 2: the volume bar beneath the buttons — hidden on tablet
+                (md–lg) so the center seek never collides with the cluster */}
+            <div className="hidden lg:flex items-center gap-1.5 w-full px-2 text-zinc-400" title={`Volume — ${Math.round(vol * 100)}%`}>
               <Volume2 className="h-3.5 w-3.5 text-zinc-500 shrink-0" />
               <input
                 type="range"

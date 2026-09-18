@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 import {
@@ -166,6 +166,7 @@ interface FlatAlbum extends Album {
   artist: string;
   video_count: number;
   inst_count: number;
+  hay: string; // lowercase search blob, built once per payload
 }
 
 interface FlatTrack extends Track {
@@ -173,6 +174,7 @@ interface FlatTrack extends Track {
   album: string;
   albumCover?: string | null;
   albumPath: string;
+  hay: string; // lowercase search blob, built once per payload
 }
 
 // ---- search: plain words + tag-scoped terms -------------------------------
@@ -225,9 +227,13 @@ export default function LibraryPage() {
     : DEFAULT_RUN_ALL;
   const qc = useQueryClient();
   const navigate = useNavigate();
-  // Per-slice selectors: a bare useStore() subscribes this page to every
-  // store write (progress ticks, volume, queue) and re-renders the tables.
   const query = useStore((s) => s.query);
+  // Debounced 200ms: the filter memo only recomputes after typing pauses.
+  const [debouncedQuery, setDebouncedQuery] = useState(query);
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedQuery(query), 200);
+    return () => clearTimeout(t);
+  }, [query]);
   const selection = useStore((s) => s.selection);
   const setSelection = useStore((s) => s.setSelection);
   const toggleTrack = useStore((s) => s.toggleTrack);
@@ -307,6 +313,8 @@ export default function LibraryPage() {
   const [artistW, setArtistW, resetArtistW] = useColumnWidths("artists");
   const [trackW, setTrackW, resetTrackW] = useColumnWidths("tracks");
 
+  // Haystacks precomputed once per payload: the filter memo then only
+  // does substring checks (no join/lowercase per keystroke).
   const flat = useMemo(() => {
     const albums: FlatAlbum[] = [];
     const tracks: FlatTrack[] = [];
@@ -315,13 +323,19 @@ export default function LibraryPage() {
         // Prefer the tag-derived album artist (ALBUMARTIST/ARTIST); the
         // artist folder name is only a fallback (it carries the MBID suffix).
         const artistName = al.album_artist || a.name;
+        const trackHays: string[] = [];
+        for (const t of al.tracks ?? []) {
+          const hay = [artistName, al.meta?.ALBUM ?? "", t.file, ...Object.values(t.tags ?? {}).filter(Boolean).map(String)].join(" ").toLowerCase();
+          trackHays.push(hay);
+          tracks.push({ ...t, artist: artistName, album: al.meta?.ALBUM ?? al.path.split("/").pop() ?? "", albumCover: al.cover_file ?? null, albumPath: al.path, hay });
+        }
         albums.push({
           ...al,
           artist: artistName,
           video_count: (al.tracks ?? []).filter((t) => t.is_video).length,
           inst_count: (al.tracks ?? []).filter((t) => t.tags.INSTRUMENTAL === "1").length,
+          hay: [artistName, al.meta?.ALBUM, al.meta?.DATE, al.meta?.ARTIST, al.meta?.LABEL, al.meta?.CATALOGNUMBER, ...trackHays].join(" ").toLowerCase(),
         });
-        for (const t of al.tracks) tracks.push({ ...t, artist: artistName, album: al.meta?.ALBUM ?? al.path.split("/").pop() ?? "", albumCover: al.cover_file ?? null, albumPath: al.path });
       }
     return { albums, tracks };
   }, [lib]);
@@ -359,11 +373,14 @@ export default function LibraryPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flat]);
 
+  // Album haystacks keyed by path (flat.albums covers every album in lib).
+  const albumHay = useMemo(() => new Map(flat.albums.map((al) => [al.path, al.hay])), [flat]);
+
   const filtered = useMemo(() => {
     if (!lib) return { artists: [] as Artist[], albums: [] as FlatAlbum[], tracks: [] as FlatTrack[] };
-    const terms = parseQueryTerms(query);
+    const terms = parseQueryTerms(debouncedQuery);
     const words = terms.words;
-    const wordsMatch = (hay: string) => words.every((w) => hay.toLowerCase().includes(w));
+    const wordsMatch = (hay: string) => words.every((w) => hay.includes(w)); // hay already lowercase
 
     // tag-scoped term against any tags record ("#person" = any credited
     // person, "#any" = every tag, otherwise the exact canonical key)
@@ -376,28 +393,22 @@ export default function LibraryPage() {
     const trackTagOK = (t: Track) =>
       terms.tags.every(({ key, value }) => tagTermOK(t.tags as Record<string, unknown>, key, value));
 
-    // plain words search EVERY tag value plus the flattened names
-    const trackHay = (t: Track & { artist?: string; album?: string }) =>
-      [t.artist, t.album, t.file, ...Object.values(t.tags ?? {}).filter(Boolean).map(String)].join(" ");
-    const trOK = (t: Track) => trackPresetOK(t, preset) && trackTagOK(t) && wordsMatch(trackHay(t));
+    const trOK = (t: FlatTrack) => trackPresetOK(t, preset) && trackTagOK(t) && wordsMatch(t.hay);
 
     const alOK = (al: Album) => albumPresetOK(al, preset);
     const alTagOK = (al: Album) =>
       terms.tags.every(({ key, value }) =>
         tagTermOK((al.meta ?? {}) as Record<string, unknown>, key, value) ||
         (al.tracks ?? []).some((t) => tagTermOK(t.tags as Record<string, unknown>, key, value)));
-    const alSearch = (al: Album, artist: string) =>
-      wordsMatch([artist, al.meta?.ALBUM, al.meta?.DATE, al.meta?.ARTIST, al.meta?.LABEL, al.meta?.CATALOGNUMBER, ...(al.tracks ?? []).map(trackHay)].join(" ")) &&
-      alTagOK(al);
 
     const artists: Artist[] = lib.artists
-      .map((a) => ({ ...a, albums: a.albums.filter((al) => alOK(al) && alSearch(al, a.name)) }))
+      .map((a) => ({ ...a, albums: a.albums.filter((al) => alOK(al) && wordsMatch(albumHay.get(al.path) ?? "") && alTagOK(al)) }))
       .filter((a) => a.albums.length);
 
-    const albums = flat.albums.filter((al) => alOK(al) && alSearch(al, al.artist));
+    const albums = flat.albums.filter((al) => alOK(al) && wordsMatch(al.hay) && alTagOK(al));
     const tracks = flat.tracks.filter(trOK);
     return { artists, albums, tracks };
-  }, [lib, query, preset, flat]);
+  }, [lib, debouncedQuery, preset, flat, albumHay]);
 
   // ---- selection helpers ----
   const selTracks = useMemo(() => {

@@ -1,3 +1,9 @@
+/** Column defs, visibility/width prefs, and the columns chooser + resizer.
+ *
+ * Imported by the library/album/cached/trash tables and their tracklists
+ * (see AlbumPage, LibraryPage, CachedTracksView, TrashPage, FavoritesPage).
+ * Column visibility and widths persist per view in localStorage. */
+
 import { useEffect, useRef, useState } from "react";
 import { Columns3, X } from "lucide-react";
 import type { MouseEvent as ReactMouseEvent } from "react";
@@ -34,7 +40,7 @@ export const ALBUM_TRACK_COL_W: Record<string, string> = {
   bitrate: "w-[16%]",
   dr: "w-[10%]",
 };
-
+/** Default album-tracklist columns (num/cover/title/genre/dur/bitrate/DR). */
 export const ALBUM_TRACK_COLS: Col[] = [
   { id: "num", label: "#", sortKey: "tracknumber" },
   { id: "cover", label: "", sortKey: "" },
@@ -44,7 +50,7 @@ export const ALBUM_TRACK_COLS: Col[] = [
   { id: "bitrate", label: "Bitrate", sortKey: "tech.bitrate" },
   { id: "dr", label: "DR", sortKey: "tags.DYNAMIC RANGE" },
 ];
-
+/** Visible-column ids per view, persisted in localStorage; toggle flips one id. */
 export function useColumnPrefs(key: string, defs: Col[]): [string[], (id: string) => void] {
   // v3: type/INST columns joined the default sets and credit columns became
   // toggleable opt-ins — bumping the key lets the new defaults apply once

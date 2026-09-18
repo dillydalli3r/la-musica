@@ -1,3 +1,9 @@
+/** Grading + audit verdicts (PASS/FAIL) for albums and tracks.
+ *
+ * Imported by badges, cards, and table rows (see Badges, AlbumCard,
+ * LibraryPage, AlbumPage, ArtistPage). */
+
+/** PASS/FAIL verdict styling for a graded + audited album or track. */
 export interface TrackStatus {
   key: "pass" | "fail";
   label: string;
@@ -17,6 +23,7 @@ export function auditFails(audit: string | null | undefined): boolean {
   return a === "FAKE" || a === "MIX";
 }
 
+/** Verdict for a grading pass flag plus its audit result (FAKE/MIX fails). */
 export function statusFor(pass: boolean, audit: string | null | undefined): TrackStatus {
   // Grading marks stay deliberately quiet: a passed album is barely tinted,
   // failures get a muted red — details live in hover titles, not loud chips.

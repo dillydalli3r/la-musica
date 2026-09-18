@@ -2011,6 +2011,13 @@ def _ask_to_wish(release, queries, waited, cfg, confirm_lossy):
         artist=((release.get("artists") or [{}])[0].get("name", "")),
         year=str(release.get("date") or "")[:4],
         queries=list(queries))
+    # add_wish is idempotent: a wish from an earlier attempt comes back
+    # unchanged, so refresh its queries — the worker hunts with the stored
+    # set, and stale ones would silently drop this job's better templates.
+    try:
+        wishes.update_wish(wish["id"], {"queries": list(queries)})
+    except Exception:
+        pass
     _log(f"Added to wishes (#{wish['id']}) — the worker keeps searching for this "
          f"release in the background with the same queries, so nothing is lost "
          f"by parking this job.")

@@ -214,9 +214,10 @@ function saveRecentSearch(list: string[], q: string): string[] {
  * a disconnect. Shows what the app is doing and a one-click retry that does
  * NOT restart slskd (restarting resets the server's cooldown and made the
  * old stop → start → login loop stop working). */
-function ReconnectingCard({ username, password, onDone }: {
+function ReconnectingCard({ username, password, error, onDone }: {
   username: string;
   password: string;
+  error?: string | null;
   onDone: () => void;
 }) {
   const [showForm, setShowForm] = useState(false);
@@ -240,9 +241,13 @@ function ReconnectingCard({ username, password, onDone }: {
       <span className="text-zinc-300">
         Reconnecting to Soulseek as <b>{username}</b>…
       </span>
-      <span className="text-zinc-600">
-        the network sometimes enforces a short cooldown after a disconnect
-      </span>
+      {error ? (
+        <span className="text-red-300">slskd said: {error}</span>
+      ) : (
+        <span className="text-zinc-600">
+          the network sometimes enforces a short cooldown after a disconnect
+        </span>
+      )}
       <div className="ml-auto flex gap-1.5">
         <button className="btn-ghost !py-1 text-xs" onClick={retry} disabled={busy}>
           {busy ? "Reconnecting…" : "Reconnect now"}
@@ -2126,10 +2131,11 @@ export default function SoulseekPage() {
           // slskd hands the responses over only once the search has ENDED
           // (it reports counts while running), so the poll rides out the
           // whole window — a fixed 45s cutoff dropped results from searches
-          // that were still collecting.
+          // that were still collecting. Every backend terminal state counts
+          // (backend is_search_done); anything else is still collecting.
           const isDone =
             Boolean(res.isComplete) ||
-            (res.state ? res.state !== "InProgress" && (res.state.includes("Completed") || res.state.includes("TimedOut")) : false);
+            (res.state ? /Completed|TimedOut|ResponseLimitReached|Cancelled|Errored|FileLimitReached/.test(res.state) : false);
           if (isDone || elapsed >= SEARCH_POLL_LIMIT_S) {
             if (pollRef.current) {
               clearInterval(pollRef.current);
@@ -2366,10 +2372,11 @@ export default function SoulseekPage() {
       )}
 
       {!status?.conflict && running && status?.logged_in === false && (
-        status?.has_credentials && !status?.error ? (
+        status?.has_credentials ? (
           <ReconnectingCard
             username={String(status.username ?? "")}
             password={String(status.password ?? "")}
+            error={(status?.error as string | null) ?? null}
             onDone={refetchStatus}
           />
         ) : (

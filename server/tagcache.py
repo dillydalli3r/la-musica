@@ -15,7 +15,7 @@ from collections import OrderedDict
 from mlo.audio import AudioFile
 
 _TAG_MAX = 16384
-_LIB_TTL = 5.0  # seconds
+_LIB_TTL = 60.0  # seconds; tag writes/renames bust via invalidate calls
 _COVER_MAX = 512
 
 _lock = threading.Lock()

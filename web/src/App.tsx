@@ -102,6 +102,7 @@ function useSlskDot() {
     queryKey: ["soulseek", "status-dot"],
     queryFn: api.soulseekStatus,
     refetchInterval: 20000,
+    refetchIntervalInBackground: false,
     staleTime: 15000,
     retry: false,
   });
@@ -265,6 +266,7 @@ export default function App() {
     queryKey: ["soulseekAuto"],
     queryFn: api.soulseekAutoStatus,
     refetchInterval: (q) => (q.state.data?.state === "running" || q.state.data?.state === "confirm" ? 2000 : 15000),
+    refetchIntervalInBackground: false,
   });
   const autoState = useRef<string | null>(null);
   useEffect(() => {
@@ -300,6 +302,7 @@ export default function App() {
     queryFn: api.library,
     enabled: searchOpen && q.length >= 2,
     staleTime: 30000,
+    refetchIntervalInBackground: false,
   });
   const hits = useMemo(() => {
     if (!lib || q.length < 2) return { artists: [], albums: [], tracks: [] };
@@ -334,6 +337,21 @@ export default function App() {
   };
   // On phones the rail can't fit — it becomes a hamburger + overlay drawer.
   const [navOpen, setNavOpen] = useState(false);
+  const navTriggerRef = useRef<HTMLButtonElement>(null);
+  const navCloseRef = useRef<HTMLButtonElement>(null);
+  // Esc closes the drawer; focus moves in on open and returns on close.
+  useEffect(() => {
+    if (!navOpen) return;
+    navCloseRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setNavOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      navTriggerRef.current?.focus();
+    };
+  }, [navOpen]);
 
   useEffect(() => {
     applyAccent(localStorage.getItem("mlo.accent"));
@@ -472,14 +490,15 @@ export default function App() {
                   // with contrast text; inactive ones stay quiet. The label
                   // collapses via max-width so the icon glides with the
                   // shrinking sidebar instead of jumping to a new layout.
-                  `flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors border ${
+                  // nav-link adds the compositor-only hover nudge (CSS).
+                  `nav-link flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm border ${
                     isActive
                       ? "bg-accent on-accent font-semibold border-transparent shadow-sm"
                       : "text-zinc-400 hover:text-white hover:bg-raise border-transparent"
                   }`
                 }
               >
-                <span className="relative shrink-0 inline-flex">
+                <span className="nav-icon relative shrink-0 inline-flex">
                   <Icon className="h-4 w-4 shrink-0" />
                   {to === "/soulseek" && <SlskIconDot dot={slskDot} />}
                 </span>
@@ -507,14 +526,21 @@ export default function App() {
       {navOpen && (
         <>
           <div className="anim-fade fixed inset-0 z-40 bg-black/50 md:hidden" onClick={() => setNavOpen(false)} />
-          <aside className="anim-pop fixed left-0 top-0 bottom-0 z-50 w-52 bg-panel border-r border-border p-2 flex flex-col gap-1 overflow-y-auto md:hidden shadow-2xl">
+          <aside
+            role="dialog"
+            aria-modal="true"
+            aria-label="Site navigation"
+            className="anim-pop fixed left-0 top-0 bottom-0 z-50 w-52 bg-panel border-r border-border p-2 flex flex-col gap-1 overflow-y-auto md:hidden shadow-2xl"
+          >
             <div className="flex items-center gap-2 border-b border-border pb-2 mb-1 px-1">
               <img src="/icon.png" alt="la musica" className="h-7 w-7 rounded-md object-cover ring-1 ring-border shadow-sm" />
               <span className="flex-1 overflow-hidden whitespace-nowrap font-bold tracking-tight text-sm">la musica</span>
               <button
+                ref={navCloseRef}
                 className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-raise transition-colors"
                 onClick={() => setNavOpen(false)}
                 title="Close menu"
+                aria-label="Close navigation menu"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -531,14 +557,14 @@ export default function App() {
                     end={end}
                     onClick={() => setNavOpen(false)}
                     className={({ isActive }) =>
-                      `flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm transition-colors border ${
+                      `nav-link flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm border ${
                         isActive
                           ? "bg-accent on-accent font-semibold border-transparent shadow-sm"
                           : "text-zinc-400 hover:text-white hover:bg-raise border-transparent"
                       }`
                     }
                   >
-                    <span className="relative shrink-0 inline-flex">
+                    <span className="nav-icon relative shrink-0 inline-flex">
                       <Icon className="h-4 w-4 shrink-0" />
                       {to === "/soulseek" && <SlskIconDot dot={slskDot} />}
                     </span>
@@ -560,9 +586,12 @@ export default function App() {
         <header className="absolute inset-x-0 top-0 h-12 z-30 flex items-center gap-3 px-4 pointer-events-none">
           <div className="flex items-center gap-1.5 shrink-0 pointer-events-auto">
             <button
+              ref={navTriggerRef}
               className="h-9 w-9 rounded-full border border-border bg-panel/60 backdrop-blur flex md:hidden items-center justify-center text-zinc-300 hover:text-white hover:border-accent/50 transition-colors"
               onClick={() => setNavOpen(true)}
               title="Menu"
+              aria-label="Open navigation menu"
+              aria-expanded={navOpen}
             >
               <Menu className="h-4 w-4" />
             </button>

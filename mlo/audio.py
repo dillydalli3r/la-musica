@@ -577,8 +577,10 @@ class AudioFile:
 
     def flush(self):
         """Write pending tag changes to disk (no-op when nothing changed)."""
-        if self.audio is None or not self._dirty:
+        if not self._dirty:
             return True
+        if self.audio is None:
+            return False  # nothing loaded: a pending write could never land
         try:
             self.audio.save()
             self._dirty = False

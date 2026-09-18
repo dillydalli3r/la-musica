@@ -1346,7 +1346,10 @@ def load_config() -> dict:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 user = json.load(f)
-        except Exception:
+        except Exception as e:
+            # honey: corrupt config still boots on defaults; cause goes to the
+            # log (and stays out of the UI) instead of vanishing silently.
+            print(c(f"WARNING: ignoring corrupt config {path}: {e}", Color.YELLOW))
             user = None
     return normalize_config(user)
 
@@ -1522,5 +1525,8 @@ def save_config(cfg: dict) -> bool:
         _migrate_to_data_dir()
         return True
     except Exception as e:
+        # honey: caller shows this after "Failed to save config" (+ disk-full /
+        # perms cause instead of a bare False).
         print(c(f"ERROR: Could not save config: {e}", Color.RED))
+        save_config.last_error = str(e)
         return False

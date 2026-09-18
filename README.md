@@ -16,6 +16,7 @@ trash (`.mlo/trash`) beside it — one folder to back up or carry between
 machines.
 
 ## Highlights
+- **Polish, robustness and hardening pass** (new in 2.7.0) — sidebar hover nudge plus shared motion tokens for consistent animation; lyrics robustness with millisecond precision, `[offset:]` clamping, translation/transliteration alignment, mixed synced+plain files, and a stale-track seek guard; performance via debounced library search, O(1) cover lookup, 60 s library cache, optimistic offline cache, and no background-tab polling; backend hardening with symlink-safe path guards, capped caches, and partial-success bulk tagging; Soulseek with bounded wish waits, no silent-drop handoffs, and daemon errors surfaced in the UI; plus keyboard/screen-reader and small-phone/tablet fixes.
 
 - **Home** — a sidebar landing page of library highlights: recently added,
   best-graded, rediscover, top-artist, favourite, wanted and

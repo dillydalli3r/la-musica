@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AudioLines, X } from "lucide-react";
 import { api } from "../api";
-import { parsePlayerLrc, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
+import { parsePlayerLrc, parseLrc, splitStoredLines, hasLyricsText, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
 import { useLyricsFollow, LYRICS_PAD_BOTTOM, LYRICS_PAD_TOP } from "../lib/lyrScroll";
 import Visualizer from "./Visualizer";
 
@@ -39,6 +39,7 @@ export default function LyricsSidebar({
     xlit: string[] | null;
     trans: string[] | null;
     instrumental: boolean;
+    forPath: string | null;
     title?: string;
     album?: string;
   } | null>(null);
@@ -61,21 +62,20 @@ export default function LyricsSidebar({
       .tags(path)
       .then((t) => {
         if (dead) return;
-        const splitStored = (s: string): string[] =>
-          /\[\d{1,2}:\d{1,2}/.test(s)
-            ? parsePlayerLrc(s).map((l) => l.text)
-            : s.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+        const main = typeof t.lyrics === "string" ? t.lyrics : null;
+        const withLeader = !!main && parsePlayerLrc(main).length > parseLrc(main).length;
         setPayload({
-          lyrics: typeof t.lyrics === "string" ? t.lyrics : null,
-          xlit: typeof t.lyrics_xlit === "string" && t.lyrics_xlit.trim() ? splitStored(t.lyrics_xlit) : null,
-          trans: typeof t.lyrics_trans === "string" && t.lyrics_trans.trim() ? splitStored(t.lyrics_trans) : null,
+          lyrics: main,
+          xlit: typeof t.lyrics_xlit === "string" && t.lyrics_xlit.trim() ? splitStoredLines(t.lyrics_xlit, withLeader) : null,
+          trans: typeof t.lyrics_trans === "string" && t.lyrics_trans.trim() ? splitStoredLines(t.lyrics_trans, withLeader) : null,
           instrumental: ((t.tags as Record<string, string>)?.INSTRUMENTAL ?? "").toString().trim() === "1",
+          forPath: path,
           title: (t.tags as Record<string, string>)?.TITLE,
           album: (t.tags as Record<string, string>)?.ALBUM,
         });
       })
       .catch(() => {
-        if (!dead) setPayload({ lyrics: null, xlit: null, trans: null, instrumental: false });
+        if (!dead) setPayload({ lyrics: null, xlit: null, trans: null, instrumental: false, forPath: path });
       });
     return () => {
       dead = true;
@@ -84,9 +84,13 @@ export default function LyricsSidebar({
   }, [path]);
 
   const instrumental = payload?.instrumental ?? false;
+  // Never seek the new track to the old track's timestamps while its payload
+  // is still in flight (matches NowPlayingView's staleLyrics gate).
+  const staleLyrics = (payload?.forPath ?? null) !== path;
+  const hasLyrics = hasLyricsText(payload?.lyrics) && !instrumental && !staleLyrics;
   const lines: LrcLine[] = useMemo(
-    () => (payload?.lyrics && !instrumental ? parsePlayerLrc(payload.lyrics) : []),
-    [payload?.lyrics, instrumental]
+    () => (payload?.lyrics && hasLyrics ? parsePlayerLrc(payload.lyrics) : []),
+    [payload?.lyrics, hasLyrics]
   );
   const synced = lines.length > 0;
   const displayLines: LrcLine[] = useMemo(
@@ -95,8 +99,10 @@ export default function LyricsSidebar({
         ? []
         : synced
           ? lines
-          : (payload?.lyrics ?? "").split(/\r?\n/).map((text) => ({ ts: "", time: 0, text })).filter((l) => l.text.trim()),
-    [instrumental, synced, lines, payload?.lyrics]
+          : hasLyrics
+            ? (payload?.lyrics ?? "").split(/\r?\n/).map((text) => ({ ts: "", time: 0, text })).filter((l) => l.text.trim())
+            : [],
+    [instrumental, synced, lines, hasLyrics, payload?.lyrics]
   );
 
   // ~60 fps lyric clock: shared <audio> element read directly, so line
@@ -160,7 +166,7 @@ export default function LyricsSidebar({
   const album = payload?.album || current?.album || "";
 
   return (
-    <aside className="fixed top-12 bottom-[5.75rem] right-0 w-full sm:w-[380px] z-30 bg-panel/95 backdrop-blur border-l border-border shadow-2xl flex flex-col">
+    <aside className="fixed top-12 bottom-[5.75rem] right-0 w-full max-w-[100vw] sm:w-[380px] z-30 bg-panel/95 backdrop-blur border-l border-border shadow-2xl flex flex-col">
       <div className="flex items-center gap-2 px-4 py-2.5 border-b border-border/60">
         <div className="min-w-0 flex-1">
           <div className="text-xs font-semibold truncate">{title}</div>
@@ -196,7 +202,8 @@ export default function LyricsSidebar({
           <>
             <div style={{ height: LYRICS_PAD_TOP }} />
             {displayLines.map((l, i) => {
-            const isActive = synced && activeEnd >= activeStart && i >= activeStart && i <= activeEnd;
+            const isActive = synced && activeEnd >= activeStart && i >= activeStart && i <= activeEnd && !staleLyrics;
+            const seekable = synced && !staleLyrics;
             const trans = payload?.trans?.[i];
             const xlit = payload?.xlit?.[i];
             // a stored sub-line that just mirrors the primary line (same
@@ -206,9 +213,9 @@ export default function LyricsSidebar({
             return (
               <div
                 key={i}
-                className={`py-1.5 ${synced ? "cursor-pointer" : ""} ${isActive ? "opacity-100" : synced ? "opacity-70" : ""}`}
+                className={`py-1.5 ${seekable ? "cursor-pointer" : ""} ${isActive ? "opacity-100" : synced ? "opacity-70" : ""}`}
                 onClick={
-                  synced
+                  seekable
                     ? () => {
                         // Seek, then center the clicked line directly — the
                         // active-line step misses clicks inside the line
@@ -218,7 +225,7 @@ export default function LyricsSidebar({
                       }
                     : undefined
                 }
-                title={synced ? "Click to seek" : undefined}
+                title={seekable ? "Click to seek" : undefined}
               >
                 <div
                   ref={(el) => {

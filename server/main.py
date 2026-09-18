@@ -378,7 +378,8 @@ def get_config():
 def set_config(cfg: dict):
     ok = save_config(cfg)
     if not ok:
-        raise HTTPException(500, "Failed to save config")
+        reason = getattr(save_config, "last_error", "") or ""
+        raise HTTPException(500, f"Failed to save config{(': ' + reason) if reason else ''}")
     # A settings change can alter what the recommendation shelf and the
     # discovery chains return (source order, counts, providers on/off), and
     # the library payload carries grading results that depend on the grader
@@ -457,8 +458,9 @@ def _in_music_folder(p, folder):
     sibling like C:\\Music2 is never treated as being inside C:\\Music.
     """
     try:
-        ap = os.path.abspath(os.path.normpath(p))
-        af = os.path.abspath(os.path.normpath(folder))
+        # realpath: a symlink inside the library pointing out must not pass.
+        ap = os.path.realpath(os.path.normpath(p))
+        af = os.path.realpath(os.path.normpath(folder))
     except (OSError, ValueError, TypeError):
         return False
     if ap == af:
@@ -974,6 +976,7 @@ _NATIVE_AUDIO_CODECS = {"aac", "mp3", "opus", "vorbis", "flac", "alac",
                         "pcm_u8", "pcm_s16le", "pcm_s24le", "pcm_s16be",
                         "pcm_f32le"}
 _playback_meta_cache: dict = {}
+_PLAYBACK_META_MAX = 500  # honey: plain-dict LRU; probed once per file version
 
 
 @app.get("/api/videos/meta")
@@ -998,9 +1001,11 @@ def videos_meta(path: str = Query(...)):
     try:
         mtime = os.path.getmtime(p)
     except OSError:
-        mtime = 0.0
+        raise HTTPException(404, "file not found")
     hit = _playback_meta_cache.get(p)
     if hit and hit[0] == mtime:
+        _playback_meta_cache.pop(p, None)
+        _playback_meta_cache[p] = hit
         return {"path": p.replace("\\", "/"), **hit[1]}
 
     ext = os.path.splitext(p)[1].lower()
@@ -1023,6 +1028,9 @@ def videos_meta(path: str = Query(...)):
         native, reason = True, None
     meta = {"native": native, "reason": reason, "duration": duration,
             "video_codec": vcodec, "audio_codecs": acodecs}
+    _playback_meta_cache.pop(p, None)  # refresh recency
+    while len(_playback_meta_cache) >= _PLAYBACK_META_MAX:
+        _playback_meta_cache.pop(next(iter(_playback_meta_cache)))
     _playback_meta_cache[p] = (mtime, meta)
     return {"path": p.replace("\\", "/"), **meta}
 
@@ -2163,7 +2171,13 @@ def _run_scripts(req: RunRequest):
 
     cfg = load_config()
     if req.targets:
-        cfg["targets"] = [os.path.normpath(t) for t in req.targets]
+        targets = [os.path.normpath(t) for t in req.targets]
+        folder = cfg.get("music_folder") or ""
+        if folder and os.path.isdir(folder):
+            for t in targets:
+                if not _in_music_folder(t, folder):
+                    raise HTTPException(400, f"target outside music folder: {t}")
+        cfg["targets"] = targets
     # Per-script options default from saved config; the request can override.
     # A *supplied* force dict is authoritative and complete (see
     # script_runners._apply_force): the UI's one-shot Force switch sends every
@@ -2521,6 +2535,10 @@ def mb_assign(req: AssignTagsRequest):
     Videos are re-emitted losslessly, so a raw container comes back as a
     same-stem MKV: `container_changed`/`output_paths` name those files."""
     from mlo.audio import AudioFile
+    # honey: unbounded dict = unbounded tag writes per request; 500 is far
+    # above any wizard batch, raise it if a real flow ever hits the cap.
+    if len(req.tracks or {}) > 500:
+        raise HTTPException(400, "too many tracks (max 500 per request)")
     errors = []
     changed = 0
     folder = _music_folder()
@@ -2577,9 +2595,9 @@ def mb_assign(req: AssignTagsRequest):
         af.defer_save(False)
         changed += 1
         tagcache.invalidate_path(fp)
-    if errors:
-        raise HTTPException(500, "; ".join(errors))
-    return {"ok": True, "changed": changed,
+    # Partial success is the norm (one unreadable file must not discard the
+    # rest): always 200 with the capped list, never 500 — callers show `errors`.
+    return {"ok": not errors, "changed": changed, "errors": errors[:20],
             "container_changed": bool(swapped), "output_paths": swapped}
 
 
@@ -4778,17 +4796,13 @@ def _refresh_slskd_shares_soon():
         except Exception:
             import traceback
             traceback.print_exc()
-    threading.Thread(target=_worker, name="mlo-share-refresh", daemon=True).start()
-
-
-@app.get("/api/track/download")
 def track_download(path: str = Query(...)):
     """Serve the original, untouched audio file as a browser download."""
-    p = os.path.normpath(path)
-    if not _in_music_folder(p, _music_folder()):
-        raise HTTPException(400, "path is outside the music folder")
+    p = os.path.normpath(mbresolve.resolve_track(path) or path)
     if not os.path.isfile(p):
         raise HTTPException(404, "file not found")
+    if not _in_music_folder(p, _music_folder()):
+        raise HTTPException(400, "path is outside the music folder")
     return FileResponse(p, media_type="application/octet-stream",
                         filename=os.path.basename(p))
 
@@ -4814,13 +4828,11 @@ def track_export(path: str = Query(...), codec: str = Query("flac"),
     if codec not in _EXPORT_CODECS:
         raise HTTPException(400, f"unsupported codec: {codec}")
     ext, _lossless, args_tpl = _EXPORT_CODECS[codec]
-    p = os.path.normpath(path)
-    if not _in_music_folder(p, _music_folder()):
-        raise HTTPException(400, "path is outside the music folder")
+    p = os.path.normpath(mbresolve.resolve_track(path) or path)
     if not os.path.isfile(p):
         raise HTTPException(404, "file not found")
-
-    from mlo.tools import detect_all_tools
+    if not _in_music_folder(p, _music_folder()):
+        raise HTTPException(400, "path is outside the music folder")
     ffmpeg = (detect_all_tools().get("ffmpeg") or {}).get("ffmpeg_exe")
     if not ffmpeg:
         raise HTTPException(500, "ffmpeg is not installed")
@@ -5671,11 +5683,14 @@ def import_scan(path: str = Query(...)):
     The folder may live anywhere — the follow-up ingest step moves it into
     the library.
     """
-    p = os.path.normpath(path)
+    p = os.path.realpath(os.path.normpath(path))
     if not os.path.isdir(p):
         raise HTTPException(404, "folder not found")
     out = []
-    for root, dirs, files in os.walk(p):
+    # honey: pre-ingest scan must accept folders outside the library (native
+    # picker, downloads); realpath + no-followlinks + entry cap instead of a
+    # music-folder guard, which would break the import flow.
+    for root, dirs, files in os.walk(p, followlinks=False):
         for f in files:
             full = os.path.join(root, f)
             rel = os.path.relpath(full, p).replace("\\", "/")
@@ -5684,6 +5699,10 @@ def import_scan(path: str = Query(...)):
             except OSError:
                 size = 0
             out.append({"relPath": rel, "size": size})
+            if len(out) >= 5000:
+                break
+        if len(out) >= 5000:
+            break
     out.sort(key=lambda x: x["relPath"].lower())
     return {"root": p.replace("\\", "/"), "files": out}
 

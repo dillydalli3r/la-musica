@@ -1,11 +1,16 @@
+/** Table sorting: toggle state, row comparison, and the sortable header.
+ *
+ * Imported by the library/cached/trash/favorites tables and album
+ * tracklists (see LibraryPage, AlbumPage, CachedTracksView). */
+
 import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react";
 import type { CSSProperties, ReactNode } from "react";
-
+/** Active table sort: dotted row key + direction. */
 export interface SortState {
   key: string;
   dir: 1 | -1;
 }
-
+/** Toggle sort on a column: same key flips direction, new key sorts ascending. */
 export function toggleSort(current: SortState | null, key: string): SortState {
   if (current?.key === key) return { key, dir: current.dir === 1 ? -1 : 1 };
   return { key, dir: 1 };
@@ -20,7 +25,7 @@ export function rowValue(row: Record<string, any>, key: string): unknown {
   }
   return v;
 }
-
+/** Null-tolerant comparison: numbers numerically, numeric strings by value, rest case-insensitive. */
 export function compareValues(a: unknown, b: unknown): number {
   if (a === null || a === undefined) return b === null || b === undefined ? 0 : -1;
   if (b === null || b === undefined) return 1;
@@ -47,7 +52,7 @@ const SECONDARY_KEYS: Record<string, string[]> = {
   tracknumber: ["discnumber", "file"],
   discnumber: ["tracknumber", "file"],
 };
-
+/** Rows sorted by the active sort (stable tie-breaks via secondary keys, then filename); null sort returns input order. */
 export function sortRows<T extends Record<string, any>>(rows: T[], sort: SortState | null): T[] {
   if (!sort) return rows;
   const key = sort.key;
@@ -77,7 +82,7 @@ export function byDiscThenTrack(
     String(a.file).localeCompare(String(b.file))
   );
 }
-
+/** One disc's slice of an album tracklist. */
 export interface DiscGroup<T> {
   disc: number | null;
   tracks: T[];
@@ -99,7 +104,7 @@ export function groupByDisc<T extends Record<string, any>>(tracks: T[]): DiscGro
   if (noDisc.length) groups.push({ disc: null, tracks: noDisc });
   return groups;
 }
-
+/** Clickable sortable table header cell with direction indicator. */
 export function SortHeader({
   label,
   sort,

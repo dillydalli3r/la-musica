@@ -20,9 +20,12 @@
      Defaults are the black & white theme. */
   --accent: 255 255 255;
   --accent-soft: 212 212 216;
-  /* foreground drawn ON TOP of accent fills (white for dark accents,
-     near-black for light accents like the black & white theme) */
-  --accent-fg: 9 9 11;
+  /* App-wide motion tokens (mirrored in tailwind.config.js): one clock so
+  a duration tweak lands everywhere instead of per-rule magic numbers. */
+  --motion-fast: 150ms;
+  --motion-base: 300ms;
+  --motion-slow: 500ms;
+  --ease-motion: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* Native checkbox tints follow the accent token (ranges are fully custom). */
@@ -117,7 +120,14 @@ input[type="range"].seek-fat::-moz-range-thumb {
   border-radius: 4px;
 }
 input[type="range"]:focus-visible {
-  outline: none;
+  outline: 2px solid rgb(var(--accent) / 0.55);
+  outline-offset: 4px;
+}
+input[type="range"]:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 5px rgb(var(--accent) / 0.35);
+}
+input[type="range"]:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 5px rgb(var(--accent) / 0.35);
 }
 
 /* Text on top of solid accent fills (buttons, tabs, badges). */
@@ -208,8 +218,9 @@ body {
   .section {
     @apply border-t border-border/60 pt-5;
   }
-  /* Horizontal-scroll wrapper for the wide MusicBrainz tables: the table is
-     laid out at an honest minimum width and the wrapper scrolls, instead of
+  /* Horizontal-scroll wrapper for the wide MusicBrainz tables (pattern:
+     wrap the <table> in <div class="table-scroll">): the table is laid
+     out at an honest minimum width and the wrapper scrolls, instead of
      nine fixed-layout columns wrapping into unreadable ribbons on a phone. */
   .table-scroll {
     @apply overflow-x-auto;
@@ -386,19 +397,19 @@ table td {
   to   { opacity: 1; transform: none; }
 }
 .page-enter {
-  animation: page-in 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+  animation: page-in var(--motion-base) var(--ease-motion);
 }
 .btn-primary,
 .btn-ghost {
-  transition: transform 0.12s ease, background-color 0.15s ease,
-    color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: transform 0.12s ease, background-color var(--motion-fast) ease,
+    color var(--motion-fast) ease, border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease;
 }
 .btn-primary:active,
 .btn-ghost:active {
   transform: scale(0.96);
 }
 .chip {
-  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  transition: background-color var(--motion-fast) ease, color var(--motion-fast) ease, border-color var(--motion-fast) ease;
 }
 
 /* Frosted panel used across the redesigned surfaces */
@@ -421,7 +432,7 @@ table td {
 /* Cards/list rows ease in one after another (cap the delay so long lists
    don't leave the tail invisible for a second). */
 .stagger > * {
-  animation: fade-up 0.35s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation: fade-up var(--motion-base) var(--ease-motion) backwards;
 }
 .stagger > *:nth-child(1) { animation-delay: 0.02s; }
 .stagger > *:nth-child(2) { animation-delay: 0.05s; }
@@ -438,14 +449,14 @@ table td {
   to   { opacity: 1; transform: none; }
 }
 .anim-pop {
-  animation: pop-in 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+  animation: pop-in 0.18s var(--ease-motion);
 }
 
 @keyframes fade-in {
   from { opacity: 0; }
   to   { opacity: 1; }
 }
-.anim-fade { animation: fade-in 0.2s ease; }
+.anim-fade { animation: fade-in var(--motion-fast) ease; }
 
 /* Toasts stack in a centered column (the container does the horizontal
    centering), so each one only animates vertically. */
@@ -453,7 +464,7 @@ table td {
   from { opacity: 0; transform: translateY(12px) scale(0.97); }
   to   { opacity: 1; transform: none; }
 }
-.toast-in { animation: toast-in 0.22s cubic-bezier(0.22, 1, 0.36, 1); }
+.toast-in { animation: toast-in 0.22s var(--ease-motion); }
 
 /* Skeleton shimmer for loading shelves. */
 @keyframes shimmer {
@@ -464,6 +475,21 @@ table td {
   background: linear-gradient(90deg, #18181b 25%, #232329 37%, #18181b 63%);
   background-size: 400% 100%;
   animation: shimmer 1.3s ease-in-out infinite;
+}
+
+/* Sidebar hover nudge: compositor-only translate, keeps color swap. */
+.nav-link {
+  transition: transform var(--motion-fast) ease, color var(--motion-fast) ease,
+    background-color var(--motion-fast) ease, border-color var(--motion-fast) ease;
+}
+.nav-link:hover {
+  transform: translateX(3px);
+}
+.nav-link:hover .nav-icon {
+  transform: translateX(1px);
+}
+.nav-icon {
+  transition: transform var(--motion-fast) ease;
 }
 
 /* Respect users who ask the OS for less motion. */
@@ -477,8 +503,23 @@ table td {
   .amb-cover,
   .amb-sweep,
   .amb-orb,
+  .amb-glow,
   .artwork-glow,
-  .title-marquee {
+  .title-marquee,
+  .nav-link,
+  .nav-icon {
     animation: none !important;
+    transition: none !important;
+    transform: none !important;
+  }
+  /* Lyric blur kill-list (NowPlayingView LINE_BLUR = .np-line-blur):
+     synced lines reveal on focus so keyboard users still read full text. */
+  .np-line-blur {
+    filter: none !important;
+    opacity: 1 !important;
+  }
+  .np-line-blur:focus-within {
+    filter: none;
+    opacity: 1;
   }
 }

@@ -33,11 +33,13 @@ type ArtistLike = {
   albums?: { meta?: { MUSICBRAINZ_ALBUMARTISTID?: string | null } }[];
 };
 
+/** In-app route for a track: MBID URL when tagged, path URL otherwise. */
 export function trackRef(t: TrackLike): string {
   const id = t.tags?.MUSICBRAINZ_TRACKID;
   return id ? `/track/mb:${id}` : `/track/${encodeURIComponent(t.path ?? "")}`;
 }
 
+/** In-app route for an album: MBID URL when tagged, path URL otherwise. */
 export function albumRef(a: AlbumLike): string {
   const id = a.meta?.MUSICBRAINZ_ALBUMID;
   return id ? `/album/mb:${id}` : `/album/${encodeURIComponent(a.path)}`;
@@ -51,6 +53,7 @@ export function artistRef(a: ArtistLike): string {
   return id ? `/artist/mb:${id}` : `/artist/${encodeURIComponent(a.path)}`;
 }
 
+/** The artist's MusicBrainz album-artist ID, if any album carries one. */
 export function artistMbid(a: ArtistLike): string | undefined {
   return a.albums?.find((al) => al.meta?.MUSICBRAINZ_ALBUMARTISTID)?.meta
     ?.MUSICBRAINZ_ALBUMARTISTID ?? undefined;

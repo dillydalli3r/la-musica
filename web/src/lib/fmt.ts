@@ -1,3 +1,8 @@
+/** Shared display formatters: audio tech readouts, dates, durations, counts.
+ *
+ * Imported across cards, tables, player, and progress surfaces (see
+ * AlbumCard, LibraryPage, PlayerBar, ProgressBar, SoulseekPage). */
+
 /** Shared compact audio-format readout: "FLAC 16/44.1 · 1022 kbps" —
  * codec with its bit depth/sample rate first, bitrate last. */
 export interface TechInfo {
@@ -27,7 +32,7 @@ export function isVideoTech(t?: TechInfo | null): boolean {
   if (t.width && t.height) return true;
   return !!t.codec && VIDEO_CODEC_RE.test(String(t.codec));
 }
-
+/** True when the path ends in a playable music-video container extension. */
 export function isVideoFile(fileOrPath: string | null | undefined): boolean {
   if (!fileOrPath) return false;
   const m = (fileOrPath.match(/\.([a-z0-9]+)$/i) ?? [])[0];
@@ -52,7 +57,7 @@ export function fmtPair(t?: TechInfo | null): string {
   if (t.sample_rate) return `${(t.sample_rate / 1000).toFixed(1).replace(/\.0$/, "")} kHz`;
   return "";
 }
-
+/** Full tech readout: codec + depth/rate pair, bitrate last ("FLAC 16/44.1 · 904 kbps"). */
 export function fmtTech(t?: TechInfo | null): string {
   if (!t) return "";
   // Video files: resolution + the AUDIO stream's depth/rate only — video

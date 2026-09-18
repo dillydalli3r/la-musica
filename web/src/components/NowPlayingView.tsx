@@ -14,7 +14,7 @@ import Popover, { MenuItem } from "./Popover";
 import ScrubSeek from "./ScrubSeek";
 import { MAX_DB, MIN_DB, activeAnalyser } from "../lib/analyser";
 import Visualizer from "./Visualizer";
-import { parsePlayerLrc, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
+import { parsePlayerLrc, parseLrc, splitStoredLines, hasLyricsText, activeLineRange, KaraokeWords, type LrcLine } from "./LyricsViewer";
 import type { Playlist } from "../types";
 import { useLyricsFollow, LYRICS_PAD_BOTTOM, LYRICS_PAD_TOP } from "../lib/lyrScroll";
 import { nextSpeed, fmtSpeed } from "../lib/playback";
@@ -111,7 +111,7 @@ const LYRIC_SIZES = {
 } as const;
 
 /** Ease for the active line's growth — slow out, no snap. */
-const LINE_EASE = "transition-[transform,color] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]";
+const LINE_EASE = "transition-[transform,color] duration-motion-slow ease-motion";
 
 /** How much smaller an inactive line renders next to the active one. The
  * layout is ALWAYS the active size — inactive lines shrink via transform
@@ -121,9 +121,9 @@ const LINE_EASE = "transition-[transform,color] duration-500 ease-[cubic-bezier(
 const INACTIVE_SCALE = { sm: 0.88, md: 0.84, lg: 0.8 } as const;
 
 /** Non-current synced lines read greyed-out (a slight blur + dim grey);
- * hovering a line reveals it in full detail. Plain-text lyrics are never
+ * hover or keyboard focus reveals full detail. Plain-text lyrics are never
  * styled — only synced lines get the active/inactive treatment. */
-const LINE_BLUR = "blur-[2px] opacity-60 hover:blur-none hover:opacity-100 transition-[opacity,filter] duration-300";
+const LINE_BLUR = "np-line-blur blur-[2px] opacity-60 hover:blur-none hover:opacity-100 focus-within:blur-none focus-within:opacity-100 transition-[opacity,filter] duration-motion-base ease-motion";
 
 export default function NowPlayingView(p: Props) {
   const { vol, setVol } = useStore();
@@ -186,6 +186,8 @@ export default function NowPlayingView(p: Props) {
   const { time, duration } = p;
   const { queue, index, setIndex, setQueue, queueRemoveAt, queueMove, setPlaying } = useStore();
   const queueListRef = useRef<HTMLDivElement>(null);
+  const queueTriggerRef = useRef<HTMLButtonElement>(null);
+  const queueCloseRef = useRef<HTMLButtonElement>(null);
   // drag-reorder state for the queue drawer (absolute queue indexes)
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [overIdx, setOverIdx] = useState<number | null>(null);
@@ -197,6 +199,22 @@ export default function NowPlayingView(p: Props) {
       ?.querySelector(`[data-queue-index="${index}"]`)
       ?.scrollIntoView({ block: "center" });
   }, [queueOpen, index]);
+
+  // Keyboard-operable drawer: Esc closes, focus moves in on open and
+  // returns to the trigger on close. Separate from the scroll above so a
+  // track change while open doesn't yank focus back to the close button.
+  useEffect(() => {
+    if (!queueOpen) return;
+    queueCloseRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setQueueOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      queueTriggerRef.current?.focus();
+    };
+  }, [queueOpen]);
 
   // ~60 fps lyric clock: while playing, rAF reads the shared <audio> element
   // directly so syllable highlighting isn't stepped at timeupdate's ~4 Hz.
@@ -394,14 +412,12 @@ export default function NowPlayingView(p: Props) {
         setLyricsText(typeof t.lyrics === "string" ? t.lyrics : null);
         setLyricsFor(p.current.path);
         const seeded: Record<string, string[]> = {};
-        const splitStored = (s: string): string[] =>
-          /\[\d{1,2}:\d{1,2}/.test(s)
-            ? parsePlayerLrc(s).map((l) => l.text)
-            : s.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+        const main = typeof t.lyrics === "string" ? t.lyrics : null;
+        const withLeader = !!main && parsePlayerLrc(main).length > parseLrc(main).length;
         if (typeof t.lyrics_xlit === "string" && t.lyrics_xlit.trim())
-          seeded.transliterate = splitStored(t.lyrics_xlit);
+          seeded.transliterate = splitStoredLines(t.lyrics_xlit, withLeader);
         if (typeof t.lyrics_trans === "string" && t.lyrics_trans.trim())
-          seeded.translate = splitStored(t.lyrics_trans);
+          seeded.translate = splitStoredLines(t.lyrics_trans, withLeader);
         setTransforms(seeded);
       })
       .catch(() => {
@@ -429,7 +445,7 @@ export default function NowPlayingView(p: Props) {
   );
   // Layout (cover sizing, pane presence) follows the on-screen lyrics even
   // while stale so next/previous never reflows the whole view.
-  const layoutHasLyrics = !!lyricsText?.trim() && !instrumental;
+  const layoutHasLyrics = hasLyricsText(lyricsText) && !instrumental;
   const hasLyrics = layoutHasLyrics && !staleLyrics;
   const plainLines = useMemo(() => {
     if (!hasLyrics) return [];
@@ -674,7 +690,7 @@ export default function NowPlayingView(p: Props) {
     /* Every text row keeps a fixed height and is ALWAYS rendered —
        blanking a row while the next track's tags load is what made
        the block (and the title itself) shake on next/previous. */
-    <div className="text-center w-[26rem] min-w-0">
+    <div className="text-center w-[26rem] max-w-full min-w-0">
       <div className="h-8 flex items-center justify-center gap-2" title={title}>
         <div className="text-2xl font-bold text-white truncate">{title}</div>
         <AdvisoryMark value={freshTags?.ITUNESADVISORY} />
@@ -696,23 +712,25 @@ export default function NowPlayingView(p: Props) {
   );
   const transportRow = (
     <div className="flex items-center justify-center gap-2.5 flex-wrap">
-      <button className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${p.shuffle ? "text-accent" : "text-zinc-500"}`} onClick={p.onToggleShuffle} title="Shuffle">
+      <button aria-label="Shuffle" aria-pressed={p.shuffle} className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${p.shuffle ? "text-accent" : "text-zinc-500"}`} onClick={p.onToggleShuffle} title="Shuffle">
         <Shuffle className="h-4 w-4" />
       </button>
-      <button className="p-2.5 rounded-lg transition-colors hover:bg-white/10 text-white" onClick={() => p.onStep(-1)} title="Previous track">
+      <button aria-label="Previous track" className="p-2.5 rounded-lg transition-colors hover:bg-white/10 text-white" onClick={() => p.onStep(-1)} title="Previous track">
         <SkipBack className="h-5 w-5" />
       </button>
       <button
+        aria-label={p.playing ? "Pause" : "Play"}
+        aria-pressed={p.playing}
         className="p-4 rounded-lg bg-accent on-accent hover:bg-accent-soft shadow-lg transition-colors"
         onClick={p.onTogglePlay}
         title="Play / pause (Space)"
       >
         {p.playing ? <Pause className="h-6 w-6" /> : <Play className="h-6 w-6 ml-0.5" />}
       </button>
-      <button className="p-2.5 rounded-lg transition-colors hover:bg-white/10 text-white" onClick={() => p.onStep(1)} title="Next track">
+      <button aria-label="Next track" className="p-2.5 rounded-lg transition-colors hover:bg-white/10 text-white" onClick={() => p.onStep(1)} title="Next track">
         <SkipForward className="h-5 w-5" />
       </button>
-      <button className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${p.loop ? "text-accent" : "text-zinc-500"}`} onClick={p.onToggleLoop} title="Repeat one">
+      <button aria-label="Repeat one" aria-pressed={p.loop} className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${p.loop ? "text-accent" : "text-zinc-500"}`} onClick={p.onToggleLoop} title="Repeat one">
         <Repeat className="h-4 w-4" />
       </button>
       <button
@@ -727,6 +745,8 @@ export default function NowPlayingView(p: Props) {
           either side of it, whatever heights they have */}
       <span className="w-px h-6 bg-white/15 mx-1 self-center shrink-0" />
       <button
+        aria-label={p.liked ? "Unlike" : "Like this track"}
+        aria-pressed={p.liked}
         className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${p.liked ? "text-accent" : "text-zinc-500 hover:text-zinc-300"}`}
         onClick={p.onToggleLike}
         title={p.liked ? "Unlike" : "Like this track"}
@@ -735,6 +755,8 @@ export default function NowPlayingView(p: Props) {
       </button>
       <div className="relative">
         <button
+          aria-label="Add this track to a playlist"
+          aria-expanded={plOpen}
           className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${plOpen ? "text-accent bg-white/10" : "text-zinc-500 hover:text-zinc-300"}`}
           onClick={() => setPlOpen(!plOpen)}
           title="Add this track to a playlist"
@@ -777,7 +799,7 @@ export default function NowPlayingView(p: Props) {
     </div>
   );
   const seekRow = (
-    <div className="flex items-center gap-2 text-xs text-zinc-400 w-[26rem] px-2">
+    <div className="flex items-center gap-2 text-xs text-zinc-400 w-[26rem] max-w-full px-2">
       <span className="w-10 text-right font-mono tabular-nums">{fmtDuration(dispTime)}</span>
       <ScrubSeek
         videoPath={videoPath}
@@ -803,8 +825,9 @@ export default function NowPlayingView(p: Props) {
           step={0.05}
           value={vol}
           onChange={(e) => setVol(Number(e.target.value))}
-          className="w-24 seek-fat"
+          className="w-24 max-w-full seek-fat"
           title="Volume"
+          aria-label="Volume"
         />
         <VolumePct value={vol} onChange={setVol} />
       </div>
@@ -968,6 +991,7 @@ export default function NowPlayingView(p: Props) {
             className="p-2 rounded-lg transition-colors hover:bg-white/10 text-zinc-400 hover:text-white"
             onClick={p.onClose}
             title="Exit fullscreen (Esc)"
+            aria-label="Exit fullscreen"
           >
             <ChevronDown className="h-5 w-5" />
           </button>
@@ -992,9 +1016,12 @@ export default function NowPlayingView(p: Props) {
               <span className="truncate">{upNextLabel || "—"}</span>
             </button>
             <button
+              ref={queueTriggerRef}
               className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${queueOpen ? "text-white bg-white/10" : "text-zinc-400 hover:text-white"}`}
               onClick={() => setQueueOpen(!queueOpen)}
               title="Up next (queue)"
+              aria-label="Up next queue"
+              aria-expanded={queueOpen}
             >
               <ListMusic className="h-5 w-5" />
             </button>
@@ -1009,6 +1036,8 @@ export default function NowPlayingView(p: Props) {
                   persist(VIZ_KEY, v ? "1" : "0");
                 }}
                 title="Toggle visualizer bars"
+                aria-label="Toggle visualizer bars"
+                aria-pressed={viz}
               >
                 <AudioLines className="h-5 w-5" />
               </button>
@@ -1018,6 +1047,8 @@ export default function NowPlayingView(p: Props) {
                 className={`p-2 rounded-lg transition-colors hover:bg-white/10 ${options ? "text-white bg-white/10" : "text-zinc-400 hover:text-white"}`}
                 onClick={() => setOptions(!options)}
                 title="Lyrics & display options"
+                aria-label="Lyrics and display options"
+                aria-expanded={options}
               >
                 <Settings2 className="h-5 w-5" />
               </button>
@@ -1211,7 +1242,7 @@ export default function NowPlayingView(p: Props) {
                 clipped column, and a shrinking flex item there collapsed to
                 nothing (bars rendered, box clipped away). */}
             {viz && (
-              <div className="sticky bottom-0 z-10 shrink-0 min-h-12 w-[26rem] px-2">
+              <div className="sticky bottom-0 z-10 shrink-0 min-h-12 w-[26rem] max-w-full px-2">
                 <Visualizer playing={p.playing} className="block h-12 w-full" />
               </div>
             )}
@@ -1260,7 +1291,7 @@ export default function NowPlayingView(p: Props) {
       {/* up-next queue drawer — same features as the player bar's queue
           popover: CLEAR upcoming, per-track ✕, drag to reorder */}
       {queueOpen && (
-        <div className="absolute top-12 right-0 bottom-0 w-80 max-w-[85vw] z-20 bg-zinc-950 flex flex-col rounded-l-2xl border-l border-t border-border">
+        <div role="dialog" aria-modal="true" aria-label="Up next queue" className="absolute top-12 right-0 bottom-0 w-80 max-w-[85vw] z-20 bg-zinc-950 flex flex-col rounded-l-2xl border-l border-t border-border">
           <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 gap-2">
             <div className="text-[11px] uppercase tracking-widest text-zinc-400 min-w-0 truncate">
               Queue · {queue.length} track{queue.length === 1 ? "" : "s"}
@@ -1276,7 +1307,7 @@ export default function NowPlayingView(p: Props) {
                   CLEAR
                 </button>
               )}
-              <button className="p-2 rounded-lg hover:bg-white/10 text-zinc-400 hover:text-white" onClick={() => setQueueOpen(false)} title="Close queue">
+              <button ref={queueCloseRef} className="p-2 rounded-lg hover:bg-white/10 text-zinc-400 hover:text-white" onClick={() => setQueueOpen(false)} title="Close queue" aria-label="Close queue">
                 <X className="h-5 w-5" />
               </button>
             </div>
@@ -1346,6 +1377,7 @@ export default function NowPlayingView(p: Props) {
                     className="p-1 rounded text-zinc-600 hover:text-red-300 hover:bg-white/5 opacity-0 group-hover/qr:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity shrink-0"
                     onClick={() => queueRemoveAt(i)}
                     title="Remove from queue"
+                    aria-label={`Remove ${t.title || t.file} from queue`}
                   >
                     <X className="h-3.5 w-3.5" />
                   </button>

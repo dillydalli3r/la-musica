@@ -12,21 +12,27 @@ export default {
         accent: "rgb(var(--accent) / <alpha-value>)",
         "accent-soft": "rgb(var(--accent-soft) / <alpha-value>)",
       },
-      fontFamily: {
-        sans: ["Inter", "Segoe UI", "system-ui", "sans-serif"],
-        mono: ["JetBrains Mono", "Consolas", "monospace"],
+      transitionDuration: {
+        "motion-fast": "150ms",
+        "motion-base": "300ms",
+        "motion-slow": "500ms",
       },
-      // Rectangular design language: radii are kept tight so every card /
-      // popover / cover reads squared-off with only a subtle edge soften.
-      // Circles are reserved for spinners alone.
-      borderRadius: {
-        sm: "2px",
-        DEFAULT: "3px",
-        md: "4px",
-        lg: "6px",
-        xl: "8px",
-        "2xl": "10px",
-        "3xl": "12px",
+      transitionTimingFunction: {
+        motion: "cubic-bezier(0.22, 1, 0.36, 1)",
+      },
+      animation: {
+        "page-in": "page-in 0.3s cubic-bezier(0.22, 1, 0.36, 1)",
+        "fade-up": "fade-up 0.35s cubic-bezier(0.22, 1, 0.36, 1) backwards",
+        pop: "pop-in 0.18s cubic-bezier(0.22, 1, 0.36, 1)",
+        fade: "fade-in 0.2s ease",
+        "toast-in": "toast-in 0.22s cubic-bezier(0.22, 1, 0.36, 1)",
+      },
+      keyframes: {
+        "page-in": { from: { opacity: "0", transform: "translateY(7px)" }, to: { opacity: "1", transform: "none" } },
+        "fade-up": { from: { opacity: "0", transform: "translateY(10px)" }, to: { opacity: "1", transform: "none" } },
+        "pop-in": { from: { opacity: "0", transform: "scale(0.96) translateY(6px)" }, to: { opacity: "1", transform: "none" } },
+        "fade-in": { from: { opacity: "0" }, to: { opacity: "1" } },
+        "toast-in": { from: { opacity: "0", transform: "translateY(12px) scale(0.97)" }, to: { opacity: "1", transform: "none" } },
       },
     },
   },

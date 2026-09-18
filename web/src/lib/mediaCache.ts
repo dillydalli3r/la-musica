@@ -18,21 +18,6 @@ function absolute(base: string): string {
   return new URL(base, window.location.href).toString();
 }
 
-/** The URL this track's player element will request. A video whose probe
- * says the browser cannot decode it natively is played through the live
- * transcode (`?transcode=1`), so it must be cached under that same URL —
- * the direct-stream URL is never requested for exactly those videos. */
-export async function playableUrl(path: string): Promise<string> {
-  if (!isVideoFile(path)) return absolute(api.streamUrl(path));
-  let transcode = false;
-  try {
-    transcode = (await api.videoMeta(path)).native === false;
-  } catch {
-    /* probe unavailable (server down) — fall back to the direct stream */
-  }
-  return absolute(api.videoStreamUrl(path, transcode));
-}
-
 /** Every URL a track's stream may have been cached under: the direct one,
  * plus the live transcode for videos (the player retries a failed direct
  * stream through it). Lets lookups and removals work without a probe, so
@@ -74,7 +59,9 @@ async function warm(c: Cache, url: string): Promise<void> {
 }
 
 export async function cacheTrack(path: string): Promise<void> {
-  const url = await playableUrl(path);
+  // Optimistic direct URL — no probe up front; the player retries via
+  // transcode only if direct playback actually fails.
+  const url = isVideoFile(path) ? absolute(api.videoStreamUrl(path)) : absolute(api.streamUrl(path));
   const c = await cache();
   // The response is explicitly moved into the cache; the stream endpoint
   // has no custom headers we need to preserve beyond the defaults.
@@ -83,7 +70,7 @@ export async function cacheTrack(path: string): Promise<void> {
   await c.put(url, resp);
   // Covers and the artist image ride along, so offline playback is not left
   // with a placeholder where the artwork should be.
-  await Promise.all(artworkUrls(path).map((u) => warm(c, u)));
+  await Promise.allSettled(artworkUrls(path).map((u) => warm(c, u)));
 }
 
 export async function uncacheTrack(path: string): Promise<void> {
