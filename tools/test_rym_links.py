@@ -12,6 +12,15 @@ What this pins, with the HTTP layer stubbed (no network at all):
     de-`the`-ed one, then RYM's own search page;
   * a Cloudflare interstitial, a 404, and a 200 that landed somewhere else
     are all rejected and fall through — never accepted as a link;
+  * every request carries the whole Chrome header set, and the credential
+    travels in a cookie jar rather than a hand-built `Cookie:` header, so
+    RYM's OWN Set-Cookie can join it: the first request a pasted cookie makes
+    is ONE navigation to RYM's home page (`_rym_warm`), which is what makes
+    the WAF hand those cookies over — once per paste, never per call, and the
+    next paste starts from a jar with nothing left of the old one;
+  * what went wrong is recorded, not guessed: `rym_last_response()` says the
+    status, whether the challenge marker was in the body, the URL and when,
+    so the Sources panel can tell a stale cookie from a blocked network;
   * a blocked RYM costs ONE probe for the whole process: the ladder is not
     walked, later lookups make no request at all, and the note says what the
     user can do (set rym_cookie, or rely on the MusicBrainz links) — but the
@@ -58,17 +67,31 @@ class Response:
         self.status_code, self.text, self.url = status, text, url
 
 
+class FakeCookies(dict):
+    """`httpx.Cookies` as the RYM code needs it: a jar seeded from the user's
+    paste, which the fake transport reads back off every request it serves."""
+
+    def set(self, name, value, domain="", path="/"):
+        self[str(name)] = value
+
+
 class FakeHttpx:
     HTTPError = RuntimeError
+    Cookies = FakeCookies
 
     def __init__(self, routes, boom=False):
         self.routes, self.boom, self.calls = dict(routes), boom, []
+        self.jars, self.headers = [], []
 
     def get(self, url, params=None, headers=None, timeout=None,
-            follow_redirects=None):
+            follow_redirects=None, cookies=None):
         full = url + ("?" + "&".join(f"{k}={v}" for k, v in sorted(params.items()))
                       if params else "")
         self.calls.append(full)
+        # Per call, in order: what the jar carried to RYM (the credential,
+        # plus whatever RYM's own Set-Cookie added — see `_rym_warm`).
+        self.jars.append(dict(cookies or {}))
+        self.headers.append(dict(headers or {}))
         if self.boom:
             raise RuntimeError("no connection")
         for key, route in self.routes.items():
@@ -157,10 +180,16 @@ def run(routes, boom=False, cache=None, mb=None):
     intg._rym_cookie = lambda cfg=None: ""
     # `_rym_warned` is the latch; the other two are the key it belongs to (the
     # cookie it was found with, and when) — a stale pair would decide whether
-    # THIS case's first lookup goes out at all.
+    # THIS case's first lookup goes out at all. The jar and the warm-up marker
+    # are keyed to the paste the same way: a case that sets a cookie must get
+    # RYM's home page navigation once, not a leftover from the case before.
     intg._rym_warned = False
     intg._rym_blocked_cookie = ""
     intg._rym_blocked_at = 0.0
+    intg._rym_jar = None
+    intg._rym_jar_paste = None
+    intg._rym_warmed = None
+    intg._rym_last_info = {}
     return intg.httpx
 
 
@@ -170,6 +199,7 @@ _real_cache_dir = intg._rym_cache_dir
 _real_cookie = intg._rym_cookie
 _real_interval = intg.RYM_MIN_INTERVAL
 _real_audiofile = mlo_audio.AudioFile
+_real_last_info = intg._rym_last_info
 
 CFG = {"rym_links_auto": True}
 try:
@@ -462,7 +492,9 @@ try:
 
     # ----------------------------------------------------------------------- #
     # 11) only what MB could not state is scraped: MB gives the album, RYM's
-    #     own artist page (cookie configured) gives the artist
+    #     own artist page (cookie configured) gives the artist — and the FIRST
+    #     request a paste makes is the warm-up navigation to RYM's home page,
+    #     which is what makes the WAF hand over its own cookies
     # ----------------------------------------------------------------------- #
     fake = run({"/artist/nirvana": ok(artist_page("Nirvana"))},
                mb=FakeMusicBrainz(entities={
@@ -473,7 +505,23 @@ try:
                          mbid=NIRVANA_GROUP)
     assert got == {"album": UNPLUGGED, "artist": f"{BASE}/artist/nirvana",
                    "note": ""}, got
-    assert fake.calls == [f"{BASE}/artist/nirvana"], fake.calls
+    assert fake.calls == [f"{BASE}/", f"{BASE}/artist/nirvana"], fake.calls
+    # the credential rides in the jar (so RYM's Set-Cookie can join it), never
+    # in a hand-built `Cookie:` header, and it goes out on the warm-up too
+    assert fake.jars == [{"cf_clearance": "abc"}, {"cf_clearance": "abc"}], \
+        fake.jars
+    assert "Cookie" not in fake.headers[1], fake.headers[1]
+    # a full Chrome header set on both — the warm-up as a top-level navigation
+    # (no Referer, Sec-Fetch-Site: none), the page as same-site
+    for sent in fake.headers:
+        assert "Mozilla/5.0" in sent["User-Agent"], sent
+        assert sent["sec-ch-ua-platform"] == '"Windows"', sent
+        assert sent["Sec-Fetch-Dest"] == "document", sent
+        assert sent["Sec-Fetch-Mode"] == "navigate", sent
+    assert "Referer" not in fake.headers[0], fake.headers[0]
+    assert fake.headers[0]["Sec-Fetch-Site"] == "none", fake.headers[0]
+    assert fake.headers[1]["Referer"] == f"{BASE}/", fake.headers[1]
+    assert fake.headers[1]["Sec-Fetch-Site"] == "same-origin", fake.headers[1]
 
     # ----------------------------------------------------------------------- #
     # 12) the refusal latch belongs to the credential that earned it
@@ -485,11 +533,17 @@ try:
     with contextlib.redirect_stdout(log):
         got = intg.rym_links("Rihanna", "Loud", cfg=CFG)
     assert got["note"] == intg._RYM_BLOCKED_NOTE, got
-    assert len(fake.calls) == 1, fake.calls
+    assert len(fake.calls) == 2, fake.calls     # the warm-up, then the release
+    # the refusal says WHICH refusal it was: the challenge marker was in the
+    # body, so the cookie is what has to change
+    last = intg.rym_last_response()
+    assert last["status"] == 200 and last["challenge"] is True, last
+    assert last["url"] == f"{BASE}/release/album/rihanna/loud/", last
+    assert "expired" in last["reason"] and "rym_cookie" in last["reason"], last
     # the SAME cookie is still refused: no second request (the latch's purpose)
     with contextlib.redirect_stdout(io.StringIO()):
         assert intg.rym_links("Rihanna", "Loud", cfg=CFG) == got
-    assert len(fake.calls) == 1, fake.calls
+    assert len(fake.calls) == 2, fake.calls
 
     # …but it is not a verdict on a cookie the user has since REPLACED:
     # pasting a fresh one and testing it must reach RYM (pre-fix it never did
@@ -607,6 +661,54 @@ try:
     # …and an artist page that is not that artist's supplies no genres either
     fake = run({"/artist/rihanna": ok(genre_page("Cover Band", "Loud Cover"))})
     assert intg.rym_artist_genres("Rihanna") is None
+
+    # ----------------------------------------------------------------------- #
+    # 15) the warm-up navigation: RYM's own Set-Cookie lands in the jar and is
+    #     sent on the requests that follow, and it runs ONCE per paste — the
+    #     second lookup under the same cookie navigates nowhere
+    # ----------------------------------------------------------------------- #
+    fake = run({"/release/album/rihanna/loud/": ok(release_page("Rihanna", "Loud")),
+                "/release/album/rihanna/loud-2/":
+                    ok(release_page("Rihanna", "Loud 2")),
+                "/artist/rihanna": ok(artist_page("Rihanna"))})
+    intg._rym_cookie = lambda cfg=None: "cf_clearance=abc; session=xyz"
+    warmed = []
+
+    def warm_get(url, **kwargs):
+        """The real stub, plus what RYM answers its home page with: the WAF's
+        own cookie, which the jar has to keep."""
+        answer = FakeHttpx.get(fake, url, **kwargs)
+        if url == f"{BASE}/":
+            warmed.append(url)
+            answer.cookies = {"__cf_bm": "waf"}
+        return answer
+
+    fake.get = warm_get
+    got = intg.rym_links("Rihanna", "Loud", cfg=CFG)
+    assert got == {"album": f"{BASE}/release/album/rihanna/loud/",
+                   "artist": f"{BASE}/artist/rihanna", "note": ""}, got
+    assert warmed == [f"{BASE}/"], warmed
+    # the paste went out on the warm-up, and the WAF's cookie joined it for
+    # the release page (which is the whole point of the navigation)
+    assert fake.jars[0] == {"cf_clearance": "abc", "session": "xyz"}, fake.jars
+    assert fake.jars[1] == {"cf_clearance": "abc", "session": "xyz",
+                            "__cf_bm": "waf"}, fake.jars
+    assert fake.jars[2] == fake.jars[1], fake.jars
+
+    # a second lookup under the SAME paste does not navigate again…
+    intg.rym_links("Rihanna", "Loud 2", cfg=CFG)
+    assert fake.calls.count(f"{BASE}/") == 1, fake.calls
+    # …and a NEW paste (the user replaced the cookie) warms once more, with
+    # nothing left over from the old one. A fresh album, so a request really
+    # goes out: a warm-up exists to make a request succeed, so a lookup that
+    # the cache answers asks for nothing and warms nothing.
+    fake.routes["/release/album/rihanna/loud-3/"] = \
+        ok(release_page("Rihanna", "Loud 3"))
+    intg._rym_cookie = lambda cfg=None: "cf_clearance=new"
+    intg._rym_warned = False
+    intg.rym_links("Rihanna", "Loud 3", cfg=CFG)
+    assert fake.calls.count(f"{BASE}/") == 2, fake.calls
+    assert fake.jars[-1] == {"cf_clearance": "new", "__cf_bm": "waf"}, fake.jars
 finally:
     intg.httpx = _real_httpx
     intg.mb_get_cached = _real_mb_get_cached
@@ -616,6 +718,10 @@ finally:
     intg._rym_warned = False
     intg._rym_blocked_cookie = ""
     intg._rym_blocked_at = 0.0
+    intg._rym_jar = None
+    intg._rym_jar_paste = None
+    intg._rym_warmed = None
+    intg._rym_last_info = _real_last_info
     mlo_audio.AudioFile = _real_audiofile
 
 print("test_rym_links: OK")

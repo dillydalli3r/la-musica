@@ -667,16 +667,16 @@ def show_main_menu(config):
 
 def manage_dependencies():
     from .fetchdeps import (
-        DISPLAY_NAMES, installed_versions, latest_versions,
-        install_dependency, refresh_tool_cache,
+        DISPLAY_NAMES, dependency_rows, install_dependency, refresh_tool_cache,
     )
 
     clear_screen()
     print_header("DEPENDENCY MANAGER")
 
-    installed = installed_versions()
+    # block=True: the table is printed once and the CLI has nobody to return
+    # to, so the live GitHub check runs inline instead of in the background.
     try:
-        latest = latest_versions()
+        rows = dependency_rows(block=True)
     except Exception as e:
         log(c(f"ERROR: could not query GitHub: {e}", Color.RED))
         pause_for_input()
@@ -684,15 +684,23 @@ def manage_dependencies():
 
     print()
     name_w = max(len(name) for name in DISPLAY_NAMES.values())
-    for key, name in DISPLAY_NAMES.items():
-        iv = installed.get(key, "-")
-        lv = latest.get(key, "?")
-        state = (
-            c("up to date", Color.GREEN) if iv == lv and iv != "-"
-            else c("update available", Color.YELLOW) if iv != "-"
-            else c("not installed", Color.RED)
+    # Same states, same words as the GUI: `installed` vs. the pinned `target`
+    # the installer fetches vs. what upstream actually releases.
+    state_text = {
+        "ok": ("up to date", Color.GREEN),
+        "update": ("update available", Color.YELLOW),
+        "missing": ("not installed", Color.RED),
+        "error": ("check failed", Color.RED),
+    }
+    for row in rows:
+        iv = row["installed_version"] or row["detected_version"] or "-"
+        lv = row["latest_version"] or "?"
+        uv = row["upstream_version"] or "?"
+        label, color = state_text.get(row["state"], (row["state"], Color.RED))
+        print(
+            f"  {row['name']:<{name_w}}  installed {iv:<10} target {lv:<10} "
+            f"available {uv:<10} {c(label, color)}"
         )
-        print(f"  {name:<{name_w}}  installed {iv:<10} latest {lv:<10} {state}")
     print()
 
     choice = input("Install/update all tools now? (y/n): ").strip().lower()

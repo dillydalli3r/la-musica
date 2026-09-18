@@ -209,16 +209,25 @@ class Response:
         self.status_code, self.text, self.url = status, text, url
 
 
+class FakeCookies(dict):
+    """`httpx.Cookies` as the RYM code needs it: the jar a cookie paste seeds,
+    which the transport reads back off every request it serves."""
+
+    def set(self, name, value, domain="", path="/"):
+        self[str(name)] = value
+
+
 class FakeHttpx:
     """RateYourMusic's seam (`integrations.httpx`)."""
 
     HTTPError = RuntimeError
+    Cookies = FakeCookies
 
     def __init__(self, routes, boom=False):
         self.routes, self.boom, self.calls = dict(routes), boom, []
 
     def get(self, url, params=None, headers=None, timeout=None,
-            follow_redirects=None):
+            follow_redirects=None, cookies=None):
         self.calls.append(url)
         if self.boom:
             raise RuntimeError("no connection")

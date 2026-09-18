@@ -16,6 +16,12 @@ trash (`.mlo/trash`) beside it — one folder to back up or carry between
 machines.
 
 ## Highlights
+- **Offline app, honest downloads, live share index** (new in 2.7.4) — the app itself now opens with the server down: the service worker precaches the built shell (every lazy route chunk, listed by the build as `precache.json`) and caches the library/config/album/artist payloads, so a downloaded album plays, renders its description and browses its artist offline. Downloads warm those payloads and drop them with the last track of the album. Download failures carry a reason ("the server has no file at that path", "the download was cut short (2 MB of 41 MB)") instead of a bare count, a stalled stream now has a 120 s deadline and one retry, and a truncated body is rejected rather than cached. Two dead routes were found and fixed on the way: `/api/track/download` had lost its decorator and `/api/track/export` referenced `detect_all_tools` it never imported — every export answered 500. Soulseek's share refresh was dead code (a worker defined and never started): tags, scripts, optimizations, organizes and imports now schedule a debounced share rescan, so the daemon stops serving its boot-time file list.
+
+- **Dependencies: available version + auto-update** (new in 2.7.4) — the dependency tables (Dependencies page, Settings → Dependencies, setup wizard, `mlo` CLI) show **three** versions per tool: installed, the pinned target the app installs, and a new **Available** column fed by a live GitHub check (30-minute background TTL, `?refresh=1` to force, degrades to the pinned pair with a note when the API rate-limits). Status is derived from the live value, and a new `dependencies_auto_update` setting installs missing/outdated tools in the background when enabled.
+
+- **RYM requests are browser-faithful, and say why they failed** (new in 2.7.4) — the scraper now sends a full Chrome header set, keeps a real cookie jar (RYM's own `Set-Cookie`, e.g. `__cf_bm`, rides along) and makes one warm-up navigation per pasted cookie before the page it wants. Refusals are classified: missing cookie, 403 without a challenge (WAF/network), challenge page (expired cookie), 429, 5xx — each with the fix, surfaced both in the sources panel and as `rym_last` (`HTTP 403 · no challenge marker · <url> · <time>`). Note: on a network Cloudflare blocks, a valid cookie still gets a 403 — the app now says exactly that instead of "the cookie is stale or this network is blocked".
+
 - **Icon-button fixes** (new in 2.7.3) — an accent-filled icon button (play) takes its glyph colour from the theme's `--accent-fg`, not white: the mono theme's accent IS white, so the play glyph was invisible until something else coloured it on hover. The album/playlist heart now sits immediately right of play, and the cover-art menu wears the same 36px box as the action row instead of its own 30px square.
 
 - **One row, one button, one moving background** (new in 2.7.2) — the album and playlist action rows are now a single shared 36px square recipe (`.btn-icon`, with an accent-filled play and a red armed state), so play, download, links, like, tags and the overflow menu line up instead of being four slightly different boxes; the square download button never prints a label — it fills a determinate progress arc while caching, scales its check in when done, and arming a removal turns the SAME box red and pulsing rather than expanding into "Remove 8?"; and the fullscreen background actually moves: the music window is measured against a rolling loud reference (a fixed dB window moved the glow by ~0.15 and the backdrop looked frozen), the glow swings most of its opacity and a third of its scale per beat, and the cover/sweep/colour-field clocks are 24-55 s instead of 62-180 s.
@@ -93,25 +99,27 @@ machines.
   per-band rolling reference, so a loud master shows shape instead of pinning
   every bar at full height, and it meters both audio and music videos —
   starting on the first play, surviving track changes, seeks and buffering.
+  The strip is bars only — the falling peak caps were removed, they read as
+  clutter rather than information.
   With nothing playing the strip eases onto its baseline and then stops
   drawing (the loop drops from the display clock to a 10 Hz timer and skips
   the repaint), and its colour ramp is one gradient per frame rather than one
   per bar, so a paused or idle player is not a 60 fps redraw of the same
   line.
-  The fullscreen background is **mostly ambient, with one beat layer**: a
-  blurred cover, an aurora sweep and drifting color fields each animate on
-  their own CSS clock (24-55 s — measured to actually read as movement, where
-  the old 62-180 s was indistinguishable from a still image), the cover's
-  grain and vignette settle them, and the music swells ONE glow. That glow is
-  the only audio-driven layer, and it is measured against a **rolling loud
-  reference** rather than a fixed dB window: a fixed window cannot work
-  across masters (on a real track the mix swings inside ~4 dB, which moved
-  `--amb` by ~0.15 and left the backdrop looking frozen), so the reference
-  follows the track's own loud passages and the glow swings most of its
-  opacity and a third of its scale against it. The value is written ~14x/s
-  and eased under a quarter-second by CSS — snappy enough to ride a kick,
-  slow enough to never flash (a write is skipped unless the value moved).
-  Both halves are switchable under the player's *Background* options
+  The fullscreen background is **alive**: a blurred cover, an aurora sweep and
+  three drifting colour fields (24-37 s clocks, each hue-rotated so the
+  backdrop is colour rather than one flat tint) move on their own, and the
+  music drives THREE layers at once — a wide glow, a hue-shifted bloom and the
+  colour field itself, which swells with the beat. That value is measured
+  against a **rolling loud reference** rather than a fixed dB window (a fixed
+  window cannot work across masters — on a real track the mix swings inside
+  ~4 dB, which moved `--amb` by only 0.15 and left the backdrop looking
+  frozen): measured 0.31-0.88 across a track, with the glow's opacity swinging
+  0.33-0.81 and its scale 1.03-1.22, and 30-40% of background pixels changing
+  between frames three seconds apart. It is written ~14x/s and eased under a
+  quarter-second by CSS, so it rides a kick without ever flashing (a write is
+  skipped unless the value moved).
+  The layers are switchable under the player's *Background* options
   (`mlo.np.orbs` color drift, `mlo.np.vis` music glow) and
   `prefers-reduced-motion` freezes the lot.
   ReplayGain is applied through the WebAudio gain
@@ -125,9 +133,14 @@ machines.
   (`GET /api/videos/thumb`), debounced, cached per second, and silent — a
   frame that cannot be cut leaves the time label standing alone. Browser-fullscreen
   with a two-stage Esc.
-- **Offline cache** — "Download" caches tracks (and video streams) in a
-  service-worker media cache; cached tracks keep playing with the backend
-  down. "Export" is the real file-saving path.
+- **Offline cache** — "Download" puts a track's audio in a service-worker
+  media cache *and* warms what the page around it needs: the album and artist
+  payloads (description, credits, cover references) plus the cover and artist
+  image — all dropped again when the last cached track of that album or artist
+  is removed. The worker also precaches the built app (every lazy route chunk,
+  listed by the build), so the UI itself opens with the server down: a
+  downloaded album plays, prints its description and browses its artist
+  offline. "Export" is the real file-saving path.
 - **Playlists** — manual playlists (drag-reorder, favorites, .m3u8
   export/import) and **smart playlists** driven by saved grade/audit/tag
   filters. Playlist pages look and behave exactly like album pages, with a
@@ -217,6 +230,10 @@ machines.
   lacks a country is reported as ineligible instead of being downloaded on a
   guess.
 - **Soulseek** — managed slskd instance (autostart, shares = music folder),
+  whose share index is **refreshed whenever the library changes** (tags,
+  scripts, optimizations, organizes, imports and deletes all schedule one
+  debounced `PUT /shares` rescan, so the network stops browsing the file list
+  the daemon saw at boot),
   search & download UI with a live status dot in the sidebar (the backend
   pushes a frame the moment the login state, the daemon or a port conflict
   changes, so the dot turns green on login — or red on an unexpected logout —
@@ -1176,6 +1193,18 @@ the title rows immediately.
 Saving a file to disk is *Export*'s job and the staging folder is Soulseek's —
 neither is this page.
 
+**The app itself works offline.** The service worker precaches the built shell
+— the document plus every bundle, with the lazy route chunks listed by the
+build (`web/dist/precache.json`, emitted by a tiny Vite plugin) because
+index.html never references them — and then caches the payloads the offline UI
+renders from: `/api/library`, `/api/config` and the `/api/album` /
+`/api/artist` bodies, all network-first with the cache as the fallback. A
+download warms the album and artist payloads for its own entity (that is where
+the description, the credits and the cover references live) and removes them
+when the last cached track of that entity goes. Measured with the backend
+stopped: the sidebar, the Downloads page and a downloaded album page all
+render, and playback of a cached FLAC advances normally.
+
 Releases downloaded to the staging folder `<music>/.mlo/downloads` are listed
 by `GET /api/downloads` (newest first); `POST /api/downloads/import` moves
 entries into the library as albums and `POST /api/downloads/delete` removes
@@ -1318,14 +1347,34 @@ RateYourMusic first, then MusicBrainz, matching the documented chain.
 
 ### Dependencies: latest versions & updates
 
-`GET /api/dependencies` reports, for every tool the installer knows, the
-version that is installed, the platform's target (`latest_version`) and its
-state (`ok` / `update` / `missing`). Settings → Dependencies and the sidebar
-page both show that pair — **Installed** and **Latest** — so a tool that is
-behind is visible without running anything. Latest means *the version this
-app would fetch*, not the newest thing upstream: the installer pins reviewed
-releases on purpose, and a newer upstream tag is a release decision, not a
-runtime one.
+`GET /api/dependencies` reports, for every tool the installer knows, three
+versions — **Installed** (on disk / on PATH), **Latest** (the platform's
+target, `latest_version`: *the version this app would fetch*) and
+**Available** (`upstream_version`: the newest release GitHub actually has, for
+the tools published there). Settings → Dependencies, the sidebar page and the
+setup wizard all show the same three columns, and `python -m mlo`'s
+Dependency Manager prints the same table in the terminal.
+
+Latest is a deliberate *pin* (see `PINNED`): the installer downloads reviewed
+releases so installs and CI builds are reproducible, and a newer upstream tag
+is a release decision, not a runtime one. Available is the honest answer to
+"is there something newer?", checked against GitHub's `releases/latest` for
+every GitHub-published tool. php (windows.php.net), simple-dr-meter (a tag
+archive) and the two PyPI packages have no release to ask about; their rows
+report no Available version.
+
+The check is cached for 30 minutes and always runs **in the background**: a
+request returns what is known plus `checking: true` while the fetch is in
+flight (`upstream_checked_at` says when the last pass finished, and it is
+polled by the Dependencies page). `?refresh=1` re-checks now instead of
+waiting out the TTL. A network or API failure never breaks the response — the
+affected tool keeps its previous value (or `null`) and carries a `note`; the
+row's state becomes `error` only when nothing is known at all.
+
+`state` is derived from Available, not from the pin: `ok` (installed ==
+upstream), `update` (upstream known and different — the row's hover shows the
+upstream version), `missing`, `error` (that tool's check failed). Rows with no
+upstream at all fall back to the pinned pair.
 
 Updates are one click (*Install / update all*, or per tool) and land in
 `<app>/.dependencies`. In Docker that is the `lamusica-dependencies` volume,
@@ -1334,6 +1383,13 @@ install into the same folder at runtime, and distro-provided tools (ffmpeg,
 flac, libjxl, …) are reported ready from the image's own packages. Only the
 Windows-only tools (AudioAuditor, CUETools, Logchecker+php, slskd) cannot be
 fetched on Linux — their rows say so instead of failing an install.
+
+**Install always fetches the pinned Latest**, never Available: an upstream tag
+that has not been reviewed is exactly what the pin exists to keep out. With
+`dependencies_auto_update` (Settings → Dependencies, off by default) a
+background pass every few hours installs every tool whose state is `missing`
+or `update` through the same pinned path and logs one line per tool; the flag
+is re-read on every pass, so switching it off stops the next one.
 
 ### Terminal entry point
 

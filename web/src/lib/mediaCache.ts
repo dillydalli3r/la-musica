@@ -45,6 +45,19 @@ function artworkUrls(trackPath: string): string[] {
   return [absolute(api.coverUrl(album)), absolute(api.artistImageUrl(parentDir(album)))];
 }
 
+/** The JSON a downloaded track needs offline: its album payload (description,
+ *  credits, cover reference — the album page's whole body) and its artist
+ *  payload. Same shape of GET as artwork, and the service worker serves them
+ *  from this cache too, so an album page opens with the server down.
+ *  The URLs must stay identical to `api.album()` / `api.artist()`. */
+function entityUrls(trackPath: string): string[] {
+  const album = parentDir(trackPath);
+  return [
+    absolute(`/api/album?path=${encodeURIComponent(album)}`),
+    absolute(`/api/artist?path=${encodeURIComponent(parentDir(album))}`),
+  ];
+}
+
 async function cache(): Promise<Cache> {
   return caches.open(CACHE_NAME);
 }
@@ -60,6 +73,35 @@ async function warm(c: Cache, url: string): Promise<void> {
   }
 }
 
+/** How long one track's stream may take before the attempt is abandoned.
+ *  Without this the fetch had no deadline at all: a stalled server left the
+ *  button spinning until the browser gave up (minutes), and the track was
+ *  reported as failed with nothing to show for the wait. */
+const STREAM_TIMEOUT_MS = 120_000;
+
+/** Fetch a stream with a deadline and one retry.
+ *
+ *  A dropped connection or a 5xx is worth a second attempt (the server may be
+ *  mid-restart); a 4xx is the server saying no, so it is reported as-is —
+ *  "could not be downloaded" with a status is actionable, a bare count is
+ *  not. */
+async function fetchStream(url: string): Promise<Response> {
+  const attempt = () => fetch(url, { signal: AbortSignal.timeout(STREAM_TIMEOUT_MS) });
+  let resp: Response;
+  try {
+    resp = await attempt();
+  } catch {
+    resp = await attempt();
+  }
+  if (!resp.ok && resp.status >= 500) resp = await attempt();
+  if (!resp.ok) {
+    throw new Error(
+      resp.status === 404 ? "the server has no file at that path" : `the server answered ${resp.status}`
+    );
+  }
+  return resp;
+}
+
 export async function cacheTrack(path: string): Promise<void> {
   // Optimistic direct URL — no probe up front; the player retries via
   // transcode only if direct playback actually fails.
@@ -67,17 +109,54 @@ export async function cacheTrack(path: string): Promise<void> {
   const c = await cache();
   // The response is explicitly moved into the cache; the stream endpoint
   // has no custom headers we need to preserve beyond the defaults.
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`server responded ${resp.status}`);
+  const resp = await fetchStream(url);
   await c.put(url, resp);
-  // Covers and the artist image ride along, so offline playback is not left
-  // with a placeholder where the artwork should be.
-  await Promise.allSettled(artworkUrls(path).map((u) => warm(c, u)));
+  // A short body is worse than no body: the service worker would serve a
+  // truncated stream as if it were the whole track, and the player would fail
+  // at the end of it with the server long gone. Both the server and the cache
+  // entry carry a Content-Length, so the mismatch is visible without reading
+  // the payload back.
+  const want = Number(resp.headers.get("content-length") || 0);
+  const got = Number((await c.match(url))?.headers.get("content-length") || 0);
+  if (want && got && want !== got) {
+    await c.delete(url);
+    throw new Error(`the download was cut short (${got} of ${want} bytes)`);
+  }
+  // Covers, the artist image and the album/artist payloads ride along, so
+  // offline playback is not left with a placeholder where the artwork should
+  // be, and the album page still has its description.
+  await Promise.allSettled([...artworkUrls(path), ...entityUrls(path)].map((u) => warm(c, u)));
 }
 
 export async function uncacheTrack(path: string): Promise<void> {
   const c = await cache();
   await Promise.all(cacheUrls(path).map((u) => c.delete(u)));
+  await pruneEntityPayloads();
+}
+
+/** Drop every album/artist payload no cached track needs any more.
+ *
+ *  Called after a removal instead of deleting the payload per track: an album
+ *  still holding cached tracks must keep the payload it renders from, and a
+ *  bulk removal is one sweep rather than N racing ones. */
+export async function pruneEntityPayloads(): Promise<void> {
+  const keep = new Set<string>();
+  for (const p of await cachedPaths()) {
+    const album = parentDir(p);
+    keep.add(album);
+    keep.add(parentDir(album));
+  }
+  const c = await cache();
+  for (const u of await cachedUrls()) {
+    let url: URL;
+    try {
+      url = new URL(u);
+    } catch {
+      continue;
+    }
+    if (url.pathname !== "/api/album" && url.pathname !== "/api/artist") continue;
+    if (!keep.has(url.searchParams.get("path") || "")) await c.delete(u);
+  }
 }
 
 export async function isTrackCached(path: string): Promise<boolean> {

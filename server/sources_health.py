@@ -182,11 +182,25 @@ def _artist_mbid(cfg):
     return _ARTIST_MBID["mbid"]
 
 
+def _rym_reason_since(started):
+    """Why RYM refused, as the module recorded it for THIS probe — "" when the
+    record is older than the probe, or when RYM answered.
+
+    `integrations.rym_last_response()` is process-wide, so a probe that read
+    it blindly could report a refusal from an earlier run (or a test stub's)
+    as its own; the timestamp is what makes the sentence this probe's."""
+    from server import integrations as intg
+
+    last = intg.rym_last_response()
+    return str(last.get("reason") or "") if last.get("at", 0) >= started else ""
+
+
 def _probe_genre(pid, cfg):
     from server import discovery
     from server import integrations as intg
 
     if pid == "rateyourmusic":
+        started = time.time()
         before = intg._rym_failures
         # This row IS a user's Test: forget the refusal latch first, so RYM is
         # asked again with whatever cookie is saved now — otherwise the row
@@ -194,8 +208,14 @@ def _probe_genre(pid, cfg):
         intg._rym_clear_block()
         data = intg.rym_genres(SAMPLE_ARTIST, SAMPLE_ALBUM)
         if intg._rym_failures != before:
-            return "skipped", ("RYM refused the request (403/challenge) — the "
-                               "cookie is stale or this network is blocked")
+            # WHY RYM said no, in RYM's own recorded words: "403/challenge"
+            # was one sentence for five different problems, and the fix for
+            # "no cookie configured" is not the fix for "the WAF is blocking
+            # this network" (see `integrations._rym_reason`). The row also
+            # carries `rym_last` — the response behind the sentence.
+            return "skipped", _rym_reason_since(started) or (
+                "RYM refused the request (403/challenge) — the cookie is "
+                "stale or this network is blocked")
         detail = _count_detail((data or {}).get("genres"))
         return ("ok", detail) if detail else ("fail", "no RYM genres for the sample")
 
@@ -326,6 +346,7 @@ def _probe_links(pid, cfg):
     # ladder answered (or that RYM refused the client). The latch is cleared
     # first because this row IS a user's Test: it asks RYM for real whatever
     # an earlier refusal left standing.
+    started = time.time()
     fails_before = intg._rym_failures
     intg._rym_clear_block()
     got = intg.rym_links(SAMPLE_ARTIST, SAMPLE_ALBUM, cfg) or {}
@@ -336,8 +357,12 @@ def _probe_links(pid, cfg):
                              ("artist" if artist else "")) if x]
         return "ok", " · ".join(parts) + " link resolved" + (f" · {note}" if note else "")
     if intg._rym_failures > fails_before:
-        return "fail", note or ("RYM did not answer — the pasted Cookie header "
-                                "was refused (403/challenge); paste a fresh one")
+        # RYM's own sentence first: "the pasted Cookie header was refused" is
+        # true of a 403 the WAF sent and misleading when RYM merely answered
+        # 503 — and `rym_last` on the row says which it was.
+        return "fail", (_rym_reason_since(started) or note or
+                        "RYM did not answer — the pasted Cookie header was "
+                        "refused (403/challenge); paste a fresh one")
     return "fail", note or "no link could be verified"
 
 
@@ -442,6 +467,8 @@ def health_payload(cfg=None, kind=None, probe=False):
         from mlo.config import load_config
 
         cfg = load_config() or {}
+    from server import integrations as intg
+
     specs = _specs(kind)
 
     rows, pending = [], []
@@ -476,6 +503,17 @@ def health_payload(cfg=None, kind=None, probe=False):
             for row, future in futures:
                 status, detail, ms = future.result()
                 row.update(status=status, detail=detail, ms=ms)
+                if row["id"] == "rateyourmusic":
+                    # The RYM rows carry WHY, not only that they failed:
+                    # `detail` is the sentence the probe built, and `rym_last`
+                    # is the response behind it — status code, whether the
+                    # Cloudflare challenge marker was in the body, the URL and
+                    # when. "403" and "403 with no challenge marker" are a
+                    # stale cookie and a blocked network respectively, and the
+                    # panel cannot tell them apart from a status chip.
+                    last = intg.rym_last_response()
+                    if last:
+                        row["rym_last"] = last
 
     return {"sources": rows,
             "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}

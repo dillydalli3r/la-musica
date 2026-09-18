@@ -879,6 +879,12 @@ DEFAULT_CONFIG = {
     "first_run_done": False,
     "last_update_check": 0,
     "update_check_interval_days": 7,
+    # Install tools that are missing or behind their upstream release without
+    # waiting for the Dependencies page. OFF by default: it downloads binaries
+    # on its own schedule, which is a decision the user makes, not one the app
+    # makes for them. The worker reads this every pass, so switching it off
+    # stops the next pass immediately.
+    "dependencies_auto_update": False,
     # Sidecar files (cue/log/lrc/accurip) shown as extra rows in library views
     "show_sidecar_files": False,
 }

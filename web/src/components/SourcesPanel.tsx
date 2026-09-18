@@ -49,7 +49,7 @@ const KEY_INFO: Record<string, { label: string; hint: string; url?: string; link
     label: "RateYourMusic cookie",
     hint:
       "How to get it: sign in to rateyourmusic.com in your browser → F12 (dev tools) → Network → reload the page → click any request to rateyourmusic.com → Headers → Request Headers → copy everything after \"Cookie:\". " +
-      "Paste the whole value (newlines and a stray \"Cookie:\" label are handled). " +
+      "Paste the WHOLE header value — every name=value pair it shows, not just one token like cf_clearance: RYM checks the session cookies together, and the app normalises the paste for you (newlines, a stray \"Cookie:\" label). " +
       "It is a session credential: keep it to yourself, and paste a fresh one when RYM starts refusing — signing out or clearing cookies invalidates it, and Test asks RYM again even after a refusal. " +
       "MusicBrainz already states the RYM page for many releases, so this is only needed for the rest.",
     url: "https://rateyourmusic.com",
@@ -57,6 +57,22 @@ const KEY_INFO: Record<string, { label: string; hint: string; url?: string; link
     secret: true,
   },
 };
+
+/** The RYM rows carry the last response RYM gave the backend (`rym_last`):
+ *  `detail` is the sentence the probe built, and this is the response behind
+ *  it. "403" and "403 with no challenge marker" are a stale cookie and a
+ *  blocked network — the panel shows which one it was. Only those rows have
+ *  it, and it is not part of the shared `SourceHealth` shape. */
+type RymLast = {
+  status?: number | null;
+  challenge?: boolean;
+  url?: string;
+  at_iso?: string;
+  reason?: string;
+};
+
+const rymLastOf = (row: SourceHealth): RymLast | undefined =>
+  (row as SourceHealth & { rym_last?: RymLast }).rym_last;
 
 /** The config keys this panel can prompt for, in a stable order. */
 const KEY_NAMES = Object.keys(KEY_INFO);
@@ -199,6 +215,7 @@ export default function SourcesPanel({ only }: { only?: SourceKind } = {}) {
               const stateLabel = promptKeys.includes("rym_cookie")
                 ? row.configured ? "cookie set" : "cookie missing"
                 : row.configured ? "configured" : "not configured";
+              const rymLast = rymLastOf(row);
               return (
               <div key={busyId(row)} className="px-3 py-2 space-y-1.5">
                 <div className="flex items-center gap-2 flex-wrap">
@@ -249,6 +266,23 @@ export default function SourcesPanel({ only }: { only?: SourceKind } = {}) {
                 </div>
 
                 {row.detail && <div className="text-[11px] text-zinc-500">{row.detail}</div>}
+                {/* Why RYM said no comes from the response itself: the status
+                    code, whether Cloudflare's challenge marker was in the
+                    body, the URL that was asked for and when. The sentence
+                    above says what to do about it; this says what came back —
+                    a stale cookie and a blocked network both read as "403"
+                    without it. */}
+                {rymLast && (
+                  <div className="text-[11px] text-zinc-600">
+                    Last RYM reply:{" "}
+                    {typeof rymLast.status === "number"
+                      ? `HTTP ${rymLast.status}`
+                      : "no answer"}{" "}
+                    · {rymLast.challenge ? "challenge marker seen" : "no challenge marker"}
+                    {rymLast.url ? ` · ${rymLast.url}` : ""}
+                    {rymLast.at_iso ? ` · ${rymLast.at_iso}` : ""}
+                  </div>
+                )}
                 {row.notes && <div className="text-[11px] text-zinc-600">{row.notes}</div>}
 
                 {promptKeys.length > 0 && (

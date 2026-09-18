@@ -112,17 +112,27 @@ export default function DownloadButton({
         return;
       }
       let n = 0;
-      let failed = 0;
+      const failures: string[] = [];
       for (const p of todo) {
         try {
           await cacheTrack(p);
-        } catch {
-          failed += 1; // one dead file must not abandon the rest
+        } catch (e) {
+          // One dead file must not abandon the rest — but a bare count ("2 of
+          // 2 could not be downloaded") leaves nothing to act on, so the
+          // reason travels out with the file it belongs to.
+          failures.push(`${p.split(/[\\/]/).pop() ?? p} — ${e instanceof Error ? e.message : String(e)}`);
         }
         setDone(++n);
       }
-      if (failed) toast.error(`${failed} of ${todo.length} track(s) could not be downloaded`);
-      else toast.success(`Downloaded ${todo.length} track${todo.length === 1 ? "" : "s"} for offline playback`);
+      if (failures.length) {
+        const head = failures.slice(0, 2).join(" · ");
+        toast.error(
+          `${failures.length} of ${todo.length} track(s) could not be downloaded: ${head}` +
+            (failures.length > 2 ? ` · +${failures.length - 2} more` : "")
+        );
+      } else {
+        toast.success(`Downloaded ${todo.length} track${todo.length === 1 ? "" : "s"} for offline playback`);
+      }
     } finally {
       setBusy(false);
       await rescan();

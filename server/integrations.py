@@ -6,6 +6,7 @@ URLs stored as tags, but we validate/parse them here.
 """
 import asyncio
 import contextlib
+from datetime import datetime, timezone
 import html as _html
 import json
 import os
@@ -1250,6 +1251,16 @@ def genre_cascade(release, limit=None):
 # browser-like headers, gets nothing, logs ONE line and the genre chain falls
 # through to the next source. It never invents a genre from a partial page.
 #
+# A good cookie is not enough by itself, and that is the difference this
+# module is built around: the WAF also hands out cookies of its OWN on a plain
+# top-level navigation, and it refuses a cold client that never made one. So
+# the paste seeds a cookie jar (`_rym_cookiejar`) that every request carries,
+# the FIRST request under a paste is ONE warm-up navigation to RYM's home page
+# (`_rym_warm`) whose Set-Cookie joins that jar, and every request sends the
+# full Chrome header set (client hints and fetch metadata included) — see
+# RYM_HEADERS and `_rym_headers`. None of it is a credential or a trick: it is
+# what a browser does before a page it is allowed to read.
+#
 # Scraping is polite and cheap: one request per second, and a 30-day disk
 # cache under <music>/.mlo/data/rym_cache so repeat imports never re-fetch.
 # (Deezer and Apple, by contrast, are keyless public APIs and their advisory
@@ -1267,18 +1278,32 @@ def genre_cascade(release, limit=None):
 # (see "RYM link
 # resolution" below).
 RYM_BASE = "https://rateyourmusic.com"
-# What a normal Chrome window sends. A bare library UA gets a challenge, so
-# these are the cheapest thing that can make an allowed request succeed.
+# What a normal Chrome window sends, field for field. Everything here is a
+# header a browser ALWAYS sends, so nothing in it is a claim the client cannot
+# back up: a bare library UA — or the UA without the client hints, the fetch
+# metadata and the wide Accept set that go with it — is what the WAF filters
+# on, and a request that succeeds with a good cookie must not be refused for
+# looking like an unattended scraper.
 RYM_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
                   "Chrome/124.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,"
-              "image/avif,image/webp,*/*;q=0.8",
+              "image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
     "Cache-Control": "no-cache",
     "Referer": RYM_BASE + "/",
     "Upgrade-Insecure-Requests": "1",
+    # Client hints. Chrome sends the same three on every request; the UA above
+    # without them is a combination no real Chrome ever produces.
+    "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", '
+                 '"Not-A.Brand";v="99"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    # Fetch metadata: a document navigation, same-site (RYM is the Referer).
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
 }
 RYM_MIN_INTERVAL = 1.0        # seconds between requests, per their etiquette
 RYM_CACHE_TTL = 30 * 86400.0  # genre data moves slowly
@@ -1300,6 +1325,10 @@ _rym_warned = False           # RYM refused since `_rym_blocked_at`, under
 _rym_blocked_cookie = ""      # this cookie — the latch `_rym_get` reads via
 _rym_blocked_at = 0.0         # `_rym_blocked` (the test harnesses reset these)
 _rym_failures = 0             # how often RYM failed to answer at all
+_rym_jar = None               # httpx.Cookies for `_rym_jar_paste`: the user's
+_rym_jar_paste = None         # own pairs PLUS whatever RYM's Set-Cookie added
+_rym_warmed = None            # the paste whose warm-up navigation has run
+_rym_last_info = {}           # what RYM last answered — `rym_last_response()`
 # Cloudflare's interstitial instead of a release page. Cached or parsed it
 # would be an empty page at best, so it counts as unreachable.
 _RYM_CHALLENGE_RE = re.compile(
@@ -1398,13 +1427,89 @@ def _rym_cookie(cfg=None):
     return "; ".join(pairs)
 
 
-def _rym_headers(cfg=None):
-    """Browser-like headers, plus the user's cookie session when configured."""
+def _rym_cookiejar(cfg=None):
+    """The cookie jar for the current paste: the user's pairs, plus every
+    Set-Cookie RYM has answered with since (see `_rym_warm`).
+
+    The credential travels in THIS jar rather than in a `Cookie:` header for
+    one reason: the WAF's own cookies join it on the warm-up, and a header
+    built once would never carry them. Rebuilt whenever the paste changes —
+    the value the user pastes in Settings is the whole credential — so nothing
+    from a refused cookie leaks into the next one."""
+    global _rym_jar, _rym_jar_paste
+    paste = _rym_cookie(cfg)
+    if _rym_jar is None or _rym_jar_paste != paste:
+        jar = httpx.Cookies()
+        for pair in paste.split(";"):
+            name, _, value = pair.strip().partition("=")
+            if name:
+                # RYM's own host: the paste is a rateyourmusic.com session and
+                # must never be sent anywhere else by accident.
+                jar.set(name, value, domain="rateyourmusic.com")
+        _rym_jar, _rym_jar_paste = jar, paste
+    return _rym_jar
+
+
+def _rym_headers(warm=False):
+    """The full Chrome header set — see RYM_HEADERS.
+
+    The cookie is NOT part of this: it belongs to the jar (`_rym_jar`), which
+    is what lets the WAF's own cookies ride along. `warm=True` is the
+    top-level navigation to RYM's home page, which a browser sends with no
+    Referer, `Sec-Fetch-Site: none` and `Sec-Fetch-User: ?1` — a request that
+    claims RYM referred it while asking for RYM's root is a shape no browser
+    produces."""
     headers = dict(RYM_HEADERS)
-    cookie = _rym_cookie(cfg)
-    if cookie:
-        headers["Cookie"] = cookie
+    if warm:
+        headers.pop("Referer", None)
+        headers["Sec-Fetch-Site"] = "none"
+        headers["Sec-Fetch-User"] = "?1"
     return headers
+
+
+def _rym_fetch(url, params, headers, jar):
+    """One GET at RYM's etiquette: the 1 req/s spacing and the request itself
+    under the same lock, so the Sources panel's parallel probes (genre and
+    links rows) can never have two requests in flight at once."""
+    global _rym_last
+    with _rym_lock:
+        wait = RYM_MIN_INTERVAL - (time.time() - _rym_last)
+        if wait > 0:
+            time.sleep(wait)
+        _rym_last = time.time()
+        return httpx.get(url, params=params or {}, headers=headers,
+                         cookies=jar, timeout=20.0, follow_redirects=True)
+
+
+def _rym_warm(cfg=None):
+    """ONE navigation to RYM's home page per cookie paste, before the first
+    request that paste makes anywhere else.
+
+    This is the difference between a page and an interstitial for a cookie
+    that is otherwise fine: the pasted session cookie (cf_clearance) is the
+    user's half of the handshake, but the WAF also hands out cookies of its
+    own (`__cf_bm`, `_cfuvid`) on a plain top-level navigation, and it treats
+    a cold client that never made one as a scraper. Those Set-Cookie values go
+    into the jar, so the request the caller actually wanted carries the whole
+    set Chrome would send.
+
+    Best effort, and per PASTE rather than per call: the request below reports
+    its own failure if RYM still refuses (and no second warm-up can rescue a
+    paste that is stale), so nothing is raised or logged here. Two probes
+    starting at the same moment can both see an unwarmed paste and both
+    navigate once — a duplicated polite request, never a wrong answer."""
+    global _rym_warmed
+    paste = _rym_cookie(cfg)
+    if not paste or _rym_warmed == paste:
+        return
+    _rym_warmed = paste
+    try:
+        r = _rym_fetch(RYM_BASE + "/", None, _rym_headers(warm=True),
+                       _rym_cookiejar(cfg))
+    except httpx.HTTPError:
+        return
+    # `Response.cookies` is httpx's own parse of this answer's Set-Cookie.
+    _rym_cookiejar(cfg).update(getattr(r, "cookies", None) or {})
 
 
 def _rym_blocked(cfg=None):
@@ -1432,8 +1537,83 @@ def _rym_clear_block():
     _rym_warned = False
 
 
-def _rym_unreachable(reason, cfg=None):
-    """One concise line per refusal — not per album, not per candidate.
+def _rym_record(status, url, challenge=False, reason=""):
+    """What RYM last answered, in module state — `rym_last_response()` serves
+    it to the Sources panel.
+
+    `status` None means nothing answered at all (a timeout, a refused
+    connection); `challenge` is whether the Cloudflare interstitial was in the
+    body; `reason` is the sentence `_rym_reason` wrote for a refusal ("" when
+    RYM answered); `url` and `at` say WHICH request got this answer, which is
+    what turns "RYM refused the request" into something a user can act on."""
+    global _rym_last_info
+    _rym_last_info = {"status": status, "challenge": bool(challenge),
+                      "url": str(url or ""), "at": time.time(),
+                      "reason": str(reason or "")}
+
+
+# How to fix a refusal, in one place: the health row and the last-response
+# record both quote it, so the two cannot drift apart. Kept short and free of
+# the site name: it lands in a log line that is already long, and the panel
+# prints it next to the field it names.
+_RYM_HOWTO = ("paste the whole `Cookie:` header (every name=value pair, not "
+              "just one token) into Settings → Discovery → rym_cookie")
+
+
+def _rym_reason(cfg=None, status=None, challenge=False, tries=1):
+    """WHY RYM would not answer. Five cases, five different fixes, so one
+    "403/challenge" sentence is not enough:
+
+      * no cookie configured — nothing the WAF could accept was ever sent;
+      * a challenge page on a 200 — the cookie is stale (or belongs to another
+        network), and a fresh paste is what fixes it;
+      * a 403 with NO challenge marker — the WAF refused the client outright:
+        a datacenter/VPN network is blocked whatever the cookie says;
+      * a 429 — RYM is throttling this network; and
+      * a 5xx — RYM itself is unwell. The last two are transient, and both
+        were already retried (RYM_RETRIES) before this sentence was written.
+
+    The cookie advice is only appended where a cookie could help: telling a
+    user to paste one while RYM answers 503 sends them after the wrong thing."""
+    cookie = _rym_cookie(cfg)
+    if challenge:
+        why = "Cloudflare challenge instead of a page (HTTP 200) — " + \
+            ("the rym_cookie has expired or is not for this network" if cookie
+             else "no rym_cookie is set")
+        return why + "; " + _RYM_HOWTO
+    if status == 429:
+        return ("HTTP 429 — RYM is throttling this network (retried %dx)"
+                % tries)
+    if status is not None and status >= 500:
+        return "HTTP %d — RYM server error (retried %dx)" % (status, tries)
+    if status == 403:
+        why = ("HTTP 403 refused without a Cloudflare challenge — the WAF is "
+               "blocking this network")
+        why += (", or the cookie is for another session" if cookie
+                else ", and no rym_cookie is set")
+        return why + "; " + _RYM_HOWTO
+    return "HTTP %s refused the request" % status
+
+
+def rym_last_response():
+    """RYM's last answer, for the Sources panel — {} before the first request.
+
+    `status` is the HTTP status (None = nothing answered), `challenge` whether
+    the Cloudflare interstitial was in the body, `url` what was asked for,
+    `at`/`at_iso` when, and `reason` why it was refused ("" when RYM
+    answered). It exists because `_rym_get`'s latch makes a refusal cost ONE
+    probe: the log line is over by the time the user looks, and this is what
+    the panel prints instead of a second guess at what went wrong."""
+    info = dict(_rym_last_info)
+    if info:
+        info["at_iso"] = datetime.fromtimestamp(info["at"], timezone.utc) \
+            .isoformat(timespec="seconds")
+    return info
+
+
+def _rym_unreachable(reason, cfg=None, status=None, challenge=False, url=""):
+    """Record the last response and log ONE concise line per refusal — not per
+    album, not per candidate.
 
     A per-album traceback would bury the import log for a source that is
     simply unavailable, so this is logged once and the chain moves on. The
@@ -1443,16 +1623,21 @@ def _rym_unreachable(reason, cfg=None):
     request and `_rym_get` answers None without going out again, which is what
     keeps a blocked RYM off the import's critical path. The refusal records
     the cookie it was found with and when — `_rym_blocked` is what reads
-    those, and a cookie the user replaces clears the latch on the spot."""
+    those, and a cookie the user replaces clears the latch on the spot.
+
+    The response that earned the refusal is recorded (`_rym_record`) BEFORE
+    the latch can answer the next caller from state: the line is printed once,
+    but the panel has to be able to say WHICH refusal this was."""
     global _rym_warned, _rym_failures, _rym_blocked_cookie, _rym_blocked_at
+    _rym_record(status, url, challenge, reason)
     _rym_failures += 1
     if _rym_warned:
         return
     _rym_warned = True
     _rym_blocked_cookie = _rym_cookie(cfg)
     _rym_blocked_at = time.time()
-    print(f"[mlo] rateyourmusic: {reason} — skipping RYM (set rym_cookie in "
-          "Settings with a logged-in browser session to enable it)")
+    print(f"[mlo] rateyourmusic: {reason} — skipping RYM (rym_cookie in "
+          "Settings → Discovery is the credential)")
 
 
 def _rym_cache_dir():
@@ -1497,6 +1682,10 @@ def _rym_get(path, params=None, cfg=None, expect=None):
     """Polite GET: 1 req/s, disk-cached, browser-like headers, None on any
     failure (a blocked RYM is logged once — see `_rym_unreachable`).
 
+    A request under a NEW cookie is preceded by ONE warm-up navigation
+    (`_rym_warm`) — RYM's home page — which is what makes the WAF hand over
+    its own cookies before the page the caller actually wants.
+
     *expect* is the path the caller asked for: a 404 or a redirect to
     somewhere else (RYM sends an unknown slug to search/home) then counts as
     "no such page" — a miss the caller can move on from, not a sign that RYM
@@ -1507,7 +1696,6 @@ def _rym_get(path, params=None, cfg=None, expect=None):
     request, and only then does the source count as unreachable. A user-
     initiated Test clears the latch first (`_rym_clear_block`), because "does
     this cookie work?" is a question the panel has to ask RYM for real."""
-    global _rym_last
     import hashlib
     from urllib.parse import urlencode, urlsplit
     key = hashlib.sha1(
@@ -1522,43 +1710,43 @@ def _rym_get(path, params=None, cfg=None, expect=None):
         # asking them at 1 req/s is how an import of a few dozen albums used
         # to burn minutes on a source that was never going to answer.
         return None
+    url = f"{RYM_BASE}{path}"
+    _rym_warm(cfg)
+    jar, headers = _rym_cookiejar(cfg), _rym_headers()
     reason = ""
     for attempt in range(RYM_RETRIES + 1):
-        with _rym_lock:
-            wait = RYM_MIN_INTERVAL - (time.time() - _rym_last)
-            if wait > 0:
-                time.sleep(wait)
-            _rym_last = time.time()
-            try:
-                r = httpx.get(
-                    f"{RYM_BASE}{path}", params=params or {},
-                    headers=_rym_headers(cfg),
-                    timeout=20.0, follow_redirects=True,
-                )
-            except httpx.HTTPError as e:
-                r, reason = None, f"no connection ({type(e).__name__})"
+        try:
+            r = _rym_fetch(url, params, headers, jar)
+        except httpx.HTTPError as e:
+            r, reason = None, f"no connection ({type(e).__name__})"
         busy = r is None or r.status_code == 429 or r.status_code >= 500
         if not busy or attempt >= RYM_RETRIES:
             break
+    tried = attempt + 1
     if r is None:
-        _rym_unreachable(reason, cfg)
+        _rym_unreachable(reason, cfg, url=url)
         return None
     if r.status_code != 200:
         # 404 is a slug that does not exist, not a blocked source: the caller
         # tries its next candidate instead of declaring RYM unreachable.
         if r.status_code != 404:
-            _rym_unreachable(f"HTTP {r.status_code}", cfg)
+            _rym_unreachable(_rym_reason(cfg, r.status_code, tries=tried), cfg,
+                             status=r.status_code, url=url)
         return None
     if not r.text:
-        _rym_unreachable("empty response", cfg)
+        _rym_unreachable("empty response", cfg, status=r.status_code, url=url)
         return None
     if _RYM_CHALLENGE_RE.search(r.text[:4000]):
-        _rym_unreachable("Cloudflare challenge instead of a page", cfg)
+        _rym_unreachable(_rym_reason(cfg, r.status_code, challenge=True), cfg,
+                         status=r.status_code, challenge=True, url=url)
         return None
     if expect is not None:
         final = urlsplit(str(getattr(r, "url", "") or "")).path
         if not final.startswith(expect):
             return None
+    # A usable answer is also "the last response": the panel must not keep
+    # showing a refusal RYM has since moved past.
+    _rym_record(r.status_code, url)
     _rym_cache_write(key, r.text)
     return r.text
 

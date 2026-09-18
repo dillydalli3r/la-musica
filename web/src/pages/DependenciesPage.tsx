@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { FolderOpen, RotateCcw, Wrench } from "lucide-react";
 import { api } from "../api";
@@ -12,7 +12,11 @@ type DepTool = {
   latest_version?: string;
   detected_version?: string;
   path?: string | null;
-  state: string; // "ok" | "update" | "missing"
+  state: string; // "ok" | "update" | "missing" | "error"
+  upstream_version?: string | null;
+  upstream_checked_at?: string | null;
+  update_available?: boolean;
+  note?: string | null;
 };
 
 /** Sidebar "Dependencies" — the external binaries the scripts shell out to
@@ -21,10 +25,27 @@ type DepTool = {
  * folder, and pull updates in one click. */
 export default function DependenciesPage() {
   const [busy, setBusy] = useState(false);
+  // Refresh asks the backend to re-check GitHub for THIS fetch only
+  // (?refresh=1); the normal fetch answers from its 30-minute cache.
+  const forceRef = useRef(false);
   const { data: deps, isLoading, refetch } = useQuery({
     queryKey: ["dependencies"],
-    queryFn: api.dependencies,
+    queryFn: () => api.dependencies(forceRef.current),
   });
+  const refreshNow = () => {
+    forceRef.current = true;
+    refetch().finally(() => {
+      forceRef.current = false;
+    });
+  };
+
+  // The upstream check runs in the backend's background thread: poll while it
+  // is in flight, or the version the user just asked for never appears.
+  useEffect(() => {
+    if (!deps?.checking) return;
+    const t = setInterval(() => refetch(), 3000);
+    return () => clearInterval(t);
+  }, [deps?.checking, refetch]);
 
   const tools: DepTool[] = deps?.tools ?? [];
   const missing = tools.filter((t) => t.state === "missing");
@@ -74,7 +95,7 @@ export default function DependenciesPage() {
         subtitle="External tools the scripts rely on. Missing ones are downloaded into the app's dependencies folder — nothing is installed system-wide."
         actions={
           <>
-            <button className="btn-ghost !py-1 text-xs" onClick={() => refetch()} disabled={busy || isLoading}>
+            <button className="btn-ghost !py-1 text-xs" onClick={refreshNow} disabled={busy || isLoading}>
               <RotateCcw className="h-3 w-3" /> Refresh
             </button>
             {(missing.length > 0 || updates.length > 0) && (
@@ -98,6 +119,7 @@ export default function DependenciesPage() {
           {isLoading ? "Checking tools…" : `${ready}/${tools.length} ready`}
           {updates.length > 0 && <span className="text-amber-400"> · {updates.length} update(s) available</span>}
           {missing.length > 0 && <span className="text-red-400"> · {missing.length} missing</span>}
+          {deps?.checking && <span className="text-zinc-400"> · checking upstream…</span>}
         </span>
         {deps?.deps_dir && (
           <button
@@ -121,6 +143,9 @@ export default function DependenciesPage() {
               <th className="th" title="The version the installer fetches for this tool — on Linux a distro-provided tool shows its system package instead">
                 Latest
               </th>
+              <th className="th" title="Newest release published upstream on GitHub. The installer still fetches the reviewed version in Latest.">
+                Available
+              </th>
               <th className="th">Location</th>
             </tr>
           </thead>
@@ -133,10 +158,20 @@ export default function DependenciesPage() {
                     <span className="chip bg-emerald-900/50 text-emerald-300 border border-emerald-800">Ready</span>
                   )}
                   {t.state === "update" && (
-                    <span className="chip bg-amber-900/50 text-amber-300 border border-amber-900">Update</span>
+                    <span
+                      className="chip bg-amber-900/50 text-amber-300 border border-amber-900"
+                      title={t.note ?? (t.upstream_version ? `Upstream: ${t.upstream_version}` : undefined)}
+                    >
+                      Update
+                    </span>
                   )}
                   {t.state === "missing" && (
                     <span className="chip bg-red-900/50 text-red-300 border border-red-900">Missing</span>
+                  )}
+                  {t.state === "error" && (
+                    <span className="chip bg-zinc-800 text-zinc-400 border border-zinc-700" title={t.note ?? undefined}>
+                      Check failed
+                    </span>
                   )}
                 </td>
                 <td className="td text-zinc-500">
@@ -145,6 +180,13 @@ export default function DependenciesPage() {
                 <td className="td text-zinc-500">
                   {t.latest_version || <span className="text-zinc-600 italic">Unknown</span>}
                 </td>
+                <td className="td text-zinc-500" title={t.note ?? ""}>
+                  {t.upstream_version
+                    ? <span className={t.update_available ? "text-amber-300" : undefined}>{t.upstream_version}</span>
+                    : deps?.checking
+                      ? <span className="text-zinc-600 italic">Checking…</span>
+                      : <span className="text-zinc-600 italic">Unknown</span>}
+                </td>
                 <td className="td text-[11px] text-zinc-600 font-mono truncate" title={t.path ?? ""}>
                   {t.path ? shortPath(t.path) : "—"}
                 </td>
@@ -152,13 +194,23 @@ export default function DependenciesPage() {
             ))}
             {!isLoading && tools.length === 0 && (
               <tr>
-                <td className="td text-zinc-500" colSpan={5}>
+                <td className="td text-zinc-500" colSpan={6}>
                   Could not read the tool list — is the backend running?
                 </td>
               </tr>
             )}
           </tbody>
         </table>
+      </div>
+
+      <div className="text-[10px] text-zinc-600">
+        Install downloads the pinned release from GitHub into the dependencies folder; PATH-installed tools
+        (scoop etc.) are shown as ready. <span className="text-zinc-500">Available</span> is what upstream has
+        published — the installer waits for the pin to be reviewed, so Install fetches Latest, not Available.
+        {deps?.note && <span className="text-amber-500"> Upstream check: {deps.note}</span>}
+        {deps?.upstream_checked_at && (
+          <span> Checked {new Date(deps.upstream_checked_at).toLocaleTimeString()}.</span>
+        )}
       </div>
     </div>
   );

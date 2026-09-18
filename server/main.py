@@ -584,42 +584,24 @@ def open_folder(req: AlbumRemove):
 
 
 @app.get("/api/dependencies")
-def dependencies():
-    """Installed external tools (.dependencies + PATH) vs. the pinned
-    versions the scripts expect, with optional GitHub 'latest' check."""
-    from mlo.tools import detect_all_tools, DEPS_DIR
-    from mlo.fetchdeps import DISPLAY_NAMES, installed_versions, latest_versions
-    tools = detect_all_tools()
-    installed = installed_versions()
-    latest = {}
-    try:
-        latest = latest_versions()
-    except Exception:
-        pass
-    out = []
-    for key, name in DISPLAY_NAMES.items():
-        info = tools.get(key) or {}
-        exe = next((v for k, v in info.items() if k.endswith("_exe") and v), None)
-        ver = info.get("version")
-        iv = installed.get(key)
-        lv = latest.get(key)
-        present = bool(iv or info)
-        if not present:
-            state = "missing"
-        elif lv and (iv or ver) and lv != (iv or ver):
-            state = "update"
-        else:
-            state = "ok"
-        out.append({
-            "key": key,
-            "name": name,
-            "installed_version": iv,
-            "latest_version": lv,
-            "detected_version": ver,
-            "path": exe,
-            "state": state,
-        })
-    return {"deps_dir": str(DEPS_DIR), "tools": out}
+def dependencies(refresh: int = Query(0)):
+    """Installed external tools (.dependencies + PATH) vs. the pinned target
+    the installer fetches AND the newest release upstream actually has.
+
+    `refresh=1` re-checks GitHub now instead of waiting out the 30-minute TTL.
+    Both are answered from a cache and re-fetched by a background thread, so
+    this route never waits on GitHub: `checking` says a pass is in flight and
+    `upstream_version` stays null until it lands. A failed check degrades a row
+    (`upstream_version: null` + `note`) — never the whole table.
+
+    Also starts the auto-update loop: it is a background thread with nothing to
+    do until something asks which tools are installed, and this is that call.
+    """
+    from mlo.tools import DEPS_DIR
+    from mlo import fetchdeps
+    fetchdeps.ensure_auto_update_worker()
+    return {"deps_dir": str(DEPS_DIR),
+            **fetchdeps.dependencies_payload(refresh=bool(refresh))}
 
 
 def _check_source_kind(kind):
@@ -2138,6 +2120,11 @@ def tags_bulk(req: BulkTagsRequest):
         except Exception as e:
             failed += 1
             errors.append(f"{os.path.basename(rp)}: {e}")
+    # Tag writes change file sizes and mtimes, which is what the network's
+    # file list shows — refresh the share index once the batch is done
+    # (debounced: a 500-track batch asks slskd once, a few seconds later).
+    if removed or added:
+        _refresh_slskd_shares_soon()
     return {"ok": failed == 0, "removed": removed, "added": added,
             "failed": failed, "errors": errors[:20]}
 
@@ -4785,17 +4772,18 @@ def soulseek_login(req: SoulseekLoginRequest):
 
 
 def _refresh_slskd_shares_soon():
-    """Library changed (organize/import/remove) — refresh the slskd share
-    index in the background so the network always sees the current paths."""
-    def _worker():
-        try:
-            from server import soulseek
-            if soulseek.is_running() or soulseek.web_up(load_config()):
-                time.sleep(3.0)  # debounce bursts of organize calls
-                soulseek.restart()
-        except Exception:
-            import traceback
-            traceback.print_exc()
+    """Library changed (organize/import/remove/tag/run) — refresh the slskd
+    share index in the background so the network always sees the current paths.
+
+    This function used to DEFINE `_worker` and never start it, so all of its
+    call sites were silent no-ops and the shared file list went stale until
+    slskd was restarted by hand. The work now lives in server.soulseek (which
+    owns the daemon) and is debounced there."""
+    from server import soulseek
+    soulseek.refresh_shares_soon()
+
+
+@app.get("/api/track/download")
 def track_download(path: str = Query(...)):
     """Serve the original, untouched audio file as a browser download."""
     p = os.path.normpath(mbresolve.resolve_track(path) or path)
@@ -4833,6 +4821,10 @@ def track_export(path: str = Query(...), codec: str = Query("flac"),
         raise HTTPException(404, "file not found")
     if not _in_music_folder(p, _music_folder()):
         raise HTTPException(400, "path is outside the music folder")
+    # Local import like every other ffmpeg call site in this module: the
+    # module-level `from mlo.tools import …` was missing here, so the whole
+    # export endpoint answered 500 (NameError) instead of a file.
+    from mlo.tools import detect_all_tools
     ffmpeg = (detect_all_tools().get("ffmpeg") or {}).get("ffmpeg_exe")
     if not ffmpeg:
         raise HTTPException(500, "ffmpeg is not installed")

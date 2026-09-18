@@ -807,6 +807,17 @@ export default function SettingsPage() {
         { k: "beets_organize_after", label: "Re-run organize after each beets import", type: "bool" },
       ],
     },
+    {
+      title: "Dependencies",
+      blurb:
+        "External tools are pinned to reviewed releases; the table above shows what upstream has published as well. This is the only switch that belongs to the tool chain itself.",
+      fields: [
+        {
+          k: "dependencies_auto_update", label: "Install missing tools and updates automatically", type: "bool",
+          help: "A background pass every few hours installs every tool whose state is Missing or Update — into the dependencies folder, nothing system-wide. Off by default: the app downloads binaries on its own schedule only if you ask it to. The button above still works either way.",
+        },
+      ],
+    },
   ];
   const GRADE_CHECK_KEYS: CfgField[] = [
     { k: "grade_check_tag_spaces", label: "Tag spaces", type: "bool" },
@@ -1117,7 +1128,7 @@ export default function SettingsPage() {
       ["grading", "Grading"], ["cdrips", "CD Rips"], ["videos", "Videos"],
       ["audiometa", "Key & BPM"], ["beets", "Beets tagging"],
       ["soulseek", "Soulseek (managed slskd)"], ["autoimport", "Auto-import"],
-      ["wishes", "Wishes"], ["home", "Home"],
+      ["wishes", "Wishes"], ["home", "Home"], ["deps", "Dependencies"],
       ["discovery", "Discovery"], ["artistimages", "Artist images"], ["ai", "AI lyric transforms"], ["import", "Import pipeline"],
       ["importtags", "Import & tag cleanup"],
     ].map(([tab, prefix]) => [
@@ -1163,7 +1174,7 @@ export default function SettingsPage() {
 
   const { data: deps, refetch: refetchDeps } = useQuery({
     queryKey: ["dependencies"],
-    queryFn: api.dependencies,
+    queryFn: () => api.dependencies(),
     retry: false,
   });
   const [depsBusy, setDepsBusy] = useState(false);
@@ -1685,6 +1696,9 @@ export default function SettingsPage() {
                       <th className="th">Status</th>
                       <th className="th">Installed</th>
                       <th className="th">Latest</th>
+                      <th className="th" title="Newest release upstream has published. The installer still fetches the reviewed version in Latest.">
+                        Available
+                      </th>
                       <th className="th">Path</th>
                     </tr>
                   </thead>
@@ -1694,11 +1708,26 @@ export default function SettingsPage() {
                         <td className="td font-medium">{t.name}</td>
                         <td className="td">
                           {t.state === "ok" && <span className="chip bg-emerald-900/50 text-emerald-300 border border-emerald-800">Ready</span>}
-                          {t.state === "update" && <span className="chip bg-amber-900/50 text-amber-300 border border-amber-900">Update</span>}
+                          {t.state === "update" && (
+                            <span
+                              className="chip bg-amber-900/50 text-amber-300 border border-amber-900"
+                              title={t.note ?? (t.upstream_version ? `Upstream: ${t.upstream_version}` : undefined)}
+                            >
+                              Update
+                            </span>
+                          )}
                           {t.state === "missing" && <span className="chip bg-red-900/50 text-red-300 border border-red-900">Missing</span>}
+                          {t.state === "error" && (
+                            <span className="chip bg-zinc-800 text-zinc-400 border border-zinc-700" title={t.note ?? undefined}>
+                              Check failed
+                            </span>
+                          )}
                         </td>
                         <td className="td text-zinc-500">{t.installed_version ?? t.detected_version ?? "—"}</td>
                         <td className="td text-zinc-500">{t.latest_version ?? "—"}</td>
+                        <td className="td text-zinc-500" title={t.note ?? ""}>
+                          {t.upstream_version ?? (deps?.checking ? "checking…" : "—")}
+                        </td>
                         <td className="td text-zinc-500 truncate max-w-[280px]">{t.path ?? "—"}</td>
                       </tr>
                     ))}
@@ -1706,7 +1735,10 @@ export default function SettingsPage() {
                 </table>
               </div>
               <div className="text-[10px] text-zinc-600">
-                Install downloads the pinned release from GitHub into the dependencies folder; PATH-installed tools (scoop etc.) are shown as ready.
+                Install downloads the pinned release from GitHub into the dependencies folder; PATH-installed tools
+                (scoop etc.) are shown as ready. <span className="text-zinc-500">Available</span> is what upstream has
+                published — Install fetches Latest, the reviewed pin.
+                {deps?.note && <span className="text-amber-500"> Upstream check: {deps.note}</span>}
               </div>
             </div>
           )}

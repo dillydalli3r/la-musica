@@ -1378,6 +1378,53 @@ def rescan_shares(cfg=None):
 
 
 # --------------------------------------------------------------------------- #
+# Share refreshes: keeping the network's view of the library current
+# --------------------------------------------------------------------------- #
+# A run — an import chain, a tag batch, an optimize pass, a library organize —
+# rewrites hundreds of paths in minutes. slskd indexes shares at boot and only
+# picks changes up from a rescan, so without this other users keep browsing the
+# file list the library had when the daemon last started.
+_SHARE_REFRESH_LOCK = threading.Lock()
+_SHARE_REFRESH_TIMER = {"timer": None}
+
+
+def refresh_shares_soon(delay=6.0):
+    """Coalesce a burst of library changes into ONE share rescan.
+
+    Trailing-edge debounce: every call pushes the timer out, so a run that
+    keeps writing files asks slskd once, a few seconds after the last change,
+    instead of once per album. Cheap enough to call from anywhere.
+    """
+    with _SHARE_REFRESH_LOCK:
+        timer = _SHARE_REFRESH_TIMER["timer"]
+        if timer is not None:
+            timer.cancel()
+        timer = threading.Timer(delay, _refresh_shares_now)
+        timer.daemon = True
+        _SHARE_REFRESH_TIMER["timer"] = timer
+    timer.start()
+
+
+def _refresh_shares_now():
+    with _SHARE_REFRESH_LOCK:
+        _SHARE_REFRESH_TIMER["timer"] = None
+    cfg = load_config()
+    try:
+        if not (is_running() or web_up(cfg)):
+            return  # nothing to tell; the next start indexes the current tree
+        try:
+            rescan_shares(cfg)
+        except Exception:
+            # Builds without the rescan API (and a daemon that is up but not
+            # answering the call) need the restart path — the same thing the
+            # manual "Refresh shares" button does.
+            traceback.print_exc()
+            restart(cfg)
+    except Exception:
+        traceback.print_exc()
+
+
+# --------------------------------------------------------------------------- #
 # Importing completed downloads into the library
 # --------------------------------------------------------------------------- #
 # An album folder is one that holds audio (LIB_AUDIO_EXTS — music videos are

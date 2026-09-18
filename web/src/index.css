@@ -360,27 +360,38 @@ table td {
 .amb-orb {
   position: absolute;
   border-radius: 9999px;
-  filter: blur(70px);
+  filter: blur(70px) saturate(1.5);
   /* additive color mixing: overlapping fields add light instead of turning
      muddy, which is what keeps the backdrop colorful rather than grey */
   mix-blend-mode: screen;
   will-change: transform;
   pointer-events: none;
 }
-.amb-orb-a { opacity: 0.78; animation: amb-drift-a 24s ease-in-out infinite alternate; }
-.amb-orb-b { opacity: 0.7; animation: amb-drift-b 30s ease-in-out infinite alternate; }
-.amb-orb-c { opacity: 0.64; animation: amb-drift-c 37s ease-in-out infinite alternate; }
+/* Each field carries its own hue rotation: three tints of one cover colour
+   read as a single flat wash, three hues read as colour. */
+.amb-orb-b { filter: blur(70px) saturate(1.5) hue-rotate(-28deg); }
+.amb-orb-c { filter: blur(70px) saturate(1.5) hue-rotate(34deg); }
+.amb-orb-a { opacity: 0.82; animation: amb-drift-a 24s ease-in-out infinite alternate; }
+.amb-orb-b { opacity: 0.74; animation: amb-drift-b 30s ease-in-out infinite alternate; }
+.amb-orb-c { opacity: 0.68; animation: amb-drift-c 37s ease-in-out infinite alternate; }
+/* The beat moves the whole colour field, not just the glow: --amb is written
+   ~14x/s and this scales the field with it (transform only). */
+.amb-orbs {
+  transform: scale(calc(0.96 + 0.1 * var(--amb, 0.45)));
+  transition: transform 0.22s ease-out;
+  will-change: transform;
+}
 @keyframes amb-drift-a {
   from { transform: translate3d(0, 0, 0) scale(1); }
-  to   { transform: translate3d(16vw, 11vh, 0) scale(1.28); }
+  to   { transform: translate3d(18vw, 12vh, 0) scale(1.34); }
 }
 @keyframes amb-drift-b {
-  from { transform: translate3d(0, 0, 0) scale(1.16); }
-  to   { transform: translate3d(-13vw, -9vh, 0) scale(0.88); }
+  from { transform: translate3d(0, 0, 0) scale(1.2); }
+  to   { transform: translate3d(-15vw, -10vh, 0) scale(0.84); }
 }
 @keyframes amb-drift-c {
-  from { transform: translate3d(0, 0, 0) scale(0.9); }
-  to   { transform: translate3d(-11vw, 13vh, 0) scale(1.22); }
+  from { transform: translate3d(0, 0, 0) scale(0.86); }
+  to   { transform: translate3d(-13vw, 15vh, 0) scale(1.28); }
 }
 
 /* 4) the only music-driven layer. --amb (0..1) is written ~14x/s by the
@@ -400,6 +411,19 @@ table td {
   opacity: calc(0.04 + 0.86 * var(--amb, 0.45));
   transform: scale(calc(0.9 + 0.36 * var(--amb, 0.45)));
   transition: opacity 0.16s ease-out, transform 0.3s ease-out;
+  will-change: opacity, transform;
+  pointer-events: none;
+}
+
+/* The second music-driven layer: the same beat value on a hue-shifted tint,
+   so a kick reads as light moving THROUGH the colour field instead of one
+   layer fading in place. Screen-blended like the colour fields it sits over. */
+.amb-bloom {
+  mix-blend-mode: screen;
+  filter: hue-rotate(38deg) saturate(1.35);
+  opacity: calc(0.05 + 0.62 * var(--amb, 0.45));
+  transform: scale(calc(0.86 + 0.42 * var(--amb, 0.45)));
+  transition: opacity 0.18s ease-out, transform 0.34s ease-out;
   will-change: opacity, transform;
   pointer-events: none;
 }
@@ -562,7 +586,9 @@ table td {
   .amb-cover,
   .amb-sweep,
   .amb-orb,
+  .amb-orbs,
   .amb-glow,
+  .amb-bloom,
   .artwork-glow,
   .title-marquee,
   .nav-link,

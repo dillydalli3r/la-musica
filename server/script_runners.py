@@ -651,4 +651,12 @@ def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None):
         if removed:
             log(f"Removed {len(removed)} empty folder(s) left by the run: "
                 + ", ".join(removed))
+        # The run is over: whatever it did to tags, filenames or folders, the
+        # Soulseek network is still serving its boot-time view of them until
+        # slskd re-indexes. Debounced there, so a chain of scripts asks once.
+        try:
+            from server import soulseek
+            soulseek.refresh_shares_soon()
+        except Exception:
+            traceback.print_exc()
     return results

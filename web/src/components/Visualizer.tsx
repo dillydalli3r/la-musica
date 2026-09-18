@@ -36,22 +36,16 @@ const RELEASE = 0.12;
  * narrow band of heights, so the strip reads as a silhouette only after a
  * mild contrast stretch. Clamped, so it can never push a bar over full. */
 const CONTRAST = 1.25;
-/** Peak-cap gravity, as strip-heights per frame (~2.6 s to fall the full
- * strip). With the bars releasing in ~20 frames the caps separate from them
- * and read as falling, instead of riding the bar tops. */
-const PEAK_FALL = 0.0065;
 /** Level above which a bar gets its halo — the decorative motion that is
  * skipped under prefers-reduced-motion. */
 const GLOW_AT = 0.55;
 
-/** Are the bars — and their falling caps — already sitting on the idle
- *  baseline? Then there is nothing left to ease and nothing to redraw: a
- *  paused strip should cost its timer and nothing else, not the same flat
- *  line ten times a second. */
-function atRest(levels: Float32Array, peaks: Float32Array, n: number): boolean {
+/** Are the bars already sitting on the idle baseline? Then there is nothing
+ *  left to ease and nothing to redraw: a paused strip should cost its timer
+ *  and nothing else, not the same flat line ten times a second. */
+function atRest(levels: Float32Array, n: number): boolean {
   for (let i = 0; i < n; i++) {
     if (Math.abs((levels[i] ?? 0) - BASE) > REST_EPS) return false;
-    if (Math.abs((peaks[i] ?? 0) - BASE) > REST_EPS) return false;
   }
   return true;
 }
@@ -59,9 +53,12 @@ function atRest(levels: Float32Array, peaks: Float32Array, n: number): boolean {
 /** Frequency-bar visualizer driven ONLY by the shared WebAudio analyser.
  * Bars use logarithmic band mapping — music's energy lives in the low
  * octaves, a linear split makes the left half dance and the right half
- * sit flat — plus per-bar peak caps that fall with gravity. With no live
- * signal (paused, idle, unobservable stream) it holds a flat baseline:
- * the strip never invents motion or noise.
+ * sit flat. With no live signal (paused, idle, unobservable stream) it
+ * holds a flat baseline: the strip never invents motion or noise.
+ *
+ * No peak caps: the falling bars themselves are the meter, and a row of
+ * detached lines floating above them read as clutter rather than as
+ * information.
  *
  * Height mapping — the exact maths, because the old one is why loud tracks
  * drew one solid block:
@@ -91,7 +88,6 @@ function atRest(levels: Float32Array, peaks: Float32Array, n: number): boolean {
 export default function Visualizer({ playing, className = "" }: { playing: boolean; className?: string }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const levels = useRef<Float32Array>(new Float32Array(BARS));
-  const peaks = useRef<Float32Array>(new Float32Array(BARS));
   const norm = useRef<Float32Array>(new Float32Array(BARS));
   const playingRef = useRef(playing);
   useEffect(() => {
@@ -174,7 +170,7 @@ export default function Visualizer({ playing, className = "" }: { playing: boole
       const now = performance.now();
       if (synthetic && !resized) {
         if (now - lastIdle < IDLE_MS) return;
-        if (atRest(levels.current, peaks.current, n)) {
+        if (atRest(levels.current, n)) {
           lastIdle = now;
           return;
         }
@@ -212,15 +208,6 @@ export default function Visualizer({ playing, className = "" }: { playing: boole
         // what lets the eye follow one band instead of a wall.
         const cur = levels.current[i] ?? 0;
         levels.current[i] = cur + (target - cur) * (target > cur ? ATTACK : RELEASE);
-        // Peak caps with gravity. The 0.008/frame fall was PLAYBACK gravity:
-        // idle frames only repaint at 4 Hz, so the same constant left the caps
-        // hanging at half height above collapsed bars for ~20 s. With no signal
-        // they instead fall with the bars (the same release easing) until they
-        // meet the baseline.
-        const pk = peaks.current[i] ?? 0;
-        peaks.current[i] = synthetic
-          ? Math.max(levels.current[i], pk + (levels.current[i] - pk) * RELEASE)
-          : Math.max(levels.current[i], pk - PEAK_FALL);
       }
 
       // ---- draw ------------------------------------------------------
@@ -229,11 +216,10 @@ export default function Visualizer({ playing, className = "" }: { playing: boole
       const base = h;
       // ONE ramp for the whole strip, anchored to the canvas instead of
       // rebuilt per bar: the old code allocated a CanvasGradient for every
-      // bar on every frame (56 throwaway objects at 60 fps). The ramp still
-      // runs from the quiet colour at the baseline to the bright one at the
-      // top of the strip, so a taller bar now carries MORE of it — the
-      // meter reads level as brightness too, and the peak caps stay bright
-      // against it.
+      // bar on every frame (56 throwaway objects at 60 fps). The ramp runs
+      // from the quiet colour at the baseline to the bright one at the top of
+      // the strip, so a taller bar carries MORE of it — the meter reads level
+      // as brightness as well as height.
       const ramp = ctx.createLinearGradient(0, base, 0, base - Math.max(1, h - 2));
       ramp.addColorStop(0, `rgb(${accent} / 0.5)`);
       ramp.addColorStop(1, `rgb(${accentSoft} / 0.95)`);
@@ -255,13 +241,6 @@ export default function Visualizer({ playing, className = "" }: { playing: boole
         ctx.beginPath();
         ctx.roundRect(x, base - bh, bw, bh, r);
         ctx.fill();
-        // falling peak cap
-        const pk = peaks.current[i] ?? 0;
-        if (pk > 0.02) {
-          const py = base - Math.max(2, pk * (h - 2)) - 2;
-          ctx.fillStyle = `rgb(${accent} / 0.9)`;
-          ctx.fillRect(x, py, bw, 2);
-        }
       }
     };
 

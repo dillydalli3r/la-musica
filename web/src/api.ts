@@ -859,10 +859,32 @@ export const api = {
       body: JSON.stringify({ path }),
     }),
 
-  dependencies: () =>
-    json<{ deps_dir: string; tools: { key: string; name: string; installed_version?: string; latest_version?: string; detected_version?: string; path?: string | null; state: string }[] }>(
-      `${API}/dependencies`
-    ),
+  dependencies: (refresh = false) =>
+    json<{
+      deps_dir: string;
+      /** True while a background check of the upstream (GitHub) versions runs. */
+      checking?: boolean;
+      /** When the last completed upstream check finished (ISO, null = never). */
+      upstream_checked_at?: string | null;
+      /** The last upstream-check error, if any — the table still renders. */
+      note?: string | null;
+      tools: {
+        key: string;
+        name: string;
+        installed_version?: string;
+        /** The pinned release the installer fetches (the reviewed version). */
+        latest_version?: string;
+        detected_version?: string;
+        path?: string | null;
+        /** ok | update | missing | error — derived from the upstream value. */
+        state: string;
+        /** Newest release upstream has; null while unknown / not on GitHub. */
+        upstream_version?: string | null;
+        upstream_checked_at?: string | null;
+        update_available?: boolean;
+        note?: string | null;
+      }[];
+    }>(`${API}/dependencies${refresh ? "?refresh=1" : ""}`),
   installDependencies: (keys?: string[]) =>
     json<{ results: { key: string; name: string; ok: boolean; error?: string }[] }>(
       `${API}/dependencies/install`,

@@ -40,6 +40,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import zipfile
 import urllib.request
 
@@ -362,6 +364,252 @@ def latest_versions():
             pkg = LINUX_PACKAGES[key]
             out[key] = f"apt: {pkg}" if pkg else None
     return out
+
+
+# ----------------------------------------------------------------------
+# Live upstream versions
+# ----------------------------------------------------------------------
+# How long an upstream answer stays usable. GitHub's anonymous API allows 60
+# requests/hour; one request per GitHub-published tool (12) every 30 minutes is
+# 24/hour, so a full pass has headroom and a page load never hammers the API.
+UPSTREAM_TTL_S = 30 * 60
+
+# {key: {"version": str|None, "checked_at": float, "error": str|None}}
+_upstream_cache = {}
+_upstream_lock = threading.Lock()
+_upstream_thread = None
+_upstream_running = False
+_upstream_done_at = None
+_upstream_error = None
+
+
+def _iso(timestamp):
+    """UTC ISO-8601 for a `time.time()` stamp, or None (JSON-friendly)."""
+    if not timestamp:
+        return None
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(timestamp))
+
+
+def _version_label(version):
+    """Comparable label for a version or GitHub tag, or None when the string
+    carries no version at all (a rolling release tagged `latest`).
+
+    Three forms must compare equal, or an update is reported that installing
+    cannot fix:
+      * GitHub tags carry the `v`/`V` prefix the pinned labels drop
+      * ffmpeg's rolling releases are tagged `autobuild-<date>-<time>` while
+        PINNED labels that same build by its date
+      * yt-dlp's tag is zero-padded (`2026.08.19`) where its label is not
+        (`2026.8.19`)
+    """
+    if not version:
+        return None
+    text = str(version).strip()
+    m = re.match(r"^autobuild-(\d{4})-(\d{2})-(\d{2})", text, re.IGNORECASE)
+    if m:
+        text = ".".join(m.groups())
+    text = text.lstrip("vV")
+    if not re.search(r"\d", text):
+        return None
+    return ".".join(
+        str(int(part)) if part.isdigit() else part for part in text.split("."))
+
+
+def _upstream_keys():
+    """Tools whose newest release a GitHub API call can answer.
+
+    Only repos in REPOS: php (windows.php.net), simple-dr-meter (a tag archive)
+    and the two PyPI packages publish elsewhere, so their rows keep the pinned
+    target and report no upstream version at all.
+    """
+    return [key for key in DISPLAY_NAMES if key in REPOS]
+
+
+def _fetch_upstream(key):
+    """Newest release of *key* as a version label, or None when it has no tag.
+
+    The same GitHub call as get_latest_release() - which is asked for the
+    PINNED tag instead - so the API handling (headers, JSON, 30 s timeout)
+    stays in one place.
+    """
+    data = _api_json(
+        f"https://api.github.com/repos/{REPOS[key]}/releases/latest")
+    return _version_label(data.get("tag_name"))
+
+
+def _refresh_upstream(keys=None):
+    """One pass over *keys*; every failure is kept per tool, never raised.
+
+    A failed check still stamps `checked_at`, so it is retried next TTL window
+    rather than on every request, and the tool keeps the version it already had
+    - a GitHub outage shows the last known value, not an empty table.
+    """
+    global _upstream_done_at, _upstream_error
+    keys = _upstream_keys() if keys is None else keys
+    last_error = None
+    for key in keys:
+        previous = _upstream_cache.get(key) or {}
+        try:
+            entry = {"version": _fetch_upstream(key), "checked_at": time.time(),
+                     "error": None}
+        except Exception as e:
+            last_error = f"{type(e).__name__}: {e}"[:200]
+            entry = {"version": previous.get("version"), "checked_at": time.time(),
+                     "error": last_error}
+        with _upstream_lock:
+            _upstream_cache[key] = entry
+    with _upstream_lock:
+        _upstream_done_at = time.time()
+        _upstream_error = last_error
+
+
+def _upstream_stale(keys, now):
+    return any(
+        not _upstream_cache.get(key)
+        or (now - _upstream_cache[key]["checked_at"]) >= UPSTREAM_TTL_S
+        for key in keys
+    )
+
+
+def _kick_upstream(keys, force=False):
+    """Start ONE background pass when something is stale (or `force`), and say
+    whether one is running.
+
+    The request that found the cache stale answers from what is known while the
+    thread fetches; the versions land in the cache for the next request.
+    """
+    global _upstream_thread, _upstream_running
+    with _upstream_lock:
+        if _upstream_running:
+            return True
+        if not force and not _upstream_stale(keys, time.time()):
+            return False
+        _upstream_running = True
+
+    def _work():
+        global _upstream_running
+        try:
+            _refresh_upstream(keys)
+        finally:
+            with _upstream_lock:
+                _upstream_running = False
+
+    _upstream_thread = threading.Thread(target=_work, name="deps-upstream",
+                                        daemon=True)
+    _upstream_thread.start()
+    return True
+
+
+def upstream_versions(refresh=False, block=False):
+    """{key: {"version", "checked_at", "error"}} for GitHub-published tools.
+
+    Never blocks a caller on GitHub: by default a stale (or `refresh=True`
+    forced) cache is re-fetched by a background thread while the caller gets
+    what is already known. `block=True` fetches inline - the CLI prints its
+    table once and has nobody to return to.
+    """
+    keys = _upstream_keys()
+    if block:
+        if refresh or _upstream_stale(keys, time.time()):
+            _refresh_upstream(keys)
+    else:
+        _kick_upstream(keys, force=refresh)
+    with _upstream_lock:
+        return {key: dict(value) for key, value in _upstream_cache.items()}
+
+
+def _upstream_check_state():
+    """(a pass is running, last completed pass, last pass's first error)."""
+    with _upstream_lock:
+        return _upstream_running, _upstream_done_at, _upstream_error
+
+
+def dependency_rows(refresh=False, block=False):
+    """One row per tool - the single source of truth for the API, the CLI table
+    and the auto-update worker, so all three agree on what "update" means.
+
+    Three versions per tool, deliberately NOT merged:
+      installed_version  what is on disk / on PATH
+      latest_version     the pinned target `install_dependency` fetches; the
+                         reviewed release on purpose (see PINNED)
+      upstream_version   what GitHub's newest release actually is (None while
+                         unknown / not a GitHub tool)
+
+    `state` is derived from the LIVE upstream value: `ok` (installed ==
+    upstream), `update` (upstream known and different), `missing`, `error`
+    (that tool's check failed). Rows with no upstream at all (PyPI, php,
+    simple-dr-meter) fall back to the pinned pair, which is the only answer
+    available for them.
+    """
+    tools = detect_all_tools()
+    installed = installed_versions()
+    latest = latest_versions()
+    upstream = upstream_versions(refresh=refresh, block=block)
+    out = []
+    for key, name in DISPLAY_NAMES.items():
+        info = tools.get(key) or {}
+        exe = next((v for k, v in info.items() if k.endswith("_exe") and v), None)
+        ver = info.get("version")
+        iv = installed.get(key)
+        have = iv or ver
+        target = latest.get(key)
+        entry = upstream.get(key) or {}
+        uv = entry.get("version")
+        err = entry.get("error")
+        update_available = bool(
+            uv and have and _version_label(uv) != _version_label(have))
+        # A failed upstream check must NOT mark a healthy install as broken:
+        # GitHub rate-limits unauthenticated callers, and a wall of red for a
+        # transient 403 is worse than no check at all. The upstream cell and
+        # the note carry the failure; the status falls back to the pinned
+        # pair, which is the one answer always available.
+        if not (iv or info):
+            state = "missing"
+        elif uv:
+            state = "update" if update_available else "ok"
+        elif target and have and _version_label(target) != _version_label(have):
+            state = "update"
+        else:
+            state = "ok"
+        if err:
+            note = f"upstream check failed: {err} — status is against the pinned target"
+        elif key not in REPOS:
+            note = "no GitHub releases — only the pinned target is installable"
+        elif entry and not uv:
+            note = "upstream has no versioned release (rolling build)"
+        else:
+            note = None
+        out.append({
+            "key": key,
+            "name": name,
+            "installed_version": iv,
+            "latest_version": target,
+            "detected_version": ver,
+            "path": exe,
+            "state": state,
+            "upstream_version": uv,
+            "upstream_checked_at": _iso(entry.get("checked_at")),
+            "update_available": update_available,
+            "note": note,
+        })
+    return out
+
+
+def dependencies_payload(refresh=False):
+    """The `/api/dependencies` body: the rows plus the state of the check.
+
+    `checking` is true while a background pass is in flight (the UI polls on
+    it) and `note` carries the last pass's error, so a GitHub failure is
+    visible instead of silent.
+    """
+    rows = dependency_rows(refresh=refresh)
+    running, done, err = _upstream_check_state()
+    return {
+        "tools": rows,
+        "checking": running,
+        "upstream_checked_at": _iso(done),
+        "note": err,
+    }
 
 
 def installed_versions():
@@ -925,3 +1173,92 @@ def refresh_tool_cache():
     import mlo.tools as tools_mod
     tools_mod._TOOLS_CACHE = None
     return detect_all_tools()
+
+
+# ----------------------------------------------------------------------
+# Automatic updates
+# ----------------------------------------------------------------------
+# How often the loop looks at the config flag. Short, because the flag is what
+# decides whether anything happens: switching it off stops the next pass, and
+# switching it on starts one within a tick.
+AUTO_UPDATE_TICK_S = 300
+
+# One install pass per 6 h. Installing downloads the PINNED release and the pin
+# does not move between passes, so a shorter interval only re-fetches the same
+# file. ponytail: fixed interval, make it a config key if it ever needs tuning.
+AUTO_UPDATE_INTERVAL_S = 6 * 3600
+
+_auto_thread = None
+_auto_stop = threading.Event()
+
+
+def auto_update_enabled():
+    """The `dependencies_auto_update` switch, read fresh on every pass so
+    turning it off stops the next one instead of a cached answer."""
+    try:
+        from .config import load_config
+        return bool(load_config().get("dependencies_auto_update", False))
+    except Exception:
+        return False
+
+
+def auto_update_pass(log=print):
+    """Install every tool whose state is `missing` or `update`, once.
+
+    Never raises into the caller: a failed tool is logged and picked up again
+    next pass. States come from dependency_rows(), i.e. the LIVE upstream
+    values (its own non-blocking cache; the background check fills it).
+    """
+    try:
+        rows = dependency_rows()
+    except Exception as e:
+        log(f"[deps] auto-update: could not list the tools ({e})")
+        return 0
+    changed = 0
+    for row in rows:
+        if row["state"] not in ("missing", "update"):
+            continue
+        try:
+            install_dependency(row["key"], log=lambda m: None)
+            log(f"[deps] auto-update: {row['name']} was {row['state']}, "
+                f"installed {row['latest_version'] or 'the pinned release'}")
+            changed += 1
+        except Exception as e:
+            log(f"[deps] auto-update: {row['name']} failed: {e}")
+    if changed:
+        try:
+            refresh_tool_cache()
+        except Exception:
+            pass
+    return changed
+
+
+def _auto_update_loop():
+    """Flag check, then at most one pass per interval."""
+    last = 0.0
+    while not _auto_stop.wait(AUTO_UPDATE_TICK_S):
+        try:
+            if not auto_update_enabled():
+                continue
+            if time.time() - last < AUTO_UPDATE_INTERVAL_S:
+                continue
+            last = time.time()
+            auto_update_pass()
+        except Exception as e:  # the loop outlives any single pass
+            print(f"[deps] auto-update loop error: {e}")
+
+
+def ensure_auto_update_worker():
+    """Start the auto-update loop, once, in the background.
+
+    Started lazily by the app (the first /api/dependencies request) - that is
+    also the first moment anything knows which tools are installed.
+    """
+    global _auto_thread
+    if _auto_thread is not None and _auto_thread.is_alive():
+        return False
+    _auto_stop.clear()
+    _auto_thread = threading.Thread(target=_auto_update_loop,
+                                    name="deps-auto-update", daemon=True)
+    _auto_thread.start()
+    return True

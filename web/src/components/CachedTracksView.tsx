@@ -273,14 +273,24 @@ export default function CachedTracksView() {
   };
 
   const remove = async (tracks: Track[]) => {
-    await Promise.all(tracks.map((t) => uncacheTrack(t.path)));
-    toast(`Removed ${tracks.length} track(s) from the offline cache`);
+    // A rejected Cache Storage call used to be an unhandled rejection: the row
+    // stayed on screen with no explanation. Say what happened instead.
+    try {
+      await Promise.all(tracks.map((t) => uncacheTrack(t.path)));
+      toast(`Removed ${tracks.length} track(s) from the offline cache`);
+    } catch (e) {
+      toast.error(`Could not remove from the offline cache: ${e instanceof Error ? e.message : e}`);
+    }
     after();
   };
 
   const clearAll = async () => {
-    await clearMediaCache();
-    toast("Offline cache cleared");
+    try {
+      await clearMediaCache();
+      toast("Offline cache cleared");
+    } catch (e) {
+      toast.error(`Could not clear the offline cache: ${e instanceof Error ? e.message : e}`);
+    }
     after();
   };
 

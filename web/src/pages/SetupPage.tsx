@@ -28,7 +28,7 @@ export default function SetupPage() {
 
   const { data: deps, refetch: refetchDeps } = useQuery({
     queryKey: ["dependencies"],
-    queryFn: api.dependencies,
+    queryFn: () => api.dependencies(),
     retry: false,
     enabled: step >= 2,
   });
@@ -231,6 +231,9 @@ export default function SetupPage() {
                     <th className="th">Tool</th>
                     <th className="th">Status</th>
                     <th className="th">Version</th>
+                    <th className="th" title="Newest release upstream has published. Install still fetches the reviewed pinned version.">
+                      Available
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -239,10 +242,25 @@ export default function SetupPage() {
                       <td className="td font-medium">{t.name}</td>
                       <td className="td">
                         {t.state === "ok" && <span className="chip bg-emerald-900/50 text-emerald-300 border border-emerald-800">Ready</span>}
-                        {t.state === "update" && <span className="chip bg-amber-900/50 text-amber-300 border border-amber-900">Update</span>}
+                        {t.state === "update" && (
+                          <span
+                            className="chip bg-amber-900/50 text-amber-300 border border-amber-900"
+                            title={t.note ?? (t.upstream_version ? `Upstream: ${t.upstream_version}` : undefined)}
+                          >
+                            Update
+                          </span>
+                        )}
                         {t.state === "missing" && <span className="chip bg-red-900/50 text-red-300 border border-red-900">Missing</span>}
+                        {t.state === "error" && (
+                          <span className="chip bg-zinc-800 text-zinc-400 border border-zinc-700" title={t.note ?? undefined}>
+                            Check failed
+                          </span>
+                        )}
                       </td>
                       <td className="td text-zinc-500">{t.installed_version ?? t.detected_version ?? "—"}</td>
+                      <td className="td text-zinc-500" title={t.note ?? ""}>
+                        {t.upstream_version ?? (deps?.checking ? "checking…" : "—")}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

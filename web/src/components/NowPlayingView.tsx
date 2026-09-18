@@ -938,36 +938,47 @@ export default function NowPlayingView(p: Props) {
           />
         </div>
         {orbs && (
-          <div className="absolute inset-0">
+          /* .amb-orbs carries the beat: the whole color field swells with
+             --amb, so the music moves the backdrop itself and not just one
+             edge of it */
+          <div className="amb-orbs absolute inset-0">
             {/* mix-blend-mode: screen adds light instead of turning muddy,
-                which is what keeps overlapping fields colorful */}
+                which is what keeps overlapping fields colorful; each field
+                also carries its own hue rotation so the backdrop is not one
+                flat tint of the cover */}
             <div
               className="amb-orb amb-orb-a w-[62vw] h-[62vw] -top-[18vw] -left-[12vw]"
-              style={{ background: `radial-gradient(circle at 38% 34%, rgb(${rgb.join(" ")} / 0.85), transparent 66%)` }}
+              style={{ background: `radial-gradient(circle at 38% 34%, rgb(${rgb.join(" ")} / 0.9), transparent 66%)` }}
             />
             <div
               className="amb-orb amb-orb-b w-[54vw] h-[54vw] bottom-[-16vw] right-[-10vw]"
-              style={{ background: `radial-gradient(circle at 40% 30%, rgb(${rgb.map((v) => Math.min(255, v + 34)).join(" ")} / 0.75), transparent 64%)` }}
+              style={{ background: `radial-gradient(circle at 40% 30%, rgb(${rgb.map((v) => Math.min(255, v + 34)).join(" ")} / 0.8), transparent 64%)` }}
             />
             <div
               className="amb-orb amb-orb-c w-[44vw] h-[44vw] top-[26%] left-[34%]"
-              style={{ background: `radial-gradient(circle at 60% 40%, rgb(${rgb.map((v) => Math.max(0, v - 28)).join(" ")} / 0.7), transparent 62%)` }}
+              style={{ background: `radial-gradient(circle at 60% 40%, rgb(${rgb.map((v) => Math.max(0, v - 28)).join(" ")} / 0.75), transparent 62%)` }}
             />
           </div>
         )}
-        {/* the one music-driven layer: a wide soft glow behind the artwork.
-            .amb-glow eases opacity/scale from --amb over ~0.6-0.9 s, so the
-            music reads as the light breathing, never as a flash */}
+        {/* the two music-driven layers: a wide glow behind the artwork and a
+            hue-shifted bloom over the color fields. Both read the same
+            --amb, so a kick is visible across the whole background, and both
+            are opacity/transform only — never repainted per frame */}
         <div
           className="amb-glow absolute inset-0"
-          style={{ background: `radial-gradient(ellipse 58% 46% at 50% 52%, rgb(${rgb.join(" ")} / 0.42), transparent 72%)` }}
+          style={{ background: `radial-gradient(ellipse 58% 46% at 50% 52%, rgb(${rgb.join(" ")} / 0.5), transparent 72%)` }}
+        />
+        <div
+          className="amb-bloom absolute inset-0"
+          style={{ background: `radial-gradient(ellipse 72% 62% at 50% 46%, rgb(${rgb.join(" ")} / 0.55), transparent 66%)` }}
         />
         <div className="amb-grain absolute inset-0" />
         <div className="amb-vignette absolute inset-0" />
       </div>
       {/* legibility wash — deliberately light so the color field stays
-          visible; only the very top and bottom darken for the bars */}
-      <div className="absolute inset-0 bg-gradient-to-b from-zinc-950/55 via-zinc-950/20 to-zinc-950/80" />
+          visible; only the very top and bottom darken, for the top bar and
+          the visualizer strip */}
+      <div className="absolute inset-0 bg-gradient-to-b from-zinc-950/45 via-zinc-950/10 to-zinc-950/70" />
       </>
       )}
 

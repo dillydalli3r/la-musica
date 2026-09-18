@@ -8,8 +8,11 @@
  */
 const CACHE_NAME = "mlo-media-v2";
 
+/** The URL the shell is cached under: one document for every client-side
+ *  route, which is what the server's SPA fallback serves. */
+const SHELL_URL = new URL("/", self.location.origin).href;
+
 self.addEventListener("install", () => {
-  // No precaching — tracks are cached explicitly from the UI.
   self.skipWaiting();
 });
 
@@ -18,10 +21,51 @@ self.addEventListener("activate", (event) => {
     (async () => {
       const names = await caches.keys();
       await Promise.all(names.filter((n) => n !== CACHE_NAME).map((n) => caches.delete(n)));
+      // The shell is precached here rather than in `install`: a worker that
+      // has been updated (or one installed while the server was down) still
+      // needs a document to open, and this runs on every activation.
+      try {
+        await precacheShell();
+      } catch {
+        /* offline install: the fetches below will fill it in */
+      }
       await self.clients.claim();
     })()
   );
 });
+
+/** Cache the built app: the document plus every bundle it references.
+ *
+ *  The bundle names are content-hashed, so they cannot be listed in this file
+ *  — they are discovered from the served index.html. Without this the UI is
+ *  unreachable with the server down, which is the one moment the downloaded
+ *  music is supposed to matter. */
+async function precacheShell() {
+  const cache = await caches.open(CACHE_NAME);
+  const resp = await fetch(SHELL_URL, { cache: "reload" });
+  if (!resp.ok) return;
+  const html = await resp.clone().text();
+  await cache.put(SHELL_URL, resp);
+  const referenced = [...html.matchAll(/(?:src|href)="(\/assets\/[^"]+|\/[^"'/]+\.(?:js|css|png|svg|webmanifest|ico|woff2?))"/g)].map(
+    (m) => m[1]
+  );
+  // The build's own list adds the lazy route chunks, which index.html never
+  // mentions — without them an offline navigation to an unvisited page would
+  // wait on a chunk that can never arrive.
+  let built = [];
+  try {
+    const manifest = await fetch("/precache.json", { cache: "reload" });
+    if (manifest.ok) built = await manifest.json();
+  } catch {
+    /* an older build without the manifest: the document's own list stands */
+  }
+  await Promise.allSettled(
+    [...new Set([...referenced, ...built])].map(async (a) => {
+      const r = await fetch(a, { cache: "reload" });
+      if (r.ok) await cache.put(a, r);
+    })
+  );
+}
 
 /** Serve `range` ("bytes=0-", "bytes=100-200", "bytes=-500") out of a cached
  * full body as a 206. Chrome/Edge send a Range header for every media
@@ -44,11 +88,26 @@ async function sliceCached(resp, range) {
   return new Response(buf.slice(start, end + 1), { status: 206, statusText: "Partial Content", headers });
 }
 
-/** Artwork and lyrics: plain GETs whose payload is small and immutable enough
- *  to keep. Network-first (so a changed cover shows immediately when online)
- *  with the cache as the offline fallback, and every successful response is
- *  stored on the way through — browsing online is what fills the cache. */
-const ART_PATHS = new Set(["/api/cover", "/api/artist/image", "/api/lyrics/get"]);
+/** JSON the offline app is built from: artwork and lyrics, plus the payloads
+ *  a download warms — the library (the downloads page groups by it), the
+ *  config (the shell gates on it at boot) and the album/artist bodies (their
+ *  descriptions, credits and cover references). Network-first, so online is
+ *  always fresh, with the cache as the offline fallback; every successful
+ *  response is stored on the way through, so browsing online fills the cache. */
+const API_PATHS = new Set([
+  "/api/cover",
+  "/api/artist/image",
+  "/api/lyrics/get",
+  "/api/library",
+  "/api/config",
+  "/api/album",
+  "/api/artist",
+]);
+
+/** Build output never changes under a given name (the names are hashed), so
+ *  these are served from the cache first — that is what makes a cold start
+ *  with the server down instant instead of a white page. */
+const STATIC_RE = /^\/(assets\/|icon\.png|favicon|manifest|apple-touch)/;
 
 self.addEventListener("fetch", (event) => {
   const req = event.request;
@@ -60,7 +119,40 @@ self.addEventListener("fetch", (event) => {
   const backendOrigin = /^(http:\/\/127\.0\.0\.1:8000|http:\/\/localhost:8000)$/.test(url.origin);
   if (!(sameOrigin || backendOrigin)) return;
 
-  if (ART_PATHS.has(url.pathname)) {
+  // Navigations: network-first so a redeploy lands immediately, cached
+  // document as the fallback — the shell must open with the server down.
+  if (req.mode === "navigate") {
+    event.respondWith(
+      (async () => {
+        const cache = await caches.open(CACHE_NAME);
+        try {
+          const resp = await fetch(req);
+          if (resp.ok) await cache.put(SHELL_URL, resp.clone());
+          return resp;
+        } catch {
+          const hit = await cache.match(SHELL_URL);
+          return hit ?? new Response("offline and not cached", { status: 504 });
+        }
+      })()
+    );
+    return;
+  }
+
+  if (sameOrigin && STATIC_RE.test(url.pathname)) {
+    event.respondWith(
+      (async () => {
+        const cache = await caches.open(CACHE_NAME);
+        const hit = await cache.match(req);
+        if (hit) return hit;
+        const resp = await fetch(req);
+        if (resp.ok) await cache.put(req, resp.clone());
+        return resp;
+      })()
+    );
+    return;
+  }
+
+  if (API_PATHS.has(url.pathname)) {
     event.respondWith(
       (async () => {
         const cache = await caches.open(CACHE_NAME);
