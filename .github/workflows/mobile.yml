@@ -47,6 +47,11 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Rust for the Android wheel
+        # pydantic-core is a Rust extension: cibuildwheel drives cargo, and the
+        # target has to exist before it starts.
+        run: rustup target add aarch64-linux-android
+
       - name: Cache the built wheels
         uses: actions/cache@v4
         with:
@@ -76,6 +81,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Rust for the iOS wheel
+        # Same reason as the Android job: the target must exist before
+        # cibuildwheel hands the build to cargo.
+        run: rustup target add aarch64-apple-ios
 
       - name: Cache the built wheels
         uses: actions/cache@v4
