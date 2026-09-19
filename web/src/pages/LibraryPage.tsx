@@ -14,7 +14,8 @@ import {
 } from "../lib/sort.tsx";
 import {
   ColumnResizer, ColumnsMenu, useColumnPrefs, useColumnWidths, useCustomColumns,
-  customColValue, customCols, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, type Col, type CustomCol,
+  customColValue, customCols, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, ALBUM_TRACK_MIN_W, TABLE_FIT, TAG_COL_W,
+  type Col, type CustomCol,
 } from "../lib/columns";
 import { gradeSliver, statusFor, auditFails } from "../lib/status";
 import { invalidateLibrary } from "../lib/invalidate";
@@ -84,19 +85,26 @@ const ALBUM_SORTS = [
   { key: "meta.CATALOGNUMBER", label: "Catalog #" },
 ];
 
-/** Column widths for the fixed table layout: percentages compress with
- * the window; "album"/"title" has no width and absorbs whatever is left. */
+/** One floor per column, in px: the narrowest that column can be before its
+ *  content starts wrapping a character per line. They also are the table's
+ *  floor, summed by TABLE_FIT's `min-w-max`, so a window wider than their sum
+ *  shares the extra out in proportion — the old percentages took their cut of
+ *  whatever width the table had, which is how the album name column in this
+ *  very table ended up at 0 px even on a 1440 px screen. */
 const ALBUM_COL_W: Record<string, string> = {
-  album: "w-auto",
-  artist: "w-[16%]",
-  year: "w-[7%]",
-  tracks: "w-[7%]",
-  grade: "w-[10%]",
-  media: "w-[10%]",
-  dr: "w-[6%]",
-  source: "w-[13%]",
-  videos: "w-[7%]",
-  inst: "w-[7%]",
+  // `md:` because below that the phone fold has already dropped the columns
+  // beside it, and the name shares the row with the cover, the chevron and the
+  // row actions — a 220 px floor there would push those off the screen.
+  album: "md:w-[220px]",
+  artist: "w-[108px]",
+  year: "w-16",
+  tracks: "w-16",
+  grade: "w-20",
+  media: "w-[88px]",
+  dr: "w-12",
+  source: "w-20",
+  videos: "w-20",
+  inst: "w-20",
 };
 
 const ALBUM_COLS: Col[] = [
@@ -112,11 +120,13 @@ const ALBUM_COLS: Col[] = [
   { id: "inst", label: "INST", sortKey: "inst_count" },
 ];
 
+/** Same floors as the album table for the shared column ids; the artist table's
+ *  own name column is sized where it renders (see the Artist header th). */
 const ARTIST_COL_W: Record<string, string> = {
-  albums: "w-[12%]",
-  tracks: "w-[12%]",
-  checks: "w-[12%]",
-  grade: "w-[16%]",
+  albums: "w-[88px]",
+  tracks: "w-[88px]",
+  checks: "w-[88px]",
+  grade: "w-[112px]",
 };
 
 const ARTIST_COLS: Col[] = [
@@ -126,24 +136,29 @@ const ARTIST_COLS: Col[] = [
   { id: "grade", label: "Grade", sortKey: "aggregate.grade_pct" },
 ];
 
+/** The track table's floors — same rule as ALBUM_COL_W above, with a wider
+ *  one for Title: that cell also carries the issue, grade, cached and favourite
+ *  marks, so its floor has to leave the title text itself a readable column. */
 const TRACK_COL_W: Record<string, string> = {
-  num: "w-16",
+  num: "w-12",
   cover: "w-[52px]",
-  title: "w-auto",
-  artist: "w-[11%]",
-  album: "w-[11%]",
-  year: "w-[6%]",
-  genre: "w-[10%]",
-  media: "w-[8%]",
-  duration: "w-[6%]",
-  bitrate: "w-[9%]",
-  dr: "w-[5%]",
-  source: "w-[9%]",
-  type: "w-[6%]",
-  inst: "w-[6%]",
-  composer: "w-[10%]",
-  lyricist: "w-[10%]",
-  remixer: "w-[9%]",
+  // `md:` like the album table's name column: on a phone the title is the only
+  // column left beside the cover, so it takes the whole row instead.
+  title: "md:w-[220px]",
+  artist: "w-[108px]",
+  album: "w-[112px]",
+  year: "w-16",
+  genre: "w-24",
+  media: "w-[88px]",
+  duration: "w-16",
+  bitrate: "w-[88px]",
+  dr: "w-12",
+  source: "w-20",
+  type: "w-20",
+  inst: "w-20",
+  composer: "w-[112px]",
+  lyricist: "w-[112px]",
+  remixer: "w-[96px]",
 };
 
 const TRACK_COLS: Col[] = [
@@ -1120,7 +1135,7 @@ export default function LibraryPage() {
       {view === "albums" && (
         <div>
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className={`${TABLE_FIT} text-sm`}>
               <thead className="border-b border-border">
                 <tr>
                   {selectMode && (
@@ -1133,7 +1148,7 @@ export default function LibraryPage() {
                   <th className="th w-14"></th>
                   {albumDefs.filter((c) => albumCols.includes(c.id)).map((c) => (
                     <SortHeader key={c.id} label={c.label} sort={albumSort} sortKey={c.sortKey} onSort={setAlbumSort}
-                      className={`relative ${ALBUM_COL_W[c.id] ?? (c.tag ? "w-[10%]" : "")}${phoneHide(ALBUM_PHONE_CLS, c.id)}`}
+                      className={`relative ${ALBUM_COL_W[c.id] ?? (c.tag ? TAG_COL_W : "")}${phoneHide(ALBUM_PHONE_CLS, c.id)}`}
                       style={albumW[c.id] ? { width: albumW[c.id] } : undefined} >
                       <ColumnResizer width={albumW[c.id]} onDrag={(w) => setAlbumW(c.id, w)} onReset={() => resetAlbumW()} />
                     </SortHeader>
@@ -1186,7 +1201,7 @@ export default function LibraryPage() {
       {view === "artists" && (
         <div>
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className={`${TABLE_FIT} text-sm`}>
               <thead className="border-b border-border">
                 <tr>
                   {selectMode && (
@@ -1195,10 +1210,13 @@ export default function LibraryPage() {
                         onChange={() => setSelection({ artists: allArtistsSelected ? [] : sortedArtists.map((a) => a.path) })} />
                     </th>
                   )}
-                  <th className="th">Artist</th>
+                  {/* The row's own name gets the floor the album table gives its
+                      album column — the counter columns beside it fold on a phone,
+                      this one never does, so its floor only applies from `md`. */}
+                  <th className="th md:w-[220px]">Artist</th>
                   {ARTIST_COLS.filter((c) => artistCols.includes(c.id)).map((c) => (
                     <SortHeader key={c.id} label={c.label} sort={artistSort} sortKey={c.sortKey} onSort={setArtistSort}
-                      className={`relative ${ARTIST_COL_W[c.id] ?? "w-[14%]"}${phoneHide(ARTIST_PHONE_CLS, c.id)}`}
+                      className={`relative ${ARTIST_COL_W[c.id] ?? TAG_COL_W}${phoneHide(ARTIST_PHONE_CLS, c.id)}`}
                       style={artistW[c.id] ? { width: artistW[c.id] } : undefined}>
                       <ColumnResizer width={artistW[c.id]} onDrag={(w) => setArtistW(c.id, w)} onReset={() => resetArtistW()} />
                     </SortHeader>
@@ -1245,7 +1263,7 @@ export default function LibraryPage() {
       {view === "tracks" && (
         <div>
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className={`${TABLE_FIT} text-sm`}>
               <thead className="border-b border-border">
                 <tr>
                   {selectMode && (
@@ -1261,7 +1279,7 @@ export default function LibraryPage() {
                       </th>
                     ) : (
                     <SortHeader key={c.id} label={c.label} sort={trackSort} sortKey={c.sortKey} onSort={setTrackSort}
-                      className={`relative ${TRACK_COL_W[c.id] ?? (c.tag ? "w-[10%]" : "")}${phoneHide(TRACK_PHONE_CLS, c.id)}`}
+                      className={`relative ${TRACK_COL_W[c.id] ?? (c.tag ? TAG_COL_W : "")}${phoneHide(TRACK_PHONE_CLS, c.id)}`}
                       style={trackW[c.id] ? { width: trackW[c.id] } : undefined}>
                       <ColumnResizer width={trackW[c.id]} onDrag={(w) => setTrackW(c.id, w)} onReset={() => resetTrackW()} />
                     </SortHeader>
@@ -1529,19 +1547,20 @@ function AlbumRowGroup({
         colSpan={colSpan}
         expandedContent={
           /* Its own scroll wrapper: this nested table is what overflows first
-             on a phone, and the outer wrapper cannot scroll for it. */
+             on a phone, and the outer wrapper cannot scroll for it. Its floor
+             is the album tracklist's own (shared columns, shared floor). */
           <div className="overflow-x-auto">
-            <table className="w-full">
+            <table className={`w-full ${ALBUM_TRACK_MIN_W}`}>
               <thead className="border-b border-border">
                 <tr>
                   {selectMode && <th className="th w-8"></th>}
                   {[...ALBUM_TRACK_COLS, ...customCols(trackCustom, "tags")].filter((c) => trackCols.includes(c.id)).map((c) =>
                     c.id === "cover" ? (
-                      <th key={c.id} className={`th relative ${ALBUM_TRACK_COL_W[c.id] ?? ""}${phoneHide(TRACK_PHONE_CLS, c.id)}`} title="Cover art">
+                      <th key={c.id} className={`th relative ${ALBUM_TRACK_COL_W[c.id] ?? TAG_COL_W}${phoneHide(TRACK_PHONE_CLS, c.id)}`} title="Cover art">
                         <span className="sr-only">Cover</span>
                       </th>
                     ) : (
-                      <th key={c.id} className={`th relative ${ALBUM_TRACK_COL_W[c.id] ?? ""}${phoneHide(TRACK_PHONE_CLS, c.id)}`} style={trackWidths[c.id] ? { width: trackWidths[c.id] } : undefined}>
+                      <th key={c.id} className={`th relative ${ALBUM_TRACK_COL_W[c.id] ?? TAG_COL_W}${phoneHide(TRACK_PHONE_CLS, c.id)}`} style={trackWidths[c.id] ? { width: trackWidths[c.id] } : undefined}>
                         {c.label}
                         <ColumnResizer width={trackWidths[c.id]} onDrag={(w) => onTrackWidth(c.id, w)} onReset={onResetTrackWidths} />
                       </th>

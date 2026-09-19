@@ -13,6 +13,7 @@ export default {
   "nav.downloads": "Downloads",
   "nav.import": "Importar",
   "nav.soulseek": "Soulseek",
+  "nav.musicbrainz": "MusicBrainz",
   "nav.export": "Exportar",
   "nav.optimize": "Otimização",
   "nav.grading": "Avaliação",

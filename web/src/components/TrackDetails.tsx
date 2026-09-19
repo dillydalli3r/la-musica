@@ -11,29 +11,23 @@ import { trackRef } from "../lib/refs";
 import { AuditBadge, GradeBadge, advisoryLine, instrumentalLine } from "./Badges";
 import TrackDownloadExport from "./TrackDownloadExport";
 import Modal from "./Modal";
+import { tagLabel, tagTooltip, useTagRegistry } from "../lib/tags";
 
-const INFO_ROWS: { key: string; label: string }[] = [
-  { key: "ARTIST", label: "Artist" },
-  { key: "ALBUMARTIST", label: "Album artist" },
-  { key: "ALBUM", label: "Album" },
-  { key: "TRACKNUMBER", label: "Track #" },
-  { key: "DISCNUMBER", label: "Disc #" },
-  { key: "DATE", label: "Date" },
-  { key: "ORIGINALDATE", label: "Original date" },
-  { key: "GENRE", label: "Genre" },
-  { key: "MEDIA", label: "Media" },
-  { key: "SOURCE", label: "Source" },
-  { key: "RELEASETYPE", label: "Release type" },
-  { key: "RELEASECOUNTRY", label: "Country" },
-  { key: "LABEL", label: "Label" },
-  { key: "CATALOGNUMBER", label: "Catalog #" },
-  { key: "COMPOSER", label: "Composer" },
-  { key: "LYRICIST", label: "Lyricist" },
-  { key: "REMIXER", label: "Remixer" },
-  { key: "COPYRIGHT", label: "Copyright" },
-  { key: "ISRC", label: "ISRC" },
-  { key: "MUSICBRAINZ_TRACKID", label: "MB recording" },
-  { key: "MUSICBRAINZ_ALBUMID", label: "MB release" },
+/** The tags this modal gives their own row elsewhere (advisory, instrumental,
+ *  AudioAuditor, the lyrics state) — a display choice, so they are kept out of
+ *  the generic check list. Labels come from the registry. */
+const DEDICATED_ROWS = ["GENRE", "ITUNESADVISORY", "INSTRUMENTAL", "MEDIA", "SOURCE", "AUDIOAUDITOR_OVERRIDE"];
+
+/** Which tags the Song info table lists, in this order.
+ *
+ *  A display choice — which tags are worth a row in a compact modal — and
+ *  nothing more: every LABEL comes from the registry (server/tags_registry.py),
+ *  so this list can reorder or trim rows but cannot invent a name for a tag. */
+const INFO_KEYS = [
+  "ARTIST", "ALBUMARTIST", "ALBUM", "TRACKNUMBER", "DISCNUMBER", "DATE",
+  "ORIGINALDATE", "GENRE", "MEDIA", "SOURCE", "RELEASETYPE", "RELEASECOUNTRY",
+  "LABEL", "CATALOGNUMBER", "COMPOSER", "LYRICIST", "REMIXER", "COPYRIGHT",
+  "ISRC", "MUSICBRAINZ_TRACKID", "MUSICBRAINZ_ALBUMID",
 ];
 
 /** Per-track song info + grading/audit detail modal (metadata, credits,
@@ -57,9 +51,12 @@ export default function TrackDetails({
   const issues: string[] = track.issues ?? [];
   const values = track.values ?? {};
   const tags = track.tags ?? {};
-  const checkRows = Object.entries(values).filter(([k]) => !["GENRE", "ITUNESADVISORY", "INSTRUMENTAL", "MEDIA", "SOURCE", "AUDIOAUDITOR_OVERRIDE"].includes(k));
+  const checkRows = Object.entries(values).filter(([k]) => !DEDICATED_ROWS.includes(k));
   const failKeys = new Set(issues.map((i) => i.toUpperCase()));
-  const infoRows = INFO_ROWS.filter(({ key }) => tags[key as keyof typeof tags]);
+  const infoRows = INFO_KEYS.filter((key) => tags[key as keyof typeof tags]);
+  // What the app knows about each of those tags — the label, and the prose the
+  // registry carries for it (shown as the row's tooltip).
+  const reg = useTagRegistry();
   const tech = [fmtTech(track.tech), track.tech.length ? fmtDuration(track.tech.length) : ""].filter(Boolean).join(" · ");
   const lyricsState = track.lyrics_embedded ? "embedded" : track.lyrics_lrc ? ".lrc sidecar" : "missing";
   const trackPath = track.path ?? "";
@@ -125,9 +122,9 @@ export default function TrackDetails({
                 <td className="px-2 py-1 text-zinc-500 w-28 align-top">Title</td>
                 <td className="px-2 py-1 text-zinc-200">{track.tags?.TITLE ?? track.file}</td>
               </tr>
-              {infoRows.map(({ key, label }) => (
+              {infoRows.map((key) => (
                 <tr key={key}>
-                  <td className="px-2 py-1 text-zinc-500 align-top">{label}</td>
+                  <td className="px-2 py-1 text-zinc-500 align-top" title={tagTooltip(reg, key)}>{tagLabel(reg, key)}</td>
                   <td className="px-2 py-1 text-zinc-200 break-all">{String(tags[key as keyof typeof tags])}</td>
                 </tr>
               ))}
@@ -223,7 +220,7 @@ export default function TrackDetails({
                   const failed = failKeys.has(k.toUpperCase());
                   return (
                     <tr key={k} className={failed ? "bg-red-950/20" : ""}>
-                      <td className="px-2 py-1 text-zinc-500">{k}</td>
+                      <td className="px-2 py-1 text-zinc-500" title={tagTooltip(reg, k)}>{tagLabel(reg, k)}</td>
                       <td className={`px-2 py-1 text-right ${failed ? "text-red-400" : "text-emerald-400"}`}>
                         {failed ? "FAIL" : v === null || v === "" ? "—" : "OK"}
                       </td>

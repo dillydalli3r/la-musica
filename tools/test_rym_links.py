@@ -222,8 +222,27 @@ try:
     assert not intg._rym_mentions("<h1>Bjork</h1>", "Björk", "Homogenic")
 
     # ----------------------------------------------------------------------- #
-    # 2) the exact slug wins, and the album page supplies the artist link
+    # 2) RYM's own release spelling wins, and the album page supplies the
+    #    artist link. VERIFIED live against MusicBrainz's own url-rels for the
+    #    release group: RYM spells an artist segment with UNDERSCORES in a
+    #    release path — "The Beatles" + "Abbey Road" is
+    #    `/release/album/the_beatles/abbey_road/`, and `the-beatles/abbey-road`
+    #    is a 404. The dash form is tried only AFTER it (see §3).
     # ----------------------------------------------------------------------- #
+    fake = run({
+        "/release/album/the_beatles/abbey_road/":
+            ok(release_page("The Beatles", "Abbey Road")),
+        "/artist/the-beatles": ok(artist_page("The Beatles")),
+    })
+    got = intg.rym_links("The Beatles", "Abbey Road", cfg=CFG)
+    assert got == {"album": f"{BASE}/release/album/the_beatles/abbey_road/",
+                   "artist": f"{BASE}/artist/the-beatles", "note": ""}, got
+    assert fake.calls == [f"{BASE}/release/album/the_beatles/abbey_road/",
+                          f"{BASE}/artist/the-beatles"], fake.calls
+
+    # a 404 on that spelling falls THROUGH the ladder instead of ending the
+    # lookup: the legacy dash page (every release RYM slugged with dashes was
+    # never rewritten) answers second.
     fake = run({
         "/release/album/the-beatles/abbey-road/":
             ok(release_page("The Beatles", "Abbey Road")),
@@ -232,42 +251,59 @@ try:
     got = intg.rym_links("The Beatles", "Abbey Road", cfg=CFG)
     assert got == {"album": f"{BASE}/release/album/the-beatles/abbey-road/",
                    "artist": f"{BASE}/artist/the-beatles", "note": ""}, got
-    assert fake.calls == [f"{BASE}/release/album/the-beatles/abbey-road/",
+    assert fake.calls == [f"{BASE}/release/album/the_beatles/abbey_road/",
+                          f"{BASE}/release/album/the-beatles/abbey-road/",
                           f"{BASE}/artist/the-beatles"], fake.calls
 
     # ----------------------------------------------------------------------- #
-    # 3) the de-`the`-ed slug is tried when the exact one is not there, and a
-    #    404 is a miss — it never claims RYM is unreachable
+    # 3) the legacy dash spelling resolves when the underscore one is not
+    #    there, and the ARTIST ladder still carries the de-`the`-ed slug
     # ----------------------------------------------------------------------- #
     fake = run({
-        "/release/album/pink-floyd/the-wall/": status(404),
-        "/release/album/pink-floyd/wall/":
+        "/release/album/pink_floyd/the_wall/": status(404),
+        "/release/album/pink-floyd/the-wall/":
             ok(release_page("Pink Floyd", "The Wall")),
         "/artist/pink-floyd": ok(artist_page("Pink Floyd")),
     })
     log = io.StringIO()
     with contextlib.redirect_stdout(log):
         got = intg.rym_links("Pink Floyd", "The Wall", cfg=CFG)
-    assert got["album"] == f"{BASE}/release/album/pink-floyd/wall/", got
+    assert got["album"] == f"{BASE}/release/album/pink-floyd/the-wall/", got
     assert got["note"] == "", got
     assert log.getvalue() == "", log.getvalue()
 
     # a slug that 200s on a DIFFERENT path (RYM's search/home) is not the page
     # that was asked for, even when its content mentions the artist + album
     fake = run({
-        "/release/album/pink-floyd/the-wall/":
+        "/release/album/pink_floyd/the_wall/":
             elsewhere(release_page("Pink Floyd", "The Wall")),
-        "/release/album/pink-floyd/wall/": ok(release_page("Pink Floyd", "The Wall")),
+        "/release/album/pink-floyd/the-wall/":
+            ok(release_page("Pink Floyd", "The Wall")),
         "/artist/pink-floyd": ok(artist_page("Pink Floyd")),
     })
     got = intg.rym_links("Pink Floyd", "The Wall", cfg=CFG)
-    assert got["album"] == f"{BASE}/release/album/pink-floyd/wall/", got
-    assert f"{BASE}/release/album/pink-floyd/the-wall/" in fake.calls, fake.calls
+    assert got["album"] == f"{BASE}/release/album/pink-floyd/the-wall/", got
+    assert f"{BASE}/release/album/pink_floyd/the_wall/" in fake.calls, fake.calls
     # the content was right, the PATH was not: that is what rejected it
     page = release_page("Pink Floyd", "The Wall")
     assert intg._rym_mentions(page, "Pink Floyd", "The Wall")
-    assert intg._rym_verified("/release/album/pink-floyd/the-wall/", CFG,
+    assert intg._rym_verified("/release/album/pink_floyd/the_wall/", CFG,
                               "Pink Floyd", "The Wall") is None
+
+    # an ARTIST page that drops the article is found by the de-`the`-ed slug —
+    # the one ladder where that candidate still belongs (a release slug keeps
+    # its "the": `the_beatles`, `the_smiths`).
+    fake = run({"/artist/beatles": ok(artist_page("The Beatles"))})
+    got = intg.rym_links("The Beatles", "Nothing Here", cfg=CFG)
+    assert got["artist"] == f"{BASE}/artist/beatles", got
+    # every release spelling is tried first (its own, then the legacy dashes),
+    # then RYM's search, and only then the artist pages, article first.
+    assert fake.calls[:4] == [f"{BASE}/release/album/the_beatles/nothing_here/",
+                              f"{BASE}/release/album/the-beatles/nothing-here/",
+                              f"{BASE}/release/album/the_beatles/nothing-here/",
+                              f"{BASE}/release/album/the-beatles/nothing_here/"], fake.calls
+    assert fake.calls[-2:] == [f"{BASE}/artist/the-beatles",
+                               f"{BASE}/artist/beatles"], fake.calls
 
     # ----------------------------------------------------------------------- #
     # 4) interstitial / 404 → nothing resolved, nothing raised

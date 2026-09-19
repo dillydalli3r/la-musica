@@ -385,6 +385,120 @@ export interface MBRelease {
   medium_formats?: string[];
 }
 
+/** One row of the in-app MusicBrainz browser's search (`GET /api/mb/search`).
+ *  The server normalizes MusicBrainz's own payloads, so only the MBID is
+ *  guaranteed and each entity kind fills in what its index carries. */
+export interface MBSearchRow {
+  id: string;
+  score?: number;
+  title?: string;
+  disambiguation?: string;
+  /** the credited artist — release groups, releases and recordings */
+  artist?: string;
+  artist_mbid?: string;
+  /** the credited artists, when a payload carries them separately */
+  artists?: { name?: string; mbid?: string }[];
+  status?: string;
+  formats?: string;
+  /** the release group's type: Album/EP/Single/… — releases and groups */
+  primary_type?: string;
+  secondary_types?: string[];
+  release_type?: string;
+  catalog_number?: string;
+  track_count?: number;
+  country?: string;
+  date?: string;
+  first_release_date?: string;
+  /** artist rows: MusicBrainz's own kind ("Group", "Person", …) */
+  type?: string;
+  /** artist rows: [begin, end], either possibly empty */
+  life_span?: string[];
+  /** artist rows: the first few tag names */
+  tags?: string[];
+  /** recording rows: length in milliseconds */
+  length?: number | null;
+}
+
+/** A page of search rows plus MusicBrainz's match count — the browser pages
+ *  100 rows at a time by passing `offset` back. */
+export interface MBSearchRows {
+  rows: MBSearchRow[];
+  total: number;
+}
+
+/** One edition row of a release-group or recording page. */
+export interface MBReleaseRow {
+  id: string;
+  title: string;
+  date?: string;
+  country?: string;
+  status?: string;
+  formats?: string;
+  disc_count?: number;
+  track_count?: number;
+  /** per-disc track counts ("10 + 11") for a multi-disc edition */
+  track_breakdown?: string;
+  barcode?: string;
+  disambiguation?: string;
+  primary_type?: string;
+  secondary_types?: string[];
+}
+
+/** A release group as the artist page lists it. */
+export interface MBReleaseGroupRow {
+  id: string;
+  title: string;
+  primary_type?: string;
+  secondary_types?: string[];
+  first_release_date?: string;
+}
+
+/** An artist page: identity + the release groups MusicBrainz holds. */
+export interface MBArtistBrowse {
+  id: string;
+  name: string;
+  disambiguation?: string;
+  type?: string;
+  country?: string;
+  life_span?: string[];
+  genres?: string[];
+  tags?: string[];
+  total?: number;
+  offset?: number;
+  release_groups: MBReleaseGroupRow[];
+}
+
+/** A release-group page: identity + its editions. */
+export interface MBReleaseGroupBrowse {
+  id: string;
+  title: string;
+  disambiguation?: string;
+  artist?: string;
+  artist_mbid?: string | null;
+  primary_type?: string;
+  secondary_types?: string[];
+  genres?: string[];
+  first_release_date?: string;
+  total?: number;
+  offset?: number;
+  releases: MBReleaseRow[];
+}
+
+/** A recording page: identity + the releases carrying it. */
+export interface MBRecordingBrowse {
+  id: string;
+  title: string;
+  disambiguation?: string;
+  artist?: string;
+  artist_mbid?: string | null;
+  length?: number | null;
+  genres?: string[];
+  isrcs?: string[];
+  total?: number;
+  offset?: number;
+  releases: MBReleaseRow[];
+}
+
 export interface MatchSuggestion {
   local: string;
   file: string;

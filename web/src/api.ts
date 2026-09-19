@@ -20,6 +20,9 @@ import type {
   LyricsAutoResult,
   LyricsHit,
   LyricsProviders,
+  MBArtistBrowse,
+  MBRecordingBrowse,
+  MBSearchRows,
   ScriptRunResult,
   SourceHealth,
   SourceKind,
@@ -1145,6 +1148,28 @@ export const api = {
   mbSearchArtists: (q: string) => json<any[]>(`${API}/mb/search/artists?q=${encodeURIComponent(q)}`),
   mbReleaseGroup: (id: string, offset = 0, limit = 300) =>
     json<any>(`${API}/mb/release-group/${id}?offset=${offset}&limit=${limit}`),
+  // Generic MusicBrainz browser (in-app entity pages). Searches and
+  // discographies page 100 rows at a time — pass offset for "load more".
+  // primaryType/secondaryType map onto MusicBrainz's own release-type
+  // qualifiers (Album/EP/Single + Soundtrack/Live/Compilation/...).
+  mbSearch: (
+    type: string, q: string, limit = 100,
+    mode: "free" | "catno" | "barcode" = "free", offset = 0,
+    primaryType = "", secondaryType = ""
+  ) =>
+    json<MBSearchRows>(
+      `${API}/mb/search?type=${encodeURIComponent(type)}&q=${encodeURIComponent(q)}` +
+      `&limit=${limit}&offset=${offset}&mode=${mode}` +
+      `&primary_type=${encodeURIComponent(primaryType)}&secondary_type=${encodeURIComponent(secondaryType)}`
+    ),
+  mbArtist: (id: string, offset = 0, limit = 300) =>
+    json<MBArtistBrowse>(`${API}/mb/artist/${id}?offset=${offset}&limit=${limit}`),
+  mbRecording: (id: string, offset = 0, limit = 300) =>
+    json<MBRecordingBrowse>(`${API}/mb/recording/${id}?offset=${offset}&limit=${limit}`),
+  /** Which MusicBrainz kind a bare pasted MBID is — the browser routes a
+   *  pasted ID to its entity page without making the user pick a type. */
+  mbIdentify: (id: string) =>
+    json<{ type: string; id: string; title: string }>(`${API}/mb/detect/${id}`),
   mbMatch: (albumPath: string, releaseId: string, staged = false) =>
     json<{ release: import("./types").MBRelease; suggestions: import("./types").MatchSuggestion[] }>(
       `${API}/mb/match`,
@@ -1690,7 +1715,11 @@ export const api = {
   importAllCancel: () => json<ImportRun>(`${API}/soulseek/import-all/cancel`, { method: "POST" }),
 
   // Home page (recommendations + highlights)
-  home: () => json<HomeData>(`${API}/home`, undefined, 60000),
+  // `refresh` is the "Your library" card's button: the payload is TTL-cached
+  // server-side and built from the equally-cached library tree, so a plain
+  // refetch showed the same rows for minutes. The flag drops those caches.
+  home: (refresh = false) =>
+    json<HomeData>(`${API}/home${refresh ? "?refresh=1" : ""}`, undefined, 120000),
 
   // ----------------------------------------------------------------- //
   // Discovery — the provider catalogue behind Settings' order editors. //

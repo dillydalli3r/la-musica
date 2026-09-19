@@ -153,7 +153,11 @@ export default function SetupPage() {
           </div>
         </div>
 
-        <div className="flex items-center gap-2 text-[11px] text-zinc-500 mb-4">
+        {/* Same rail as the client wizard's, and wrapped for the same reason:
+            six labelled steps are 474px of content in a 390px column, so
+            Soulseek and Done used to sit past the right edge, reachable only by
+            sideways-scrolling the page's own scroll container. */}
+        <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500 mb-4">
           {([1, 2, 3, 4, 5, 6] as Step[]).map((s) => (
             <div key={s} className="flex items-center gap-2">
               <span
@@ -188,11 +192,11 @@ export default function SetupPage() {
                 General shows the resolved folder.
               </div>
             </div>
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <button className="btn-ghost" onClick={skip} disabled={busy}>
                 Skip for now
               </button>
-              <button className="btn-primary" disabled={busy} onClick={() => setStep(2)}>
+              <button className="btn-primary ml-auto" disabled={busy} onClick={() => setStep(2)}>
                 Next <ArrowRight className="h-3.5 w-3.5" />
               </button>
             </div>
@@ -266,7 +270,7 @@ export default function SetupPage() {
                 </tbody>
               </table>
             </div>
-            <div className="flex justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <button className="btn-ghost" onClick={() => setStep(1)}>
                 <ArrowLeft className="h-3.5 w-3.5" /> Back
               </button>
@@ -288,11 +292,11 @@ export default function SetupPage() {
               </p>
             </div>
             <SourcesPanel />
-            <div className="flex justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <button className="btn-ghost" onClick={() => setStep(2)}>
                 <ArrowLeft className="h-3.5 w-3.5" /> Back
               </button>
-              <div className="flex gap-2">
+              <div className="ml-auto flex flex-wrap justify-end gap-2">
                 <button className="btn-ghost" onClick={() => setStep(4)}>
                   Skip for now
                 </button>
@@ -438,11 +442,15 @@ export default function SetupPage() {
               </label>
             </div>
 
-            <div className="flex items-center justify-between">
+            {/* Wrap plus a right-group ml-auto is the whole fit fix for this
+                file's widest footers: "Skip for now" beside "Save & continue"
+                used to squeeze both buttons until their labels broke into two
+                lines. Every footer below carries it. */}
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <button className="btn-ghost" onClick={() => setStep(3)} disabled={busy}>
                 <ArrowLeft className="h-3.5 w-3.5" /> Back
               </button>
-              <div className="flex gap-2">
+              <div className="ml-auto flex flex-wrap justify-end gap-2">
                 <button className="btn-ghost" onClick={() => setStep(5)} disabled={busy}>
                   Skip for now
                 </button>
@@ -490,11 +498,11 @@ export default function SetupPage() {
                 </label>
               </div>
             </div>
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <button className="btn-ghost" onClick={() => setStep(4)} disabled={busy}>
                 <ArrowLeft className="h-3.5 w-3.5" /> Back
               </button>
-              <div className="flex gap-2">
+              <div className="ml-auto flex flex-wrap justify-end gap-2">
                 <button className="btn-ghost" onClick={() => setStep(6)} disabled={busy}>
                   Skip for now
                 </button>
@@ -519,7 +527,7 @@ export default function SetupPage() {
               Sources and AI keys can be tested and changed anytime in Settings → Sources and Settings → AI.
               This wizard stays available from Settings → General. Scripts that need missing tools will tell you when you run them.
             </p>
-            <div className="flex justify-end">
+            <div className="flex flex-wrap justify-end">
               <button className="btn-primary" disabled={busy} onClick={finish}>
                 {busy ? "Saving…" : "Open library"} <ArrowRight className="h-3.5 w-3.5" />
               </button>

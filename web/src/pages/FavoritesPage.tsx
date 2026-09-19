@@ -111,6 +111,22 @@ const LIKED_COL_W: Record<string, string> = {
   duration: "w-14 md:w-[7%]",
 };
 
+/** The liked table's floor, derived from its own columns: the fixed num and
+ *  cover take 96 px, artist + album + duration take 39% of what is left, and
+ *  the Title (auto) gets the remainder — but Duration is the tight one, since
+ *  7% of the width has to hold the 56 px a "3:45" needs, and 56 / 0.07 = 800.
+ *  There the title still has 0.61 × 800 − 96 = 392 px. Without it the fixed
+ *  layout simply shrinks columns past what they hold (the title measured 0 px
+ *  in the library's own table at 580 px), so the table keeps this width and
+ *  the wrapper scrolls instead. `md:` because below it the phone fold has
+ *  already left the title the whole row. */
+const LIKED_MIN_W = "md:min-w-[800px]";
+
+/** Floor for the two favorites tables that follow the same shape — an auto name
+ *  column plus percentages: each counter column holds a count at 12 %, so 380 px
+ *  is where a count still fits; the name gets 0.76 / 0.88 of the width there. */
+const FAV_TABLE_MIN_W = "md:min-w-[380px]";
+
 /** Liked-tracks table on a phone (390 px): the row keeps its cover, its title
  *  and the length. #, artist and album fold below `md` — their percentage
  *  widths leave about five characters of text there, and this is a like list,
@@ -238,7 +254,7 @@ function LikedTracks() {
           cell classes, cover chips and hover-revealed hearts. Click plays,
           ctrl/shift-click opens the track page. */}
       <div className="overflow-x-auto">
-        <table className="w-full text-sm">
+        <table className={`w-full text-sm ${LIKED_MIN_W}`}>
           <thead className="border-b border-border">
             <tr>
               {likedDefs.filter((c) => likedCols.includes(c.id)).map((c) =>
@@ -382,7 +398,7 @@ function FavArtists() {
   // cell as hover affordances, exactly like hearts in the track table.
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-sm">
+      <table className={`w-full text-sm ${FAV_TABLE_MIN_W}`}>
         <thead className="border-b border-border">
           <tr>
             <th className="th">Artist</th>
@@ -481,7 +497,7 @@ function FavPlaylists() {
   // Same table language as the other favorites tabs / the library tables.
   return (
     <div className="overflow-x-auto">
-      <table className="w-full text-sm">
+      <table className={`w-full text-sm ${FAV_TABLE_MIN_W}`}>
         <thead className="border-b border-border">
           <tr>
             <th className="th">Playlist</th>

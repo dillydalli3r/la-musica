@@ -33,10 +33,13 @@ What this pins:
     as the overflow, the family lands last, its return value is still "how
     many values were removed", and a list that is already canonical is never
     rewritten;
-  * `server.integrations.genre_chain` lets the AI answer REPLACE the merged
-    source list when `ai_genre_inference` is on — canonicalized into the full
-    specific/family list — names "ai" among the path's contributing sources,
-    and leaves every field alone when it is off or the ranker raises.
+  * `server.integrations.genre_chain` asks the AI only as a TIE-BREAKER: when
+    the sources already fill every slot the writer would write, no model call
+    is spent; when they disagree or cannot fill the slots the call happens as
+    before and a usable answer REPLACES the merged source list —
+    canonicalized into the full specific/family list — names "ai" among the
+    path's contributing sources, and leaves every field alone when the setting
+    is off or the ranker raises.
 
 Run:  python tools/test_genre_format.py   (exit 0 = pass, 1 = failure)
 """
@@ -351,7 +354,8 @@ assert autotag.genre_count({"mb_genre_count": 3}, 1) == 1  # a request lowers
 assert autotag.genre_count({"mb_genre_count": 2}, 5) == 2  # never raises
 
 # --------------------------------------------------------------------------- #
-# 7) genre_chain hands the merged list to the AI and replaces it on an answer
+# 7) genre_chain asks the AI only as a TIE-BREAKER, and replaces the merged
+#    list when it answers
 # --------------------------------------------------------------------------- #
 RELEASE = {"id": "rel-1", "title": "Test Album", "date": "1997-05-21",
            "country": "GB",
@@ -366,9 +370,11 @@ ON = {"mb_genre_count": 3, "genre_sources": ["musicbrainz"],
       "ai_genre_inference": True, "ai_base_url": "http://127.0.0.1:9/v1",
       "ai_model": "test-model"}
 try:
-    # One source, album-wide, so the merged candidates are known exactly.
+    # (a) The sources cannot fill the track's three slots (one album-level
+    # specific genre), so the model IS asked, with the sources' own names as
+    # its candidates.
     intg._genre_source_answers = lambda *a, **k: {
-        intg._ALL_TRACKS: {"level": "album", "genres": ["shoegaze", "dream pop"]}}
+        intg._ALL_TRACKS: {"level": "album", "genres": ["shoegaze"]}}
     seen = []
 
     def fake_infer(*, artist, album, title="", track_path="", candidates=None,
@@ -389,21 +395,54 @@ try:
     # candidates, the cap and the release context.
     assert seen and seen[0][:2] == ("Test Artist", "Test Album"), seen
     assert seen[0][2] == "Track One", seen
-    assert seen[0][3] == ["shoegaze", "dream pop"], seen
+    assert seen[0][3] == ["shoegaze"], seen
     assert seen[0][4] == 3, seen
     assert seen[0][5].get("year") == "1997", seen
     assert seen[0][5].get("country") == "GB", seen
 
+    # (b) The sources ALREADY settle the track — two specifics in front of a
+    # derived family is the whole three-slot answer — so no model call is
+    # spent on repeating it, and the provenance names the sources only.
+    seen.clear()
+    intg._genre_source_answers = lambda *a, **k: {
+        intg._ALL_TRACKS: {"level": "album", "genres": ["shoegaze", "dream pop"]}}
+    settled = intg.genre_chain(artist="Test Artist", album="Test Album",
+                              release=RELEASE, files=[], cfg=dict(ON))
+    assert seen == [], seen
+    assert settled["per_track"][(1, 1)] == ["shoegaze", "dream pop"], settled["per_track"]
+    assert settled["per_track_sources"][(1, 1)] == ["musicbrainz"], settled["per_track_sources"]
+
+    # (c) Two sources whose top genres DISAGREE (and whose merged list is
+    # complete all the same): that is the tie the model exists for, so it is
+    # asked again.
+    seen.clear()
+
+    def two_sources(source, *a, **k):
+        rows = {"musicbrainz": ["shoegaze"], "itunes": ["dream pop"]}
+        names = rows.get(source)
+        return {intg._ALL_TRACKS: {"level": "album", "genres": names}} if names else {}
+
+    intg._genre_source_answers = two_sources
+    tie = intg.genre_chain(artist="Test Artist", album="Test Album",
+                           release=RELEASE, files=[],
+                           cfg=dict(ON, genre_sources=["musicbrainz", "itunes"]))
+    assert seen, "a disagreement between the sources is the model's job"
+    assert seen[0][3] == ["shoegaze", "dream pop"], seen
+    assert tie["per_track_sources"][(1, 1)] == ["musicbrainz", "itunes", "ai"], \
+        tie["per_track_sources"]
+
     # The setting off: the ranker is not reached at all, and every field is
     # what the sources alone produced (the merge keeps their spelling — the
     # WRITERS canonicalize).
+    intg._genre_source_answers = lambda *a, **k: {
+        intg._ALL_TRACKS: {"level": "album", "genres": ["shoegaze"]}}
     seen.clear()
     quiet = intg.genre_chain(artist="Test Artist", album="Test Album",
                              release=RELEASE, files=[],
                              cfg={"mb_genre_count": 3,
                                   "genre_sources": ["musicbrainz"]})
     assert seen == [], seen
-    assert quiet["per_track"][(1, 1)] == ["shoegaze", "dream pop"], quiet["per_track"]
+    assert quiet["per_track"][(1, 1)] == ["shoegaze"], quiet["per_track"]
     assert quiet["per_track_sources"][(1, 1)] == ["musicbrainz"], quiet["per_track_sources"]
 
     # A ranker that raises is swallowed whole: a broken endpoint must never
@@ -414,9 +453,9 @@ try:
     genre_ai.infer_genres = dead_infer
     off = intg.genre_chain(artist="Test Artist", album="Test Album",
                            release=RELEASE, files=[], cfg=dict(ON))
-    assert off["per_track"][(1, 1)] == ["shoegaze", "dream pop"], off["per_track"]
+    assert off["per_track"][(1, 1)] == ["shoegaze"], off["per_track"]
     assert off["per_track_sources"][(1, 1)] == ["musicbrainz"], off["per_track_sources"]
-    assert off["genres"] == ["shoegaze", "dream pop"], off["genres"]
+    assert off["genres"] == ["shoegaze"], off["genres"]
 finally:
     intg._genre_source_answers = _real_sources
     genre_ai.infer_genres = _real_infer

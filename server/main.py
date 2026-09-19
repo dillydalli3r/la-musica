@@ -633,14 +633,28 @@ def library():
 
 
 @app.get("/api/home")
-def home(request: Request):
+def home(request: Request, refresh: int = Query(0)):
     """Home page: stats, recent additions, top grades, favorites, a random
     rediscovery shelf, most-collected artists, open wishes and albums failing
     their checks.
 
     Scoped by the session's user: the shelves carry that person's favourites
     and playlist count, and the cache is keyed on the user for the same reason.
+
+    `?refresh=1` is the "Your library" card's Refresh button, and it has to do
+    more than re-ask: the payload is cached for 15 minutes and is BUILT from
+    the library payload, which is cached again under its own key. Refetching
+    the route therefore returned the same rows for a quarter of an hour, which
+    reads exactly like a dead button. Refresh drops the library, tag,
+    identity and recommendation caches the way a settings save does, so the
+    next build re-walks the music folder — the point of pressing it after a
+    file was added or a script was run.
     """
+    if refresh:
+        tagcache.invalidate_all()
+        mbresolve.invalidate()
+        from server import recommendations
+        recommendations.invalidate()
     from server import recommendations
     try:
         return recommendations.build_home(load_config(), auth_mod.current_user(request))
@@ -1136,6 +1150,22 @@ def videos_meta(path: str = Query(...)):
         _playback_meta_cache.pop(next(iter(_playback_meta_cache)))
     _playback_meta_cache[p] = (mtime, meta)
     return {"path": p.replace("\\", "/"), **meta}
+
+
+@app.get("/api/tags/registry")
+def tags_registry():
+    """What this app knows about every tag, in one payload.
+
+    Every field is derived from the code that owns that fact (see
+    server.tags_registry): the tag vocabulary, the writer's script name, the
+    grade checks, the write gate and the grader's own excess-tag predicate.
+    The tag editor, the bulk dialog and the Grading page read this instead of
+    each keeping its own hand-written list of labels and checks. Built once
+    per process — it reads import-time tables only.
+    """
+    from server import tags_registry as registry_mod
+
+    return registry_mod.registry()
 
 
 @app.get("/api/tags")
@@ -2635,6 +2665,67 @@ def mb_release_group(mbid: str, limit: int = Query(300), offset: int = Query(0))
         raise HTTPException(400, "invalid MusicBrainz ID or URL")
     try:
         return intg.release_group_browse(rid, max(1, limit), max(0, offset))
+    except Exception as e:
+        raise HTTPException(502, f"MusicBrainz lookup failed: {e}")
+
+
+# ---- generic MusicBrainz browser (search + entity pages) -------------------
+@app.get("/api/mb/search")
+def mb_search(q: str = Query(..., min_length=1), type: str = Query("release"),
+              limit: int = Query(100), offset: int = Query(0),
+              mode: str = Query("free"), primary_type: str = Query(""),
+              secondary_type: str = Query("")):
+    """Search MusicBrainz for the in-app browser: type = artist |
+    release-group | release | recording; mode = free | catno | barcode
+    (catno/barcode only apply to releases); primary_type/secondary_type narrow
+    releases and release groups to MusicBrainz release types (Album, EP,
+    Single, Soundtrack, Live, ...). Returns {rows, total} — searches page 100
+    rows at a time via offset."""
+    if type not in intg.MB_ENTITIES:
+        raise HTTPException(400, "type must be one of " + ", ".join(intg.MB_ENTITIES))
+    if mode not in ("free", "catno", "barcode"):
+        raise HTTPException(400, "mode must be free, catno or barcode")
+    try:
+        return intg.search_mb(type, q, limit, mode, max(0, offset),
+                              primary_type=primary_type.strip(),
+                              secondary_type=secondary_type.strip())
+    except Exception as e:
+        raise HTTPException(502, f"MusicBrainz search failed: {e}")
+
+
+@app.get("/api/mb/artist/{mbid}")
+def mb_artist(mbid: str, limit: int = Query(300), offset: int = Query(0)):
+    rid = intg._mbid(mbid)
+    if not rid:
+        raise HTTPException(400, "invalid MusicBrainz ID or URL")
+    try:
+        return intg.artist_browse(rid, max(1, limit), max(0, offset))
+    except Exception as e:
+        raise HTTPException(502, f"MusicBrainz lookup failed: {e}")
+
+
+@app.get("/api/mb/recording/{mbid}")
+def mb_recording(mbid: str, limit: int = Query(300), offset: int = Query(0)):
+    rid = intg._mbid(mbid)
+    if not rid:
+        raise HTTPException(400, "invalid MusicBrainz ID or URL")
+    try:
+        return intg.recording_browse(rid, max(1, limit), max(0, offset))
+    except Exception as e:
+        raise HTTPException(502, f"MusicBrainz lookup failed: {e}")
+
+
+@app.get("/api/mb/detect/{mbid}")
+def mb_detect(mbid: str):
+    """Identify which MusicBrainz entity kind a bare MBID belongs to, so the
+    browser can route pasted IDs without the user choosing a type."""
+    rid = intg._mbid(mbid)
+    if not rid:
+        raise HTTPException(400, "invalid MusicBrainz ID or URL")
+    try:
+        return intg.detect_mbid(rid)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
     except Exception as e:
         raise HTTPException(502, f"MusicBrainz lookup failed: {e}")
 
@@ -5516,6 +5607,7 @@ def mb_genres_import(req: GenreImportRequest):
         artist=artist, album=album, limit=n, cfg=cfg, sources=["musicbrainz"],
         release=release or {"id": "", "release_group_id": rgid, "genres": [],
                             "artists": [], "media": []},
+        files=files,
     )
     names = chain.get("genres") or []
     track_genres = {}
@@ -5525,8 +5617,26 @@ def mb_genres_import(req: GenreImportRequest):
             track_genres[(int(t.get("disc") or 1), int(t.get("position") or 0))] = g
 
     updated = _write_album_genres(files, names, track_genres, limit=n)
+    # The same report shape `/api/genres/import` answers with: what MusicBrainz
+    # said per source and track, which tier answered (this button is the one
+    # that legitimately ends up album-level when no recording carries a genre),
+    # and why a source was not asked.
+    levels = chain.get("levels") or {}
+    level_counts = chain.get("level_counts") or {}
+    notes = dict(chain.get("notes") or {})
+    wide = int(level_counts.get("album") or 0) + int(level_counts.get("artist") or 0)
+    if wide:
+        notes["genre level"] = (
+            f"{wide} track(s) answered at ALBUM or ARTIST level (their own "
+            f"recording states no genre); with genres per track = {n}, that is "
+            "often the whole answer")
     return {"ok": True, "updated": updated, "genres": names,
             "per_source": chain.get("per_source") or {},
+            "per_source_counts": chain.get("per_source_counts") or {},
+            "levels": levels,
+            "level_counts": level_counts,
+            "skipped": chain.get("skipped") or {},
+            "notes": notes,
             "per_track": bool(track_genres)}
 
 
@@ -5549,12 +5659,21 @@ def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=Fals
     `mb_genre_count` — the requested `limit` (the wizard's per-run "Max
     genres") may only LOWER it, through the one helper that reads the setting
     (`mlo.autotag.genre_count`), so a per-run control can never write more
-    genres than the user configured. Sources
-    that cannot answer are reported in `notes` (a blocked RYM, a Discogs or
-    Last.fm source without its token/key) — nothing is filled in from a guess.
-    MusicBrainz recording genres refine each track when the album names a
-    release. Returns {updated, per_source, notes, genres}.
+    genres than the user configured.
 
+    It STOPS asking once every track is full: at `mb_genre_count = 2` one good
+    specific genre plus its derived family is the whole answer, and the sources
+    below the one that supplied it are not asked at all (`asked`,
+    `stopped_after`). A source that cannot answer is skipped before any request
+    — unconfigured (Discogs/Last.fm/Spotify), known-blocked (RateYourMusic), or
+    a documented no-op (Soulseek) — and named in `skipped`. MusicBrainz
+    recording genres refine each track when the album names a release.
+
+    The report is what the wizard and the Settings panel render: `per_source`
+    with `per_source_counts` (names and tracks per source), `sources`/`levels`
+    (per track path, in the order that contributed and the tier that answered),
+    `level_counts` (how many tracks an ALBUM/artist-level answer covered), the
+    trims, and `notes`. Nothing is ever filled in from a guess.
     `progress(i, total, source)` is the chain's own per-source step, which is
     what the background job (and the websocket relay) reports while it runs.
     """
@@ -5606,6 +5725,7 @@ def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=Fals
     # touched, so the caller can say what the cap actually did.
     from mlo.autotag import trim_genres
     trimmed = extra = 0
+    trimmed_files = []
     for p in files:
         try:
             af = AudioFile(p)
@@ -5617,25 +5737,50 @@ def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=Fals
         if removed:
             trimmed += 1
             extra += removed
+            trimmed_files.append(os.path.basename(p))
     if trimmed:
         tagcache.invalidate_all()
         mbresolve.invalidate()
+    levels = chain.get("levels") or {}
+    level_counts = chain.get("level_counts") or {}
     notes = dict(chain.get("notes") or {})
     if trimmed:
         # Reuses the chain's own notes channel (the wizard renders it under the
         # genre step), so the trim is visible where genres are reported.
         notes["genres per track"] = (f"{extra} extra genre(s) trimmed — genres per "
                                      f"track is {cap} (Settings → Import)")
+    # An album- or artist-level answer is not a track's own fact, and with two
+    # slots it is often the whole answer — so the report says how many tracks
+    # it covered rather than leaving the caller to read every `levels` entry.
+    wide = int(level_counts.get("album") or 0) + int(level_counts.get("artist") or 0)
+    if wide:
+        notes["genre level"] = (
+            f"{wide} track(s) answered at ALBUM or ARTIST level (their own "
+            f"recording states no genre); with genres per track = {cap}, that "
+            "is often the whole answer")
+    if chain.get("stopped_after"):
+        notes["genre sources"] = (
+            f"stopped after {chain['stopped_after']}: every track's genres were "
+            f"already complete (asked {len(chain.get('asked') or [])} of "
+            f"{len(chain.get('order') or [])} configured source(s))")
     return {"updated": updated, "genres": names,
             "per_source": chain.get("per_source") or {},
+            "per_source_counts": chain.get("per_source_counts") or {},
             "notes": notes,
             "per_track": bool(per_track),
             "genre_count": cap,
             "trimmed": trimmed,
+            "trimmed_files": trimmed_files,
+            "trimmed_genres": chain.get("per_track_trimmed") or {},
             # Where each file's genres came from, in the order that
-            # contributed, plus the tier that answered (track/album/artist).
+            # contributed, plus the tier that answered (track/album/artist),
+            # and what the chain did with the sources it did not need.
             "sources": chain.get("sources") or {},
-            "levels": chain.get("levels") or {}}
+            "levels": levels,
+            "level_counts": level_counts,
+            "asked": chain.get("asked") or [],
+            "stopped_after": chain.get("stopped_after"),
+            "skipped": chain.get("skipped") or {}}
 
 
 @app.post("/api/genres/import")

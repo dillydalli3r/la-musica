@@ -20,6 +20,7 @@ import TagActionsMenu from "../components/TagActionsMenu";
 import Modal from "../components/Modal";
 import MoreLikeThis from "../components/MoreLikeThis";
 import { CreditsPanel, creditTagsFrom } from "../components/TrackDetails";
+import { failedChecksOf, invalidValueReason, isExcessTag, tagInfoOf, tagLabel, tagTooltip, useTagRegistry } from "../lib/tags";
 
 export default function TrackPage() {
   const { path = "" } = useParams();
@@ -33,6 +34,10 @@ export default function TrackPage() {
     queryKey: ["track-tags", decoded],
     queryFn: () => api.tags(decoded),
   });
+
+  // What the app knows about each tag, from the server's single source of
+  // truth (server/tags_registry.py) — labels, families, writers and checks.
+  const reg = useTagRegistry();
 
   // Full grading/audit context from the album payload (issues, checks,
   // audit verdict, log grade, AccurateRip status, tech). With "mb:<id>"
@@ -178,21 +183,55 @@ export default function TrackPage() {
     }
   };
 
-  const linkTags: Record<string, { label: string; kind: "mb" | "rym"; url?: (v: string) => string }> = {
-    MUSICBRAINZ_ALBUMID: { label: "MusicBrainz Album", kind: "mb", url: (v) => `https://musicbrainz.org/release/${v}` },
-    MUSICBRAINZ_TRACKID: { label: "MusicBrainz Track", kind: "mb", url: (v) => `https://musicbrainz.org/recording/${v}` },
-    MUSICBRAINZ_ARTISTID: { label: "MusicBrainz Artist", kind: "mb", url: (v) => `https://musicbrainz.org/artist/${v}` },
-    MUSICBRAINZ_RELEASEGROUPID: { label: "MusicBrainz Release Group", kind: "mb", url: (v) => `https://musicbrainz.org/release-group/${v}` },
-    RATEYOURMUSIC_ALBUM: { label: "RateYourMusic Album", kind: "rym" },
-    RATEYOURMUSIC_TRACK: { label: "RateYourMusic Track", kind: "rym" },
-    RATEYOURMUSIC_ARTIST: { label: "RateYourMusic Artist", kind: "rym" },
+  // The identity links a tag value can be opened at. The label shown for each
+  // comes from the registry like every other tag's (tagLabel below), so only
+  // the URL shape lives here.
+  const linkTags: Record<string, { kind: "mb" | "rym"; url?: (v: string) => string }> = {
+    MUSICBRAINZ_ALBUMID: { kind: "mb", url: (v) => `https://musicbrainz.org/release/${v}` },
+    MUSICBRAINZ_TRACKID: { kind: "mb", url: (v) => `https://musicbrainz.org/recording/${v}` },
+    MUSICBRAINZ_ARTISTID: { kind: "mb", url: (v) => `https://musicbrainz.org/artist/${v}` },
+    MUSICBRAINZ_RELEASEGROUPID: { kind: "mb", url: (v) => `https://musicbrainz.org/release-group/${v}` },
+    RATEYOURMUSIC_ALBUM: { kind: "rym" },
+    RATEYOURMUSIC_TRACK: { kind: "rym" },
+    RATEYOURMUSIC_ARTIST: { kind: "rym" },
   };
 
-  const mainFields = ["TITLE", "ARTIST", "ALBUM", "GENRE", "DATE", "TRACKNUMBER", "DISCNUMBER",
-    "ALBUMARTIST", "ORIGINALDATE", "RELEASETYPE", "RELEASECOUNTRY", "CATALOGNUMBER"];
-  const extraFields = Object.keys(tags)
-    .filter((k) => !mainFields.includes(k) && k !== "MOOD" && !(k in linkTags) && !["LYRICS", "UNSYNCEDLYRICS"].includes(k))
-    .sort();
+  // The grader puts the full problem text on the ALBUM and only the check code
+  // on the track, appended in the same order — so a code can be shown with the
+  // sentence a person acts on.
+  const issueMessages = Object.entries(album?.issues ?? {})
+    .filter(([, files]) => files.includes(fileName))
+    .map(([text]) => text);
+  const messageFor = (code: string) => {
+    const i = issues.findIndex((c) => c.toUpperCase() === code.toUpperCase());
+    return i >= 0 && issueMessages[i] ? issueMessages[i] : code;
+  };
+
+  // Every tag on the file, resolved through the registry: which family it
+  // belongs to, whether the strip pass would call it excess, and which of the
+  // grader's own issues (plus a closed value set's verdict) it fails on.
+  const tagRows = Object.entries(tags).map(([tag, value]) => {
+    const invalid = invalidValueReason(reg, tag, value);
+    return {
+      tag,
+      value,
+      excess: isExcessTag(reg, tag),
+      anomalies: [
+        ...failedChecksOf(reg, tag, issues).map((code) => ({ code, title: messageFor(code) })),
+        ...(invalid ? [{ code: "bad value", title: invalid }] : []),
+      ],
+    };
+  });
+  const grouped = new Map<string, typeof tagRows>();
+  for (const row of tagRows) {
+    const id = tagInfoOf(reg, row.tag)?.family ?? "other";
+    grouped.set(id, [...(grouped.get(id) ?? []), row]);
+  }
+  // Registry family order, then whatever the registry has no entry for: a tag
+  // beets wrote under its own spelling, or one a vendor left behind.
+  const tagGroups = [...(reg?.families.map((f) => ({ id: f.id, label: f.label })) ?? []), { id: "other", label: "Other" }]
+    .map((f) => ({ ...f, rows: grouped.get(f.id) ?? [] }))
+    .filter((g) => g.rows.length > 0);
 
   return (
     <div className="p-6 space-y-5">
@@ -283,90 +322,72 @@ export default function TrackPage() {
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
         <div className="space-y-4">
-          <div className="section space-y-2.5">
-            <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Metadata (read-only)</div>
-            <div className="stagger grid grid-cols-2 gap-2.5">
-              {mainFields.map((k) =>
-                tags[k] ? (
-                  <div key={k} className="min-w-0">
-                    <div className="text-[10px] text-zinc-500 uppercase">{k}</div>
-                    <div className="text-sm text-zinc-200 truncate" title={tags[k]}>{tags[k]}</div>
-                  </div>
-                ) : null
-              )}
+          {/* Every tag the file carries, grouped the way the registry says.
+              The label, the meaning, the writer and the grading checks all
+              come from server/tags_registry.py, so this page cannot hold a
+              different idea of a tag than the engine does — and the two
+              anomaly marks are verdicts, not guesses: `excess` is what the
+              strip pass would remove (the grader's own allow-list), and a
+              failing check is a code the grader already reported here. */}
+          <div className="section space-y-3">
+            <div className="flex items-baseline gap-2">
+              <span className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Tags</span>
+              <span className="text-[10px] text-zinc-600">hover a name for what it means, who writes it and what grades it</span>
             </div>
-            <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500 pt-2">MusicBrainz / RateYourMusic links</div>
-            {Object.entries(linkTags).map(([k, spec]) =>
-              tags[k] ? (
-                <div key={k} className="flex items-center gap-2">
-                  <span className="text-[10px] text-zinc-500 uppercase w-40 shrink-0">{spec.label}</span>
-                  <span className="text-sm text-zinc-200 truncate flex-1" title={tags[k]}>{tags[k]}</span>
-                  {/* the identity-link button lives on its own metadata row:
-                      MB rows carry the MusicBrainz mark, RYM rows the RYM mark */}
-                  <a
-                    href={spec.url ? spec.url(tags[k]) : tags[k]}
-                    target="_blank"
-                    rel="noreferrer"
-                    title={`Open ${spec.label}`}
-                    className="p-1.5 rounded-lg hover:bg-raise transition-transform hover:scale-110 inline-flex items-center shrink-0"
-                  >
-                    {spec.kind === "mb" ? <MbIcon className="h-4 w-4" /> : <RymIcon className="h-4 w-4" />}
-                  </a>
+            {tagGroups.map((group) => (
+              <div key={group.id} className="space-y-1.5">
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-600 border-b border-border/60 pb-1">
+                  {group.label}
                 </div>
-              ) : null
-            )}
-            {extraFields.length > 0 && (
-              <>
-                <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500 pt-2">Other tags</div>
-                <div className="stagger grid grid-cols-1 gap-1.5 max-h-56 overflow-auto">
-                  {extraFields.map((k) => (
-                    <div key={k} className="flex gap-2 items-baseline min-w-0">
-                      <span className="text-[10px] text-zinc-500 uppercase w-44 shrink-0 truncate" title={k}>{k}</span>
-                      <span className="text-sm text-zinc-200 break-all min-w-0">{tags[k]}</span>
+                <div className="stagger grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2">
+                  {group.rows.map((row) => (
+                    <div key={row.tag} className="min-w-0">
+                      <div className="text-[10px] text-zinc-500 uppercase truncate" title={tagTooltip(reg, row.tag)}>
+                        {tagLabel(reg, row.tag)}
+                      </div>
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span
+                          className={`text-sm truncate ${row.excess || row.anomalies.length ? "text-amber-200" : "text-zinc-200"}`}
+                          title={row.value}
+                        >
+                          {row.value}
+                        </span>
+                        {/* the identity-link button rides on its own tag row:
+                            MB rows carry the MusicBrainz mark, RYM rows the RYM mark */}
+                        {linkTags[row.tag] && (
+                          <a
+                            href={linkTags[row.tag].url ? linkTags[row.tag].url!(row.value) : row.value}
+                            target="_blank"
+                            rel="noreferrer"
+                            title={`Open ${tagLabel(reg, row.tag)}`}
+                            className="p-1 rounded hover:bg-raise transition-transform hover:scale-110 inline-flex items-center shrink-0"
+                          >
+                            {linkTags[row.tag].kind === "mb" ? <MbIcon className="h-3.5 w-3.5" /> : <RymIcon className="h-3.5 w-3.5" />}
+                          </a>
+                        )}
+                        {row.excess && (
+                          <span
+                            className="chip shrink-0 text-[10px] bg-amber-950/40 text-amber-300 border border-amber-900"
+                            title="No script or tagger this app knows writes it — Optimize FLACs (3) or Format all (10) strips it"
+                          >
+                            excess
+                          </span>
+                        )}
+                        {row.anomalies.map((a) => (
+                          <span
+                            key={a.code}
+                            className="chip shrink-0 text-[10px] bg-red-950/40 text-red-300 border border-red-900"
+                            title={a.title}
+                          >
+                            {a.code}
+                          </span>
+                        ))}
+                      </div>
                     </div>
                   ))}
                 </div>
-              </>
-            )}
-            {/* MOOD and ENERGY are written together by the auto-tagging
-                script (8), or by the mood & energy script (16) on its own —
-                absent until one of them has run, so the empty case says what
-                would fill it. Both are shown on ONE row: ENERGY is the 0-100
-                arousal the mood was scored from, and a label without its
-                number hides why the track landed there. */}
-            <div className="flex items-center gap-2 pt-2 border-t border-border/60 mt-1">
-              <span className="text-[10px] text-zinc-500 uppercase w-44 shrink-0">MOOD · ENERGY</span>
-              {tags.MOOD || tags.ENERGY ? (
-                <span className="flex items-center gap-2 flex-wrap">
-                  {tags.MOOD ? (
-                    <span className="chip bg-zinc-800/70 border border-border text-zinc-300" title="Written by the auto-tagging script, or by Mood & Energy (script 16)">
-                      {tags.MOOD}
-                    </span>
-                  ) : null}
-                  {tags.ENERGY ? (
-                    <span className="chip bg-zinc-800/70 border border-border text-zinc-300" title="The arousal (0-100) the mood was scored from — classified from the track's own audio">
-                      {tags.ENERGY}
-                      <span className="text-zinc-500">/100</span>
-                    </span>
-                  ) : null}
-                  {tags.MOOD && tags.ENERGY ? null : (
-                    <span
-                      className="text-xs text-zinc-600"
-                      title="Mood & Energy (script 16) backfills the missing half without touching the other"
-                    >
-                      {tags.MOOD ? "no energy yet" : "no mood yet"} — run mood &amp; energy (script 16) or auto tagging (script 8)
-                    </span>
-                  )}
-                </span>
-              ) : (
-                <span
-                  className="text-xs text-zinc-600"
-                  title="Auto tagging (script 8) writes MOOD and ENERGY from the audio and its metadata; Mood & Energy (script 16) runs the same classifier on its own"
-                >
-                  no mood yet — run auto tagging (script 8) or mood &amp; energy (script 16)
-                </span>
-              )}
-            </div>
+              </div>
+            ))}
           </div>
 
           <div className="section">
@@ -416,7 +437,7 @@ export default function TrackPage() {
                 <div className="text-[10px] text-zinc-500 uppercase tracking-wider mt-3 mb-1">Failed checks</div>
                 <ul className="stagger space-y-1">
                   {issues.map((iss, i) => (
-                    <li key={i} className="text-xs text-red-300/90 bg-red-950/30 border border-red-900/40 rounded px-2 py-1">{iss}</li>
+                    <li key={i} className="text-xs text-red-300/90 bg-red-950/30 border border-red-900/40 rounded px-2 py-1">{issueMessages[i] ?? iss}</li>
                   ))}
                 </ul>
               </>
@@ -535,6 +556,7 @@ function VideoTagCard({
   const [advisory, setAdvisory] = useState("0");
   const [busy, setBusy] = useState(false);
   const navigate = useNavigate();
+  const reg = useTagRegistry();
 
   useEffect(() => {
     setForm(Object.fromEntries(VIDEO_TAG_FIELDS.map((k) => [k, tags[k] ?? ""])));
@@ -575,7 +597,7 @@ function VideoTagCard({
       <div className="grid grid-cols-2 gap-2.5">
         {VIDEO_TAG_FIELDS.map((k) => (
           <label key={k} className="text-[10px] text-zinc-500 uppercase block">
-            {k.replace("TRACKNUMBER", "Track").replace("DISCNUMBER", "Disc")}
+            {tagLabel(reg, k)}
             <input
               className="input !py-1 !px-2 text-xs mt-0.5 w-full"
               value={form[k] ?? ""}

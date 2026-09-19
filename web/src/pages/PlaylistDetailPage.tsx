@@ -345,7 +345,13 @@ export default function PlaylistDetailPage() {
         {/* ---------------- tracklist table (album-page style) ------------- */}
         {tracks.length > 0 ? (
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            {/* Its floor, from its own columns: the fixed # and cover take 96 px
+                and the reorder handle 96 more, artist + album + duration take
+                40% of what is left, and Duration (8%) has to hold the 56 px a
+                "3:45" needs — 56 / 0.08 = 700. There the Title still has
+                0.6 × 700 − 192 = 228 px. The table has no phone fold, so unlike
+                the library's tables this floor applies at every width. */}
+            <table className="w-full text-sm min-w-[700px]">
               <thead className="border-b border-border">
                 <tr>
                   <th className="th w-12">#</th>

@@ -30,7 +30,10 @@ export interface CustomCol {
 
 /** Column layout shared by every album tracklist — the album page table and
  *  the expanded album rows in the library albums view are the same table, so
- *  visible columns and drag-resized widths are stored under one prefs key. */
+ *  visible columns and drag-resized widths are stored under one prefs key.
+ *  These widths stay relative (percentages plus an auto Title) so the page
+ *  keeps the fluid geometry it has; the floor that stops the title being
+ *  squeezed out of existence is `ALBUM_TRACK_MIN_W` on the table. */
 export const ALBUM_TRACK_COL_W: Record<string, string> = {
   num: "w-16",
   cover: "w-[52px]",
@@ -40,6 +43,36 @@ export const ALBUM_TRACK_COL_W: Record<string, string> = {
   bitrate: "w-[16%]",
   dr: "w-[10%]",
 };
+/** Floor for a table whose columns carry their own width (`_COL_W` maps): a
+ *  fixed layout squares up to `w-full` by scaling every column down and
+ *  handing the auto column whatever is left, so a table too narrow for its
+ *  columns renders the name column one character per line — the library's
+ *  track table measured a 0 px title at 580 px wide. `min-w-max` is the
+ *  table's floor: max-content of a fixed layout is the sum of its columns, so
+ *  the table stops at the columns' own widths and the `overflow-x-auto`
+ *  wrapper scrolls from there instead. `md:` only, because below it the phone
+ *  fold has already dropped the columns that do not fit and the couple left
+ *  share the width with room to spare — same as before this floor existed. */
+export const TABLE_FIT = "w-full md:min-w-max";
+
+/** The album tracklist's floor, derived from its own columns rather than
+ *  picked: the fixed ones (num 64 + cover 52 + dur 80) and the corner control
+ *  (76) take 272 px up front, the percentage ones (genre 16% + bitrate 16% +
+ *  DR 10%) take 42% of what is left, and the remainder goes to the auto
+ *  Title column — 814 px is the width where that title is still 200 px.
+ *  Narrower than this the fixed layout hands the title the leftover, which
+ *  measured 0 px at a 342 px phone width, so the table holds this width and
+ *  its wrapper scrolls instead. The library's expanded album rows share these
+ *  columns without the corner control, so the floor is slightly generous
+ *  there — harmless, it only starts scrolling a little sooner. */
+export const ALBUM_TRACK_MIN_W = "min-w-[814px]";
+
+/** Floor for a user-added tag column (`tag:*` ids): the values are free text,
+ *  so it gets the same readable minimum as a genre cell. Without a width of its
+ *  own such a column is auto, and TABLE_FIT's `min-w-max` would then grow the
+ *  table to the longest tag value it can find. */
+export const TAG_COL_W = "w-[96px]";
+
 /** Default album-tracklist columns (num/cover/title/genre/dur/bitrate/DR). */
 export const ALBUM_TRACK_COLS: Col[] = [
   { id: "num", label: "#", sortKey: "tracknumber" },

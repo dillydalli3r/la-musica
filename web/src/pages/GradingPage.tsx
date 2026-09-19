@@ -7,6 +7,8 @@ import ConfirmButton from "../components/ConfirmButton";
 import Segmented from "../components/Segmented";
 import { PageLoading } from "../components/Badges";
 import PageHeader from "../components/PageHeader";
+import { tagLabel, useTagRegistry } from "../lib/tags";
+import type { TagRegistry } from "../lib/tags";
 
 /** In-depth grading configuration: every check that can count for or
  * against grading, grouped the way they apply — track/album checks,
@@ -14,17 +16,12 @@ import PageHeader from "../components/PageHeader";
  * the file categories that participate in album grading at all. Toggles
  * edit a local copy; Save writes the whole grading block via saveConfig. */
 
-interface CheckDef {
-  k: string;
-  label: string;
-  desc: string;
-}
-
 interface Group {
   id: string;
   title: string;
   desc: string;
-  items: CheckDef[];
+  /** The registry check keys this group shows, in the order it wants them. */
+  keys: string[];
 }
 
 const GROUPS: Group[] = [
@@ -32,126 +29,204 @@ const GROUPS: Group[] = [
     id: "tracks",
     title: "Tracks & albums",
     desc: "Core checks applied to every track and album in the library.",
-    items: [
-      { k: "grade_check_unreadable", label: "Unreadable files", desc: "Files that can't be opened or decoded fail the album." },
-      { k: "grade_check_missing_tags", label: "Required tags", desc: "Every required per-track tag (title, artist, date, …) must exist and be non-empty." },
-      { k: "grade_check_album_tags", label: "Album-level tags", desc: "Album-wide tags (album, album artist, catalog number, …) must be present on the tracks." },
-      { k: "grade_check_mood", label: "Mood tag present", desc: "Every track needs a MOOD tag — script 8 fills it (script 16 re-runs just that classifier), so no track should ship without one (issue code MOOD_MISSING)." },
-      { k: "grade_check_energy", label: "Energy tag present", desc: "Every track needs an ENERGY tag (0-100, written with MOOD by script 8 or 16; issue code ENERGY_MISSING)." },
-      { k: "grade_check_genre", label: "Genre tag present", desc: "Every track needs a GENRE tag. Graded on its own, independent of the required-tags sweep (issue code GENRE_MISSING)." },
-      { k: "grade_check_genre_count", label: "Genre count per track", desc: "A track may hold AT MOST the number of genres set by 'Genres per track' in Settings → Import & tags (mb_genre_count) — only an overflow fails (issue code GENRE_COUNT). Fewer is fine: the family is derived from the specific genre, so one specific genre is a complete answer and nothing is topped up with filler." },
-      { k: "grade_check_genre_order", label: "Genre order (family last)", desc: "The family, if present, must be the LAST genre — shoegaze / dream pop / rock. A family in an earlier slot, or a genre repeated, fails (issue code GENRE_ORDER). The names themselves are graded by the vocabulary check below." },
-      { k: "grade_check_genre_vocab", label: "Genre vocabulary", desc: "Every GENRE name must be one MusicBrainz publishes (shoegaze, dream pop, …). A name it does not know fails with issue code GENRE_VOCAB and is named in the report — the writers keep what a source said, so grading is where it surfaces. Grading never rewrites the tag: run Auto tagging (8) or Format all (10) to canonicalize it." },
-      { k: "grade_check_replaygain", label: "ReplayGain tags present", desc: "A file that carries any REPLAYGAIN_* tag must carry all four — REPLAYGAIN_TRACK_GAIN/_PEAK and _ALBUM_GAIN/_PEAK. A file with none is not graded (run the Loudness pass; the player can also analyse on demand)." },
-      { k: "grade_check_encoder", label: "Encoder identity", desc: "The ENCODER_* markers switched on under Tagging → Encoder tags must be present (PROGRAM is off by default). Covers are graded by the same rule while image processing is on." },
-      { k: "grade_check_naming", label: "Naming script match", desc: "File paths must match the configured naming script (full or shortened MusicBrainz IDs both accepted)." },
-      { k: "grade_check_filename_case", label: "Path capitalization", desc: "Filenames and folder names must match the naming script's letter case exactly — TOXICITY vs Toxicity fails. Organize applies the canonical casing." },
-      { k: "grade_check_ext_case", label: "Lowercase extensions", desc: "File extensions must be lowercase (01 - Song.FLAC fails). Organize lowercases every extension it touches." },
-      { k: "grade_check_key_bpm", label: "Key & BPM", desc: "INITIALKEY and BPM tags (written by script 12) are required." },
-      { k: "grade_check_acoustid", label: "AcoustID tags present", desc: "Files already carrying ACOUSTID_ID or ACOUSTID_FINGERPRINT must keep both — a library without them is never graded." },
-      { k: "grade_check_excess_tags", label: "Excess tags", desc: "Any tag the optimizer would strip — outside the known tag set — fails the track. Run Optimization to remove them." },
-      { k: "grade_check_media", label: "Media type", desc: "The MEDIA tag must be present and consistent with the release." },
-      { k: "grade_check_source", label: "Source tag", desc: "The SOURCE tag must be present (with different rules for CD vs digital releases)." },
-      { k: "grade_check_instrumental", label: "Instrumental consistency", desc: "INSTRUMENTAL=1 tracks must not carry lyrics; INSTRUMENTAL=0 tracks are graded for lyrics below." },
-      { k: "grade_check_disallowed", label: "Disallowed file types", desc: "Unclassified files (.txt, .pdf, .m3u, …) fail the album unless their category is enabled under File categories." },
-      { k: "grade_check_extra_images", label: "Stray images", desc: "Images that are neither cover.* nor per-track sidecars fail the album." },
-      { k: "grade_check_empty_folders", label: "Empty folders", desc: "A folder with no audio track anywhere beneath it fails the run (issue code EMPTY_FOLDER) — albums come from audio files, so such a folder would otherwise be skipped silently. A folder still holding part of the album (cover.*, .cue, .log, .lrc, .accurip) counts too: its audio is gone. Hidden and app-state folders are ignored." },
-      { k: "grade_check_expected_tracks", label: "Release tracklist manifest", desc: "An album that carries a MusicBrainz release id but no .mlo_expected.json fails the run (issue code EXPECTED_TRACKS_MISSING). The manifest records the release's own tracklist, which is the only way a partial import can name the tracks that never arrived; script 15 (Release tracklist) writes it, and the album page greys out the missing tracks from it. An album with no release id is not graded on it — script 15 writes no manifest without one, so the check could never be cleared." },
-      { k: "grade_check_album_description", label: "Album description stored", desc: "The album folder needs a non-blank description.txt — fetch one on the album page." },
-      { k: "grade_check_raw_video", label: "Raw videos", desc: "Un-remuxed videos (VOB/AVI/WMV/TS) fail — run script 11 to normalize them to MKV." },
-      { k: "grade_check_lossless_source", label: "Lossless sources", desc: "Uncompressed lossless sources (WAV/AIFF/APE/WV/SHN) fail — script 3 converts them to FLAC." },
-      { k: "grade_check_disc_naming", label: "Disc rip-sheet naming", desc: "A CD's .log / .cue / .accurip files must follow the configured disc pattern (CD-1, CD-2 … by default). The check runs whatever auto-rename is set to — with it off, renaming them is a manual job (the issue text says so). Disc FOLDERS are the layout scan's business: it reports a folder inside an album that is not a disc folder, and the naming script covers their letter case." },
-      { k: "grade_check_cd_log", label: "CD — .log present", desc: "Every CD disc needs an exact-match .log file." },
-      { k: "grade_check_cd_cue", label: "CD — .cue present", desc: "Every CD disc needs a .cue sheet." },
-      { k: "grade_check_cd_format", label: "CD — lossless format", desc: "CD tracks must be FLAC (lossless)." },
-      { k: "grade_check_crc", label: "CRC checksums", desc: "Every track must be covered by a per-track CRC in its own disc's .log, and that CRC must match the CRC of the track's decoded audio — coverage alone is not enough (issue codes CRC / CRC_MISMATCH)." },
+    keys: [
+      "grade_check_unreadable",
+      "grade_check_missing_tags",
+      "grade_check_album_tags",
+      "grade_check_mood",
+      "grade_check_energy",
+      "grade_check_genre",
+      "grade_check_genre_count",
+      "grade_check_genre_order",
+      "grade_check_genre_vocab",
+      "grade_check_replaygain",
+      "grade_check_encoder",
+      "grade_check_naming",
+      "grade_check_filename_case",
+      "grade_check_ext_case",
+      "grade_check_key_bpm",
+      "grade_check_acoustid",
+      "grade_check_excess_tags",
+      "grade_check_media",
+      "grade_check_source",
+      "grade_check_instrumental",
+      "grade_check_disallowed",
+      "grade_check_extra_images",
+      "grade_check_empty_folders",
+      "grade_check_expected_tracks",
+      "grade_check_album_description",
+      "grade_check_raw_video",
+      "grade_check_lossless_source",
+      "grade_check_disc_naming",
+      "grade_check_cd_log",
+      "grade_check_cd_cue",
+      "grade_check_cd_format",
+      "grade_check_crc",
     ],
   },
   {
     id: "artist",
     title: "Artist",
     desc: "Graded once per ARTIST folder, not per album — the artist page shows the same two checks and its own badge.",
-    items: [
-      { k: "grade_check_artist_image", label: "Artist image stored", desc: "The artist folder must hold an artist.jpg / artist.png (issue code ARTIST_IMAGE_MISSING)." },
-      { k: "grade_check_artist_description", label: "Artist description stored", desc: "The artist folder must hold a non-blank description.txt (issue code ARTIST_DESCRIPTION_MISSING)." },
+    keys: [
+      "grade_check_artist_image",
+      "grade_check_artist_description",
     ],
   },
   {
     id: "auditing",
     title: "Auditing",
     desc: "Audio verification (script 6) and the log scores it produces. With 'Require audit tag' on, AUDIT must read REAL — a FAKE or MIX verdict fails the track; off, the verdict does not change the grade. AccurateRip is AUDIT-ONLY: a .accurip that mismatches the reference database (or is missing) never fails grading on its own — it turns the AUDIT column FAKE, which is what fails the album once 'Require audit tag' is on.",
-    items: [
-      { k: "grade_check_audit", label: "Require audit tag", desc: "Tracks must carry an AUDIT tag (run Audit Library). Off by default so unaudited libraries aren't auto-failed." },
-      { k: "grade_check_log_checksum", label: "Log checksum valid", desc: "The rip .log's own EAC SHA256 must verify. A log that does not verify — or that states no checksum while 'verify log checksum' is on — fails grading (issue code LOG_CHECKSUM), independently of the audit tag. XLD and older EAC logs that carry no checksum concept pass." },
-      { k: "grade_check_accuraterip", label: "AccurateRip verified (audit only)", desc: "A .accurip whose verdict is not REAL marks the album's AUDIT FAKE (and each affected track red) — grading itself is reserved to tagging, so this key never costs a grade point. Turn on 'Require audit tag' for that verdict to fail the album." },
-      { k: "grade_check_log_grade", label: "Log grade present & in range", desc: "LOG_GRADE tag must exist and be 0–100." },
+    keys: [
+      "grade_check_audit",
+      "grade_check_log_checksum",
+      "grade_check_accuraterip",
+      "grade_check_log_grade",
     ],
   },
   {
     id: "links",
     title: "Identity links",
     desc: "The two release-level identity links, graded per track.",
-    items: [
-      { k: "grade_check_mb_links", label: "MusicBrainz release link", desc: "The MusicBrainz release (or its release group) must be tagged." },
-      { k: "grade_check_rym_links", label: "RateYourMusic release link", desc: "The RateYourMusic release page URL must be tagged." },
+    keys: [
+      "grade_check_mb_links",
+      "grade_check_rym_links",
     ],
   },
   {
     id: "covers",
     title: "Covers",
     desc: "Cover art presence and the size / square rules from Settings → Images.",
-    items: [
-      { k: "grade_check_cover", label: "Cover art", desc: "The album must have cover art meeting the configured size, squareness and crop rules." },
-      { k: "grade_check_cover_crop", label: "Cover aspect ratio (squareness)", desc: "The cover's width/height must be square within cover_crop_threshold — an aspect-ratio test, not crop detection (issue: 'Cover aspect ratio WxH not square')." },
-      { k: "grade_check_sidecar_cover", label: "Per-track sidecar covers", desc: "Sidecar covers (01 - Song.jpg) must meet the same cover rules." },
+    keys: [
+      "grade_check_cover",
+      "grade_check_cover_crop",
+      "grade_check_sidecar_cover",
     ],
   },
   {
     id: "formatting",
     title: "Strict formatting",
     desc: "Whitespace / blank-line / canonical-form rules. These make near-miss files fail so the formatter scripts can fix them.",
-    items: [
-      { k: "grade_check_tag_spaces", label: "Tags — no padding", desc: "Leading/trailing spaces or tabs in any tag value fail." },
-      { k: "grade_check_tag_blank_lines", label: "Tags — no blank lines", desc: "Blank lines inside tag values fail (LYRICS is exempt — its own rules apply)." },
-      { k: "grade_check_lyrics_spaces", label: "Lyrics — no padding", desc: "Leading/trailing spaces on lyric lines fail." },
-      { k: "grade_check_lyrics_blank_lines", label: "Lyrics — blank line rules", desc: "Blank-line placement must match the lyrics formatter's canonical output." },
-      { k: "grade_check_lyrics_zero", label: "Lyrics — zero timestamp rule", desc: "The [00:00.00] leader line must follow the configured lyrics rules." },
-      { k: "grade_check_lyrics_format", label: "Lyrics — canonical formatting", desc: "Stored lyrics must exactly match what the Format Lyrics script would produce." },
-      { k: "grade_check_cue_spaces", label: "CUE — no padding", desc: "Leading/trailing spaces in CUE lines fail." },
-      { k: "grade_check_cue_blank_lines", label: "CUE — no blank lines", desc: "Blank lines in CUE sheets fail." },
-      { k: "grade_check_cue_format", label: "CUE — canonical formatting", desc: "CUE sheets must match the canonical formatter output." },
-      { k: "grade_check_accurip_format", label: ".accurip — canonical formatting", desc: ".accurip files must match the canonical shape (each line trimmed, outer blank lines handled) that the AccurateRip / Format All scripts write — run one of them to fix it." },
-      { k: "grade_check_cue_files", label: "CUE — referenced files exist", desc: "Every file a CUE's FILE line names must exist in the album. The formatter carries names through verbatim, so a converted (wav→flac) or renamed album keeps a sheet pointing at a file that is not there (run the CUE Sheets script)." },
+    keys: [
+      "grade_check_tag_spaces",
+      "grade_check_tag_blank_lines",
+      "grade_check_lyrics_spaces",
+      "grade_check_lyrics_blank_lines",
+      "grade_check_lyrics_zero",
+      "grade_check_lyrics_format",
+      "grade_check_cue_spaces",
+      "grade_check_cue_blank_lines",
+      "grade_check_cue_format",
+      "grade_check_accurip_format",
+      "grade_check_cue_files",
     ],
   },
   {
     id: "lyrics",
     title: "Lyrics & translations",
     desc: "Presence checks for lyrics and the translation/transliteration tags stored beside them (TRANSLATION-EN, TRANSLITERATION-JA-LATN, sidecars).",
-    items: [
-      { k: "grade_check_lyrics", label: "Lyrics present", desc: "Every non-instrumental track needs lyrics (embedded and/or .lrc sidecar, per the lyrics format)." },
-      { k: "grade_check_lyrics_lang_tags", label: "Transform language tags", desc: "Transform tags must carry their language (TRANSLATION-EN, TRANSLITERATION-JA-LATN — never the bare legacy names)." },
-      { k: "grade_check_xlit_transliteration", label: "Transliteration — needed, never extra", desc: "A track whose lyrics are already Latin script must NOT carry a TRANSLITERATION tag (or a .romaji.lrc sidecar) — that fails as XLIT_UNNEEDED — while non-Latin lyrics must have one, or it fails as XLIT_MISSING. Instrumental tracks are never graded on it." },
-      { k: "grade_check_xlit_translation", label: "Translation — needed, never extra", desc: "Computed against the reader's language (the first of 'Lyrics translation languages'): a track already in that language must not carry a TRANSLATION tag or a .<lang>.lrc sidecar (XLIT_UNNEEDED), and one that is not must have the right one (XLIT_MISSING, which also names a mismatch like TRANSLATION-DE stored for English lyrics)." },
+    keys: [
+      "grade_check_lyrics",
+      "grade_check_lyrics_lang_tags",
+      "grade_check_xlit_transliteration",
+      "grade_check_xlit_translation",
     ],
   },
   {
     id: "categories",
     title: "File categories",
     desc: "Which file types participate in album grading. Turning a category off stops its own checks AND marks those files as disallowed — the 'Disallowed file types' toggle above decides whether that fails the album.",
-    items: [
-      { k: "grade_include_music", label: "Audio tracks", desc: "The music files themselves." },
-      { k: "grade_include_cover", label: "Cover art", desc: "cover.* images count toward the grade." },
-      { k: "grade_include_description", label: "Album description", desc: "description.txt (fetched on the album page) counts as the app's own file rather than a stray one." },
-      { k: "grade_include_cue", label: "CUE sheets", desc: ".cue sidecars count toward the grade." },
-      { k: "grade_include_log", label: "Log files", desc: ".log sidecars count toward the grade." },
-      { k: "grade_include_lrc", label: "LRC lyrics", desc: ".lrc sidecars count toward the grade." },
-      { k: "grade_include_accurip", label: "AccurateRip files", desc: ".accurip files count toward the grade." },
-      { k: "grade_include_video", label: "Remuxed videos", desc: "MKV/MP4 music videos count toward the grade." },
-      { k: "grade_include_other", label: "Other files", desc: "Anything unclassified counts toward the grade. Off by default." },
+    keys: [
+      "grade_include_music",
+      "grade_include_cover",
+      "grade_include_description",
+      "grade_include_cue",
+      "grade_include_log",
+      "grade_include_lrc",
+      "grade_include_accurip",
+      "grade_include_video",
+      "grade_include_other",
     ],
   },
 ];
+
+/** What each check means, keyed by its registry key.
+ *
+ *  Prose only: WHICH checks exist is the registry's answer
+ *  (server/tags_registry.py reads them straight out of DEFAULT_CONFIG), and
+ *  this page renders a row per registry check. A check this map does not
+ *  describe still renders — with its registry label and the tags it grades —
+ *  so a new check can never be invisible here, which is how
+ *  grade_check_genre_vocab once went missing from Settings. */
+const CHECK_DESC: Record<string, string> = {
+  grade_check_unreadable: "Files that can't be opened or decoded fail the album.",
+  grade_check_missing_tags: "Every required per-track tag (title, artist, date, …) must exist and be non-empty.",
+  grade_check_album_tags: "Album-wide tags (album, album artist, catalog number, …) must be present on the tracks.",
+  grade_check_mood: "Every track needs a MOOD tag — script 8 fills it (script 16 re-runs just that classifier), so no track should ship without one (issue code MOOD_MISSING).",
+  grade_check_energy: "Every track needs an ENERGY tag (0-100, written with MOOD by script 8 or 16; issue code ENERGY_MISSING).",
+  grade_check_genre: "Every track needs a GENRE tag. Graded on its own, independent of the required-tags sweep (issue code GENRE_MISSING).",
+  grade_check_genre_count: "A track may hold AT MOST the number of genres set by 'Genres per track' in Settings → Import & tags (mb_genre_count) — only an overflow fails (issue code GENRE_COUNT). Fewer is fine: the family is derived from the specific genre, so one specific genre is a complete answer and nothing is topped up with filler.",
+  grade_check_genre_order: "The family, if present, must be the LAST genre — shoegaze / dream pop / rock. A family in an earlier slot, or a genre repeated, fails (issue code GENRE_ORDER). The names themselves are graded by the vocabulary check below.",
+  grade_check_genre_vocab: "Every GENRE name must be one MusicBrainz publishes (shoegaze, dream pop, …). A name it does not know fails with issue code GENRE_VOCAB and is named in the report — the writers keep what a source said, so grading is where it surfaces. Grading never rewrites the tag: run Auto tagging (8) or Format all (10) to canonicalize it.",
+  grade_check_replaygain: "A file that carries any REPLAYGAIN_* tag must carry all four — REPLAYGAIN_TRACK_GAIN/_PEAK and _ALBUM_GAIN/_PEAK. A file with none is not graded (run the Loudness pass; the player can also analyse on demand).",
+  grade_check_encoder: "The ENCODER_* markers switched on under Tagging → Encoder tags must be present (PROGRAM is off by default). Covers are graded by the same rule while image processing is on.",
+  grade_check_naming: "File paths must match the configured naming script (full or shortened MusicBrainz IDs both accepted).",
+  grade_check_filename_case: "Filenames and folder names must match the naming script's letter case exactly — TOXICITY vs Toxicity fails. Organize applies the canonical casing.",
+  grade_check_ext_case: "File extensions must be lowercase (01 - Song.FLAC fails). Organize lowercases every extension it touches.",
+  grade_check_key_bpm: "INITIALKEY and BPM tags (written by script 12) are required.",
+  grade_check_acoustid: "Files already carrying ACOUSTID_ID or ACOUSTID_FINGERPRINT must keep both — a library without them is never graded.",
+  grade_check_excess_tags: "Any tag the optimizer would strip — outside the known tag set — fails the track. Run Optimization to remove them.",
+  grade_check_media: "The MEDIA tag must be present and consistent with the release.",
+  grade_check_source: "The SOURCE tag must be present (with different rules for CD vs digital releases).",
+  grade_check_instrumental: "INSTRUMENTAL=1 tracks must not carry lyrics; INSTRUMENTAL=0 tracks are graded for lyrics below.",
+  grade_check_disallowed: "Unclassified files (.txt, .pdf, .m3u, …) fail the album unless their category is enabled under File categories.",
+  grade_check_extra_images: "Images that are neither cover.* nor per-track sidecars fail the album.",
+  grade_check_empty_folders: "A folder with no audio track anywhere beneath it fails the run (issue code EMPTY_FOLDER) — albums come from audio files, so such a folder would otherwise be skipped silently. A folder still holding part of the album (cover.*, .cue, .log, .lrc, .accurip) counts too: its audio is gone. Hidden and app-state folders are ignored.",
+  grade_check_expected_tracks: "An album that carries a MusicBrainz release id but no .mlo_expected.json fails the run (issue code EXPECTED_TRACKS_MISSING). The manifest records the release's own tracklist, which is the only way a partial import can name the tracks that never arrived; script 15 (Release tracklist) writes it, and the album page greys out the missing tracks from it. An album with no release id is not graded on it — script 15 writes no manifest without one, so the check could never be cleared.",
+  grade_check_album_description: "The album folder needs a non-blank description.txt — fetch one on the album page.",
+  grade_check_raw_video: "Un-remuxed videos (VOB/AVI/WMV/TS) fail — run script 11 to normalize them to MKV.",
+  grade_check_lossless_source: "Uncompressed lossless sources (WAV/AIFF/APE/WV/SHN) fail — script 3 converts them to FLAC.",
+  grade_check_disc_naming: "A CD's .log / .cue / .accurip files must follow the configured disc pattern (CD-1, CD-2 … by default). The check runs whatever auto-rename is set to — with it off, renaming them is a manual job (the issue text says so). Disc FOLDERS are the layout scan's business: it reports a folder inside an album that is not a disc folder, and the naming script covers their letter case.",
+  grade_check_cd_log: "Every CD disc needs an exact-match .log file.",
+  grade_check_cd_cue: "Every CD disc needs a .cue sheet.",
+  grade_check_cd_format: "CD tracks must be FLAC (lossless).",
+  grade_check_crc: "Every track must be covered by a per-track CRC in its own disc's .log, and that CRC must match the CRC of the track's decoded audio — coverage alone is not enough (issue codes CRC / CRC_MISMATCH).",
+  grade_check_artist_image: "The artist folder must hold an artist.jpg / artist.png (issue code ARTIST_IMAGE_MISSING).",
+  grade_check_artist_description: "The artist folder must hold a non-blank description.txt (issue code ARTIST_DESCRIPTION_MISSING).",
+  grade_check_audit: "Tracks must carry an AUDIT tag (run Audit Library). Off by default so unaudited libraries aren't auto-failed.",
+  grade_check_log_checksum: "The rip .log's own EAC SHA256 must verify. A log that does not verify — or that states no checksum while 'verify log checksum' is on — fails grading (issue code LOG_CHECKSUM), independently of the audit tag. XLD and older EAC logs that carry no checksum concept pass.",
+  grade_check_accuraterip: "A .accurip whose verdict is not REAL marks the album's AUDIT FAKE (and each affected track red) — grading itself is reserved to tagging, so this key never costs a grade point. Turn on 'Require audit tag' for that verdict to fail the album.",
+  grade_check_log_grade: "LOG_GRADE tag must exist and be 0–100.",
+  grade_check_mb_links: "The MusicBrainz release (or its release group) must be tagged.",
+  grade_check_rym_links: "The RateYourMusic release page URL must be tagged.",
+  grade_check_cover: "The album must have cover art meeting the configured size, squareness and crop rules.",
+  grade_check_cover_crop: "The cover's width/height must be square within cover_crop_threshold — an aspect-ratio test, not crop detection (issue: 'Cover aspect ratio WxH not square').",
+  grade_check_sidecar_cover: "Sidecar covers (01 - Song.jpg) must meet the same cover rules.",
+  grade_check_tag_spaces: "Leading/trailing spaces or tabs in any tag value fail.",
+  grade_check_tag_blank_lines: "Blank lines inside tag values fail (LYRICS is exempt — its own rules apply).",
+  grade_check_lyrics_spaces: "Leading/trailing spaces on lyric lines fail.",
+  grade_check_lyrics_blank_lines: "Blank-line placement must match the lyrics formatter's canonical output.",
+  grade_check_lyrics_zero: "The [00:00.00] leader line must follow the configured lyrics rules.",
+  grade_check_lyrics_format: "Stored lyrics must exactly match what the Format Lyrics script would produce.",
+  grade_check_cue_spaces: "Leading/trailing spaces in CUE lines fail.",
+  grade_check_cue_blank_lines: "Blank lines in CUE sheets fail.",
+  grade_check_cue_format: "CUE sheets must match the canonical formatter output.",
+  grade_check_accurip_format: ".accurip files must match the canonical shape (each line trimmed, outer blank lines handled) that the AccurateRip / Format All scripts write — run one of them to fix it.",
+  grade_check_cue_files: "Every file a CUE's FILE line names must exist in the album. The formatter carries names through verbatim, so a converted (wav→flac) or renamed album keeps a sheet pointing at a file that is not there (run the CUE Sheets script).",
+  grade_check_lyrics: "Every non-instrumental track needs lyrics (embedded and/or .lrc sidecar, per the lyrics format).",
+  grade_check_lyrics_lang_tags: "Transform tags must carry their language (TRANSLATION-EN, TRANSLITERATION-JA-LATN — never the bare legacy names).",
+  grade_check_xlit_transliteration: "A track whose lyrics are already Latin script must NOT carry a TRANSLITERATION tag (or a .romaji.lrc sidecar) — that fails as XLIT_UNNEEDED — while non-Latin lyrics must have one, or it fails as XLIT_MISSING. Instrumental tracks are never graded on it.",
+  grade_check_xlit_translation: "Computed against the reader's language (the first of 'Lyrics translation languages'): a track already in that language must not carry a TRANSLATION tag or a .<lang>.lrc sidecar (XLIT_UNNEEDED), and one that is not must have the right one (XLIT_MISSING, which also names a mismatch like TRANSLATION-DE stored for English lyrics).",
+  grade_include_music: "The music files themselves.",
+  grade_include_cover: "cover.* images count toward the grade.",
+  grade_include_description: "description.txt (fetched on the album page) counts as the app's own file rather than a stray one.",
+  grade_include_cue: ".cue sidecars count toward the grade.",
+  grade_include_log: ".log sidecars count toward the grade.",
+  grade_include_lrc: ".lrc sidecars count toward the grade.",
+  grade_include_accurip: ".accurip files count toward the grade.",
+  grade_include_video: "MKV/MP4 music videos count toward the grade.",
+  grade_include_other: "Anything unclassified counts toward the grade. Off by default.",
+};
 
 /** Numeric settings shown alongside the toggles. */
 const NUMBERS: { k: string; label: string; desc: string; min: number; max: number }[] = [
@@ -164,20 +239,34 @@ const NUMBERS: { k: string; label: string; desc: string; min: number; max: numbe
   },
 ];
 
-/** Every grading key this page owns — the reset-to-defaults scope. */
-const GRADING_KEYS = [
-  ...GROUPS.flatMap((g) => g.items.map((i) => i.k)),
+/** Every grading key this page owns — the reset-to-defaults scope.
+ *
+ *  The keys come from the REGISTRY (which reads them out of DEFAULT_CONFIG),
+ *  not from the groups: a check the config holds and no group lists is still
+ *  reset, and it still renders (see the "Other checks" section). */
+const GRADING_KEYS = (reg: TagRegistry | undefined) => [
+  ...(reg?.checks.map((c) => c.key) ?? []),
   ...NUMBERS.map((n) => n.k),
 ];
 
 /** The same list WITHOUT the numeric settings: Enable/Disable all may only
  *  write booleans. Writing them over grade_log_score_threshold turned a tuned
  *  threshold into `false` (rendered as 0, which disables the check). */
-const GRADING_TOGGLES = GROUPS.flatMap((g) => g.items.map((i) => i.k));
+const GRADING_TOGGLES = (reg: TagRegistry | undefined) => reg?.checks.map((c) => c.key) ?? [];
 
 /** The real toggles, minus the file-category permissions: a preset may force
- * checks on, but choosing what counts toward a grade is the user's call. */
-const CHECK_KEYS = GROUPS.filter((g) => g.id !== "categories").flatMap((g) => g.items.map((i) => i.k));
+ *  checks on, but choosing what counts toward a grade is the user's call. */
+const CHECK_KEYS = (reg: TagRegistry | undefined) =>
+  (reg?.checks ?? []).filter((c) => !c.key.startsWith("grade_include_")).map((c) => c.key);
+
+/** The registry checks one group shows, in registry order. */
+const groupChecks = (
+  reg: TagRegistry | undefined,
+  keys: string[],
+): { key: string; label: string; desc: string; tags: string[] }[] =>
+  (reg?.checks ?? [])
+    .filter((c) => keys.includes(c.key))
+    .map((c) => ({ key: c.key, label: c.label, desc: CHECK_DESC[c.key] ?? "", tags: c.tags }));
 
 export default function GradingPage() {
   const { data: config, isError: configError, refetch: refetchConfig } = useQuery({
@@ -185,9 +274,21 @@ export default function GradingPage() {
     queryFn: api.config,
   });
   const { data: defaults } = useQuery({ queryKey: ["configDefaults"], queryFn: api.configDefaults });
+  const reg = useTagRegistry();
   const qc = useQueryClient();
   const [local, setLocal] = useState<Record<string, unknown> | null>(null);
   const [saving, setSaving] = useState(false);
+
+  // Checks the registry holds that no group above lists. They are rendered in
+  // their own section instead of being dropped: the registry reads the check
+  // list out of DEFAULT_CONFIG, so a check added to the grader shows up here
+  // the day it exists, without this file being touched.
+  const orphanKeys = (reg?.checks ?? [])
+    .map((c) => c.key)
+    .filter((k) => !GROUPS.some((g) => g.keys.includes(k)));
+  const sections: Group[] = orphanKeys.length
+    ? [...GROUPS, { id: "other", title: "Other checks", desc: "Graded checks this page has no group for yet — they come straight from the grader's own config keys.", keys: orphanKeys }]
+    : GROUPS;
 
   useEffect(() => {
     if (config && local === null) setLocal({ ...config });
@@ -226,7 +327,7 @@ export default function GradingPage() {
     if (!d) return;
     setLocal((c) => {
       const next = { ...(c ?? {}) };
-      for (const k of GRADING_KEYS) if (d[k] !== undefined) next[k] = d[k];
+      for (const k of GRADING_KEYS(reg)) if (d[k] !== undefined) next[k] = d[k];
       return next;
     });
     toast("Grading checks reset to defaults — Save to apply");
@@ -236,16 +337,16 @@ export default function GradingPage() {
 
   const [q, setQ] = useState("");
   const needle = q.trim().toLowerCase();
-  const visible = (items: CheckDef[]) =>
+  const visible = <T extends { key: string; label: string; desc: string }>(items: T[]): T[] =>
     needle
       ? items.filter((it) => it.label.toLowerCase().includes(needle)
-          || it.k.toLowerCase().includes(needle) || it.desc.toLowerCase().includes(needle))
+          || it.key.toLowerCase().includes(needle) || it.desc.toLowerCase().includes(needle))
       : items;
 
   const setBulk = (v: boolean) =>
     setLocal((c) => {
       const next = { ...(c ?? {}) };
-      for (const k of GRADING_TOGGLES) next[k] = v;
+      for (const k of GRADING_TOGGLES(reg)) next[k] = v;
       return next;
     });
 
@@ -267,8 +368,8 @@ export default function GradingPage() {
     ];
     setLocal((c) => {
       const next = { ...(c ?? {}) };
-      for (const k of GRADING_KEYS) if (d[k] !== undefined) next[k] = d[k];
-      if (name === "strict") for (const k of CHECK_KEYS) next[k] = true;
+      for (const k of GRADING_KEYS(reg)) if (d[k] !== undefined) next[k] = d[k];
+      if (name === "strict") for (const k of CHECK_KEYS(reg)) next[k] = true;
       else if (name === "relaxed") for (const k of relaxedOff) next[k] = false;
       return next;
     });
@@ -328,7 +429,7 @@ export default function GradingPage() {
               className="chip font-mono bg-white/5 border border-border text-zinc-400"
               title="Enabled grading checks — the file-category permissions are counted per group instead"
             >
-              {CHECK_KEYS.filter(val).length}/{CHECK_KEYS.length} checks on
+              {CHECK_KEYS(reg).filter(val).length}/{CHECK_KEYS(reg).length} checks on
             </span>
           </div>
         )}
@@ -350,10 +451,11 @@ export default function GradingPage() {
           )}
         </div>
       ) : (
-        GROUPS.map((g) => {
-          const rows = visible(g.items);
-          const on = g.items.filter((it) => val(it.k)).length;
-          const tot = g.items.length;
+        sections.map((g) => {
+          const group = groupChecks(reg, g.keys);
+          const rows = visible(group);
+          const on = group.filter((it) => val(it.key)).length;
+          const tot = group.length;
           return (
             <section key={g.id} className="space-y-1.5">
               <div className="px-1 pt-2 flex items-start justify-between gap-3">
@@ -388,18 +490,30 @@ export default function GradingPage() {
               <div className="stagger divide-y divide-border/40 rounded-lg border border-border/60 bg-panel/40">
                 {rows.map((it) => (
                   <label
-                    key={it.k}
+                    key={it.key}
                     className="flex items-start gap-3 px-3.5 py-2.5 cursor-pointer select-none hover:bg-raise/40 transition-colors"
                   >
                     <input
                       type="checkbox"
                       className="mt-0.5"
-                      checked={val(it.k)}
-                      onChange={(e) => set(it.k, e.target.checked)}
+                      checked={val(it.key)}
+                      onChange={(e) => set(it.key, e.target.checked)}
                     />
                     <span className="min-w-0">
                       <span className="text-sm text-zinc-200 block">{it.label}</span>
-                      <span className="text-[11px] text-zinc-500 block leading-snug">{it.desc}</span>
+                      {/* The prose is this page's; the checks it describes are
+                          the registry's. A check with no prose yet still shows
+                          — its name and the tags it grades. */}
+                      <span className="text-[11px] text-zinc-500 block leading-snug">
+                        {it.desc || (it.tags.length
+                          ? `Grades: ${it.tags.map((t) => tagLabel(reg, t)).join(", ")}`
+                          : it.key)}
+                      </span>
+                      {it.desc && it.tags.length > 0 && (
+                        <span className="text-[10px] text-zinc-600 block leading-snug font-mono">
+                          {it.tags.join(" · ")}
+                        </span>
+                      )}
                     </span>
                   </label>
                 ))}

@@ -1030,7 +1030,7 @@ export default function NowPlayingView(p: Props) {
           {/* bottom control overlay — same blocks as the audio layout; eases
               away (with the cursor) while the video plays untouched */}
           <div
-            className={`absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-black/85 via-black/45 to-transparent pt-24 pb-5 px-4 sm:px-8 transition-[opacity,transform] duration-300 ease-out ${
+            className={`safe-np-video absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-black/85 via-black/45 to-transparent pt-24 transition-[opacity,transform] duration-300 ease-out ${
               chromeVisible ? "" : "pointer-events-none opacity-0 translate-y-6"
             }`}
           >
@@ -1051,9 +1051,12 @@ export default function NowPlayingView(p: Props) {
           (z-10) and queue drawer (z-20) stay above the bar. */}
       <div className={`relative z-[2] h-full flex flex-col ${videoPath ? "pointer-events-none" : ""}`}>
         {/* top bar — exit button top-left, queue/options cluster top-right;
-            eases away with the bottom overlay while the video plays */}
+            eases away with the bottom overlay while the video plays.
+            `safe-np-top` carries the base padding AND the notch/status-bar
+            inset: the overlay is `fixed inset-0`, so without it the system
+            clock, the queue readout and the options button share one line. */}
         <div
-          className={`flex items-center justify-between px-5 py-3 transition-[opacity,transform] duration-300 ease-out ${
+          className={`safe-np-top flex items-center justify-between transition-[opacity,transform] duration-300 ease-out ${
             videoPath ? (chromeVisible ? "pointer-events-auto" : "pointer-events-none opacity-0 -translate-y-3") : ""
           }`}
         >
@@ -1270,9 +1273,16 @@ export default function NowPlayingView(p: Props) {
             fills the screen behind the top bar (see the video layer above)
             with the same controls overlaid at the bottom edge */}
         {!videoPath && (
-        <div className={`flex-1 min-h-0 flex flex-col lg:flex-row items-center gap-4 sm:gap-8 px-4 sm:px-8 pb-4 overflow-clip ${layoutHasLyrics ? "" : "lg:justify-center"}`}>
+        <div className={`safe-np-body flex-1 min-h-0 flex flex-col lg:flex-row items-center gap-4 sm:gap-8 overflow-clip ${layoutHasLyrics ? "" : "lg:justify-center"}`}>
           {/* left column: cover, track/album/artist, all playback controls —
               centered as a group inside the full column height.
+              `w-full`: this is a flex item in a column whose `items-center`
+              sizes it to its CONTENT, so the fixed-width rows below (the
+              title block, the seek row, the visualizer, all `w-[26rem]`)
+              made the column 416px wide inside a 358px parent — the title
+              and the visualizer then hung off both edges of a phone, past
+              their own `max-w-full` (which measures against a parent that
+              had already overflowed, so it clamped nothing).
               max-h-full + overflow-y-auto: on a short window this column is
               taller than the clipped row above it, which used to silently cut
               the bottom controls (and the visualizer strip with them) off with
@@ -1283,7 +1293,7 @@ export default function NowPlayingView(p: Props) {
               overflow unreachable on very short windows; move to a safe-center
               layout if anyone ever uses the player that small. */}
           <div
-            className={`flex flex-col items-center justify-center gap-4 shrink-0 min-w-0 max-h-full min-h-0 overflow-x-clip overflow-y-auto ${
+            className={`w-full flex flex-col items-center justify-center gap-4 shrink-0 min-w-0 max-h-full min-h-0 overflow-x-clip overflow-y-auto ${
               layoutHasLyrics ? "lg:w-[42%] lg:h-full" : ""
             }`}
           >
@@ -1361,7 +1371,7 @@ export default function NowPlayingView(p: Props) {
       {/* up-next queue drawer — same features as the player bar's queue
           popover: CLEAR upcoming, per-track ✕, drag to reorder */}
       {queueOpen && (
-        <div role="dialog" aria-modal="true" aria-label="Up next queue" className="absolute top-12 right-0 bottom-0 w-80 max-w-[85vw] z-20 bg-zinc-950 flex flex-col rounded-l-2xl border-l border-t border-border">
+        <div role="dialog" aria-modal="true" aria-label="Up next queue" className="safe-np-queue absolute right-0 bottom-0 w-80 max-w-[85vw] z-20 bg-zinc-950 flex flex-col rounded-l-2xl border-l border-t border-border">
           <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 gap-2">
             <div className="text-[11px] uppercase tracking-widest text-zinc-400 min-w-0 truncate">
               Queue · {queue.length} track{queue.length === 1 ? "" : "s"}

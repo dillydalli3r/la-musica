@@ -43,6 +43,15 @@ const COL_W: Record<string, string> = {
   cached: "w-20",
 };
 
+/** Floors, from each table's own columns: the chevron and cover take 96 px and
+ *  the Actions header 96 more, so the album list's name (auto, 22% beside it)
+ *  and the tracklist's title (auto, 16% beside it) are what the fixed layout
+ *  shrinks when the columns do not fit — 690 px and 486 px are where each of
+ *  them still has its 200 px. Both `md:` only: below it the fold has already
+ *  left the name the row. */
+const CACHE_MIN_W = "md:min-w-[690px]";
+const CACHE_TRACK_MIN_W = "md:min-w-[486px]";
+
 /** The tracklist under an expanded album row — its own prefs key for the same
  *  reason. */
 const TRACK_COLS: Col[] = [
@@ -160,7 +169,7 @@ function CachedAlbumRow({
       colSpan={cols.length + 3}
       expandedContent={
         <div className="overflow-x-auto">
-          <table className="w-full">
+          <table className={`w-full ${CACHE_TRACK_MIN_W}`}>
           <thead className="border-b border-border">
             <tr>
               {TRACK_COLS.filter((c) => trackCols.includes(c.id)).map((c) => (
@@ -386,7 +395,7 @@ export default function CachedTracksView() {
       ) : (
         <>
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
+            <table className={`w-full text-sm ${CACHE_MIN_W}`}>
               <thead className="border-b border-border">
                 <tr>
                   <th className="th w-10"></th>

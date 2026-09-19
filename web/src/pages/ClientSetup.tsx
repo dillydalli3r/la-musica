@@ -167,8 +167,15 @@ export default function ClientSetup({ onDone }: { onDone: () => void }) {
                     {/* Deliberately no autoFocus: this is the first screen a phone
                         sees, and the keyboard would cover the help text and the
                         Test button before the address has even been read. */}
+                    {/* `min-w-0` is what keeps this row inside the card on
+                        every engine: `min-width: auto` (the flex default)
+                        floors a text input at its own intrinsic width, and
+                        Safari reads that floor off the `size` attribute — the
+                        field would refuse to shrink and push "Test connection"
+                        past the card's edge on a phone. Chromium already
+                        shrinks it, so nothing moves on the desktop. */}
                     <input
-                      className="input font-mono text-xs"
+                      className="input font-mono text-xs min-w-0"
                       value={address}
                       onChange={(e) => {
                         setAddress(e.target.value);
@@ -222,9 +229,9 @@ export default function ClientSetup({ onDone }: { onDone: () => void }) {
                   </p>
                 ))}
 
-              <div className="flex items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-[11px] text-zinc-600">{probe?.ok ? "" : t("client.need_test")}</span>
-                <button className="btn-primary" onClick={() => setStep("account")} disabled={!probe?.ok}>
+                <button className="btn-primary ml-auto" onClick={() => setStep("account")} disabled={!probe?.ok}>
                   {t("client.next")} <ArrowRight className="h-3.5 w-3.5" />
                 </button>
               </div>
@@ -285,8 +292,8 @@ export default function ClientSetup({ onDone }: { onDone: () => void }) {
 
               {error && <p className="text-xs text-amber-300 break-words">{error}</p>}
 
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap gap-2">
                   <button type="button" className="btn-ghost" onClick={() => setStep("server")} disabled={busy}>
                     <ArrowLeft className="h-3.5 w-3.5" /> {t("client.back")}
                   </button>
@@ -294,7 +301,7 @@ export default function ClientSetup({ onDone }: { onDone: () => void }) {
                     {t("client.skip")}
                   </button>
                 </div>
-                <button className="btn-primary" disabled={busy || !password}>
+                <button className="btn-primary ml-auto" disabled={busy || !password}>
                   {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <KeyRound className="h-3.5 w-3.5" />}
                   {t(needsSetup ? "auth.set_password_sign_in" : "auth.sign_in")}
                 </button>
@@ -316,8 +323,16 @@ export default function ClientSetup({ onDone }: { onDone: () => void }) {
                   ? t("notify.blocked_help")
                   : ""}
               </p>
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex gap-2">
+              {/* Two groups that cannot share a phone's line: at 390px
+                  "Enable notifications" is a 129px two-line button, and with
+                  "Next" beside it the row was 421px inside a 294px card — the
+                  primary action sat off-screen and the page scrolled sideways.
+                  Wrapping keeps the wording and the 44px targets; `ml-auto` is
+                  what right-aligns the right group on the line it wraps onto
+                  (justify-between leaves a lone item at the left edge). The
+                  same two attributes are on the footers of every other step. */}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap gap-2">
                   <button type="button" className="btn-ghost" onClick={() => setStep("account")}>
                     <ArrowLeft className="h-3.5 w-3.5" /> {t("client.back")}
                   </button>
@@ -325,7 +340,7 @@ export default function ClientSetup({ onDone }: { onDone: () => void }) {
                     {t("client.skip")}
                   </button>
                 </div>
-                <div className="flex gap-2">
+                <div className="ml-auto flex flex-wrap justify-end gap-2">
                   <button
                     type="button"
                     className="btn-primary"
@@ -360,12 +375,12 @@ export default function ClientSetup({ onDone }: { onDone: () => void }) {
               {/* What that server actually runs — and, when it is behind, the
                   one line that says so. Same notice as Settings → Security. */}
               <ServerVersionNotice />
-              <div className="flex items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <button type="button" className="btn-ghost" onClick={() => setStep("notifications")}>
                   <ArrowLeft className="h-3.5 w-3.5" /> {t("client.back")}
                 </button>
                 <button
-                  className="btn-primary"
+                  className="btn-primary ml-auto"
                   onClick={() => {
                     markClientSetupDone();
                     onDone();

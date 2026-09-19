@@ -204,6 +204,56 @@ body {
   padding-left: env(safe-area-inset-left);
 }
 
+/* The fullscreen player is portalled to <body> and `fixed inset-0`, so like
+   the nav drawer it inherits nothing from `.safe-shell` and repeats the
+   insets its own chrome needs: the top bar (the exit button and the queue
+   readout), the bottom control cluster and the up-next drawer. Only the
+   CHROME is padded, never the overlay root — the ambience layers are
+   `absolute inset-0` inside it and would shrink away from the notch.
+   Each rule keeps its block's old padding as a floor, so a device with no
+   insets (every desktop) lays out pixel-identically to before.
+   `--mlo-inset-*` is a TEST HOOK, not a second source of truth: env() is
+   what a real phone reports and a machine with no notch always reports 0
+   there, so the insets would be unverifiable without a way to override
+   them. A check sets `--mlo-inset-top: 47px` and measures the real layout;
+   unset, the variables fall back to 0. */
+.safe-np-top {
+  padding-top: max(0.75rem, env(safe-area-inset-top, 0px), var(--mlo-inset-top, 0px));
+  /* The bar's own 0.75rem bottom padding is not an inset: it is the gap
+     between the bar and the controls below it, so it does not grow with
+     the notch the way the top one does. */
+  padding-bottom: 0.75rem;
+  padding-left: max(1.25rem, env(safe-area-inset-left, 0px), var(--mlo-inset-left, 0px));
+  padding-right: max(1.25rem, env(safe-area-inset-right, 0px), var(--mlo-inset-right, 0px));
+}
+/* Bottom cluster: the transport, the seek/volume line and the visualizer
+   strip in the audio layout, and the control overlay in the video one — the
+   two differ only in the floor they were laid out with. */
+.safe-np-body {
+  padding-left: max(1rem, env(safe-area-inset-left, 0px), var(--mlo-inset-left, 0px));
+  padding-right: max(1rem, env(safe-area-inset-right, 0px), var(--mlo-inset-right, 0px));
+  padding-bottom: max(1rem, env(safe-area-inset-bottom, 0px), var(--mlo-inset-bottom, 0px));
+}
+.safe-np-video {
+  padding-left: max(1rem, env(safe-area-inset-left, 0px), var(--mlo-inset-left, 0px));
+  padding-right: max(1rem, env(safe-area-inset-right, 0px), var(--mlo-inset-right, 0px));
+  padding-bottom: max(1.25rem, env(safe-area-inset-bottom, 0px), var(--mlo-inset-bottom, 0px));
+}
+@media (min-width: 640px) {
+  .safe-np-body,
+  .safe-np-video {
+    padding-left: max(2rem, env(safe-area-inset-left, 0px), var(--mlo-inset-left, 0px));
+    padding-right: max(2rem, env(safe-area-inset-right, 0px), var(--mlo-inset-right, 0px));
+  }
+}
+/* The queue drawer is anchored just under the top bar, so it has to clear
+   the inset that bar now carries or it swallows the bar's own buttons. */
+.safe-np-queue {
+  top: calc(3rem + max(env(safe-area-inset-top, 0px), var(--mlo-inset-top, 0px)));
+  padding-right: max(env(safe-area-inset-right, 0px), var(--mlo-inset-right, 0px));
+  padding-bottom: max(env(safe-area-inset-bottom, 0px), var(--mlo-inset-bottom, 0px));
+}
+
 /* Nothing may scroll sideways: a wide table, an unbreakable file path or a
    fixed `min-w-` inside a panel must not shift the shell off-screen. Sideways
    scrolling stays deliberate and local, inside a `.table-scroll` wrapper. */

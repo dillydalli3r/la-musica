@@ -161,7 +161,15 @@ export default function DependenciesPage() {
               <th className="th" title="Newest release published upstream on GitHub. The installer still fetches the reviewed version in Latest.">
                 Available
               </th>
-              <th className="th">Location</th>
+              {/* The only column that needs a width: its text is a shortened
+                  path, and the longest token in it is the version-prefixed file
+                  name ("…/AudioAuditor v2.0.0/AudioAuditorCLI.exe", measured
+                  153 px at this column's 11 px mono). Six equal columns at the
+                  table's 46 rem floor leave it 123 px, which crushes that token;
+                  180 px is 153 + the cell's 24 px padding, rounded up. The other
+                  five columns share what is left, so from `md` up — where the
+                  table is wider than its floor — the layout is as it was. */}
+              <th className="th w-[180px]">Location</th>
             </tr>
           </thead>
           <tbody className="stagger">

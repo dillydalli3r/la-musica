@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useRef } from "react";
 import { Link } from "react-router-dom";
 import { AlertTriangle, ArrowDownUp, Clock, Disc3, Heart, RefreshCw, Sparkles, Star, Users } from "lucide-react";
 import { api } from "../api";
@@ -186,11 +187,25 @@ function ArtistShelf({ title, artists }: { title: string; artists?: HomeArtist[]
 
 export default function HomePage() {
   const { t } = useI18n();
+  // Refresh means "look at the music folder again", not "ask again": the
+  // server caches this payload and the library tree behind it, so a plain
+  // refetch redrew the same rows for minutes. The flag is one-shot — a ref
+  // rather than a query key, so an ordinary background refetch (window focus)
+  // keeps using the cache instead of forcing a rebuild every time.
+  const forceRefresh = useRef(false);
   const { data, isLoading, isError, isFetching, refetch } = useQuery({
     queryKey: ["home"],
-    queryFn: api.home,
+    queryFn: () => {
+      const force = forceRefresh.current;
+      forceRefresh.current = false;
+      return api.home(force);
+    },
     staleTime: 5 * 60_000,
   });
+  const refresh = () => {
+    forceRefresh.current = true;
+    void refetch();
+  };
 
   if (isLoading) {
     return (
@@ -215,7 +230,7 @@ export default function HomePage() {
         <div className="flex justify-center">
           <button
             className="btn-ghost !py-1.5 text-xs tap"
-            onClick={() => refetch()}
+            onClick={refresh}
             disabled={isFetching}
             title={t("home.refresh_title")}
           >
@@ -258,7 +273,7 @@ export default function HomePage() {
             actions={
               <button
                 className="btn-ghost !py-1.5 text-xs tap"
-                onClick={() => refetch()}
+                onClick={refresh}
                 disabled={isFetching}
                 title={t("home.refresh_title")}
               >

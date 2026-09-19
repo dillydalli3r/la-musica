@@ -56,6 +56,15 @@ const TRASH_COL_W: Record<string, string> = {
   removed: "w-32",
 };
 
+/** The trash list's floor, from its own columns: the chevron and cover take
+ *  96 px, the four summary columns 432 px and the Actions header 240 px from
+ *  `md` up — 768 px of fixed width that the item name has to fit behind.
+ *  Without a floor the fixed layout takes the deficit out of that name (it is
+ *  the only column without a width), so 968 px is where the name keeps its
+ *  200 px and the wrapper scrolls below that. `md:` because below it the
+ *  summary columns have folded and the name shares the row with the buttons. */
+const TRASH_MIN_W = "md:min-w-[968px]";
+
 /** A phone (390 px) row keeps the item and its two buttons: the summary
  *  columns are added up in the toolbar anyway, and keeping them squeezes the
  *  item name to nothing. The class has to sit on the header AND the cells, or
@@ -129,13 +138,20 @@ function FilesTable({ e }: { e: Entry }) {
   );
   const total = e.file_count ?? files.length;
   return (
-    <div>
+    /* Its own scroll wrapper: two columns leave the name a positive leftover,
+       so nothing collapses in here today — but a table with no wrapper can
+       never scroll its way out of one, and the shell clips sideways overflow
+       rather than scrolling it. */
+    <div className="overflow-x-auto">
       {total > files.length && (
         <div className="px-3 py-1.5 text-[11px] text-zinc-500">
           showing {files.length} of {total} files
         </div>
       )}
-      <table className="w-full">
+      {/* Name is the only column without a width, so it takes the deficit; the
+          floor keeps it at 200 px next to the 112 px size column. No fold here,
+          so unlike the list above this one applies at every width. */}
+      <table className="w-full min-w-[312px]">
         <thead className="border-b border-border">
           <tr>
             <th className="th w-auto">Name</th>
@@ -600,7 +616,7 @@ export default function TrashPage() {
       ) : (
         /* ---------------- Albums ---------------- */
         <div className="overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className={`w-full text-sm ${TRASH_MIN_W}`}>
             <thead className="border-b border-border">
               <tr>
                 {selectMode && (

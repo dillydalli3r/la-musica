@@ -24,7 +24,7 @@ import TagActionsMenu from "../components/TagActionsMenu";
 import StatsPanel from "../components/StatsPanel";
 import TrackDetails, { CreditsPanel, creditTagsFrom } from "../components/TrackDetails";
 import { SortHeader, sortRows, toggleSort, groupByDisc, type SortState } from "../lib/sort.tsx";
-import { ColumnsMenu, ColumnResizer, useColumnPrefs, useColumnWidths, useCustomColumns, customCols, customColValue, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, type Col } from "../lib/columns";
+import { ColumnsMenu, ColumnResizer, useColumnPrefs, useColumnWidths, useCustomColumns, customCols, customColValue, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, ALBUM_TRACK_MIN_W, TAG_COL_W, type Col } from "../lib/columns";
 import { toast, useStore } from "../store";
 import { fmtTech, albumTech } from "../lib/fmt";
 import { fmtDuration } from "../lib/fmt";
@@ -1046,8 +1046,10 @@ export default function AlbumPage() {
         </div>
       )}
 
-      <div className="section">
-        <table className="w-full text-sm">
+      {/* `overflow-x-auto`: the tracklist is what overflows on a phone and the
+          page cannot scroll sideways for it. */}
+      <div className="section overflow-x-auto">
+        <table className={`w-full text-sm ${ALBUM_TRACK_MIN_W}`}>
           {/* Borderless header: the only separator is this section's own
               hairline above the table. */}
           <thead>
@@ -1055,12 +1057,12 @@ export default function AlbumPage() {
               {selectMode && <th className="th w-10"></th>}
               {trackDefs.filter((c) => trackCols.includes(c.id)).map((c) =>
                 c.id === "cover" ? (
-                  <th key={c.id} className={`th relative ${ALBUM_TRACK_COL_W[c.id] ?? ""}`} title="Cover art">
+                  <th key={c.id} className={`th relative ${ALBUM_TRACK_COL_W[c.id] ?? TAG_COL_W}`} title="Cover art">
                     <span className="sr-only">Cover</span>
                   </th>
                 ) : (
                   <SortHeader key={c.id} label={c.label} sort={sort} sortKey={c.sortKey} onSort={(k) => setSort(toggleSort(sort, k))}
-                    className={`relative ${ALBUM_TRACK_COL_W[c.id] ?? ""}${c.id === "num" ? " cell-nowrap" : ""}`}
+                    className={`relative ${ALBUM_TRACK_COL_W[c.id] ?? TAG_COL_W}${c.id === "num" ? " cell-nowrap" : ""}`}
                     style={trackW[c.id] ? { width: trackW[c.id] } : undefined}>
                     <ColumnResizer width={trackW[c.id]} onDrag={(w) => setTrackW(c.id, w)} onReset={resetTrackW} />
                   </SortHeader>

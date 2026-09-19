@@ -112,8 +112,12 @@ export default function LoginPage({ onSignedIn }: { onSignedIn: () => void }) {
                 <Server className="h-3.5 w-3.5" /> {t("auth.server_address")}
               </span>
               <div className="flex gap-2">
+                {/* `min-w-0` floors the shrink at zero: the flex default
+                    (`min-width: auto`) lets Safari hold a text input at its
+                    intrinsic `size` width, which would push "Use" past the
+                    card's edge on a phone. Chromium already shrinks it. */}
                 <input
-                  className="input font-mono text-xs"
+                  className="input font-mono text-xs min-w-0"
                   value={address}
                   onChange={(e) => setAddress(e.target.value)}
                   placeholder="http://127.0.0.1:8000"

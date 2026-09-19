@@ -8,12 +8,21 @@ What this pins, with every HTTP seam stubbed (no network at all):
     theaudiodb → wikidata → bandcamp → discogs → deezer → spotify, equal to
     `mlo.config.DEFAULT_CONFIG["genre_sources"]`, with every per-track source
     ahead of every album-only one;
-  * every source is asked for EVERY TRACK: the per-track tiers answer per
-    track where the source has one (MusicBrainz recording, ListenBrainz
-    recording, iTunes `primaryGenreName`, Last.fm `track.getTopTags`,
-    TheAudioDB `searchtrack.php`, Wikidata's recording P136, RYM's own rows),
-    and a source that cannot answer per track answers at its album/artist
-    tier, labelled `level: album`/`level: artist` — never promoted to a track;
+  * the sources are asked IN ORDER until every track is FULL: the writer's own
+    policy decides that (`_genre_complete` — at `mb_genre_count = 2` one
+    specific genre plus its derived family), a source below that point is never
+    asked (`asked`/`stopped_after`), and a source that cannot answer is skipped
+    BEFORE any request — no credential (RateYourMusic's cookie, Discogs'
+    token, Last.fm's key, Spotify's id+secret), a RateYourMusic that already
+    refused this cookie, or a documented no-op (Soulseek) — with the reason in
+    `notes`/`skipped`;
+  * every source that IS asked answers at its best tier: the per-track tiers
+    answer per track where the source has one (MusicBrainz recording,
+    ListenBrainz recording, iTunes `primaryGenreName`, Last.fm
+    `track.getTopTags`, TheAudioDB `searchtrack.php`, Wikidata's recording
+    P136, RYM's own rows), and a source that cannot answer per track answers at
+    its album/artist tier, labelled `level: album`/`level: artist` — never
+    promoted to a track (`level_counts` totals those tiers);
   * the merged order is `genre_sources` order, so a reversed list reverses the
     result, and an album-only source never outranks a per-track one;
   * ListenBrainz rows carrying a `genre_mbid` (recognised genres) beat the
@@ -90,7 +99,10 @@ WIDE_SOURCES = ["bandcamp", "discogs", "deezer", "spotify"]
 
 # The default configuration (no saved `genre_sources`): the chain must use the
 # module default. Every test below therefore runs the REAL priority list.
-CFG = {"mb_genre_count": 3}
+# The cookie is what makes RateYourMusic an ASKED source at all: without one
+# the chain skips it before any request (no credential = no page, see
+# `_genre_source_skip`), which is its own test in §5.
+CFG = {"mb_genre_count": 3, "rym_cookie": "cf_clearance=test"}
 # An explicit, hand-picked list — for the order-honouring tests (§1 reversed,
 # §6) where a shorter list keeps the expectation readable.
 ORDER = ["rateyourmusic", "listenbrainz", "musicbrainz", "itunes",
@@ -150,6 +162,40 @@ RYM_DESCRIPTOR_PAGE = (
     '<tr class="tracklist_row"><td class="tracklist_track_num">1</td>'
     '<td class="tracklist_track_title">Track One</td></tr>'
     '</table></body></html>')
+# A release page in the markup RYM actually serves — an excerpt of an archived
+# capture, kept where it matters: the `+`-spaced genre slugs with RYM's own
+# capitals (web.archive.org/web/20210325091401/https://rateyourmusic.com/release/
+# album/grouper/dragging-a-dead-deer-up-a-hill/), the primary/secondary genre
+# blocks, and the `tracklist_line` / `tracklist_num` / `tracklist_title` row
+# shape a client without a logged-in cookie gets (the desktop table spells those
+# `tracklist_row`/`tracklist_track_num`/`tracklist_track_title`, which the other
+# fixtures here cover). A lowercase-and-dash-only genre class drops every
+# multi-word genre on this page, which is most of RYM's value.
+RYM_LIVE_PAGE = (
+    '<html><head><title>Dragging a Dead Deer Up a Hill by Grouper (Album, '
+    'Psychedelic Folk)</title></head><body>'
+    '<h1 class="album_title_main">Dragging a Dead Deer Up a Hill</h1>'
+    '<a href="/artist/grouper">Grouper</a>'
+    '<span class="release_pri_genres"><a  class="genre" '
+    'href="/genre/Psychedelic+Folk/">Psychedelic Folk</a>, '
+    '<a  class="genre" href="/genre/Ambient/">Ambient</a></span>'
+    '<span class="release_sec_genres"><a  class="genre" '
+    'href="/genre/Dream+Pop/">Dream Pop</a>, '
+    '<a  class="genre" href="/genre/Drone/">Drone</a>, '
+    '<a  class="genre" href="/genre/Ethereal+Wave/">Ethereal Wave</a></span>'
+    '<ul id="tracks_mobile" class="tracks tracklisting">'
+    '<li class="track"><div class="tracklist_line" style="width:100%;">'
+    '<span class="tracklist_num">                      1                   </span>'
+    '<span class="tracklist_title"><span><span class="rendered_text">Disengaged'
+    '</span></span><span class="tracklist_duration" data-inseconds="256">'
+    '                      4:16                   </span></span>'
+    '<div style="clear:both;"></div></div></li>'
+    '<li class="track"><div class="tracklist_line" style="width:100%;">'
+    '<span class="tracklist_num">                      2                   </span>'
+    '<span class="tracklist_title"><span><span class="rendered_text">Heavy Water '
+    '/ I&#39;d Rather Be Sleeping'
+    '</span></span></span><div style="clear:both;"></div></div></li>'
+    '</ul></body></html>')
 RYM_CHALLENGE = ("<html><head><title>Just a moment...</title></head>"
                  "<body>Checking your browser before accessing "
                  "rateyourmusic.com</body></html>")
@@ -503,14 +549,26 @@ assert reversed_got["per_track"][(1, 1)] == ["Space Rock", "Art Rock",
 assert reversed_got["sources"][FILE_ONE] == ["wikidata", "itunes", "musicbrainz"], \
     reversed_got["sources"]
 
-# The cap is enforced PER TRACK, not across the album.
+# The cap is enforced PER TRACK, not across the album — and once every track
+# holds a list the writer would write in full (RYM answered two specifics, and
+# the family is derived from the first), the chain STOPS: the sources below it
+# could only repeat what is already there, so they are never asked.
 clear()
 full_stack()
 got = chain()
-assert len(got["per_track"][(1, 1)]) == 3 and len(got["per_track"][(1, 2)]) == 3, got["per_track"]
-assert got["per_track"][(1, 1)] == ["Heavy Metal", "Groove Metal",
-                                    "alternative metal"], got["per_track"]
-assert len(got["genres"]) == 3, got["genres"]
+assert got["per_track"][(1, 1)] == ["Heavy Metal", "Groove Metal"], got["per_track"]
+assert got["per_track"][(1, 2)] == ["Industrial Metal", "Heavy Metal",
+                                    "Groove Metal"], got["per_track"]
+assert got["genres"] == ["Heavy Metal", "Groove Metal",
+                         "Industrial Metal"], got["genres"]
+assert got["asked"] == ["rateyourmusic"], got["asked"]
+assert got["stopped_after"] == "rateyourmusic", got["stopped_after"]
+# The report says how much each source said (its release-wide row answers both
+# tracks, and its one per-track row answers a third time), and what the cap
+# left out.
+assert got["per_source_counts"]["rateyourmusic"] == {
+    "names": 3, "tracks": 3}, got["per_source_counts"]
+assert got["per_track_trimmed"] == {}, got["per_track_trimmed"]
 # A different cap is honoured too.
 clear()
 full_stack()
@@ -530,7 +588,10 @@ assert got["per_source"]["itunes"] == ["Nu Metal"], got["per_source"]
 assert "Nu Metal" not in got["per_track"][(1, 1)], got["per_track"]
 assert got["levels"][FILE_TWO] == "track", got["levels"]
 assert got["levels"][FILE_ONE] == "track", got["levels"]   # MB recording genres
-assert got["notes"]["rateyourmusic"] == "no data", got["notes"]
+# A RYM that was ASKED and refused says so — the reason names the setting to
+# fix, instead of an empty answer that looks like "nothing there".
+assert got["notes"]["rateyourmusic"].startswith(
+    "skipped: RateYourMusic refused this cookie"), got["notes"]
 
 # --------------------------------------------------------------------------- #
 # 2) Reliability — one source failing never removes the others'
@@ -544,7 +605,8 @@ stub_mb({"release-group/rg-1": {"genres": [{"name": "Progressive Rock"}]}})
 buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
     got = chain(limit=6)
-assert got["notes"]["rateyourmusic"] == "no data", got["notes"]
+assert got["notes"]["rateyourmusic"].startswith(
+    "skipped: RateYourMusic refused this cookie"), got["notes"]
 assert got["per_track"][(1, 1)][0] == "alternative metal", got["per_track"]
 assert "rateyourmusic" not in got["sources"][FILE_ONE], got["sources"]
 assert buf.getvalue().count("rateyourmusic") == 1, buf.getvalue()
@@ -611,6 +673,79 @@ assert got["per_track"][(1, 2)] == ["Industrial Metal", "Heavy Metal",
 assert got["levels"][FILE_TWO] == "track", got["levels"]
 assert got["levels"][FILE_ONE] == "album", got["levels"]
 
+# The RELEASE URLs the module derives, and the order it tries them in. RYM's
+# release slugs are UNDERSCORE-separated and keep their punctuation runs (every
+# spelling here is one MusicBrainz states on the release group); its artist
+# pages are dash-separated — and asking for an album with the artist spelling
+# is what made every multi-word album 404 on its first candidate.
+assert intg._rym_release_slug("Sgt. Pepper's Lonely Hearts Club Band") == \
+    "sgt__peppers_lonely_hearts_club_band"
+assert intg._rym_release_slug("In Rainbows") == "in_rainbows"
+assert intg._rym_release_slug("The Beatles") == "the_beatles"
+assert intg._rym_release_slug("Simon & Garfunkel") == "simon_and_garfunkel"
+assert intg._rym_slug("The Beatles") == "the-beatles"      # the ARTIST page
+# RYM's older pages kept dashes and were never rewritten, so both are tried.
+assert intg._rym_release_candidates("The Dark Side of the Moon") == \
+    ["the_dark_side_of_the_moon", "the-dark-side-of-the-moon"]
+
+# The page MusicBrainz states is asked for AS STATED — no slug guessed at all.
+# (`cfg={}` keeps these deterministic: the live config is not read.)
+clear()
+fake = stub_rym({"rateyourmusic.com": RYM_PAGE})
+page = intg.rym_genres(
+    "Test Artist", "Test Album", cfg={},
+    album_url="https://rateyourmusic.com/release/album/test-artist/test_album/")
+assert page["genres"] == ["Heavy Metal", "Groove Metal"], page
+assert fake.calls == ["https://rateyourmusic.com/release/album/test-artist/test_album/"], \
+    fake.calls
+# With no stated page, the ladder starts at RYM's own underscore spelling.
+clear()
+fake = stub_rym({"rateyourmusic.com": RYM_PAGE})
+page = intg.rym_genres("Test Artist", "Test Album", cfg={})
+assert page["genres"] == ["Heavy Metal", "Groove Metal"], page
+assert fake.calls[0] == \
+    "https://rateyourmusic.com/release/album/test_artist/test_album/", fake.calls
+# An artist or song URL is not a release page, so it is never read as one.
+assert intg._rym_path_from_url("https://rateyourmusic.com/artist/radiohead") == ""
+assert intg._rym_path_from_url("https://rateyourmusic.com/release/song/x/y/") == ""
+assert intg._rym_path_from_url(
+    "https://rateyourmusic.com/release/album/radiohead/in_rainbows/") == \
+    "/release/album/radiohead/in_rainbows/"
+
+# RYM's own page markup, parsed by the source's own entry points: every genre
+# on it comes back (the multi-word ones included) and the mobile track list is
+# read row by row.
+assert intg._rym_genres_from(RYM_LIVE_PAGE) == [
+    "Psychedelic Folk", "Ambient", "Dream Pop", "Drone", "Ethereal Wave"], \
+    intg._rym_genres_from(RYM_LIVE_PAGE)
+rows = intg._rym_tracks_from(RYM_LIVE_PAGE)
+assert [r["title"] for r in rows] == ["Disengaged",
+                                      "Heavy Water / I'd Rather Be Sleeping"], rows
+assert [r["position"] for r in rows] == [1, 2], rows
+# …and the decoded title is what maps a row onto our own track, exactly as the
+# page's own entity spelling would otherwise fail to (`_rym_ref` folds it).
+assert intg._rym_ref(rows[1]["title"]) == \
+    intg._rym_ref("Heavy Water / I\u2019d Rather Be Sleeping"), rows[1]
+
+clear()
+fake = stub_rym({"rateyourmusic.com": RYM_LIVE_PAGE})
+stub_json(lb_router(rows=[], rg_rows=[], artist_rows=[]))
+stub_apple(apple_router({}))
+stub_mb({})
+live_release = {"id": "rel-g", "release_group_id": "rg-g", "genres": [],
+                "artists": [{"name": "Grouper", "mbid": "art-g"}],
+                "media": [{"disc": 1, "position": 1, "title": "Disengaged",
+                           "genres": []}]}
+got = intg.genre_chain(artist="Grouper", album="Dragging a Dead Deer Up a Hill",
+                       release=live_release, cfg=CFG, limit=6, files=[FILE_ONE])
+assert got["per_source"]["rateyourmusic"] == [
+    "Psychedelic Folk", "Ambient", "Dream Pop", "Drone", "Ethereal Wave"], \
+    got["per_source"]
+assert got["per_track"][(1, 1)] == [
+    "Psychedelic Folk", "Ambient", "Dream Pop", "Drone", "Ethereal Wave"], \
+    got["per_track"]
+assert got["levels"][FILE_ONE] == "album", got["levels"]
+
 # --------------------------------------------------------------------------- #
 # 4) Wikidata — the release group's own relation, QIDs resolved to labels
 # --------------------------------------------------------------------------- #
@@ -647,9 +782,43 @@ stub_mb({})
 got = chain(release=BARE_RELEASE)
 hosts = {url.split("/")[2] for url, _p in calls}
 assert "ws.audioscrobbler.com" not in hosts and "api.discogs.com" not in hosts, hosts
-assert got["notes"]["lastfm"] == "no data", got["notes"]
-assert got["notes"]["discogs"] == "no data", got["notes"]
+# RYM answered both tracks here, so the chain stopped before either of them.
 assert got["per_track"][(1, 1)] == ["Heavy Metal", "Groove Metal"], got["per_track"]
+assert "lastfm" not in got["asked"] and "discogs" not in got["asked"], got["asked"]
+
+# A source without its key is skipped BEFORE any request, and the report names
+# the setting instead of reporting "no data" for something never asked.
+clear()
+calls = stub_json(lambda url, params: None)
+stub_rym({"rateyourmusic.com": RYM_CHALLENGE})
+stub_apple(apple_router({}))
+stub_mb({})
+got = intg.genre_chain(artist="Test Artist", album="Test Album",
+                       release=BARE_RELEASE, cfg=CFG, limit=6,
+                       files=[FILE_ONE, FILE_TWO],
+                       sources=["lastfm", "discogs", "deezer"])
+assert got["notes"]["lastfm"].startswith("skipped: no lastfm_api_key"), got["notes"]
+assert got["notes"]["discogs"].startswith("skipped: no discogs_token"), got["notes"]
+assert set(got["skipped"]) == {"lastfm", "discogs"}, got["skipped"]
+assert got["asked"] == ["deezer"], got["asked"]
+hosts = {url.split("/")[2] for url, _p in calls}
+assert "ws.audioscrobbler.com" not in hosts and "api.discogs.com" not in hosts, hosts
+
+# RateYourMusic is gated the same way, on its credential: no `rym_cookie` means
+# no page (RYM refuses an automated client), so the chain does not spend a
+# request and a second of throttle learning that.
+clear()
+fake = stub_rym({"rateyourmusic.com": RYM_PAGE})
+stub_json(lambda url, params: None)
+stub_apple(apple_router({}))
+stub_mb({})
+got = intg.genre_chain(artist="Test Artist", album="Test Album",
+                       release=BARE_RELEASE, cfg={"mb_genre_count": 3},
+                       limit=6, files=[FILE_ONE, FILE_TWO],
+                       sources=["rateyourmusic", "musicbrainz"])
+assert got["notes"]["rateyourmusic"].startswith("skipped: no rym_cookie"), got["notes"]
+assert "rateyourmusic" not in got["asked"], got["asked"]
+assert fake.calls == [], fake.calls          # not one request to RYM
 
 # With the keys set, Last.fm answers per TRACK (then artist) and Discogs
 # answers album-level.
@@ -958,10 +1127,13 @@ stub_mb({})
 _real_token = intg._spotify_token
 try:
     # The credential gate is the config, not the token: without them Spotify is
-    # not even asked (the patched token proves the gate is what stopped it).
+    # not even asked (the patched token proves the gate is what stopped it),
+    # and the report names the two settings rather than saying "no data".
     intg._spotify_token = lambda cfg=None, timeout=None: "tok"
     got = chain(limit=8, release=BARE_RELEASE)
-    assert got["notes"]["spotify"] == "no data", got["notes"]
+    assert got["notes"]["spotify"].startswith(
+        "skipped: no spotify_client_id/spotify_client_secret"), got["notes"]
+    assert "spotify" not in got["asked"], got["asked"]
     assert not [u for u, _p in calls if "spotify" in u], calls
     # With credentials it answers at the ARTIST tier, honestly labelled.
     keyed = dict(CFG, spotify_client_id="id", spotify_client_secret="secret")
@@ -1053,9 +1225,18 @@ _client = TestClient(mlo_main.app)   # no lifespan: no workers, no slskd boot
 
 JOB_SOURCES = ("rateyourmusic", "listenbrainz", "musicbrainz")
 JOB_NOTES = {"rateyourmusic": "no data", "musicbrainz": "answered"}
+# The chain's report, in the shape `_run_genre_chain` passes through: per-source
+# counts, what was actually asked and where it stopped, what was skipped and
+# why, which tier answered, and the cap's own trail.
 JOB_RESULT = {"updated": 2, "genres": ["Shoegaze"],
               "per_source": {"musicbrainz": ["Shoegaze"]}, "notes": JOB_NOTES,
-              "per_track": {(1, 1): ["Shoegaze"]}, "sources": {}, "levels": {}}
+              "per_track": {(1, 1): ["Shoegaze"]}, "sources": {}, "levels": {},
+              "per_source_counts": {"musicbrainz": {"names": 1, "tracks": 2}},
+              "asked": ["musicbrainz"], "stopped_after": "musicbrainz",
+              "order": ["rateyourmusic", "listenbrainz", "musicbrainz"],
+              "skipped": {"rateyourmusic": "skipped: no rym_cookie"},
+              "level_counts": {"track": 1, "album": 1, "artist": 0},
+              "per_track_trimmed": {}, "trimmed": []}
 _asked = []
 _real_genre_chain = intg.genre_chain
 
@@ -1082,10 +1263,24 @@ try:
         body = one.json()
         assert _asked[-1] == [source], _asked
         assert body["genres"] == ["Shoegaze"], body
-        assert body["notes"] == JOB_NOTES, body
         assert body["per_source"] == {"musicbrainz": ["Shoegaze"]}, body
+        # The chain's own report reaches the caller, and it keeps its own
+        # sentence for the cases a name alone cannot express: a track answered
+        # at ALBUM level, and a chain that stopped early.
+        assert body["per_source_counts"] == {
+            "musicbrainz": {"names": 1, "tracks": 2}}, body
+        assert body["asked"] == ["musicbrainz"], body
+        assert body["stopped_after"] == "musicbrainz", body
+        assert body["skipped"] == {"rateyourmusic": "skipped: no rym_cookie"}, body
+        assert body["level_counts"] == {"track": 1, "album": 1, "artist": 0}, body
+        assert body["notes"]["rateyourmusic"] == JOB_NOTES["rateyourmusic"], body
+        assert body["notes"]["musicbrainz"] == JOB_NOTES["musicbrainz"], body
+        assert "ALBUM or ARTIST" in body["notes"]["genre level"], body
+        assert "stopped after musicbrainz" in body["notes"]["genre sources"], body
         assert set(body) >= {"updated", "genres", "per_source", "notes", "per_track",
-                             "sources", "levels"}, sorted(body)
+                             "sources", "levels", "per_source_counts", "asked",
+                             "stopped_after", "skipped", "level_counts",
+                             "trimmed_files", "trimmed_genres"}, sorted(body)
 
     # No `sources` at all still means every configured source, in order.
     every = _client.post("/api/genres/import", json={"paths": [JOB_ALBUM]})

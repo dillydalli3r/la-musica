@@ -2,8 +2,8 @@ import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowDownUp, ChevronLeft, ChevronRight, ClipboardCheck, Disc3, Download, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
-  Keyboard, Library, ListMusic, Menu, Music2, PanelLeftClose, Search, Tags, Trash2, User, WifiOff, X,
+  ArrowDownUp, ArrowUpRight, ChevronLeft, ChevronRight, ClipboardCheck, Disc3, Download, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
+  Keyboard, Library, ListMusic, Menu, Music2, Music4, PanelLeftClose, Search, Tags, Trash2, User, WifiOff, X,
   Settings as SettingsIcon, Wrench,
 } from "lucide-react";
 import { api, AuthError, getToken, IN_TAURI, onAuthLost, serverUrl } from "./api";
@@ -40,6 +40,11 @@ const GenrePage = lazy(() => import("./pages/GenrePage"));
 const DownloadsPage = lazy(() => import("./pages/DownloadsPage"));
 const ImportWizard = lazy(() => import("./pages/ImportWizard"));
 const DonationsPage = lazy(() => import("./pages/DonationsPage"));
+const MBSearchPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBSearchPage })));
+const MBArtistPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBArtistPage })));
+const MBReleaseGroupPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBReleaseGroupPage })));
+const MBReleasePage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBReleasePage })));
+const MBRecordingPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBRecordingPage })));
 // Not lazy: the sign-in screen is what a signed-out client sees FIRST, and a
 // chunk fetch that itself needs the server would be a poor greeting.
 import LoginPage from "./pages/LoginPage";
@@ -77,6 +82,10 @@ const NAV_GROUPS: { labelKey: MessageKey; items: { to: string; labelKey: Message
     items: [
       { to: "/import", labelKey: "nav.import", icon: Import, end: false },
       { to: "/soulseek", labelKey: "nav.soulseek", icon: ArrowDownUp, end: false },
+      // MusicBrainz sits with acquiring: browsing the database IS how a user
+      // finds the release they are about to import, and every entity page
+      // carries the auto-import and wish actions.
+      { to: "/mb/search", labelKey: "nav.musicbrainz", icon: Music4, end: false },
       { to: "/export", labelKey: "nav.export", icon: HardDriveDownload, end: false },
     ],
   },
@@ -103,9 +112,9 @@ const COLLAPSE_KEY = "mlo.sidebar.collapsed";
 const SEARCH_SOURCE_KEY = "mlo.search.source";
 type SearchSource = "local" | "mb";
 
-/** The MusicBrainz page a search hit opens outside the app — the same
- *  destination the import wizard's own MB search puts in its release link. */
-const mbUrl = (kind: "release" | "artist", id: string) => `https://musicbrainz.org/${kind}/${id}`;
+/** The MusicBrainz page a search hit points at — the secondary link on a
+ *  dropdown row (the row itself opens the app's own /mb/… route). */
+const mbUrl = (kind: string, id: string) => `https://musicbrainz.org/${kind}/${id}`;
 
 /** The value, `ms` after it stopped changing. MusicBrainz rate-limits a
  *  client to about one request a second, and a query keyed on the raw input
@@ -225,17 +234,18 @@ function PageLoading() {
 }
 
 /** One typed row in the top-bar search dropdown: a direct in-app link to the
- *  entity, with its kind on the right. A MusicBrainz hit cannot be an in-app
- *  route — the app has no page for a release it does not own — so `external`
- *  renders it as a link out to the same page the import wizard's MB search
- *  points at. */
+ *  entity, with its kind on the right. A MusicBrainz hit is a link into the
+ *  app's own browser (`/mb/…`) exactly like a local hit is a link into the
+ *  library — `external` adds musicbrainz.org as a small secondary affordance,
+ *  never the primary click. */
 function SearchHit({ to, icon: Icon, label, hint, onGo, external }: {
   to: string;
   icon: LucideIcon;
   label: string;
   hint: string;
   onGo: () => void;
-  external?: boolean;
+  /** musicbrainz.org URL of the same entity, for the escape-hatch icon */
+  external?: string;
 }) {
   const body = (
     <>
@@ -245,14 +255,24 @@ function SearchHit({ to, icon: Icon, label, hint, onGo, external }: {
     </>
   );
   const cls = "w-full flex items-center gap-2.5 px-3 py-2 text-xs text-zinc-200 hover:bg-raise transition-colors";
-  return external ? (
-    <a href={to} target="_blank" rel="noreferrer" className={cls} onClick={onGo}>
-      {body}
-    </a>
-  ) : (
-    <Link to={to} onClick={onGo} className={cls}>
-      {body}
-    </Link>
+  return (
+    <div className="flex items-center">
+      <Link to={to} onClick={onGo} className={cls}>
+        {body}
+      </Link>
+      {external && (
+        <a
+          href={external}
+          target="_blank"
+          rel="noreferrer"
+          onClick={onGo}
+          title="Open on MusicBrainz"
+          className="shrink-0 mr-1.5 p-1.5 rounded-lg text-zinc-600 hover:text-white hover:bg-raise transition-colors"
+        >
+          <ArrowUpRight className="h-3.5 w-3.5" />
+        </a>
+      )}
+    </div>
   );
 }
 
@@ -533,6 +553,19 @@ export default function App() {
   });
   const mbRows = (Array.isArray(mbReleases) ? mbReleases : []).slice(0, 6);
   const mbArtistRows = (Array.isArray(mbArtists) ? mbArtists : []).slice(0, 4);
+
+  // A pasted musicbrainz.org link is an identity, not a query: it becomes a
+  // direct in-app open at the top of the dropdown, and Enter takes it to that
+  // page — so a link copied from a browser or a chat lands in the app.
+  const mbLink = source === "mb" && query.trim()
+    ? /^(?:https?:\/\/)?(?:www\.)?musicbrainz\.org\/(artist|release-group|release|recording)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(
+        query.trim()
+      )
+    : null;
+  /** Its in-app route — a release group browses at /mb/rg/… . */
+  const mbLinkTo = mbLink
+    ? `/mb/${mbLink[1] === "release-group" ? "rg" : mbLink[1]}/${mbLink[2]}`
+    : null;
 
   /** Enter opens the artist page when the query IS an artist (exact match, or
    *  the one artist the query narrows to) — otherwise it leaves the already
@@ -971,20 +1004,20 @@ export default function App() {
                 if (e.key !== "Enter" || !query.trim()) return;
                 e.preventDefault();
                 setSearchOpen(false);
-                // MusicBrainz mode has no in-app page to land on: Enter takes
-                // the first release, which is the one the wizard's own search
-                // would have offered first. Local mode prefers the artist the
-                // query names; otherwise it leaves the library filter that
-                // typing already applied alone.
+                // MusicBrainz mode: a pasted entity link opens that entity,
+                // anything else is a search of the in-app browser (which is
+                // where its results are read and downloaded from). Local mode
+                // prefers the artist the query names; otherwise it leaves the
+                // library filter that typing already applied alone.
                 if (source === "mb") {
-                  if (mbRows[0]?.id) window.open(mbUrl("release", mbRows[0].id), "_blank", "noopener");
+                  navigate(mbLinkTo ?? `/mb/search?q=${encodeURIComponent(query.trim())}`);
                   return;
                 }
                 const artistTo = openOnEnter();
                 if (artistTo) navigate(artistTo);
               }}
             />
-            {searchOpen && query.trim() && (source === "local" || mbRows.length > 0 || mbArtistRows.length > 0) && (
+            {searchOpen && query.trim() && (source === "local" || !!mbLinkTo || mbRows.length > 0 || mbArtistRows.length > 0) && (
               <div className="anim-fade absolute left-0 right-0 top-full mt-1 z-40 rounded-lg border border-border bg-zinc-950/95 backdrop-blur shadow-xl overflow-hidden max-h-[70vh] overflow-y-auto">
                 {source === "local" ? (
                   <>
@@ -1021,29 +1054,41 @@ export default function App() {
                   </>
                 ) : (
                   <>
-                    {/* Artists first, then releases: a name is how a user
-                        finds the act, and both kinds open on musicbrainz.org
-                        (the app has no page for a release it does not own). */}
+                    {/* A pasted entity link first (it is an identity, not a
+                        query), then artists, then releases. Every row opens
+                        the app's own page; the icon on the right is the
+                        escape hatch to musicbrainz.org. */}
+                    {mbLinkTo && mbLink && (
+                      <SearchHit
+                        key="pasted"
+                        to={mbLinkTo}
+                        icon={Music4}
+                        label={query.trim()}
+                        hint={mbLink[1].replace("-", " ")}
+                        onGo={() => setSearchOpen(false)}
+                        external={mbUrl(mbLink[1] === "release-group" ? "release-group" : mbLink[1], mbLink[2])}
+                      />
+                    )}
                     {mbArtistRows.map((a: { id: string; name: string; type?: string }) => (
                       <SearchHit
                         key={`a-${a.id}`}
-                        to={mbUrl("artist", a.id)}
+                        to={`/mb/artist/${a.id}`}
                         icon={User}
                         label={a.name}
                         hint={a.type || t("page.artist")}
                         onGo={() => setSearchOpen(false)}
-                        external
+                        external={mbUrl("artist", a.id)}
                       />
                     ))}
                     {mbRows.map((h: { id: string; title: string; artist?: string; date?: string }) => (
                       <SearchHit
                         key={`r-${h.id}`}
-                        to={mbUrl("release", h.id)}
+                        to={`/mb/release/${h.id}`}
                         icon={Disc3}
                         label={h.title || h.id}
                         hint={h.artist || h.date || ""}
                         onGo={() => setSearchOpen(false)}
-                        external
+                        external={mbUrl("release", h.id)}
                       />
                     ))}
                   </>
@@ -1084,6 +1129,15 @@ export default function App() {
             <Route path="/dependencies" element={<DependenciesPage />} />
             <Route path="/import" element={<ImportWizard />} />
             <Route path="/settings" element={<SettingsPage />} />
+            {/* MusicBrainz browser: search + the four entity pages. Reachable
+                from the sidebar, from the top bar's MusicBrainz mode, and from
+                a pasted musicbrainz.org link. */}
+            <Route path="/mb" element={<Navigate to="/mb/search" replace />} />
+            <Route path="/mb/search" element={<MBSearchPage />} />
+            <Route path="/mb/artist/:id" element={<MBArtistPage />} />
+            <Route path="/mb/rg/:id" element={<MBReleaseGroupPage />} />
+            <Route path="/mb/release/:id" element={<MBReleasePage />} />
+            <Route path="/mb/recording/:id" element={<MBRecordingPage />} />
             {/* Re-runnable: the wizard is the app's setup surface, not a
                 one-shot gate — Settings → General opens it again. Every step
                 is skippable and it only writes what is entered there. */}
