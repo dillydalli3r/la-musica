@@ -1,6 +1,6 @@
 # la musica
 
-**v3.1.1** — the release that made the library answer questions about itself.
+**v3.1.2** — the release that made the library answer questions about itself.
 Genres are two slots now — the specific genre, then its family — spelled the way
 MusicBrainz spells them, with the family derived instead of asked for. Paths
 carry the release-group id as well, so a file names its album even out of its
@@ -10,6 +10,8 @@ artist, album, track and playlist page has a local-only *More like this* shelf,
 and every client — the container included — says when it is behind. On a phone:
 44 px touch targets, no pinch-zoom, a real zoom setting, and a SideStore/AltStore
 source so the iOS build installs with its own name, icon and version attached.
+
+Lyrics can be manually submitted to LRCLIB even when the database already holds the recording: the refusal now offers a labelled **Submit anyway**, which resubmits with the override.
 
 The patch that fixed what 3.1.0 got wrong on a phone: the setup wizard's buttons ran off the screen, a wide table crushed its text one character per line instead of scrolling, the fullscreen player put its controls under the notch, and the Home card's Refresh button re-asked a cached answer. It also brings back the in-app MusicBrainz browser (sidebar + top bar), reworks genre importing, and fixes RateYourMusic release pages never resolving.
 
@@ -924,12 +926,17 @@ the saved order and the plain-lyrics policy.
   overwritten unless you ask for a re-fetch.
 - The lyrics manager's search box can query the chain without writing
   anything (`GET /api/lyrics/find`).
-- **Publishing gives back, never overwrites.** "Publish to LRCLIB" (the lyric
-  editor and the manager) asks LRCLIB first, with the same exact-then-search
-  lookup the fetch chain uses, and refuses when the database already answers
-  for that recording — the community copy is not this app's to replace. Script
-  18 applies the same rule for a whole library, with `force_publish` as the
-  one documented exception. A lookup that cannot be reached does not block the
+- **Publishing gives back, and a person can override.** "Publish to LRCLIB"
+  (the lyric editor and the manager) asks LRCLIB first, with the same
+  exact-then-search lookup the fetch chain uses, and by default refuses when the
+  database already answers for that recording — the community copy is not this
+  app's to replace on its own. The refusal is not a dead end: the panel then
+  offers **Submit anyway**, which resubmits with `force: true` on a second,
+  explicitly-labelled press (a correction to your own submission, a better
+  sync). LRCLIB's own answer is reported verbatim — "LRCLIB already has this
+  track" is the database refusing a duplicate, not a failure here. Script 18
+  applies the same default rule for a whole library, with `force_publish` as
+  its documented switch. A lookup that cannot be reached does not block the
   submission: only a *found* record does.
 
 ## Mood, energy & genre (rewritten in 3.0.0)

@@ -47,7 +47,7 @@ try:
 except ImportError:
     run_format_all = None
 
-__version__ = "3.1.1"
+__version__ = "3.1.2"
 __all__ = [
     "load_config", "save_config", "DEFAULT_CONFIG",
     "run_auto_tagging",

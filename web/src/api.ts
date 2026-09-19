@@ -1203,8 +1203,11 @@ export const api = {
       body: JSON.stringify({ path, lrc, staged }),
     }),
   // Submit lyrics to LRCLIB on behalf of a track (or with explicit fields).
-  lyricsPublish: (body: { path?: string; artist?: string; track?: string; album?: string; duration?: number; plain?: string; synced?: string }) =>
-    json<{ ok: boolean; message: string }>(`${API}/lyrics/publish`, {
+  /** Submit lyrics to LRCLIB. `force` overrides the "the database already has
+   *  this recording" rule — the editor sends it only on an explicitly-confirmed
+   *  second press, and the reply carries `exists` so the UI can offer that. */
+  lyricsPublish: (body: { path?: string; artist?: string; track?: string; album?: string; duration?: number; plain?: string; synced?: string; force?: boolean }) =>
+    json<{ ok: boolean; message: string; exists?: boolean; forced?: boolean }>(`${API}/lyrics/publish`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),

@@ -3078,6 +3078,10 @@ class LyricsPublishRequest(BaseModel):
     duration: Optional[int] = None
     plain: str = ""
     synced: str = ""
+    # The community-copy rule is the DEFAULT, not a wall: a person submitting
+    # their OWN lyrics (a correction, a better sync, a track they recorded)
+    # must be able to say so. Set on the second, explicitly-confirmed press.
+    force: bool = False
 
 
 @app.post("/api/lyrics/publish")
@@ -3087,10 +3091,14 @@ async def lyrics_publish(req: LyricsPublishRequest):
     The editor sends the exact text it shows; plain vs synced is detected
     from [mm:ss.xx] timestamps so pasting either form just works.
 
-    A recording LRCLIB already answers for is NEVER submitted: that copy is
-    the community's, and this app only gives the database what it is missing
-    (the same rule script 18 enforces, checked with the same exact-then-search
-    match script 18 uses, through the app's own LRCLIB client)."""
+    A recording LRCLIB already answers for is not submitted by default: that
+    copy is the community's, and this app only gives the database what it is
+    missing (the same rule script 18 enforces, checked with the same
+    exact-then-search match script 18 uses, through the app's own LRCLIB
+    client). `force: true` is the manual override — the editor offers it on a
+    second, explicitly-confirmed press — and then the submission is made and
+    LRCLIB's own answer is reported verbatim: "LRCLIB already has this track"
+    is the database refusing a duplicate, not a failure of this app."""
     from server.integrations import lrclib_get, lrclib_publish
 
     artist, track, album = req.artist.strip(), req.track.strip(), req.album.strip()
@@ -3115,7 +3123,7 @@ async def lyrics_publish(req: LyricsPublishRequest):
             # An unreachable lookup is not an answer: let the submission
             # itself be the thing that reports the network failure.
             existing = None
-        if existing:
+        if existing and not req.force:
             return {"ok": False, "exists": True,
                     "message": "LRCLIB already has lyrics for this track — "
                                "nothing was published"}
@@ -3131,7 +3139,10 @@ async def lyrics_publish(req: LyricsPublishRequest):
                 synced = stored
     ok, msg = await asyncio.to_thread(
         lrclib_publish, artist, track, album, duration, plain, synced)
-    return {"ok": ok, "message": msg}
+    # `forced` says the caller overrode the community-copy rule, so the UI can
+    # keep the difference between "submitted" and "submitted against an
+    # existing entry" visible after the fact.
+    return {"ok": ok, "message": msg, "forced": bool(req.force)}
 
 
 @app.get("/api/rym/validate")

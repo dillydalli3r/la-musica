@@ -44,6 +44,11 @@ export default function LrclibPublishPanel({
   const [dur, setDur] = useState(String(Math.round(duration ?? 0) || ""));
   const [busy, setBusy] = useState(false);
   const [arm, setArm] = useState(false);
+  /** The server's "the database already has this recording" answer, kept so the
+   *  panel can offer the override instead of dead-ending. Publishing is public
+   *  and outward-facing, so the override is a separate, explicitly-labelled
+   *  press — never something one click does by accident. */
+  const [exists, setExists] = useState(false);
 
   const trimmed = text.trim();
   const synced = /\[\d{1,2}:\d{1,2}/.test(trimmed);
@@ -57,13 +62,17 @@ export default function LrclibPublishPanel({
     );
   }
 
-  const publish = async () => {
+  const publish = async (force = false) => {
     if (!a.trim() || !t.trim()) {
       toast("Artist and track name are required to publish");
       return;
     }
-    if (!arm) {
+    // Two steps for a first publish; the override button IS the second step
+    // for a force-submit (it appears only after a refusal and says what it
+    // does), so it must not silently become a three-click act.
+    if (!arm && !force) {
       setArm(true);
+      setExists(false);
       setTimeout(() => setArm(false), 4000);
       return;
     }
@@ -76,11 +85,15 @@ export default function LrclibPublishPanel({
         duration: Number(dur) || undefined,
         synced: synced ? trimmed : undefined,
         plain: synced ? toPlain(trimmed) : trimmed,
+        force: force || undefined,
       });
       toast(r.message ?? (r.ok ? "Published to LRCLIB" : "Publish failed"));
       if (r.ok) {
         setArm(false);
+        setExists(false);
         onDone?.();
+      } else if (r.exists) {
+        setExists(true);
       }
     } catch (e) {
       toast.error(String(e));
@@ -118,7 +131,7 @@ export default function LrclibPublishPanel({
         <button
           className={`btn-primary !py-1 text-xs ${arm ? "!bg-red-600" : ""}`}
           disabled={busy}
-          onClick={publish}
+          onClick={() => publish(false)}
           title={synced ? "Publishes the synced (timestamped) lyrics" : "Publishes as plain (untimed) lyrics"}
         >
           {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
@@ -128,6 +141,27 @@ export default function LrclibPublishPanel({
           {lines} line{lines === 1 ? "" : "s"} · {synced ? "synced" : "plain"} · goes live publicly on lrclib.net
         </span>
       </div>
+      {exists && (
+        /* LRCLIB already answers for this recording. The app does not replace
+           a community copy on its own, but a person correcting their own
+           submission must be able to — so the override is offered, labelled
+           with what it does, and sent only from here. */
+        <div className="rounded-md border border-amber-900/50 bg-amber-950/20 px-2 py-1.5 space-y-1">
+          <div className="text-[11px] text-amber-200/90">
+            LRCLIB already holds lyrics for this recording. Submitting anyway adds
+            or replaces the entry for it.
+          </div>
+          <button
+            className="btn-ghost !py-1 text-xs"
+            disabled={busy}
+            onClick={() => publish(true)}
+            title="Submit despite the existing LRCLIB entry"
+          >
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+            Submit anyway
+          </button>
+        </div>
+      )}
     </div>
   );
 }
