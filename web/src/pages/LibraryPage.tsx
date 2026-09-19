@@ -162,6 +162,35 @@ const TRACK_COLS: Col[] = [
   { id: "remixer", label: "Remixer", sortKey: "tags.REMIXER", defHidden: true },
 ];
 
+/** A phone (390 px) table keeps the row's own name and drops the numbers: at
+ *  that width a row that keeps them squeezes the name to nothing, and the
+ *  table's own scroll wrapper cannot give it back.
+ *
+ *  The class has to sit on the header AND on the cells, or the fixed-layout
+ *  grid misaligns; `md` is where each column comes back. */
+const PHONE_HIDE = " hidden md:table-cell";
+const ALBUM_PHONE_CLS: Record<string, string> = {
+  artist: PHONE_HIDE, year: PHONE_HIDE, tracks: PHONE_HIDE, grade: PHONE_HIDE,
+  media: PHONE_HIDE, dr: PHONE_HIDE, source: PHONE_HIDE, videos: PHONE_HIDE,
+  inst: PHONE_HIDE,
+};
+/** The artist table keeps its grade badge and drops the aggregate counters. */
+const ARTIST_PHONE_CLS: Record<string, string> = {
+  albums: PHONE_HIDE, tracks: PHONE_HIDE, checks: PHONE_HIDE,
+};
+/** Both track tables (the Tracks view and every album tracklist): the cover,
+ *  the title and the length stay, the tag columns fold. */
+const TRACK_PHONE_CLS: Record<string, string> = {
+  num: PHONE_HIDE, artist: PHONE_HIDE, album: PHONE_HIDE, year: PHONE_HIDE,
+  genre: PHONE_HIDE, media: PHONE_HIDE, duration: PHONE_HIDE, bitrate: PHONE_HIDE,
+  dr: PHONE_HIDE, source: PHONE_HIDE, type: PHONE_HIDE, inst: PHONE_HIDE,
+  composer: PHONE_HIDE, lyricist: PHONE_HIDE, remixer: PHONE_HIDE,
+};
+/** Tag columns the user added fold with the built-ins they sit beside. */
+function phoneHide(cls: Record<string, string>, id: string): string {
+  return cls[id] ?? (id.startsWith("tag:") ? PHONE_HIDE : "");
+}
+
 interface FlatAlbum extends Album {
   artist: string;
   video_count: number;
@@ -675,12 +704,16 @@ export default function LibraryPage() {
           window is narrow): view tabs, sort, grid size, group-by, columns,
           quick filter — then stats/select and the counts on the right. */}
       <div className="flex items-center gap-2 flex-wrap">
-        <Segmented value={view} onChange={setView} options={VIEW_TABS} />
+        {/* Five view tabs are wider than a phone: they wrap inside their own
+            box. `max-w-full` resolves against the toolbar (a block-level flex
+            container, so it does bound them); min-h-[2rem] keeps a 32 px target. */}
+        <Segmented value={view} onChange={setView} options={VIEW_TABS}
+          className="max-w-full flex-wrap [&>button]:min-h-[2rem]" />
 
         {(view === "albums" || view === "compact" || view === "grid") && (
           <div className="relative">
             <button
-              className={`btn-ghost !py-1.5 text-xs ${sortOpen ? "!text-white !bg-raise" : ""}`}
+              className={`btn-ghost !py-1.5 text-xs min-h-[2rem] md:min-h-0 ${sortOpen ? "!text-white !bg-raise" : ""}`}
               onClick={() => setSortOpen(!sortOpen)}
               title="Sort albums"
             >
@@ -730,7 +763,7 @@ export default function LibraryPage() {
 
         {(view === "albums" || view === "grid") && (
           <button
-            className={`btn-ghost !py-1.5 text-xs ${groupByArtist ? "!text-accent !border-accent/50" : ""}`}
+            className={`btn-ghost !py-1.5 text-xs min-h-[2rem] md:min-h-0 ${groupByArtist ? "!text-accent !border-accent/50" : ""}`}
             onClick={() => setGroupByArtist(!groupByArtist)}
             title="Group albums under artist headers"
           >
@@ -762,7 +795,7 @@ export default function LibraryPage() {
         {/* quick filter lives on the same line as the view options */}
         <div className="relative">
           <button
-            className={`btn-ghost !py-1.5 text-xs ${filterOpen ? "!text-white !bg-raise" : ""}`}
+            className={`btn-ghost !py-1.5 text-xs min-h-[2rem] md:min-h-0 ${filterOpen ? "!text-white !bg-raise" : ""}`}
             onClick={() => setFilterOpen(!filterOpen)}
             title="Filter the library"
           >
@@ -796,14 +829,14 @@ export default function LibraryPage() {
 
         <div className="ml-auto flex items-center gap-2">
           <button
-            className="btn-ghost !py-1.5 text-xs"
+            className="btn-ghost !py-1.5 text-xs min-h-[2rem] md:min-h-0"
             onClick={() => setStatsOpen(true)}
             title={selectionCount ? "Statistics for the current selection" : "Library-wide statistics"}
           >
             <BarChart3 className="h-3.5 w-3.5" /> Stats
           </button>
           <button
-            className={`btn-ghost !py-1.5 text-xs ${selectMode ? "!text-accent !border-accent/50" : ""}`}
+            className={`btn-ghost !py-1.5 text-xs min-h-[2rem] md:min-h-0 ${selectMode ? "!text-accent !border-accent/50" : ""}`}
             onClick={toggleSelectMode}
             title="Select mode — show checkboxes for batch actions"
           >
@@ -824,15 +857,15 @@ export default function LibraryPage() {
             {selection.albums.length} album{selection.albums.length === 1 ? "" : "s"} · {selection.artists.length} artist{selection.artists.length === 1 ? "" : "s"} · {selection.tracks.length} track{selection.tracks.length === 1 ? "" : "s"} · {selTracks.size} total tracks
           </span>
           <div className="ml-auto flex gap-1.5 flex-wrap">
-            <button className="btn-primary !py-1 text-xs" onClick={playSelection}>
+            <button className="btn-primary !py-1 text-xs min-h-[2rem] md:min-h-0" onClick={playSelection}>
               <Play className="h-3.5 w-3.5" /> Play
             </button>
-            <button className="btn-ghost !py-1 text-xs" onClick={() => addToPlaylist([...selTracks])}>
+            <button className="btn-ghost !py-1 text-xs min-h-[2rem] md:min-h-0" onClick={() => addToPlaylist([...selTracks])}>
               <ListPlus className="h-3.5 w-3.5" /> Playlist
             </button>
             {(selection.albums.length > 0 || selection.artists.length > 0) && (
               <button
-                className="btn-danger !py-1 text-xs"
+                className="btn-danger !py-1 text-xs min-h-[2rem] md:min-h-0"
                 onClick={() => removeAlbums(selectionAlbumDirs)}
                 disabled={busy || removing === "batch" || !selectionAlbumDirs.length}
                 title="Move selected albums to trash"
@@ -842,7 +875,7 @@ export default function LibraryPage() {
             )}
             <ScriptsDropdown onRun={runScriptsOnSelection} runAllIds={runAllIds} />
             <button
-              className="btn-ghost !py-1 text-xs"
+              className="btn-ghost !py-1 text-xs min-h-[2rem] md:min-h-0"
               onClick={downloadLyricsSelection}
               disabled={lyricsBusy}
               title="Auto-import missing lyrics for the selection through the provider chain (skips instrumentals)"
@@ -850,7 +883,7 @@ export default function LibraryPage() {
               <CloudDownload className="h-3.5 w-3.5" /> {lyricsBusy ? "Fetching…" : "Lyrics"}
             </button>
             <button
-              className="btn-ghost !py-1 text-xs"
+              className="btn-ghost !py-1 text-xs min-h-[2rem] md:min-h-0"
               onClick={() => setBulkTagsOpen(true)}
               disabled={!selTracks.size}
               title="Bulk remove or set tags on the selected tracks"
@@ -858,14 +891,14 @@ export default function LibraryPage() {
               <Tag className="h-3.5 w-3.5" /> Tags
             </button>
             <button
-              className="btn-ghost !py-1 text-xs"
+              className="btn-ghost !py-1 text-xs min-h-[2rem] md:min-h-0"
               onClick={organizeSelection}
               disabled={busy || removing === "batch" || !selectionAlbumDirs.length}
               title="Apply the naming script from Settings"
             >
               <FolderSync className="h-3.5 w-3.5" /> {busy ? "Organizing…" : "Organize"}
             </button>
-            <button className="btn-ghost !py-1 text-xs" onClick={clearSelection}>
+            <button className="btn-ghost !py-1 text-xs min-h-[2rem] md:min-h-0" onClick={clearSelection}>
               Clear
             </button>
           </div>
@@ -1008,7 +1041,7 @@ export default function LibraryPage() {
                   <span className="text-[10px] text-zinc-600 shrink-0 w-8 text-right">{al.track_count}t</span>
                   <div className="opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 flex gap-1 shrink-0 transition-opacity" onClick={(e) => e.stopPropagation()}>
                     <button
-                      className="btn-ghost !px-1.5 !py-0.5"
+                      className="btn-ghost !px-1.5 !py-0.5 min-h-[2rem] md:min-h-0"
                       title={isExp ? "Collapse" : "Show tracks"}
                       onClick={() => toggleExpand(al.path)}
                     >
@@ -1100,7 +1133,7 @@ export default function LibraryPage() {
                   <th className="th w-14"></th>
                   {albumDefs.filter((c) => albumCols.includes(c.id)).map((c) => (
                     <SortHeader key={c.id} label={c.label} sort={albumSort} sortKey={c.sortKey} onSort={setAlbumSort}
-                      className={`relative ${ALBUM_COL_W[c.id] ?? (c.tag ? "w-[10%]" : "")}`}
+                      className={`relative ${ALBUM_COL_W[c.id] ?? (c.tag ? "w-[10%]" : "")}${phoneHide(ALBUM_PHONE_CLS, c.id)}`}
                       style={albumW[c.id] ? { width: albumW[c.id] } : undefined} >
                       <ColumnResizer width={albumW[c.id]} onDrag={(w) => setAlbumW(c.id, w)} onReset={() => resetAlbumW()} />
                     </SortHeader>
@@ -1165,7 +1198,7 @@ export default function LibraryPage() {
                   <th className="th">Artist</th>
                   {ARTIST_COLS.filter((c) => artistCols.includes(c.id)).map((c) => (
                     <SortHeader key={c.id} label={c.label} sort={artistSort} sortKey={c.sortKey} onSort={setArtistSort}
-                      className={`relative ${ARTIST_COL_W[c.id] ?? "w-[14%]"}`}
+                      className={`relative ${ARTIST_COL_W[c.id] ?? "w-[14%]"}${phoneHide(ARTIST_PHONE_CLS, c.id)}`}
                       style={artistW[c.id] ? { width: artistW[c.id] } : undefined}>
                       <ColumnResizer width={artistW[c.id]} onDrag={(w) => setArtistW(c.id, w)} onReset={() => resetArtistW()} />
                     </SortHeader>
@@ -1187,10 +1220,14 @@ export default function LibraryPage() {
                           {a.name}
                         </Link>
                       </td>
-                      {artistCols.includes("albums") && <td className="td text-zinc-500">{a.aggregate.album_count}</td>}
-                      {artistCols.includes("tracks") && <td className="td text-zinc-500">{a.aggregate.track_count}</td>}
+                      {artistCols.includes("albums") && (
+                        <td className={`td text-zinc-500${phoneHide(ARTIST_PHONE_CLS, "albums")}`}>{a.aggregate.album_count}</td>
+                      )}
+                      {artistCols.includes("tracks") && (
+                        <td className={`td text-zinc-500${phoneHide(ARTIST_PHONE_CLS, "tracks")}`}>{a.aggregate.track_count}</td>
+                      )}
                       {artistCols.includes("checks") && (
-                        <td className="td text-zinc-500">{a.aggregate.pass_count}/{a.aggregate.total_checks}</td>
+                        <td className={`td text-zinc-500${phoneHide(ARTIST_PHONE_CLS, "checks")}`}>{a.aggregate.pass_count}/{a.aggregate.total_checks}</td>
                       )}
                       {artistCols.includes("grade") && (
                         <td className="td"><GradeBadge pass={(a.aggregate.grade_pct ?? 0) >= 100 && !auditFails(a.aggregate.audit_summary)} score={a.aggregate.grade_pct} audit={a.aggregate.audit_summary} /></td>
@@ -1224,7 +1261,7 @@ export default function LibraryPage() {
                       </th>
                     ) : (
                     <SortHeader key={c.id} label={c.label} sort={trackSort} sortKey={c.sortKey} onSort={setTrackSort}
-                      className={`relative ${TRACK_COL_W[c.id] ?? (c.tag ? "w-[10%]" : "")}`}
+                      className={`relative ${TRACK_COL_W[c.id] ?? (c.tag ? "w-[10%]" : "")}${phoneHide(TRACK_PHONE_CLS, c.id)}`}
                       style={trackW[c.id] ? { width: trackW[c.id] } : undefined}>
                       <ColumnResizer width={trackW[c.id]} onDrag={(w) => setTrackW(c.id, w)} onReset={() => resetTrackW()} />
                     </SortHeader>
@@ -1252,7 +1289,7 @@ export default function LibraryPage() {
                           <input type="checkbox" className="" checked={sel} onChange={() => toggleTrack(tr.path)} />
                         </td>
                       )}
-                      {trackCols.includes("num") && <td className="td cell-nowrap text-zinc-600">{tr.tracknumber ?? tr.tags.TRACKNUMBER ?? "—"}</td>}
+                      {trackCols.includes("num") && <td className={`td cell-nowrap text-zinc-600${phoneHide(TRACK_PHONE_CLS, "num")}`}>{tr.tracknumber ?? tr.tags.TRACKNUMBER ?? "—"}</td>}
                       {trackCols.includes("cover") && (
                         <td className="td cell-cover pr-0">
                           <TrackCover
@@ -1309,38 +1346,38 @@ export default function LibraryPage() {
                           </div>
                         </td>
                       )}
-                      {trackCols.includes("artist") && <td className="td text-zinc-400 break-words">{tr.artist}</td>}
-                      {trackCols.includes("album") && <td className="td text-zinc-500 break-words">{tr.album}</td>}
-                      {trackCols.includes("year") && <td className="td text-zinc-500" title={tr.tags.DATE ?? undefined}>{fmtDateCell(tr.tags.DATE, fullDates)}</td>}
-                      {trackCols.includes("genre") && <td className="td text-zinc-500 break-words">{tr.tags.GENRE ?? "—"}</td>}
-                      {trackCols.includes("media") && <td className="td"><MediaChip media={tr.tags.MEDIA} /></td>}
-                      {trackCols.includes("duration") && <td className="td text-zinc-500">{fmtDuration(tr.tech.length)}</td>}
-                      {trackCols.includes("bitrate") && <td className="td text-zinc-500">{fmtTech(tr.tech) || "—"}</td>}
+                      {trackCols.includes("artist") && <td className={`td text-zinc-400 break-words${phoneHide(TRACK_PHONE_CLS, "artist")}`}>{tr.artist}</td>}
+                      {trackCols.includes("album") && <td className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, "album")}`}>{tr.album}</td>}
+                      {trackCols.includes("year") && <td className={`td text-zinc-500${phoneHide(TRACK_PHONE_CLS, "year")}`} title={tr.tags.DATE ?? undefined}>{fmtDateCell(tr.tags.DATE, fullDates)}</td>}
+                      {trackCols.includes("genre") && <td className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, "genre")}`}>{tr.tags.GENRE ?? "—"}</td>}
+                      {trackCols.includes("media") && <td className={`td${phoneHide(TRACK_PHONE_CLS, "media")}`}><MediaChip media={tr.tags.MEDIA} /></td>}
+                      {trackCols.includes("duration") && <td className={`td text-zinc-500${phoneHide(TRACK_PHONE_CLS, "duration")}`}>{fmtDuration(tr.tech.length)}</td>}
+                      {trackCols.includes("bitrate") && <td className={`td text-zinc-500${phoneHide(TRACK_PHONE_CLS, "bitrate")}`}>{fmtTech(tr.tech) || "—"}</td>}
                       {trackCols.includes("dr") && (
-                        <td className="td text-zinc-500 tabular-nums" title={`Dynamic range${tr.tags["ALBUM DYNAMIC RANGE"] ? ` · album ${tr.tags["ALBUM DYNAMIC RANGE"]}` : ""}`}>
+                        <td className={`td text-zinc-500 tabular-nums${phoneHide(TRACK_PHONE_CLS, "dr")}`} title={`Dynamic range${tr.tags["ALBUM DYNAMIC RANGE"] ? ` · album ${tr.tags["ALBUM DYNAMIC RANGE"]}` : ""}`}>
                           {tr.tags["DYNAMIC RANGE"] ?? "—"}
                         </td>
                       )}
-                      {trackCols.includes("source") && <td className="td text-zinc-500 break-words">{tr.tags.SOURCE ?? "—"}</td>}
+                      {trackCols.includes("source") && <td className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, "source")}`}>{tr.tags.SOURCE ?? "—"}</td>}
                       {trackCols.includes("type") && (
-                        <td className="td text-zinc-500" title={tr.is_video ? "Music video" : "Audio track"}>
+                        <td className={`td text-zinc-500${phoneHide(TRACK_PHONE_CLS, "type")}`} title={tr.is_video ? "Music video" : "Audio track"}>
                           {tr.is_video ? (
                             <span className="inline-flex items-center gap-1"><FileVideo className="h-3.5 w-3.5" /> Video</span>
                           ) : "Audio"}
                         </td>
                       )}
                       {trackCols.includes("inst") && (
-                        <td className="td">
+                        <td className={`td${phoneHide(TRACK_PHONE_CLS, "inst")}`}>
                           {tr.tags.INSTRUMENTAL === "1"
                             ? <span className="chip bg-zinc-800 text-zinc-400 border border-border text-[10px]">INST</span>
                             : <span className="text-zinc-600">—</span>}
                         </td>
                       )}
-                      {trackCols.includes("composer") && <td className="td text-zinc-500 break-words" title="Composer">{tr.tags.COMPOSER ?? "—"}</td>}
-                      {trackCols.includes("lyricist") && <td className="td text-zinc-500 break-words" title="Lyricist">{tr.tags.LYRICIST ?? "—"}</td>}
-                      {trackCols.includes("remixer") && <td className="td text-zinc-500 break-words" title="Remixer">{tr.tags.REMIXER ?? "—"}</td>}
+                      {trackCols.includes("composer") && <td className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, "composer")}`} title="Composer">{tr.tags.COMPOSER ?? "—"}</td>}
+                      {trackCols.includes("lyricist") && <td className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, "lyricist")}`} title="Lyricist">{tr.tags.LYRICIST ?? "—"}</td>}
+                      {trackCols.includes("remixer") && <td className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, "remixer")}`} title="Remixer">{tr.tags.REMIXER ?? "—"}</td>}
                       {trackCustom.filter((c) => trackCols.includes(c.id)).map((c) => (
-                        <td key={c.id} className="td text-zinc-500 break-words" title={`Tag: ${c.tag}`}>
+                        <td key={c.id} className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, c.id)}`} title={`Tag: ${c.tag}`}>
                           {customColValue(tr, c.tag) || "—"}
                         </td>
                       ))}
@@ -1412,43 +1449,48 @@ function AlbumRowGroup({
   const showAlbumCol = visibleCols.includes("album");
   const cells: AlbumRowCell[] = [];
   if (visibleCols.includes("artist"))
-    cells.push({ id: "artist", cls: "td text-zinc-400 break-words", node: album.artist });
+    cells.push({ id: "artist", cls: `td text-zinc-400 break-words${phoneHide(ALBUM_PHONE_CLS, "artist")}`, node: album.artist });
   if (visibleCols.includes("year"))
     cells.push({
-      id: "year", cls: "td text-zinc-500",
+      id: "year", cls: `td text-zinc-500${phoneHide(ALBUM_PHONE_CLS, "year")}`,
       title: album.meta?.ORIGINALDATE ?? album.meta?.DATE ?? undefined,
       node: fmtDateCell(album.meta?.ORIGINALDATE || album.meta?.DATE, fullDates),
     });
   if (visibleCols.includes("tracks"))
-    cells.push({ id: "tracks", cls: "td text-zinc-500", node: album.track_count });
+    cells.push({ id: "tracks", cls: `td text-zinc-500${phoneHide(ALBUM_PHONE_CLS, "tracks")}`, node: album.track_count });
   if (visibleCols.includes("grade"))
     cells.push({
       id: "grade",
+      cls: `td${phoneHide(ALBUM_PHONE_CLS, "grade")}`,
       node: <GradeBadge pass={!!album.pass && !auditFails(album.audit_summary)} score={album.grade_pct} audit={album.audit_summary} />,
     });
-  if (visibleCols.includes("media")) cells.push({ id: "media", node: <MediaChip media={album.media} /> });
+  if (visibleCols.includes("media"))
+    cells.push({
+      id: "media", cls: `td${phoneHide(ALBUM_PHONE_CLS, "media")}`,
+      node: <MediaChip media={album.media} />,
+    });
   if (visibleCols.includes("dr"))
     cells.push({
-      id: "dr", cls: "td text-zinc-500 tabular-nums", title: "Album dynamic range",
+      id: "dr", cls: `td text-zinc-500 tabular-nums${phoneHide(ALBUM_PHONE_CLS, "dr")}`, title: "Album dynamic range",
       node: album.meta?.["ALBUM DYNAMIC RANGE"] ?? "—",
     });
   if (visibleCols.includes("source"))
-    cells.push({ id: "source", cls: "td text-zinc-500 break-words", node: album.source_summary ?? "—" });
+    cells.push({ id: "source", cls: `td text-zinc-500 break-words${phoneHide(ALBUM_PHONE_CLS, "source")}`, node: album.source_summary ?? "—" });
   if (visibleCols.includes("videos"))
     cells.push({
-      id: "videos", cls: "td text-zinc-500 tabular-nums", title: "Music videos in this album",
+      id: "videos", cls: `td text-zinc-500 tabular-nums${phoneHide(ALBUM_PHONE_CLS, "videos")}`, title: "Music videos in this album",
       node: album.video_count || "—",
     });
   if (visibleCols.includes("inst"))
     cells.push({
-      id: "inst", cls: "td text-zinc-500 tabular-nums", title: "Instrumental tracks in this album",
+      id: "inst", cls: `td text-zinc-500 tabular-nums${phoneHide(ALBUM_PHONE_CLS, "inst")}`, title: "Instrumental tracks in this album",
       node: album.inst_count || "—",
     });
   // Tag columns last — the header renders them in this same order.
   for (const c of tagCols) {
     if (!visibleCols.includes(c.id)) continue;
     cells.push({
-      id: c.id, cls: "td text-zinc-500 break-words", title: `Tag: ${c.tag}`,
+      id: c.id, cls: `td text-zinc-500 break-words${phoneHide(ALBUM_PHONE_CLS, c.id)}`, title: `Tag: ${c.tag}`,
       node: customColValue({ tags: album.meta }, c.tag) || "—",
     });
   }
@@ -1467,10 +1509,12 @@ function AlbumRowGroup({
         cells={cells}
         actions={
           <>
-            <button className="btn-ghost !px-1.5 !py-1" title="Add to playlist" onClick={onPlaylist}>
+            {/* Row actions are always visible on touch, so they carry a 32 px
+                tap target on a phone and the library's compact size from `md`. */}
+            <button className="btn-ghost !px-1.5 !py-2 md:!py-1" title="Add to playlist" onClick={onPlaylist}>
               <ListPlus className="h-3.5 w-3.5" />
             </button>
-            <button className="btn-danger !px-1.5 !py-1" title="Remove album (to trash)" disabled={removing} onClick={onRemove}>
+            <button className="btn-danger !px-1.5 !py-2 md:!py-1" title="Remove album (to trash)" disabled={removing} onClick={onRemove}>
               <Trash2 className="h-3.5 w-3.5" />
             </button>
           </>
@@ -1484,17 +1528,20 @@ function AlbumRowGroup({
         onToggle={onToggle}
         colSpan={colSpan}
         expandedContent={
+          /* Its own scroll wrapper: this nested table is what overflows first
+             on a phone, and the outer wrapper cannot scroll for it. */
+          <div className="overflow-x-auto">
             <table className="w-full">
               <thead className="border-b border-border">
                 <tr>
                   {selectMode && <th className="th w-8"></th>}
                   {[...ALBUM_TRACK_COLS, ...customCols(trackCustom, "tags")].filter((c) => trackCols.includes(c.id)).map((c) =>
                     c.id === "cover" ? (
-                      <th key={c.id} className={`th relative ${ALBUM_TRACK_COL_W[c.id] ?? ""}`} title="Cover art">
+                      <th key={c.id} className={`th relative ${ALBUM_TRACK_COL_W[c.id] ?? ""}${phoneHide(TRACK_PHONE_CLS, c.id)}`} title="Cover art">
                         <span className="sr-only">Cover</span>
                       </th>
                     ) : (
-                      <th key={c.id} className={`th relative ${ALBUM_TRACK_COL_W[c.id] ?? ""}`} style={trackWidths[c.id] ? { width: trackWidths[c.id] } : undefined}>
+                      <th key={c.id} className={`th relative ${ALBUM_TRACK_COL_W[c.id] ?? ""}${phoneHide(TRACK_PHONE_CLS, c.id)}`} style={trackWidths[c.id] ? { width: trackWidths[c.id] } : undefined}>
                         {c.label}
                         <ColumnResizer width={trackWidths[c.id]} onDrag={(w) => onTrackWidth(c.id, w)} onReset={onResetTrackWidths} />
                       </th>
@@ -1529,7 +1576,7 @@ function AlbumRowGroup({
                             </td>
                           )}
                           {trackCols.includes("num") && (
-                            <td className="td text-zinc-600 tabular-nums cell-nowrap">
+                            <td className={`td text-zinc-600 tabular-nums cell-nowrap${phoneHide(TRACK_PHONE_CLS, "num")}`}>
                               {groups.length > 1 ? `${g.disc}-${t.tracknumber ?? t.tags.TRACKNUMBER ?? "?"}` : t.tracknumber ?? t.tags.TRACKNUMBER ?? "—"}
                             </td>
                           )}
@@ -1588,13 +1635,13 @@ function AlbumRowGroup({
                               </div>
                             </td>
                           )}
-                          {trackCols.includes("genre") && <td className="td text-zinc-500 break-words">{t.tags.GENRE ?? "—"}</td>}
+                          {trackCols.includes("genre") && <td className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, "genre")}`}>{t.tags.GENRE ?? "—"}</td>}
                           {trackCols.includes("dur") && <td className="td text-zinc-500">{fmtDuration(t.tech.length)}</td>}
                           {trackCols.includes("bitrate") && (
-                            <td className="td text-zinc-500">{fmtTech(t.tech) || "—"}</td>
+                            <td className={`td text-zinc-500${phoneHide(TRACK_PHONE_CLS, "bitrate")}`}>{fmtTech(t.tech) || "—"}</td>
                           )}
                           {trackCols.includes("dr") && (
-                            <td className="td text-zinc-500 tabular-nums" title={`Dynamic range${t.tags["ALBUM DYNAMIC RANGE"] ? ` · album ${t.tags["ALBUM DYNAMIC RANGE"]}` : ""}`}>
+                            <td className={`td text-zinc-500 tabular-nums${phoneHide(TRACK_PHONE_CLS, "dr")}`} title={`Dynamic range${t.tags["ALBUM DYNAMIC RANGE"] ? ` · album ${t.tags["ALBUM DYNAMIC RANGE"]}` : ""}`}>
                               {t.tags["DYNAMIC RANGE"] ?? "—"}
                             </td>
                           )}
@@ -1602,7 +1649,7 @@ function AlbumRowGroup({
                               built-ins (same order as their headers) */}
                           {trackCustom.map((c) =>
                             trackCols.includes(c.id) ? (
-                              <td key={c.id} className="td text-zinc-500 break-words" title={c.label}>
+                              <td key={c.id} className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, c.id)}`} title={c.label}>
                                 {customColValue(t, c.tag) || "—"}
                               </td>
                             ) : null
@@ -1614,6 +1661,7 @@ function AlbumRowGroup({
                 })()}
               </tbody>
             </table>
+          </div>
         }
       />
     </>
@@ -1629,7 +1677,7 @@ function ScriptsDropdown({ onRun, runAllIds }: { onRun: (ids: number[], force?: 
   ];
   return (
     <div className="relative">
-      <button className="btn-ghost !py-1 text-xs" onClick={() => setOpen(!open)}>
+      <button className="btn-ghost !py-1 text-xs min-h-[2rem] md:min-h-0" onClick={() => setOpen(!open)}>
         <Wand2 className="h-3.5 w-3.5" /> Scripts
       </button>
       {open && (

@@ -25,9 +25,17 @@ machines.
 - **Five client targets** (new in 3.0.0) — the same library from the browser,
   a Windows/macOS/Linux window or an Android/iOS app. The Tauri v2 shell in
   `desktop/` builds desktop bundles that **spawn and own** the Python backend,
-  and mobile builds that are pure clients: a phone app takes the server's
-  address on the sign-in screen instead of starting a server it could not run.
-  See *Client apps*.
+  and mobile builds that are pure clients: the shells ask for the server's
+  address in their own first-run wizard instead of starting a server they could
+  not run, and a shell whose server does not answer lands on the sign-in screen
+  with that address field rather than rendering a shell full of errors. See
+  *Client apps*.
+- **The clients keep working with the server down** (new in 3.0.0) — the JSON
+  the app reads is kept on the device (GETs only, 512 KiB per entry, 3 MiB
+  total), an **Offline** pill says when a stored answer is being shown, and
+  downloaded tracks, videos and lyrics previews play in the desktop and phone
+  builds too, where there is no service worker to serve them. Writes, Soulseek
+  and imports still need the server. See *Offline*.
 - **A login gate, because the server is no longer loopback-only** (new in
   3.0.0) — one password, PBKDF2-HMAC-SHA256, sessions whose SHA-256 alone
   touches the disk (`<music>/.mlo/data/auth.db`), and an `auth_mode: auto`
@@ -1412,7 +1420,9 @@ identity, transcodes included, so a second run only adds what is missing.
 cache*: the tracks this browser can play with the server down, laid out as the
 library's album table (album rows with covers, expandable tracklists, the same
 Columns menu and drag-resizable widths), with play and "remove from cache" per
-track plus a two-step *Clear all*. It renders the very same panel the Soulseek
+track plus a two-step *Clear all*. (The JSON half of "offline" — the pages
+themselves, and the shells' `blob:` playback — is the *Offline* subsection
+below.) It renders the very same panel the Soulseek
 page shows as its **Cached tracks** tab, so the two can never disagree, and the
 total size comes from the same cache the player reads.
 
@@ -1433,6 +1443,8 @@ the title rows immediately.
 Saving a file to disk is *Export*'s job and the staging folder is Soulseek's —
 neither is this page.
 
+### Offline (new in 3.0.0)
+
 **The app itself works offline.** The service worker precaches the built shell
 — the document plus every bundle, with the lazy route chunks listed by the
 build (`web/dist/precache.json`, emitted by a tiny Vite plugin) because
@@ -1444,6 +1456,57 @@ the description, the credits and the cover references live) and removes them
 when the last cached track of that entity goes. Measured with the backend
 stopped: the sidebar, the Downloads page and a downloaded album page all
 render, and playback of a cached FLAC advances normally.
+
+A second, smaller cache covers the clients that have **no service worker at
+all** (both shells — nothing registers a worker under `tauri://localhost`) and
+every JSON page the worker's list above does not name:
+
+- **What it keeps.** Only **GETs** — a write's reply describes a change, not a
+  state that can be re-read — which is one rule in one function
+  (`cacheable()` in `web/src/api.ts`, the single path every request goes
+  through). **512 KiB per entry, 3 MiB total**, oldest-first eviction, and a
+  payload wider than 4 000 rows is skipped *before* it is serialized. Keys are
+  path + query with the **origin dropped**, so the web app's relative URLs and
+  a shell's absolute ones name the same entry, and pointing the client at
+  another server clears the whole store (the old server's library would be the
+  wrong answer).
+- **What it never keeps.** `/api/config` (API keys and the Soulseek password
+  sit in it in clear) and `/api/auth/*` (an auth status answered from disk
+  would show a signed-in app to nobody, or a signed-out one to somebody with a
+  live session); the byte streams `/api/stream`, `/api/videos/stream`,
+  `/api/videos/thumb`, `/api/videos/subtitle`, `/api/cover`,
+  `/api/artist/image`, `/api/soulseek/local-file` (bodies are not JSON, are
+  per-range, and would be the largest thing in a ~5 MB store); and
+  `/api/soulseek/preview*`, which is a live transcode. Audio, video and images
+  are the **media cache's** job, not this one's.
+- **When it is used.** Only when the request cannot reach the server *at all*
+  (a thrown fetch: down, no network, timed out) — the last answer for that
+  endpoint is served and the app is marked offline. An HTTP 4xx/5xx is an
+  **answer** and is handled exactly as before: an unreachable server never
+  turns a rejected request into a successful one.
+- **Downloaded playback in a shell, without a service worker.**
+  `mediaCache.offlineMediaUrl(path)` looks the same Cache Storage keys up and
+  returns a `blob:` URL an `<audio>`/`<video>` element can play — one blob per
+  cache key, revoked when the download is removed — because the http stream URL
+  simply fails when the server is away. `PlayerBar`, `SubtitledVideo` and both
+  lyrics panes resolve **cached-first** (cached wins even over a live stream
+  while offline) and toast *not downloaded* when there is nothing cached and
+  the server is gone.
+- **The Offline pill.** The top bar shows one whenever the app is rendering
+  stored answers, with the honest one-liner on hover: *"The server is
+  unreachable — showing what this app has saved. Downloads still play."* The
+  listener (`onOfflineFallback`) fires only on the offline↔online
+  **transition**, never per request, so the pill cannot re-render the shell
+  once per endpoint per second. In the web app the service worker's own cache
+  fallback marks the response (`X-MLO-Offline: 1`) so the same pill lights
+  there too.
+- **What works, and what honestly does not.** Browsing pages whose JSON was
+  cached, and playing downloaded tracks, videos and synced-lyrics previews
+  (lyrics are plain JSON and cache normally) works. **Writes** — tags, grades,
+  playlists, deletions, settings — **Soulseek** (a live daemon on the server),
+  imports, exports, and any page whose payload was never cached do not, and
+  they say so. Nothing is queued for a later reconnect: this is a read cache,
+  not an offline-first sync.
 
 Releases downloaded to the staging folder `<music>/.mlo/downloads` are listed
 by `GET /api/downloads` (newest first); `POST /api/downloads/import` moves
@@ -1753,7 +1816,7 @@ The same React build runs in five places. The `desktop/` Tauri v2 shell wraps
 | Windows | `npx tauri build` | `.msi`, NSIS `.exe` | spawns and owns the backend |
 | macOS | `npx tauri build` | `.app`, `.dmg` | spawns and owns the backend |
 | Linux | `npx tauri build` | `.deb`, `.AppImage` | spawns and owns the backend |
-| Android | `npx tauri android build --apk` | unsigned APK | a client of a server you run |
+| Android | `npx tauri android build --apk --debug` | debug-signed APK | a client of a server you run |
 | iOS | `npx tauri ios build … --no-sign` | unsigned IPA | a client of a server you run |
 
 Both the frontend and the shell are built locally before bundling:
@@ -1766,7 +1829,7 @@ cd ../desktop && npm install && npx tauri build
 CI does the same on three runners: `.github/workflows/desktop.yml` is a matrix
 (`windows-latest` → msi + nsis, `macos-latest` → app + dmg, `ubuntu-latest` →
 deb + appimage) running `npx tauri build --bundles …`; `.github/workflows/mobile.yml`
-builds the Android APK (`tauri android build --apk`, JDK 17 + NDK r27) and the
+builds the Android APK (`tauri android build --apk --debug`, JDK 17 + NDK r27) and the
 iOS app, and packages the `.app` into `Payload/` and zips it into an IPA.
 `.github/workflows/release.yml` runs on a `v*` tag, calls both, and attaches
 the client builds to the release beside the Windows zip and the GHCR image.
@@ -1787,32 +1850,127 @@ manage.
   (Open la musica / Auto-start on login / Exit (stop backend)), closing the
   window hides it, and quitting genuinely stops the backend — the child
   process, or `POST /api/shutdown` when the backend was adopted.
-- The phone app has no backend to start, so it starts with the **sign-in
-  screen's Server address field** (shown by both shells; leave it empty in the
-  browser, where the page's own origin is the server). Enter the address the
-  backend answers on — `http://musicbox.lan:8000`, a Tailscale name, whatever
-  `server_host:server_port` names — press *Use*, then sign in with the
-  server's password. The address is remembered per device
-  (`localStorage: mlo.server`), and the helper text says exactly this: *this
-  computer for the desktop app, the server's address (or Tailscale name) for a
-  phone*.
+- **A shell that has never been set up opens its own wizard, not the app.**
+  The desktop, iOS and Android builds bundle this SPA and open it from
+  `tauri://localhost`, so there is no same-origin backend to fall back on:
+  `web/src/pages/ClientSetup.tsx` walks **Server → Account → Notifications →
+  Done**, before every other gate in `App.tsx`, and nothing below it runs until
+  *Finish*.
+  - **Server** — the address the backend answers on (`http://musicbox.lan:8000`,
+    a Tailscale name, whatever `server_host:server_port` names; empty means
+    "this page's own origin", which only the web app can use). *Test* probes
+    `${address}/api/health` with a 3 s deadline (`probeServer`), and **Next**
+    stays disabled until an address really answered with a la musica
+    `version` — a captive portal's 200 is not a server. The address is saved
+    through the API module (`localStorage: mlo.server`, `setServerUrl`), so
+    every later call, the event socket and the media URLs follow it.
+  - **Account** — sign in with the server's password; when the probe reported
+    `has_password: false` the step instead *claims* that server (name,
+    password, repeat), exactly like the web's first-run screen.
+  - **Notifications** — asks this client for notification permission from a
+    real click (browsers reject a request made from a timer; see
+    *Notifications*), and is skippable.
+  - **Done** — repeats the server address and the account back, and *Finish*
+    records `localStorage: mlo.clientSetup` and reloads (the API base and the
+    token changed under the running module state). That flag is **per device
+    and re-runnable**: Settings → Security carries *Run setup again*
+    (`resetClientSetup()` plus a reload) for a moved server or a skipped step,
+    and the address can be corrected from the wizard at any time.
+  The web app and the Docker image are served BY their backend and never see
+  this page — `isClientShell()` is exactly "inside Tauri".
+- **A shell whose server does not answer lands on the sign-in screen, with the
+  address field.** The gate reads the auth status as a *value*: a network
+  failure resolves to `null` ("no server") while a real 401/428 still throws
+  `AuthError`, so a phone with the wrong address — or a backend that is not up
+  yet — gets the one screen that can point it somewhere, instead of the whole
+  shell rendering with every request erroring. And the gate closes only on a
+  real answer: `isError` goes true for any failed request, so a dropped poll
+  (a Wi-Fi hiccup, the backend restarting on a config save, a phone back from
+  the lock screen) used to tear the sidebar, the page, the player and the
+  scroll position out of the DOM and remount them as that screen; only a 401
+  (`signedOut`, latched until a sign-in) or the server asking for a password
+  this client does not have gates now.
 
-**Both mobile artifacts are unsigned sideload builds.** The Android APK comes
-out of the workflow as `app-universal-release-unsigned.apk` — install it by
-enabling install-from-unknown-sources (or swap the CLI flag to `--apk --debug`
-for a debug-signed one). The IPA is built `--no-sign` with `CODE_SIGNING_*`
-disabled and zipped manually, because **the repository carries no Apple
-certificate, provisioning profile or team id**; installing it on a device means
-signing it yourself (Xcode with your own team id, or a sideloading tool) on a
-device whose UDID that certificate covers. Neither is a store build, and
-nothing in the repo pretends otherwise.
+**Stability on a phone — what used to read as "it keeps refreshing".** The
+shell no longer re-renders wholesale on every store write: `App` subscribes
+field by field (`useStore((s) => s.…)`) instead of calling the hook bare, the
+2 s auto-import poll uses `select: (j) => j.state` so a poll only ticks when the
+*job state* changes, and the script-progress frames go to a `LiveProgress`
+component that owns that subscription — a frame repaints a 40 px bar and
+nothing else, where before it repainted every route and the scroll position
+with it. The progress socket is not opened at all while the login gate is up,
+and it backs off to 30 s instead of hammering a fixed 3 s (a phone off the
+Wi-Fi used to open 20 sockets a minute, each one a 4401 close); both
+`/ws/progress` and `/ws/events` are gated server-side, so an unauthenticated
+peer cannot read the library's layout and live activity off the progress relay.
+`SoulseekPage`'s once-a-second status poll is gone, and dragging the volume
+slider no longer writes `localStorage` once per pointermove.
 
-**Icons** are generated, not drawn by hand: `tools/make_tauri_icons.py` draws
-the spectrum-bar set with PIL (`icon.png` at 512, `32x32`, `128x128`,
-`128x128@2x`, `.ico` with 16-256 px frames, `.icns`) into
-`desktop/src-tauri/icons/`. The mobile icon sets (`icons/ios/`,
-`icons/android/`) are committed in full. To regenerate from your own artwork
-instead, `npm run icon` in `desktop/` is `tauri icon`.
+**Both mobile artifacts are sideload builds, and neither is signed by us.**
+The Android APK comes out of the workflow as a **debug** APK (`tauri android
+build --apk --debug`, uploaded as `la-musica-android-debug`) — debug is the
+build type that signs with the SDK's debug keystore and therefore *installs* on
+a phone, while a release APK is only signed when
+`src-tauri/gen/android/keystore.properties` exists, a keystore generated
+locally and never committed. A release APK is one keystore away: add the
+signing config and swap the flag. The IPA is built `--no-sign` with
+`CODE_SIGNING_*` disabled and zipped manually, because **the repository carries
+no Apple certificate, provisioning profile or team id**; installing it on a
+device means signing it yourself (Xcode with your own team id, or a sideloading
+tool) on a device whose UDID that certificate covers. Neither is a store build,
+and nothing in the repo pretends otherwise.
+
+**Icons** are generated, not drawn by hand: `tauri icon` is the only writer of
+an app icon anywhere in this repo, and `tools/make_tauri_icons.py` is now a thin
+driver for the CLI pinned in `desktop/package-lock.json`
+(`npx --no-install tauri icon icon-source.png`). All 52 icon files came from
+`desktop/icon-source.png`: the desktop set (`icon.png`, `32x32`, `128x128`,
+`128x128@2x`, `.ico` with 16-256 px frames, `.icns` — and `bundle.icon` now
+lists `icons/icon.png` too) plus the committed mobile sets `icons/ios/` and
+`icons/android/`. Drawing a second set with PIL here is what previously left
+those files showing artwork that was not the app's logo.
+
+**The order `tauri icon` runs in is the whole trick, and CI enforces it.**
+`tauri android init` / `tauri ios init` render **Tauri's own placeholder logo**
+into the project they generate, and the Android and Xcode builds read the app
+icon from *there* — `bundle.icon` only feeds the desktop bundles. `tauri icon`
+prefers the generated project when it exists, so it must run **after** init.
+`mobile.yml` therefore regenerates the committed sets *before* init (that copy
+is the reference), runs `tauri icon` again *after* init, and asserts with `cmp`
+that the generated `mipmap-*/ic_launcher_foreground.png` and six
+`AppIcon-*.png` files match that reference byte for byte — failing the job if
+the placeholder is still in place. Before this, the shipping APK and IPA
+carried Tauri's logo.
+
+**Plain-http servers, on both phone platforms.** A self-hosted la musica server
+is http on an address only the user knows, and both platforms block that by
+default. On iOS and macOS, `desktop/src-tauri/Info.plist` sets
+`NSAllowsArbitraryLoadsInWebContent` — the App Transport Security exemption
+covers the *webview's* fetches, sockets and playback, while the shell's native
+calls (there are none today) stay under full ATS; `NSExceptionDomains` cannot
+be used because the host is chosen by the user at runtime. Tauri merges that
+file into the generated plist for both `tauri ios build` and the macOS bundle.
+Android has no config key for the cleartext policy and the generated Gradle
+project is not committed, so `mobile.yml` flips
+`["usesCleartextTraffic"] = "false"` to `"true"` in
+`gen/android/app/build.gradle.kts` right after `android init` (the template
+sets it true for the debug build type only, and a release APK would otherwise
+refuse every request the webview makes with `net::ERR_CLEARTEXT_NOT_PERMITTED`
+on API 28+). It permits nothing but the http the app exists to talk to — the
+app ships no other network client — and `desktop/README.md` names the same
+one-liner for a release build done outside CI.
+
+**Responsive — every route measured at three widths.** Every page was measured
+at **390×780** (a phone in portrait, the narrowest thing the app is installed
+on), **834×1112** and **1440×900**: no route scrolls sideways, and at phone
+width every control in the main content is at least **32 px** tall
+(`min-h-8 md:min-h-0` — the floor applies below `md`, and `md:` restores the
+compact desktop geometry unchanged, so this is a phone fix and nothing else).
+Tables fold their low-value columns below `md` and keep their own horizontal
+scroll box, so a wide table never drags the document with it; `PageHeader`
+stacks its actions under the title; the settings section nav becomes a
+horizontal strip; `Modal` footers wrap. `tools/check_responsive.cjs` is the
+check (see *Tests*).
 
 ## Security & accounts (new in 3.0.0)
 
@@ -1879,6 +2037,13 @@ that: `/api/auth/login`, `/api/auth/password` (requires the current one),
 browser on your desktop, the desktop app on your laptop, or your phone — each
 one signs in once and keeps its own session.
 
+A **shell** — the desktop app, the iOS or the Android build — asks for that
+address in its own first-run wizard before it asks for anything else, and
+remembers it per device (`localStorage: mlo.server`); *Run setup again* under
+Settings → Security re-opens the wizard with the current address already in the
+field, which is how a phone follows a server that moved. The web app and the
+Docker image need none of this: the page's own origin *is* the server.
+
 For a phone away from home, a Tailscale/ZeroTier address or a reverse proxy in
 front of la musica is the usual arrangement; the server needs nothing special,
 it only has to be reachable.
@@ -1900,8 +2065,14 @@ it only has to be reachable.
   app by hand with a different `uvicorn --host` does disagree — the gate still
   reads the config — so if you bind somewhere else yourself, set
   `server_host` (or `auth_mode: required`) to match.
-- **`/ws/progress` is not gated.** It relays script progress frames only, but it
-  accepts a connection without a session.
+- **Both WebSockets are gated, and they are the two routes where the token
+  rides the query string.** `/ws/progress` and `/ws/events` cannot set an
+  `Authorization` header from a browser, so they take `?token=` (or the
+  `mlo_session` cookie) and check it exactly like a JSON route: with the gate
+  on, a missing, expired or revoked token is accepted and then closed with code
+  **4401**, so the client can tell "sign in again" from "server down". The
+  progress relay carries album and track paths and the running step's own text,
+  which is why it is no longer open to anyone who can reach the host.
 - Anything already on the host — another local user, a container neighbour —
   reads `.mlo/data/auth.db` and the config. The gate defends the network
   boundary, not a hostile local account.
@@ -1994,7 +2165,8 @@ the codes in `i18n.ts` and the files on disk are the same set, and no bundle
 repeats a key or ships an empty string.
 
 **What is translated:** the sidebar and top bar, the Home page shell, the
-sign-in / first-run screens, the Settings → *Security* and *Notifications*
+sign-in / first-run screens (the shells' client wizard included), the
+Settings → *Security* and *Notifications*
 panels and the language picker itself, the credits popover and the Donations
 page. **What is not:** the deeper tool pages — Soulseek, Optimization,
 Grading, Dependencies and the rest — are still English literals. Adding a
@@ -2006,7 +2178,9 @@ keys are missing.
 
 ```
 web/         React 19 + TypeScript + Tailwind UI (Vite, service-worker media cache,
-             six locales in src/locales — typed against the English key set)
+             the offline JSON copy (src/lib/offlineCache.ts) and blob: playback of
+             downloads in the shells, six locales in src/locales — typed against the
+             English key set)
 server/      FastAPI backend: library payload, playlists, integrations,
              import (AcoustID + the shared script chain + bulk queue),
              discovery (Deezer/ListenBrainz/iTunes/TheAudioDB/Wikipedia +
@@ -2120,9 +2294,17 @@ python tools/smoke_api.py           # route smoke test against a running backend
                                     # (python tools/smoke_api.py http://127.0.0.1:8000)
 ```
 
-The browser-side check (`tools/check_menus.cjs` — every sidebar entry and
-route renders with no page errors) needs a running backend and Playwright
-(`npm i -D playwright`).
+The browser-side checks need a running backend serving the built `web/dist`,
+plus Playwright (`npm i -D playwright`). `tools/check_menus.cjs` walks every
+sidebar entry and route and fails on a page error. `tools/check_responsive.cjs`
+re-measures every top-level route at **390×780, 834×1112 and 1440×900** and
+fails on sideways scroll, on an element that sticks out past the viewport with
+no scroll box of its own, and — at phone width only, because the desktop look is
+deliberately compact — on a control shorter than 32 px; it prints
+`N/M checks passed` and exits non-zero. It exits **2** when Playwright is not
+resolvable (set `PLAYWRIGHT` to a module path, or install it), the same
+convention as the other `check_*.cjs` tools, so a missing browser is never
+mistaken for a layout defect.
 
 The other `tools/test_*.py` suites cover the login gate and its routes
 (`test_auth.py`), the genre hierarchy — the three-slot policy, `trim_genres`,
@@ -2149,7 +2331,7 @@ npx oxlint && npm run build`, plus `node tools/test_i18n.cjs` for the locale
 bundles (key parity both ways, placeholders aligned). CI (`.github/workflows/ci.yml`) runs the Python
 suites, that frontend gate and `cargo check` for the Tauri shell on every push
 and pull request; the suites that
-need a live backend (the browser check and `smoke_api.py`) are manual.
+need a live backend (the browser checks and `smoke_api.py`) are manual.
 
 ## Donations (new in 3.0.0)
 

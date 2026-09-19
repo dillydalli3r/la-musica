@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { KeyRound, Loader2, LogOut, ShieldCheck } from "lucide-react";
+import { KeyRound, Loader2, LogOut, ShieldCheck, Wand2 } from "lucide-react";
 import { api, IN_TAURI, serverUrl, setToken } from "../api";
 import { useI18n } from "../lib/i18n";
+import { isClientShell, resetClientSetup } from "../lib/clientSetup";
 import { toast } from "../store";
 
 /** Settings → Security: the password, this client's session, and the facts a
@@ -93,6 +94,23 @@ export default function SecurityPanel() {
           <button className="btn-ghost !py-1.5 text-xs" disabled={busy} onClick={() => void signOut(true)}>
             <LogOut className="h-3.5 w-3.5" /> {t("auth.revoke_all")}
           </button>
+          {/* Client shells only: the wizard that asked for this device's
+              server. It is re-runnable on purpose — moving the server, or
+              having skipped a step, must not mean reinstalling the app. The
+              reload is the wizard's own contract (the API base and token
+              change under it). */}
+          {isClientShell() && (
+            <button
+              className="btn-ghost !py-1.5 text-xs"
+              disabled={busy}
+              onClick={() => {
+                resetClientSetup();
+                window.location.reload();
+              }}
+            >
+              <Wand2 className="h-3.5 w-3.5" /> {t("client.rerun")}
+            </button>
+          )}
         </div>
       </div>
 

@@ -140,7 +140,9 @@ function Shelf({
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 gap-3 stagger">
         {items.map((a, i) => (
-          <HomeCard key={`${a.mbid ?? a.path}-${i}`} a={a} />
+          // Identity first: an index in the key remounts a card (and replays
+          // its stagger animation) whenever the shelf order changes.
+          <HomeCard key={a.mbid ?? a.path ?? `shelf-${i}`} a={a} />
         ))}
       </div>
     </section>
@@ -184,7 +186,7 @@ function ArtistShelf({ title, artists }: { title: string; artists?: HomeArtist[]
 
 export default function HomePage() {
   const { t } = useI18n();
-  const { data, isLoading, isFetching, refetch } = useQuery({
+  const { data, isLoading, isError, isFetching, refetch } = useQuery({
     queryKey: ["home"],
     queryFn: api.home,
     staleTime: 5 * 60_000,
@@ -197,13 +199,29 @@ export default function HomePage() {
       </div>
     );
   }
-  if (!data) {
+  // A dead or unreachable server answers nothing, so the query only ever ends
+  // in its error state — without this branch the page sat on the spinner for
+  // good. An empty payload is the same dead end (the shelves are all derived
+  // server-side), so both render the error with a way to try again.
+  // Testing `!data` here (rather than `!isLoading && !data`) is also what
+  // narrows `data` for the render below.
+  if (isError || !data) {
     return (
       <div className="p-6 mx-auto max-w-6xl">
         <EmptyState
           title={t("home.error_title")}
           hint={t("home.error_hint")}
         />
+        <div className="flex justify-center">
+          <button
+            className="btn-ghost !py-1.5 text-xs min-h-[2rem] md:min-h-0"
+            onClick={() => refetch()}
+            disabled={isFetching}
+            title={t("home.refresh_title")}
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} /> {t("home.refresh")}
+          </button>
+        </div>
       </div>
     );
   }
@@ -239,7 +257,7 @@ export default function HomePage() {
             }
             actions={
               <button
-                className="btn-ghost !py-1.5 text-xs"
+                className="btn-ghost !py-1.5 text-xs min-h-[2rem] md:min-h-0"
                 onClick={() => refetch()}
                 disabled={isFetching}
                 title={t("home.refresh_title")}

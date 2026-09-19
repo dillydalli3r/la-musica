@@ -7,7 +7,7 @@
     "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build",
-    "icon": "tauri icon"
+    "icon": "tauri icon icon-source.png"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

@@ -3,10 +3,11 @@ import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowDownUp, ChevronLeft, ChevronRight, ClipboardCheck, Disc3, Download, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
-  Keyboard, Library, ListMusic, Menu, Music2, PanelLeftClose, Search, Tags, Trash2, User, X,
+  Keyboard, Library, ListMusic, Menu, Music2, PanelLeftClose, Search, Tags, Trash2, User, WifiOff, X,
   Settings as SettingsIcon, Wrench,
 } from "lucide-react";
-import { api, getToken, IN_TAURI, onAuthLost, serverUrl } from "./api";
+import { api, AuthError, getToken, IN_TAURI, onAuthLost, serverUrl } from "./api";
+import type { AuthStatus } from "./api";
 import type { Library as LibraryData } from "./types";
 import type { LucideIcon } from "lucide-react";
 import { albumRef, artistRef, trackRef } from "./lib/refs";
@@ -42,6 +43,14 @@ const DonationsPage = lazy(() => import("./pages/DonationsPage"));
 // Not lazy: the sign-in screen is what a signed-out client sees FIRST, and a
 // chunk fetch that itself needs the server would be a poor greeting.
 import LoginPage from "./pages/LoginPage";
+// The client shells (desktop/iOS/Android) get their own first-run wizard: the
+// web app is served BY the server it talks to, so it never has to be told
+// where that server is — a shell does, and it must be able to change its mind
+// later (Settings → Security re-runs this).
+import ClientSetup from "./pages/ClientSetup";
+import { isClientSetupDone, isClientShell } from "./lib/clientSetup";
+import { isOffline, onOfflineFallback } from "./api";
+import type { OfflineInfo } from "./api";
 
 import PlayerBar from "./components/PlayerBar";
 import { ProgressInline } from "./components/ProgressBar";
@@ -88,6 +97,11 @@ const NAV_GROUPS: { labelKey: MessageKey; items: { to: string; labelKey: Message
 
 const COLLAPSE_KEY = "mlo.sidebar.collapsed";
 
+/** A `setTimeout`/`setInterval` handle in this build: a number in the browser
+ *  typings, an object under Node's — naming it once keeps the shell's refs and
+ *  locals readable and gives the pair one place to change. */
+type Timer = ReturnType<typeof setTimeout>;
+
 const ACCENTS: Record<string, [string, string, string]> = {
   violet: ["139 92 246", "167 139 250", "255 255 255"],
   pink: ["236 72 153", "249 168 212", "255 255 255"],
@@ -108,11 +122,18 @@ export function applyAccent(name: string | null) {
 /** Soulseek availability dot: green = logged into the Soulseek network,
  * amber = slskd running but not logged in, hidden = not running. Sits on
  * the nav icon's corner so it reads the same with the sidebar collapsed.
- * When logged in, `name` carries the account name — shown in the tooltip. */
-function useSlskDot() {
+ * When logged in, `name` carries the account name — shown in the tooltip.
+ *
+ * `enabled` is false while the shell is behind the login gate: the dot is not
+ * rendered there (the sidebar is not), and a client that has not been told
+ * where its server is must not poll an address it cannot reach — that poll was
+ * one more failed request per 20s on the screen whose whole job is to ask for
+ * the address. */
+function useSlskDot(enabled: boolean) {
   const { data: st } = useQuery({
     queryKey: ["soulseek", "status-dot"],
     queryFn: api.soulseekStatus,
+    enabled,
     refetchInterval: 20000,
     refetchIntervalInBackground: false,
     staleTime: 15000,
@@ -146,6 +167,21 @@ function SlskIconDot({ dot }: { dot: { cls: string; tip: string; name?: string |
       className={`absolute -top-1 -right-1.5 h-2 w-2 rounded-full ${dot.cls} ring-2 ring-panel`}
       title={dot.tip}
     />
+  );
+}
+
+/** The live script-progress readout, with a store subscription of its own.
+ *  The relay pushes a progress frame per step — during a chained run that is
+ *  many per second — and App re-rendering the whole shell for each of them is
+ *  what a phone shows as the page refreshing while the user tries to scroll.
+ *  Subscribing here repaints this 40px bar and nothing else. */
+function LiveProgress() {
+  const progress = useStore((s) => s.progress);
+  if (!progress) return null;
+  return (
+    <div className="absolute right-4 top-full mt-1 z-40">
+      <ProgressInline progress={progress} />
+    </div>
   );
 }
 
@@ -189,10 +225,21 @@ function SearchHit({ to, icon: Icon, label, hint, onGo }: {
 }
 
 export default function App() {
-  const { progress, setProgress, toasts, dismissToast, query, setQuery } = useStore();
+  // Subscribed field by field, never as `useStore()`: a selector-less call
+  // re-renders App — and App is the ENTIRE shell, every route and the player
+  // bar included — on EVERY store write, and the store has writers that fire
+  // many times a second (a progress frame per relay tick, a selection toggle
+  // per row click, a volume drag). That churn is what a phone shows as the
+  // app refreshing under the user's finger, and it is what kills momentum
+  // scrolling. The progress readout keeps a subscription of its own, in
+  // LiveProgress, so a frame repaints a 40px bar and nothing else.
+  const toasts = useStore((s) => s.toasts);
+  const dismissToast = useStore((s) => s.dismissToast);
+  const query = useStore((s) => s.query);
+  const setQuery = useStore((s) => s.setQuery);
   const qc = useQueryClient();
   const { t } = useI18n();
-  const progressClear = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const progressClear = useRef<Timer | undefined>(undefined);
   // The shortcut sheet: opened by "?" or the keyboard button in the top bar.
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -206,7 +253,19 @@ export default function App() {
   const [signedOut, setSignedOut] = useState(false);
   const auth = useQuery({
     queryKey: ["auth", "status"],
-    queryFn: api.authStatus,
+    // A server that does not answer is not a *failure* to retry into a
+    // spinner — it is the answer "no server", and the shell's gate needs it as
+    // a VALUE (`null`), not as react-query's internal error state: a rejected
+    // query keeps `data` undefined, which is indistinguishable from "still
+    // asking", and the client needs the difference.
+    queryFn: async (): Promise<AuthStatus | null> => {
+      try {
+        return await api.authStatus();
+      } catch (e) {
+        if (e instanceof AuthError) throw e;   // a real 401/428: the server answered
+        return null;
+      }
+    },
     retry: false,
     refetchInterval: 60000,
     refetchIntervalInBackground: false,
@@ -222,9 +281,29 @@ export default function App() {
   // without this, a fresh mobile install renders the whole shell with every
   // request erroring and no way to point it anywhere. Once an address answers,
   // the 60s poll resolves `isError` and the gate opens by itself.
+  //
+  // `!auth.data` is what makes that gate MONOTONE, and it is the difference
+  // between a usable app and one that looks like it reloads itself: `isError`
+  // goes true for any failed request, so once the server HAD answered, one
+  // dropped poll — Wi-Fi hiccup, backend restarting on a config save, a phone
+  // coming back from the lock screen — used to tear the entire shell out of
+  // the DOM (sidebar, page, player, scroll position) and remount it as this
+  // screen, and the next successful poll put it back. A network failure is not
+  // a lost session: it must not gate. Only a real answer may — a 401 from the
+  // server (`signedOut`, which stays latched until a sign-in), or the server
+  // saying it wants a password this client does not have.
   const needsLogin = signedOut
-    || (IN_TAURI && auth.isError)
+    || (IN_TAURI && auth.data === null)
     || (!!auth.data?.required && !auth.data.authenticated);
+
+  // ---- offline ------------------------------------------------------------
+  // `isOffline()` is true while the API is answering from the on-disk cache
+  // (see lib/offlineCache.ts): the app keeps working — that is the point of
+  // the cache — but the user has to know why the numbers stopped moving. The
+  // listener fires only on the offline↔online transition, so this cannot
+  // re-render per request.
+  const [offline, setOffline] = useState<boolean>(() => isOffline());
+  useEffect(() => onOfflineFallback((info: OfflineInfo | null) => setOffline(!!info)), []);
 
   // Global keyboard shortcuts. The player owns its own transport keys
   // (Space, arrows, brackets — see PlayerBar) and this layer deliberately adds
@@ -256,7 +335,7 @@ export default function App() {
   }, []);
 
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
-  const slskDot = useSlskDot();
+  const slskDot = useSlskDot(!needsLogin);
 
   // The server's `ui_locale` is the app-wide language; this browser's own pick
   // (if any) wins, and i18n.ts owns that precedence — this only hands it the
@@ -312,15 +391,30 @@ export default function App() {
   // long stopped watching, so it lands them in the tagging wizard whatever page
   // they drifted to. Same query key as the auto panel — one poll, react-query
   // keeps the more aggressive interval — and the panel's own toast is untouched.
-  const { data: autoJob } = useQuery({
+  //
+  // The observer takes the job's STATE alone, as one primitive, and the album
+  // path is read from the cache only when the edge actually fires. Observing
+  // the raw job (stage text, byte counts, a growing log) re-rendered App on
+  // every poll — and App is the whole shell: sidebar, page, player, and the
+  // scroll position in `main`. A tree that re-renders under the user's finger
+  // every couple of seconds is what "the app keeps refreshing, I cannot scroll"
+  // is; a string that only changes on a state change re-renders nothing.
+  const { data: autoStateNow } = useQuery({
     queryKey: ["soulseekAuto"],
     queryFn: api.soulseekAutoStatus,
+    // No server to ask yet: the login screen owns the screen and the only
+    // request it should be making is its own status probe.
+    enabled: !needsLogin,
+    // 2s while a job is live is the point of the poll — it is how the queue and
+    // the confirm prompt advance — and it drops to 15s the moment the job
+    // leaves running/confirm, so an idle client is not polling a list at all.
     refetchInterval: (q) => (q.state.data?.state === "running" || q.state.data?.state === "confirm" ? 2000 : 15000),
     refetchIntervalInBackground: false,
+    select: (j) => j.state,
   });
   const autoState = useRef<string | null>(null);
   useEffect(() => {
-    const st = autoJob?.state ?? null;
+    const st = autoStateNow ?? null;
     const prev = autoState.current;
     autoState.current = st;
     // Only the running/confirm → done EDGE navigates. The ref holds that edge
@@ -328,10 +422,11 @@ export default function App() {
     // finished job cannot yank the user back into the wizard.
     if (st !== "done" || (prev !== "running" && prev !== "confirm")) return;
     // A wish handoff also ends "done" — but nothing landed on disk to tag.
-    const album = autoJob?.result?.album_path ?? "";
+    const job = qc.getQueryData<{ result?: { album_path?: string } | null }>(["soulseekAuto"]);
+    const album = job?.result?.album_path ?? "";
     if (!album) return;
     navigate(`/import?album=${encodeURIComponent(album)}`);
-  }, [autoJob, navigate]);
+  }, [autoStateNow, navigate, qc]);
 
   // Global search lives in the top bar and drives the library filter from
   // anywhere — typing on another page jumps to the library. The dropdown
@@ -408,6 +503,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // Nothing to talk to: the login screen is up, which means the shell has no
+    // server (or no session). Opening a socket it cannot complete — and worse,
+    // restarting that socket on a fixed timer — is request churn on a client
+    // that is still being told where its server is.
+    if (needsLogin) return;
     // The progress socket must reach the SAME server the API does — the
     // shell's configured address, or this page's own origin. Hardcoding
     // 127.0.0.1:8000 (as this did) left every phone pointed at a LAN server
@@ -416,16 +516,24 @@ export default function App() {
     const wsBase = base
       ? base.replace(/^http/, "ws")
       : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`;
-    // This socket is gated like every other API surface, and a WebSocket
-    // handshake cannot carry an Authorization header — so the session token
-    // rides the query string (same rule as /ws/events; see lib/notify.ts).
-    const token = getToken();
-    const progressUrl = `${wsBase}/ws/progress${token ? `?token=${encodeURIComponent(token)}` : ""}`;
     let alive = true;
     let ws: WebSocket | null = null;
-    let retry: ReturnType<typeof setTimeout> | undefined;
+    let retry: Timer | undefined;
+    let attempt = 0;
     const connect = () => {
-      ws = new WebSocket(progressUrl);
+      // The token is read on EVERY attempt: a WebSocket handshake cannot carry
+      // an Authorization header, so it rides the query string (same rule as
+      // /ws/events; see lib/notify.ts) — and a URL built once at mount kept
+      // reconnecting with the token a sign-in had just replaced, which the
+      // server answers with a 4401 close.
+      const token = getToken();
+      ws = new WebSocket(`${wsBase}/ws/progress${token ? `?token=${encodeURIComponent(token)}` : ""}`);
+      // A completed handshake means the server IS there, whatever happens
+      // next: reset the backoff so a healthy connection is never treated as a
+      // dead one.
+      ws.onopen = () => {
+        attempt = 0;
+      };
       ws.onmessage = (e) => {
         try {
           const p = JSON.parse(e.data);
@@ -439,23 +547,31 @@ export default function App() {
             return;
           }
           if (typeof p?.done !== "number") return; // ping / non-progress frame
-          setProgress(p);
+          // Through getState, not a hook value: App does not subscribe to
+          // `progress` (see LiveProgress), so a frame repaints the bar alone.
+          useStore.getState().setProgress(p);
           // The relay never sends an explicit "finished" frame — clear the
           // indicator shortly after the bar completes.
-          if (progressClear.current) clearTimeout(progressClear.current);
+          clearTimeout(progressClear.current);
           if (p.total && p.done >= p.total) {
-            progressClear.current = setTimeout(() => setProgress(null), 2500);
+            progressClear.current = setTimeout(() => useStore.getState().setProgress(null), 2500);
           }
         } catch {
           /* ignore */
         }
       };
       // The backend restarts on every config save / Soulseek restart /
-      // dependency install — without this retry the progress bars never come
-      // back until a full page reload.
+      // dependency install, so this has to retry — but NOT on a fixed 3s:
+      // a client whose server is simply not there (phone off the Wi-Fi, wrong
+      // address, backend still booting) opened 20 sockets a minute, forever,
+      // each one a connect the phone's radio had to make and tear down, and
+      // each one a 4401 close when there was no session. Back off like the
+      // event stream does, capped at 30s, and let the retry pick up a
+      // re-signed-in token by itself.
       ws.onclose = () => {
         if (!alive) return;
-        retry = setTimeout(connect, 3000);
+        attempt += 1;
+        retry = setTimeout(connect, Math.min(30000, 1000 * 2 ** Math.min(attempt, 5)));
       };
     };
     connect();
@@ -465,8 +581,35 @@ export default function App() {
       ws?.close();
       clearTimeout(progressClear.current);
     };
+    // Re-run when the gate changes: the socket belongs to a signed-in shell,
+    // and re-entering one must not wait for the backoff to expire.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [needsLogin]);
+
+  // The gate CLOSING is a server-and-session change, and everything the login
+  // screen blocked was fetched while there was nothing to answer — react-query
+  // does not refetch on a re-render, so `config` (which decides the first-run
+  // wizard) and every page's payload would stay empty until the user happened
+  // to navigate. The login screen's own probe can now close the gate with no
+  // sign-in click at all (a backend that was still booting when the shell
+  // opened), so this cannot rely on the sign-in callback alone.
+  const wasGated = useRef(needsLogin);
+  useEffect(() => {
+    if (wasGated.current && !needsLogin) void qc.invalidateQueries();
+    wasGated.current = needsLogin;
+  }, [needsLogin, qc]);
+
+  // The shell's own first-run wizard, before every other gate: it needs no
+  // server and no token, and it is what asks which server this device talks
+  // to. Re-runnable from Settings → Security (which clears the flag).
+  if (isClientShell() && !isClientSetupDone()) {
+    // A reload rather than an in-place re-render: finishing the wizard changes
+    // the API base URL and the token, and module-level state (the event
+    // socket, the media-cache keys, every cached query) was built against the
+    // OLD server. This is a one-time, user-triggered reload on the client
+    // shells only — never a timer.
+    return <ClientSetup onDone={() => window.location.reload()} />;
+  }
 
   // The gate comes before the first-run wizard: an unclaimed remote server has
   // no config to show anyone yet, and every route below would answer 428.
@@ -696,6 +839,20 @@ export default function App() {
             {/* Notifications sit with the shell's own controls: the bell is
                 also what opens the /ws/events socket (lib/notify.ts). */}
             <NotificationBell />
+            {/* Offline: the app is answering from its own cache, so it stays
+                usable with the server gone — but the user must be able to tell
+                "nothing changed" from "nothing can reach me". WifiOff is a
+                lucide icon; the pill is deliberately quiet (this is a state,
+                not an error). */}
+            {offline && (
+              <span
+                className="h-9 px-2.5 rounded-full border border-amber-900/60 bg-amber-950/40 backdrop-blur hidden sm:flex items-center gap-1.5 text-[11px] text-amber-200/90"
+                title={t("offline.help")}
+              >
+                <WifiOff className="h-3.5 w-3.5" />
+                {t("offline.label")}
+              </span>
+            )}
           </div>
           {/* the search input spans the rest of the bar */}
           <div className="relative flex-1 pointer-events-auto">
@@ -756,12 +913,9 @@ export default function App() {
             )}
           </div>
           {/* live script progress floats below the bar so the search keeps
-              the full width */}
-          {progress && (
-            <div className="absolute right-4 top-full mt-1 z-40">
-              <ProgressInline progress={progress} />
-            </div>
-          )}
+              the full width — its own component, so a progress frame does not
+              re-render the shell (see LiveProgress) */}
+          <LiveProgress />
         </header>
 
         <main className="flex-1 overflow-auto min-w-0 pt-12">

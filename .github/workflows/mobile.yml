@@ -84,11 +84,59 @@ jobs:
         working-directory: desktop
         run: npm ci
 
+      - name: Regenerate the committed icon sets
+        # `tauri icon` is the only thing that writes app icons anywhere in this
+        # repo. With no generated project in the tree yet it writes the
+        # committed sets — `src-tauri/icons/{ios,android}` plus the desktop
+        # png/ico/icns — which makes this step the reference copy the icons
+        # installed after `init` are compared against below.
+        working-directory: desktop
+        run: npx tauri icon icon-source.png
+
       - name: Initialize the Android project
         # Generated, never committed: `--ci` (the runner sets CI anyway) skips
         # the prompts about the package name and target archs.
         working-directory: desktop
         run: npx tauri android init --ci
+
+      - name: Install the app icons into the Android project
+        # `android init` renders Tauri's own logo into the generated project
+        # (`gen/android/app/src/main/res/mipmap-*`), and nothing else in the
+        # toolchain replaces it — which is why an APK built without this step
+        # shows Tauri's logo, not la musica's. `tauri icon` prefers the
+        # generated project when it exists, so it has to run *after* init.
+        #
+        # The cmp is the actual assertion: it fails if the generated project
+        # still holds the template logo, i.e. if this step ever stops taking
+        # effect. PNGs are written deterministically by the pinned CLI, so the
+        # reference copy from two steps up matches byte for byte.
+        working-directory: desktop
+        run: |
+          npx tauri icon icon-source.png
+          cmp -s src-tauri/gen/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher_foreground.png \
+                 src-tauri/icons/android/mipmap-xxxhdpi/ic_launcher_foreground.png \
+            || { echo "::error::the generated Android project does not carry the la musica icons"; exit 1; }
+
+      - name: Allow plain-http servers in the release build type
+        # Tauri v2 has no config key for Android's cleartext policy, and the
+        # generated project is not committed, so the switch lives here. The
+        # generated `app/build.gradle.kts` sets the `usesCleartextTraffic`
+        # manifest placeholder to "false" for every build type and to "true"
+        # only for debug, while every self-hosted la musica server is plain
+        # http on a LAN address, a Tailscale name or 127.0.0.1 — a release APK
+        # would otherwise refuse every request the webview makes
+        # (net::ERR_CLEARTEXT_NOT_PERMITTED on API 28+). This permits nothing
+        # but the http the app exists to talk to: the app ships no other
+        # network client. desktop/README.md names the same one-liner for a
+        # release build done outside CI.
+        working-directory: desktop
+        run: |
+          gradle=src-tauri/gen/android/app/build.gradle.kts
+          sed -i 's/\["usesCleartextTraffic"\] = "false"/["usesCleartextTraffic"] = "true"/' "$gradle"
+          if grep -q 'usesCleartextTraffic"\] = "false"' "$gradle"; then
+            echo "::error::could not allow cleartext traffic in $gradle"
+            exit 1
+          fi
 
       - name: Cache the Rust crate graph
         # The cross-compile of every dependency for four Android ABIs is what
@@ -149,9 +197,39 @@ jobs:
         working-directory: desktop
         run: npm ci
 
+      - name: Regenerate the committed icon sets
+        # See the Android job: with no generated project in the tree,
+        # `tauri icon` writes the committed sets, which is both what the
+        # AppIcon assertion below compares against and how the committed
+        # `src-tauri/icons/ios/` set stays current.
+        working-directory: desktop
+        run: npx tauri icon icon-source.png
+
       - name: Initialize the iOS project
         working-directory: desktop
         run: npx tauri ios init --ci
+
+      - name: Install the app icons into the Xcode project
+        # `ios init` copies Tauri's own logo into
+        # `gen/apple/Assets.xcassets/AppIcon.appiconset`, and the Xcode build
+        # reads the app icon from there — never from `bundle.icon`, which only
+        # feeds the desktop bundles. Hence the shipping IPA had Tauri's logo
+        # (or no icon at all) until `tauri icon` ran here: it prefers the
+        # generated project when it exists, so it has to run *after* init.
+        #
+        # The cmp asserts the set really is ours: PNGs are written
+        # deterministically by the pinned CLI, so it matches the reference copy
+        # generated before init — and fails if the template logo is still in
+        # place.
+        working-directory: desktop
+        run: |
+          npx tauri icon icon-source.png
+          iconset=src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset
+          for icon in AppIcon-20x20@1x.png AppIcon-29x29@1x.png AppIcon-40x40@2x.png \
+                      AppIcon-60x60@2x.png AppIcon-76x76@2x.png AppIcon-512@2x.png; do
+            cmp -s "$iconset/$icon" "src-tauri/icons/ios/$icon" \
+              || { echo "::error::$iconset/$icon is not the la musica icon"; exit 1; }
+          done
 
       - name: Cache the Rust crate graph
         uses: Swatinem/rust-cache@v2

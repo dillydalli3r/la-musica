@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { KeyRound, Loader2, Lock, Server, ShieldCheck } from "lucide-react";
-import { api, setServerUrl, setToken, serverUrl, IN_TAURI } from "../api";
+import { api, setServerUrl, setToken, serverUrl, IN_MOBILE_SHELL, IN_TAURI } from "../api";
 import { toast } from "../store";
 import { useI18n } from "../lib/i18n";
 
@@ -30,6 +30,14 @@ export default function LoginPage({ onSignedIn }: { onSignedIn: () => void }) {
     // have typed it a moment ago — so a failed probe is a hint ("no server
     // answered"), not a dead end.
     refetchOnWindowFocus: false,
+    // While NOTHING has answered, keep probing — and stop the moment something
+    // does. The shell's gate is monotone (once it is up, only a sign-in takes
+    // it down), so a backend that is still booting, a Wi-Fi association that
+    // has not come up yet, or an address the user just typed can only be
+    // noticed here: with a single probe per mount the screen sat on "no answer"
+    // until the user pressed a button or reloaded the app. 3s is slower than a
+    // human can type, and a reachable server is asked exactly once.
+    refetchInterval: (q) => (q.state.status === "error" ? 3000 : false),
   });
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -152,7 +160,12 @@ export default function LoginPage({ onSignedIn }: { onSignedIn: () => void }) {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               autoComplete={needsSetup ? "new-password" : "current-password"}
-              autoFocus
+              // Not on a phone: this screen's FIRST field is the server address
+              // (a mobile client has to be told where its server is), and an
+              // auto-opened keyboard on the password box scrolls that field out
+              // of the viewport before the user has seen it. iOS does the
+              // scrolling itself, when the user taps the field they mean.
+              autoFocus={!IN_MOBILE_SHELL}
             />
           </label>
 

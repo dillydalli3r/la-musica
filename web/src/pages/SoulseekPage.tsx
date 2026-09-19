@@ -248,11 +248,11 @@ function ReconnectingCard({ username, password, error, onDone }: {
           the network sometimes enforces a short cooldown after a disconnect
         </span>
       )}
-      <div className="ml-auto flex gap-1.5">
-        <button className="btn-ghost !py-1 text-xs" onClick={retry} disabled={busy}>
+      <div className="ml-auto flex flex-wrap gap-1.5 justify-end">
+        <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={retry} disabled={busy}>
           {busy ? "Reconnecting…" : "Reconnect now"}
         </button>
-        <button className="btn-ghost !py-1 text-xs" onClick={() => setShowForm(true)}>
+        <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={() => setShowForm(true)}>
           Different account
         </button>
       </div>
@@ -288,7 +288,7 @@ function PortConflictCard({ message, otherUser }: {
         its slskd) and press Start again. This app never stops the other
         program's slskd for you.
       </p>
-      <a className="btn-ghost text-xs" href="/settings">
+      <a className="btn-ghost text-xs min-h-8 sm:min-h-0" href="/settings">
         <ExternalLink className="h-3.5 w-3.5" /> Open Settings
       </a>
     </div>
@@ -343,7 +343,7 @@ function LoginCard({ onDone, initialUsername, initialPassword, initialError }: {
       </p>
       <div className="flex gap-2 flex-wrap">
         <input
-          className="input w-52"
+          className="input w-full sm:w-52 min-h-8 sm:min-h-0"
           placeholder="Soulseek username"
           value={username}
           autoComplete="username"
@@ -351,7 +351,7 @@ function LoginCard({ onDone, initialUsername, initialPassword, initialError }: {
         />
         <div className="relative">
           <input
-            className="input w-52 pr-9"
+            className="input w-full sm:w-52 pr-9 min-h-8 sm:min-h-0"
             placeholder="Password"
             type={showPw ? "text" : "password"}
             value={password}
@@ -360,7 +360,7 @@ function LoginCard({ onDone, initialUsername, initialPassword, initialError }: {
             onKeyDown={(e) => e.key === "Enter" && !busy && login()}
           />
           <button
-            className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-200"
+            className="absolute right-2 top-1/2 -translate-y-1/2 p-[9px] -mx-[9px] text-zinc-500 hover:text-zinc-200"
             onClick={() => setShowPw(!showPw)}
             title={showPw ? "Hide password" : "Show password"}
             type="button"
@@ -368,7 +368,7 @@ function LoginCard({ onDone, initialUsername, initialPassword, initialError }: {
             {showPw ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
           </button>
         </div>
-        <button className="btn-primary" onClick={login} disabled={busy}>
+        <button className="btn-primary min-h-10 sm:min-h-0" onClick={login} disabled={busy}>
           {busy ? "Connecting…" : "Log in / create account"}
         </button>
       </div>
@@ -409,10 +409,12 @@ function ProgressFileRow({ f }: { f: SlskAutoFile }) {
   return (
     <div className="flex items-center gap-3 px-2 py-1.5 rounded hover:bg-white/[0.04] text-xs">
       <div className="flex-1 min-w-0 truncate text-zinc-200" title={f.name}>{fileName(f.name ?? "")}</div>
-      <div className="w-28 shrink-0 h-1.5 rounded-sm bg-border/70 overflow-hidden">
+      {/* The bar and the byte pair are the first things to go on a phone: the
+          percentage chip in the next column already carries the same reading. */}
+      <div className="hidden sm:block w-28 shrink-0 h-1.5 rounded-sm bg-border/70 overflow-hidden">
         <div className={`h-full ${complete ? "bg-emerald-500" : "bg-accent"}`} style={{ width: `${p}%` }} />
       </div>
-      <span className="text-zinc-500 w-24 text-right shrink-0">
+      <span className="text-zinc-500 w-14 sm:w-24 text-right shrink-0">
         {fmtSize(f.bytes ?? 0)} / {fmtSize(f.size ?? 0)}
       </span>
       <span className="w-16 text-right shrink-0">
@@ -449,9 +451,9 @@ function AutoProgress({ p }: { p: SlskAutoProgress }) {
   const shown = files.slice(0, 8);
   return (
     <div className="mt-2 rounded-lg border border-border bg-panel/60 p-2.5">
-      <div className="flex items-center gap-2 text-[11px]">
+      <div className="flex flex-wrap items-center gap-2 text-[11px]">
         <span className="font-medium text-zinc-300">{p.phase || "download"}</span>
-        {p.username && <span className="text-zinc-500 truncate" title={p.dir}>· {p.username}</span>}
+        {p.username && <span className="text-zinc-500 min-w-0 truncate" title={p.dir}>· {p.username}</span>}
         <span className="ml-auto shrink-0 text-zinc-400">
           {fmtCounts(complete, total)} files complete · {arrived} arrived · {fmtPercent(pct)} of bytes
         </span>
@@ -595,7 +597,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
           <Zap className="h-3.5 w-3.5" /> Auto-import a MusicBrainz release
         </div>
         {running && (
-          <button className="btn-ghost !py-1 text-xs text-red-300" onClick={cancel}>
+          <button className="btn-ghost !py-1 text-xs text-red-300 min-h-8 sm:min-h-0" onClick={cancel}>
             <Square className="h-3 w-3" /> Stop
           </button>
         )}
@@ -610,19 +612,19 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
       {!running && (
         <div className="flex gap-2 flex-wrap">
           <input
-            className="input flex-1 min-w-[240px]"
+            className="input flex-1 min-w-[240px] min-h-8 sm:min-h-0"
             placeholder="MusicBrainz release URL or MBID (e.g. https://musicbrainz.org/release/…)"
             value={mbid}
             onChange={(e) => setMbid(e.target.value)}
           />
           <input
-            className="input w-56"
+            className="input w-full sm:w-56 min-h-8 sm:min-h-0"
             placeholder="Custom queries (; separated, optional)"
             value={queries}
             onChange={(e) => setQueries(e.target.value)}
             title="Override the search terms for this run. Fields: artist album year country catalognumber barcode label"
           />
-          <button className="btn-primary" onClick={start}>
+          <button className="btn-primary min-h-10 sm:min-h-0" onClick={start}>
             <Zap className="h-4 w-4" /> Auto-import
           </button>
         </div>
@@ -650,7 +652,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
                 {job.result?.error || "The job stopped before it finished — see the log below."}
               </div>
               <button
-                className="btn-ghost !py-1 text-xs mt-2 text-red-300"
+                className="btn-ghost !py-1 text-xs mt-2 text-red-300 min-h-8 sm:min-h-0"
                 disabled={!releaseMbid(mbid)}
                 onClick={start}
                 title="Run the same release again with the values in the form above"
@@ -666,7 +668,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
                 Stopped during {job.stage || "the current step"} — nothing else was downloaded.
               </div>
               <button
-                className="btn-ghost !py-1 text-xs mt-2"
+                className="btn-ghost !py-1 text-xs mt-2 min-h-8 sm:min-h-0"
                 disabled={!releaseMbid(mbid)}
                 onClick={start}
                 title="Run the same release again with the values in the form above"
@@ -693,15 +695,15 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
               {(job.confirm.queries ?? []).length > 0 && (
                 <div className="space-y-1 mb-2">
                   {(job.confirm.queries ?? []).map((q, i) => (
-                    <div key={i} className="text-[11px] text-zinc-500 truncate" title={q}>searched “{q}”</div>
+                    <div key={`${q}-${i}`} className="text-[11px] text-zinc-500 truncate" title={q}>searched “{q}”</div>
                   ))}
                 </div>
               )}
-              <div className="flex items-center gap-2">
-                <button className="btn-primary !py-1 text-xs" onClick={() => answer(true)} disabled={answering}>
+              <div className="flex flex-wrap items-center gap-2">
+                <button className="btn-primary !py-1 text-xs min-h-10 sm:min-h-0" onClick={() => answer(true)} disabled={answering}>
                   <Star className="h-3.5 w-3.5" /> Move to wishes
                 </button>
-                <button className="btn-ghost !py-1 text-xs" onClick={() => answer(false)} disabled={answering}>
+                <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={() => answer(false)} disabled={answering}>
                   No, stop
                 </button>
               </div>
@@ -726,11 +728,11 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
                   </div>
                 ))}
               </div>
-              <div className="flex items-center gap-2">
-                <button className="btn-primary !py-1 text-xs" onClick={() => answer(true)} disabled={answering}>
+              <div className="flex flex-wrap items-center gap-2">
+                <button className="btn-primary !py-1 text-xs min-h-10 sm:min-h-0" onClick={() => answer(true)} disabled={answering}>
                   <Download className="h-3.5 w-3.5" /> Download without logs
                 </button>
-                <button className="btn-ghost !py-1 text-xs" onClick={() => answer(false)} disabled={answering}>
+                <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={() => answer(false)} disabled={answering}>
                   No, wait for a CD rip
                 </button>
               </div>
@@ -751,19 +753,19 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
                   </div>
                 ))}
               </div>
-              <div className="flex items-center gap-2">
-                <button className="btn-primary !py-1 text-xs" onClick={() => answer(true)} disabled={answering}>
+              <div className="flex flex-wrap items-center gap-2">
+                <button className="btn-primary !py-1 text-xs min-h-10 sm:min-h-0" onClick={() => answer(true)} disabled={answering}>
                   <Download className="h-3.5 w-3.5" /> Download lossy anyway
                 </button>
-                <button className="btn-ghost !py-1 text-xs" onClick={() => answer(false)} disabled={answering}>
+                <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={() => answer(false)} disabled={answering}>
                   No, wait for lossless
                 </button>
               </div>
             </div>
           ))}
           <div className="mt-1.5 max-h-44 overflow-auto font-mono text-[10px] leading-relaxed text-zinc-500 space-y-0.5 break-words">
-            {(job?.log ?? []).map((l: any, i: number) => (
-              <div key={i} className={l.msg.startsWith("ERROR") ? "text-red-400" : l.msg.startsWith("  ✕") ? "text-red-300" : undefined}>
+            {(job?.log ?? []).map((l, i) => (
+              <div key={`${l.t}-${i}`} className={l.msg.startsWith("ERROR") ? "text-red-400" : l.msg.startsWith("  ✕") ? "text-red-300" : undefined}>
                 <span className="text-zinc-700 mr-1.5">{l.t}</span>{l.msg}
               </div>
             ))}
@@ -778,7 +780,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
                     the peer carries the tail of the path, and the hover title
                     has the full path plus the reason. */}
                 {(job?.attempts ?? []).map((a, i) => (
-                  <div key={i} className="flex items-baseline gap-1.5" title={`${a.username} — ${a.dir}\n${a.reason}`}>
+                  <div key={`${a.username}-${i}`} className="flex items-baseline gap-1.5" title={`${a.username} — ${a.dir}\n${a.reason}`}>
                     <span className="shrink-0 text-zinc-600">{a.username || "?"}</span>
                     <span className="min-w-0 truncate text-zinc-700">…{String(a.dir).slice(-40)}</span>
                     <span className="min-w-0 break-words text-zinc-400">{a.reason}</span>
@@ -796,7 +798,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
           ) : (
             <div className="mt-2 flex items-center gap-2 flex-wrap">
               <button
-                className="btn-primary !py-1 text-xs"
+                className="btn-primary !py-1 text-xs min-h-10 sm:min-h-0"
                 disabled={!tagPath}
                 onClick={() => {
                   stopPreviews();
@@ -955,7 +957,7 @@ function BrowseModal({ username, onAuto, onClose }: {
       headerExtra={
         <>
           <button
-            className="btn-ghost !py-1 text-xs shrink-0"
+            className="btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0"
             disabled={isFetching}
             onClick={() => refetch()}
             title="Re-read the share list from slskd"
@@ -963,7 +965,7 @@ function BrowseModal({ username, onAuto, onClose }: {
             <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} />
           </button>
           <button
-            className="btn-ghost !py-1 text-xs shrink-0"
+            className="btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0"
             disabled={busy !== null || picked.size === 0}
             onClick={queuePicked}
             title="Queue every file in the ticked folders"
@@ -971,7 +973,7 @@ function BrowseModal({ username, onAuto, onClose }: {
             <Download className="h-3.5 w-3.5" /> Queue selected{picked.size > 0 ? ` (${picked.size})` : ""}
           </button>
           <button
-            className="btn-ghost !py-1 text-xs shrink-0"
+            className="btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0"
             disabled={busy !== null}
             onClick={queueUser}
             title={`Queue everything ${username} shares — slskd scans their whole file list`}
@@ -982,7 +984,7 @@ function BrowseModal({ username, onAuto, onClose }: {
       }
     >
       <input
-        className="input w-full !py-1.5 text-xs"
+        className="input w-full !py-1.5 text-xs min-h-8 sm:min-h-0"
         placeholder="Filter folders (artist, album, path…)"
         value={text}
         onChange={(e) => setText(e.target.value)}
@@ -1029,30 +1031,30 @@ function BrowseModal({ username, onAuto, onClose }: {
                       </span>
                     </button>
                     <button
-                      className="btn-ghost !py-1 text-xs shrink-0"
+                      className="btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0"
                       disabled={busy !== null || d.files.length === 0}
                       onClick={() => queue(d)}
                       title="Queue every file in this folder"
                     >
-                      <Download className="h-3.5 w-3.5" /> Download
+                      <Download className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Download</span>
                     </button>
                     <button
-                      className="btn-ghost !py-1 text-xs shrink-0"
+                      className="btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0"
                       disabled={busy !== null}
                       onClick={() => auto(d)}
                       title="Search the release this folder holds and import it fully tagged"
                     >
-                      <Zap className="h-3.5 w-3.5" /> Auto-import
+                      <Zap className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Auto-import</span>
                     </button>
                   </div>
                   {isOpen && (
                     <div className="border-t border-border/60 max-h-64 overflow-auto">
-                      {d.files.map((f, i) => (
-                        <div key={i} className="flex items-center gap-3 px-3 py-1 border-t border-border/40 first:border-t-0 text-xs">
+                      {d.files.map((f) => (
+                        <div key={f.filename} className="flex items-center gap-3 px-3 py-1 border-t border-border/40 first:border-t-0 text-xs">
                           <span className="flex-1 min-w-0 truncate text-zinc-300" title={f.filename}>{fileName(f.filename)}</span>
                           <span className="text-zinc-500 w-16 text-right shrink-0">{fmtSize(f.size)}</span>
                           <button
-                            className="btn-ghost !px-1.5 !py-0.5 shrink-0"
+                            className="btn-ghost !px-1.5 !py-0.5 shrink-0 min-h-8 sm:min-h-0"
                             disabled={busy !== null}
                             onClick={() => queueFile(f)}
                             title="Queue this file on its own"
@@ -1068,7 +1070,7 @@ function BrowseModal({ username, onAuto, onClose }: {
             })}
           </div>
           {shown.length > limit && (
-            <button className="btn-secondary w-full py-2 text-xs" onClick={() => setLimit((n) => n + 200)}>
+            <button className="btn-secondary w-full py-2 text-xs min-h-8 sm:min-h-0" onClick={() => setLimit((n) => n + 200)}>
               Show more ({shown.length - limit} folders remaining)
             </button>
           )}
@@ -1229,21 +1231,21 @@ function ReviewRow({ f, onChanged }: { f: ReviewFile; onChanged: () => void }) {
           </div>
         </button>
         <button
-          className={`btn-ghost !py-1 text-xs shrink-0 ${previewOpen ? "!text-accent" : ""}`}
+          className={`btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0 ${previewOpen ? "!text-accent" : ""}`}
           onClick={() => setPreviewOpen(!previewOpen)}
           title={f.is_video ? "Watch (preview player)" : "Listen (preview player)"}
         >
-          <Play className="h-3.5 w-3.5" /> Preview
+          <Play className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Preview</span>
         </button>
         <button
-          className={`btn-ghost !py-1 text-xs shrink-0 ${tagOpen ? "!text-accent" : ""}`}
+          className={`btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0 ${tagOpen ? "!text-accent" : ""}`}
           onClick={() => setTagOpen(!tagOpen)}
           title="Check / edit the tags before import — video files are remuxed to MKV on save (stream copy, no quality loss)"
         >
-          <Tag className="h-3.5 w-3.5" /> Tag
+          <Tag className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Tag</span>
         </button>
         <button
-          className={`btn-ghost !py-1 text-xs shrink-0 ${armDelete ? "!text-red-300 border border-red-800" : ""}`}
+          className={`btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0 ${armDelete ? "!text-red-300 border border-red-800" : ""}`}
           disabled={busy}
           onClick={discard}
           title={armDelete ? "Click again to delete this download" : "Delete this download without importing"}
@@ -1281,7 +1283,7 @@ function ReviewRow({ f, onChanged }: { f: ReviewFile; onChanged: () => void }) {
               <label key={t.key} className="text-[10px] text-zinc-500 block">
                 {t.label}
                 <input
-                  className="input !py-1 !px-2 text-xs mt-0.5 w-full"
+                  className="input !py-1 !px-2 text-xs mt-0.5 w-full min-h-8 sm:min-h-0"
                   value={form[t.key] ?? ""}
                   placeholder={t.placeholder}
                   onChange={(e) => set(t.key, e.target.value)}
@@ -1291,7 +1293,7 @@ function ReviewRow({ f, onChanged }: { f: ReviewFile; onChanged: () => void }) {
             <label className="text-[10px] text-zinc-500 block">
               Advisory
               <select
-                className="input !py-1 !px-2 text-xs mt-0.5 w-full"
+                className="input !py-1 !px-2 text-xs mt-0.5 w-full min-h-8 sm:min-h-0"
                 value={form.ITUNESADVISORY ?? "0"}
                 onChange={(e) => set("ITUNESADVISORY", e.target.value)}
               >
@@ -1302,7 +1304,7 @@ function ReviewRow({ f, onChanged }: { f: ReviewFile; onChanged: () => void }) {
             </label>
           </div>
           <div className="flex items-center gap-2">
-            <button className="btn-primary !py-1 text-xs" disabled={busy} onClick={save}>
+            <button className="btn-primary !py-1 text-xs min-h-10 sm:min-h-0" disabled={busy} onClick={save}>
               <Save className="h-3.5 w-3.5" /> Save tags{f.is_video ? " (remux to MKV)" : ""}
             </button>
             <span className="text-[10px] text-zinc-600">
@@ -1413,7 +1415,7 @@ function ImportRunCard({ run }: { run: ImportRunStatus | undefined }) {
         )}
         {running && (
           <button
-            className="btn-ghost !py-1 text-xs ml-auto"
+            className="btn-ghost !py-1 text-xs ml-auto min-h-8 sm:min-h-0"
             onClick={cancel}
             title="Stop after the album being imported — never mid-album, a half-imported album is worse than a slow one"
           >
@@ -1428,8 +1430,8 @@ function ImportRunCard({ run }: { run: ImportRunStatus | undefined }) {
       )}
       {run.results.length > 0 && (
         <div className="space-y-0.5 max-h-48 overflow-auto stagger">
-          {run.results.map((r, i) => (
-            <div key={`${r.path}-${i}`} className="flex items-center gap-2 px-1 py-0.5">
+          {run.results.map((r) => (
+            <div key={r.path} className="flex items-center gap-2 px-1 py-0.5">
               {r.ok ? (
                 <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
               ) : (
@@ -1494,7 +1496,7 @@ function ReadyImports() {
             : "nothing finished is waiting to be imported"}
         </span>
         <button
-          className="btn-ghost !py-0.5 !px-2 text-[11px] ml-auto"
+          className="btn-ghost !py-0.5 !px-2 text-[11px] ml-auto min-h-8 sm:min-h-0"
           onClick={() => refetch()}
           disabled={isFetching}
           title="Rescan the download folder"
@@ -1511,7 +1513,7 @@ function ReadyImports() {
           <span className="text-zinc-500 w-8 text-right shrink-0" title={`${a.files} file(s)`}>{a.files} f</span>
           <span className="text-zinc-500 w-16 text-right shrink-0">{fmtSize(a.bytes)}</span>
           <button
-            className="btn-primary !py-0.5 !px-2 text-[11px] shrink-0"
+            className="btn-primary !py-0.5 !px-2 text-[11px] shrink-0 min-h-10 sm:min-h-0"
             disabled={runBusy || busyPath !== null}
             onClick={() => start(a)}
             title="Import this album all the way through — convert, tag, organize, then the import chain"
@@ -1595,10 +1597,10 @@ function ReviewPanel() {
           )}
         </div>
         <div className="flex gap-2">
-          <button className="btn-ghost !py-1 text-xs" onClick={() => refetch()} title="Rescan the download folder">
+          <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={() => refetch()} title="Rescan the download folder">
             <RefreshCw className="h-3.5 w-3.5" />
           </button>
-          <button className="btn-primary !py-1 text-xs" onClick={importAll} title="Ingest completed downloads into the library">
+          <button className="btn-primary !py-1 text-xs min-h-10 sm:min-h-0" onClick={importAll} title="Ingest completed downloads into the library">
             <Download className="h-3.5 w-3.5" /> Import completed
           </button>
         </div>
@@ -1615,7 +1617,7 @@ function ReviewPanel() {
           {albums.map(([dir, count]) => (
             <button
               key={dir}
-              className="btn-ghost !py-1 text-xs"
+              className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
               onClick={() => {
                 stopPreviews();
                 navigate(`/import?album=${encodeURIComponent(dir)}`);
@@ -1634,7 +1636,7 @@ function ReviewPanel() {
           {justImported.moved.map((dir) => (
             <button
               key={dir}
-              className="btn-ghost !py-1 text-xs"
+              className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
               onClick={() => {
                 stopPreviews();
                 navigate(`/import?album=${encodeURIComponent(dir)}`);
@@ -1768,7 +1770,7 @@ function SharingCard({ running }: { running: boolean }) {
             />
             Start with the app
           </label>
-          <button className="btn-ghost !py-1 text-xs" onClick={rescan} disabled={busy || !running}>
+          <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={rescan} disabled={busy || !running}>
             <RefreshCw className="h-3.5 w-3.5" /> Rescan
           </button>
         </div>
@@ -1790,7 +1792,7 @@ function SharingCard({ running }: { running: boolean }) {
           ))}
           <div className="flex items-center gap-2">
             <input
-              className="input !py-1 flex-1 font-mono text-[11px]"
+              className="input !py-1 flex-1 font-mono text-[11px] min-h-8 sm:min-h-0"
               placeholder="Add a folder to share (full path)"
               value={newDir}
               onChange={(e) => setNewDir(e.target.value)}
@@ -1802,7 +1804,7 @@ function SharingCard({ running }: { running: boolean }) {
               }}
             />
             <button
-              className="btn-ghost !py-1 text-xs"
+              className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
               disabled={!newDir.trim()}
               onClick={() => {
                 setDirs([...(dirs ?? []), newDir.trim()]);
@@ -1813,7 +1815,7 @@ function SharingCard({ running }: { running: boolean }) {
             </button>
           </div>
           {dirty && (
-            <button className="btn-primary !py-1 text-xs w-full" onClick={() => save()} disabled={busy}>
+            <button className="btn-primary !py-1 text-xs w-full min-h-10 sm:min-h-0" onClick={() => save()} disabled={busy}>
               {busy ? "Applying…" : "Save & apply (restarts slskd to rescan)"}
             </button>
           )}
@@ -1904,7 +1906,7 @@ function WishRow({ w, run, importing, pageBusy, onImport, onChanged }: {
 
   return (
     <div className="rounded-lg border border-border bg-card overflow-hidden">
-      <div className="flex items-center gap-3 p-2.5">
+      <div className="flex flex-wrap items-center gap-3 p-2.5">
         {!failed && w.release_mbid ? (
           <img
             src={api.artUrl(`https://coverartarchive.org/release/${w.release_mbid}/front-250`)}
@@ -1919,7 +1921,7 @@ function WishRow({ w, run, importing, pageBusy, onImport, onChanged }: {
           </div>
         )}
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className={`chip text-[9px] border ${importing ? "bg-sky-900/40 text-sky-300 border-sky-800" : st.cls}`}>
               {importing ? (
                 <Loader2 className="h-3 w-3 animate-spin" />
@@ -1937,10 +1939,10 @@ function WishRow({ w, run, importing, pageBusy, onImport, onChanged }: {
             {w.last_error ? <span className="text-zinc-600"> — {w.last_error}</span> : null}
           </div>
         </div>
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="flex flex-wrap items-center gap-1 shrink-0 w-full justify-end sm:w-auto">
           {canImport && (
             <button
-              className="btn-ghost !py-1 text-xs"
+              className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
               onClick={onImport}
               disabled={importing || pageBusy || runBusy}
               title="Import the download this wish is waiting on — the album goes through the whole pipeline in the background"
@@ -1949,17 +1951,17 @@ function WishRow({ w, run, importing, pageBusy, onImport, onChanged }: {
             </button>
           )}
           {w.status !== "imported" && (
-            <button className="btn-ghost !py-1 text-xs" onClick={search} disabled={busy} title="Search Soulseek now">
+            <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={search} disabled={busy} title="Search Soulseek now">
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
             </button>
           )}
           {w.album_path && (
-            <a className="btn-ghost !py-1 text-xs" href={`/album/${encodeURIComponent(w.album_path)}`} title="Open the imported album">
+            <a className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" href={`/album/${encodeURIComponent(w.album_path)}`} title="Open the imported album">
               <PackageOpen className="h-3.5 w-3.5" />
             </a>
           )}
           <a
-            className="btn-ghost !py-1 text-xs"
+            className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
             href={`https://musicbrainz.org/release/${w.release_mbid}`}
             target="_blank"
             rel="noreferrer"
@@ -1967,10 +1969,10 @@ function WishRow({ w, run, importing, pageBusy, onImport, onChanged }: {
           >
             <ExternalLink className="h-3.5 w-3.5" />
           </a>
-          <button className="btn-ghost !py-1 text-xs" onClick={() => setOpen(!open)} title="Notes">
+          <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={() => setOpen(!open)} title="Notes">
             {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
           </button>
-          <button className="btn-ghost !py-1 text-xs text-red-300" onClick={remove} title="Remove wish">
+          <button className="btn-ghost !py-1 text-xs text-red-300 min-h-8 sm:min-h-0" onClick={remove} title="Remove wish">
             <Trash2 className="h-3.5 w-3.5" />
           </button>
         </div>
@@ -1978,12 +1980,12 @@ function WishRow({ w, run, importing, pageBusy, onImport, onChanged }: {
       {open && (
         <div className="border-t border-border/60 p-2.5 flex items-center gap-2 anim-fade">
           <input
-            className="input !py-1 text-xs flex-1"
+            className="input !py-1 text-xs flex-1 min-h-8 sm:min-h-0"
             placeholder="Note — pressings to prefer, source hints…"
             value={note}
             onChange={(e) => setNote(e.target.value)}
           />
-          <button className="btn-ghost !py-1 text-xs" onClick={saveNote} disabled={note === w.note}>
+          <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={saveNote} disabled={note === w.note}>
             <Save className="h-3.5 w-3.5" /> Save
           </button>
         </div>
@@ -2126,19 +2128,19 @@ function WishesPanel() {
           <span className="text-zinc-500">
             Save releases now; the app re-searches Soulseek on an interval and imports them when a verified copy appears.
           </span>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex flex-wrap items-center gap-2 justify-end">
             <button
-              className="btn-primary !py-1 text-xs"
+              className="btn-primary !py-1 text-xs min-h-10 sm:min-h-0"
               onClick={importAll}
               disabled={busy || runBusy}
               title="Import every finished download into the library, one album at a time"
             >
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />} Import all completed
             </button>
-            <button className="btn-ghost !py-1 text-xs" onClick={reconcile} disabled={busy} title="Flip wishes already present in the library">
+            <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={reconcile} disabled={busy} title="Flip wishes already present in the library">
               <CheckCircle2 className="h-3.5 w-3.5" /> Sync library
             </button>
-            <button className="btn-primary !py-1 text-xs" onClick={searchAll} disabled={busy}>
+            <button className="btn-primary !py-1 text-xs min-h-10 sm:min-h-0" onClick={searchAll} disabled={busy}>
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />} Search all now
             </button>
           </div>
@@ -2163,13 +2165,13 @@ function WishesPanel() {
         <div className="flex gap-2">
           <Link2 className="h-4 w-4 text-zinc-600 self-center shrink-0" />
           <input
-            className="input flex-1"
+            className="input flex-1 min-h-8 sm:min-h-0"
             placeholder="Paste a MusicBrainz release ID or URL to wish for it"
             value={mbid}
             onChange={(e) => setMbid(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && !busy && add()}
           />
-          <button className="btn-primary" onClick={add} disabled={busy || !mbid.trim()}>
+          <button className="btn-primary min-h-10 sm:min-h-0" onClick={add} disabled={busy || !mbid.trim()}>
             <Plus className="h-4 w-4" /> Add wish
           </button>
         </div>
@@ -2205,8 +2207,13 @@ function WishesPanel() {
         <details className="panel">
           <summary className="text-[10px] uppercase tracking-widest text-zinc-500 cursor-pointer">Wish log</summary>
           <div className="mt-2 space-y-0.5 max-h-48 overflow-auto font-mono text-[10px]">
-            {data.log.slice(-40).reverse().map((l, i) => (
-              <div key={i} className={l.level === "warn" ? "text-amber-400/80" : l.level === "ok" ? "text-emerald-400/80" : "text-zinc-500"}>
+            {data.log.slice(-40).reverse().map((l) => (
+              // The window slides as the worker appends: an index key remounts
+              // every line on each poll, the line's own stamp + text does not.
+              <div
+                key={`${l.t}-${l.msg}`}
+                className={l.level === "warn" ? "text-amber-400/80" : l.level === "ok" ? "text-emerald-400/80" : "text-zinc-500"}
+              >
                 {new Date(l.t * 1000).toLocaleTimeString()} — {l.msg}
               </div>
             ))}
@@ -2255,7 +2262,12 @@ export default function SoulseekPage() {
   const [pending, setPending] = useState<null | "start" | "stop">(null);
   useEffect(() => {
     if (!pending) return;
-    const iv = setInterval(refetchStatus, 1000);
+    // 3s — the same cadence as this page's fastest list poll, and deliberately
+    // NOT removed in favour of the websocket's own invalidation (another
+    // component owns that frame, and a start/stop spinner that never clears if
+    // it stops arriving is worse than a slower one). A 1s refetch here
+    // re-rendered every panel on the page once a second.
+    const iv = setInterval(refetchStatus, 3000);
     const timeout = setTimeout(() => setPending(null), 45000);
     return () => {
       clearInterval(iv);
@@ -2576,15 +2588,15 @@ export default function SoulseekPage() {
         actions={
           <>
             {running ? (
-              <button className="btn-ghost" onClick={stop} disabled={pending !== null}>
+              <button className="btn-ghost min-h-8 sm:min-h-0" onClick={stop} disabled={pending !== null}>
                 {pending === "stop" ? "Stopping…" : <><Power className="h-4 w-4" /> Stop</>}
               </button>
             ) : (
-              <button className="btn-primary" onClick={start} disabled={pending !== null}>
+              <button className="btn-primary min-h-10 sm:min-h-0" onClick={start} disabled={pending !== null}>
                 {pending === "start" ? "Starting…" : <><Play className="h-4 w-4" /> Start slskd</>}
               </button>
             )}
-            <button className="btn-ghost" onClick={() => { refetchStatus(); refetchDownloads(); }} title="Reload status and the transfer list">
+            <button className="btn-ghost min-h-8 sm:min-h-0" onClick={() => { refetchStatus(); refetchDownloads(); }} title="Reload status and the transfer list">
               <RefreshCw className="h-4 w-4" />
             </button>
           </>
@@ -2615,7 +2627,7 @@ export default function SoulseekPage() {
           <label className="flex items-center gap-1.5 text-zinc-500">
             Listen (Soulseek)
             <input
-              className="input w-28 !py-1 !px-2 font-mono"
+              className="input w-28 !py-1 !px-2 font-mono min-h-8 sm:min-h-0"
               inputMode="numeric"
               value={listenPort}
               onChange={(e) => setListenPort(e.target.value.replace(/\D/g, ""))}
@@ -2625,14 +2637,14 @@ export default function SoulseekPage() {
           <label className="flex items-center gap-1.5 text-zinc-500">
             Web UI
             <input
-              className="input w-28 !py-1 !px-2 font-mono"
+              className="input w-28 !py-1 !px-2 font-mono min-h-8 sm:min-h-0"
               inputMode="numeric"
               value={webPort}
               onChange={(e) => setWebPort(e.target.value.replace(/\D/g, ""))}
               title="Local slskd API/web port"
             />
           </label>
-          <button className="btn-ghost !py-1 text-xs" disabled={!portsChanged || portsBusy} onClick={savePorts}>
+          <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" disabled={!portsChanged || portsBusy} onClick={savePorts}>
             <Save className="h-3.5 w-3.5" /> {portsBusy ? "Saving…" : "Save"}
           </button>
           <span className="text-[10px] text-zinc-600">
@@ -2684,17 +2696,17 @@ export default function SoulseekPage() {
       <div className="panel-hero">
         <div className="flex flex-wrap gap-2">
           <input
-            className="input flex-1"
+            className="input flex-1 min-h-8 sm:min-h-0"
             placeholder="Search Soulseek manually (artist — album, title, catalog #…)"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && !searching && runSearch()}
           />
-          <button className="btn-primary" onClick={() => runSearch()} disabled={searching || !running}>
+          <button className="btn-primary min-h-10 sm:min-h-0" onClick={() => runSearch()} disabled={searching || !running}>
             <Search className="h-4 w-4" /> {searching ? "Searching…" : "Search"}
           </button>
           {searching && (
-            <button className="btn-ghost" onClick={cancelSearch} title="Stop this search — slskd drops it and the results stop polling">
+            <button className="btn-ghost min-h-8 sm:min-h-0" onClick={cancelSearch} title="Stop this search — slskd drops it and the results stop polling">
               <Square className="h-4 w-4" /> Cancel search
             </button>
           )}
@@ -2714,7 +2726,7 @@ export default function SoulseekPage() {
               </button>
             ))}
             <button
-              className="btn-ghost !px-1.5 !py-0 text-[11px] text-zinc-500"
+              className="btn-ghost !px-1.5 !py-0 text-[11px] text-zinc-500 min-h-8 sm:min-h-0"
               onClick={() => {
                 setRecent([]);
                 try {
@@ -2754,7 +2766,7 @@ export default function SoulseekPage() {
                 {/* codec filter, built from what the peers actually offer */}
                 {codecs.length > 1 && (
                   <select
-                    className="input !py-1 !w-auto text-[11px]"
+                    className="input !py-1 !w-auto text-[11px] min-h-8 sm:min-h-0"
                     value={codec}
                     onChange={(e) => setCodec(e.target.value)}
                     title="Show only folders holding this codec"
@@ -2765,9 +2777,9 @@ export default function SoulseekPage() {
                 )}
               </div>
               <div className="flex items-center gap-1.5 text-xs text-zinc-500">
-                <button className="btn-ghost !py-0.5 !px-2 text-[11px]" onClick={expandAll}>Expand all</button>
+                <button className="btn-ghost !py-0.5 !px-2 text-[11px] min-h-8 sm:min-h-0" onClick={expandAll}>Expand all</button>
                 <span>·</span>
-                <button className="btn-ghost !py-0.5 !px-2 text-[11px]" onClick={collapseAll}>Collapse all</button>
+                <button className="btn-ghost !py-0.5 !px-2 text-[11px] min-h-8 sm:min-h-0" onClick={collapseAll}>Collapse all</button>
               </div>
             </div>
 
@@ -2779,7 +2791,7 @@ export default function SoulseekPage() {
                     {/* folder header: what you'd actually download */}
                     <div className="flex items-center gap-3 px-3 py-2 bg-panel/60 flex-wrap">
                       <button
-                        className="flex-1 min-w-0 text-left"
+                        className="flex-1 min-w-0 w-full sm:w-auto text-left"
                         onClick={() => toggleGroup(g.key)}
                         title={g.dir}
                       >
@@ -2807,7 +2819,7 @@ export default function SoulseekPage() {
                       })()}
                       {g.hasLog && (
                         <button
-                          className="btn-ghost !py-1 text-xs shrink-0"
+                          className="btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0"
                           disabled={logTest[g.key] === "busy"}
                           onClick={() => testLogs(g)}
                           title="Download only the .log file(s) and grade them before committing to the album"
@@ -2816,14 +2828,14 @@ export default function SoulseekPage() {
                         </button>
                       )}
                       <button
-                        className="btn-ghost !py-1 text-xs shrink-0"
+                        className="btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0"
                         onClick={() => setBrowseUser(g.username)}
                         title={`Browse everything ${g.username} shares`}
                       >
                         <FolderOpen className="h-3.5 w-3.5" /> Browse
                       </button>
                       <button
-                        className="btn-ghost !py-1 text-xs shrink-0"
+                        className="btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0"
                         disabled={busyUser === g.username || !g.files.length}
                         onClick={() => downloadFile(g.files[0], true)}
                         title="Download this whole folder"
@@ -2833,18 +2845,20 @@ export default function SoulseekPage() {
                     </div>
                     {open && (
                       <div className="border-t border-border/60">
-                        {g.files.map((f, i) => (
-                          <div key={i} className="flex items-center gap-3 px-3 py-1.5 border-t border-border/40 first:border-t-0 text-xs">
+                        {g.files.map((f) => (
+                          <div key={f.file} className="flex items-center gap-3 px-3 py-1.5 border-t border-border/40 first:border-t-0 text-xs">
                             <span className="flex-1 min-w-0 truncate text-zinc-300" title={fileName(f.file)}>
                               {fileName(f.file)}
                             </span>
-                            <span className="text-zinc-500 w-16 text-right shrink-0">{fmtSize(f.size)}</span>
-                            <span className="text-zinc-500 w-20 text-right shrink-0">
+                            <span className="text-zinc-500 w-14 sm:w-16 text-right shrink-0">{fmtSize(f.size)}</span>
+                            {/* bitrate is a desktop column: the size and the
+                                extension already identify the file on a phone */}
+                            <span className="hidden sm:block text-zinc-500 w-20 text-right shrink-0">
                               {f.bitrate ? `${f.bitrate}${f.vbr ? " vbr" : ""}` : extOf(f.file) || "—"}
                             </span>
                             <span className="text-zinc-500 w-10 text-right shrink-0">{fmtDur(f.duration)}</span>
                             <button
-                              className="btn-ghost !px-1.5 !py-0.5 shrink-0"
+                              className="btn-ghost !px-1.5 !py-0.5 shrink-0 min-h-8 sm:min-h-0"
                               disabled={busyUser === g.username}
                               onClick={() => downloadFile(f, false)}
                               title="Download this file"
@@ -2866,7 +2880,7 @@ export default function SoulseekPage() {
               )}
               {visible.length > visibleLimit && (
                 <button
-                  className="btn-secondary w-full py-2 text-xs mt-2"
+                  className="btn-secondary w-full py-2 text-xs mt-2 min-h-8 sm:min-h-0"
                   onClick={() => setVisibleLimit((n) => n + 60)}
                 >
                   Show more ({visible.length - visibleLimit} remaining)
@@ -2891,7 +2905,7 @@ export default function SoulseekPage() {
             ) : (
               <span>Broadcasting query to Soulseek network…</span>
             )}
-            <button className="btn-ghost !py-0.5 !px-2 text-[11px]" onClick={cancelSearch} title="Stop this search">
+            <button className="btn-ghost !py-0.5 !px-2 text-[11px] min-h-8 sm:min-h-0" onClick={cancelSearch} title="Stop this search">
               Cancel search
             </button>
           </div>
@@ -2972,10 +2986,22 @@ function MessagesPanel({ running }: { running: boolean }) {
   }, [open, unreadInbound, qc]);
 
   // Newest message is what you came for — keep it in view as the thread grows.
+  // Not unconditionally, though: the thread poll replaces the list every few
+  // seconds, and a scrollTop write on every poll yanks the reader (and on iOS
+  // the page) back to the bottom while they are reading history. So a thread
+  // that was just opened jumps to the newest message, and an open one only
+  // follows when the reader is already at the bottom.
   const scrollRef = useRef<HTMLDivElement>(null);
+  const openedFor = useRef<string | null | undefined>(undefined);
   useEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    if (openedFor.current !== open) {
+      openedFor.current = open;
+      el.scrollTop = el.scrollHeight;
+      return;
+    }
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 60) el.scrollTop = el.scrollHeight;
   }, [open, messages.length]);
 
   // The just-typed peer may not exist server-side yet — show it anyway so the
@@ -3030,7 +3056,7 @@ function MessagesPanel({ running }: { running: boolean }) {
         </div>
         <div className="flex-1" />
         <input
-          className="input !py-1 !px-2 text-xs w-56"
+          className="input !py-1 !px-2 text-xs w-full sm:w-56 min-h-8 sm:min-h-0"
           placeholder="New message — peer username"
           value={newUser}
           onChange={(e) => setNewUser(e.target.value)}
@@ -3043,7 +3069,7 @@ function MessagesPanel({ running }: { running: boolean }) {
           title="Open (or start) a thread with this Soulseek user — sending creates it"
         />
         <button
-          className="btn-ghost !py-1 text-xs"
+          className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
           onClick={() => { refetch(); if (open) thread.refetch(); }}
           title="Reload the conversation list and the open thread"
         >
@@ -3056,8 +3082,8 @@ function MessagesPanel({ running }: { running: boolean }) {
       ) : isError ? (
         <EmptyState title="Could not load conversations" hint="slskd is unreachable — this retries automatically." />
       ) : (
-        <div className="flex gap-3 mt-3">
-          <div className="w-56 shrink-0 rounded-lg border border-border bg-panel/60 p-1 space-y-0.5 max-h-[420px] overflow-auto stagger">
+        <div className="flex flex-col sm:flex-row gap-3 mt-3">
+          <div className="w-full sm:w-56 shrink-0 rounded-lg border border-border bg-panel/60 p-1 space-y-0.5 max-h-[420px] overflow-auto stagger">
             {peers.length === 0 ? (
               <div className="text-xs text-zinc-600 p-2">No conversations yet.</div>
             ) : (
@@ -3081,7 +3107,7 @@ function MessagesPanel({ running }: { running: boolean }) {
                     </span>
                   )}
                   <button
-                    className="btn-ghost !px-1.5 !py-0.5 text-[10px]"
+                    className="btn-ghost !px-1.5 !py-0.5 text-[10px] min-h-8 sm:min-h-0"
                     onClick={() => closeConversation(c.username)}
                     disabled={closing === c.username}
                     title="Close this conversation (drops it from slskd)"
@@ -3149,7 +3175,7 @@ function MessagesPanel({ running }: { running: boolean }) {
                     disabled={sending}
                   />
                   <button
-                    className="btn-primary !py-1 text-xs self-end"
+                    className="btn-primary !py-1 text-xs self-end min-h-10 sm:min-h-0"
                     onClick={send}
                     disabled={sending || !draft.trim()}
                   >
@@ -3303,7 +3329,7 @@ function DownloadsPanel({ downloads, status }: {
           ))}
           {finished > 0 && (
             <button
-              className="btn-ghost !py-0.5 !px-2 text-[11px] ml-1"
+              className="btn-ghost !py-0.5 !px-2 text-[11px] ml-1 min-h-8 sm:min-h-0"
               disabled={busy !== null}
               onClick={() => clear("finished")}
               title="Remove finished / failed transfers from this list (in-progress and queued transfers are kept)"
@@ -3313,7 +3339,7 @@ function DownloadsPanel({ downloads, status }: {
           )}
           {active.length + queued.length > 0 && (
             <button
-              className="btn-ghost !py-0.5 !px-2 text-[11px]"
+              className="btn-ghost !py-0.5 !px-2 text-[11px] min-h-8 sm:min-h-0"
               disabled={busy !== null}
               onClick={() => clear(
                 "incomplete",
@@ -3326,7 +3352,7 @@ function DownloadsPanel({ downloads, status }: {
           )}
           {failed.length > 0 && (
             <button
-              className="btn-ghost !py-0.5 !px-2 text-[11px]"
+              className="btn-ghost !py-0.5 !px-2 text-[11px] min-h-8 sm:min-h-0"
               disabled={busy !== null}
               onClick={() => clear("failed")}
               title="Remove only the failed transfers from this list (completed ones stay, nothing on disk is touched)"
@@ -3336,7 +3362,7 @@ function DownloadsPanel({ downloads, status }: {
           )}
           {active.length + queued.length > 0 && (
             <button
-              className="btn-ghost !py-0.5 !px-2 text-[11px]"
+              className="btn-ghost !py-0.5 !px-2 text-[11px] min-h-8 sm:min-h-0"
               disabled={busy !== null}
               onClick={() => cancel([...active, ...queued])}
               title="Drop every running and queued transfer from slskd's queue"
@@ -3346,7 +3372,7 @@ function DownloadsPanel({ downloads, status }: {
           )}
           {failed.length > 0 && (
             <button
-              className="btn-ghost !py-0.5 !px-2 text-[11px]"
+              className="btn-ghost !py-0.5 !px-2 text-[11px] min-h-8 sm:min-h-0"
               disabled={busy !== null}
               onClick={() => retry(failed)}
               title="Queue every failed transfer's file again"
@@ -3391,27 +3417,27 @@ function DownloadsPanel({ downloads, status }: {
             ))}
           </div>
           <div className="space-y-1 max-h-[360px] overflow-auto stagger">
-            {shown.map((f, i) => (
-              <div key={f.id || `${f.username}-${i}`} className="flex items-center gap-3 px-2 py-1.5 rounded hover:bg-white/[0.04] text-xs">
+            {shown.map((f) => (
+              <div key={f.id || `${f.username}\u0000${f.filename}`} className="flex items-center gap-3 px-2 py-1.5 rounded hover:bg-white/[0.04] text-xs">
                 <div className="flex-1 min-w-0">
                   <div className="truncate text-zinc-200" title={f.filename}>{fileName(f.filename ?? "")}</div>
                   <div className="text-[10px] text-zinc-600 truncate" title={f.dir}>{f.username} · {f.dir}</div>
                 </div>
                 {view === "active" && (
-                  <div className="w-16 sm:w-28 shrink-0 h-1.5 rounded-sm bg-border/70 overflow-hidden">
+                  <div className="hidden sm:block w-16 sm:w-28 shrink-0 h-1.5 rounded-sm bg-border/70 overflow-hidden">
                     <div className={`h-full ${f.state === "InProgress" ? "bg-accent" : "bg-zinc-600"}`} style={{ width: `${pct(f)}%` }} />
                   </div>
                 )}
-                <span className="text-zinc-500 w-16 text-right shrink-0">{fmtSize(f.size ?? 0)}</span>
+                <span className="text-zinc-500 w-14 sm:w-16 text-right shrink-0">{fmtSize(f.size ?? 0)}</span>
                 {/* slskd reports the running average per transfer — hidden on
                     phones, where the row has no width to spare */}
                 <span className="text-zinc-500 w-20 text-right shrink-0 hidden sm:block" title="Average transfer rate">
                   {fmtRate(f.averageSpeed)}
                 </span>
-                <span className="w-16 text-right shrink-0">{bucket(f)}</span>
+                <span className="w-14 sm:w-16 text-right shrink-0">{bucket(f)}</span>
                 {view === "active" ? (
                   <button
-                    className="btn-ghost !px-1.5 !py-0.5 text-[11px] shrink-0 w-16 justify-center"
+                    className="btn-ghost !px-1.5 !py-0.5 text-[11px] shrink-0 w-16 justify-center min-h-8 sm:min-h-0"
                     disabled={busy !== null}
                     onClick={() => cancel([f])}
                     title="Drop this transfer from slskd's queue"
@@ -3420,7 +3446,7 @@ function DownloadsPanel({ downloads, status }: {
                   </button>
                 ) : failed.includes(f) ? (
                   <button
-                    className="btn-ghost !px-1.5 !py-0.5 text-[11px] shrink-0 w-16 justify-center"
+                    className="btn-ghost !px-1.5 !py-0.5 text-[11px] shrink-0 w-16 justify-center min-h-8 sm:min-h-0"
                     disabled={busy !== null}
                     onClick={() => retry([f])}
                     title="Queue this file again"
@@ -3491,7 +3517,7 @@ function StagingCard({ id, root, busy, onDelete, onClear }: {
         <div className="flex items-center gap-1 shrink-0">
           {root.count > 0 && (
             <button
-              className="btn-ghost !py-0.5 !px-2 text-[11px]"
+              className="btn-ghost !py-0.5 !px-2 text-[11px] min-h-8 sm:min-h-0"
               disabled={busy}
               onClick={onClear}
               title={`Delete every entry in ${root.folder} — the folder itself stays`}
@@ -3512,15 +3538,16 @@ function StagingCard({ id, root, busy, onDelete, onClear }: {
               {e.album && (
                 <span className="chip text-[9px] bg-raise border border-border text-zinc-400" title="Holds audio, so it can be imported into the library">album</span>
               )}
-              <span className="text-zinc-500 w-8 text-right shrink-0" title={`${e.files} file(s)`}>{e.files} f</span>
-              <span className="text-zinc-500 w-16 text-right shrink-0">{fmtSize(e.bytes)}</span>
+              <span className="hidden sm:block text-zinc-500 w-8 text-right shrink-0" title={`${e.files} file(s)`}>{e.files} f</span>
+              <span className="text-zinc-500 w-14 sm:w-16 text-right shrink-0">{fmtSize(e.bytes)}</span>
               <button
-                className="btn-ghost !px-1.5 !py-0.5 text-[11px] shrink-0"
+                className="btn-ghost !px-2 sm:!px-1.5 !py-0.5 text-[11px] shrink-0 min-h-8 sm:min-h-0"
                 disabled={busy}
                 onClick={() => onDelete(e)}
                 title={`Delete ${e.name} from ${root.folder}`}
               >
-                <Trash2 className="h-3 w-3" /> Delete
+                <Trash2 className="h-3 w-3" />
+                <span className="hidden sm:inline">Delete</span>
               </button>
             </div>
           ))}
@@ -3609,7 +3636,7 @@ function StagingPanel() {
         <div className="text-xs text-amber-300">
           Could not read the staging folders — the server may be restarting (the walk can also take a
           while on a large queue).{" "}
-          <button className="btn-ghost !py-0.5 text-xs" onClick={() => refetch()}>
+          <button className="btn-ghost !py-0.5 text-xs min-h-8 sm:min-h-0" onClick={() => refetch()}>
             Retry
           </button>
         </div>
@@ -3667,8 +3694,8 @@ function UploadsPanel({ running }: { running: boolean }) {
         <EmptyState title="No uploads yet" hint="No one has pulled from your shares since slskd last started." />
       ) : (
         <div className="space-y-1 max-h-[300px] overflow-auto stagger">
-          {[...sharingNow, ...past].slice(0, 60).map((f: any, i: number) => (
-            <div key={`${f.username}-${i}`} className="flex items-center gap-3 px-2 py-1.5 rounded hover:bg-white/[0.04] text-xs">
+          {[...sharingNow, ...past].slice(0, 60).map((f) => (
+            <div key={`${f.username}\u0000${f.dir}\u0000${f.filename}`} className="flex items-center gap-3 px-2 py-1.5 rounded hover:bg-white/[0.04] text-xs">
               <div className="flex-1 min-w-0">
                 <div className="truncate text-zinc-200" title={f.filename}>{fileName(f.filename ?? "")}</div>
                 <div className="text-[10px] text-zinc-600 truncate">{f.username}</div>
@@ -3812,7 +3839,7 @@ function StagingImportPanel() {
           </span>
         </div>
         <button
-          className="btn-ghost !py-1 text-xs"
+          className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
           onClick={() => refetch()}
           disabled={isFetching}
           title="Re-read the downloads folder"
@@ -3882,7 +3909,7 @@ function StagingImportPanel() {
         {entries.length > 0 && (
           <div className="flex items-center gap-2 flex-wrap">
             <button
-              className="btn-ghost !py-1 text-xs"
+              className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
               onClick={() => setSel(allSelected ? new Set() : new Set(entries.map((e) => e.name)))}
             >
               {allSelected ? "Select none" : "Select all"}
@@ -3890,9 +3917,9 @@ function StagingImportPanel() {
             {liveSelection.length > 0 && (
               <span className="text-xs text-zinc-400">{liveSelection.length} selected</span>
             )}
-            <div className="flex items-center gap-2 ml-auto">
+            <div className="flex flex-wrap items-center gap-2 ml-auto justify-end">
               <button
-                className="btn-primary !py-1 text-xs"
+                className="btn-primary !py-1 text-xs min-h-10 sm:min-h-0"
                 onClick={doImport}
                 disabled={busy || !liveSelection.length}
                 title={
@@ -3907,16 +3934,16 @@ function StagingImportPanel() {
               {confirmDelete ? (
                 <>
                   <span className="text-xs text-amber-300">Delete permanently?</span>
-                  <button className="btn-danger !py-1 text-xs" onClick={doDelete} disabled={busy}>
+                  <button className="btn-danger !py-1 text-xs min-h-8 sm:min-h-0" onClick={doDelete} disabled={busy}>
                     <Trash2 className="h-3.5 w-3.5" /> Yes, delete
                   </button>
-                  <button className="btn-ghost !py-1 text-xs" onClick={() => setConfirmDelete(false)} disabled={busy}>
+                  <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={() => setConfirmDelete(false)} disabled={busy}>
                     <X className="h-3.5 w-3.5" /> Cancel
                   </button>
                 </>
               ) : (
                 <button
-                  className="btn-danger !py-1 text-xs"
+                  className="btn-danger !py-1 text-xs min-h-8 sm:min-h-0"
                   onClick={() => setConfirmDelete(true)}
                   disabled={busy || !liveSelection.length}
                   title="Delete the selected entries from disk — this cannot be undone"

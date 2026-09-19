@@ -56,6 +56,12 @@ const TRASH_COL_W: Record<string, string> = {
   removed: "w-32",
 };
 
+/** A phone (390 px) row keeps the item and its two buttons: the summary
+ *  columns are added up in the toolbar anyway, and keeping them squeezes the
+ *  item name to nothing. The class has to sit on the header AND the cells, or
+ *  the fixed-layout grid misaligns; `md` is where they come back. */
+const PHONE_HIDE = " hidden md:table-cell";
+
 /** Root-level art names GET /api/cover auto-detects. CoverImg only ever asks
  *  for a named file (no name = placeholder box), so the client names the file
  *  the server would have found — the same search, on the entry's own listing. */
@@ -343,19 +349,27 @@ export default function TrashPage() {
   const rowActions = (e: Entry) => (
     <>
       <button
-        className="btn-ghost !py-1 !px-2 text-xs"
+        className="btn-ghost !py-2 !px-2 text-xs md:!py-1"
         onClick={() => restoreOne(e)}
         disabled={busy}
+        aria-label={e.origin ? "Restore" : "Restore to…"}
         title={
           e.origin
             ? `Restore to ${e.origin}`
             : "Original location unknown — choose the folder to restore into"
         }
       >
-        <Undo2 className="h-3 w-3" /> {e.origin ? "Restore" : "Restore to…"}
+        <Undo2 className="h-3 w-3" />
+        <span className="hidden md:inline">{e.origin ? "Restore" : "Restore to…"}</span>
       </button>
-      <button className="btn-danger !py-1 !px-2 text-xs" onClick={() => removeOne(e)} disabled={busy}>
-        <Trash2 className="h-3 w-3" /> Delete permanently
+      <button
+        className="btn-danger !py-2 !px-2 text-xs md:!py-1"
+        onClick={() => removeOne(e)}
+        disabled={busy}
+        aria-label="Delete permanently"
+      >
+        <Trash2 className="h-3 w-3" />
+        <span className="hidden md:inline">Delete permanently</span>
       </button>
     </>
   );
@@ -394,20 +408,21 @@ export default function TrashPage() {
     if (cols.includes("kind"))
       cells.push({
         id: "kind",
+        cls: `td${PHONE_HIDE}`,
         node: <span className="chip bg-raise border border-border text-zinc-400">{e.kind}</span>,
       });
     if (cols.includes("tracks"))
       cells.push({
         id: "tracks",
-        cls: "td text-zinc-500 tabular-nums",
+        cls: `td text-zinc-500 tabular-nums${PHONE_HIDE}`,
         node: e.kind === "album" ? `${e.tracks ?? 0} track${e.tracks === 1 ? "" : "s"}` : "—",
       });
     if (cols.includes("size"))
-      cells.push({ id: "size", cls: "td text-zinc-500 tabular-nums", node: fmtSize(e.bytes) });
+      cells.push({ id: "size", cls: `td text-zinc-500 tabular-nums${PHONE_HIDE}`, node: fmtSize(e.bytes) });
     if (cols.includes("removed"))
       cells.push({
         id: "removed",
-        cls: "td text-zinc-500",
+        cls: `td text-zinc-500${PHONE_HIDE}`,
         title: e.trashed_at,
         node: `trashed ${ago(e.trashed_at)}`,
       });
@@ -421,11 +436,12 @@ export default function TrashPage() {
           then Empty trash, the trash folder, select mode and the counts on
           the right, all on ONE line. */}
       <div className="flex items-center gap-2 flex-wrap">
-        <Segmented value={view} onChange={setView} options={VIEW_TABS} />
+        <Segmented value={view} onChange={setView} options={VIEW_TABS}
+          className="[&>button]:min-h-[2rem]" />
 
         <div className="relative">
           <button
-            className={`btn-ghost !py-1.5 text-xs ${sortOpen ? "!text-white !bg-raise" : ""}`}
+            className={`btn-ghost !py-1.5 text-xs min-h-[2rem] md:min-h-0 ${sortOpen ? "!text-white !bg-raise" : ""}`}
             onClick={() => setSortOpen(!sortOpen)}
             title="Sort the trash"
           >
@@ -464,7 +480,7 @@ export default function TrashPage() {
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-600" />
           <input
-            className="input !py-1.5 !pl-8 text-xs !w-52"
+            className="input !py-1.5 !pl-8 text-xs !w-52 min-h-[2rem] md:min-h-0"
             placeholder="Filter the trash"
             title="Filter by album name or by the raw folder name"
             value={filter}
@@ -474,14 +490,14 @@ export default function TrashPage() {
 
         <div className="ml-auto flex items-center gap-2">
           {entries.length > 0 && (
-            <button className="btn-danger !py-1.5 text-xs" onClick={emptyAll} disabled={busy}>
+            <button className="btn-danger !py-1.5 text-xs min-h-[2rem] md:min-h-0" onClick={emptyAll} disabled={busy}>
               {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
               Empty trash
             </button>
           )}
           {folder && (
             <button
-              className="btn-ghost !py-1.5 text-xs font-mono max-w-[24rem] truncate"
+              className="btn-ghost !py-1.5 text-xs font-mono max-w-full sm:max-w-[24rem] truncate min-h-[2rem] md:min-h-0"
               onClick={copyFolder}
               title="Copy the trash folder path"
             >
@@ -490,7 +506,7 @@ export default function TrashPage() {
             </button>
           )}
           <button
-            className={`btn-ghost !py-1.5 text-xs ${selectMode ? "!text-accent !border-accent/50" : ""}`}
+            className={`btn-ghost !py-1.5 text-xs min-h-[2rem] md:min-h-0 ${selectMode ? "!text-accent !border-accent/50" : ""}`}
             onClick={toggleSelectMode}
             title="Select mode — show checkboxes for batch actions"
           >
@@ -513,7 +529,7 @@ export default function TrashPage() {
           </span>
           <div className="ml-auto flex gap-1.5 flex-wrap">
             <button
-              className="btn-primary !py-1 text-xs"
+              className="btn-primary !py-1 text-xs min-h-[2rem] md:min-h-0"
               onClick={restoreSelected}
               disabled={busy}
               title="Put the selected items back into the library"
@@ -526,14 +542,14 @@ export default function TrashPage() {
               Restore
             </button>
             <button
-              className="btn-danger !py-1 text-xs"
+              className="btn-danger !py-1 text-xs min-h-[2rem] md:min-h-0"
               onClick={removeSelected}
               disabled={busy}
               title="Erase the selected items from disk — cannot be undone"
             >
               <Trash2 className="h-3.5 w-3.5" /> Delete permanently
             </button>
-            <button className="btn-ghost !py-1 text-xs" onClick={() => setSelected([])}>
+            <button className="btn-ghost !py-1 text-xs min-h-[2rem] md:min-h-0" onClick={() => setSelected([])}>
               Clear
             </button>
           </div>
@@ -602,7 +618,7 @@ export default function TrashPage() {
                 />
                 {TRASH_COLS.filter((c) => cols.includes(c.id)).map((c) =>
                   c.id === "kind" ? (
-                    <th key={c.id} className={`th ${TRASH_COL_W[c.id]}`}>
+                    <th key={c.id} className={`th ${TRASH_COL_W[c.id]}${PHONE_HIDE}`}>
                       {c.label}
                     </th>
                   ) : (
@@ -612,11 +628,13 @@ export default function TrashPage() {
                       sort={sort}
                       sortKey={c.sortKey}
                       onSort={(k) => setSort(toggleSort(sort, k))}
-                      className={TRASH_COL_W[c.id]}
+                      className={`${TRASH_COL_W[c.id]}${PHONE_HIDE}`}
                     />
                   )
                 )}
-                <th className="th w-[15rem] text-right">Actions</th>
+                {/* 240 px of labels only fit from `md` up; below that the two
+                    buttons keep their icons and their aria-labels. */}
+                <th className="th w-24 md:w-[15rem] text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="stagger">
@@ -625,8 +643,11 @@ export default function TrashPage() {
                   key={e.name}
                   title={e.label}
                   titleExtra={
+                    /* The raw folder name is a hover/provenance detail: on a
+                       phone it would take the whole cell and leave the item
+                       name invisible. */
                     <span
-                      className="text-[11px] text-zinc-600 font-mono truncate max-w-[10rem] shrink-0"
+                      className="hidden md:inline-block text-[11px] text-zinc-600 font-mono truncate max-w-[10rem] shrink-0"
                       title={e.path}
                     >
                       {e.name}

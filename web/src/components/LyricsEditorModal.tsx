@@ -4,8 +4,9 @@ import {
   Eraser, Keyboard, Loader2, Pause, Play, Plus, Save,
   Trash2, Undo2, Wand2,
 } from "lucide-react";
-import { api } from "../api";
+import { api, isOffline } from "../api";
 import { toast, useStore } from "../store";
+import { offlineMediaUrl } from "../lib/mediaCache";
 import {
   parseLrc, serializeLrc, KaraokeWords, type LrcLine, type LrcWord,
 } from "./LyricsViewer";
@@ -79,7 +80,10 @@ export default function LyricsEditorModal({
   const [dur, setDur] = useState(duration ?? 0);  const [speed, setSpeed] = useState(1);
   // The preview element is a second decoder — the player bar's volume effect
   // never reaches it, so it follows the shared app volume itself.
-  const { vol } = useStore();
+  // Field selector, not `useStore()`: the modal's line list is a big subtree
+  // and used to re-render on every unrelated store write, volume frames
+  // included.
+  const vol = useStore((s) => s.vol);
   const [mode, setMode] = useState<StampMode>("line");
   const [busy, setBusy] = useState<string | null>(null);
   const [keysMenu, setKeysMenu] = useState(false);
@@ -96,6 +100,8 @@ export default function LyricsEditorModal({
   const pendingRef = useRef<Pending | null>(null);
   const capturingRef = useRef<LyricsAction | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  // The track the preview element's source was resolved for — see togglePlay.
+  const previewPath = useRef<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const rowRefs = useRef<Record<number, HTMLDivElement | null>>({});
 
@@ -165,10 +171,29 @@ export default function LyricsEditorModal({
       a.pause();
       setPlaying(false);
     } else {
-      if (!a.src) a.src = api.streamUrl(path);
-      a.playbackRate = speed;
-      a.volume = vol;
-      a.play().catch(() => toast("Playback failed — audio format unsupported in browser"));
+      const p = path;
+      const start = () => {
+        a.playbackRate = speed;
+        a.volume = vol;
+        a.play().catch(() => toast("Playback failed — audio format unsupported in browser"));
+      };
+      if (a.src) {
+        start();
+      } else {
+        // Cache first, exactly like the player bar: a downloaded track
+        // previews in a shell with no server. The lookup is async, so a
+        // track change while it is in flight must win over the late result.
+        previewPath.current = p;
+        void (async () => {
+          const cached = await offlineMediaUrl(p);
+          if (previewPath.current !== p) return;
+          if (!cached && isOffline()) {
+            toast.error(`“${track || p}” isn’t downloaded — it needs the server to play.`);
+          }
+          a.src = cached ?? api.streamUrl(p);
+          start();
+        })();
+      }
       setPlaying(true);
     }
   };

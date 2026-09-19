@@ -196,7 +196,7 @@ export default function SourcesPanel({ only }: { only?: SourceKind } = {}) {
             a source that cannot run here is skipped, never fatal.
           </div>
         </div>
-        <button className="btn-ghost !py-1 text-xs" onClick={testAll} disabled={busy !== null}>
+        <button className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0" onClick={testAll} disabled={busy !== null}>
           <RotateCcw className={`h-3 w-3 ${busy === "all" ? "animate-spin" : ""}`} />
           {busy === "all" ? "Testing…" : "Test all"}
         </button>
@@ -257,7 +257,7 @@ export default function SourcesPanel({ only }: { only?: SourceKind } = {}) {
                     {row.ms ? ` · ${row.ms} ms` : ""}
                   </span>
                   <button
-                    className="btn-ghost !py-0.5 !px-2 text-[11px]"
+                    className="btn-ghost !py-0.5 !px-2 text-[11px] min-h-8 md:min-h-0"
                     onClick={() => testOne(row)}
                     disabled={busy !== null}
                   >
@@ -265,7 +265,7 @@ export default function SourcesPanel({ only }: { only?: SourceKind } = {}) {
                   </button>
                 </div>
 
-                {row.detail && <div className="text-[11px] text-zinc-500">{row.detail}</div>}
+                {row.detail && <div className="text-[11px] text-zinc-500 break-words">{row.detail}</div>}
                 {/* Why RYM said no comes from the response itself: the status
                     code, whether Cloudflare's challenge marker was in the
                     body, the URL that was asked for and when. The sentence
@@ -273,7 +273,7 @@ export default function SourcesPanel({ only }: { only?: SourceKind } = {}) {
                     a stale cookie and a blocked network both read as "403"
                     without it. */}
                 {rymLast && (
-                  <div className="text-[11px] text-zinc-600">
+                  <div className="text-[11px] text-zinc-600 break-all">
                     Last RYM reply:{" "}
                     {typeof rymLast.status === "number"
                       ? `HTTP ${rymLast.status}`
@@ -294,7 +294,7 @@ export default function SourcesPanel({ only }: { only?: SourceKind } = {}) {
                             {KEY_INFO[k].label}
                           </span>
                           <input
-                            className="input !py-1 text-[11px] mt-0.5"
+                            className="input !py-1 text-[11px] mt-0.5 min-h-8 md:min-h-0"
                             type={KEY_INFO[k].secret ? "password" : "text"}
                             value={draft[k] ?? ""}
                             placeholder={KEY_INFO[k].label}
@@ -303,7 +303,7 @@ export default function SourcesPanel({ only }: { only?: SourceKind } = {}) {
                         </label>
                       ))}
                       <button
-                        className="btn-primary !py-1 text-xs shrink-0"
+                        className="btn-primary !py-1 text-xs shrink-0 min-h-10 md:min-h-0"
                         disabled={busy !== null || !promptKeys.some((k) => (draft[k] ?? "") !== String(config?.[k] ?? ""))}
                         onClick={() => saveKeys(row)}
                         title="Save these keys and test this source again"

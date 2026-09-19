@@ -137,8 +137,41 @@ const INACTIVE_SCALE = { sm: 0.88, md: 0.84, lg: 0.8 } as const;
  * styled — only synced lines get the active/inactive treatment. */
 const LINE_BLUR = "np-line-blur blur-[2px] opacity-60 hover:blur-none hover:opacity-100 focus-within:blur-none focus-within:opacity-100 transition-[opacity,filter] duration-motion-base ease-motion";
 
+/** The volume cluster is its own component because dragging the slider writes
+ *  `vol` once per pointer step. Subscribed here, where the value is actually
+ *  rendered, a drag repaints three small controls instead of the whole pane —
+ *  the fullscreen view used to re-render its entire lyrics subtree once per
+ *  frame of a volume drag. */
+function VolumeControl() {
+  const vol = useStore((s) => s.vol);
+  const setVol = useStore((s) => s.setVol);
+  const VolIcon = vol <= 0 ? VolumeX : vol < 0.5 ? Volume1 : Volume2;
+  return (
+    <div className="hidden md:flex items-center gap-1.5 text-zinc-500 shrink-0" title={`Volume — ${Math.round(vol * 100)}%`}>
+      <VolIcon className="h-4 w-4" />
+      <input
+        type="range"
+        min={0}
+        max={1}
+        step={0.05}
+        value={vol}
+        onChange={(e) => setVol(Number(e.target.value))}
+        className="w-24 max-w-full seek-fat"
+        title="Volume"
+        aria-label="Volume"
+      />
+      <VolumePct value={vol} onChange={setVol} />
+    </div>
+  );
+}
+
 export default function NowPlayingView(p: Props) {
-  const { vol, setVol } = useStore();
+  // Subscribed field by field, never as a selector-less `useStore()`: this is
+  // the fullscreen pane, and the store is written many times a second while
+  // playing (a relay progress frame among them). One wholesale subscription
+  // re-rendered the whole lyrics subtree on each of those writes. `vol` is not
+  // read here at all — the volume cluster subscribes for itself, so a drag
+  // frame never reaches this component (see VolumeControl).
   // Stored transliteration + translation default ON — they arrive with the
   // track's tags (or a .romaji.lrc / .<lang>.lrc sidecar) and render as
   // sub-lines under each line; nothing is generated on the fly.
@@ -196,7 +229,16 @@ export default function NowPlayingView(p: Props) {
   const qc = useQueryClient();
 
   const { time, duration } = p;
-  const { queue, index, setIndex, setQueue, queueRemoveAt, queueMove, setPlaying } = useStore();
+  // Same per-field treatment: the drawer renders `queue`/`index`, and the
+  // action selectors are stable references — so this pane repaints on a queue
+  // or track change, not on every unrelated store write.
+  const queue = useStore((s) => s.queue);
+  const index = useStore((s) => s.index);
+  const setIndex = useStore((s) => s.setIndex);
+  const setQueue = useStore((s) => s.setQueue);
+  const queueRemoveAt = useStore((s) => s.queueRemoveAt);
+  const queueMove = useStore((s) => s.queueMove);
+  const setPlaying = useStore((s) => s.setPlaying);
   const queueListRef = useRef<HTMLDivElement>(null);
   const queueTriggerRef = useRef<HTMLButtonElement>(null);
   const queueCloseRef = useRef<HTMLButtonElement>(null);
@@ -698,8 +740,6 @@ export default function NowPlayingView(p: Props) {
   const techStr = fmtPair(tech);
   const techTip = fmtTech(tech);
 
-  const VolIcon = vol <= 0 ? VolumeX : vol < 0.5 ? Volume1 : Volume2;
-
   // What the options menu says about the gain the player is applying right now
   // — the same three cases the bar's chip covers: tags, measured on demand,
   // and unity (nothing shown in the bar).
@@ -847,21 +887,7 @@ export default function NowPlayingView(p: Props) {
           the volume group. */}
       <span className="w-10 text-right font-mono tabular-nums">{fmtDuration(duration)}</span>
       <span className="w-px h-6 bg-white/15 self-center shrink-0 mx-2" />
-      <div className="hidden md:flex items-center gap-1.5 text-zinc-500 shrink-0" title={`Volume — ${Math.round(vol * 100)}%`}>
-        <VolIcon className="h-4 w-4" />
-        <input
-          type="range"
-          min={0}
-          max={1}
-          step={0.05}
-          value={vol}
-          onChange={(e) => setVol(Number(e.target.value))}
-          className="w-24 max-w-full seek-fat"
-          title="Volume"
-          aria-label="Volume"
-        />
-        <VolumePct value={vol} onChange={setVol} />
-      </div>
+      <VolumeControl />
     </div>
   );
 

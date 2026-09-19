@@ -173,11 +173,26 @@ export const useStore = create<Store>((set) => ({
     }),
   clearSelection: () => set({ selection: { tracks: [], albums: [], artists: [] } }),
   vol: initialVol(),
+  // `setVol` is called once per pointermove while the slider is dragged, and a
+  // synchronous `localStorage.setItem` on that path is a disk write per frame
+  // (a real stutter on a phone, and it also notifies every subscriber that
+  // reads `vol`). The value in the store is still set immediately — the audio
+  // element follows the finger — but the write to disk is coalesced to the
+  // end of the drag's frame budget.
   setVol: (vol) => {
-    localStorage.setItem(VOL_KEY, String(vol));
     set({ vol });
+    if (volWrite !== undefined) return;
+    volWrite = window.setTimeout(() => {
+      volWrite = undefined;
+      try {
+        localStorage.setItem(VOL_KEY, String(useStore.getState().vol));
+      } catch {
+        /* storage disabled: the level still applies to this session */
+      }
+    }, 250);
   },
 }));
+let volWrite: number | undefined;
 
 let toastSeq = 0;
 

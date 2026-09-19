@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  App Transport Security exemption for the webview, and nothing else.
+
+	  A self-hosted la musica server is plain http on an address only the user
+	  knows: a LAN IP, a Tailscale/MagicDNS name, or 127.0.0.1:8000 for the
+	  desktop shell's own backend. TLS is not optional for the project to run
+	  without it - the server ships without a certificate, so every request the
+	  React UI makes (fetch, WebSocket, audio/video playback) is http:// or
+	  ws://. ATS blocks exactly those requests by default, which is what makes
+	  the app unusable against a real install.
+
+	  NSAllowsArbitraryLoadsInWebContent keeps the exemption inside the webview:
+	  the shell's native URLSession calls (there are none today - lib.rs has no
+	  HTTP client) stay under full ATS, and NSExceptionDomains cannot be used
+	  here because the host is chosen by the user at runtime, not by us.
+
+	  Tauri merges this file into the generated plist for both iOS
+	  (`tauri ios build`, which also accepts the same path via
+	  bundle.iOS.infoPlist) and the macOS .app bundle, so one file covers both
+	  Apple platforms. Android is unaffected and documented in desktop/README.md.
+	-->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+	</dict>
+</dict>
+</plist>

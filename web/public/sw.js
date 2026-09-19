@@ -131,6 +131,18 @@ async function sliceCached(resp, range) {
   return new Response(buf.slice(start, end + 1), { status: 206, statusText: "Partial Content", headers });
 }
 
+/** A response served out of the cache because the network could not answer,
+ *  tagged so the page can tell it apart from a real one. api.ts reads this
+ *  header and turns the offline banner on; without it a stale 200 would look
+ *  like the server's own answer. A navigation cannot read its own document's
+ *  headers, but the app's first API call is answered the same way, so the
+ *  banner still appears. */
+function marked(resp) {
+  const headers = new Headers(resp.headers);
+  headers.set("X-MLO-Offline", "1");
+  return new Response(resp.body, { status: resp.status, statusText: resp.statusText, headers });
+}
+
 /** JSON the offline app is built from: artwork and lyrics, plus the payloads
  *  a download warms — the library (the downloads page groups by it), the
  *  config (the shell gates on it at boot) and the album/artist bodies (their
@@ -177,7 +189,7 @@ self.addEventListener("fetch", (event) => {
           return resp;
         } catch {
           const hit = await cache.match(SHELL_URL);
-          return hit ?? new Response("offline and not cached", { status: 504 });
+          return hit ? marked(hit) : new Response("offline and not cached", { status: 504 });
         }
       })()
     );
@@ -208,7 +220,7 @@ self.addEventListener("fetch", (event) => {
           return resp;
         } catch {
           const hit = await cache.match(req);
-          return hit ?? new Response("offline and not cached", { status: 504 });
+          return hit ? marked(hit) : new Response("offline and not cached", { status: 504 });
         }
       })()
     );

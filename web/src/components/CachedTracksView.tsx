@@ -52,6 +52,12 @@ const TRACK_COLS: Col[] = [
   { id: "bitrate", label: "Bitrate", sortKey: "tech.bitrate" },
 ];
 
+/** A phone (390 px) row keeps the album or the title and the buttons: the
+ *  percentages below leave a few characters at that width. The class has to
+ *  sit on the header AND the cells or the fixed-layout grid misaligns; `md` is
+ *  where each column comes back. */
+const PHONE_HIDE = " hidden md:table-cell";
+
 const TRACK_COL_W: Record<string, string> = {
   num: "w-16",
   title: "w-auto",
@@ -112,12 +118,14 @@ function CachedAlbumRow({
 }) {
   const showAlbumCol = cols.includes("album");
   const cells: AlbumRowCell[] = [];
-  if (cols.includes("artist")) cells.push({ id: "artist", cls: "td text-zinc-400 break-words", node: row.artist });
-  if (cols.includes("year")) cells.push({ id: "year", cls: "td text-zinc-500", node: row.year || "—" });
+  if (cols.includes("artist"))
+    cells.push({ id: "artist", cls: `td text-zinc-400 break-words${PHONE_HIDE}`, node: row.artist });
+  if (cols.includes("year"))
+    cells.push({ id: "year", cls: `td text-zinc-500${PHONE_HIDE}`, node: row.year || "—" });
   if (cols.includes("cached"))
     cells.push({
       id: "cached",
-      cls: "td text-zinc-500 tabular-nums",
+      cls: `td text-zinc-500 tabular-nums${PHONE_HIDE}`,
       title: `${row.cachedCount} of ${row.album.track_count} track(s) of this album are cached`,
       node: `${row.cachedCount} / ${row.album.track_count}`,
     });
@@ -132,11 +140,12 @@ function CachedAlbumRow({
       cells={cells}
       actions={
         <>
-          <button className="btn-ghost !px-1.5 !py-1" title="Play these cached tracks" onClick={() => onPlay()}>
+          {/* Touch shows these always: 32 px targets on a phone, compact from `md`. */}
+          <button className="btn-ghost !px-1.5 !py-2 md:!py-1" title="Play these cached tracks" onClick={() => onPlay()}>
             <Play className="h-3.5 w-3.5" />
           </button>
           <button
-            className="btn-danger !px-1.5 !py-1"
+            className="btn-danger !px-1.5 !py-2 md:!py-1"
             title="Remove this album from the offline cache"
             onClick={onRemove}
           >
@@ -150,13 +159,14 @@ function CachedAlbumRow({
       onToggle={onToggle}
       colSpan={cols.length + 3}
       expandedContent={
-        <table className="w-full">
+        <div className="overflow-x-auto">
+          <table className="w-full">
           <thead className="border-b border-border">
             <tr>
               {TRACK_COLS.filter((c) => trackCols.includes(c.id)).map((c) => (
                 <th
                   key={c.id}
-                  className={`th relative ${TRACK_COL_W[c.id] ?? ""}`}
+                  className={`th relative ${TRACK_COL_W[c.id] ?? ""}${c.id === "num" || c.id === "bitrate" ? PHONE_HIDE : ""}`}
                   style={trackWidths[c.id] ? { width: trackWidths[c.id] } : undefined}
                 >
                   {c.label}
@@ -179,7 +189,7 @@ function CachedAlbumRow({
                 onClick={() => onPlay(t.path)}
               >
                 {trackCols.includes("num") && (
-                  <td className="td text-zinc-600 tabular-nums cell-nowrap">
+                  <td className={`td text-zinc-600 tabular-nums cell-nowrap${PHONE_HIDE}`}>
                     {t.tracknumber ?? t.tags.TRACKNUMBER ?? "—"}
                   </td>
                 )}
@@ -192,17 +202,17 @@ function CachedAlbumRow({
                   </td>
                 )}
                 {trackCols.includes("dur") && <td className="td text-zinc-500">{fmtDuration(t.tech.length)}</td>}
-                {trackCols.includes("bitrate") && <td className="td text-zinc-500">{fmtTech(t.tech) || "—"}</td>}
+                {trackCols.includes("bitrate") && <td className={`td text-zinc-500${PHONE_HIDE}`}>{fmtTech(t.tech) || "—"}</td>}
                 <td className="td text-right">
                   <div
                     className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity"
                     onClick={(e) => e.stopPropagation()}
                   >
-                    <button className="btn-ghost !px-1.5 !py-0.5" title="Play this track" onClick={() => onPlay(t.path)}>
+                    <button className="btn-ghost !px-1.5 !py-1.5 min-h-[2rem] md:min-h-0" title="Play this track" onClick={() => onPlay(t.path)}>
                       <Play className="h-3 w-3" />
                     </button>
                     <button
-                      className="btn-danger !px-1.5 !py-0.5"
+                      className="btn-danger !px-1.5 !py-1.5 min-h-[2rem] md:min-h-0"
                       title="Remove this track from the offline cache"
                       onClick={() => onRemoveTrack(t)}
                     >
@@ -213,7 +223,8 @@ function CachedAlbumRow({
               </tr>
             ))}
           </tbody>
-        </table>
+          </table>
+        </div>
       }
     />
   );
@@ -314,7 +325,7 @@ export default function CachedTracksView() {
         </div>
         <div className="flex items-center gap-1 flex-wrap">
           <button
-            className="btn-ghost !py-1 text-xs"
+            className="btn-ghost !py-1 text-xs min-h-[2rem] md:min-h-0"
             onClick={() => refetch()}
             disabled={isFetching}
             title="Re-read what this browser holds offline"
@@ -323,7 +334,7 @@ export default function CachedTracksView() {
           </button>
           {count > 0 && (
             <ConfirmButton
-              className="btn-danger !py-1 text-xs"
+              className="btn-danger !py-1 text-xs min-h-[2rem] md:min-h-0"
               confirmLabel="Clear all"
               onConfirm={clearAll}
               title="Delete every cached track from this browser — offline playback stops working until they are downloaded again"
@@ -372,7 +383,7 @@ export default function CachedTracksView() {
                       sort={sort}
                       sortKey={c.sortKey}
                       onSort={(k) => setSort((s) => toggleSort(s, k))}
-                      className={`relative ${COL_W[c.id] ?? ""}`}
+                      className={`relative ${COL_W[c.id] ?? ""}${c.id === "album" ? "" : PHONE_HIDE}`}
                       style={widths[c.id] ? { width: widths[c.id] } : undefined}
                     >
                       <ColumnResizer

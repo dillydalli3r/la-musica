@@ -14,6 +14,11 @@ import { isVideoFile } from "./fmt";
  */
 const CACHE_NAME = "mlo-media-v2";
 
+/** The `blob:` URLs handed out by offlineMediaUrl, keyed by the cache key
+ *  they wrap: created once per key (a player that asks twice gets the same
+ *  URL) and revoked the moment the bytes are removed. */
+const blobUrls = new Map<string, string>();
+
 function absolute(base: string): string {
   // api.ts prefixes an absolute origin inside Tauri; resolve to absolute
   // here too so cache keys match SW-intercepted request URLs.
@@ -136,7 +141,17 @@ export async function cacheTrack(path: string): Promise<void> {
 
 export async function uncacheTrack(path: string): Promise<void> {
   const c = await cache();
-  await Promise.all(cacheUrls(path).map((u) => c.delete(u)));
+  const urls = cacheUrls(path);
+  await Promise.all(urls.map((u) => c.delete(u)));
+  // A live blob: URL keeps its bytes alive after the cache entry is gone, and
+  // would keep feeding an element a track the user just removed.
+  for (const u of urls) {
+    const blob = blobUrls.get(u);
+    if (blob) {
+      URL.revokeObjectURL(blob);
+      blobUrls.delete(u);
+    }
+  }
   await pruneEntityPayloads();
 }
 
@@ -229,7 +244,36 @@ export async function cachedBytes(): Promise<number> {
 
 /** Evict everything (offline cache reset). */
 export async function clearMediaCache(): Promise<void> {
+  for (const url of blobUrls.values()) URL.revokeObjectURL(url);
+  blobUrls.clear();
   await caches.delete(CACHE_NAME);
+}
+
+/** A `blob:` URL for a downloaded track, or null when it is not cached.
+ *
+ *  In a shell there is no service worker, so the stream URL the player
+ *  normally requests (http://host:8000/api/stream?…) simply fails when the
+ *  server is away — the bytes are in Cache Storage, but nothing hands them to
+ *  an <audio>/<video> element. This is that hand-off: look the path up under
+ *  the same keys `cacheUrls()` uses and turn the stored body into a URL the
+ *  element can play. Created once per cache key — a second call returns the
+ *  same URL instead of leaking another blob — and revoked on removal. */
+export async function offlineMediaUrl(path: string): Promise<string | null> {
+  try {
+    const c = await cache();
+    for (const url of cacheUrls(path)) {
+      const hit = await c.match(url);
+      if (!hit) continue;
+      const existing = blobUrls.get(url);
+      if (existing) return existing;
+      const blob = URL.createObjectURL(await hit.blob());
+      blobUrls.set(url, blob);
+      return blob;
+    }
+    return null;
+  } catch {
+    return null; // Cache Storage unavailable (insecure context), or no entry
+  }
 }
 
 /** The query key for the cached-path snapshot. One key, so CachedTracksView,

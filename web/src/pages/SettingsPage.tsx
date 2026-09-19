@@ -114,7 +114,7 @@ function ProviderOrder({
                 </div>
                 <button
                   type="button"
-                  className="text-zinc-500 hover:text-white disabled:opacity-30"
+                  className="min-h-8 min-w-8 md:min-h-0 md:min-w-0 flex items-center justify-center text-zinc-500 hover:text-white disabled:opacity-30"
                   title="Move up"
                   disabled={i === 0}
                   onClick={() => move(i, -1)}
@@ -123,7 +123,7 @@ function ProviderOrder({
                 </button>
                 <button
                   type="button"
-                  className="text-zinc-500 hover:text-white disabled:opacity-30"
+                  className="min-h-8 min-w-8 md:min-h-0 md:min-w-0 flex items-center justify-center text-zinc-500 hover:text-white disabled:opacity-30"
                   title="Move down"
                   disabled={i === order.length - 1}
                   onClick={() => move(i, 1)}
@@ -132,7 +132,7 @@ function ProviderOrder({
                 </button>
                 <button
                   type="button"
-                  className="text-zinc-500 hover:text-red-300"
+                  className="min-h-8 min-w-8 md:min-h-0 md:min-w-0 flex items-center justify-center text-zinc-500 hover:text-red-300"
                   title="Remove from the list (unlisted providers are not used)"
                   onClick={() => onChange(order.filter((x) => x !== id))}
                 >
@@ -149,7 +149,7 @@ function ProviderOrder({
             <button
               key={o.id}
               type="button"
-              className="chip border border-white/15 bg-white/5 text-[10px] text-zinc-400 hover:text-white"
+              className="chip border border-white/15 bg-white/5 text-[10px] text-zinc-400 hover:text-white min-h-8 md:min-h-0"
               title={o.notes}
               onClick={() => onChange([...order, o.id])}
             >
@@ -161,7 +161,7 @@ function ProviderOrder({
       {order.length > 0 && (
         <button
           type="button"
-          className="text-[10px] text-zinc-500 hover:text-white underline"
+          className="text-[10px] text-zinc-500 hover:text-white underline min-h-8 md:min-h-0"
           onClick={() => onChange([])}
         >
           Reset to the built-in order
@@ -226,7 +226,7 @@ function CoverDefaults() {
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-[11px] font-semibold text-zinc-400">Region</span>
         <select
-          className="input !w-auto !py-1 text-xs"
+          className="input !w-auto !py-1 text-xs min-h-8 md:min-h-0"
           value={country}
           onChange={(e) => setCountry(e.target.value)}
         >
@@ -272,12 +272,12 @@ function CoverDefaults() {
         })}
       </div>
       <div className="flex items-center gap-2 flex-wrap">
-        <button className="btn-primary !py-1 text-xs" onClick={save} disabled={busy || !dirty}>
+        <button className="btn-primary !py-1 text-xs min-h-10 md:min-h-0" onClick={save} disabled={busy || !dirty}>
           <Check className="h-3 w-3" /> Save as default
         </button>
         {dirty && (
           <button
-            className="btn-ghost !py-1 text-xs"
+            className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0"
             disabled={busy}
             onClick={() => {
               setSrcSel(cat.default_sources);
@@ -1334,7 +1334,7 @@ export default function SettingsPage() {
             <div key={f.k} className="md:col-span-2 xl:col-span-3">
               <div className="text-[11px] text-zinc-400 mb-1">{f.label}</div>
               <input
-                className="input !py-1 text-xs w-full"
+                className="input !py-1 text-xs w-full min-h-8 md:min-h-0"
                 value={parts.join(", ")}
                 onChange={(e) => setCfg(f.k, e.target.value.split(",").map((s) => s.trim()))}
               />
@@ -1356,7 +1356,7 @@ export default function SettingsPage() {
             <div className="flex items-center gap-2 w-full">
               <span className="flex-1 min-w-0 truncate">{f.label}</span>
               <select
-                className="input !w-32 !py-0.5 text-[11px] shrink-0"
+                className="input !w-32 !py-0.5 text-[11px] shrink-0 min-h-8 md:min-h-0"
                 value={String(scriptCfg[f.k] ?? "")}
                 onChange={(e) => setCfg(f.k, e.target.value)}
               >
@@ -1370,7 +1370,7 @@ export default function SettingsPage() {
               <div className="flex items-center gap-2 w-full">
                 <span className="flex-1 min-w-0 truncate">{f.label}</span>
                 <input
-                  className="input !w-32 !py-0.5 text-[11px] shrink-0"
+                  className="input !w-32 !py-0.5 text-[11px] shrink-0 min-h-8 md:min-h-0"
                   value={
                     Array.isArray(scriptCfg[f.k])
                       ? (scriptCfg[f.k] as unknown[]).join("; ")
@@ -1387,14 +1387,14 @@ export default function SettingsPage() {
                 <span className="flex-1 min-w-0 truncate">{f.label}</span>
                 <div className="relative shrink-0">
                   <input
-                    className="input !w-32 !py-0.5 !pr-7 text-[11px]"
+                    className="input !w-32 !py-0.5 !pr-7 text-[11px] min-h-8 md:min-h-0"
                     type={showPasswords.has(f.k) ? "text" : "password"}
                     value={String(scriptCfg[f.k] ?? "")}
                     onChange={(e) => setCfg(f.k, e.target.value)}
                   />
                   <button
                     type="button"
-                    className="absolute right-1.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-200"
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 p-[9px] -mx-[9px] text-zinc-500 hover:text-zinc-200"
                     title={showPasswords.has(f.k) ? "Hide password" : "Show password"}
                     onClick={() =>
                       setShowPasswords((prev) => {
@@ -1416,7 +1416,7 @@ export default function SettingsPage() {
               <div className="flex items-center gap-2 w-full">
                 <span className="flex-1 min-w-0 truncate">{f.label}</span>
                 <input
-                  className="input !w-20 !py-0.5 text-[11px] shrink-0 text-right"
+                  className="input !w-20 !py-0.5 text-[11px] shrink-0 text-right min-h-8 md:min-h-0"
                   type="number"
                   min={f.min}
                   max={f.max}
@@ -1452,7 +1452,7 @@ export default function SettingsPage() {
               {searchHits.map((h, i) => (
                 <button
                   key={i}
-                  className="w-full text-left px-2.5 py-1.5 rounded-md hover:bg-white/10"
+                  className="w-full text-left px-2.5 py-1.5 rounded-md hover:bg-white/10 min-h-8 md:min-h-0"
                   onClick={() => {
                     if (h.tab) setTab(h.tab);
                     setQ("");
@@ -1467,18 +1467,21 @@ export default function SettingsPage() {
         </div>
       </PageHeader>
 
-      <div className="flex gap-6">
-        <nav className="w-44 shrink-0 space-y-0.5 sticky top-20 self-start max-h-[calc(100vh-120px)] overflow-auto pr-1">
+      {/* One column below md: the tab rail becomes a horizontal, scrollable
+          strip ABOVE the panels instead of a 176px column beside them, which
+          would leave the fields about eight characters wide on a phone. */}
+      <div className="flex flex-col gap-4 md:flex-row md:gap-6">
+        <nav className="flex shrink-0 gap-1.5 overflow-x-auto pb-1 md:sticky md:top-20 md:self-start md:block md:max-h-[calc(100vh-120px)] md:w-44 md:space-y-0.5 md:overflow-y-auto md:pb-0 md:pr-1">
           {NAV.map((n, i) => (
-            <div key={n.id}>
+            <div key={n.id} className="shrink-0">
               {n.section && (i === 0 || NAV[i - 1].section !== n.section) && (
-                <div className="px-3 pt-3 pb-1 text-[10px] uppercase tracking-wider text-zinc-600 first:pt-0">{n.section}</div>
+                <div className="hidden md:block px-3 pt-3 pb-1 text-[10px] uppercase tracking-wider text-zinc-600 first:pt-0">{n.section}</div>
               )}
               <button
                 onClick={() => setTab(n.id)}
-                className={`w-full text-left px-3 py-1.5 rounded-md text-xs transition-colors ${
+                className={`w-full whitespace-nowrap text-left px-3 py-2 rounded-md text-xs transition-colors md:py-1.5 ${
                   tab === n.id ? "bg-accent on-accent font-medium" : "text-zinc-400 hover:text-white hover:bg-panel border border-transparent"
-                }`}
+                } min-h-8 md:min-h-0`}
               >
                 {n.label}
               </button>
@@ -1556,7 +1559,7 @@ export default function SettingsPage() {
                   reset by it: it only writes what you enter there.
                 </div>
                 <button
-                  className="btn-ghost !py-1 text-xs"
+                  className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0"
                   onClick={() => navigate("/setup")}
                 >
                   <Wand2 className="h-3 w-3" /> Run the setup wizard again
@@ -1638,7 +1641,7 @@ export default function SettingsPage() {
                   <label className="flex items-center justify-between gap-3 text-xs text-zinc-300">
                     <span>Fullscreen lyrics size</span>
                     <select
-                      className="input !w-28 !py-1"
+                      className="input !w-28 !py-1 min-h-8 md:min-h-0"
                       value={localStorage.getItem("mlo.np.size") ?? "md"}
                       onChange={(e) => localStorage.setItem("mlo.np.size", e.target.value)}
                     >
@@ -1666,7 +1669,7 @@ export default function SettingsPage() {
                   <label className="flex items-center justify-between gap-3 text-xs text-zinc-300">
                     <span>Default lyrics save target</span>
                     <select
-                      className="input !w-40 !py-1"
+                      className="input !w-40 !py-1 min-h-8 md:min-h-0"
                       value={localStorage.getItem("mlo.lyricsSaveTarget") ?? "embedded"}
                       onChange={(e) => localStorage.setItem("mlo.lyricsSaveTarget", e.target.value)}
                     >
@@ -1701,7 +1704,7 @@ export default function SettingsPage() {
                   Shorter folder names (truncate MusicBrainz IDs to 8 chars)
                 </label>
                 <button
-                  className="btn-ghost !py-1 text-xs"
+                  className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0"
                   onClick={() =>
                     setNamingScript(
                       String((configDefaults as Record<string, unknown> | undefined)?.naming_script ?? "")
@@ -1710,7 +1713,7 @@ export default function SettingsPage() {
                 >
                   <RotateCcw className="h-3.5 w-3.5" /> Reset to default
                 </button>
-                <button className="btn-ghost !py-1 text-xs" onClick={runPreview} disabled={previewing}>
+                <button className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0" onClick={runPreview} disabled={previewing}>
                   Preview
                 </button>
               </div>
@@ -1740,26 +1743,29 @@ export default function SettingsPage() {
                 <div>
                   <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Dependencies</div>
                   <div className="text-[11px] text-zinc-600 mt-0.5">
-                    Tools the scripts need. Installed from <code className="font-mono">{deps?.deps_dir ?? ".dependencies"}</code> or found on PATH.
+                    Tools the scripts need. Installed from <code className="font-mono break-all">{deps?.deps_dir ?? ".dependencies"}</code> or found on PATH.
                   </div>
                 </div>
-                <div className="flex gap-2">
-                  <button className="btn-ghost !py-1 text-xs" onClick={() => refetchDeps()} disabled={depsBusy}>
+                <div className="flex flex-wrap gap-2">
+                  <button className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0" onClick={() => refetchDeps()} disabled={depsBusy}>
                     Refresh
                   </button>
                   <button
-                    className="btn-ghost !py-1 text-xs"
+                    className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0"
                     onClick={() => installDeps(deps?.tools.filter((t) => t.state === "missing").map((t) => t.key))}
                     disabled={depsBusy}
                   >
                     Install missing
                   </button>
-                  <button className="btn-primary !py-1 text-xs" onClick={() => installDeps()} disabled={depsBusy}>
+                  <button className="btn-primary !py-1 text-xs min-h-10 md:min-h-0" onClick={() => installDeps()} disabled={depsBusy}>
                     {depsBusy ? "Installing…" : "Install / update all"}
                   </button>
                 </div>
               </div>
-              <div className="rounded-md border border-border overflow-hidden table-scroll">
+              {/* `table-scroll` alone: the utility `overflow-hidden` used to sit
+                  beside it and, living in the utilities layer, won — the table
+                  was clipped instead of scrolled at a phone width. */}
+              <div className="rounded-md border border-border table-scroll">
                 <table className="w-full text-sm">
                   <thead className="bg-panel/60">
                     <tr>
@@ -1841,7 +1847,7 @@ export default function SettingsPage() {
                         ? `beets v${beetsStatus.version} installed (vendored in .dependencies)`
                         : "beets is not installed yet"}
                     </span>
-                    <button className="btn-primary !py-1 text-xs" onClick={installBeets} disabled={beetsBusy}>
+                    <button className="btn-primary !py-1 text-xs min-h-10 md:min-h-0" onClick={installBeets} disabled={beetsBusy}>
                       {beetsBusy ? "Installing…" : beetsStatus?.installed ? "Reinstall" : "Install beets"}
                     </button>
                   </div>
@@ -1885,66 +1891,70 @@ export default function SettingsPage() {
                     <div className="text-[10px] text-zinc-600 mt-0.5 mb-1.5">
                       Which tag families each audio container receives (ANDed with the global switches above).
                     </div>
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr>
-                          <th className="text-left text-zinc-500 font-medium py-1">Type</th>
-                          {TAG_FAMILIES.map((fam) => (
-                            <th key={fam} className="text-zinc-500 font-medium py-1">{fam}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {AUDIO_TYPES.map((t) => (
-                          <tr key={t}>
-                            <td className="py-0.5 text-zinc-300">{t}</td>
+                    <div className="table-scroll">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr>
+                            <th className="text-left text-zinc-500 font-medium py-1">Type</th>
                             {TAG_FAMILIES.map((fam) => (
-                              <td key={fam} className="py-0.5">
-                                <input
-                                  type="checkbox"
-                                  className="accent-[var(--accent)]"
-                                  checked={!!audioTagWrites[t]?.[fam]}
-                                  onChange={(e) => toggleTagWrite(t, fam, e.target.checked)}
-                                />
-                              </td>
+                              <th key={fam} className="text-zinc-500 font-medium py-1">{fam}</th>
                             ))}
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody>
+                          {AUDIO_TYPES.map((t) => (
+                            <tr key={t}>
+                              <td className="py-0.5 text-zinc-300">{t}</td>
+                              {TAG_FAMILIES.map((fam) => (
+                                <td key={fam} className="py-0.5">
+                                  <input
+                                    type="checkbox"
+                                    className="accent-[var(--accent)]"
+                                    checked={!!audioTagWrites[t]?.[fam]}
+                                    onChange={(e) => toggleTagWrite(t, fam, e.target.checked)}
+                                  />
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                   <div className="pt-2 border-t border-border">
                     <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Encoder marker tags</div>
                     <div className="text-[10px] text-zinc-600 mt-0.5 mb-1.5">
                       Written to files when re-encoded. QUALITY/VERSION gate re-optimization; PROGRAM is informational.
                     </div>
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr>
-                          <th className="text-left text-zinc-500 font-medium py-1">Format</th>
-                          {ENCODER_FIELDS.map((f) => (
-                            <th key={f} className="text-zinc-500 font-medium py-1">{f}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {ENCODER_FORMATS.map((fmt) => (
-                          <tr key={fmt}>
-                            <td className="py-0.5 text-zinc-300">{fmt}</td>
+                    <div className="table-scroll">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr>
+                            <th className="text-left text-zinc-500 font-medium py-1">Format</th>
                             {ENCODER_FIELDS.map((f) => (
-                              <td key={f} className="py-0.5">
-                                <input
-                                  type="checkbox"
-                                  className="accent-[var(--accent)]"
-                                  checked={!!encoderTags[fmt]?.[f]}
-                                  onChange={(e) => toggleEncoder(fmt, f, e.target.checked)}
-                                />
-                              </td>
+                              <th key={f} className="text-zinc-500 font-medium py-1">{f}</th>
                             ))}
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody>
+                          {ENCODER_FORMATS.map((fmt) => (
+                            <tr key={fmt}>
+                              <td className="py-0.5 text-zinc-300">{fmt}</td>
+                              {ENCODER_FIELDS.map((f) => (
+                                <td key={f} className="py-0.5">
+                                  <input
+                                    type="checkbox"
+                                    className="accent-[var(--accent)]"
+                                    checked={!!encoderTags[fmt]?.[f]}
+                                    onChange={(e) => toggleEncoder(fmt, f, e.target.checked)}
+                                  />
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </>
               )}
@@ -1968,7 +1978,7 @@ export default function SettingsPage() {
               <p className="text-[11px] text-zinc-600 leading-relaxed">{t("settings.notifications_help")}</p>
               <div className="flex flex-wrap items-center gap-2">
                 <button
-                  className="btn-ghost !py-1.5 text-xs"
+                  className="btn-ghost !py-1.5 text-xs min-h-8 md:min-h-0"
                   onClick={async () => {
                     const state = await requestNotifications();
                     setNotifyState(state);
@@ -1997,7 +2007,7 @@ export default function SettingsPage() {
             </div>
           )}
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <ConfirmButton
               onConfirm={resetAllDefaults}
               confirmLabel="Reset all"
@@ -2014,7 +2024,7 @@ export default function SettingsPage() {
               <LayoutGrid className="h-4 w-4" /> Reset UI & layout
             </ConfirmButton>
             <button
-              className="btn-primary"
+              className="btn-primary min-h-10 md:min-h-0"
               onClick={save}
               // The form is seeded FROM the config; saving before it loaded
               // posts empty strings over live values (an empty music_folder
@@ -2073,7 +2083,7 @@ export default function SettingsPage() {
               spellCheck={false}
             />
             <div className="flex items-center gap-2 mt-2">
-              <button className="btn-ghost !py-1 text-xs" onClick={applyRaw}>
+              <button className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0" onClick={applyRaw}>
                 Apply to form
               </button>
               <span className="text-[10px] text-zinc-600">

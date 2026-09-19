@@ -71,6 +71,48 @@ does exactly that, so `.github/workflows/mobile.yml` is the reference for the
 toolchain each target needs; a local build needs the same SDK/NDK or Xcode
 installed first.
 
+## Plain-http servers: what is shipped, and what you have to do
+
+A self-hosted la musica server is plain `http` on an address only you know: a
+LAN IP, a Tailscale/MagicDNS name, or `127.0.0.1:8000` for the desktop shell's
+own backend. The server ships no certificate and offers no TLS, so both Apple
+platforms have to be told to allow cleartext, or the app cannot reach *any*
+server:
+
+- **iOS and macOS** — `src-tauri/Info.plist` sets
+  `NSAppTransportSecurity > NSAllowsArbitraryLoadsInWebContent`. Tauri merges
+  that file into the generated iOS `Info.plist` at `tauri ios build` time (the
+  `bundle.iOS.infoPlist` config key is the explicit form of the same thing),
+  and into the macOS `.app`; without it App Transport Security blocks every
+  `http://` and `ws://` request the webview makes — fetch, WebSocket, audio and
+  video playback alike. The exemption covers web content only, so the shell's
+  own native calls would still be held to full ATS (there are none: `lib.rs`
+  carries no HTTP client).
+- **Android** — there is no config key for the manifest's cleartext flag and
+  the generated project is not committed, so the allowance is applied in CI
+  right after `tauri android init` (`.github/workflows/mobile.yml`). The
+  generated `app/build.gradle.kts` ships
+  `manifestPlaceholders["usesCleartextTraffic"] = "false"` for every build type
+  and `"true"` for `debug` only. **The APK CI publishes is a debug build, so it
+  is already allowed**; a release APK built by hand needs the same flip before
+  Gradle runs:
+
+  ```bash
+  cd desktop
+  sed -i 's/\["usesCleartextTraffic"\] = "false"/["usesCleartextTraffic"] = "true"/' \
+    src-tauri/gen/android/app/build.gradle.kts
+  ```
+
+What that asks of your network: the phone needs to be able to reach the
+server's address — same Wi-Fi/LAN, or the Tailscale/VPN client running on the
+phone — and the server must be listening on a reachable address rather than the
+loopback default (`server_host` in the server's `config.json`, `127.0.0.1` out
+of the box), because a server bound to loopback is invisible on the network.
+Then type that address on the app's login screen (with the port) and sign in
+with the auth password. An install that is reachable over `https` through a
+reverse proxy works too — the cleartext allowance only widens what is
+permitted, it does not require plain http.
+
 ## Mobile installs: what CI gives you
 
 - **Android** — CI builds a **debug** APK (`--apk --debug`), which is signed
@@ -126,7 +168,23 @@ To ship a fully standalone `.exe` without requiring Python:
    external binaries, so a copy dropped into `src-tauri/resources/` is not
    packaged and will not be found.
 
-Icons regenerate with `python tools/make_tauri_icons.py`, which writes the
-desktop set (png/ico/icns) from `desktop/icon-source.png`. The committed
-`src-tauri/icons/ios/` and `src-tauri/icons/android/` folders are the mobile
-icon sets for those same sources.
+## Icons
+
+Icons come from `desktop/icon-source.png` through Tauri's own `tauri icon` —
+`npx tauri icon icon-source.png` in `desktop/`, wrapped by
+`python tools/make_tauri_icons.py` so the old entry point keeps working. That
+one run writes every set: the desktop files (`32x32`, `128x128`, `128x128@2x`,
+`icon.png`, `icon.icns`, `icon.ico`, plus the Windows Store logos) into
+`src-tauri/icons/`, and the iOS `AppIcon-*.png` / Android `mipmap-*` sets into
+`src-tauri/icons/{ios,android}` — or straight into `src-tauri/gen/` when the
+generated native projects exist.
+
+That destination rule is what the mobile builds hang on: `tauri android init` /
+`tauri ios init` render **Tauri's own logo** into the generated project, and
+the Xcode/Gradle build reads the app icon from there — never from
+`bundle.icon`, which only feeds the desktop bundles. So the icon command has to
+run *after* init, which is exactly what `.github/workflows/mobile.yml` does,
+and it fails the build if the generated project still holds the template logo.
+Delete `src-tauri/gen/` and re-run init plus the icon command if you changed
+the artwork; `tauri icon` on its own cannot reach into a project that does not
+exist yet.

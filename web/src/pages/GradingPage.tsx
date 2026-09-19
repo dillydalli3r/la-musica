@@ -298,10 +298,10 @@ export default function GradingPage() {
             >
               <RotateCcw className="h-3.5 w-3.5" /> Reset to defaults
             </ConfirmButton>
-            <button className="btn-ghost !py-1.5 text-xs" onClick={discard} disabled={!dirty || saving}>
+            <button className="btn-ghost !py-1.5 text-xs min-h-8 md:min-h-0" onClick={discard} disabled={!dirty || saving}>
               <RotateCcw className="h-3.5 w-3.5" /> Discard
             </button>
-            <button className="btn-primary !py-1.5 text-xs" onClick={save} disabled={!dirty || saving}>
+            <button className="btn-primary !py-1.5 text-xs min-h-10 md:min-h-0" onClick={save} disabled={!dirty || saving}>
               <Save className="h-3.5 w-3.5" /> {saving ? "Saving…" : "Save"}
             </button>
           </>
@@ -310,18 +310,22 @@ export default function GradingPage() {
         {local && (
           <div className="flex items-center gap-2 flex-wrap">
             <input
-              className="input !py-1.5 text-xs max-w-xs"
+              className="input !py-1.5 text-xs w-full sm:max-w-xs min-h-8 md:min-h-0"
               placeholder="Filter checks… (tags, lyrics, cover…)"
               value={q}
               onChange={(e) => setQ(e.target.value)}
             />
             <Segmented
+              // The preset switcher's own options are px-3 py-1.5 (28 px); a
+              // min-height on the flex wrapper stretches them to a phone tap
+              // target without touching the shared Segmented component.
+              className="min-h-8 md:min-h-0"
               value={preset}
               onChange={applyPreset}
               options={PRESETS}
             />
-            <button className="btn-ghost !py-1 text-xs" onClick={() => setBulk(true)}>Enable all</button>
-            <button className="btn-ghost !py-1 text-xs" onClick={() => setBulk(false)}>Disable all</button>
+            <button className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0" onClick={() => setBulk(true)}>Enable all</button>
+            <button className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0" onClick={() => setBulk(false)}>Disable all</button>
             <span
               className="chip font-mono bg-white/5 border border-border text-zinc-400"
               title="Enabled grading checks — the file-category permissions are counted per group instead"
@@ -339,7 +343,7 @@ export default function GradingPage() {
               <div className="text-amber-300">
                 Could not load the grading settings — the server may be restarting.
               </div>
-              <button className="btn-ghost !py-1.5 text-xs" onClick={() => refetchConfig()}>
+              <button className="btn-ghost !py-1.5 text-xs min-h-8 md:min-h-0" onClick={() => refetchConfig()}>
                 <RefreshCw className="h-3.5 w-3.5" /> Retry
               </button>
             </>
@@ -414,7 +418,7 @@ export default function GradingPage() {
                         <span className="text-[11px] text-zinc-500 block leading-snug">{n.desc}</span>
                       </span>
                       <input
-                        className="input !w-20 !py-1 text-sm shrink-0"
+                        className="input !w-20 !py-1 text-sm shrink-0 min-h-8 md:min-h-0"
                         type="number"
                         min={n.min}
                         max={n.max}

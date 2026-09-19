@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { FolderOpen, RotateCcw, Wrench } from "lucide-react";
 import { api } from "../api";
@@ -32,6 +32,13 @@ export default function DependenciesPage() {
   const { data: deps, isLoading, refetch } = useQuery({
     queryKey: ["dependencies"],
     queryFn: () => api.dependencies(forceRef.current),
+    // The upstream check runs in the backend's background thread, so the page
+    // has to ask again until the answer lands. Handing that to React Query
+    // instead of a manual setInterval matters on the phone app: its interval
+    // pauses while the window is hidden, and it re-renders nothing when the
+    // payload is unchanged, where a 3 s `refetch()` rebuilt the whole tool
+    // table (and fought the user's scroll) for as long as the check ran.
+    refetchInterval: (query) => (query.state.data?.checking ? 5000 : false),
   });
   const refreshNow = () => {
     forceRef.current = true;
@@ -39,14 +46,6 @@ export default function DependenciesPage() {
       forceRef.current = false;
     });
   };
-
-  // The upstream check runs in the backend's background thread: poll while it
-  // is in flight, or the version the user just asked for never appears.
-  useEffect(() => {
-    if (!deps?.checking) return;
-    const t = setInterval(() => refetch(), 3000);
-    return () => clearInterval(t);
-  }, [deps?.checking, refetch]);
 
   const tools: DepTool[] = deps?.tools ?? [];
   const missing = tools.filter((t) => t.state === "missing");
@@ -99,26 +98,26 @@ export default function DependenciesPage() {
         subtitle="External tools the scripts rely on. Missing ones are downloaded into the app's dependencies folder — nothing is installed system-wide."
         actions={
           <>
-            <button className="btn-ghost !py-1 text-xs" onClick={refreshNow} disabled={busy || isLoading}>
+            <button className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0" onClick={refreshNow} disabled={busy || isLoading}>
               <RotateCcw className="h-3 w-3" /> Refresh
             </button>
             {(missing.length > 0 || updates.length > 0) && (
               <button
-                className="btn-ghost !py-1 text-xs"
+                className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0"
                 onClick={() => install([...missing, ...updates].map((t) => t.key))}
                 disabled={busy}
               >
                 Install {missing.length + updates.length} ({missing.length} missing · {updates.length} updates)
               </button>
             )}
-            <button className="btn-primary !py-1 text-xs" onClick={() => install()} disabled={busy}>
+            <button className="btn-primary !py-1 text-xs min-h-10 md:min-h-0" onClick={() => install()} disabled={busy}>
               {busy ? "Installing…" : "Install / update all"}
             </button>
           </>
         }
       />
 
-      <div className="flex items-center gap-4 text-[11px] text-zinc-500">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-zinc-500">
         <span>
           {isLoading ? "Checking tools…" : `${ready}/${tools.length} ready`}
           {updates.length > 0 && <span className="text-amber-400"> · {updates.length} update(s) available</span>}
@@ -127,7 +126,7 @@ export default function DependenciesPage() {
         </span>
         {deps?.deps_dir && (
           <button
-            className="inline-flex items-center gap-1 hover:text-zinc-300 transition-colors font-mono truncate max-w-[24rem]"
+            className="inline-flex items-center gap-1 min-w-0 min-h-8 md:min-h-0 hover:text-zinc-300 transition-colors font-mono truncate max-w-[24rem]"
             onClick={openDepsDir}
             title="Open the dependencies folder"
           >
@@ -144,8 +143,10 @@ export default function DependenciesPage() {
         />
       )}
 
+      {/* `table-scroll` alone: the companion `overflow-hidden` utility wins the
+          cascade (utilities layer) and clipped the table instead of scrolling it. */}
       {!noTools && (
-      <div className="rounded-lg border border-border overflow-hidden table-scroll">
+      <div className="rounded-lg border border-border table-scroll">
         <table className="w-full text-sm">
           <thead className="bg-panel/60">
             <tr>

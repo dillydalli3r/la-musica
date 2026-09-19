@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { api } from "../api";
+import { api, isOffline } from "../api";
+import { toast } from "../store";
+import { offlineMediaUrl } from "../lib/mediaCache";
 
 /** <track> elements for every subtitle source of a video: muxed streams and
  * external .srt/.vtt sidecars, all served as WebVTT by the backend. */
@@ -74,14 +76,41 @@ export function SubtitledVideo({
   // transcode before reporting an error.
   const [errorFallback, setErrorFallback] = useState(false);
   useEffect(() => setErrorFallback(false), [path]);
+  // The cached copy of this video: a blob: URL once the lookup has run and the
+  // download is there, null when it is not, `undefined` while the lookup is
+  // still in flight — then the element gets no src at all, because starting it
+  // on the network URL offline fires a failed request and an onError into the
+  // transcode retry, which cannot answer either, a tick before the blob lands.
+  const [cached, setCached] = useState<string | null>();
+  useEffect(() => {
+    let on = true;
+    setCached(undefined);
+    void offlineMediaUrl(path).then((url) => {
+      if (!on) return;
+      if (!url && isOffline()) {
+        // Doomed either way, so say so instead of leaving a black rectangle.
+        toast.error(`“${path.split(/[\\/]/).pop() ?? path}” isn’t downloaded — it needs the server to play.`);
+      }
+      setCached(url);
+    });
+    return () => { on = false; };
+  }, [path]);
   // The probe decision and the onError fallback both force the live stream;
   // derived, so a late-arriving probe result needs no state syncing.
   const live = errorFallback || preferTranscode || meta?.native === false;
+  // A cached copy holds the DIRECT stream's bytes, so the transcode decision
+  // normally wins over it — but with the server away the cached copy is the
+  // only thing that can play, so offline it wins instead. A blob: URL goes in
+  // as-is: `?transcode=1` and the session token describe a network request, and
+  // the bytes behind the blob came from the URL that was cached, not from the
+  // one a query string would name.
+  const cachedSrc = cached && (!live || isOffline()) ? cached : null;
+  const src = cachedSrc ?? (cached === undefined && !live ? undefined : api.videoStreamUrl(path, live));
   return (
     <video
       key={`${path}|${live ? "x" : "direct"}`}
       ref={videoRef}
-      src={api.videoStreamUrl(path, live)}
+      src={src}
       controls={controls}
       autoPlay
       muted={muted}

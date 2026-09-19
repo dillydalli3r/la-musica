@@ -2148,7 +2148,7 @@ const finish = async () => {
           uploaded.length > 1 || albumPath ? (
             <>
               {uploaded.length > 1 && (
-                <select className="input !w-auto text-sm" value={albumIndex} onChange={(e) => switchAlbum(Number(e.target.value))}>
+                <select className="input !w-auto text-sm min-h-8 sm:min-h-0" value={albumIndex} onChange={(e) => switchAlbum(Number(e.target.value))}>
                   {uploaded.map((a, i) => (
                     <option key={a.path} value={i}>{a.name}</option>
                   ))}
@@ -2172,7 +2172,7 @@ const finish = async () => {
           <div key={s} className="flex items-center gap-1.5 shrink-0">
             <button
               onClick={() => i < step && setStep(i)}
-              className={`flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs transition-colors ${
+              className={`flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs min-h-8 sm:min-h-0 transition-colors ${
                 i === step
                   ? "bg-accent on-accent"
                   : i < step
@@ -2260,7 +2260,7 @@ const finish = async () => {
                     <span className="flex-1 min-w-0 truncate text-zinc-300">{it.name}</span>
                   )}
                   {row?.error && (
-                    <span className="text-[10px] text-red-300/90 truncate max-w-[18rem]" title={row.error}>
+                    <span className="text-[10px] text-red-300/90 truncate max-w-[40%] sm:max-w-[18rem]" title={row.error}>
                       {row.error}
                     </span>
                   )}
@@ -2301,7 +2301,7 @@ const finish = async () => {
       {step === 0 && (
         <div className="space-y-4">
           <div
-            className="panel-hero border-2 border-dashed p-10 text-center hover:border-accent/60 transition-colors cursor-pointer"
+            className="panel-hero border-2 border-dashed p-6 sm:p-10 text-center hover:border-accent/60 transition-colors cursor-pointer"
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => {
               e.preventDefault();
@@ -2349,18 +2349,18 @@ const finish = async () => {
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
-            <button className="btn-ghost" onClick={pickFolderNative}>
+            <button className="btn-ghost min-h-8 sm:min-h-0" onClick={pickFolderNative}>
               <FolderOpen className="h-4 w-4" /> Choose folder
             </button>
             <input
-              className="input max-w-xs"
+              className="input max-w-xs min-h-8 sm:min-h-0"
               placeholder="Default album name"
               value={albumName}
               onChange={(e) => setAlbumName(e.target.value)}
             />
             <label className="flex items-center gap-1.5 text-xs text-zinc-400">
               Media type:
-              <select className="input !w-auto !py-1 text-xs" value={mediaType} onChange={(e) => setMediaType(e.target.value)}>
+              <select className="input !w-auto !py-1 text-xs min-h-8 sm:min-h-0" value={mediaType} onChange={(e) => setMediaType(e.target.value)}>
                 <option value="">Not sure</option>
                 <option value="CD">CD rip</option>
                 <option value="Digital Media">Digital Media</option>
@@ -2382,21 +2382,21 @@ const finish = async () => {
 
           {totalFiles > 0 && (
             <div className="space-y-3">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <span className="text-sm font-semibold">Separate into albums</span>
                 <span className="text-xs text-zinc-500">
                   {totalFiles} file(s) → {albums.length} album(s) — rename, or move files between albums with the dropdown
                 </span>
-                <button className="btn-ghost !py-1 text-xs ml-auto" onClick={addAlbum}>
+                <button className="btn-ghost !py-1 text-xs ml-auto min-h-8 sm:min-h-0" onClick={addAlbum}>
                   <Plus className="h-3.5 w-3.5" /> Add album
                 </button>
               </div>
               {albums.map((g, gi) => (
                 <div key={gi} className="panel p-3">
-                  <div className="flex items-center gap-2 mb-2">
+                  <div className="flex flex-wrap items-center gap-2 mb-2">
                     <Disc3 className="h-4 w-4 text-zinc-500 shrink-0" />
                     <input
-                      className="input !w-auto min-w-[200px] font-medium"
+                      className="input !w-auto min-w-[200px] font-medium min-h-8 sm:min-h-0"
                       value={g.name}
                       placeholder="Album name"
                       onChange={(e) => renameGroup(gi, e.target.value)}
@@ -2407,7 +2407,7 @@ const finish = async () => {
                         <span className="text-amber-300/90"> — partial album</span>
                       )}
                     </span>
-                    <button className="btn-danger !px-2 !py-1 ml-auto" onClick={() => removeAlbum(gi)} disabled={albums.length <= 1} title="Remove (files move to first album)">
+                    <button className="btn-danger !px-2 !py-1 ml-auto min-h-8 sm:min-h-0" onClick={() => removeAlbum(gi)} disabled={albums.length <= 1} title="Remove (files move to first album)">
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
                   </div>
@@ -2446,7 +2446,7 @@ const finish = async () => {
                 </div>
               ))}
               <button
-                className="btn-primary"
+                className="btn-primary min-h-10 sm:min-h-0"
                 onClick={doImport}
                 disabled={uploading || !albums.some((g) => g.name.trim() && g.files.length)}
               >
@@ -2477,9 +2477,9 @@ const finish = async () => {
             <div className="text-sm font-semibold text-zinc-300">
               MusicBrainz release <span className="text-zinc-500 font-normal">— {currentAlbumName}</span>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <input
-                className={`input flex-1 ${releaseId ? "!border-emerald-700" : ""}`}
+                className={`input flex-1 ${releaseId ? "!border-emerald-700" : ""} min-h-8 sm:min-h-0`}
                 placeholder="MusicBrainz release URL or ID (e.g. https://musicbrainz.org/release/…)"
                 value={mbLink}
                 onChange={(e) => setMbLink(e.target.value)}
@@ -2512,9 +2512,9 @@ const finish = async () => {
             )}
             <div className="text-xs text-zinc-600">or search:</div>
             <div className="flex gap-2">
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 <select
-                  className="input !w-auto text-xs shrink-0"
+                  className="input !w-auto text-xs shrink-0 min-h-8 sm:min-h-0"
                   value={searchMode}
                   onChange={(e) => setSearchMode(e.target.value as any)}
                   title="Search MusicBrainz by"
@@ -2524,20 +2524,20 @@ const finish = async () => {
                   <option value="catno">Catalog number</option>
                   <option value="barcode">Barcode</option>
                 </select>
-                <input className="input" placeholder="Search MusicBrainz…" value={mbSearch} onChange={(e) => setMbSearch(e.target.value)} onKeyDown={(e) => e.key === "Enter" && doSearch()} />
-                <button className="btn-ghost shrink-0" onClick={() => doSearch()} disabled={busy}>Search</button>
+                <input className="input min-h-8 sm:min-h-0" placeholder="Search MusicBrainz…" value={mbSearch} onChange={(e) => setMbSearch(e.target.value)} onKeyDown={(e) => e.key === "Enter" && doSearch()} />
+                <button className="btn-ghost shrink-0 min-h-8 sm:min-h-0" onClick={() => doSearch()} disabled={busy}>Search</button>
               </div>
             </div>
             <div className="text-xs text-zinc-600">or find an artist:</div>
             <div className="flex gap-2">
               <input
-                className="input"
+                className="input min-h-8 sm:min-h-0"
                 placeholder="Artist name…"
                 value={artistQuery}
                 onChange={(e) => setArtistQuery(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && doArtistSearch()}
               />
-              <button className="btn-ghost shrink-0" onClick={doArtistSearch} disabled={busy}>Find artist</button>
+              <button className="btn-ghost shrink-0 min-h-8 sm:min-h-0" onClick={doArtistSearch} disabled={busy}>Find artist</button>
             </div>
             {artistHits.length > 0 && (
               <div className="max-h-40 overflow-auto space-y-1">
@@ -2576,9 +2576,9 @@ const finish = async () => {
               </div>
             )}
             <div className="text-sm font-semibold text-zinc-300 pt-2">RateYourMusic links (optional)</div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <input
-                className={`input flex-1 ${rymValid === true ? "!border-emerald-700" : rymValid === false ? "!border-red-800" : ""}`}
+                className={`input flex-1 ${rymValid === true ? "!border-emerald-700" : rymValid === false ? "!border-red-800" : ""} min-h-8 sm:min-h-0`}
                 placeholder="Album: https://rateyourmusic.com/release/…"
                 value={rymLink}
                 onChange={(e) => {
@@ -2588,7 +2588,7 @@ const finish = async () => {
               />
               <LinkValidChip state={rymValid} kind={rymKind} />
               <button
-                className="btn-ghost shrink-0"
+                className="btn-ghost shrink-0 min-h-8 sm:min-h-0"
                 onClick={findRymLinks}
                 disabled={findingLinks || busy}
                 title="Ask RateYourMusic for this album's and this artist's pages and fill both fields for review"
@@ -2598,9 +2598,9 @@ const finish = async () => {
               </button>
             </div>
             {rymNote && <div className="text-[10px] text-amber-300/80">{rymNote}</div>}
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <input
-                className={`input flex-1 ${rymArtistValid === true ? "!border-emerald-700" : rymArtistValid === false ? "!border-red-800" : ""}`}
+                className={`input flex-1 ${rymArtistValid === true ? "!border-emerald-700" : rymArtistValid === false ? "!border-red-800" : ""} min-h-8 sm:min-h-0`}
                 placeholder="Artist: https://rateyourmusic.com/artist/…"
                 value={rymArtistLink}
                 onChange={(e) => {
@@ -2615,11 +2615,11 @@ const finish = async () => {
             </div>
             {rymArtistNote && <div className="text-[10px] text-amber-300/80">{rymArtistNote}</div>}
           </div>
-          <div className="flex items-center gap-2">
-            <button className="btn-primary" onClick={handleFetch} disabled={busy}>
+          <div className="flex flex-wrap items-center gap-2">
+            <button className="btn-primary min-h-10 sm:min-h-0" onClick={handleFetch} disabled={busy}>
               <Wand2 className="h-4 w-4" /> Fetch release & auto-match
             </button>
-            <button className="btn-ghost" onClick={detectFromTags} disabled={busy || !albumPath}>
+            <button className="btn-ghost min-h-8 sm:min-h-0" onClick={detectFromTags} disabled={busy || !albumPath}>
               Detect from tags
             </button>
             {busy && fetchStatus && (
@@ -2648,14 +2648,14 @@ const finish = async () => {
             >
               {g.rows.map((s) => {
                 return (
-                  <div key={s.local} className="flex items-center gap-3 panel px-3 py-2">
+                  <div key={s.local} className="flex flex-wrap items-center gap-3 panel px-3 py-2">
                     <TrackNoBadge disc={discNoOf(s.local)} track={trackNoOf(s.local)} />
                     <span className="flex-1 truncate text-sm">{displayTitle(s.local)}</span>
-                    <span className="text-xs text-zinc-500">
+                    <span className="min-w-0 truncate text-xs text-zinc-500">
                       {s.matched ? `${s.release_track!.disc}.${s.release_track!.position} ${s.release_track!.title}` : "no match"}
                     </span>
                     <select
-                      className="input !w-auto text-xs"
+                      className="input !w-auto text-xs max-w-full min-h-8 sm:min-h-0"
                       value={s.release_track ? `${s.release_track.disc}-${s.release_track.position}` : ""}
                       onChange={(e) => {
                         const [d, p] = e.target.value.split("-").map(Number);
@@ -2675,7 +2675,7 @@ const finish = async () => {
             </DiscSection>
           ))}
           <div className="flex justify-end">
-            <button className="btn-primary" onClick={confirmMatch} disabled={busy}>
+            <button className="btn-primary min-h-10 sm:min-h-0" onClick={confirmMatch} disabled={busy}>
               Save matching
             </button>
           </div>
@@ -2703,12 +2703,12 @@ const finish = async () => {
                 {artistArt?.path ? <span className="font-mono"> · {artistArt.path}</span> : null}
               </span>
               {metaReply && (
-                <button className="btn-ghost !py-0.5 !px-1.5 text-[11px] ml-auto" onClick={() => setMetaReply(null)}>
+                <button className="btn-ghost !py-0.5 !px-1.5 text-[11px] ml-auto min-h-8 sm:min-h-0" onClick={() => setMetaReply(null)}>
                   Clear result
                 </button>
               )}
               <button
-                className={`btn-ghost !py-1 text-xs ${metaReply ? "" : "ml-auto"}`}
+                className={`btn-ghost !py-1 text-xs min-h-8 sm:min-h-0 ${metaReply ? "" : "ml-auto"}`}
                 onClick={fetchArtistMeta}
                 disabled={busy || !albumPath}
                 title="Ask the configured sources for the missing artist image, artist description and album description; what is already present is left alone"
@@ -2722,8 +2722,8 @@ const finish = async () => {
             {metaRows.map((row) => {
               const item = metaReply?.[row.kind];
               return (
-                <div key={row.kind} className="flex items-center gap-2 text-[11px]">
-                  <span className="w-40 shrink-0 text-zinc-400">{row.label}</span>
+                <div key={row.kind} className="flex flex-wrap items-center gap-2 text-[11px]">
+                  <span className="w-28 sm:w-40 shrink-0 text-zinc-400">{row.label}</span>
                   <span
                     className={`chip border shrink-0 ${
                       row.present
@@ -2773,10 +2773,10 @@ const finish = async () => {
                   : "No album cover on disk yet."}
               </div>
               <div className="flex items-center gap-2 flex-wrap">
-                <button className="btn-ghost !py-1 text-xs" onClick={() => albumCoverInput.current?.click()} disabled={busy}>
+                <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={() => albumCoverInput.current?.click()} disabled={busy}>
                   <UploadCloud className="h-3.5 w-3.5" /> Upload image
                 </button>
-                <button className="btn-ghost !py-1 text-xs" onClick={() => setCoverSearch({})} disabled={busy}>
+                <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={() => setCoverSearch({})} disabled={busy}>
                   Search covers
                 </button>
               </div>
@@ -2784,7 +2784,7 @@ const finish = async () => {
                   user's — same one-click affordance as the album page. */}
               {!coverInfo?.file && !!stagedCoverRows?.length && (
                 <button
-                  className="btn-primary !py-1.5 text-xs"
+                  className="btn-primary !py-1.5 text-xs min-h-10 sm:min-h-0"
                   onClick={() =>
                     setCoverSearch({ results: stagedCoverRows, provider: stagedCovers.data?.provider ?? null })
                   }
@@ -2814,7 +2814,7 @@ const finish = async () => {
               )}
               <div className="flex items-center gap-2 flex-wrap">
                 <button
-                  className="btn-ghost !py-1 text-xs"
+                  className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
                   onClick={() => mbCoverUrl && applyCoverUrl(mbCoverUrl)}
                   disabled={busy || !mbCoverUrl}
                 >
@@ -2850,13 +2850,13 @@ const finish = async () => {
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-xs font-semibold text-zinc-400">Album cover from URL</span>
               <input
-                className="input flex-1 min-w-[240px] !py-1 text-xs"
+                className="input flex-1 min-w-[240px] !py-1 text-xs min-h-8 sm:min-h-0"
                 placeholder="https://…/cover.jpg"
                 value={coverUrl}
                 onChange={(e) => setCoverUrl(e.target.value)}
               />
               <button
-                className="btn-ghost !py-1 text-xs"
+                className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
                 onClick={() => applyCoverUrl(coverUrl)}
                 disabled={busy || !coverUrl.trim()}
               >
@@ -2873,7 +2873,7 @@ const finish = async () => {
                 tracks 7 and 8 get the same art).
               </span>
               <button
-                className="btn-ghost !py-1 text-xs ml-auto"
+                className="btn-ghost !py-1 text-xs ml-auto min-h-8 sm:min-h-0"
                 onClick={() =>
                   setCoverSel(
                     coverSel.size && coverSel.size === stepTracks.length
@@ -2887,33 +2887,33 @@ const finish = async () => {
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               <button
-                className="btn-ghost !py-1 text-xs"
+                className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
                 onClick={() => trackCoverInput.current?.click()}
                 disabled={busy || !coverSel.size}
               >
                 <UploadCloud className="h-3.5 w-3.5" /> Upload to selected
               </button>
               <input
-                className="input !w-64 !py-1 text-xs"
+                className="input !w-64 !py-1 text-xs min-h-8 sm:min-h-0"
                 placeholder="Cover image URL for the selection…"
                 value={trackCoverUrl}
                 onChange={(e) => setTrackCoverUrl(e.target.value)}
               />
               <button
-                className="btn-ghost !py-1 text-xs"
+                className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
                 onClick={() => applyCoverUrl(trackCoverUrl, selectedCoverFiles())}
                 disabled={busy || !coverSel.size || !trackCoverUrl.trim()}
               >
                 <ExternalLink className="h-3.5 w-3.5" /> Use URL
               </button>
               <button
-                className="btn-ghost !py-1 text-xs"
+                className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
                 onClick={() => mbCoverUrl && applyCoverUrl(mbCoverUrl, selectedCoverFiles())}
                 disabled={busy || !coverSel.size || !mbCoverUrl}
               >
                 <CloudDownloadIcon /> MusicBrainz cover
               </button>
-              <button className="btn-danger !py-1 text-xs" onClick={clearTrackCovers} disabled={busy || !coverSel.size}>
+              <button className="btn-danger !py-1 text-xs min-h-8 sm:min-h-0" onClick={clearTrackCovers} disabled={busy || !coverSel.size}>
                 <Trash2 className="h-3.5 w-3.5" /> Clear per-track cover
               </button>
             </div>
@@ -2930,13 +2930,13 @@ const finish = async () => {
                 extra={
                   <>
                     <button
-                      className="btn-ghost !py-0.5 !px-1.5 text-[11px]"
+                      className="btn-ghost !py-0.5 !px-1.5 text-[11px] min-h-8 sm:min-h-0"
                       onClick={() => setCoverSelFor(g.rows.map((t) => t.path), true)}
                     >
                       All
                     </button>
                     <button
-                      className="btn-ghost !py-0.5 !px-1.5 text-[11px]"
+                      className="btn-ghost !py-0.5 !px-1.5 text-[11px] min-h-8 sm:min-h-0"
                       onClick={() => setCoverSelFor(g.rows.map((t) => t.path), false)}
                     >
                       None
@@ -2974,9 +2974,9 @@ const finish = async () => {
             ))}
           </div>
 
-          <div className="flex items-center gap-2 justify-end">
+          <div className="flex flex-wrap items-center gap-2 justify-end">
             <span className="text-xs text-zinc-500">Covers are written as you apply them — Continue just moves on.</span>
-            <button className="btn-primary" onClick={saveCovers}>Continue to genres</button>
+            <button className="btn-primary min-h-10 sm:min-h-0" onClick={saveCovers}>Continue to genres</button>
           </div>
 
           <input
@@ -3028,7 +3028,7 @@ const finish = async () => {
         <div className="space-y-3">
           <div className="flex items-center gap-2 flex-wrap">
             <button
-              className="btn-ghost"
+              className="btn-ghost min-h-8 sm:min-h-0"
               onClick={() => importGenresFrom("musicbrainz")}
               disabled={busy || !albumTargets().length}
               title="Ask MusicBrainz for this album's genres (recording → release → release group → artist) and write what it states"
@@ -3036,7 +3036,7 @@ const finish = async () => {
               <CloudDownloadIcon /> Genres from MusicBrainz
             </button>
             <button
-              className="btn-ghost"
+              className="btn-ghost min-h-8 sm:min-h-0"
               onClick={() => importGenresFrom("rateyourmusic")}
               disabled={busy || !albumTargets().length}
               title="Ask RateYourMusic for this album's genres and write what its page states — a blocked RYM says so instead of writing a guess"
@@ -3046,7 +3046,7 @@ const finish = async () => {
             <label className="flex items-center gap-1.5 text-xs text-zinc-400 ml-auto">
               Max genres / track
               <select
-                className="input !w-auto !py-1 text-xs"
+                className="input !w-auto !py-1 text-xs min-h-8 sm:min-h-0"
                 value={genreLimit ?? 0}
                 onChange={(e) => setGenreLimit(e.target.value === "0" ? null : Number(e.target.value))}
               >
@@ -3130,7 +3130,7 @@ const finish = async () => {
                 </button>
               ))}
               <button
-                className="btn-danger !py-1 text-xs ml-auto"
+                className="btn-danger !py-1 text-xs ml-auto min-h-8 sm:min-h-0"
                 onClick={removeAllGenres}
                 title="Clear the genre field on every track in this step"
               >
@@ -3150,7 +3150,7 @@ const finish = async () => {
                   ? [
                       <input
                         key="in"
-                        className="input !w-52 !py-1 text-xs"
+                        className="input !w-52 !py-1 text-xs min-h-8 sm:min-h-0"
                         placeholder="Apply genre to whole disc…"
                         value={discGenres[g.disc!] ?? ""}
                         onChange={(e) => setDiscGenres((m) => ({ ...m, [g.disc!]: e.target.value }))}
@@ -3158,7 +3158,7 @@ const finish = async () => {
                       />,
                       <button
                         key="btn"
-                        className="btn-ghost !py-1 text-xs"
+                        className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
                         onClick={() => applyGenresToDisc(g.disc!, (discGenres[g.disc!] ?? "").trim())}
                       >
                         Apply to all
@@ -3185,7 +3185,7 @@ const finish = async () => {
                       </span>
                     ))}
                     <input
-                      className="input !w-36 !py-1 text-xs"
+                      className="input !w-36 !py-1 text-xs min-h-8 sm:min-h-0"
                       placeholder={genreList(t.path).length ? "+ add genre…" : "Add genre…"}
                       value={genreAddValues[t.path] ?? ""}
                       onChange={(e) => setGenreAddValues((v) => ({ ...v, [t.path]: e.target.value }))}
@@ -3202,7 +3202,7 @@ const finish = async () => {
             </DiscSection>
           ))}
           <div className="flex justify-end">
-            <button className="btn-primary" onClick={saveGenres} disabled={busy}>Save genres</button>
+            <button className="btn-primary min-h-10 sm:min-h-0" onClick={saveGenres} disabled={busy}>Save genres</button>
           </div>
         </div>
       )}
@@ -3215,8 +3215,8 @@ const finish = async () => {
               {lyricsNotice}
             </div>
           )}
-          <div className="flex items-center gap-2">
-            <button className="btn-primary text-xs" onClick={() => autoImportLyrics()} disabled={busy}>
+          <div className="flex flex-wrap items-center gap-2">
+            <button className="btn-primary text-xs min-h-8 sm:min-h-0" onClick={() => autoImportLyrics()} disabled={busy}>
               <CloudDownloadIcon /> Auto-import lyrics
             </button>
             <span className="text-xs text-zinc-500">
@@ -3252,7 +3252,7 @@ const finish = async () => {
             const open = lyrOpen.has(t.path);
             return (
               <div key={t.path} className="panel px-3 py-2 space-y-2">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
                   <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
                   {hasDraft && (
@@ -3289,7 +3289,7 @@ const finish = async () => {
                     INSTRUMENTAL
                   </label>
                   <button
-                    className="btn-ghost !py-0.5 text-[11px] shrink-0"
+                    className="btn-ghost !py-0.5 text-[11px] shrink-0 min-h-8 sm:min-h-0"
                     onClick={() => toggleLyricsRow(t.path)}
                     disabled={inst === "1"}
                     title={inst === "1" ? "Marked instrumental — uncheck INSTRUMENTAL to edit lyrics" : "Open the lyrics editor for this track"}
@@ -3300,7 +3300,7 @@ const finish = async () => {
                 {open && inst !== "1" && (
                   <div className="space-y-1.5">
                     <button
-                      className="btn-ghost !py-0.5 text-[11px]"
+                      className="btn-ghost !py-0.5 text-[11px] min-h-8 sm:min-h-0"
                       onClick={() => autoImportLyrics([t.path])}
                       disabled={busy}
                       title="Fetch this track's lyrics through the provider chain and write them to the file"
@@ -3323,7 +3323,7 @@ const finish = async () => {
             );
           })}
           <div className="flex justify-end">
-            <button className="btn-primary" onClick={saveLyricsStep} disabled={busy}>Save lyrics & instrumental</button>
+            <button className="btn-primary min-h-10 sm:min-h-0" onClick={saveLyricsStep} disabled={busy}>Save lyrics & instrumental</button>
           </div>
         </div>
       )}
@@ -3338,7 +3338,7 @@ const finish = async () => {
               <button
                 key={v}
                 onClick={() => applyAdvisoryToAll(v)}
-                className="btn-ghost !py-1 text-xs"
+                className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
                 title={`Set every track to ${v === "0" ? "clean" : v === "1" ? "explicit" : "safe"}`}
               >
                 {v === "0" ? "0 · clean" : v === "1" ? "1 · explicit" : "2 · safe"}
@@ -3352,7 +3352,7 @@ const finish = async () => {
           <div className="panel px-3 py-2 space-y-1.5">
             <div className="flex items-center gap-2 flex-wrap">
               <button
-                className="btn-ghost !py-1 text-xs"
+                className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
                 onClick={fetchAdvisoryAll}
                 disabled={busy || !stepTracks.length}
                 title="Ask the configured advisory sources (Deezer / Spotify by ISRC, Apple) for every track and write what they state"
@@ -3387,7 +3387,7 @@ const finish = async () => {
             )}
           </div>
           {stepTracks.map((t) => (
-            <div key={t.path} className="flex items-center gap-3 panel px-3 py-2">
+            <div key={t.path} className="flex flex-wrap items-center gap-3 panel px-3 py-2">
               <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
               <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
               {!!t.tags.ITUNESADVISORY && !["0", "1", "2"].includes(t.tags.ITUNESADVISORY.trim()) && (
@@ -3403,7 +3403,7 @@ const finish = async () => {
                   <button
                     key={v}
                     onClick={() => setAdvisory((a) => ({ ...a, [t.path]: v }))}
-                    className={`px-3 py-1 rounded text-xs border ${
+                    className={`px-2 sm:px-3 py-1.5 rounded text-xs border ${
                       (advisory[t.path] ?? t.tags.ITUNESADVISORY) === v
                         ? "bg-accent on-accent border-accent"
                         : "bg-panel text-zinc-400 border-border hover:border-accent/50"
@@ -3416,7 +3416,7 @@ const finish = async () => {
             </div>
           ))}
           <div className="flex justify-end">
-            <button className="btn-primary" onClick={saveAdvisory} disabled={busy}>Save advisory</button>
+            <button className="btn-primary min-h-10 sm:min-h-0" onClick={saveAdvisory} disabled={busy}>Save advisory</button>
           </div>
         </div>
       )}
@@ -3459,7 +3459,7 @@ const finish = async () => {
             </div>
             <div className="flex items-center gap-2 mt-3 flex-wrap">
               <button
-                className="btn-primary !py-1.5 text-xs"
+                className="btn-primary !py-1.5 text-xs min-h-10 sm:min-h-0"
                 onClick={runAllHere}
                 disabled={runningAll || scriptsRunning || (!albumPath && !uploaded.length)}
                 title="Run the scripts in the order set in Settings → Optimization, on this album only"
@@ -3468,7 +3468,7 @@ const finish = async () => {
                 {runningAll ? "Running…" : "Run all scripts"}
               </button>
               <button
-                className="btn-ghost !py-1.5 text-xs"
+                className="btn-ghost !py-1.5 text-xs min-h-10 sm:min-h-0"
                 onClick={runAllScripts}
                 disabled={scriptsRunning || runningAll || (!albumPath && !uploaded.length)}
                 title="Run the configured import chain — the same scripts a bulk or Soulseek import runs"
@@ -3528,27 +3528,27 @@ const finish = async () => {
                  works until the next reorganization. */
               <Link
                 to={releaseId ? `/album/mb:${encodeURIComponent(releaseId)}` : `/album/${encodeURIComponent(albumPath)}`}
-                className="btn-ghost"
+                className="btn-ghost min-h-8 sm:min-h-0"
                 onClick={finish}
               >
                 Open album
               </Link>
             )}
-            <button className="btn-primary" onClick={finish}>Done</button>
+            <button className="btn-primary min-h-10 sm:min-h-0" onClick={finish}>Done</button>
           </div>
         </div>
       )}
 
       {/* nav buttons */}
       {step > 0 && step < 7 && (
-        <div className="flex justify-between pt-2">
-          <button className="btn-ghost" onClick={() => setStep(step - 1)}>
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
+          <button className="btn-ghost min-h-8 sm:min-h-0" onClick={() => setStep(step - 1)}>
             <ChevronLeft className="h-4 w-4" /> Back
           </button>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 ml-auto justify-end">
             {nextBlock && <span className="text-xs text-amber-300/90">{nextBlock}</span>}
             <button
-              className="btn-primary"
+              className="btn-primary min-h-10 sm:min-h-0"
               disabled={!canNext || busy}
               onClick={() =>
                 step === 1
@@ -3632,7 +3632,7 @@ function ActionBar({
   return (
     <div className="flex items-center gap-2 min-w-0 w-full" role="status">
       <span className="h-3 w-3 rounded-full border-2 border-zinc-700 border-t-accent-soft animate-spin shrink-0" />
-      <span className="text-[11px] text-zinc-300 truncate max-w-[24rem]" title={label}>
+      <span className="text-[11px] text-zinc-300 min-w-0 truncate max-w-[24rem]" title={label}>
         {label}
       </span>
       <div className="h-1 flex-1 min-w-[80px] rounded-sm bg-raise overflow-hidden">
@@ -3695,7 +3695,7 @@ function AcoustidBlock({
         </span>
         {queue && (
           <button
-            className="btn-primary !py-1 text-xs ml-auto"
+            className="btn-primary !py-1 text-xs ml-auto min-h-8 sm:min-h-0"
             onClick={onMatchAll}
             disabled={matchAllBusy || !canMatchAll}
             title="Match every queued album to the release chosen below and write its metadata"
@@ -3705,7 +3705,7 @@ function AcoustidBlock({
           </button>
         )}
         <button
-          className={`btn-ghost !py-1 text-xs ${queue ? "" : "ml-auto"}`}
+          className={`btn-ghost !py-1 text-xs min-h-8 sm:min-h-0 ${queue ? "" : "ml-auto"}`}
           onClick={onRun}
           disabled={busy}
         >
@@ -3745,7 +3745,7 @@ function AcoustidBlock({
                     <span className="text-zinc-600 font-mono">score {Math.round(row.score * 100)}%</span>
                   )}
                   <button
-                    className="btn-ghost !py-0.5 text-[11px] ml-auto"
+                    className="btn-ghost !py-0.5 text-[11px] ml-auto min-h-8 sm:min-h-0"
                     onClick={() => onUse(row)}
                     disabled={busy}
                     title="Fetch this release and auto-match the album's tracks"
@@ -3809,7 +3809,7 @@ function DiscSection({
   return (
     <div className="space-y-1.5">
       <div
-        className="flex items-center gap-1.5 px-1 pt-2 text-xs font-bold uppercase tracking-wider text-zinc-400 cursor-pointer select-none"
+        className="flex flex-wrap items-center gap-1.5 px-1 pt-2 text-xs font-bold uppercase tracking-wider text-zinc-400 cursor-pointer select-none"
         onClick={onToggle}
       >
         <button className="p-0.5 text-zinc-500 hover:text-white">
@@ -3821,7 +3821,7 @@ function DiscSection({
           {count} track{count === 1 ? "" : "s"}
         </span>
         {extra && (
-          <span className="ml-auto flex items-center gap-1.5 normal-case font-normal" onClick={(e) => e.stopPropagation()}>
+          <span className="ml-auto flex flex-wrap items-center gap-1.5 justify-end normal-case font-normal" onClick={(e) => e.stopPropagation()}>
             {extra}
           </span>
         )}
@@ -3881,7 +3881,7 @@ function ImportFileRow({ f, gi, albums, groupFiles, selectable, excluded, onTogg
         {!excluded && coverFor && <span className="block text-[10px] text-accent-soft">→ {coverFor}</span>}
       </span>
       <select
-        className="input !w-auto !py-0.5 text-[11px] shrink-0"
+        className="input !w-auto !py-0.5 text-[11px] shrink-0 min-h-8 sm:min-h-0 max-w-[45%]"
         value={gi}
         onChange={(e) => onMove(Number(e.target.value))}
       >

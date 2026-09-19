@@ -3,7 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/icon.png" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Full-height app shell (App.tsx is `h-screen overflow-hidden`).
+         `interactive-widget=resizes-visual` keeps the on-screen keyboard from
+         resizing the LAYOUT viewport: 100vh keeps describing the whole screen,
+         so a focus does not reflow the entire shell (library, player bar) —
+         the keyboard moves the visual viewport instead, which the browser
+         pans to reach the field being edited.
+         `viewport-fit=cover` is deliberately NOT set: nothing in index.css
+         reads env(safe-area-inset-*), so painting edge-to-edge would slide
+         the player bar under the home indicator with no padding to lift it
+         back. Add it together with that padding, not before.
+         Zoom is left at the default (no user-scalable/maximum-scale): the
+         library, lyrics and tag values are mostly text, and pinch-zoom is
+         the accessibility way to read them. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-visual" />
     <title>la musica</title>
   </head>
   <body>

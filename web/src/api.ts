@@ -28,6 +28,7 @@ import type {
   WishesPayload,
 } from "./types";
 import { toast } from "./store";
+import * as offline from "./lib/offlineCache";
 
 // The Tauri shell (desktop, iOS, Android) serves the frontend from
 // tauri://localhost, so relative /api paths cannot reach the Python backend:
@@ -86,7 +87,12 @@ let API = `${BASE}/api`;
 export function setServerUrl(url: string | null) {
   const clean = (url || "").trim().replace(/\/+$/, "");
   writeStore(SERVER_KEY, clean || null);
-  BASE = clean || (IN_TAURI ? "http://127.0.0.1:8000" : "");
+  const next = clean || (IN_TAURI ? "http://127.0.0.1:8000" : "");
+  // The offline copy is keyed by endpoint, not by server: left in place, a
+  // client pointed at a second server would answer from the first one's
+  // library the moment the network is gone.
+  if (next !== BASE) offline.clearAll();
+  BASE = next;
   API = `${BASE}/api`;
 }
 
@@ -157,8 +163,93 @@ function coverQuery(track?: string, tracks?: string[]): string {
   );
 }
 
-/** One place every request goes through: the deadline, the session token and
- *  the 401 that means "sign in again".
+/** Set while what the app is showing came out of the offline copy (or out of
+ *  the service worker's own) instead of from the server, so a banner can say
+ *  "offline — showing what was saved". `at` is when that copy was written;
+ *  null when a service worker served it and the write time depends on that
+ *  cache's own lifetime. */
+export interface OfflineInfo {
+  /** The endpoint that could not be reached (path + query). */
+  key: string;
+  at: number | null;
+}
+type OfflineListener = (offline: OfflineInfo | null) => void;
+const offlineListeners = new Set<OfflineListener>();
+let offlineInfo: OfflineInfo | null = null;
+
+/** Watch the offline state. Called on every CHANGE, including the change back
+ *  to online (with null); not called during registration — read `isOffline()`
+ *  once for the first render. */
+export function onOfflineFallback(fn: OfflineListener): () => void {
+  offlineListeners.add(fn);
+  return () => offlineListeners.delete(fn);
+}
+
+/** True while the app is rendering cached answers. */
+export function isOffline(): boolean {
+  return offlineInfo !== null;
+}
+
+function setOffline(info: OfflineInfo | null) {
+  if ((offlineInfo === null) === (info === null)) {
+    // Same side of the line — a different endpoint, or the same one again.
+    // Remember the newest detail but do NOT ping the listeners: a page
+    // polling several endpoints while offline (or the service worker marking
+    // every GET) would otherwise re-render the banner once per endpoint per
+    // second, which on a phone reads as the app refreshing under your thumb.
+    offlineInfo = info;
+    return;
+  }
+  offlineInfo = info;
+  for (const fn of offlineListeners) {
+    try {
+      fn(info);
+    } catch {
+      /* a listener must never break the request that reported the state */
+    }
+  }
+}
+
+/** Endpoints whose answers are never kept on disk.
+ *
+ *  `/api/auth/*` and `/api/config` are session and secret material: the
+ *  config carries API keys and the Soulseek password in clear, and an auth
+ *  status answered from disk would show a signed-in app to nobody (or a
+ *  signed-out one to somebody with a live session).
+ *
+ *  The rest are byte streams — one of them a range request in the middle of a
+ *  download — so their bodies are not JSON, are per-position, and would be
+ *  the largest thing in a 5 MB store. `/api/soulseek/preview*` is a live
+ *  transcode for the same reason.
+ *
+ *  The cover endpoint is listed as itself alone: /api/cover/info,
+ *  /api/cover/search and /api/cover/sources are ordinary JSON and cache fine. */
+const NEVER_CACHE_EXACT: Record<string, true> = {
+  "/api/config": true,
+  "/api/cover": true,
+  "/api/stream": true,
+  "/api/videos/stream": true,
+  "/api/videos/thumb": true,
+  "/api/videos/subtitle": true,
+  "/api/soulseek/local-file": true,
+  "/api/artist/image": true,
+};
+const NEVER_CACHE_PREFIX = ["/api/auth/", "/api/soulseek/preview"];
+
+/** The offline store key for a request, or null when its answer must not be
+ *  kept. Only GETs are cacheable: a write's reply describes a change, not a
+ *  state that can be re-read later. */
+function cacheable(url: string, init?: RequestInit): string | null {
+  if ((init?.method || "GET").toUpperCase() !== "GET") return null;
+  const path = offline.cacheKey(url);
+  const endpoint = path.split("?")[0];
+  if (NEVER_CACHE_EXACT[endpoint]) return null;
+  if (NEVER_CACHE_PREFIX.some((p) => endpoint.startsWith(p))) return null;
+  return path;
+}
+
+/** One place every request goes through: the deadline, the session token, the
+ *  401 that means "sign in again", and the offline copy a GET falls back to.
  *
  *  `credentials: "include"` matters for the Tauri/mobile shells: the login
  *  response sets an HttpOnly cookie, and although a cross-site cookie is not
@@ -171,10 +262,22 @@ async function json<T>(url: string, init?: RequestInit, timeoutMs = 20000): Prom
   const token = getToken();
   const headers = new Headers(init?.headers);
   if (token) headers.set("Authorization", `Bearer ${token}`);
+  const key = cacheable(url, init);
   let r: Response;
   try {
     r = await fetch(url, { credentials: "include", ...init, headers, signal: ctrl.signal });
   } catch (e) {
+    // No answer at all: the server is down, the network is gone, or the call
+    // ran out of time. (An unreachable server's 4xx/5xx is an answer, and is
+    // handled below exactly as before — a rejected request must not be turned
+    // into a successful one.) Serve the last answer this endpoint gave.
+    if (key) {
+      const cached = offline.get<T>(key);
+      if (cached !== null) {
+        setOffline({ key, at: offline.cachedAt(key) });
+        return cached;
+      }
+    }
     // an aborted fetch is OUR timeout, not the network being down — say which
     if (ctrl.signal.aborted) throw new Error(`no answer within ${Math.round(timeoutMs / 1000)}s`);
     throw e;
@@ -204,7 +307,14 @@ async function json<T>(url: string, init?: RequestInit, timeoutMs = 20000): Prom
     }
     throw new Error(detail);
   }
-  return r.json() as Promise<T>;
+  const body = (await r.json()) as T;
+  if (key) offline.put(key, body);
+  // The service worker answers an offline API GET out of its own cache with
+  // this marker: the fetch succeeded, but the server never saw it, so the app
+  // is showing a stored answer all the same. (Readable same-origin, which is
+  // the only place that worker runs.)
+  setOffline(r.headers.get("X-MLO-Offline") === "1" ? { key: key ?? offline.cacheKey(url), at: null } : null);
+  return body;
 }
 
 /** Fields a tag-writing endpoint adds when the write re-emitted the file in

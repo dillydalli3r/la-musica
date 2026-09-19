@@ -29,6 +29,10 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 #[cfg(desktop)]
 use tauri::{Manager, RunEvent};
+// The mobile path needs `Manager` too, for the one thing it does at startup:
+// look up the window from the config and show it.
+#[cfg(mobile)]
+use tauri::Manager;
 #[cfg(desktop)]
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as AutostartManagerExt};
 #[cfg(desktop)]
@@ -435,6 +439,25 @@ pub fn run() {
             }
             Ok(())
         });
+
+    // Mobile: the OS owns the window and there is no tray to show it from, so
+    // the shell shows it exactly once, here, and never touches it again.
+    // `visible: false` in tauri.conf.json is a DESKTOP concern — the desktop
+    // app opens into the tray and is shown on demand — and the mobile runtime
+    // happens to ignore that flag today (tao's iOS `Window::new` carries a TODO
+    // for it, Android's `set_visible` is a no-op), so this is the explicit form
+    // of a guarantee that must not rest on an upstream TODO: an unseen window is
+    // a phone with no login screen, i.e. no way to type the server address that
+    // screen exists to collect. Nothing on the mobile path may create, recreate,
+    // hide or reload this window — a webview torn down and rebuilt is exactly
+    // the "the app keeps refreshing" a user sees as the app restarting.
+    #[cfg(mobile)]
+    let builder = builder.setup(|app| {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.show();
+        }
+        Ok(())
+    });
 
     builder
         .on_window_event(|_window, _event| {

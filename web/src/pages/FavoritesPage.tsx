@@ -37,10 +37,15 @@ export default function FavoritesPage() {
         icon={Heart}
         title="Favorites"
         actions={
+          // Four tabs do not fit beside the title at 390 px: they wrap, and
+          // the width cap (viewport-relative — the header's actions box is
+          // sized by its content, so `max-w-full` cannot bound it) keeps the
+          // box inside the phone. min-h-[2rem] keeps each tab a 32 px tap target.
           <Segmented
             value={kind}
             onChange={(k) => navigate(`/favorites/${k}`)}
             options={TABS.map((t) => ({ id: t.id, label: t.label, icon: t.icon }))}
+            className="max-w-[calc(100vw-9rem)] flex-wrap justify-end [&>button]:min-h-[2rem]"
           />
         }
       />
@@ -98,8 +103,26 @@ const LIKED_COL_W: Record<string, string> = {
   title: "w-auto",
   artist: "w-[16%]",
   album: "w-[16%]",
-  duration: "w-[7%]",
+  // A phone-width 7% is ~27 px — narrower than the "3:45" it holds, so the
+  // duration gets a real width below `md` and its share only from there up.
+  duration: "w-14 md:w-[7%]",
 };
+
+/** Liked-tracks table on a phone (390 px): the row keeps its cover, its title
+ *  and the length. #, artist and album fold below `md` — their percentage
+ *  widths leave about five characters of text there, and this is a like list,
+ *  so the track names are the point. The class must go on the header AND its
+ *  cells or the fixed grid misaligns. */
+const PHONE_HIDE = " hidden md:table-cell";
+const LIKED_PHONE_CLS: Record<string, string> = {
+  num: PHONE_HIDE,
+  artist: PHONE_HIDE,
+  album: PHONE_HIDE,
+};
+/** User-added tag columns fold with the built-ins they sit beside. */
+function likedHide(id: string): string {
+  return LIKED_PHONE_CLS[id] ?? (id.startsWith("tag:") ? PHONE_HIDE : "");
+}
 
 function LikedTracks() {
   const { data: likes, isLoading } = useTrackLikes();
@@ -203,7 +226,7 @@ function LikedTracks() {
             onAddCustom={addLikedCustom}
             onRemoveCustom={removeLikedCustomCol}
           />
-          <button className="btn-primary !py-1 text-xs" onClick={() => play(0)}>
+          <button className="btn-primary !py-1 text-xs min-h-[2rem] md:min-h-0" onClick={() => play(0)}>
             <Play className="h-3.5 w-3.5" /> Play all
           </button>
         </div>
@@ -223,10 +246,10 @@ function LikedTracks() {
                     sort={sort}
                     sortKey={c.sortKey}
                     onSort={(k) => setSort(toggleSort(sort, k))}
-                    className={LIKED_COL_W[c.id] ?? (c.tag ? "w-[10%]" : "")}
+                    className={(LIKED_COL_W[c.id] ?? (c.tag ? "w-[10%]" : "")) + likedHide(c.id)}
                   />
                 ) : (
-                  <th key={c.id} className={`th ${LIKED_COL_W[c.id] ?? ""}`} title={c.id === "cover" ? "Cover art" : undefined}>
+                  <th key={c.id} className={`th ${LIKED_COL_W[c.id] ?? ""}${likedHide(c.id)}`} title={c.id === "cover" ? "Cover art" : undefined}>
                     {c.id === "cover" ? <span className="sr-only">Cover</span> : c.label}
                   </th>
                 )
@@ -247,7 +270,7 @@ function LikedTracks() {
                   }
                 }}
               >
-                {likedCols.includes("num") && <td className="td cell-nowrap text-zinc-600 tabular-nums">{i + 1}</td>}
+                {likedCols.includes("num") && <td className={`td cell-nowrap text-zinc-600 tabular-nums${PHONE_HIDE}`}>{i + 1}</td>}
                 {likedCols.includes("cover") && (
                 <td className="td cell-cover pr-0">
                   {"coverFile" in r ? (
@@ -278,14 +301,14 @@ function LikedTracks() {
                 </td>
                 )}
                 {likedCols.includes("artist") && (
-                  <td className="td text-zinc-400 break-words">{r.missing ? "—" : r.artistName}</td>
+                  <td className={`td text-zinc-400 break-words${PHONE_HIDE}`}>{r.missing ? "—" : r.artistName}</td>
                 )}
                 {likedCols.includes("album") && (
-                  <td className="td text-zinc-500 break-words">{r.missing ? "—" : r.albumName}</td>
+                  <td className={`td text-zinc-500 break-words${PHONE_HIDE}`}>{r.missing ? "—" : r.albumName}</td>
                 )}
                 {likedCols.includes("duration") && <td className="td text-zinc-500">{fmtDuration(r.dur)}</td>}
                 {likedCustom.filter((c) => likedCols.includes(c.id)).map((c) => (
-                  <td key={c.id} className="td text-zinc-500 break-words" title={`Tag: ${c.tag}`}>
+                  <td key={c.id} className={`td text-zinc-500 break-words${likedHide(c.id)}`} title={`Tag: ${c.tag}`}>
                     {customColValue(r, c.tag) || "—"}
                   </td>
                 ))}
@@ -360,8 +383,9 @@ function FavArtists() {
         <thead className="border-b border-border">
           <tr>
             <th className="th">Artist</th>
-            <th className="th w-[12%]">Albums</th>
-            <th className="th w-[12%]">Tracks</th>
+            {/* a phone-width 12% is ~46 px — too narrow for a count */}
+            <th className="th w-16 md:w-[12%]">Albums</th>
+            <th className="th w-16 md:w-[12%]">Tracks</th>
           </tr>
         </thead>
         <tbody className="stagger">
@@ -382,7 +406,7 @@ function FavArtists() {
                 <td className="td">
                   <div className="flex items-center gap-1.5 min-w-0">
                     <button
-                      className="btn-ghost !px-1.5 !py-1 shrink-0 row-hover"
+                      className="btn-ghost !px-1.5 !py-1 shrink-0 row-hover min-h-[2rem] md:min-h-0"
                       title="Play all"
                       onClick={() => q.length && playNow(q)}
                     >
@@ -458,7 +482,7 @@ function FavPlaylists() {
         <thead className="border-b border-border">
           <tr>
             <th className="th">Playlist</th>
-            <th className="th w-[12%]">Tracks</th>
+            <th className="th w-16 md:w-[12%]">Tracks</th>
           </tr>
         </thead>
         <tbody className="stagger">
@@ -467,7 +491,7 @@ function FavPlaylists() {
               <td className="td">
                 <div className="flex items-center gap-1.5 min-w-0">
                   <button
-                    className="btn-ghost !px-1.5 !py-1 shrink-0 row-hover"
+                    className="btn-ghost !px-1.5 !py-1 shrink-0 row-hover min-h-[2rem] md:min-h-0"
                     title="Play playlist"
                     onClick={() => play(p)}
                   >

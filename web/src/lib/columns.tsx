@@ -247,12 +247,12 @@ export function ColumnsMenu({
       <button
         className={
           iconOnly
-            ? `p-1.5 rounded-lg border transition-colors ${
+            ? `p-1.5 rounded-lg border transition-colors min-h-8 min-w-8 md:min-h-0 md:min-w-0 ${
                 open
                   ? "text-accent border-accent/50 bg-raise"
                   : "border-border bg-panel/60 text-zinc-500 hover:text-white hover:bg-raise"
               }`
-            : `btn-ghost !py-1.5 text-xs ${open ? "!text-white !bg-raise" : ""}`
+            : `btn-ghost !py-1.5 text-xs min-h-8 md:min-h-0 ${open ? "!text-white !bg-raise" : ""}`
         }
         onClick={() => setOpen(!open)}
         title="Columns"

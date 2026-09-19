@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { CloudDownload, PenLine, Play, Square, Plus, Trash2, Undo2, Keyboard, Upload } from "lucide-react";
-import { api } from "../api";
+import { api, isOffline } from "../api";
 import { toast, useStore } from "../store";
+import { offlineMediaUrl } from "../lib/mediaCache";
 import LrclibPublishPanel from "./LrclibPublish";
 import Popover from "./Popover";
 import { nextSpeed, fmtSpeed } from "../lib/playback";
@@ -285,7 +286,10 @@ export default function LyricsViewer({
   const [playing, setPlaying] = useState(false);
   const [playTime, setPlayTime] = useState(0);
   const [speed, setSpeed] = useState(1);
-  const { vol } = useStore();
+  // Field selector, not `useStore()`: a selector-less call re-rendered this
+  // whole pane — the scroller and every lyric row — on every store write,
+  // volume drag steps included.
+  const vol = useStore((s) => s.vol);
   const [dur, setDur] = useState(duration ?? 0);
   const [selIdx, setSelIdx] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -306,6 +310,10 @@ export default function LyricsViewer({
   const pendingWords = useRef<{ idx: number; parts: string[]; times: number[]; done: number } | null>(null);
   const [searchHits, setSearchHits] = useState<{ id: number; artist: string; track: string; duration?: number }[] | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
+  // The track the preview element's source was last (or is being) resolved
+  // for: a cache lookup that lands after a track change must not overwrite
+  // the newer one's src.
+  const previewPath = useRef<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const lineRefs = useRef<Record<number, HTMLDivElement | null>>({});
 
@@ -382,6 +390,11 @@ export default function LyricsViewer({
     a.playbackRate = speed;
     a.volume = vol;
   }, [speed, vol, playing]);
+
+  // A track change abandons a source still resolving for the old one.
+  useEffect(() => {
+    previewPath.current = null;
+  }, [path]);
 
   const emit = (ls: LrcLine[]) => {
     const text = serializeLrc(ls, dec);
@@ -463,10 +476,23 @@ export default function LyricsViewer({
       audio.pause();
       setPlaying(false);
     } else {
-      audio.src = api.streamUrl(path);
-      audio.playbackRate = speed;
-      audio.volume = vol;
-      audio.play().catch(() => toast("Playback failed — audio format unsupported in browser"));
+      const p = path;
+      // Cache first, exactly like the player bar: a downloaded track previews
+      // in a shell with no server, and only an uncached one has to reach for
+      // the network. The lookup is async, so the guard below keeps a slow one
+      // from pointing the element at the track we have since left.
+      previewPath.current = p;
+      void (async () => {
+        const cached = await offlineMediaUrl(p);
+        if (previewPath.current !== p) return;
+        if (!cached && isOffline()) {
+          toast.error(`“${track || p}” isn’t downloaded — it needs the server to play.`);
+        }
+        audio.src = cached ?? api.streamUrl(p);
+        audio.playbackRate = speed;
+        audio.volume = vol;
+        audio.play().catch(() => toast("Playback failed — audio format unsupported in browser"));
+      })();
       setPlaying(true);
     }
   };

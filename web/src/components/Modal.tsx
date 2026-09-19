@@ -99,7 +99,7 @@ export default function Modal({
         onClick={(e) => e.stopPropagation()}
       >
         {(title || headerExtra) && (
-          <div className="flex items-center gap-3 px-5 py-3.5 border-b border-border shrink-0">
+          <div className="flex flex-wrap items-center gap-3 gap-y-2 px-5 py-3.5 border-b border-border shrink-0">
             <div className="flex-1 min-w-0">
               {title && (
                 <div className="text-sm font-semibold flex items-center gap-2 min-w-0">
@@ -121,7 +121,13 @@ export default function Modal({
           </div>
         )}
         <div ref={body} className={`flex-1 min-h-0 overflow-auto ${bodyClass}`}>{children}</div>
-        {footer && <div className="shrink-0 border-t border-border px-5 py-3">{footer}</div>}
+        {/* The footer is caller markup, so the wrap has to be applied to whatever
+            row the caller hands in: `[&>*]` keeps every button reachable at
+            390px (the rows are full-width block children, so a wrapping row can
+            only ever wrap, never change the desktop layout). */}
+        {footer && (
+          <div className="shrink-0 border-t border-border px-5 py-3 [&>*]:flex-wrap [&>*]:gap-y-2">{footer}</div>
+        )}
       </div>
     </div>
   );
