@@ -428,7 +428,14 @@ jobs:
         working-directory: desktop
         env:
           NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: npx tauri android build --apk --debug
+        # `--target aarch64` is what actually decides the ABI list: the
+        # generated project's `abiList`/`targetList` (which inject.py pins to
+        # arm64) are not enough — the CLI still drove Gradle through
+        # `rustBuildArmDebug`, and THAT link failed against the arm64-only
+        # libpython the payload stages ("incompatible with armelf_linux_eabi").
+        # One ABI is the honest build anyway: it is the only one we ship a
+        # Python for, and it halves the APK.
+        run: npx tauri android build --apk --debug --target aarch64
 
       - name: Verify the icons inside the built APK
         # The launcher rasters are copied out of `icons/android/**` by the
