@@ -51,9 +51,14 @@ jobs:
     uses: ./.github/workflows/mobile.yml
 
   release:
+    # Every platform, or nothing. An earlier version of this ran the release
+    # even after a client build failed (`if: always()`), on the theory that the
+    # source zip and the Docker image are still worth publishing — but the run
+    # that proved it also showed the trap: the release then goes out with a
+    # platform missing from its assets and nobody notices, because the OLD
+    # installer is still sitting there under the same name. A tag that cannot
+    # build all five platforms must fail loudly instead.
     needs: [ci, desktop, mobile]
-    # Run whenever CI itself passed, whatever the client builds did.
-    if: always() && needs.ci.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -150,18 +155,21 @@ jobs:
           path: clients
           merge-multiple: true
 
-      - name: List what will be published
-        # Loud, not fatal: the release must exist (the source zip and the
-        # Docker image are enough to install la musica), so a missing client
-        # bundle is an annotation naming what failed — the red job group above
-        # is where the reason lives — rather than a reason to publish nothing.
+      - name: Every platform must be present
+        # The release IS the five-platform deliverable, so a missing installer
+        # is a failed release, not a warning: without this the publish would
+        # quietly leave the previous release's asset in place (same name) and
+        # the run would look green.
         run: |
-          find clients -type f 2>/dev/null | sort || true
+          find clients -type f | sort
+          missing=0
           for want in Windows macOS Linux android-debug ios-unsigned; do
-            if ! find clients -type f -name "*${want}*" -print -quit 2>/dev/null | grep -q .; then
-              echo "::warning::no ${want} build in this release — see the desktop/mobile jobs for why"
+            if ! find clients -type f -name "*${want}*" -print -quit | grep -q .; then
+              echo "::error::no ${want} build in this release — see the desktop/mobile jobs for why"
+              missing=1
             fi
           done
+          exit "$missing"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
