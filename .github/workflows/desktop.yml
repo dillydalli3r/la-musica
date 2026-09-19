@@ -108,6 +108,49 @@ jobs:
         working-directory: desktop
         run: npx tauri build --bundles ${{ matrix.bundles }}
 
+      - name: Verify the icons inside the built bundles
+        # `bundle.icon` is what each bundler is *told* to use; what it actually
+        # embedded is a different question with a real answer, and that answer
+        # was wrong: the NSIS installer drew Tauri's own default installer icon
+        # because `bundle.windows.nsis` named none, which no amount of checking
+        # the committed files could reveal. So each platform's bundle is opened
+        # here. `tools/test_icons.py` proves the repo's icon files are the
+        # artwork; this step proves the installers carry them.
+        shell: bash
+        run: |
+          set -e
+          # `python3` is not on the Windows runner's PATH, `python` is not on
+          # the macOS/Linux ones; the exe is named after the product or the
+          # crate depending on Tauri's mood, so it is found, not assumed.
+          PY="$(command -v python3 || command -v python)"
+          B=desktop/src-tauri/target/release/bundle
+          APP="$(find "$B" -maxdepth 3 -name '*.app' -type d 2>/dev/null | head -1)"
+          if [ -n "$APP" ]; then
+            test -f "$APP/Contents/Resources/icon.icns" \
+              || { echo "::error::$APP carries no Contents/Resources/icon.icns"; exit 1; }
+            cmp "$APP/Contents/Resources/icon.icns" desktop/src-tauri/icons/icon.icns \
+              || { echo "::error::the .app's icon.icns is not the committed artwork"; exit 1; }
+            echo "ok: $APP carries the committed icon.icns"
+          fi
+
+          EXE="$(find desktop/src-tauri/target/release -maxdepth 1 -name '*.exe' -type f 2>/dev/null | head -1)"
+          if [ -n "$EXE" ]; then "$PY" tools/bundle_icons.py --exe "$EXE"; fi
+
+          NSIS="$(find "$B/nsis" -name '*.exe' 2>/dev/null | head -1)"
+          if [ -n "$NSIS" ]; then "$PY" tools/bundle_icons.py --exe "$NSIS"; fi
+
+          DEB="$(find "$B/deb" -name '*.deb' 2>/dev/null | head -1)"
+          if [ -n "$DEB" ]; then
+            rm -rf /tmp/debicons && mkdir -p /tmp/debicons
+            dpkg-deb -x "$DEB" /tmp/debicons
+            found=0
+            for icon in $(find /tmp/debicons -name '*.png' -path '*icons*'); do
+              found=1
+              "$PY" tools/bundle_icons.py --png "$icon"
+            done
+            [ "$found" = 1 ] || { echo "::error::$DEB installs no icon files"; exit 1; }
+          fi
+
       - name: Upload the bundles
         uses: actions/upload-artifact@v4
         with:

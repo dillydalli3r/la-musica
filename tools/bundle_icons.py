@@ -284,11 +284,159 @@ def check_apk(apk, fails):
             compare(name, zf.read(name), ref, fails)
 
 
+def load_dib_icon(data):
+    """A 32bpp BITMAPINFOHEADER icon frame -> (RGBA, w, h).
+
+    Windows' native icon frame: a bottom-up BGRA XOR mask with a doubled
+    height field (the lower half is the AND mask, which a 32bpp frame with a
+    real alpha channel does not use). NSIS writes its installer icons this way,
+    so a PNG-only reader finds "no icon" in a perfectly good installer.
+    """
+    size, w, h2, _planes, bpp, _comp, *_rest = struct.unpack("<IiiHHIIiiII", data[:40])
+    if bpp != 32 or size < 40:
+        raise ValueError(f"unsupported DIB frame: {bpp}bpp, {size}B header")
+    h = h2 // 2
+    px = data[size:size + w * h * 4]
+    if len(px) < w * h * 4:
+        raise ValueError("DIB frame is truncated")
+    out = bytearray(w * h * 4)
+    for y in range(h):
+        src = (h - 1 - y) * w * 4  # rows are stored bottom-up
+        for x in range(w):
+            i, o = src + x * 4, (y * w + x) * 4
+            b, g, r, a = px[i], px[i + 1], px[i + 2], px[i + 3]
+            out[o:o + 4] = bytes((r, g, b, a or 255))
+    return out, w, h
+
+
+def pe_icon_frames(blob):
+    """Every RT_ICON resource of a PE image, as (label, bytes) pairs.
+
+    Enough PE to walk from `e_lfanew` to data directory 2 and follow the
+    resource tree — no dependency, and nothing is executed: this only ever
+    reads a file. Needed because the picture Windows draws for an installer is
+    a resource inside it, so a config that silently falls back to a default
+    icon is invisible everywhere else.
+    """
+    if blob[:2] != b"MZ":
+        raise ValueError("not a PE image")
+    pe = struct.unpack_from("<I", blob, 0x3C)[0]
+    if blob[pe:pe + 4] != b"PE\0\0":
+        raise ValueError("no PE header")
+    # COFF header: sections, then the optional header whose data directories
+    # start right after it (32 bytes for PE32+, 28 for PE32).
+    n_sections, = struct.unpack_from("<H", blob, pe + 6)
+    opt_size, = struct.unpack_from("<H", blob, pe + 20)
+    opt = pe + 24
+    magic, = struct.unpack_from("<H", blob, opt)
+    dd = opt + (112 if magic == 0x20B else 96)
+    rva, size = struct.unpack_from("<II", blob, dd + 2 * 8)
+    if not rva:
+        return []
+    sections = []
+    for i in range(n_sections):
+        off = opt + opt_size + i * 40
+        name = blob[off:off + 8].rstrip(b"\0")
+        # IMAGE_SECTION_HEADER: VirtualSize, VirtualAddress, SizeOfRawData,
+        # PointerToRawData — in that order, so the RVA is the second and the
+        # file offset the fourth.
+        _vsize, vaddr, raw_size, raw_ptr = struct.unpack_from("<IIII", blob, off + 8)
+        sections.append((vaddr, raw_size, raw_ptr, name))
+
+    def at(rva_):
+        for virt, raw_size, raw, _n in sections:
+            if virt <= rva_ < virt + raw_size:
+                return raw + (rva_ - virt)
+        return None
+
+    base = at(rva)
+    if base is None:
+        return []
+    out = []
+
+    def direntry(off):
+        # IMAGE_RESOURCE_DIRECTORY_ENTRY: Name (high bit = it is a string
+        # offset, not an id) then OffsetToData (high bit = it is a
+        # subdirectory offset).
+        name, data = struct.unpack_from("<II", blob, off)
+        return bool(name & 0x80000000), bool(data & 0x80000000), (data & 0x7FFFFFFF)
+
+    def walk(off, level, type_id, name_id):
+        # IMAGE_RESOURCE_DIRECTORY is 16 bytes: the entry count is TWO 16-bit
+        # counts at offset 12 (named, then id), not one 32-bit int.
+        named, by_id = struct.unpack_from("<HH", blob, off + 12)
+        for i in range(named + by_id):
+            e = off + 16 + i * 8
+            nm, sub, val = direntry(e)
+            ident = struct.unpack_from("<I", blob, e)[0]
+            if level == 0:
+                walk(base + val, 1, ident, None)
+            elif level == 1:
+                walk(base + val, 2, type_id, None if nm else ident)
+            elif type_id == 3:  # RT_ICON
+                data = struct.unpack_from("<II", blob, base + val)
+                length = struct.unpack_from("<I", blob, base + val + 4)[0]
+                file_off = at(data[0])
+                if file_off is not None:
+                    out.append((f"RT_ICON id={name_id if name_id is not None else ident}",
+                                blob[file_off:file_off + length]))
+
+    walk(base, 0, None, None)
+    return out
+
+
+def check_exe(exe, fails):
+    """The icons inside a Windows PE (app exe or installer), against the source."""
+    ref = load_png((ROOT / "desktop" / "icon-source.png").read_bytes())
+    try:
+        frames = pe_icon_frames(pathlib.Path(exe).read_bytes())
+    except Exception as exc:
+        fails.append(f"cannot read {os.path.basename(exe)}: {exc}")
+        return
+    if not frames:
+        fails.append(f"{os.path.basename(exe)} carries no RT_ICON resource")
+        return
+    best, skipped = None, []
+    for label, payload in frames:
+        try:
+            if payload[:8] == b"\x89PNG\r\n\x1a\n":
+                image = load_png(payload)
+            else:
+                image = load_dib_icon(payload)
+        except Exception as exc:
+            w_ = struct.unpack_from("<i", payload, 4)[0] if payload[:4] == b"\x28\0\0\0" else 0
+            skipped.append(f"{w_}px ({exc})")
+            continue
+        value = mad(image, ref)
+        print(f"{os.path.basename(exe)} {label} {image[1]}x{image[2]}: mad={value:.2f} (tol {TOL})")
+        best = value if best is None else min(best, value)
+    if best is None:
+        fails.append(f"{os.path.basename(exe)}: no comparable frame ({'; '.join(skipped)})")
+    elif best > TOL:
+        fails.append(f"{os.path.basename(exe)} icon drifts from the artwork (best mad {best:.2f} > {TOL})")
+
+
+def check_png(path, fails):
+    """One installed PNG icon (a .deb's, say) against the source artwork."""
+    ref = load_png((ROOT / "desktop" / "icon-source.png").read_bytes())
+    try:
+        image = load_png(pathlib.Path(path).read_bytes())
+    except Exception as exc:
+        fails.append(f"cannot read {path}: {exc}")
+        return
+    value = mad(image, ref)
+    print(f"{path} {image[1]}x{image[2]}: mad={value:.2f} (tol {TOL})")
+    if value > TOL:
+        fails.append(f"{path} drifts from the artwork (mad {value:.2f} > {TOL})")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--app", help="path to a built iOS .app directory")
     target.add_argument("--apk", help="path to a built .apk")
+    target.add_argument("--exe", help="path to a built Windows .exe")
+    target.add_argument("--png", help="path to one installed PNG icon (.deb)")
     args = parser.parse_args()
 
     fails = []
@@ -297,11 +445,21 @@ def main():
             print(f"::error::no .app at {args.app}")
             return 1
         check_app(args.app, fails)
-    else:
+    elif args.apk:
         if not os.path.isfile(args.apk):
             print(f"::error::no .apk at {args.apk}")
             return 1
         check_apk(args.apk, fails)
+    elif args.exe:
+        if not os.path.isfile(args.exe):
+            print(f"::error::no executable at {args.exe}")
+            return 1
+        check_exe(args.exe, fails)
+    else:
+        if not os.path.isfile(args.png):
+            print(f"::error::no icon at {args.png}")
+            return 1
+        check_png(args.png, fails)
 
     for line in fails:
         print(f"::error::{line}")
