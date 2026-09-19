@@ -284,4 +284,18 @@ def reconcile_with_library(cfg=None):
         if mbid and mbid in owned:
             mark_imported(w["id"], owned[mbid] or "")
             resolved += 1
+            # A wish the user filled by hand lands here, so this path notifies
+            # too — otherwise "found" would only ever mean "the pipeline did
+            # it" and a manual download would arrive silently.
+            try:
+                from server import events
+                artist = str(w.get("artist") or "").strip()
+                title = str(w.get("title") or "").strip()
+                label = f"{artist} — {title}" if artist and title else (title or artist or "Wish")
+                events.emit("wish_found", f"Wish found: {label}",
+                            "It is in your library now.",
+                            {"wish_id": w["id"], "release_mbid": mbid},
+                            config=cfg)
+            except Exception:
+                pass
     return resolved

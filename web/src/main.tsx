@@ -5,6 +5,14 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { CircleAlert } from "lucide-react";
 import "./index.css";
 import App from "./App";
+import { applyConfigLocale } from "./lib/i18n";
+
+// The locale is fixed before the first render: the app has not fetched
+// /api/config yet, so this resolves this browser's own pick, then its
+// language, and only then English — applyConfigLocale() with no argument is
+// exactly that boot pass. When the config does arrive, App (and the settings
+// page) call applyConfigLocale(cfg) so the server's `ui_locale` applies too.
+applyConfigLocale();
 
 /** A render-time throw anywhere in the app (a lazy page chunk included)
  * would otherwise unmount the whole tree to a blank screen. */

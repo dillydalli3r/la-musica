@@ -40,6 +40,7 @@ const GROUPS: Group[] = [
       { k: "grade_check_energy", label: "Energy tag present", desc: "Every track needs an ENERGY tag (0-100, written with MOOD by script 8 or 16; issue code ENERGY_MISSING)." },
       { k: "grade_check_genre", label: "Genre tag present", desc: "Every track needs a GENRE tag. Graded on its own, independent of the required-tags sweep (issue code GENRE_MISSING)." },
       { k: "grade_check_genre_count", label: "Genre count per track", desc: "Every track must hold EXACTLY the number of genres set by 'Genres per track' in Settings → Import (mb_genre_count) — fewer or more fails (issue code GENRE_COUNT). Separate from the presence check above: a track with two genres passes that one and fails this one. The import and the trimming scripts cap a track at the same value, so a library this app tagged can never fail it." },
+      { k: "grade_check_genre_order", label: "Genre order (parent → sub)", desc: "The genres form a hierarchy: parent first, then the main genre, then the subgenre (Rock / Alternative Rock / Post-Britpop). A parent that sits in a later slot, or a slot repeated, fails (issue code GENRE_ORDER). A head this app's vocabulary does not know (Kwaito) is never a failure on its own. AI genre inference (Settings → AI) and the import's source chain are what produce the order." },
       { k: "grade_check_replaygain", label: "ReplayGain tags present", desc: "A file that carries any REPLAYGAIN_* tag must carry all four — REPLAYGAIN_TRACK_GAIN/_PEAK and _ALBUM_GAIN/_PEAK. A file with none is not graded (run the Loudness pass; the player can also analyse on demand)." },
       { k: "grade_check_encoder", label: "Encoder identity", desc: "The ENCODER_* markers switched on under Tagging → Encoder tags must be present (PROGRAM is off by default). Covers are graded by the same rule while image processing is on." },
       { k: "grade_check_naming", label: "Naming script match", desc: "File paths must match the configured naming script (full or shortened MusicBrainz IDs both accepted)." },
@@ -129,6 +130,8 @@ const GROUPS: Group[] = [
     items: [
       { k: "grade_check_lyrics", label: "Lyrics present", desc: "Every non-instrumental track needs lyrics (embedded and/or .lrc sidecar, per the lyrics format)." },
       { k: "grade_check_lyrics_lang_tags", label: "Transform language tags", desc: "Transform tags must carry their language (TRANSLATION-EN, TRANSLITERATION-JA-LATN — never the bare legacy names)." },
+      { k: "grade_check_xlit_transliteration", label: "Transliteration — needed, never extra", desc: "A track whose lyrics are already Latin script must NOT carry a TRANSLITERATION tag (or a .romaji.lrc sidecar) — that fails as XLIT_UNNEEDED — while non-Latin lyrics must have one, or it fails as XLIT_MISSING. Instrumental tracks are never graded on it." },
+      { k: "grade_check_xlit_translation", label: "Translation — needed, never extra", desc: "Computed against the reader's language (the first of 'Lyrics translation languages'): a track already in that language must not carry a TRANSLATION tag or a .<lang>.lrc sidecar (XLIT_UNNEEDED), and one that is not must have the right one (XLIT_MISSING, which also names a mismatch like TRANSLATION-DE stored for English lyrics)." },
     ],
   },
   {

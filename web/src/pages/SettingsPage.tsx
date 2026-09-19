@@ -1,15 +1,18 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Save, RotateCcw, LayoutGrid, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, Wand2, X } from "lucide-react";
+import { Bell, Save, RotateCcw, LayoutGrid, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, Wand2, X } from "lucide-react";
 import { api } from "../api";
 import ConfirmButton from "../components/ConfirmButton";
 import SourcesPanel from "../components/SourcesPanel";
+import SecurityPanel from "../components/SecurityPanel";
 import AiTestButton from "../components/AiTestButton";
 import PageHeader from "../components/PageHeader";
 import { toast } from "../store";
 import { applyAccent } from "../App";
 import { DEFAULT_RUN_ALL, SCRIPT_LABEL, isScriptId } from "../lib/scripts";
+import { LOCALES, applyConfigLocale, setLocale, useI18n } from "../lib/i18n";
+import { notificationState, requestNotifications, type NotifyState } from "../lib/notify";
 
 const ACCENT_OPTIONS: { id: string; name: string; color: string }[] = [
   { id: "violet", name: "Violet", color: "#8b5cf6" },
@@ -320,6 +323,10 @@ export default function SettingsPage() {
   const searching = q.trim().length >= 2;
   // which password fields are currently revealed
   const [showPasswords, setShowPasswords] = useState<Set<string>>(new Set());
+
+  // `locale` is the locale in force (used by the picker below when the config
+  // names none the app ships); `t` labels the picker itself.
+  const { t, locale } = useI18n();
 
   // Provider catalogues behind the order editors (Discovery / Lyrics lists).
   const { data: discoveryCat } = useQuery({ queryKey: ["discoverySources"], queryFn: api.discoverySources });
@@ -885,14 +892,42 @@ export default function SettingsPage() {
     ...CFG_GROUPS.flatMap((g) => g.fields),
     ...GRADE_CHECK_KEYS,
     ...GENERAL_TOGGLES,
-  ].map((f) => f.k);
+  ]
+    .map((f) => f.k)
+    // The language picker in the General tab is hand-rendered (its options come
+    // from the i18n bundle, not from the config), but it still loads and saves
+    // through `scriptCfg` like every other setting.
+    // The notification switches are config keys this page owns but that are
+    // not part of any field group, so they are seeded explicitly — without
+    // that they render unchecked while the server has them on (the default),
+    // and the first click would set the value to true instead of false.
+    .concat("ui_locale", "notify_wish_found", "notify_download_done", "notify_import_ready");
   const [scriptCfg, setScriptCfg] = useState<Record<string, unknown>>({});
   const setCfg = (k: string, v: unknown) => setScriptCfg((c) => ({ ...c, [k]: v }));
+
+  /** The locale the picker shows: the config's own value when the app ships a
+   *  bundle for it, otherwise whatever is in force — an empty config value, or
+   *  one naming a language with no bundle, must not select a blank option. */
+  const localeValue = LOCALES.some((l) => l.code === String(scriptCfg.ui_locale))
+    ? String(scriptCfg.ui_locale)
+    : locale;
+  /** Language pick: written to the config like every other General field (via
+   *  `scriptCfg`, so Save all settings persists it) and applied at once — this
+   *  is the one setting whose effect the user expects before saving. setLocale
+   *  also remembers it in this browser, so the choice survives a reload even
+   *  before the config round-trip. */
+  const pickLocale = (code: string) => {
+    setCfg("ui_locale", code);
+    setLocale(code);
+  };
   const [previewPath, setPreviewPath] = useState<string | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [rawConfig, setRawConfig] = useState("{}");
   const [tab, setTab] = useState("general");
+  // This browser's own notification permission, re-read on mount so the
+  // panel shows the truth even when it was granted in another tab.
+  const [notifyState, setNotifyState] = useState<NotifyState>(() => notificationState());
   const [runAll, setRunAll] = useState<number[]>(DEFAULT_RUN_ALL);
   const [beetsBusy, setBeetsBusy] = useState(false);
   const { data: beetsStatus, refetch: refetchBeets } = useQuery({
@@ -949,9 +984,20 @@ export default function SettingsPage() {
     { k: "force_publish", label: "18 · Lyrics re-publish to LRCLIB" },
   ];
 
+  /** The server-side notification switches — one per event kind the backend
+   *  publishes (server/events.py). These decide what is published at all; each
+   *  client still asks for its own OS permission below. */
+  const NOTIFY_KEYS = [
+    { k: "notify_wish_found", label: "Wish found on Soulseek" },
+    { k: "notify_download_done", label: "Download finished" },
+    { k: "notify_import_ready", label: "Album ready to import" },
+  ];
+
   const NAV: { id: string; label: string; section?: string }[] = [
     { id: "general", label: "General" },
     { id: "appearance", label: "Appearance" },
+    { id: "security", label: t("settings.security") },
+    { id: "notifications", label: t("settings.notifications") },
     { id: "home", label: "Home" },
     { id: "naming", label: "Naming" },
     { id: "tagwrites", label: "Tagging" },
@@ -998,6 +1044,14 @@ export default function SettingsPage() {
       setPreviewing(false);
     }
   };
+
+  // The server's ui_locale takes effect as soon as the config lands — unless
+  // this browser already holds the user's own pick, which outranks it (i18n
+  // resolves that precedence; this page only hands the config over, and the
+  // same call belongs wherever the config query resolves).
+  useEffect(() => {
+    if (config) applyConfigLocale(config);
+  }, [config]);
 
   useEffect(() => {
     if (!config || loaded) return;
@@ -1458,6 +1512,15 @@ export default function SettingsPage() {
                 <span className="text-xs text-zinc-500 uppercase">Worker limit (0 = auto)</span>
                 <input className="input mt-1" type="number" min={0} value={workerLimit} onChange={(e) => setWorkerLimit(Number(e.target.value))} />
               </label>
+              <label className="block">
+                <span className="text-xs text-zinc-500 uppercase">{t("settings.language")}</span>
+                <select className="input mt-1" value={localeValue} onChange={(e) => pickLocale(e.target.value)}>
+                  {LOCALES.map((l) => (
+                    <option key={l.code} value={l.code}>{l.label}</option>
+                  ))}
+                </select>
+                <span className="text-[11px] text-zinc-600 mt-1 block">{t("settings.language_help")}</span>
+              </label>
               <div className="flex flex-wrap gap-x-6 gap-y-1.5">
                 {GENERAL_TOGGLES.map((f) => (
                   <label key={f.k} className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
@@ -1893,6 +1956,45 @@ export default function SettingsPage() {
               <summary className="text-sm font-semibold cursor-pointer">Individual grading checks ({GRADE_CHECK_KEYS.length})</summary>
               <div className="mt-2">{renderFields(GRADE_CHECK_KEYS)}</div>
             </details>
+          )}
+
+          {tab === "security" && <SecurityPanel />}
+
+          {tab === "notifications" && (
+            <div className="panel space-y-3">
+              <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">
+                {t("settings.notifications")}
+              </div>
+              <p className="text-[11px] text-zinc-600 leading-relaxed">{t("settings.notifications_help")}</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  className="btn-ghost !py-1.5 text-xs"
+                  onClick={async () => {
+                    const state = await requestNotifications();
+                    setNotifyState(state);
+                    if (state === "granted") toast.success(t("notify.enabled"));
+                    else if (state === "denied") toast.error(t("notify.blocked_help"));
+                  }}
+                >
+                  <Bell className="h-3.5 w-3.5" /> {t("notify.enable")}
+                </button>
+                <span className="text-[11px] text-zinc-500">
+                  {notifyState === "granted"
+                    ? t("notify.title_granted")
+                    : notifyState === "denied"
+                    ? t("notify.blocked")
+                    : t("notify.enable")}
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-x-6 gap-y-1.5">
+                {NOTIFY_KEYS.map((f) => (
+                  <label key={f.k} className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
+                    <input type="checkbox" checked={!!scriptCfg[f.k]} onChange={(e) => setCfg(f.k, e.target.checked)} />
+                    {f.label}
+                  </label>
+                ))}
+              </div>
+            </div>
           )}
 
           <div className="flex items-center gap-2">

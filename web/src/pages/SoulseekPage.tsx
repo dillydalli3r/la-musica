@@ -8,7 +8,7 @@ import {
   MessageSquare, X,
 } from "lucide-react";
 import { api } from "../api";
-import type { SlskAutoFile, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskSearchProgress, SlskTransfer, StagingEntry, StagingRoot, StagingRootId } from "../api";
+import type { ImportRunStatus, ReadyAlbum, SlskAutoFile, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskSearchProgress, SlskTransfer, StagingEntry, StagingRoot, StagingRootId } from "../api";
 import { toast } from "../store";
 import { EmptyState, PageLoading } from "../components/Badges";
 import CachedTracksView from "../components/CachedTracksView";
@@ -1344,6 +1344,189 @@ function skippedAlbumCount(result: object): number {
   return typeof raw === "number" ? raw : 0;
 }
 
+/** One import at a time, process-wide on the server: every button that starts
+ *  one (a single wish, a single album, or all of them) reads and shows the
+ *  same run, so no panel needs a job tracker of its own. */
+const IMPORT_RUN_KEY = ["soulseekImportRun"];
+const READY_ALBUMS_KEY = ["soulseekReady"];
+
+function useImportRun() {
+  return useQuery({
+    queryKey: IMPORT_RUN_KEY,
+    queryFn: api.importAllStatus,
+    // The server keeps the last run's status forever, so the timer only runs
+    // while there is something to watch.
+    refetchInterval: (q) => (q.state.data?.state === "running" ? 1500 : false),
+  });
+}
+
+/** Progress of the running import and the per-album verdicts once it stops.
+ *  Renders nothing until a run exists, so the panels that offer Import need
+ *  no "nothing started yet" branch. */
+function ImportRunCard({ run }: { run: ImportRunStatus | undefined }) {
+  const qc = useQueryClient();
+  const state = run?.state ?? "idle";
+  const wasRunning = useRef(false);
+  // The run rewrites the library and empties the download dir, so the tabs
+  // that read either one are refreshed once it stops.
+  useEffect(() => {
+    if (state === "running") {
+      wasRunning.current = true;
+      return;
+    }
+    if (!wasRunning.current) return;
+    wasRunning.current = false;
+    for (const queryKey of [["library"], ["soulseekReview"], ["wishes"], READY_ALBUMS_KEY]) {
+      qc.invalidateQueries({ queryKey });
+    }
+  }, [state, qc]);
+
+  if (!run || (state === "idle" && run.results.length === 0)) return null;
+  const running = state === "running";
+  const failed = run.results.filter((r) => !r.ok).length;
+  const pct = run.total ? Math.round((100 * run.done) / run.total) : 0;
+  const cancel = async () => {
+    try {
+      const r = await api.importAllCancel();
+      qc.setQueryData(IMPORT_RUN_KEY, r.status);
+      toast(r.ok ? "Stopping after the album being imported…" : "No import is running");
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
+
+  return (
+    <div className="rounded-md border border-border bg-panel/60 p-2.5 space-y-2 text-xs">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[10px] uppercase tracking-widest text-zinc-500">Import run</span>
+        {running ? (
+          <span className="text-sky-300">
+            <Loader2 className="h-3 w-3 inline animate-spin mr-1" />
+            importing {Math.min(run.done + 1, run.total)} of {run.total} — {fileName(run.current ?? "") || "starting…"}
+          </span>
+        ) : (
+          <span className="text-zinc-400">
+            {state === "cancelled" ? "Stopped after" : "Imported"} {run.done} of {run.total} album(s)
+            {failed ? <span className="text-red-300/80"> · {failed} failed</span> : ""}
+            {run.finished_at ? ` · ${timeAgo(run.finished_at)}` : ""}
+          </span>
+        )}
+        {running && (
+          <button
+            className="btn-ghost !py-1 text-xs ml-auto"
+            onClick={cancel}
+            title="Stop after the album being imported — never mid-album, a half-imported album is worse than a slow one"
+          >
+            <Square className="h-3.5 w-3.5" /> Cancel
+          </button>
+        )}
+      </div>
+      {running && (
+        <div className="h-1.5 rounded-sm bg-border/70 overflow-hidden">
+          <div className="h-full bg-accent transition-[width] duration-500" style={{ width: `${pct}%` }} />
+        </div>
+      )}
+      {run.results.length > 0 && (
+        <div className="space-y-0.5 max-h-48 overflow-auto stagger">
+          {run.results.map((r, i) => (
+            <div key={`${r.path}-${i}`} className="flex items-center gap-2 px-1 py-0.5">
+              {r.ok ? (
+                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+              ) : (
+                <AlertTriangle className="h-3.5 w-3.5 text-red-400 shrink-0" />
+              )}
+              <span className="flex-1 min-w-0 truncate text-zinc-300" title={r.path}>
+                {fileName(r.album_root || r.path)}
+              </span>
+              {!r.ok && (
+                <span className="text-red-300/80 truncate max-w-[45%]" title={r.error}>{r.error || "failed"}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The albums that finished downloading and are waiting to be imported — the
+ *  same list a full import run would take. Each row sends ONE album through
+ *  the whole pipeline on its own, unlike the one-click Import completed
+ *  button above, which moves everything at once. */
+function ReadyImports() {
+  const qc = useQueryClient();
+  const { data, isFetching, refetch } = useQuery({
+    queryKey: READY_ALBUMS_KEY,
+    queryFn: api.soulseekReady,
+    // Sizing every album walks the download dir server-side, so this is
+    // fetched on mount and after an action, never on a timer.
+    staleTime: 30000,
+    refetchOnWindowFocus: false,
+  });
+  const { data: run } = useImportRun();
+  const runBusy = run?.state === "running";
+  const [busyPath, setBusyPath] = useState<string | null>(null);
+  const albums = data?.albums ?? [];
+
+  const start = async (a: ReadyAlbum) => {
+    setBusyPath(a.path);
+    try {
+      const r = await api.soulseekImportOne(a.path);
+      qc.setQueryData(IMPORT_RUN_KEY, r.status);
+      toast(`Importing ${a.name}…`);
+      refetch();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusyPath(null);
+    }
+  };
+
+  return (
+    <div className="rounded-md border border-border bg-panel/60 p-2.5 space-y-2 mb-2.5">
+      <div className="flex items-center gap-2 flex-wrap text-xs">
+        <span className="font-semibold text-zinc-300 flex items-center gap-1.5">
+          <PackageOpen className="h-3.5 w-3.5" /> Finished downloads
+        </span>
+        <span className="text-[11px] text-zinc-500">
+          {albums.length
+            ? `${albums.length} album(s) waiting in ${data?.download_dir ?? "the download folder"} — each Import takes one album through on its own`
+            : "nothing finished is waiting to be imported"}
+        </span>
+        <button
+          className="btn-ghost !py-0.5 !px-2 text-[11px] ml-auto"
+          onClick={() => refetch()}
+          disabled={isFetching}
+          title="Rescan the download folder"
+        >
+          <RefreshCw className={`h-3 w-3 ${isFetching ? "animate-spin" : ""}`} /> Rescan
+        </button>
+      </div>
+      {albums.map((a) => (
+        <div key={a.path} className="flex items-center gap-2 px-2 py-1 rounded hover:bg-white/[0.04] text-xs">
+          <div className="flex-1 min-w-0">
+            <div className="truncate text-zinc-200" title={a.path}>{a.name}</div>
+            <div className="text-[10px] text-zinc-600 truncate" title={a.rel}>{a.rel}</div>
+          </div>
+          <span className="text-zinc-500 w-8 text-right shrink-0" title={`${a.files} file(s)`}>{a.files} f</span>
+          <span className="text-zinc-500 w-16 text-right shrink-0">{fmtSize(a.bytes)}</span>
+          <button
+            className="btn-primary !py-0.5 !px-2 text-[11px] shrink-0"
+            disabled={runBusy || busyPath !== null}
+            onClick={() => start(a)}
+            title="Import this album all the way through — convert, tag, organize, then the import chain"
+          >
+            {busyPath === a.path
+              ? <Loader2 className="h-3 w-3 animate-spin" />
+              : <Download className="h-3 w-3" />} Import
+          </button>
+        </div>
+      ))}
+      <ImportRunCard run={run} />
+    </div>
+  );
+}
+
 /** Review completed downloads: preview, tag (and remux VOB→MKV), discard,
  * then import the keepers into the library. Each completed album can also be
  * handed to the import wizard for the guided cover/lyrics/advisory flow. */
@@ -1426,6 +1609,7 @@ function ReviewPanel() {
         <span className="font-mono text-zinc-400">{data?.dir ?? "…"}</span> until an import finishes — nothing is moved
         out of it before that.
       </div>
+      <ReadyImports />
       {albums.length > 0 && (
         <div className="flex flex-wrap gap-1.5 mb-2.5">
           {albums.map(([dir, count]) => (
@@ -1665,13 +1849,26 @@ const WISH_STATUS: Record<Wish["status"], { label: string; cls: string; icon: ty
   available: { label: "Available", cls: "bg-violet-900/40 text-violet-300 border-violet-800", icon: Star },
 };
 
-function WishRow({ w, onChanged }: { w: Wish; onChanged: () => void }) {
+function WishRow({ w, run, importing, pageBusy, onImport, onChanged }: {
+  w: Wish;
+  /** the page's single import run — a per-wish import reports through it */
+  run: ImportRunStatus | undefined;
+  importing: boolean;
+  pageBusy: boolean;
+  onImport: () => void;
+  onChanged: () => void;
+}) {
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState(w.note);
   const [failed, setFailed] = useState(false);
   const st = WISH_STATUS[w.status] ?? WISH_STATUS.wanted;
   const Icon = st.icon;
+  // Something to import: the album already landed, or a download found for
+  // this wish is sitting in the download dir. Anything else gets a 409, which
+  // the server answers with the next step, so the button says nothing here.
+  const canImport = w.status === "available" || !!w.album_path;
+  const runBusy = run?.state === "running";
 
   const search = async () => {
     setBusy(true);
@@ -1723,8 +1920,13 @@ function WishRow({ w, onChanged }: { w: Wish; onChanged: () => void }) {
         )}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className={`chip text-[9px] border ${st.cls}`}>
-              <Icon className={`h-3 w-3 ${w.status === "searching" ? "animate-spin" : ""}`} /> {st.label}
+            <span className={`chip text-[9px] border ${importing ? "bg-sky-900/40 text-sky-300 border-sky-800" : st.cls}`}>
+              {importing ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <Icon className={`h-3 w-3 ${w.status === "searching" ? "animate-spin" : ""}`} />
+              )}{" "}
+              {importing ? `importing… (${run ? `${Math.min(run.done + 1, run.total)}/${run.total}` : "1/1"})` : st.label}
             </span>
             {w.attempts > 0 && <span className="text-[10px] text-zinc-600">{w.attempts} attempt(s)</span>}
             <span className="text-[10px] text-zinc-600">added {timeAgo(w.added_at)}</span>
@@ -1736,6 +1938,16 @@ function WishRow({ w, onChanged }: { w: Wish; onChanged: () => void }) {
           </div>
         </div>
         <div className="flex items-center gap-1 shrink-0">
+          {canImport && (
+            <button
+              className="btn-ghost !py-1 text-xs"
+              onClick={onImport}
+              disabled={importing || pageBusy || runBusy}
+              title="Import the download this wish is waiting on — the album goes through the whole pipeline in the background"
+            >
+              {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />} Import
+            </button>
+          )}
           {w.status !== "imported" && (
             <button className="btn-ghost !py-1 text-xs" onClick={search} disabled={busy} title="Search Soulseek now">
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
@@ -1789,6 +2001,13 @@ function WishesPanel() {
   });
   const [mbid, setMbid] = useState("");
   const [busy, setBusy] = useState(false);
+  const { data: run } = useImportRun();
+  const [importingWish, setImportingWish] = useState<number | null>(null);
+  // Which wish a per-wish import belongs to. A per-wish click reports through
+  // the shared run, so the row's progress is derived from the run being
+  // alive — no second timer, and nothing to clear when it stops.
+  const runBusy = run?.state === "running";
+  const importingId = runBusy ? importingWish : null;
   const worker = data?.worker;
   const wishes = data?.wishes ?? [];
 
@@ -1847,6 +2066,44 @@ function WishesPanel() {
     }
   };
 
+  const importWish = async (w: Wish) => {
+    try {
+      const r = await api.wishImport(w.id);
+      qc.setQueryData(IMPORT_RUN_KEY, r.status);
+      setImportingWish(w.id);
+      toast(`Importing “${w.title || "wish"}”…`);
+    } catch (e) {
+      // The 409 names the next step ("nothing downloaded for this wish yet"),
+      // so show the server's own words instead of a generic failure.
+      toast.error(String(e));
+    }
+  };
+
+  /** Start the sequential run over everything that finished downloading. The
+   *  ready list is checked first so "nothing to import" is one toast here
+   *  rather than a 409 the user has to read. */
+  const importAll = async () => {
+    setBusy(true);
+    try {
+      const ready = await api.soulseekReady();
+      qc.setQueryData(READY_ALBUMS_KEY, ready);
+      if (ready.albums.length === 0) {
+        toast("Nothing ready to import — no finished download is waiting in the download folder");
+        return;
+      }
+      const r = await api.soulseekImportAll();
+      // A full run is not the wish the row last started, so that row's
+      // progress has to stop claiming it.
+      setImportingWish(null);
+      qc.setQueryData(IMPORT_RUN_KEY, r.status);
+      toast(`Importing ${ready.albums.length} album(s), one at a time…`);
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const reconcile = async () => {
     setBusy(true);
     try {
@@ -1870,6 +2127,14 @@ function WishesPanel() {
             Save releases now; the app re-searches Soulseek on an interval and imports them when a verified copy appears.
           </span>
           <div className="ml-auto flex items-center gap-2">
+            <button
+              className="btn-primary !py-1 text-xs"
+              onClick={importAll}
+              disabled={busy || runBusy}
+              title="Import every finished download into the library, one album at a time"
+            >
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />} Import all completed
+            </button>
             <button className="btn-ghost !py-1 text-xs" onClick={reconcile} disabled={busy} title="Flip wishes already present in the library">
               <CheckCircle2 className="h-3.5 w-3.5" /> Sync library
             </button>
@@ -1891,6 +2156,8 @@ function WishesPanel() {
           <span>· {openWishCount(wishes)} open</span>
         </div>
       </div>
+
+      <ImportRunCard run={run} />
 
       <div className="panel">
         <div className="flex gap-2">
@@ -1921,7 +2188,15 @@ function WishesPanel() {
       ) : (
         <div className="space-y-2 stagger">
           {wishes.map((w) => (
-            <WishRow key={w.id} w={w} onChanged={() => refetch()} />
+            <WishRow
+              key={w.id}
+              w={w}
+              run={run}
+              importing={importingId === w.id}
+              pageBusy={busy}
+              onImport={() => importWish(w)}
+              onChanged={() => refetch()}
+            />
           ))}
         </div>
       )}

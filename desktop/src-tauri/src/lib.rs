@@ -1,28 +1,48 @@
-//! la musica — Tauri desktop shell.
+//! la musica — Tauri shell.
 //!
-//! Spawns the Python FastAPI backend (`server.main:app` on 127.0.0.1:8000)
-//! when the app starts and stops it on exit, using the bundled `mlo-server`
-//! sidecar when there is one and the repo checkout otherwise. The React UI
-//! (web/dist) is served by the Tauri webview and talks to the backend over
-//! HTTP.
+//! On desktop the shell spawns the Python FastAPI backend
+//! (`server.main:app` on 127.0.0.1:8000) when the app starts and stops it on
+//! exit, using the bundled `mlo-server` sidecar when there is one and the repo
+//! checkout otherwise. The React UI (web/dist) is served by the Tauri webview
+//! and talks to the backend over HTTP.
+//!
+//! On mobile (Android/iOS) there is no Python interpreter to spawn, no tray
+//! icon, no autostart registry and no window to hide, so every backend/tray
+//! path below is compiled out behind `#[cfg(desktop)]` (`cfg(desktop)` comes
+//! from tauri-build, which sets it for every non-mobile target). The mobile
+//! shell hosts the same React UI and nothing else: the user types the address
+//! of their server into the login screen, so a mobile install is a client of
+//! a backend running somewhere else.
 
+#[cfg(desktop)]
 use std::path::PathBuf;
+#[cfg(desktop)]
 use std::process::{Child, Command};
+#[cfg(desktop)]
 use std::sync::Mutex;
+#[cfg(desktop)]
 use std::time::Duration;
 
+#[cfg(desktop)]
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+#[cfg(desktop)]
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+#[cfg(desktop)]
 use tauri::{Manager, RunEvent};
+#[cfg(desktop)]
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as AutostartManagerExt};
+#[cfg(desktop)]
 use tauri_plugin_dialog::DialogExt;
 
+#[cfg(desktop)]
 struct BackendState(Mutex<Option<Child>>);
 
 /// The tray's "Start on Login" checkbox, kept in managed state so the
 /// click handler can re-sync its visual with the registry after toggling.
+#[cfg(desktop)]
 struct AutostartItem(Mutex<Option<CheckMenuItem<tauri::Wry>>>);
 
+#[cfg(desktop)]
 const PORT: &str = "8000";
 
 /// Try to locate the backend entry point.
@@ -36,6 +56,7 @@ const PORT: &str = "8000";
 /// `None` means "no backend available"; a packaged build without the sidecar
 /// has no checkout to point Python at, and spawning a bare `python` there
 /// would only produce a process that dies immediately.
+#[cfg(desktop)]
 fn find_backend(app: &tauri::AppHandle) -> Option<(String, Vec<String>, Option<PathBuf>)> {
     // 1. bundled executable (PyInstaller one-file build of server.main)
     if let Ok(dir) = app.path().resource_dir() {
@@ -64,6 +85,7 @@ fn find_backend(app: &tauri::AppHandle) -> Option<(String, Vec<String>, Option<P
     Some((which_python(), args, Some(root)))
 }
 
+#[cfg(desktop)]
 fn which_python() -> String {
     for cand in ["python", "python3"] {
         if let Ok(out) = Command::new(cand).arg("--version").output() {
@@ -75,6 +97,7 @@ fn which_python() -> String {
     "python".to_string()
 }
 
+#[cfg(desktop)]
 fn project_root() -> PathBuf {
     let mut dir = std::env::current_dir().unwrap_or_default();
     // During `tauri dev` cwd is desktop/src-tauri; climb to the repo root.
@@ -87,6 +110,7 @@ fn project_root() -> PathBuf {
     dir
 }
 
+#[cfg(desktop)]
 fn backend_port_open() -> bool {
     std::net::TcpStream::connect(("127.0.0.1", 8000)).is_ok()
 }
@@ -98,6 +122,7 @@ fn backend_port_open() -> bool {
 /// requires the API's own `/api/health` reply, JSON `{"status":"ok"}`, which
 /// is exactly the check `start_app.py` and `tray.py` make before they adopt,
 /// shut down or kill a backend. A foreign listener is left completely alone.
+#[cfg(desktop)]
 fn backend_is_ours() -> bool {
     use std::io::{Read, Write};
     let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", 8000)) else {
@@ -127,6 +152,7 @@ fn backend_is_ours() -> bool {
 ///
 /// Only ever called after `backend_is_ours()` said the listener is ours — a
 /// foreign app on the port never receives this POST.
+#[cfg(desktop)]
 fn request_backend_shutdown() {
     use std::io::{Read, Write};
     if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", 8000)) {
@@ -144,7 +170,7 @@ fn request_backend_shutdown() {
 ///
 /// Refuses unless the port answers /api/health as ours: a foreign app on
 /// :8000 must never be force-killed.
-#[cfg(windows)]
+#[cfg(all(desktop, windows))]
 fn kill_port_listener() {
     if !backend_is_ours() {
         eprintln!("[mlo-desktop] :8000 is not our backend — left alone");
@@ -174,6 +200,7 @@ fn kill_port_listener() {
     }
 }
 
+#[cfg(desktop)]
 fn spawn_backend(app: &tauri::AppHandle) {
     // Adopt an already-running backend (tray app, previous run) instead of
     // spawning a duplicate that fails to bind and leaves confusion behind.
@@ -232,6 +259,7 @@ fn spawn_backend(app: &tauri::AppHandle) {
     }
 }
 
+#[cfg(desktop)]
 fn stop_backend(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<BackendState>() {
         if let Some(mut child) = state.0.lock().unwrap().take() {
@@ -253,6 +281,11 @@ fn stop_backend(app: &tauri::AppHandle) {
 
 /// Native folder picker (also reachable from the web UI via invoke when
 /// running inside the Tauri webview).
+///
+/// Desktop only: mobile has no folder to pick, and the dialog plugin's
+/// blocking folder API does not exist there at all — only `blocking_pick_file`
+/// does — so registering this command would not even compile for Android/iOS.
+#[cfg(desktop)]
 #[tauri::command]
 fn pick_folder(app: tauri::AppHandle) -> Option<String> {
     app.dialog()
@@ -263,6 +296,7 @@ fn pick_folder(app: tauri::AppHandle) -> Option<String> {
 }
 
 /// Show and focus the main window (tray click / tray menu "Open").
+#[cfg(desktop)]
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.unminimize();
@@ -271,6 +305,7 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+#[cfg(desktop)]
 fn sync_autostart_item(app: &tauri::AppHandle) {
     let enabled = app.autolaunch().is_enabled().unwrap_or(false);
     if let Some(state) = app.try_state::<AutostartItem>() {
@@ -280,6 +315,7 @@ fn sync_autostart_item(app: &tauri::AppHandle) {
     }
 }
 
+#[cfg(desktop)]
 fn toggle_autostart(app: &tauri::AppHandle) {
     let autolaunch = app.autolaunch();
     // Flip according to the registry (the source of truth), then re-sync
@@ -295,6 +331,7 @@ fn toggle_autostart(app: &tauri::AppHandle) {
     sync_autostart_item(app);
 }
 
+#[cfg(desktop)]
 fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let open_i = MenuItem::with_id(app, "open", "Open la musica", true, None::<&str>)?;
     let autostart_on = app.autolaunch().is_enabled().unwrap_or(false);
@@ -352,16 +389,37 @@ fn setup_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Tauri entry point.
+///
+/// On mobile this is called by the generated Android/iOS project: the
+/// `mobile_entry_point` macro emits the JNI / Objective-C glue that boots the
+/// Tauri runtime and then calls this function, so it must stay public under
+/// exactly this name.
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    // Plugins every target has: native notifications, which the web UI sends
+    // for "wish found", "download done" and "import ready" on desktop and
+    // mobile alike, and the dialog plugin (its `pick_folder` command below is
+    // desktop-only, but the plugin itself builds everywhere).
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init());
+
+    // Desktop additionally owns the backend lifecycle, the tray icon, the
+    // autostart registry and the folder picker — all things with no mobile
+    // counterpart (tauri-plugin-autostart does not even compile for Android or
+    // iOS, its lib.rs is `#![cfg(not(any(target_os = "android", target_os =
+    // "ios")))]`). Mobile therefore registers no commands at all: the login
+    // screen asks for the server address, nothing asks for a folder.
+    #[cfg(desktop)]
+    let builder = builder
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,
         ))
+        .invoke_handler(tauri::generate_handler![pick_folder])
         .manage(BackendState(Mutex::new(None)))
         .manage(AutostartItem(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![pick_folder])
         .setup(|app| {
             let handle = app.handle().clone();
             std::thread::spawn(move || {
@@ -376,24 +434,32 @@ pub fn run() {
                 eprintln!("[mlo-desktop] tray setup failed: {e}");
             }
             Ok(())
-        })
-        .on_window_event(|window, event| {
-            // Closing the window hides it to the tray; the app keeps
-            // running (and the icon stays) until Quit is used.
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        });
+
+    builder
+        .on_window_event(|_window, _event| {
+            // Desktop: closing the window hides it to the tray — the app keeps
+            // running (and the icon stays) until Quit is used. Mobile has no
+            // tray to restore the window from and the OS owns window
+            // lifecycle, so nothing is intercepted there.
+            #[cfg(desktop)]
+            if let tauri::WindowEvent::CloseRequested { api, .. } = _event {
                 api.prevent_close();
-                let _ = window.hide();
+                let _ = _window.hide();
             }
         })
         .build(tauri::generate_context!())
         .expect("error while building la musica")
-        .run(|app, event| match event {
-            // Stay alive in the tray when the last window goes away; only
-            // an explicit exit (Quit menu / process kill) ends the app.
-            RunEvent::ExitRequested { code: None, api, .. } => {
-                api.prevent_exit();
+        .run(|_app, _event| {
+            // Desktop stays alive in the tray when the last window goes away;
+            // only an explicit exit (Quit menu / process kill) ends the app —
+            // and that exit is where the spawned backend gets stopped. A
+            // mobile exit is the OS's decision, so there is nothing to hook.
+            #[cfg(desktop)]
+            match _event {
+                RunEvent::ExitRequested { code: None, api, .. } => api.prevent_exit(),
+                RunEvent::Exit => stop_backend(_app),
+                _ => {}
             }
-            RunEvent::Exit => stop_backend(app),
-            _ => {}
         });
 }

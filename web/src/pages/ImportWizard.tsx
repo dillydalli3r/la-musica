@@ -6,7 +6,7 @@ import {
   UploadCloud, ExternalLink, Check, ChevronLeft, ChevronRight, ChevronDown, Wand2,
   Plus, Trash2, Disc3, FolderOpen, X, Search, Loader2, Image as ImageIcon,
 } from "lucide-react";
-import { api, answerSources, replyFor } from "../api";
+import { api, answerSources, replyFor, IN_MOBILE_SHELL } from "../api";
 import type { AdvisoryFetchResult, MetadataFetchItem, MetadataItemKind } from "../api";
 import { toast, useStore } from "../store";
 import { advisoryLine } from "../components/Badges";
@@ -869,6 +869,15 @@ export default function ImportWizard() {
 
   const pickFolderNative = async () => {
     const inTauri = !!(window as any).__TAURI_INTERNALS__;
+    if (IN_MOBILE_SHELL) {
+      // The mobile shell registers no commands: there is no native folder
+      // dialog to open, and the phone cannot read the server's filesystem
+      // anyway. Say so, then fall through to the file input, which is the
+      // one picker a phone actually has.
+      toast("Folder browsing is a desktop feature — on a phone, import from the web UI or the desktop app.");
+      document.getElementById("import-folder")?.click();
+      return;
+    }
     if (!inTauri) {
       // no native dialog in a plain browser — fall back to the folder input
       document.getElementById("import-folder")?.click();

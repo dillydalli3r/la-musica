@@ -9,9 +9,18 @@ with lyrics it
   reader whose own language is written in that script is served too (a ja
   reader does not need Japanese lyrics romanized);
 * translates the lyrics into every language configured in
-  ``lyrics_translation_langs`` (comma separated, e.g. "en,de");
+  ``lyrics_translation_langs`` (comma separated, e.g. "en,de") — unless the
+  lyrics are already in the first of them, which is the reader's own
+  language;
 
-and stores the results in two places:
+and decides BOTH in one place, ``xlit_needs`` below: it is asked before
+anything is written and the grader asks it before judging what is stored, so
+the two can never disagree — a re-run of an already-correct library writes
+nothing at all, and a transform the rule no longer asks for (one written
+under an older, laxer rule) is DELETED rather than left to fail grading
+forever.
+
+Results are stored in two places:
 
 * embedded tags, one per language — ``TRANSLITERATION-JA-LATN`` (romanized
   Japanese), ``TRANSLATION-EN``, ``TRANSLATION-DE``, … written via the
@@ -158,24 +167,110 @@ def dominant_script(text):
     return max(counts, key=lambda k: counts[k])
 
 
-def wants_romanization(text, cfg):
-    """True when romanized lyrics are worth generating for this reader.
+# Function words of the languages a reader realistically configures. Script
+# detection cannot separate the languages that share a script — English and
+# German lyrics look identical to `dominant_script` — so the reader-language
+# test needs the only evidence left without a model: the words every language
+# repeats in nearly every line. Small and deliberately strict; an unrecognised
+# text is treated as NOT foreign, so grading never demands a translation on a
+# guess.
+_LATIN_WORDS = {
+    "en": frozenset("the and you that with not are was his her they this from "
+                    "have one all my of to in is it".split()),
+    "de": frozenset("der die das und ich nicht ein eine einen ist du wir mit "
+                    "auf dich sich sind bin".split()),
+    "fr": frozenset("le la les et je ne pas un une est vous nous avec dans "
+                    "pour que qui".split()),
+    "es": frozenset("el la los las y que no un una es tu yo con para por "
+                    "como mas".split()),
+    "it": frozenset("il lo la gli e che non un una sono con per nel come "
+                    "questo".split()),
+    "pt": frozenset("os as e que nao um uma com para por voce eu meu "
+                    "não você".split()),
+    "nl": frozenset("het een en ik niet van dat met voor zijn ben "
+                    "je".split()),
+}
 
-    The rule is script-based, driven by the configured locale (the primary
-    translation target language): lyrics whose script is not Latin AND
-    differs from the locale's own script need romanization. Japanese lyrics
-    for a ja reader add nothing (their script matches); lyrics already in
-    Latin script can't be romanized further.
 
-    (``mlo.lyrics.needs_transliteration`` is the display-side rule that
-    decides whether a STORED romanization is worth rendering; this one
-    decides whether one is worth asking the model for.)"""
-    if non_latin_ratio(text) < _LATIN_THRESHOLD:
-        return False
+def _latin_lang(text):
+    """Best guess at the language of a Latin-script text, "" when undecided.
+
+    A plain vote among `_LATIN_WORDS`; a tie (words shared by two languages,
+    or none at all) is no answer rather than a coin flip."""
+    tokens = re.findall(r"[^\W\d_]+", str(text or "").lower(), re.UNICODE)
+    if not tokens:
+        return ""
+    counts = {lang: sum(1 for t in tokens if t in words)
+              for lang, words in _LATIN_WORDS.items()}
+    best = max(counts, key=lambda k: counts[k])
+    if counts[best] < 1:
+        return ""
+    if sorted(counts.values(), reverse=True)[1] == counts[best]:
+        return ""
+    return best
+
+
+def _body_lines(text):
+    """The lyric lines a transform would actually cover: timestamp chrome and
+    ``[ar:…]`` metadata stripped, blanks dropped. Fewer than two of them is
+    not a lyric (see `xlit_needs`)."""
+    out = []
+    for line in str(text or "").splitlines():
+        _prefix, body = _split_lrc_line(line)
+        if body and not _META_LINE_RE.match(body):
+            out.append(body)
+    return out
+
+
+def _in_reader_language(text, lang):
+    """True when *text* is already in the reader's own language.
+
+    Script decides it whenever either side is not Latin script: Japanese
+    lyrics are the ja reader's own language, Cyrillic ones are not an
+    English reader's. Two Latin-script languages are separated by
+    `_latin_lang`, and an undecided text passes as the reader's own — a
+    translation is only ever demanded on positive evidence."""
     src = dominant_script(text)
-    if src == "latin":
-        return False
-    return lang_script(primary_translation_lang(cfg)) != src
+    native = lang_script(lang)
+    if native != "latin" or src != "latin":
+        return src == native
+    return _latin_lang(text) in ("", str(lang or "").strip().lower())
+
+
+def xlit_needs(text, cfg):
+    """What this track's own lyrics still need stored — the ONE rule.
+
+    Script 17 asks this before writing anything and the grader asks it before
+    judging what is stored, so the two can never disagree: a track is failed
+    for a transform the script would not have written, or passed for one it
+    would.
+
+    * a text with fewer than two lyric lines (empty, instrumental, or the
+      single placeholder line some providers hand back) needs neither;
+    * TRANSLITERATION is script-based — Lyrics whose script is Latin cannot
+      be romanized further, and lyrics already in the reader's own script (a
+      ja reader with ja lyrics) gain nothing, so only a different non-Latin
+      script is worth one;
+    * TRANSLATION is language-based — one that is already in the reader's
+      language (the first entry of ``lyrics_translation_langs``) needs none,
+      and a needed translation is wanted for every configured language,
+      which is what ``langs`` reports.
+
+    Returns ``{"transliteration": bool, "translation": bool, "langs": [...]}``
+    where ``langs`` is empty unless a translation is needed.
+    """
+    out = {"transliteration": False, "translation": False, "langs": []}
+    if len(_body_lines(text)) < 2:
+        return out
+    reader = primary_translation_lang(cfg)
+    src = dominant_script(text)
+    if non_latin_ratio(text) >= _LATIN_THRESHOLD and src != "latin" \
+            and lang_script(reader) != src:
+        out["transliteration"] = True
+    if not _in_reader_language(text, reader):
+        out["translation"] = True
+        out["langs"] = translation_langs(cfg)
+    return out
 
 
 def _same_essence(a, b):
@@ -301,6 +396,66 @@ def _has_translation(tr_val, path, lang, sidecars):
     return False
 
 
+def _stored_transform_tags(af, kind):
+    """The file's own keys for the stored *kind* transforms — the bare legacy
+    name and every language-suffixed one — spelled the way this container
+    stores them (vorbis comments verbatim, ``TXXX:…`` on ID3, freeform atoms
+    in MP4), so they can be handed straight back to ``delete_tag``."""
+    out = []
+    for key in (af.all_tags() or {}):
+        name = str(key).upper().rsplit(":", 1)[-1]
+        if name == kind or name.startswith(kind + "-"):
+            out.append(str(key))
+    return out
+
+
+def _xlit_sidecars(path, kind):
+    """The sidecar files that carry the *kind* transform of one track.
+
+    TRANSLITERATION has exactly one (``.romaji.lrc``); a translation has one
+    ``<stem>.<lang>.lrc`` per language — the configured ones plus whatever an
+    older configuration left behind, because a stale translation is exactly
+    what the not-needed branch has to clear. ``<stem>.lrc`` is the lyrics
+    sidecar itself and is never in this list."""
+    base = os.path.splitext(path)[0]
+    if kind == "TRANSLITERATION":
+        return [base + XLIT_SIDECAR]
+    out = []
+    stem = os.path.basename(base).lower()
+    try:
+        entries = os.listdir(os.path.dirname(base) or ".")
+    except OSError:
+        return out
+    for entry in entries:
+        low = entry.lower()
+        if low.startswith(stem + ".") and low.endswith(".lrc") \
+                and low != stem + ".lrc" and not low.endswith(XLIT_SIDECAR):
+            out.append(os.path.join(os.path.dirname(base), entry))
+    return out
+
+
+def _drop_stored_transforms(af, path, kind):
+    """Remove every stored *kind* transform from the tags and the sidecars.
+
+    Called when `xlit_needs` says the track's lyrics need none: the writer
+    and the grader have to agree in BOTH directions, and a transform the rule
+    no longer asks for would otherwise fail XLIT_UNNEEDED forever — the
+    script only ever added, so nothing else could clear it. Returns True when
+    something was actually removed.
+    """
+    removed = False
+    for name in _stored_transform_tags(af, kind):
+        if af.delete_tag(name):
+            removed = True
+    for sidecar in _xlit_sidecars(path, kind):
+        try:
+            os.remove(sidecar)
+            removed = True
+        except OSError:
+            pass
+    return removed
+
+
 def run_lyrics_xlit(config):
     """Script 17 entry point: write TRANSLITERATION / TRANSLATION tags and
     .romaji.lrc / .<lang>.lrc sidecars for the library (or run targets)."""
@@ -310,6 +465,10 @@ def run_lyrics_xlit(config):
     stats["translated"] = 0
     stats["latin_skipped"] = 0
     stats["identity_skipped"] = 0
+    # Transforms DELETED because the track's lyrics no longer need them (see
+    # _drop_stored_transforms) — the reverse of the writes, and the only way
+    # a stale tag from an older, laxer rule can be cleared.
+    stats["stale_removed"] = 0
 
     print_header("Lyrics Transliterate & Translate (AI)")
     force = bool(config.get("force_xlit", False))
@@ -383,19 +542,32 @@ def run_lyrics_xlit(config):
                     continue
 
                 changed = False
+                # What this track's own lyrics still need, from the ONE rule
+                # the grader asks too (xlit_needs): a transform the rule does
+                # not ask for is never written, so a re-run leaves an
+                # already-correct track untouched and grading can never
+                # disagree with what this loop decided.
+                need = xlit_needs(text, config)
 
                 # ---- transliteration ------------------------------------
                 if do_xlit:
                     existing = str(af.get_lyrics_transform("TRANSLITERATION") or "").strip()
                     has_sidecar = sidecars and os.path.isfile(
                         os.path.splitext(path)[0] + XLIT_SIDECAR)
-                    if not force and (existing or has_sidecar):
-                        pass  # already stored — keep it
-                    elif not wants_romanization(text, config):
+                    if not need["transliteration"]:
                         # Already romanized, or already in the reader's own
                         # script (a ja reader doesn't need ja lyrics in
-                        # romaji) — generating it would be a no-op.
+                        # romaji) — generating one would be a no-op. What is
+                        # STORED is removed rather than merely skipped: this
+                        # rule is what the grader judges by, so a transform
+                        # written under an older, laxer rule would otherwise
+                        # fail XLIT_UNNEEDED forever.
                         stats["latin_skipped"] += 1
+                        if _drop_stored_transforms(af, path, "TRANSLITERATION"):
+                            stats["stale_removed"] += 1
+                            changed = True
+                    elif not force and (existing or has_sidecar):
+                        pass  # already stored and still needed — keep it
                     else:
                         xlit, ok = _apply(config, text, "transliterate")
                         if ok:
@@ -416,8 +588,18 @@ def run_lyrics_xlit(config):
                             changed = True
 
                 # ---- translation ----------------------------------------
+                # Nothing to translate when the lyrics are already in the
+                # reader's own language (need["langs"] is empty then) — the
+                # model is not asked for the no-op translation _same_essence
+                # below would only throw away. Stored translations are
+                # removed instead: they are exactly what the grader rejects
+                # as XLIT_UNNEEDED (see the transliteration pass).
                 if do_trans:
-                    for lang in langs:
+                    if not need["translation"] \
+                            and _drop_stored_transforms(af, path, "TRANSLATION"):
+                        stats["stale_removed"] += 1
+                        changed = True
+                    for lang in need["langs"]:
                         if not force and _has_translation(
                                 af.get_lyrics_transform("TRANSLATION", lang, exact=True),
                                 path, lang, sidecars):
@@ -466,6 +648,7 @@ def run_lyrics_xlit(config):
     log(c(
         f"transliterated {stats['transliterated']}"
         f" · translated {stats['translated']}"
+        f" · stale removed {stats['stale_removed']}"
         f" · latin-only skipped {stats['latin_skipped']}"
         f" · identical skipped {stats['identity_skipped']}"
         f" · unchanged {stats['unchanged_count']}"

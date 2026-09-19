@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Info } from "lucide-react";
 import { useState } from "react";
 import Modal from "./Modal";
+import { useI18n } from "../lib/i18n";
 
 /** One credit row as the data file spells it. */
 export interface CreditItem {
@@ -50,6 +51,7 @@ const INLINE_SERVICES = 8;
  *  `collapsed` (the icon-only rail) swaps the names for the same trigger as a
  *  small icon button, so the credits never disappear with the sidebar. */
 export default function CreditsFooter({ collapsed = false }: { collapsed?: boolean }) {
+  const { t } = useI18n();
   const { data: groups = [] } = useCredits();
   const [open, setOpen] = useState(false);
   const services = groups.find((g) => g.title.startsWith("Services"))?.items ?? [];
@@ -60,7 +62,7 @@ export default function CreditsFooter({ collapsed = false }: { collapsed?: boole
     <div className={collapsed ? "px-2 pb-2" : "px-3 pb-2"}>
       {!collapsed && (
         <div className="text-[10px] leading-relaxed text-zinc-600">
-          <div className="text-zinc-500">Credits — data &amp; services from:</div>
+          <div className="text-zinc-500">{t("credits.from")}</div>
           <div className="mt-0.5 flex flex-wrap gap-x-1 gap-y-0.5">
             {inline.map((c, i) => (
               <span key={c.name} className="whitespace-nowrap">
@@ -87,11 +89,11 @@ export default function CreditsFooter({ collapsed = false }: { collapsed?: boole
           collapsed ? "p-1.5 w-full flex justify-center" : "flex items-center gap-1.5 px-1.5 py-1 text-[10px]"
         }`}
         onClick={() => setOpen(true)}
-        title="Credits, licences and the projects this app is built on"
+        title={t("credits.open")}
         aria-haspopup="dialog"
       >
         <Info className="h-3 w-3 shrink-0" />
-        {!collapsed && <span>{rest > 0 ? `Credits · ${rest} more` : "Credits"}</span>}
+        {!collapsed && <span>{rest > 0 ? t("credits.more", { n: rest }) : t("credits.title")}</span>}
       </button>
       {open && <CreditsDialog groups={groups} onClose={() => setOpen(false)} />}
     </div>
@@ -101,12 +103,13 @@ export default function CreditsFooter({ collapsed = false }: { collapsed?: boole
 /** The full credit list, on the shared dialog shell (backdrop click, Escape,
  *  focus trap — the same as every other modal in the app). */
 function CreditsDialog({ groups, onClose }: { groups: CreditGroup[]; onClose: () => void }) {
+  const { t } = useI18n();
   return (
     <Modal
       onClose={onClose}
-      title="Credits"
+      title={t("credits.title")}
       icon={Info}
-      subtitle="la musica is MIT-licensed and built on these projects, services and data sets."
+      subtitle={t("credits.subtitle")}
       width="max-w-3xl"
       bodyClass="px-4 py-4 space-y-4"
     >
@@ -132,8 +135,7 @@ function CreditsDialog({ groups, onClose }: { groups: CreditGroup[]; onClose: ()
         </section>
       ))}
       <p className="text-[10px] leading-relaxed text-zinc-600">
-        Full licence texts live in THIRD-PARTY-NOTICES.md in the repository. Soulseek™ is a
-        trademark of Soulseek LLC — this project is not affiliated with it or with slskd.
+        {t("credits.legal")}
       </p>
     </Modal>
   );

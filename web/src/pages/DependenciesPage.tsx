@@ -4,6 +4,7 @@ import { FolderOpen, RotateCcw, Wrench } from "lucide-react";
 import { api } from "../api";
 import { toast } from "../store";
 import PageHeader from "../components/PageHeader";
+import { EmptyState } from "../components/Badges";
 
 type DepTool = {
   key: string;
@@ -51,6 +52,9 @@ export default function DependenciesPage() {
   const missing = tools.filter((t) => t.state === "missing");
   const updates = tools.filter((t) => t.state === "update");
   const ready = tools.filter((t) => t.state === "ok").length;
+  // The tool list is empty only when the payload could not be read at all —
+  // that case is the page's empty state, not a one-row table.
+  const noTools = !isLoading && tools.length === 0;
 
   /** Path relative to the deps dir when possible — the full prefix repeats on
    * every row, so show the distinguishing tail ("…/flac v1.5.0/flac.exe"). */
@@ -133,6 +137,14 @@ export default function DependenciesPage() {
         )}
       </div>
 
+      {noTools && (
+        <EmptyState
+          title="No tools reported"
+          hint="Could not read the tool list — is the backend running? Refresh once it answers."
+        />
+      )}
+
+      {!noTools && (
       <div className="rounded-lg border border-border overflow-hidden table-scroll">
         <table className="w-full text-sm">
           <thead className="bg-panel/60">
@@ -192,16 +204,10 @@ export default function DependenciesPage() {
                 </td>
               </tr>
             ))}
-            {!isLoading && tools.length === 0 && (
-              <tr>
-                <td className="td text-zinc-500" colSpan={6}>
-                  Could not read the tool list — is the backend running?
-                </td>
-              </tr>
-            )}
           </tbody>
         </table>
       </div>
+      )}
 
       <div className="text-[10px] text-zinc-600">
         Install downloads the pinned release from GitHub into the dependencies folder; PATH-installed tools

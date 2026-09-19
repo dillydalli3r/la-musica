@@ -1,7 +1,13 @@
 # la musica
 
-**la musica** (formerly Music Library Optimizer) — a modern, self-hosted web
-app that *manages, optimizes, audits, grades and plays* your music library.
+**v3.0.0** — the release that put the library on more than one machine: a
+login gate for a server that is no longer loopback-only, five client targets
+(Windows, macOS, Linux, Android and iOS), OS notifications, an AI genre
+hierarchy, lyric-transform grading, six UI languages and a donations page.
+
+**la musica** (formerly Music Library Optimizer) — a modern, self-hosted app
+that *manages, optimizes, audits, grades and plays* your music library, from
+the browser, a desktop window or a phone.
 Built on the proven `mlo` engine with a React UI: playback of music **and**
 music videos (with karaoke-synced lyrics), manual + smart playlists,
 favorites, artist artwork and biographies pulled from Deezer, TheAudioDB,
@@ -16,10 +22,57 @@ trash (`.mlo/trash`) beside it — one folder to back up or carry between
 machines.
 
 ## Highlights
+- **Five client targets** (new in 3.0.0) — the same library from the browser,
+  a Windows/macOS/Linux window or an Android/iOS app. The Tauri v2 shell in
+  `desktop/` builds desktop bundles that **spawn and own** the Python backend,
+  and mobile builds that are pure clients: a phone app takes the server's
+  address on the sign-in screen instead of starting a server it could not run.
+  See *Client apps*.
+- **A login gate, because the server is no longer loopback-only** (new in
+  3.0.0) — one password, PBKDF2-HMAC-SHA256, sessions whose SHA-256 alone
+  touches the disk (`<music>/.mlo/data/auth.db`), and an `auth_mode: auto`
+  default that turns the gate ON the moment `server_host` is not a loopback
+  address. `off` on a non-loopback bind is treated as `required`: a
+  misconfiguration never publishes an open library. See *Security & accounts*.
+- **Notifications that reach you while the app is behind other windows** (new
+  in 3.0.0) — the backend announces a found wish, a download that finished and
+  was imported, and one that is sitting ready to import on `/ws/events`; each
+  client keeps that socket open and raises an OS notification (Tauri's plugin
+  on desktop and mobile, the Web Notification API in the browser) with an
+  in-app toast when permission is refused. Not remote push — see
+  *Notifications* for what that honestly costs.
+- **Genres are a hierarchy now** (new in 3.0.0) — three slots, **parent / main
+  / sub**, stored as repeated `GENRE` fields in that order and displayed as
+  e.g. `Rock / Alternative Rock / Post-Britpop`. The configured AI endpoint can
+  pick the three (`ai_genre_inference`, `ai_genre_effort`, `ai_genre_research`);
+  with no endpoint the fetched source list is used unchanged. Grading checks the
+  *arrangement*, not just the count (`GENRE_ORDER`).
+- **Lyric transforms are graded on whether they were needed** (new in 3.0.0) —
+  one shared decision function (`mlo/lyrics_xlit.py:xlit_needs`) drives both
+  script 17 and the grader, so a stored transliteration for Latin-script lyrics
+  fails (`XLIT_UNNEEDED`), a missing one for Japanese lyrics fails
+  (`XLIT_MISSING`), an instrumental is never graded, and script 17 writes
+  nothing at all for a track that needs nothing — re-runs stay quiet.
+- **Import everything that finished downloading, one album at a time** (new in
+  3.0.0) — *Import all completed* walks the ready albums **sequentially**, each
+  one through the whole per-album pipeline before the next starts, with a
+  cancel that takes effect after the album in flight. A wish can import its own
+  download and flips to **Imported** when its album lands.
+- **Six UI languages** (new in 3.0.0) — English, Español, Français, Deutsch,
+  日本語 and Português (Brasil). Precedence is this browser's own pick, then
+  the server's `ui_locale`, then the browser's language, then English; the
+  bundles are typed against the English key set, so a missing key is a compile
+  error rather than a blank label. The deeper tool pages are still English
+  literals. See *Languages*.
+- **A donations page** (new in 3.0.0) — Litecoin and Bitcoin addresses with
+  copy-to-clipboard (and a select-the-text fallback), and cats. Nothing is
+  gated behind it: every feature is already on the machine you installed it on.
 - **Genres per track is 3 by default, and the app can now REACH that number** (new in 2.8.2) — the
   count is one value (`mb_genre_count`) for the import, the trimming scripts and the *Genre count*
   grade, and the default is 3: a primary genre plus the two that say the most about it (which source
-  ranked them first decides which three). Auto tagging (and the genre chain it calls) now **tops a
+  ranked them first decides which three). Since 3.0.0 those three slots are a
+  parent / main / sub hierarchy rather than a flat list — see the entry above.
+  Auto tagging (and the genre chain it calls) now **tops a
   track UP to the count** instead of only filling an empty GENRE — the track's own genres stay first
   because they are deliberate, the provider answers are appended (case-insensitively de-duplicated)
   until the cap is reached — so a track that carries one genre, or was tagged by a build whose default
@@ -452,8 +505,11 @@ machines.
   two things that actually apply to an artist folder (image, description) —
   and the artist page shows that badge next to the album aggregate, so the
   two are never confused.
-- **Desktop + Web** — served by FastAPI (browser or Docker); a Tauri v2
-  desktop shell lives in `desktop/`.
+- **Five clients, one backend** — served by FastAPI (browser or Docker); the
+  Tauri v2 shell in `desktop/` builds Windows, macOS and Linux bundles that
+  start and own the backend, plus an Android APK and an unsigned iOS IPA that
+  are pure clients of a server you run. How each one finds the server is in
+  *Client apps*.
 
 ## Optimization: the 18 scripts
 
@@ -481,7 +537,7 @@ work.
 | 14 | Beets tagging | Managed beets (Picard parity) with the naming script, genre import, work/movement tags. Its output is streamed to the progress bar (one tick per item, so the longest step of a run is no longer a static label) and the plugin skips the locale-alias lookups a Latin-script library cannot use — measured on one 8-track CD album: 42 s → 14 s |
 | 15 | Release tracklist | Records the MusicBrainz release's own tracklist as `.mlo_expected.json` in the album folder (release id + disc/position/title/recording MBID per track) — the only way a PARTIAL import can name what never arrived. Grading requires it (`grade_check_expected_tracks`) for albums whose tracks carry a MusicBrainz release id — an album with no id is never failed for a manifest it could not have, and never given a fabricated one — the album page greys out the missing tracks from it, and `finish_album` runs it on every import path (after tagging, since it needs the release id the match wrote) |
 | 16 | Mood & Energy | The mood classifier on its own: decodes each track's audio (librosa; videos through ffmpeg) and writes **MOOD** plus **ENERGY** — the 0-100 arousal the verdict was scored from. Script 8 runs the same stage as part of its pass; this is the one to run when only the mood work is wanted (a genre rewritten since, `mood_source` changed, ENERGY backfilled onto a library tagged before it existed). Already-tagged tracks are skipped unless the script is forced (`force_mood`), and `mood_enabled` off skips it entirely |
-| 17 | Lyrics transliterate (AI) | The one optional model in the app: romanizes non-Latin lyrics and translates them into every language in `lyrics_translation_langs`, writing `TRANSLITERATION-JA-LATN` / `TRANSLATION-EN` tags (and `.romaji.lrc` / `.<lang>.lrc` sidecars for LRC/BOTH lyric formats). Line structure and timings are preserved and re-synced at `lrc_sync_level`, so the transforms stay karaoke-aligned with the original; blank lines pass through, already-Latin lyrics are skipped (romanizing them is a no-op) and a "translation" that mirrors its source is not stored. Any OpenAI-compatible endpoint works (Settings → AI, or the setup wizard); answers are disk-cached per track so re-runs only pay for changed lyrics, and with no AI configured the script logs one line and does nothing |
+| 17 | Lyrics transliterate (AI) | The optional model in the app: romanizes non-Latin lyrics and translates them into every language in `lyrics_translation_langs`, writing `TRANSLITERATION-JA-LATN` / `TRANSLATION-EN` tags (and `.romaji.lrc` / `.<lang>.lrc` sidecars for LRC/BOTH lyric formats). Line structure and timings are preserved and re-synced at `lrc_sync_level`, so the transforms stay karaoke-aligned with the original; blank lines pass through, already-Latin lyrics are skipped (romanizing them is a no-op) and a "translation" that mirrors its source is not stored. Any OpenAI-compatible endpoint works (Settings → AI, or the setup wizard); answers are disk-cached per track so re-runs only pay for changed lyrics, and with no AI configured the script logs one line and does nothing. The one shared decision function (`xlit_needs`) also decides what the grader expects of a stored transform — Latin-script lyrics need no transliteration, lyrics already in the reader's language need no translation — so the script writes nothing for a track that needs nothing and the grader never demands a transform that is not needed (*XLIT_UNNEEDED* / *XLIT_MISSING*); instrumental tracks are never graded for either |
 | 18 | Publish lyrics (LRCLIB) | Gives back: for every track that carries lyrics (embedded `LYRICS` or an `.lrc` sidecar) it asks LRCLIB whether it already knows that recording — artist, title, album and duration, the same exact-then-search lookup the fetch chain uses — and, when it does not, submits this library's own text (`POST /api/publish`). A synced text goes with its plain form beside it, because LRCLIB wants both. LRCLIB is the app's first lyrics provider, so a hand-tagged library is exactly what the database is missing. Default ON (`lrclib_auto_publish`; off skips the script everywhere), and a per-track rule the script can never override: a track LRCLIB already answers for is never touched (`force_publish` re-submits anyway). Skips are counted apart — `already on LRCLIB`, `no lyrics`, `instrumental`, `no duration` — and a 409 duplicate is a skip, not a failure. The manual *Publish to LRCLIB* button on the lyrics editor is unchanged and shares the same client. |
 
 ### Tag actions: re-running a script on a selection
@@ -803,7 +859,7 @@ the saved order and the plain-lyrics policy.
   one documented exception. A lookup that cannot be reached does not block the
   submission: only a *found* record does.
 
-## Mood, energy & genre (rewritten in 2.4.0)
+## Mood, energy & genre (rewritten in 3.0.0)
 
 Script 8 (Auto tagging) writes three audio-derived tags now, and grading
 requires them:
@@ -825,25 +881,26 @@ requires them:
   the pair on one row (**MOOD · ENERGY**, the label and the number it was
   scored from), and both ride in the library payload so `tag:MOOD` /
   `tag:ENERGY` columns work.
-- **GENRE** — topped up to `mb_genre_count` from `genre_sources` whenever a
-  track carries fewer (an empty tag is the common case), merged per track:
-  the track's own genres first, then the source order, then each source's
-  names, then a
-  case-insensitive de-duplication, Title Case, and a cap of
-  `mb_genre_count` (**genres per track**, default **3**) per track — and a
-  track that carries FEWER genres than that is topped up to the count (its own
-  values first, the provider's appended) That
-  one number is the whole policy: an import writes at most this many genres
-  onto a track (the best-voted source's names first, so what survives is what
-  that source ranked highest), script 8, the genre import buttons and script 10
-  **trim any excess off** an existing track, and grading fails a track that
-  carries fewer or more than this (`grade_check_genre_count`, the *Genre count*
-  check). An import that trimmed anything says so — naming the configured
-  value — as one of the album's warnings. Set it in Settings → Import. The default is **MusicBrainz →
-  RateYourMusic** — the two the library actually agrees with; the other nine
-  providers stay in the registry and can be added back in Settings →
-  Discovery (a saved list is used exactly as saved, so an old eleven-source
-  config is migrated to the new default only when it is byte-for-byte the
+- **GENRE — three slots, parent / main / sub.** Genres are a *hierarchy*, not a
+  bag. The file carries repeated `GENRE` fields in that order — `GENRE=Rock`,
+  `GENRE=Alternative Rock`, `GENRE=Post-Britpop` — and the app displays them
+  joined (`Rock / Alternative Rock / Post-Britpop`). `mb_genre_count`
+  (**genres per track**, default **3**, 1-10) is the one number behind all of
+  it: an import writes at most that many; script 8 (Auto tagging) tops a track
+  UP to it (the track's own genres stay first because they are deliberate, the
+  provider's answers are appended case-insensitively de-duplicated); and script
+  8, the genre import buttons and script 10 **trim any excess off** an existing
+  track. A track that carries fewer or more than the count fails grading
+  (`grade_check_genre_count`, the *Genre count* check), and an import that
+  trimmed anything says so — naming the configured value — as one of the
+  album's warnings. Set it in Settings → Import.
+- **Where the genres come from.** `genre_sources` is walked in order, and the
+  shipped default is **RateYourMusic → MusicBrainz** — the two the library
+  actually agrees with. The other nine providers stay in the registry
+  (`GENRE_SOURCES`: rateyourmusic, listenbrainz, musicbrainz, itunes, lastfm,
+  theaudiodb, wikidata, bandcamp, discogs, deezer, spotify) and can be added
+  back in Settings → Discovery (a saved list is used exactly as saved, so an
+  old config is migrated to the new default only when it is byte-for-byte the
   shipped order). In the import wizard the two run as **separate buttons**
   (*From MusicBrainz* / *From RateYourMusic*), one source each, so a failing
   provider can never look like a slow one:
@@ -879,13 +936,33 @@ requires them:
   - `soulseek` is not in the default list (peers advertise folders and file
     names, not genres); a saved source list naming it stays a documented no-op
     so older configs keep working.
+  - **AI ranking (new in 3.0.0).** With an AI endpoint configured, the merged
+    answer is handed to the model instead of being sliced blind:
+    `ai_genre_inference` (default on **when an endpoint exists**) sends the
+    artist, album, track, the year and country and the fetched genre list to
+    the configured OpenAI-compatible endpoint in one `/chat/completions` call
+    (`server/genre_ai.py`) and asks for exactly `mb_genre_count` genres in
+    hierarchy order — distinct, every slot filled. `ai_genre_effort`
+    (`minimal` / `low` / `medium` / `high`, default **high**) is the thinking
+    budget spent on the ranking, and `ai_genre_research` (default on) lets the
+    model go past the fetched list with its own knowledge of the artist rather
+    than only re-ranking what it was handed. Answers are disk-cached
+    (`genre-<hash>.json` under `.mlo/data/lyrics_ai_cache`), an answer with
+    fewer than two usable names is rejected, and a successful ranking adds `ai`
+    to the track's contributors so the provenance still says who answered.
+    **With no endpoint configured the source list is used unchanged** — no `ai`
+    in the provenance, no error, no extra call.
 - **Graded.** *Mood tag present*, *Energy tag present*, *Genre tag count*
   (exactly `mb_genre_count` per track — too few and too many both fail,
   `grade_check_genre_count`) and *Genre tag
   present* are per-track checks (on by default, `MOOD_MISSING` /
   `ENERGY_MISSING` / `GENRE_MISSING`), so a library that never ran script 8
   fails them until it does — which is the point: no track ships without a
-  mood.
+  mood. **Genre order is its own check** (new in 3.0.0,
+  `grade_check_genre_order`, issue code `GENRE_ORDER`): the three slots are
+  parent → main → sub, so a parent genre sitting anywhere but the first slot,
+  or the same slot twice, fails, while an unknown head ("Kwaito", say) does
+  not — the check vouches for the order, never for a fixed vocabulary.
 
 ## Import (new in 2.4.0)
 
@@ -986,7 +1063,10 @@ The import paths share one pipeline now (`server/imports.py`):
    queue (`import_bulk_concurrency`, default 2 at a time, adjustable 1-8),
    with per-item state and per-album/per-script results. Downloads'
    multi-select import uses the same queue. A path already inside the
-   library is never moved again — it just re-runs the chain.
+   library is never moved again — it just re-runs the chain. Note the split:
+   this upload queue is concurrent by design, while *Import all completed* on
+   the Downloads/Soulseek side is deliberately sequential, one album through
+   the whole chain at a time (see *Importing what finished downloading*).
 
 ## Playback loudness — ReplayGain, on demand (new in 2.4.0)
 
@@ -1079,6 +1159,23 @@ enable-all / disable-all bulk actions.
   `ENERGY` and `GENRE` (`MOOD_MISSING` / `ENERGY_MISSING` / `GENRE_MISSING`,
   each with its own toggle); script 8 writes all three, so the fix for a
   failure is one click on the Optimization page.
+- **Genre order** (new in 3.0.0) — `grade_check_genre_order` grades the
+  *arrangement* of the three slots, not their number: the hierarchy is
+  parent → main → sub, so a parent genre in any position but the first fails
+  (a repeated slot fails too). Issue code `GENRE_ORDER`, from the same
+  `mlo/genres.py` policy the writer uses — an unknown head such as `Kwaito` is
+  not a failure, because the check vouches for the order and never for a fixed
+  vocabulary. Off-setting `grade_check_genre_count` does not disable it.
+- **Lyric transforms** (new in 3.0.0) — `grade_check_xlit_transliteration`
+  and `grade_check_xlit_translation` fail a stored transform the lyrics do not
+  need (`XLIT_UNNEEDED`: a transliteration for Latin-script lyrics, a
+  translation for lyrics already in the reader's language) and a needed one
+  that is missing (`XLIT_MISSING`, naming the language as well when the text
+  is in neither Latin script nor the reader's language). Both read the one
+  decision function script 17 writes from (`mlo/lyrics_xlit.py:xlit_needs`),
+  so a transform the script declined to write is never a failed check; an
+  instrumental track, or one with no lyrics at all, is never graded for a
+  transform.
 - **Descriptions & artwork** (new in 2.4.0) — the album folder must hold a
   `description.txt` (album page → *Fetch description*), and the artist
   folder its own `artist.jpg`/`artist.png` + `description.txt`. The
@@ -1105,7 +1202,8 @@ enable-all / disable-all bulk actions.
 - **Strict formatting** — tag padding/blank lines, lyrics canonical form,
   CUE canonical form.
 - **Lyrics** — presence, canonical form, and transform tags (TRANSLATION-* /
-  TRANSLITERATION-*) carrying their language when a track stores any.
+  TRANSLITERATION-*) carrying their language when a track stores any — and
+  whether they were needed at all, per the two checks above.
 - **File categories** — which file types participate in grading at all
   (music, covers, CUE, log, LRC, accurip, videos, descriptions, other).
 
@@ -1375,6 +1473,88 @@ read from the same cache the player uses. The *Downloads* page in the sidebar
 is this exact panel with a page header, for when you are managing the offline
 copy rather than fetching something.
 
+### Importing what finished downloading (new in 3.0.0)
+
+The download folder is a pile of finished albums waiting for the same
+treatment, so the Soulseek page grew three ways in — all of them the *same*
+per-album pipeline (`server/main.py:_import_one_album`): convert any lossless
+source to the target codec → write the `MEDIA` tag → stamp the MusicBrainz
+identity → organize into the naming-script layout → run the configured import
+script chain to the end. There is no separate "quick import":
+
+- **Import** on one download row (`POST /api/soulseek/import-one`) takes that
+  album — and only that album — all the way through.
+- **Import all completed** (`POST /api/soulseek/import-all`) takes everything
+  `GET /api/soulseek/ready` lists, which is exactly what
+  `soulseek.ready_albums()` says is finished in the download dir, with its size.
+- A **wish** imports its own download (`POST /api/wishes/{id}/import`).
+
+**Import all is sequential on purpose.** Each album goes through the whole
+chain — minutes of work, the chain scripts hold a process-wide lock anyway —
+before the next one starts, so a failure in the middle leaves the albums after
+it untouched instead of half-done, and the status payload names every album
+it finished, whether it worked and where it landed
+(`GET /api/soulseek/import-all/status` →
+`{state, total, done, current, results: [{path, ok, album_root, error}], errors}`,
+`state` one of `idle` / `running` / `done` / `error` / `cancelled`).
+**Cancel finishes the album in flight** (`POST …/import-all/cancel`): it sets a
+stop flag the loop checks *between* albums and never kills an import mid-album,
+because a half-imported album is worse than a slow one. One run at a time,
+process-wide; a second call answers with the live status instead of racing the
+first over the same folders.
+
+The wish route takes **no body**. It imports the wish's own stored
+`album_path` when there is one, otherwise the ready albums whose folder name
+matches the wish's artist/title, and the `on_done` callback calls
+`wishes.mark_imported()` — which is what flips the wish to **Imported** and
+raises the `wish_found` notification, once the album has really landed rather
+than when the request was accepted.
+
+## Notifications (new in 3.0.0)
+
+The backend publishes events on one channel — `/ws/events`, a WebSocket that
+each client keeps open — and every client turns them into an OS notification.
+That is the point of the feature: a wish can be filled at 3am, and the news
+should reach you without you watching a page.
+
+- **What is published.** All three kinds have a real producer:
+  `wish_found` (the wish worker, or a manual reconciliation — and the wish's own
+  *Import* button), `download_done` (an auto-import job that downloaded **and**
+  imported the release, and the *Import all completed* run summary —
+  `Imported N albums` with the failure count), and `import_ready` (an
+  auto-import job that only landed the album in the download folder, where you
+  still have to import it: *"Downloaded — it is in the download folder, ready to
+  import."*). One settled job raises exactly one of the two download kinds, so
+  the notification tells you whether anything is left to do.
+- **The bell** in the top bar is the switch a user actually touches: clicking
+  it asks this client for permission (a real user gesture, because browsers
+  reject a permission request made from a timer or a socket callback) and shows
+  the answer it got. It renders nothing at all where there is no notification
+  API to ask. When permission is refused, the event still arrives as an
+  **in-app toast**: the toast is not a downgrade you have to discover.
+- **Per client, per platform.** The desktop and mobile shells use
+  `@tauri-apps/plugin-notification` (a platform module imported dynamically, so
+  a browser bundle never sees it), the browser uses the Web Notification API,
+  routed through the service worker when one is registered so the notification
+  survives the page being closed and clicking it focuses the app. The three
+  `notify_*` keys in the config — `notify_wish_found`,
+  `notify_download_done`, `notify_import_ready`, all on by default — are the
+  *server-side* half: which kinds are published at all.
+- **No duplicates on reconnect.** The server numbers every event (`seq`) and
+  keeps a 100-event ring; a client asks for what it missed with `?since=`, and
+  remembers the last `seq` it saw in localStorage, so a replayed frame is not
+  announced twice. The socket carries its token as `?token=` (a browser
+  WebSocket cannot set an `Authorization` header), answers a rejected handshake
+  with close code `4401`, and pings every 30 s.
+- **What this is not: remote push.** There is no VAPID key pair, no APNs and no
+  FCM in the tree, and a self-hosted app cannot have them — reaching a *closed*
+  app needs a public push service and a developer account. So the reach is
+  **any client with la musica open**, including a window that is behind others
+  or hidden, and a backgrounded browser tab. The service worker's `push` and
+  `notificationclick` handlers already exist (a notification, and clicking it
+  focusing or opening the app), so adding a push subscription later needs no
+  client change.
+
 ## Getting started
 
 ```bash
@@ -1394,10 +1574,21 @@ python -m uvicorn server.main:app --host 127.0.0.1 --port 8000
 # open http://127.0.0.1:8000
 ```
 
+`python -m server.main` — and the launchers `start_app.py` and `tray.py` —
+read `server_host` / `server_port` from the config and bind there instead of a
+hardcoded `127.0.0.1:8000`, so a launcher and a shell start the same server the
+settings describe. That address is also what decides whether the login gate
+applies (see *Security & accounts*); a hand-typed `uvicorn --host` bypasses the
+config, so bind through the config or set `auth_mode: required`.
+
 The music folder is chosen at startup, never from the UI: point
 `MLO_MUSIC_FOLDER` at your library (that is what the Docker image and the
-compose template do), or set `music_folder` in the app's own
-`<music>/.mlo/data/config.json`. There is no music-folder picker — Settings
+compose template do; it stays the only environment variable the container
+needs), or set `music_folder` in the app's own
+`<music>/.mlo/data/config.json`. `MLO_SERVER_HOST` and `MLO_SERVER_PORT` seed
+`server_host` / `server_port` the same way, and that is how the Docker image
+binds `0.0.0.0` and still gets the login gate — the seed, the bind and the gate
+read one key, so they cannot disagree. There is no music-folder picker — Settings
 shows the folder it resolved and the raw config is editable in the app (the
 import wizard's own "pick the folder to import" dialog is a different thing).
 Everything else (playlists, favourites, the beets library, the Soulseek
@@ -1439,7 +1630,9 @@ again*):
   host is routed for you), plus the translation languages and the
   transliterate/translate switches. **Test connection** sends one tiny prompt
   and shows the provider's own answer — or its own error — before anything is
-  saved. Script 17 is the only thing that needs it.
+  saved. Script 17 is the main consumer; the genre ranking calls the same
+  endpoint when `ai_genre_inference` is on and an endpoint is configured (see
+  *Mood, energy & genre*), and nothing else does.
 - **RateYourMusic links** — the same link row the Sources panel shows, with the
   cookie hint (dev tools → Network → any rym request → Cookie) and a Test that
   really resolves an album + artist pair, so "is my cookie good?" has an
@@ -1549,6 +1742,170 @@ run it from the same environment that has `server/requirements.txt` installed
 scripts 9/10 their optional modules). A missing module makes its script
 unavailable and fail loudly instead of reporting a clean "0 processed" run.
 
+## Client apps: desktop, iOS and Android (new in 3.0.0)
+
+The same React build runs in five places. The `desktop/` Tauri v2 shell wraps
+`web/dist` for all of them; what differs is the Rust half.
+
+| Target | Built by | Artifact | What it is |
+| --- | --- | --- | --- |
+| Browser | the backend (`web/dist`) | — | the app itself, over HTTP/S |
+| Windows | `npx tauri build` | `.msi`, NSIS `.exe` | spawns and owns the backend |
+| macOS | `npx tauri build` | `.app`, `.dmg` | spawns and owns the backend |
+| Linux | `npx tauri build` | `.deb`, `.AppImage` | spawns and owns the backend |
+| Android | `npx tauri android build --apk` | unsigned APK | a client of a server you run |
+| iOS | `npx tauri ios build … --no-sign` | unsigned IPA | a client of a server you run |
+
+Both the frontend and the shell are built locally before bundling:
+
+```bash
+cd web && npm install && npm run build   # web/dist, the Tauri frontendDist
+cd ../desktop && npm install && npx tauri build
+```
+
+CI does the same on three runners: `.github/workflows/desktop.yml` is a matrix
+(`windows-latest` → msi + nsis, `macos-latest` → app + dmg, `ubuntu-latest` →
+deb + appimage) running `npx tauri build --bundles …`; `.github/workflows/mobile.yml`
+builds the Android APK (`tauri android build --apk`, JDK 17 + NDK r27) and the
+iOS app, and packages the `.app` into `Payload/` and zips it into an IPA.
+`.github/workflows/release.yml` runs on a `v*` tag, calls both, and attaches
+the client builds to the release beside the Windows zip and the GHCR image.
+
+**Desktop owns a backend; mobile talks to one.** The shell's Rust is split by
+configuration: everything that spawns, watches, kills and possibly *is* the
+server is behind `#[cfg(desktop)]`, and the mobile build is only a webview
+(`#[cfg_attr(mobile, tauri::mobile_entry_point)]`) with the dialog and
+notification plugins registered — no tray, no folder picker, no process to
+manage.
+
+- The desktop shell first looks for a packed `mlo-server.exe`/`mlo-server` in
+  its resource dir and otherwise for a repo checkout, then runs
+  `python -m uvicorn server.main:app --host 127.0.0.1 --port 8000` in that
+  directory. Before starting anything it probes the port: a backend that answers
+  `/api/health` with `"status":"ok"` is *ours* and gets adopted, anything else
+  holding port 8000 raises a dialog instead of being killed. It runs a tray icon
+  (Open la musica / Auto-start on login / Exit (stop backend)), closing the
+  window hides it, and quitting genuinely stops the backend — the child
+  process, or `POST /api/shutdown` when the backend was adopted.
+- The phone app has no backend to start, so it starts with the **sign-in
+  screen's Server address field** (shown by both shells; leave it empty in the
+  browser, where the page's own origin is the server). Enter the address the
+  backend answers on — `http://musicbox.lan:8000`, a Tailscale name, whatever
+  `server_host:server_port` names — press *Use*, then sign in with the
+  server's password. The address is remembered per device
+  (`localStorage: mlo.server`), and the helper text says exactly this: *this
+  computer for the desktop app, the server's address (or Tailscale name) for a
+  phone*.
+
+**Both mobile artifacts are unsigned sideload builds.** The Android APK comes
+out of the workflow as `app-universal-release-unsigned.apk` — install it by
+enabling install-from-unknown-sources (or swap the CLI flag to `--apk --debug`
+for a debug-signed one). The IPA is built `--no-sign` with `CODE_SIGNING_*`
+disabled and zipped manually, because **the repository carries no Apple
+certificate, provisioning profile or team id**; installing it on a device means
+signing it yourself (Xcode with your own team id, or a sideloading tool) on a
+device whose UDID that certificate covers. Neither is a store build, and
+nothing in the repo pretends otherwise.
+
+**Icons** are generated, not drawn by hand: `tools/make_tauri_icons.py` draws
+the spectrum-bar set with PIL (`icon.png` at 512, `32x32`, `128x128`,
+`128x128@2x`, `.ico` with 16-256 px frames, `.icns`) into
+`desktop/src-tauri/icons/`. The mobile icon sets (`icons/ios/`,
+`icons/android/`) are committed in full. To regenerate from your own artwork
+instead, `npm run icon` in `desktop/` is `tauri icon`.
+
+## Security & accounts (new in 3.0.0)
+
+Everything the API can do — read the library, rewrite tags, move and delete
+files, start downloads — is one password away from anyone who can reach the
+port. That is what the gate covers; it is not a UI lock.
+
+### The keys
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `auth_mode` | `auto` | `auto` = gate ON when `server_host` is not loopback; `required` = gate ON always; `off` = gate off for loopback only |
+| `server_host` | `127.0.0.1` | where the server binds — and the address the gate reads |
+| `server_port` | `8000` | the port |
+| `auth_username` | `""` | an optional label shown on the login screen; the password is the credential |
+| `auth_password_hash` | `""` | PBKDF2-HMAC-SHA256, written as `pbkdf2$<rounds>$<salt-hex>$<hash-hex>` |
+| `auth_session_days` | `30` | how long a session stays valid |
+| `server_public_url` | `""` | the address clients should dial when it is not the page's own origin |
+
+`auto` follows the bind: `127.0.0.1`, `::1` and `localhost` are loopback and
+keep a single-user desktop install password-free; anything else (`0.0.0.0`, a
+LAN IP, a Tailscale address) requires a login. **`off` on a non-loopback bind
+is treated as `required`**, with a warning printed at startup — that
+combination is a misconfiguration, not a choice, and it must not publish an
+open library.
+
+### How a login works
+
+- **The password** is PBKDF2-HMAC-SHA256, 600 000 rounds, a random salt, stored
+  in `auth_password_hash` — never the password itself, and the comparison is
+  constant-time. Minimum length 8. Setting or changing one revokes every
+  session.
+- **Sessions** are random 32-byte tokens. Only their SHA-256 is stored, in
+  `<music>/.mlo/data/auth.db` (SQLite, beside `playlists.db`), so reading that
+  file does not hand anyone a working login. Sessions expire after
+  `auth_session_days` and are pruned on every write; *log out everywhere* is
+  `POST /api/auth/revoke-all`, and `GET /api/auth/sessions` reports how many
+  are live.
+- **The token travels three ways**, because no single one covers every client:
+  `Authorization: Bearer <token>` for JSON clients, an **HttpOnly** `mlo_session`
+  cookie for the browser (nothing else can authorize `<audio src>` and
+  `<img src>`), and `?token=` for the WebSockets and the Tauri/mobile shells,
+  whose origin is not the API's. The query form is the one compromise: a URL
+  can end up in a log or a history entry, so it is only accepted where the
+  other two cannot be used.
+- **Brute force** is answered per client address: 5 consecutive failures and
+  that address waits 30 s, doubling per further failure up to 15 minutes. A
+  correct password clears the record.
+- **What answers without a session:** `/api/health`, `/api/auth/status`,
+  `/api/auth/login`, `/api/auth/setup` — and the static shell, which is the
+  same bytes for everyone and carries no library data (it is what the login
+  screen itself is made of). Everything else under `/api` is gated.
+
+### First run on a server you reach over the network
+
+Start it bound to the address you will use (`server_host: 0.0.0.0` for
+"wherever", or the LAN/Tailscale address — `MLO_SERVER_HOST=0.0.0.0` is the
+container's way of setting the same key), then open the app from a client.
+`GET /api/auth/status` reports `has_password: false`, the sign-in screen offers
+a password instead of asking for one, and **every other route answers `428`**
+(`{"needs_setup": true}`) until `POST /api/auth/setup` sets the password. After
+that: `/api/auth/login`, `/api/auth/password` (requires the current one),
+`/api/auth/logout`, `/api/auth/revoke-all`. Reach the same server from the
+browser on your desktop, the desktop app on your laptop, or your phone — each
+one signs in once and keeps its own session.
+
+For a phone away from home, a Tailscale/ZeroTier address or a reverse proxy in
+front of la musica is the usual arrangement; the server needs nothing special,
+it only has to be reachable.
+
+### The honest limits
+
+- **One password, one user.** There are no accounts, no roles, no permissions
+  and no signup — every session is the owner. Two people sharing a server share
+  the password.
+- **The app does not terminate TLS.** No `--ssl-keyfile`, no certificate
+  handling anywhere; over plain HTTP a token and the password itself travel in
+  the clear. Put it behind a reverse proxy (nginx, Caddy, Traefik) or a
+  mesh VPN when it leaves the LAN, and use `server_public_url` to name the
+  https address clients should dial.
+- **The gate follows the configured `server_host`, not the socket.** The
+  launchers (`start_app.py`, `tray.py`, `python -m server.main`) bind that key,
+  and the Docker image seeds it from `MLO_SERVER_HOST` / `MLO_SERVER_PORT`, so
+  config, bind address and gate cannot disagree on those paths. Starting the
+  app by hand with a different `uvicorn --host` does disagree — the gate still
+  reads the config — so if you bind somewhere else yourself, set
+  `server_host` (or `auth_mode: required`) to match.
+- **`/ws/progress` is not gated.** It relays script progress frames only, but it
+  accepts a connection without a session.
+- Anything already on the host — another local user, a container neighbour —
+  reads `.mlo/data/auth.db` and the config. The gate defends the network
+  boundary, not a hostile local account.
+
 ## Docker
 
 ```bash
@@ -1578,6 +1935,13 @@ so `docker compose pull` and watchtower have something to compare against.
   base has no curl. 30 s interval, 5 s timeout, 30 s start period, 3 retries;
   compose declares the same check so `docker compose ps` and watchtower see
   readiness.
+- **Binding and the login gate.** The image sets `MLO_SERVER_HOST=0.0.0.0`
+  (docker-compose repeats it) and that seeds the config's `server_host` — the
+  same key the gate reads — so the container both binds the published port and
+  gets the login gate: `auth_mode: auto` sees a non-loopback address and turns
+  itself ON. The first visit therefore lands on the first-run setup screen, and
+  the library is behind a password from the first request.
+  `MLO_SERVER_PORT` seeds the port the same way.
 - **Toolchain in the image.** `ffmpeg`, `flac`, `libjxl`, `jpegtran`
   (`libjpeg-turbo-progs`) and `libchromaprint-tools` (`fpcalc`) are installed
   from apt, together with `libsndfile1` and `libgomp1` — the shared libraries
@@ -1605,25 +1969,64 @@ so `docker compose pull` and watchtower have something to compare against.
   the host. It needs the `image:` line, and the example ships
   `WATCHTOWER_CLEANUP=true` and a daily `WATCHTOWER_SCHEDULE`.
 
+## Languages (new in 3.0.0)
+
+The UI ships in six languages, and the app picks one the way a user expects:
+
+| Order | Source | Where it comes from |
+| --- | --- | --- |
+| 1 | this browser's own pick | `localStorage: mlo.locale`, written by the Settings → Language picker |
+| 2 | the server's `ui_locale` | the app's own config; the Settings → Language picker writes it there |
+| 3 | the browser's language | `navigator.language` |
+| 4 | English | the fallback that is always complete |
+
+The bundles are `web/src/locales/{en,es,fr,de,ja,pt-BR}.ts`, and `en` is the
+only complete one by definition: `t()` is typed on `keyof typeof en`
+(`web/src/lib/i18n.ts`), and every other bundle is a
+`Partial<Record<MessageKey, string>>` — so a misspelled key or one that does
+not exist is a **compile error**, not a blank label at runtime. A key missing
+from a bundle falls back to English, then to the key itself.
+
+`tools/test_i18n.cjs` (`node tools/test_i18n.cjs`) is the guard that keeps the
+bundles honest in both directions: every English key exists in every locale and
+no locale carries a key English does not, `{placeholder}` names match per key,
+the codes in `i18n.ts` and the files on disk are the same set, and no bundle
+repeats a key or ships an empty string.
+
+**What is translated:** the sidebar and top bar, the Home page shell, the
+sign-in / first-run screens, the Settings → *Security* and *Notifications*
+panels and the language picker itself, the credits popover and the Donations
+page. **What is not:** the deeper tool pages — Soulseek, Optimization,
+Grading, Dependencies and the rest — are still English literals. Adding a
+language is a new file in `web/src/locales/`, one entry in the `LOCALES` list
+in `i18n.ts`, and `node tools/test_i18n.cjs`; the test tells you exactly which
+keys are missing.
+
 ## Architecture
 
 ```
-web/         React 19 + TypeScript + Tailwind UI (Vite, service-worker media cache)
+web/         React 19 + TypeScript + Tailwind UI (Vite, service-worker media cache,
+             six locales in src/locales — typed against the English key set)
 server/      FastAPI backend: library payload, playlists, integrations,
              import (AcoustID + the shared script chain + bulk queue),
              discovery (Deezer/ListenBrainz/iTunes/TheAudioDB/Wikipedia +
              MusicBrainz), artist artwork and descriptions, streaming
-             (direct + on-the-fly transcode), export, organize,
-             WebSocket progress
+             (direct + on-the-fly transcode), export, organize, WebSocket
+             progress, the sequential import runner (import_queue), the login
+             gate (auth + api_auth) and the event channel (events → /ws/events)
 mlo/         core engine (imports mutagen for every tag operation — the CLI
              needs the same environment as the server, it is NOT stdlib-only):
              grader, audit, flac, images, lyrics (deterministic
-             word-sync + the multi-provider lyrics chain), moods (incl.
+             word-sync + the multi-provider lyrics chain), lyrics_xlit
+             (the transform decision script 17 and the grader share),
+             genres (the three-slot hierarchy policy), moods (incl.
              ENERGY), artistdata, acoustid, cue, accurip,
              loudness (batch rsgain + on-demand EBU R128), autotag, remux
              (chapters + text-subtitle filtering), fetchdeps (external
              toolchain installer), naming, discs, stats
-desktop/     Tauri v2 desktop shell
+desktop/     Tauri v2 shell — Windows/macOS/Linux bundles plus Android/iOS
+             clients; `#[cfg(desktop)]` spawns and owns the Python backend,
+             the mobile build is a pure client
 tools/       test-library generator and test suites
 ```
 
@@ -1638,14 +2041,19 @@ Where the app stores what it fetches:
 | `<music>/.mlo/data/metadata_review.json` | artist/album metadata candidates staged by `metadata_review` until you apply one |
 | `<music>/.mlo/data/rym_cache/` | RateYourMusic genre pages, cached for 30 days (1 request/second) |
 | `<music>/.mlo/data/wishes.db` | the wishlist |
+| `<music>/.mlo/data/auth.db` | live sessions of the login gate — the SHA-256 of each token, never the token (the password hash itself lives in `config.json`) |
+| `<music>/.mlo/data/lyrics_ai_cache/` | AI answers, keyed by a hash of the prompt: lyric transforms and genre rankings (`genre-<hash>.json`) |
 | `Artists/<Artist>/artist.jpg` | the artist image (normalized to the configured cover aspect + JPEG quality) |
 | `Artists/<Artist>/description.txt` | the artist description |
 | `<album>/description.txt` | the album description |
+
 ## API overview (selected)
 
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/library` | tag-rich library tree (grades, audits, tags, tech info; gzipped) |
+| `GET /api/auth/status` | the login gate's state — `required`, `has_password`, `username`, `host`, `public_url`, `session_days` — and nothing secret; the only route a client needs before it has a token |
+| `POST /api/auth/setup` `…/login` `…/logout` `…/password` `…/revoke-all` `GET …/sessions` | first-run password, sign in (mints a session + sets the `mlo_session` cookie), sign out, change the password (current one required), sign every client out everywhere, live session count |
 | `GET /api/library/layout` | read-only layout scan: misplaced audio, unexpected folders, empty albums, stray files, hidden folders, `wrong_case` |
 | `GET /api/home` | Home page: stats plus the library-only shelves (recent, top-rated, favorites, discover, top artists, wanted, needs attention) |
 | `GET/POST/PATCH/DELETE /api/wishes` | release wishlist CRUD; `POST …/{id}/search`, `…/search-all`, `…/reconcile` |
@@ -1671,6 +2079,9 @@ Where the app stores what it fetches:
 | `GET /api/metadata/candidates` `POST /api/metadata/apply` | artist image / artist description / album description candidates (staged when `metadata_review` is on) and the write of the chosen one |
 | `POST /api/videos/download-youtube` `POST /api/videos/match` | download a music video from YouTube for an artist+title (best candidate by duration); assign downloaded video files to tracks |
 | `POST /api/soulseek/download-bulk` `…/download-user` `…/search/cancel` | queue the selected search files, take everything a user shares through a fresh browse (already-queued transfers skipped), or cancel a running search |
+| `GET /api/soulseek/ready` | everything in the download dir that finished downloading and is waiting to import, with its size — the same list *Import all completed* walks |
+| `POST /api/soulseek/import-one` `…/import-all` `GET …/import-all/status` `POST …/import-all/cancel` | import one album / every ready album (sequentially, in the background) through the shared per-album pipeline; poll it and stop it after the album in flight |
+| `POST /api/wishes/{id}/import` | import the download that matches this wish (its stored path, else the ready albums matched on artist/title); the wish flips to `imported` when the album lands |
 | `GET /api/discovery/sources` | the provider catalogue behind the artist-image / description order pickers (Settings → *Artist images & descriptions*) |
 | `GET /api/sources/health` `GET /api/sources/health/{id}` | every external source (lyrics, advisory, genre, metadata, links) with its `needs`/`configured` state; `probe=1` runs one cheap lookup per configured source against a fixed sample (`kind=` filters, the single-source route returns the bare row) |
 | `GET /api/artist/artwork` | stored artist image + description + provenance + the artist's own grade |
@@ -1693,6 +2104,7 @@ Where the app stores what it fetches:
 | `POST /api/lyrics/wordsync` | deterministic line→word/syllable ELRC for a track's stored lyrics |
 | `POST /api/ai/test` | one tiny round trip to the configured AI endpoint (settings/wizard overrides allowed) — a refused provider is a `{ok:false, error}` payload, never a 500 |
 | `WS /ws/progress` | live progress |
+| `WS /ws/events` | the notification channel: `wish_found` / `download_done` / `import_ready` as JSON frames, token via `?token=` or the session cookie, `?since=` replays the 100-event ring |
 
 ## Tests
 
@@ -1712,7 +2124,11 @@ The browser-side check (`tools/check_menus.cjs` — every sidebar entry and
 route renders with no page errors) needs a running backend and Playwright
 (`npm i -D playwright`).
 
-The other `tools/test_*.py` suites cover config migration, CUE disc renaming,
+The other `tools/test_*.py` suites cover the login gate and its routes
+(`test_auth.py`), the genre hierarchy — the three-slot policy, `trim_genres`,
+the AI ranking with the chat client stubbed (`test_genre_format.py`), the
+lyric-transform checks and `xlit_needs` (`test_xlit_grading.py`), config
+migration, CUE disc renaming,
 grading paths (mood/energy/genre, the identity-tag sweep, the Picard-safe
 excess allowlist, the release-type / multi-country naming rules, the opt-in
 ReplayGain/AcoustID checks and album descriptions), artist grading
@@ -1729,10 +2145,30 @@ client and the layout scanner's capitalization reporting
 providers are stubbed, and the tests that need a toolchain (ffmpeg, fpcalc)
 skip that section when it is not installed.
 Run them all before a release. The frontend gate is `cd web && npx tsc -b &&
-npx oxlint && npm run build`. CI (`.github/workflows/ci.yml`) runs the Python
+npx oxlint && npm run build`, plus `node tools/test_i18n.cjs` for the locale
+bundles (key parity both ways, placeholders aligned). CI (`.github/workflows/ci.yml`) runs the Python
 suites, that frontend gate and `cargo check` for the Tauri shell on every push
 and pull request; the suites that
 need a live backend (the browser check and `smoke_api.py`) are manual.
+
+## Donations (new in 3.0.0)
+
+`/donations` — in the sidebar — carries two addresses and a copy button each:
+
+| Coin | Address |
+| --- | --- |
+| Litecoin | `LRisZa9HYBKE2sUc3VELYZq2WnyYtG6Jvu` |
+| Bitcoin | `bc1qf2snsus59ydvmk8rwp09e698gxjdlmyxyrnycu` |
+
+Copy uses `navigator.clipboard`, and when the browser refuses it (an insecure
+origin, a locked-down profile) the address is selected for you instead and a
+toast says so — the address is also plain `select-all` text, so a manual copy
+always works. There is a button for both at once (*Copy both*).
+
+**Nothing is gated behind it.** There is no paid tier, no license check, no
+feature that unlocks: every feature is already on the machine you installed it
+on, and that sentence is on the page. The cats are unpaid staff
+(`web/src/components/Cats.tsx`, four of them: paw, inspect, keyboard, box).
 
 ---
 

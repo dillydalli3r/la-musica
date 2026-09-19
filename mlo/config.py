@@ -508,6 +508,18 @@ DEFAULT_CONFIG = {
     # same value the import writes and the scripts trim to, so a library this
     # app tagged can never fail this check.
     "grade_check_genre_count": True,
+    # Genre ORDER: the three slots are a hierarchy — parent, main, sub
+    # ("Rock / Alternative Rock / Post-Britpop"). Fails a list whose parent
+    # sits in the wrong slot or repeats; a head this app's vocabulary cannot
+    # vouch for ("Kwaito") is never a failure (see mlo/genres.py).
+    "grade_check_genre_order": True,
+    # Lyric transforms that should not be there, and the ones that should.
+    # A track whose lyrics are already in the reader's own script must NOT
+    # carry a TRANSLITERATION tag, and a track that needs one must — the
+    # same rule for TRANSLATION, against `lyrics_translation_langs`. This is
+    # what makes script 17's output auditable instead of merely present.
+    "grade_check_xlit_transliteration": True,
+    "grade_check_xlit_translation": True,
     # ReplayGain tags: opt-in like AcoustID — graded only when the file
     # already carries at least one of the four REPLAYGAIN_* tags, and then
     # the whole set is required. A library that never ran script 7 is never
@@ -692,6 +704,24 @@ DEFAULT_CONFIG = {
     # budget for transliteration/translation quality; MINIMAL disables
     # thinking entirely for speed.
     "ai_effort": "high",
+    # AI genre inference — the one AI feature that runs during importing and
+    # tagging. The model is given the genres MusicBrainz and RateYourMusic
+    # already answered with (plus whatever the other configured sources know)
+    # and returns exactly `mb_genre_count` genres in hierarchy order: the
+    # parent first, then the genre that describes the track, then the
+    # subgenre. On by default *when an AI endpoint is configured* — with no
+    # base URL/model the import simply uses the source list as-is.
+    "ai_genre_inference": True,
+    # Thinking budget for the inference. HIGH is the default: the model is
+    # told to reason about the ranking and to look up anything the fetched
+    # list does not cover before answering, which is what makes the three
+    # slots land in the right order. MINIMAL answers from the fetched list
+    # alone, for a fast import on a big backlog.
+    "ai_genre_effort": "high",
+    # Let the model consult its own knowledge of the artist/album beyond the
+    # genres it was handed (rather than re-ranking only what it was given).
+    # Off makes the answer strictly a re-ranking of the fetched list.
+    "ai_genre_research": True,
     # Script 17 — persistent lyric transforms. Enabled, so Run All writes
     # TRANSLITERATION / TRANSLATION tags (and sidecars) for every track that
     # needs them; answers are disk-cached, so re-runs only pay for new or
@@ -982,6 +1012,47 @@ DEFAULT_CONFIG = {
     # Parallel transcode/copy workers; 0 = automatic (half the cores, max 8).
     "export_workers": 0,
 
+    # ── Accounts, remote access and notifications (v3) ────────────────────
+    # The gate that protects everything but /api/health, /api/auth/* and the
+    # static shell. "auto" is the shipped rule: ON whenever the server is
+    # reachable from anywhere but this machine's loopback (`server_host` is
+    # not a loopback address), OFF for loopback — a single-user desktop
+    # install keeps working with no password to type. "required" gates
+    # loopback too (two people sharing a machine, a kiosk); "off" only ever
+    # applies to loopback and is for a machine with no other user.
+    "auth_mode": "auto",
+    # Optional label shown on the login screen ("who am I signing in as").
+    # The password is the credential; there is no user database.
+    "auth_username": "",
+    # PBKDF2-HMAC-SHA256 — "pbkdf2$<iterations>$<salt-hex>$<hash-hex>".
+    # Never the password itself. Written by /api/auth/password, read by
+    # server/auth.py; an unparsable value is treated as "no password set".
+    "auth_password_hash": "",
+    # How long a login lasts. Sessions live in .mlo/data/auth.db, so
+    # restarting the server does not sign every client out.
+    "auth_session_days": 30,
+    # Where the server binds. A non-loopback address (0.0.0.0, a LAN IP) is
+    # what makes the gate mandatory under `auth_mode: auto`.
+    "server_host": "127.0.0.1",
+    "server_port": 8000,
+    # The address clients should dial, e.g. "http://musicbox.lan:8000" or a
+    # Tailscale name. Empty means "wherever this page was served from", which
+    # is right for the browser and the desktop shell.
+    "server_public_url": "",
+    # Desktop/mobile/web notifications for the events the app already has:
+    # a wish found on Soulseek, a download finished, an album ready to
+    # import. Each client asks for its own OS permission; these switches are
+    # the server-side half (what gets published at all).
+    "notify_wish_found": True,
+    "notify_download_done": True,
+    "notify_import_ready": True,
+    # UI language for the web app and the client shells. English is the
+    # shipped language and the fallback for every key a locale does not
+    # translate (web/src/locales). The library's own tag language — the one
+    # that decides whether lyrics need translating — is
+    # `lyrics_translation_langs`.
+    "ui_locale": "en",
+
     # First run / updates
     "first_run_done": False,
     # Install tools that are missing or behind their upstream release without
@@ -1043,9 +1114,13 @@ _INT_RANGES = {
     "export_embed_cover_jpeg_quality": (1, 100),
     "export_embed_cover_resolution": (0, 8000),
     "export_workers": (0, 64),
+    "server_port": (1, 65535),
+    "auth_session_days": (1, 3650),
 }
 _CHOICES = {
     "lyrics_format": {"EMBEDDED", "LRC", "BOTH"},
+    "auth_mode": {"auto", "required", "off"},
+    "ai_genre_effort": {"minimal", "low", "medium", "high"},
     "lrc_zero_timestamp_target": {"EMBEDDED", "LRC", "BOTH"},
     # Sync granularity required of (and targeted for) synced lyrics:
     # SYLLABLE = glued per-syllable ELRC tags, WORD = per-word ELRC tags,

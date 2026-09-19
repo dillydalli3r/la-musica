@@ -4,7 +4,9 @@ import { AlertTriangle, ArrowDownUp, Clock, Disc3, Heart, RefreshCw, Sparkles, S
 import { api } from "../api";
 import { EmptyState, PageLoading } from "../components/Badges";
 import PageHeader from "../components/PageHeader";
+import { useI18n } from "../lib/i18n";
 import CoverImg from "../components/CoverImg";
+import { useFav } from "../lib/favs";
 import type { HomeAlbum, HomeArtist } from "../types";
 
 /** Shelf chip: why a row is here (a wish's status, a favorite's origin). */
@@ -16,6 +18,40 @@ function Chip({ text, title }: { text: string; title?: string }) {
     >
       {text}
     </span>
+  );
+}
+
+/** The Home page's like control: a small star in the corner of an owned
+ *  album's cover.
+ *
+ *  It writes through the same favourites store as every other heart in the
+ *  app (`useFav` → /api/favorites), so a star set here shows up on the album
+ *  page, in Favorites, and on every other client — including the installed
+ *  iOS/Android builds, which reach the same server with the session token the
+ *  API client attaches (see web/src/api.ts). A wish that is not in the
+ *  library yet has nothing to favourite, so it gets no star.
+ */
+function StarLike({ a }: { a: HomeAlbum }) {
+  const { fav, toggle } = useFav("album", a.owned ? a.path : undefined, a.mbid);
+  if (!a.owned || !a.path) return null;
+  return (
+    <button
+      className={`absolute top-1.5 right-1.5 h-7 w-7 rounded-full border border-white/10 bg-black/60 backdrop-blur flex items-center justify-center transition-colors ${
+        fav ? "text-accent" : "text-zinc-300 hover:text-white"
+      }`}
+      onClick={(e) => {
+        // The cover sits inside a link to the album page: the star must not
+        // navigate.
+        e.preventDefault();
+        e.stopPropagation();
+        toggle();
+      }}
+      title={fav ? "Remove from favorites" : "Add to favorites"}
+      aria-pressed={fav}
+      aria-label={fav ? "Remove from favorites" : "Add to favorites"}
+    >
+      <Star className={`h-3.5 w-3.5 ${fav ? "fill-current" : ""}`} />
+    </button>
   );
 }
 
@@ -41,11 +77,15 @@ function HomeCard({ a }: { a: HomeAlbum }) {
     <div className="group flex h-full flex-col rounded-xl p-2 transition-all duration-200 hover:bg-panel/70 hover:-translate-y-0.5">
       {to ? (
         <Link to={to} className="block" title="Open album page">
-          <div className="relative">{art}</div>
+          <div className="relative">
+            {art}
+            <StarLike a={a} />
+          </div>
         </Link>
       ) : (
         <div className="relative" title={a.artist ? `${a.artist} — ${a.album}` : a.album}>
           {art}
+          <StarLike a={a} />
         </div>
       )}
       <div className="mt-2 px-0.5 flex flex-1 flex-col gap-1">
@@ -82,16 +122,15 @@ function Shelf({
   icon: Icon,
   items,
   blurb,
-  empty,
 }: {
   title: string;
   icon: typeof Sparkles;
   items: HomeAlbum[];
   blurb?: string;
-  /** Shown instead of nothing when the shelf is empty (omit to hide the shelf). */
-  empty?: string;
 }) {
-  if (!items.length && !empty) return null;
+  // An empty shelf is hidden outright: the page-level empty state is Home's,
+  // so a shelf never invents an empty look of its own.
+  if (!items.length) return null;
   return (
     <section className="space-y-2">
       <div className="flex items-baseline gap-2 px-1">
@@ -99,27 +138,24 @@ function Shelf({
         <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
         {blurb && <span className="text-[11px] text-zinc-600">{blurb}</span>}
       </div>
-      {items.length ? (
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 gap-3 stagger">
-          {items.map((a, i) => (
-            <HomeCard key={`${a.mbid ?? a.path}-${i}`} a={a} />
-          ))}
-        </div>
-      ) : (
-        <p className="px-1 text-xs text-zinc-600">{empty}</p>
-      )}
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 gap-3 stagger">
+        {items.map((a, i) => (
+          <HomeCard key={`${a.mbid ?? a.path}-${i}`} a={a} />
+        ))}
+      </div>
     </section>
   );
 }
 
 function ArtistShelf({ title, artists }: { title: string; artists?: HomeArtist[] }) {
+  const { t } = useI18n();
   if (!artists?.length) return null;
   return (
     <section className="space-y-2">
       <div className="flex items-baseline gap-2 px-1">
         <Users className="h-4 w-4 text-accent self-center" />
         <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
-        <span className="text-[11px] text-zinc-600">Deepest artist collections</span>
+        <span className="text-[11px] text-zinc-600">{t("home.shelf.artists_blurb")}</span>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 gap-3 stagger">
         {artists.map((ar) => (
@@ -147,6 +183,7 @@ function ArtistShelf({ title, artists }: { title: string; artists?: HomeArtist[]
 }
 
 export default function HomePage() {
+  const { t } = useI18n();
   const { data, isLoading, isFetching, refetch } = useQuery({
     queryKey: ["home"],
     queryFn: api.home,
@@ -156,7 +193,7 @@ export default function HomePage() {
   if (isLoading) {
     return (
       <div className="p-6 mx-auto max-w-6xl">
-        <PageLoading label="Loading your library…" />
+        <PageLoading label={t("home.loading")} />
       </div>
     );
   }
@@ -164,8 +201,8 @@ export default function HomePage() {
     return (
       <div className="p-6 mx-auto max-w-6xl">
         <EmptyState
-          title="Could not build the Home page"
-          hint="Check that your music folder is set."
+          title={t("home.error_title")}
+          hint={t("home.error_hint")}
         />
       </div>
     );
@@ -180,21 +217,22 @@ export default function HomePage() {
         <div className="absolute -right-20 -top-20 h-64 w-64 rounded-full bg-accent/10 blur-3xl pointer-events-none" />
         <div className="relative">
           <PageHeader
-            overline="Welcome back"
-            title="Your library"
+            overline={t("home.welcome")}
+            title={t("home.title")}
             subtitle={
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-zinc-400">
-                <span><b className="text-zinc-100">{stats.artists}</b> artists</span>
+                {/* the counts stay bold, the unit is the part that is translated */}
+                <span><b className="text-zinc-100">{stats.artists}</b> {t("home.stat.artists")}</span>
                 <span className="text-zinc-700">·</span>
-                <span><b className="text-zinc-100">{stats.albums}</b> albums</span>
+                <span><b className="text-zinc-100">{stats.albums}</b> {t("home.stat.albums")}</span>
                 <span className="text-zinc-700">·</span>
-                <span><b className="text-zinc-100">{stats.tracks}</b> tracks</span>
+                <span><b className="text-zinc-100">{stats.tracks}</b> {t("home.stat.tracks")}</span>
                 <span className="text-zinc-700">·</span>
-                <span><b className="text-zinc-100">{stats.playlists}</b> playlists</span>
+                <span><b className="text-zinc-100">{stats.playlists}</b> {t("home.stat.playlists")}</span>
                 {stats.grade_pct != null && (
                   <>
                     <span className="text-zinc-700">·</span>
-                    <span><b className="text-zinc-100">{stats.grade_pct}%</b> checks passed</span>
+                    <span><b className="text-zinc-100">{stats.grade_pct}%</b> {t("home.stat.checks")}</span>
                   </>
                 )}
               </div>
@@ -204,32 +242,32 @@ export default function HomePage() {
                 className="btn-ghost !py-1.5 text-xs"
                 onClick={() => refetch()}
                 disabled={isFetching}
-                title="Reload the shelves"
+                title={t("home.refresh_title")}
               >
-                <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} /> Refresh
+                <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} /> {t("home.refresh")}
               </button>
             }
           />
         </div>
       </div>
 
-      <Shelf title="Recently added" icon={Clock} items={data.recent} />
+      <Shelf title={t("home.shelf.recent")} icon={Clock} items={data.recent} />
       <Shelf
-        title="Wanted on Soulseek"
+        title={t("home.shelf.wanted")}
         icon={ArrowDownUp}
         items={data.wanted ?? []}
-        blurb="Being hunted in the background"
+        blurb={t("home.shelf.wanted_blurb")}
       />
-      <Shelf title="Best graded" icon={Star} items={data.top_rated} />
+      <Shelf title={t("home.shelf.best")} icon={Star} items={data.top_rated} />
       <Shelf
-        title="Needs attention"
+        title={t("home.shelf.attention")}
         icon={AlertTriangle}
         items={data.needs_attention ?? []}
-        blurb="Albums failing at least one check"
+        blurb={t("home.shelf.attention_blurb")}
       />
-      <ArtistShelf title="Top artists" artists={data.top_artists} />
-      <Shelf title="Rediscover" icon={Disc3} items={data.discover} />
-      <Shelf title="Favorites" icon={Heart} items={data.favorites} />
+      <ArtistShelf title={t("home.shelf.artists")} artists={data.top_artists} />
+      <Shelf title={t("home.shelf.rediscover")} icon={Disc3} items={data.discover} />
+      <Shelf title={t("page.favorites")} icon={Heart} items={data.favorites} />
     </div>
   );
 }

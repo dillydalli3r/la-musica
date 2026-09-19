@@ -44,6 +44,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .audio import AudioFile
 from .config import DEFAULT_CONFIG, should_write_audio_tag
+# one genre list policy for every writer: the trimmer, the top-up below and
+# the import all keep order, drop case-insensitive repeats and cap the same way
+from .genres import normalize_genres
 # the app's RELEASETYPE spelling ("album+live" -> "Album; Live"), shared with
 # the organizer and the grader so one release_type reads the same everywhere;
 # fuller_date is the same shared rule for the two DATE tags the album folder
@@ -116,7 +119,11 @@ def trim_genres(af, count):
     EVERY writer of the tag routes through this one helper (script 8, the
     genre import, script 10), so `mb_genre_count` means the same thing to all
     of them. Values are stored in source-priority order (highest-voted source
-    first), so "keep the first N" IS "keep the N best".
+    first), so "keep the first N" IS "keep the N best" — the kept list is
+    built by the shared `mlo.genres.normalize_genres`, which drops a
+    case-insensitive repeat as well as the overflow, so a file carrying
+    ["Rock", "rock", "Pop"] leaves here with two genres and one removal
+    reported rather than a duplicate the grader fails.
     """
     try:
         count = max(0, int(count))
@@ -137,16 +144,23 @@ def trim_genres(af, count):
     # Blank repeats are dropped rather than kept: a file carrying ["", "Rock"]
     # must not end up with the empty string as its first genre.
     values = [v for v in (str(v).strip() for v in values) if v]
-    if len(values) <= count:
-        return 0  # already at or under the cap: never rewrite a container for nothing
-    kept = values[:count]
+    # `count == 0` is this helper's "keep none" (delete the tag), which is NOT
+    # normalize_genres' own 0 — there 0 means "no cap", for rendering.
+    kept = normalize_genres(values, count) if count else []
+    if kept == values:
+        # Nothing to remove AND nothing to clean: at or under the cap, no
+        # duplicate and no stray spacing — never rewrite a container for
+        # nothing.
+        return 0
     if kept:
         # A list writes repeated GENRE fields; one value stays a plain string.
         af.set_tag("GENRE", kept if len(kept) > 1 else kept[0])
     else:
         # Nothing survives the cap — an empty GENRE is worse than no GENRE.
         af.delete_tag("GENRE")
-    return len(values) - len(kept)
+    # Never negative: one stored value holding a " / "-joined list is split
+    # into more names than it had fields, and "removed" must stay a count.
+    return max(0, len(values) - len(kept))
 
 
 # ----------------------------------------------------------------------
@@ -695,16 +709,13 @@ def run_auto_tagging(config):
                         names = _genre_lookup(artist, album_tag, path) or []
                     except Exception:
                         names = []
-                    merged = list(current)
-                    seen = {str(g).strip().casefold() for g in current}
-                    for name in names:
-                        name = str(name).strip()
-                        if not name or name.casefold() in seen:
-                            continue
-                        seen.add(name.casefold())
-                        merged.append(name)
-                        if len(merged) >= genre_count:
-                            break
+                    # `normalize_genres` is the append: the track's own values
+                    # stay first (they are deliberate), the provider's names
+                    # follow in its own priority order, a case-insensitive
+                    # repeat collapses and the cap is the same `mb_genre_count`
+                    # the trimmer and the grader use.
+                    merged = normalize_genres(list(current) + list(names),
+                                              genre_count)
                     if merged != current:
                         # The list goes in as a list: set_tag writes repeated
                         # GENRE fields, so players see several genres instead

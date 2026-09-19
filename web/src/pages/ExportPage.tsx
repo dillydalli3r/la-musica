@@ -8,6 +8,7 @@ import CoverImg, { TrackCover } from "../components/CoverImg";
 import { fmtDuration } from "../lib/fmt";
 import Segmented from "../components/Segmented";
 import PageHeader from "../components/PageHeader";
+import { EmptyState } from "../components/Badges";
 
 /** The dropdown's synthetic entry for a codec's "custom value" field; the
  * backend takes the plain number the field holds (kbps, or 0-10 for Vorbis),
@@ -346,6 +347,17 @@ export default function ExportPage() {
                   Clear
                 </button>
               </div>
+              {listKeys.length === 0 && (
+                <EmptyState
+                  title="Nothing matches"
+                  hint={
+                    filter.trim()
+                      ? `No library entry matches "${filter.trim()}".`
+                      : "The library holds nothing to export yet."
+                  }
+                />
+              )}
+              {listKeys.length > 0 && (
               <div className="stagger max-h-64 overflow-y-auto border border-border rounded-md divide-y divide-border/60">
                 {sourceKind === "albums" && filteredAlbums.map((a: any) => (
                   <label
@@ -392,10 +404,8 @@ export default function ExportPage() {
                     <span className="text-zinc-600 shrink-0 break-words">{t.artist}</span>
                   </label>
                 ))}
-                {!((sourceKind === "albums" && filteredAlbums.length) || (sourceKind === "artists" && filteredArtists.length) || (sourceKind === "tracks" && filteredTracks.length)) && (
-                  <div className="px-2 py-3 text-[11px] text-zinc-600">Nothing matches.</div>
-                )}
               </div>
+              )}
             </>
           )}
 

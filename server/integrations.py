@@ -3025,6 +3025,37 @@ def _answer_by_title(answers, title):
     return None
 
 
+def _genre_ai_rank(cfg, artist, album, title, candidates, count, extra=None):
+    """The AI's take on a track's genres, canonicalized — or None.
+
+    `server.genre_ai.infer_genres` behind the two gates that make this step
+    invisible when it is off (`ai_genre_inference`, and an endpoint actually
+    configured), and behind a blanket except: a model that times out, refuses
+    or answers junk must leave the source list EXACTLY as it was, because the
+    import it feeds has to finish either way. None means "no opinion".
+
+    Imported lazily, like the engine imports above: `server.ai` imports THIS
+    module for the User-Agent, so a module-level import would be a cycle.
+
+    The answer goes through `mlo.genres.normalize_genres` before anyone sees
+    it — the shared canonical list (order kept, case-insensitive duplicates
+    dropped, capped) is what the writers store and the grader reads.
+    """
+    if not (cfg or {}).get("ai_genre_inference"):
+        return None
+    try:
+        from server import ai as ai_mod
+        if not ai_mod.ai_configured(cfg):
+            return None
+        from server.genre_ai import infer_genres
+        from mlo.genres import normalize_genres
+        names = infer_genres(artist=artist, album=album, title=title or "",
+                             candidates=candidates, count=count, extra=extra)
+        return normalize_genres(names, count) if names else None
+    except Exception:
+        return None
+
+
 def genre_chain(artist="", album="", release=None, limit=None, sources=None,
                 cfg=None, files=None, progress=None):
     """Per-track genres for a release, merged from the configured sources.
@@ -3062,6 +3093,15 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
     `progress` (optional) is called as ``progress(i, total, source)`` before
     each source is asked, so a caller can show which source the chain is
     waiting on; a hook that raises is ignored.
+
+    With `ai_genre_inference` on AND an AI endpoint configured, the merged
+    list is then handed to `server.genre_ai.infer_genres` together with the
+    release identity, and a usable answer REPLACES it — the model is what
+    puts the three slots in hierarchy order (parent / main / sub), which no
+    source orders on its own. The answer is canonicalized through
+    `mlo.genres.normalize_genres` and its path gains "ai" in `sources`. With
+    the setting off, no endpoint, or an unusable answer, every field is
+    exactly what the sources alone produced.
 
     Returns {"genres": [...], "per_track": {(disc, position): [...]},
     "per_track_sources": {...}, "per_track_levels": {...},
@@ -3161,16 +3201,34 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
                 list(dict.fromkeys(s for _n, s, _l in kept)), level)
 
     per_track, per_track_sources, per_track_levels = {}, {}, {}
+    # What the prompt may know about the release beyond its genres; empty
+    # values are dropped by the prompt builder, so a release with no date or
+    # country simply names itself.
+    extra = {"year": str((release or {}).get("date") or "")[:4],
+             "country": (release or {}).get("country") or ""}
+
     for track in tracks:
         genres, contributors, level = merge(track)
         if not genres:
             continue
+        # The sources are the candidates (best first) and the model ranks
+        # them into the hierarchy; a track the model has nothing to say about
+        # keeps the merged order untouched.
+        ranked = _genre_ai_rank(cfg, artist, album, track.get("title"),
+                                genres, limit, extra)
+        if ranked:
+            genres = ranked
+            contributors = list(dict.fromkeys(contributors + ["ai"]))
         key = (int(track.get("disc") or 1), int(track.get("position") or 0))
         per_track[key] = genres
         per_track_sources[key] = contributors
         per_track_levels[key] = level
 
     merged, album_contributors, album_level = merge(None)
+    ranked = _genre_ai_rank(cfg, artist, album, "", merged, limit, extra)
+    if ranked:
+        merged = ranked
+        album_contributors = list(dict.fromkeys(album_contributors + ["ai"]))
     out_sources, out_levels = {}, {}
     for path in files or []:
         key = None

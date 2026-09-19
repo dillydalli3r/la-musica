@@ -474,6 +474,55 @@ ok(any("no genre, 1 expected" in i for i in res["issues"]),
 set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
 
 # ----------------------------------------------------------------------
+# Genre ORDER (grade_check_genre_order) — parent first, no repeated slot
+# ----------------------------------------------------------------------
+print("== genre order ==")
+# The count check is off in every case here: order and count are separate
+# questions, and the order check must not re-report a count it was told not
+# to grade (its fixtures are three genres long so the count would be clean
+# anyway, which is what makes this wording independent of the count rule).
+ord_cfg = dict(mood_cfg, grade_check_genre_count=False, mb_genre_count=3,
+               grade_check_genre_order=True)
+set_multi(flac, "GENRE", ["Alternative Rock", "Rock", "Post-Britpop"])
+res = _grade_album(album, "EMBEDDED", ord_cfg)
+ok(res["tracks"][0]["issues"] == ["GENRE_ORDER"],
+   f"a parent in the middle slot fails the order check "
+   f"(got {res['tracks'][0]['issues']})")
+ok(any(i.startswith("Genre order: the parent genre must come first") for i in res["issues"]),
+   f"the issue names the rule and the slot (got {res['issues']})")
+ok(res["total_checks"] - res["pass_count"] == 1,
+   f"and costs exactly one grade point ({res['pass_count']}/{res['total_checks']})")
+
+set_multi(flac, "GENRE", ["Rock", "Alternative Rock", "Post-Britpop"])
+res = _grade_album(album, "EMBEDDED", ord_cfg)
+ok("GENRE_ORDER" not in res["tracks"][0]["issues"]
+   and res["pass_count"] == res["total_checks"],
+   f"the hierarchy order passes ({res['pass_count']}/{res['total_checks']})")
+
+# ... and the switch removes it from the grade (and from the denominator).
+res_off = _grade_album(album, "EMBEDDED", dict(ord_cfg, grade_check_genre_order=False))
+ok("GENRE_ORDER" not in res_off["tracks"][0]["issues"]
+   and res_off["total_checks"] == res["total_checks"] - 1
+   and res_off["pass_count"] == res_off["total_checks"],
+   f"grade_check_genre_order=False stops grading it ({res_off['total_checks']})")
+
+set_multi(flac, "GENRE", ["Rock", "Rock", "Post-Britpop"])
+res = _grade_album(album, "EMBEDDED", ord_cfg)
+ok("GENRE_ORDER" in res["tracks"][0]["issues"]
+   and any(i.startswith("Genre slots repeat: Rock") for i in res["issues"]),
+   f"a repeated slot fails with the duplicate wording (got {res['issues']})")
+
+# A head this app's vocabulary cannot vouch for is never a failure: the check
+# judges order, it does not invent a parent for the list.
+set_multi(flac, "GENRE", ["Kwaito", "Amapiano", "Deep House"])
+res = _grade_album(album, "EMBEDDED", ord_cfg)
+ok("GENRE_ORDER" not in res["tracks"][0]["issues"]
+   and res["pass_count"] == res["total_checks"],
+   "an unknown parent is not a failure (order is left as found)")
+
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
+
+# ----------------------------------------------------------------------
 # ReplayGain family (grade_check_replaygain) — opt-in like AcoustID
 # ----------------------------------------------------------------------
 print("== replaygain presence ==")

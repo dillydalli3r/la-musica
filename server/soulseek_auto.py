@@ -275,16 +275,57 @@ def _prune_downloads():
 
 def _finish(state, result=None):
     with _lock:
+        release = dict(_job.get("release") or {})
         _job["state"] = state
         _job["result"] = result
         _job["progress"] = None   # nothing is downloading any more
         if state == "done":
             _job["stage"] = "Done"
+    _notify_finish(state, result or {}, release)
     _prune_downloads()
     if state != "cancelled":
         # Bulk import: this release is over, start the next one in the queue.
         # A cancelled job stops the queue instead (the user said stop).
         _start_next()
+
+
+def _notify_finish(state, result, release):
+    """Announce a settled auto-import job (see server/events.py).
+
+    Only a `done` job is worth a notification: an error is not something the
+    user can act on from a phone at the other end of the house, and a
+    cancelled job is one they just cancelled themselves.
+
+    A job that IMPORTED the album is a finished download; one that only landed
+    it in the download folder is a job half done — the user still has to
+    import it — so it goes out as `import_ready` instead. One job, one
+    notification, and the kind is the one that says whether anything is left
+    to do.
+    """
+    if state != "done":
+        return
+    try:
+        from server import events
+        artist = ""
+        artists = release.get("artists") or []
+        if artists and isinstance(artists[0], dict):
+            artist = str(artists[0].get("name") or "")
+        title = str(release.get("title") or "")
+        label = f"{artist} — {title}" if artist and title else (title or artist or "Soulseek download")
+        imported = bool(result.get("imported"))
+        if imported:
+            kind = "download_done"
+            body = "Downloaded and imported into your library."
+        else:
+            kind = "import_ready"
+            body = (result.get("error")
+                    or "Downloaded — it is in the download folder, ready to import.")
+        events.emit(kind, label, body,
+                    {"release_mbid": str(release.get("id") or ""),
+                     "album_path": str(result.get("album_path") or ""),
+                     "imported": imported})
+    except Exception:
+        traceback.print_exc()
 
 
 # --------------------------------------------------------------------------- #

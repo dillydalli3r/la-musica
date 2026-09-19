@@ -35,6 +35,12 @@ services:
     environment:
       # Folder inside the container to treat as the music library.
       - MLO_MUSIC_FOLDER=/music
+      # The address the server binds — and therefore whether the login gate
+      # applies: a non-loopback bind turns it ON (server/auth.py). The image
+      # sets this already; it is repeated here because this is the line that
+      # decides whether the published port is protected. First visit asks for
+      # a password (POST /api/auth/setup); every client signs in with it.
+      - MLO_SERVER_HOST=0.0.0.0
     volumes:
       # ALL app state (config.json, playlists.db + wishes.db, slskd.yaml,
       # the beets config + beets-library.db, and the ReplayGain / RYM /

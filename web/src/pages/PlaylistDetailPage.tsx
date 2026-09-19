@@ -8,6 +8,7 @@ import { api } from "../api";
 import { toast, useStore } from "../store";
 import { EmptyState, PageLoading } from "../components/Badges";
 import PageHeader from "../components/PageHeader";
+import Modal from "../components/Modal";
 import { TrackCover } from "../components/CoverImg";
 import DownloadButton from "../components/DownloadButton";
 import FavHeart from "../components/FavHeart";
@@ -443,44 +444,49 @@ export default function PlaylistDetailPage() {
       </div>
 
       {filterOpen && (
-        <div className="fixed inset-0 z-[60] bg-black/70 flex items-center justify-center p-6" onClick={() => setFilterOpen(false)}>
-          <div className="bg-card border border-border rounded-xl p-5 w-full max-w-[560px] max-h-[80vh] overflow-auto shadow-2xl" onClick={(e) => e.stopPropagation()}>
-            <h3 className="font-semibold mb-3">Smart playlist: {playlist.name}</h3>
-            <label className="flex items-center gap-2 text-sm text-zinc-400 mb-3">
-              <input type="checkbox" checked={matchAll} onChange={(e) => setMatchAll(e.target.checked)} />
-              Match all conditions (AND)
-            </label>
-            <div className="space-y-2">
-              {conditions.map((c, i) => (
-                <div key={i} className="flex gap-2">
-                  <select className="input flex-1" value={c.field} onChange={(e) => setConditions((cs) => cs.map((x, j) => (j === i ? { ...x, field: e.target.value } : x)))}>
-                    {FIELDS.map((f) => (
-                      <option key={f.value} value={f.value}>{f.label}</option>
-                    ))}
-                  </select>
-                  <select className="input w-28" value={c.op} onChange={(e) => setConditions((cs) => cs.map((x, j) => (j === i ? { ...x, op: e.target.value } : x)))}>
-                    {OPS.map((o) => (
-                      <option key={o.value} value={o.value}>{o.label}</option>
-                    ))}
-                  </select>
-                  {!["missing", "present"].includes(c.op) && (
-                    <input className="input w-32" value={String(c.value ?? "")} onChange={(e) => setConditions((cs) => cs.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)))} />
-                  )}
-                  <button className="btn-danger !px-2" onClick={() => setConditions((cs) => cs.filter((_, j) => j !== i))}>
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              ))}
-            </div>
-            <button className="btn-ghost mt-2 text-xs" onClick={() => setConditions((cs) => [...cs, { field: "grade_pass", op: "eq", value: false }])}>
-              <Plus className="h-3.5 w-3.5" /> Add condition
-            </button>
-            <div className="flex justify-end gap-2 mt-4">
+        <Modal
+          onClose={() => setFilterOpen(false)}
+          icon={Pencil}
+          title={`Smart playlist: ${playlist.name}`}
+          width="max-w-[560px]"
+          bodyClass="px-5 py-4 space-y-2"
+          footer={
+            <div className="flex justify-end gap-2">
               <button className="btn-ghost" onClick={() => setFilterOpen(false)}>Cancel</button>
               <button className="btn-primary" onClick={saveSmart}>Save &amp; evaluate</button>
             </div>
+          }
+        >
+          <label className="flex items-center gap-2 text-sm text-zinc-400">
+            <input type="checkbox" checked={matchAll} onChange={(e) => setMatchAll(e.target.checked)} />
+            Match all conditions (AND)
+          </label>
+          {conditions.map((c, i) => (
+            <div key={i} className="flex gap-2">
+              <select className="input flex-1" value={c.field} onChange={(e) => setConditions((cs) => cs.map((x, j) => (j === i ? { ...x, field: e.target.value } : x)))}>
+                {FIELDS.map((f) => (
+                  <option key={f.value} value={f.value}>{f.label}</option>
+                ))}
+              </select>
+              <select className="input w-28" value={c.op} onChange={(e) => setConditions((cs) => cs.map((x, j) => (j === i ? { ...x, op: e.target.value } : x)))}>
+                {OPS.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+              {!["missing", "present"].includes(c.op) && (
+                <input className="input w-32" value={String(c.value ?? "")} onChange={(e) => setConditions((cs) => cs.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)))} />
+              )}
+              <button className="btn-danger !px-2" onClick={() => setConditions((cs) => cs.filter((_, j) => j !== i))} title="Remove condition" aria-label="Remove condition">
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ))}
+          <div>
+            <button className="btn-ghost text-xs" onClick={() => setConditions((cs) => [...cs, { field: "grade_pass", op: "eq", value: false }])}>
+              <Plus className="h-3.5 w-3.5" /> Add condition
+            </button>
           </div>
-        </div>
+        </Modal>
       )}
     </>
   );

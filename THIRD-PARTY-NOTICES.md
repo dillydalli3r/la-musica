@@ -103,7 +103,8 @@ the same requirement for the beets bundle.
 | [Tailwind CSS](https://github.com/tailwindlabs/tailwindcss) | MIT | styling |
 | [Vite](https://github.com/vitejs/vite) | MIT | build tool |
 | [TypeScript](https://github.com/microsoft/TypeScript) | Apache-2.0 | language |
-| [Tauri API](https://github.com/tauri-apps/tauri) | MIT / Apache-2.0 | desktop shell |
+| [Tauri API](https://github.com/tauri-apps/tauri) | MIT / Apache-2.0 (lock spells it `Apache-2.0 OR MIT`) | desktop shell |
+| [@tauri-apps/plugin-notification](https://github.com/tauri-apps/plugins-workspace) | MIT OR Apache-2.0 | OS notifications on the desktop and mobile shells (the web build loads it dynamically, only inside a Tauri webview) |
 
 ## Bundled dependency trees
 
@@ -144,38 +145,55 @@ here with the licence each one declares (`License-Expression` in its
 ## Desktop shell (Rust crates)
 
 The Tauri shell in `desktop/src-tauri` compiles a locked crate graph
-(`desktop/src-tauri/Cargo.lock`, 453 crates). Direct dependencies:
+(`desktop/src-tauri/Cargo.lock`, 500 package entries — 499 registry crates
+plus the `mlo-desktop` root package). Direct dependencies:
 
 | Crate | License |
 | --- | --- |
-| tauri, tauri-build, tauri-plugin-dialog, tauri-plugin-autostart | MIT OR Apache-2.0 |
+| tauri, tauri-build, tauri-plugin-dialog, tauri-plugin-autostart, tauri-plugin-notification | MIT OR Apache-2.0 (tauri-plugin-notification declares `Apache-2.0 OR MIT`) |
 | serde, serde_json | MIT OR Apache-2.0 |
 
+**What the notification plugin pulls in** (new in 3.0.0). `tauri-plugin-notification`
+2.4.0 is what raises the OS notifications on every target, and it is the only
+part of the lock that exists for that job: **notify-rust** 4.18.0 (MIT OR
+Apache-2.0) with **mac-notification-sys** 0.6.15 on macOS and
+**tauri-winrt-notification** 0.7.3 (MIT OR Apache-2.0) with the `windows` /
+`windows-version` crates on Windows, plus **zbus** / **zvariant** (and their
+`async-*`, `enumflags2`, `ordered-stream`, `uds_windows`, `endi` … helpers) for
+the Linux desktop-bus path. It also depends on `serde_repr`, `time` and `url`,
+which the rest of the graph already carried. `tauri-plugin-autostart` brings
+**auto-launch** 0.5.0 (MIT) with `dirs`/`winreg`, and `tauri-plugin-dialog`
+brings **tauri-plugin-fs**, both also already part of the shipped shell.
+
 The rest of the graph was read from the licence each crate declares in its
-registry manifest. The 305 locked crates present in this checkout's cargo cache
-(453 entries total) resolve to:
+registry manifest. The 432 locked crates present in this checkout's cargo cache
+(500 entries total) resolve to:
 
 | License(s) | Crates |
 | --- | --- |
-| MIT OR Apache-2.0 (and the equivalent spellings) | 193 |
-| MIT | 51 |
-| Unicode-3.0 | 19 |
-| Zlib OR Apache-2.0 OR MIT | 13 |
-| Unlicense OR MIT | 11 |
-| BSD-2-Clause / BSD-3-Clause | 6 |
+| MIT OR Apache-2.0 (and the equivalent spellings) | 281 |
+| MIT | 78 |
+| Unicode-3.0 | 18 |
+| Zlib OR Apache-2.0 OR MIT (both orderings) | 18 |
+| Unlicense OR MIT (one crate spells it `Unlicense/MIT`) | 11 |
+| BSD-2-Clause / BSD-3-Clause (some additionally OR MIT/Apache-2.0) | 10 |
 | **MPL-2.0** (file-level copyleft, unmodified) | 5 — cssparser, cssparser-macros, dtoa-short, option-ext, selectors |
+| Apache-2.0 WITH LLVM-exception OR MIT/Apache-2.0 | 4 |
+| (MIT OR Apache-2.0) AND Unicode-3.0 | 1 — unicode-ident |
 | 0BSD or CC0-1.0 OR MIT-0 OR Apache-2.0 | 2 |
-| Apache-2.0 WITH LLVM-exception OR MIT/Apache-2.0 | 2 |
-| ISC | 1 |
-| MIT OR Apache-2.0 OR LGPL-2.1-or-later | 1 — r-efi (used under MIT/Apache) |
-| Apache-2.0 | 1 |
+| ISC | 1 — libloading |
+| Zlib | 1 — foldhash |
+| Apache-2.0 | 2 — sync_wrapper, tao |
 
-No GPL or AGPL crate is anywhere in the graph. The remaining lock entries are
-the platform bindings for targets this build does not use (gtk/atk/cairo/dbus
-on Linux, core-*/objc2 on macOS, older duplicate versions, build-only crates);
-they are not part of the shipped Windows shell, and each publishes its own
-licence inside its crate archive — `cargo metadata` over `Cargo.lock` lists
-them exactly.
+No GPL or AGPL crate is anywhere in the graph, and no crate in the cache
+declares no licence at all. The remaining lock entries (68 of the 500) are the
+platform bindings for targets this build does not use (gtk/atk/cairo/dbus/
+gdk-pixbuf on Linux, core-*/objc2 on macOS, `r-efi` for UEFI targets, older
+duplicate versions, build-only crates); they are not part of the shipped
+Windows shell, and each publishes its own licence inside its crate archive —
+`cargo metadata` over `Cargo.lock` lists them exactly. `r-efi` (the one entry
+in the wider graph that offers `LGPL-2.1-or-later`) is used under its MIT/
+Apache-2.0 option.
 
 ## Fonts
 

@@ -15,16 +15,50 @@ import sys
 import time
 import webbrowser
 
-PORT = 8000
-URL = f"http://127.0.0.1:{PORT}"
 ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
-def port_open(port):
+def _bind():
+    """`(host, port)` the backend should bind, from the app's config.
+
+    Read from config.json rather than hardcoded, because `server_host` is also
+    what decides whether the login gate applies (server/auth.py): a user who
+    sets `server_host` to a LAN address and finds the launcher still binding
+    loopback would have configured remote access that never happens — and a
+    gate that never turns on.
+    """
+    host, port = "127.0.0.1", 8000
+    try:
+        if ROOT not in sys.path:
+            sys.path.insert(0, ROOT)
+        from mlo.config import load_config
+        cfg = load_config()
+        host = str(cfg.get("server_host") or host).strip() or host
+        port = int(cfg.get("server_port") or port)
+    except Exception:
+        pass
+    return host, port
+
+
+def _dialable(host):
+    """A concrete address for the health probe and the browser.
+
+    A wildcard bind ("0.0.0.0", "::") answers on every interface and cannot be
+    dialled as written, so the probe uses loopback — the backend is always on
+    this machine, whatever else it also listens on.
+    """
+    return "127.0.0.1" if host in ("0.0.0.0", "::", "*", "") else host
+
+
+HOST, PORT = _bind()
+URL = f"http://{_dialable(HOST)}:{PORT}"
+
+
+def port_open(port, host="127.0.0.1"):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(0.5)
         try:
-            s.connect(("127.0.0.1", port))
+            s.connect((host, port))
             return True
         except OSError:
             return False
@@ -80,7 +114,7 @@ def main():
         try:
             subprocess.Popen(
                 [sys.executable, "-m", "uvicorn", "server.main:app",
-                 "--host", "127.0.0.1", "--port", str(PORT)],
+                 "--host", HOST, "--port", str(PORT)],
                 cwd=ROOT,
                 creationflags=flags,
                 stdout=subprocess.DEVNULL,

@@ -49,6 +49,27 @@ def _set(**fields):
         _state.update(fields)
 
 
+def _wish_found(wish):
+    """Announce a wish that the pipeline just filled.
+
+    This is the notification the whole feature exists for: the user added a
+    release to the wishlist days ago and it just landed, so every client is
+    told (see server/events.py) and the phone in the other room can say so.
+    Never raises — a notification must not fail the import that earned it.
+    """
+    try:
+        from server import events
+        artist = str(wish.get("artist") or "").strip()
+        title = str(wish.get("title") or "").strip()
+        label = f"{artist} — {title}" if artist and title else (title or artist or "Wish")
+        events.emit("wish_found", f"Wish found: {label}",
+                    "It downloaded and imported into your library.",
+                    {"wish_id": wish.get("id"),
+                     "release_mbid": str(wish.get("release_mbid") or "")})
+    except Exception:
+        traceback.print_exc()
+
+
 def _job_running():
     try:
         from server import soulseek_auto
@@ -131,6 +152,7 @@ def _run_one(wish, cfg):
             resolved = wishes.reconcile_with_library(cfg)
             if not resolved:
                 wishes.mark_imported(wid, "")
+                _wish_found(wish)
             return "imported"
         if "already queued" in low or "already running" in low or "being imported" in low:
             # Transient pipeline contention, not a failed attempt: leave the
@@ -151,6 +173,7 @@ def _run_one(wish, cfg):
     result = st.get("result") or {}
     if st.get("state") == "done" and result.get("imported"):
         wishes.mark_imported(wid, result.get("album_path") or "")
+        _wish_found(wish)
         # the library changed — drop caches so the UI sees the new album
         try:
             from server import tagcache, mbresolve

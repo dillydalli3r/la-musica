@@ -142,7 +142,7 @@ export default function PlaylistsPage() {
 
       {smart.length > 0 && (
         <div className="space-y-3">
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-zinc-500">Smart playlists</h2>
+          <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Smart playlists</h2>
           {cardGrid(smart)}
         </div>
       )}

@@ -16,6 +16,49 @@ self.addEventListener("install", () => {
   self.skipWaiting();
 });
 
+/** Web Push.
+ *
+ *  The app's own notifications (a found wish, a finished download) are raised
+ *  by the page over the /ws/events socket — see web/src/lib/notify.ts — because
+ *  this server is self-hosted and has no VAPID key pair to sign a real push
+ *  with. These two handlers exist so that a push subscription, if a deployment
+ *  ever adds one, needs no client change: the frame is the same shape the
+ *  socket carries, so the same wording reaches the user, with the app closed.
+ */
+self.addEventListener("push", (event) => {
+  let frame = { title: "la musica", body: "" };
+  try {
+    const data = event.data ? event.data.json() : null;
+    if (data) frame = { title: data.title || frame.title, body: data.body || "" };
+  } catch {
+    if (event.data) frame.body = event.data.text();
+  }
+  event.waitUntil(
+    self.registration.showNotification(frame.title, {
+      body: frame.body,
+      icon: "/icon.png",
+      badge: "/icon.png",
+      tag: "mlo-push",
+    })
+  );
+});
+
+/** Clicking a notification focuses the app instead of opening a second copy —
+ *  or opens one when none is running. */
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(
+    (async () => {
+      const all = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      for (const client of all) {
+        if ("focus" in client) return client.focus();
+      }
+      if (self.clients.openWindow) return self.clients.openWindow("/");
+      return undefined;
+    })()
+  );
+});
+
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     (async () => {
@@ -102,6 +145,9 @@ const API_PATHS = new Set([
   "/api/config",
   "/api/album",
   "/api/artist",
+  // The credit rows of an album page: warmed by lib/mediaCache's entityUrls
+  // with the download, so a cached album keeps its "who played what" offline.
+  "/api/credits",
 ]);
 
 /** Build output never changes under a given name (the names are hashed), so

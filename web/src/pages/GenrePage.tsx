@@ -80,7 +80,7 @@ export default function GenrePage() {
         />
       ) : filter.trim() ? (
         <div className="panel">
-          <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500 pb-2">
+          <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500 pb-2">
             {match.length} matching genre{match.length === 1 ? "" : "s"}
           </div>
           <div className="flex flex-wrap gap-1.5">{match.map((g) => chip(g.name, g.count))}</div>

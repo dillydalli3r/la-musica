@@ -1,15 +1,19 @@
 name: Release
 
 # Creating a v* tag runs CI first and only then builds the web frontend,
-# publishes a GitHub release with the packaged source zip
+# publishes a GitHub release carrying the packaged source zip
 # (la-musica-<version>-windows-x64.zip: mlo/, server/, tools/, web/dist,
-# start_app.py, tray.py), and pushes a Docker image to GHCR. The tag is checked
-# against mlo/__init__.py first: the app reports that version, so a mistagged
-# release would ship two different answers to "which version is this?".
+# start_app.py, tray.py) plus the desktop bundles (Windows/macOS/Linux) and
+# the mobile builds (an unsigned Android APK and an unsigned iOS IPA — see
+# .github/workflows/mobile.yml for why they cannot be signed here), and pushes
+# a Docker image to GHCR. The tag is checked against mlo/__init__.py first: the
+# app reports that version, so a mistagged release would ship two different
+# answers to "which version is this?".
 # There is no in-app updater (desktop/src-tauri/tauri.conf.json configures no
-# updater plugin/endpoints/pubkey), so a release is consumed by downloading
-# the zip or pulling the image; the draft/prerelease flags below are just the
-# default "this is a real release" choice.
+# updater plugin/endpoints/pubkey), so a release is consumed by downloading an
+# installer/zip, sideloading the mobile build, or pulling the image; the
+# draft/prerelease flags below are just the default "this is a real release"
+# choice.
 
 on:
   push:
@@ -26,8 +30,24 @@ jobs:
   ci:
     uses: ./.github/workflows/ci.yml
 
-  release:
+  # The client bundles, built from the same reusable workflows the manual runs
+  # use. They are `continue-on-error` on purpose: a tag should still publish
+  # the app (source zip + Docker image) when a platform's own toolchain is
+  # having a bad day, and the failing job is red in the run either way. The
+  # artifacts that did build are attached; the check below says which are
+  # missing rather than pretending the release is complete.
+  desktop:
     needs: ci
+    continue-on-error: true
+    uses: ./.github/workflows/desktop.yml
+
+  mobile:
+    needs: ci
+    continue-on-error: true
+    uses: ./.github/workflows/mobile.yml
+
+  release:
+    needs: [ci, desktop, mobile]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -113,11 +133,37 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Collect the desktop and mobile builds
+        # The reusable workflows upload their bundles as artifacts of THIS run
+        # (a called workflow's artifacts belong to the caller's run), so the
+        # installers and the mobile builds ride along with the release instead
+        # of expiring in the run's artifact list.
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          path: clients
+          merge-multiple: true
+
+      - name: List what will be published
+        # Loud, not fatal: the release must exist (the source zip and the
+        # Docker image are enough to install la musica), so a missing client
+        # bundle is an annotation naming what failed — the red job group above
+        # is where the reason lives — rather than a reason to publish nothing.
+        run: |
+          find clients -type f 2>/dev/null | sort || true
+          for want in Windows macOS Linux android ios-unsigned; do
+            if ! find clients -type f -name "*${want}*" -print -quit 2>/dev/null | grep -q .; then
+              echo "::warning::no ${want} build in this release — see the desktop/mobile jobs for why"
+            fi
+          done
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           name: la musica ${{ github.ref_name }}
           generate_release_notes: true
-          files: la-musica-*-windows-x64.zip
+          files: |
+            la-musica-*-windows-x64.zip
+            clients/**
           draft: false
           prerelease: false

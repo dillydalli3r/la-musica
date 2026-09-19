@@ -1,0 +1,173 @@
+name: Mobile bundles
+
+# Android APK and iOS IPA. Both jobs generate their native project in CI
+# (`tauri android init` / `tauri ios init` write into desktop/src-tauri/gen/),
+# because a generated Gradle / Xcode project cannot be maintained, or even
+# opened, on a machine without the Android SDK or Xcode — and this repository
+# carries none of the SDK, NDK, provisioning profile or signing identity those
+# projects need.
+#
+# Reusable (`release.yml` can call it) and manually dispatchable.
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop/package-lock.json
+
+      - name: Set up JDK 17
+        # The Android Gradle Plugin in tauri's generated project expects a
+        # JDK 17 toolchain; a newer JDK is what breaks AGP, not the Rust side.
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up the Android SDK
+        # Installs the command-line tools and exports ANDROID_HOME, which both
+        # the generated Gradle project and tauri's Rust→Android linker setup
+        # read.
+        uses: android-actions/setup-android@v3
+
+      - name: Set up the Android NDK
+        # The NDK is what cross-links the Rust code for the Android targets
+        # (cargo has no linker of its own for those). This is the same action
+        # tauri's own CI uses; the version is pinned rather than "latest" so a
+        # new NDK release cannot change the build under us.
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27
+          add-to-path: false
+
+      - name: Add the Android Rust targets
+        run: rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+
+      - name: npm ci (web)
+        working-directory: web
+        run: npm ci
+
+      - name: npm ci (desktop)
+        working-directory: desktop
+        run: npm ci
+
+      - name: Initialize the Android project
+        # Generated, never committed: `--ci` (the runner sets CI anyway) skips
+        # the prompts about the package name and target archs.
+        working-directory: desktop
+        run: npx tauri android init --ci
+
+      - name: Build the APK
+        working-directory: desktop
+        env:
+          NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: npx tauri android build --apk
+
+      - name: Upload the APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: la-musica-android
+          # tauri names this artifact app-universal-release-unsigned.apk: a
+          # release APK is only signed when gen/android/keystore.properties
+          # exists, and that file holds a keystore which is generated locally
+          # and never committed. An unsigned APK cannot be installed by a
+          # device as-is — it needs re-signing (apksigner with a release
+          # keystore, see desktop/README.md). For an installable build straight
+          # out of CI, swap the build step to `--apk --debug`, which signs with
+          # the SDK's debug key.
+          if-no-files-found: error
+          path: desktop/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop/package-lock.json
+
+      - name: Ensure CocoaPods
+        # tauri ios init generates the Xcode project; its dependencies are
+        # resolved by CocoaPods, which the runner image already ships. Guarded
+        # so an image without it still builds.
+        run: command -v pod >/dev/null || brew install cocoapods
+
+      - name: Add the iOS Rust targets
+        run: rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+
+      - name: npm ci (web)
+        working-directory: web
+        run: npm ci
+
+      - name: npm ci (desktop)
+        working-directory: desktop
+        run: npm ci
+
+      - name: Initialize the iOS project
+        working-directory: desktop
+        run: npx tauri ios init --ci
+
+      - name: Build the unsigned app
+        # No signing identity here: the repository carries no Apple
+        # certificate, provisioning profile or team id, and an unsigned build
+        # is all that can be produced from them without a secret. `--no-sign`
+        # skips the whole export/signing stage, and the CODE_SIGNING_* vars
+        # disable it inside xcodebuild as well (belt and braces: the flag only
+        # exists from tauri-cli 2.11, which desktop/package-lock.json pins).
+        working-directory: desktop
+        env:
+          CODE_SIGNING_ALLOWED: "NO"
+          CODE_SIGNING_REQUIRED: "NO"
+          CODE_SIGN_IDENTITY: ""
+        run: npx tauri ios build --target aarch64-apple-ios --no-sign
+
+      - name: Package the .app into an unsigned .ipa
+        # An .ipa is a zip with the app bundle inside a Payload/ directory and
+        # nothing else — no signing identity is involved in producing one.
+        #
+        # `tauri ios build` already writes its own IPA (an ad-hoc-signed one
+        # under gen/apple/build/arm64/<name>.ipa), so that is used when it
+        # exists. Otherwise the .app is packaged by hand: the CLI archives to
+        # <build>/<scheme>.xcarchive/Products/Applications/<name>.app, i.e.
+        # four levels below gen/apple/build — a shallower search finds nothing
+        # and fails the job, which would block the whole release.
+        working-directory: desktop
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          OUT="la-musica_${VERSION}_ios-unsigned.ipa"
+          BUILT="$(find src-tauri/gen/apple/build -maxdepth 3 -name '*.ipa' -type f | head -1)"
+          if [ -n "$BUILT" ]; then
+            echo "using the IPA the CLI produced: $BUILT"
+            cp "$BUILT" "$OUT"
+          else
+            APP="$(find src-tauri/gen/apple/build -maxdepth 6 -name '*.app' -type d | head -1)"
+            test -n "$APP" || { echo "::error::tauri ios build produced no .app"; exit 1; }
+            rm -rf Payload && mkdir Payload && cp -R "$APP" Payload/
+            zip -qry "$OUT" Payload
+            rm -rf Payload
+          fi
+          ls -l "$OUT"
+
+      - name: Upload the unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: la-musica-ios-unsigned
+          if-no-files-found: error
+          path: desktop/la-musica_*_ios-unsigned.ipa

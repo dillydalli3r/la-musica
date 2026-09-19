@@ -46,18 +46,21 @@ function artworkUrls(trackPath: string): string[] {
 }
 
 /** The JSON a downloaded track needs offline: its album payload (description,
- *  credits-of-the-page, cover reference — the album page's body) and its
- *  artist payload. MusicBrainz credit ROWS are not part of either (they come
- *  from /api/credits, which needs the network), so the credits menu is the one
- *  part of an album page that needs the server. Same shape of GET as artwork,
- *  and the service worker serves them from this cache too, so an album page
- *  opens with the server down.
- *  The URLs must stay identical to `api.album()` / `api.artist()`. */
+ *  cover reference, the graded rows — the album page's body), its artist
+ *  payload (bio, the artist image's identity) and the credit ROWS for the
+ *  track's album (who played what — a separate endpoint, and the one part of
+ *  an album page the server used to be needed for). Same shape of GET as
+ *  artwork, and the service worker serves them from this cache too, so an
+ *  album page opens with the server down.
+ *  The URLs must stay identical to `api.album()` / `api.artist()` /
+ *  `api.credits()` — keyed on the same `path=`/`album=` the pages ask with,
+ *  or the cache is filled with entries nothing ever reads. */
 function entityUrls(trackPath: string): string[] {
   const album = parentDir(trackPath);
   return [
     absolute(`/api/album?path=${encodeURIComponent(album)}`),
     absolute(`/api/artist?path=${encodeURIComponent(parentDir(album))}`),
+    absolute(`/api/credits?album=${encodeURIComponent(album)}`),
   ];
 }
 
@@ -157,8 +160,9 @@ export async function pruneEntityPayloads(): Promise<void> {
     } catch {
       continue;
     }
-    if (url.pathname !== "/api/album" && url.pathname !== "/api/artist") continue;
-    if (!keep.has(url.searchParams.get("path") || "")) await c.delete(u);
+    const key = url.pathname === "/api/credits" ? "album" : "path";
+    if (!["/api/album", "/api/artist", "/api/credits"].includes(url.pathname)) continue;
+    if (!keep.has(url.searchParams.get(key) || "")) await c.delete(u);
   }
 }
 
@@ -195,7 +199,8 @@ export async function cachedPaths(): Promise<string[]> {
   for (const u of await cachedUrls()) {
     try {
       const url = new URL(u);
-      if (url.pathname === "/api/album" || url.pathname === "/api/artist") continue;
+      if (url.pathname === "/api/album" || url.pathname === "/api/artist"
+          || url.pathname === "/api/credits") continue;
       const p = url.searchParams.get("path");
       if (p) paths.add(p);
     } catch {

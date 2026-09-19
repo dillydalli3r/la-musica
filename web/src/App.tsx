@@ -2,17 +2,19 @@ import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowDownUp, ChevronLeft, ChevronRight, ClipboardCheck, Disc3, Download, Gauge, HardDriveDownload, Heart, Home, Import,
+  ArrowDownUp, ChevronLeft, ChevronRight, ClipboardCheck, Disc3, Download, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
   Keyboard, Library, ListMusic, Menu, Music2, PanelLeftClose, Search, Tags, Trash2, User, X,
   Settings as SettingsIcon, Wrench,
 } from "lucide-react";
-import { api } from "./api";
+import { api, getToken, IN_TAURI, onAuthLost, serverUrl } from "./api";
 import type { Library as LibraryData } from "./types";
 import type { LucideIcon } from "lucide-react";
 import { albumRef, artistRef, trackRef } from "./lib/refs";
 import { useStore } from "./store";
 import CreditsFooter from "./components/Credits";
+import NotificationBell from "./components/NotificationBell";
 import ShortcutsOverlay from "./components/Shortcuts";
+import { applyConfigLocale, useI18n, type MessageKey } from "./lib/i18n";
 
 // Route-level code splitting: only the landing page ships in the initial
 // bundle, every other page is fetched on first visit. Without this the whole
@@ -36,6 +38,10 @@ const DependenciesPage = lazy(() => import("./pages/DependenciesPage"));
 const GenrePage = lazy(() => import("./pages/GenrePage"));
 const DownloadsPage = lazy(() => import("./pages/DownloadsPage"));
 const ImportWizard = lazy(() => import("./pages/ImportWizard"));
+const DonationsPage = lazy(() => import("./pages/DonationsPage"));
+// Not lazy: the sign-in screen is what a signed-out client sees FIRST, and a
+// chunk fetch that itself needs the server would be a poor greeting.
+import LoginPage from "./pages/LoginPage";
 
 import PlayerBar from "./components/PlayerBar";
 import { ProgressInline } from "./components/ProgressBar";
@@ -44,34 +50,38 @@ import { ProgressInline } from "./components/ProgressBar";
 // rail groups them by what the user is doing (browse / acquire / maintain)
 // and renders a label above each group. Collapsed, the labels give way to a
 // hairline divider so the rail stays a clean icon column.
-const NAV_GROUPS = [
+const NAV_GROUPS: { labelKey: MessageKey; items: { to: string; labelKey: MessageKey; icon: LucideIcon; end: boolean }[] }[] = [
   {
-    label: "Library",
+    labelKey: "nav.group.library",
     items: [
-      { to: "/", label: "Home", icon: Home, end: true },
-      { to: "/library", label: "Library", icon: Library, end: false },
-      { to: "/genres", label: "Genres", icon: Tags, end: true },
-      { to: "/trash", label: "Trash", icon: Trash2, end: true },
-      { to: "/playlists", label: "Playlists", icon: ListMusic, end: false },
-      { to: "/favorites", label: "Favorites", icon: Heart, end: false },
-      { to: "/downloads", label: "Downloads", icon: Download, end: true },
+      { to: "/", labelKey: "nav.home", icon: Home, end: true },
+      { to: "/library", labelKey: "nav.library", icon: Library, end: false },
+      { to: "/genres", labelKey: "nav.genres", icon: Tags, end: true },
+      { to: "/trash", labelKey: "nav.trash", icon: Trash2, end: true },
+      { to: "/playlists", labelKey: "nav.playlists", icon: ListMusic, end: false },
+      { to: "/favorites", labelKey: "nav.favorites", icon: Heart, end: false },
+      { to: "/downloads", labelKey: "nav.downloads", icon: Download, end: true },
     ],
   },
   {
-    label: "Discover",
+    labelKey: "nav.group.discover",
     items: [
-      { to: "/import", label: "Import", icon: Import, end: false },
-      { to: "/soulseek", label: "Soulseek", icon: ArrowDownUp, end: false },
-      { to: "/export", label: "Export", icon: HardDriveDownload, end: false },
+      { to: "/import", labelKey: "nav.import", icon: Import, end: false },
+      { to: "/soulseek", labelKey: "nav.soulseek", icon: ArrowDownUp, end: false },
+      { to: "/export", labelKey: "nav.export", icon: HardDriveDownload, end: false },
     ],
   },
   {
-    label: "Maintain",
+    labelKey: "nav.group.maintain",
     items: [
-      { to: "/optimize", label: "Optimization", icon: Gauge, end: false },
-      { to: "/grading", label: "Grading", icon: ClipboardCheck, end: false },
-      { to: "/dependencies", label: "Dependencies", icon: Wrench, end: false },
-      { to: "/settings", label: "Settings", icon: SettingsIcon, end: false },
+      { to: "/optimize", labelKey: "nav.optimize", icon: Gauge, end: false },
+      { to: "/grading", labelKey: "nav.grading", icon: ClipboardCheck, end: false },
+      { to: "/dependencies", labelKey: "nav.dependencies", icon: Wrench, end: false },
+      { to: "/settings", labelKey: "nav.settings", icon: SettingsIcon, end: false },
+      // The donation page sits with the app's own pages rather than in a
+      // footer: it is a page like any other, and a user who wants to support
+      // the project should not have to hunt for it.
+      { to: "/donations", labelKey: "nav.donations", icon: HeartHandshake, end: true },
     ],
   },
 ];
@@ -142,6 +152,7 @@ function SlskIconDot({ dot }: { dot: { cls: string; tip: string; name?: string |
 /** Shown while a lazy route's chunk downloads. Inlined (no spinner
  * library) so the fallback itself is part of the initial bundle. */
 function PageLoading() {
+  const { t } = useI18n();
   return (
     <div className="p-6 max-w-6xl mx-auto animate-pulse" aria-busy="true" aria-live="polite">
       <div className="h-7 w-52 rounded bg-raise" />
@@ -150,7 +161,7 @@ function PageLoading() {
           <div key={i} className="h-28 rounded-lg border border-border bg-card" />
         ))}
       </div>
-      <span className="sr-only">Loading page…</span>
+      <span className="sr-only">{t("loading.page")}</span>
     </div>
   );
 }
@@ -180,10 +191,40 @@ function SearchHit({ to, icon: Icon, label, hint, onGo }: {
 export default function App() {
   const { progress, setProgress, toasts, dismissToast, query, setQuery } = useStore();
   const qc = useQueryClient();
+  const { t } = useI18n();
   const progressClear = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   // The shortcut sheet: opened by "?" or the keyboard button in the top bar.
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+
+  // ---- the login gate -----------------------------------------------------
+  // `signedOut` is set by api.ts when any request comes back 401: the session
+  // expired, the server's password changed, or "sign out everywhere" was
+  // pressed elsewhere. Re-checking the server's status on that edge is what
+  // decides between the login screen and the first-run "claim this server"
+  // screen — the page must not guess which one the user needs.
+  const [signedOut, setSignedOut] = useState(false);
+  const auth = useQuery({
+    queryKey: ["auth", "status"],
+    queryFn: api.authStatus,
+    retry: false,
+    refetchInterval: 60000,
+    refetchIntervalInBackground: false,
+  });
+  useEffect(() => onAuthLost(() => setSignedOut(true)), []);
+  useEffect(() => {
+    if (signedOut) void auth.refetch();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signedOut]);
+  // Three ways in, and the third is the one a phone hits first: a client shell
+  // whose status query FAILED has no server to talk to, and the only screen
+  // that can set one is the login page (it owns the server-address field) —
+  // without this, a fresh mobile install renders the whole shell with every
+  // request erroring and no way to point it anywhere. Once an address answers,
+  // the 60s poll resolves `isError` and the gate opens by itself.
+  const needsLogin = signedOut
+    || (IN_TAURI && auth.isError)
+    || (!!auth.data?.required && !auth.data.authenticated);
 
   // Global keyboard shortcuts. The player owns its own transport keys
   // (Space, arrows, brackets — see PlayerBar) and this layer deliberately adds
@@ -216,6 +257,13 @@ export default function App() {
 
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   const slskDot = useSlskDot();
+
+  // The server's `ui_locale` is the app-wide language; this browser's own pick
+  // (if any) wins, and i18n.ts owns that precedence — this only hands it the
+  // config once it arrives.
+  useEffect(() => {
+    if (config) applyConfigLocale(config as { ui_locale?: string });
+  }, [config]);
 
   // ---- navigation history (top-bar back / forward) ------------------------
   const location = useLocation();
@@ -360,14 +408,24 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const inTauri = !!(window as any).__TAURI_INTERNALS__;
-    // window.location (not the router's location object) — this is a URL.
-    const wsBase = inTauri ? "ws://127.0.0.1:8000" : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`;
+    // The progress socket must reach the SAME server the API does — the
+    // shell's configured address, or this page's own origin. Hardcoding
+    // 127.0.0.1:8000 (as this did) left every phone pointed at a LAN server
+    // with no progress bars at all.
+    const base = serverUrl();
+    const wsBase = base
+      ? base.replace(/^http/, "ws")
+      : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`;
+    // This socket is gated like every other API surface, and a WebSocket
+    // handshake cannot carry an Authorization header — so the session token
+    // rides the query string (same rule as /ws/events; see lib/notify.ts).
+    const token = getToken();
+    const progressUrl = `${wsBase}/ws/progress${token ? `?token=${encodeURIComponent(token)}` : ""}`;
     let alive = true;
     let ws: WebSocket | null = null;
     let retry: ReturnType<typeof setTimeout> | undefined;
     const connect = () => {
-      ws = new WebSocket(`${wsBase}/ws/progress`);
+      ws = new WebSocket(progressUrl);
       ws.onmessage = (e) => {
         try {
           const p = JSON.parse(e.data);
@@ -410,6 +468,20 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The gate comes before the first-run wizard: an unclaimed remote server has
+  // no config to show anyone yet, and every route below would answer 428.
+  if (needsLogin) {
+    return (
+      <LoginPage
+        onSignedIn={() => {
+          setSignedOut(false);
+          void auth.refetch();
+          void qc.invalidateQueries();
+        }}
+      />
+    );
+  }
+
   // First-run gate: setup not completed → setup wizard. Only first_run_done
   // is checked — an empty music folder is a normal unconfigured state, so the
   // setup page's "Skip for now" leaves Settings (and the app) reachable.
@@ -441,7 +513,7 @@ export default function App() {
           <button
             className="shrink-0 rounded-md cursor-pointer hover:bg-raise p-0.5 -ml-0.5"
             onClick={toggleCollapse}
-            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            title={collapsed ? t("sidebar.expand") : t("sidebar.collapse")}
           >
             <img
               src="/icon.png"
@@ -464,29 +536,29 @@ export default function App() {
             <button
               className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-raise transition-colors"
               onClick={toggleCollapse}
-              title="Collapse sidebar"
+              title={t("sidebar.collapse")}
             >
               <PanelLeftClose className="h-4 w-4" />
             </button>
           </span>
         </div>
         {NAV_GROUPS.map((group) => (
-          <div key={group.label} className="flex flex-col gap-1">
+          <div key={group.labelKey} className="flex flex-col gap-1">
             {/* Section label: fades to a hairline divider when collapsed, so
                 the rail keeps its rhythm without a jump in icon positions. */}
             {collapsed ? (
               <div className="mx-2 my-1 border-t border-border/60" />
             ) : (
               <div className="px-3 pt-2 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
-                {group.label}
+                {t(group.labelKey)}
               </div>
             )}
-            {group.items.map(({ to, label, icon: Icon, end }) => (
+            {group.items.map(({ to, labelKey, icon: Icon, end }) => (
               <NavLink
                 key={to}
                 to={to}
                 end={end}
-                title={collapsed ? label : undefined}
+                title={collapsed ? t(labelKey) : undefined}
                 className={({ isActive }) =>
                   // Monochrome-style: the active entry is a solid accent block
                   // with contrast text; inactive ones stay quiet. The label
@@ -510,7 +582,7 @@ export default function App() {
                   }`}
                 >
                   {/* the tab always reads "Soulseek"; the account name is in the dot tooltip */}
-                  {label}
+                  {t(labelKey)}
                 </span>
               </NavLink>
             ))}
@@ -531,7 +603,7 @@ export default function App() {
           <aside
             role="dialog"
             aria-modal="true"
-            aria-label="Site navigation"
+            aria-label={t("topbar.menu_open")}
             className="anim-pop fixed left-0 top-0 bottom-0 z-50 w-52 bg-panel border-r border-border p-2 flex flex-col gap-1 overflow-y-auto md:hidden shadow-2xl"
           >
             <div className="flex items-center gap-2 border-b border-border pb-2 mb-1 px-1">
@@ -541,18 +613,18 @@ export default function App() {
                 ref={navCloseRef}
                 className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-raise transition-colors"
                 onClick={() => setNavOpen(false)}
-                title="Close menu"
-                aria-label="Close navigation menu"
+                title={t("topbar.menu_close")}
+                aria-label={t("topbar.menu_close")}
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
             {NAV_GROUPS.map((group) => (
-              <div key={group.label} className="flex flex-col gap-1">
+              <div key={group.labelKey} className="flex flex-col gap-1">
                 <div className="px-3 pt-2 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
-                  {group.label}
+                  {t(group.labelKey)}
                 </div>
-                {group.items.map(({ to, label, icon: Icon, end }) => (
+                {group.items.map(({ to, labelKey, icon: Icon, end }) => (
                   <NavLink
                     key={to}
                     to={to}
@@ -570,7 +642,7 @@ export default function App() {
                       <Icon className="h-4 w-4 shrink-0" />
                       {to === "/soulseek" && <SlskIconDot dot={slskDot} />}
                     </span>
-                    <span className="whitespace-nowrap">{label}</span>
+                    <span className="whitespace-nowrap">{t(labelKey)}</span>
                   </NavLink>
                 ))}
               </div>
@@ -591,8 +663,8 @@ export default function App() {
               ref={navTriggerRef}
               className="h-9 w-9 rounded-full border border-border bg-panel/60 backdrop-blur flex md:hidden items-center justify-center text-zinc-300 hover:text-white hover:border-accent/50 transition-colors"
               onClick={() => setNavOpen(true)}
-              title="Menu"
-              aria-label="Open navigation menu"
+              title={t("topbar.menu")}
+              aria-label={t("topbar.menu_open")}
               aria-expanded={navOpen}
             >
               <Menu className="h-4 w-4" />
@@ -601,7 +673,7 @@ export default function App() {
               className="h-9 w-9 rounded-full border border-border bg-panel/60 backdrop-blur flex items-center justify-center text-zinc-300 hover:text-white hover:border-accent/50 disabled:opacity-30 disabled:pointer-events-none transition-colors"
               onClick={goBack}
               disabled={pos === 0}
-              title="Back"
+              title={t("topbar.back")}
             >
               <ChevronLeft className="h-4 w-4" />
             </button>
@@ -609,18 +681,21 @@ export default function App() {
               className="h-9 w-9 rounded-full border border-border bg-panel/60 backdrop-blur hidden sm:flex items-center justify-center text-zinc-300 hover:text-white hover:border-accent/50 disabled:opacity-30 disabled:pointer-events-none transition-colors"
               onClick={goForward}
               disabled={pos >= stackRef.current.length - 1}
-              title="Forward"
+              title={t("topbar.forward")}
             >
               <ChevronRight className="h-4 w-4" />
             </button>
             <button
               className="h-9 w-9 rounded-full border border-border bg-panel/60 backdrop-blur hidden sm:flex items-center justify-center text-zinc-300 hover:text-white hover:border-accent/50 transition-colors"
               onClick={() => setShortcutsOpen(true)}
-              title="Keyboard shortcuts (?)"
-              aria-label="Keyboard shortcuts"
+              title={t("topbar.shortcuts") + " (?)"}
+              aria-label={t("topbar.shortcuts")}
             >
               <Keyboard className="h-4 w-4" />
             </button>
+            {/* Notifications sit with the shell's own controls: the bell is
+                also what opens the /ws/events socket (lib/notify.ts). */}
+            <NotificationBell />
           </div>
           {/* the search input spans the rest of the bar */}
           <div className="relative flex-1 pointer-events-auto">
@@ -628,7 +703,7 @@ export default function App() {
             <input
               ref={searchRef}
               className="input !py-2 !pl-10 text-xs w-full !bg-panel/60 backdrop-blur"
-              placeholder="Search for tracks, artists, albums…"
+              placeholder={t("topbar.search")}
               title="Tag-scoped search: composer:name · person:name (any credit) · genre:metal · tag:anything — quotes keep spaces · press / to jump here"
               value={query}
               onChange={(e) => onSearch(e.target.value)}
@@ -653,7 +728,7 @@ export default function App() {
                     to={artistRef(a)}
                     icon={User}
                     label={a.display_name || a.name}
-                    hint="Artist"
+                    hint={t("page.artist")}
                     onGo={() => setSearchOpen(false)}
                   />
                 ))}
@@ -663,17 +738,17 @@ export default function App() {
                     to={albumRef(al)}
                     icon={Disc3}
                     label={al.meta?.ALBUM ?? al.path}
-                    hint="Album"
+                    hint={t("page.album")}
                     onGo={() => setSearchOpen(false)}
                   />
                 ))}
-                {hits.tracks.map(({ al, t }) => (
+                {hits.tracks.map(({ al, t: tr }) => (
                   <SearchHit
-                    key={t.path}
-                    to={trackRef(t)}
+                    key={tr.path}
+                    to={trackRef(tr)}
                     icon={Music2}
-                    label={t.tags?.TITLE ?? t.file}
-                    hint={al.album_artist || "Track"}
+                    label={tr.tags?.TITLE ?? tr.file}
+                    hint={al.album_artist || t("page.track")}
                     onGo={() => setSearchOpen(false)}
                   />
                 ))}
@@ -720,13 +795,14 @@ export default function App() {
                 one-shot gate — Settings → General opens it again. Every step
                 is skippable and it only writes what is entered there. */}
             <Route path="/setup" element={<SetupPage />} />
+            <Route path="/donations" element={<DonationsPage />} />
             <Route
               path="*"
               element={
                 <div className="p-10 text-center text-sm text-zinc-500">
-                  Page not found —{" "}
+                  {t("page.not_found")} —{" "}
                   <NavLink to="/library" className="text-accent-soft hover:underline">
-                    back to the library
+                    {t("nav.library")}
                   </NavLink>
                 </div>
               }
@@ -747,24 +823,24 @@ export default function App() {
         className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 flex flex-col items-center gap-2 w-[min(92vw,30rem)] pointer-events-none"
         aria-live="polite"
       >
-        {toasts.map((t) => (
+        {toasts.map((item) => (
           <div
-            key={t.id}
-            role={t.severity === "error" ? "alert" : "status"}
+            key={item.id}
+            role={item.severity === "error" ? "alert" : "status"}
             className={`toast-in pointer-events-auto flex items-start gap-2 w-full rounded-lg border px-3.5 py-2 text-sm shadow-xl backdrop-blur ${
-              t.severity === "error"
+              item.severity === "error"
                 ? "border-red-900/70 bg-red-950/85 text-red-100"
-                : t.severity === "success"
+                : item.severity === "success"
                 ? "border-emerald-900/70 bg-emerald-950/85 text-emerald-100"
                 : "border-accent/40 bg-panel/95 text-zinc-200"
             }`}
           >
-            <span className="flex-1 min-w-0 break-words">{t.message}</span>
+            <span className="flex-1 min-w-0 break-words">{item.message}</span>
             <button
               className="shrink-0 -mr-1 p-0.5 rounded opacity-70 hover:opacity-100"
-              onClick={() => dismissToast(t.id)}
-              title="Dismiss"
-              aria-label="Dismiss notification"
+              onClick={() => dismissToast(item.id)}
+              title={t("toast.dismiss")}
+              aria-label={t("toast.dismiss")}
             >
               <X className="h-3.5 w-3.5" />
             </button>

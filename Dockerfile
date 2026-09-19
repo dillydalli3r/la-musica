@@ -13,7 +13,8 @@ FROM python:3.12-slim AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    MLO_MUSIC_FOLDER=/music
+    MLO_MUSIC_FOLDER=/music \
+    MLO_SERVER_HOST=0.0.0.0
 
 # Core audio/image tools for the optimization pipeline. These are also the
 # Linux counterparts of the Windows-only downloads in mlo/fetchdeps.py

@@ -1952,3 +1952,74 @@ def import_completed(cfg=None, finish=False, progress=None):
                                              "chain": [], "errors":
                                              ["import chain crashed"]})
     return moved
+
+
+def ready_albums(cfg=None):
+    """Album folders in the download dir that `import_completed()` would move.
+
+    This is the list the Downloads page and the "Import all completed" button
+    work from, so it must answer the SAME question the mover does — minus the
+    moving. That means the same walk and the same rules: an album is a folder
+    holding an audio file (directly, or as its ONE parent when every child is
+    a disc folder), a folder whose transfers are still running is not ready,
+    and a folder holding only rip evidence is a leftover rather than an album.
+
+    Nothing here moves, renames or prunes anything: it is a read, and it is
+    called from a polling endpoint, so an incomplete download must simply be
+    absent from the list until slskd says it finished.
+    """
+    cfg = cfg or load_config()
+    ddir = download_dir(cfg)
+    if not ddir or not os.path.isdir(ddir):
+        return []
+    pending = _pending_album_folders(cfg)
+
+    def still_downloading(src):
+        if not pending:
+            return False
+        for base, _dirs, _files in os.walk(src):
+            if os.path.basename(base).lower() in pending:
+                return True
+        return False
+
+    def disc_parent(path):
+        from server.soulseek_auto import _disc_number
+        children = [c for c in sorted(os.listdir(path))
+                    if not c.startswith(".")
+                    and os.path.isdir(os.path.join(path, c))
+                    and _holds_album_files(os.path.join(path, c))]
+        return bool(children) and all(_disc_number(c) for c in children)
+
+    out = []
+
+    def walk(epath):
+        """Collect the album folders below `epath`, exactly as the importer
+        classifies them (see import_completed's take_tree)."""
+        for c in sorted(os.listdir(epath)):
+            if c.startswith("."):
+                continue
+            cpath = os.path.join(epath, c)
+            if not os.path.isdir(cpath) or os.path.islink(cpath):
+                continue
+            if not _holds_album_files(cpath) or not _holds_audio(cpath):
+                continue
+            if _holds_album_files(cpath, direct_only=True) or disc_parent(cpath):
+                if not still_downloading(cpath):
+                    out.append(cpath)
+            else:
+                walk(cpath)
+
+    for entry in sorted(os.listdir(ddir)):
+        if entry.startswith("."):
+            continue
+        epath = os.path.join(ddir, entry)
+        if not os.path.isdir(epath):
+            continue  # a loose file: the importer gathers those, nothing to name here
+        if not _holds_album_files(epath) or not _holds_audio(epath):
+            continue
+        if _holds_album_files(epath, direct_only=True) or disc_parent(epath):
+            if not still_downloading(epath):
+                out.append(epath)
+            continue
+        walk(epath)
+    return out

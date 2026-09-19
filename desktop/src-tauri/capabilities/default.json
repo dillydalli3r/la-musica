@@ -1,11 +1,13 @@
 {
   "$schema": "gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the main window",
+  "description": "Desktop capability for the main window (backend, tray, folder picker, notifications)",
+  "platforms": ["linux", "macOS", "windows"],
   "windows": ["main"],
   "permissions": [
     "core:default",
     "dialog:allow-open",
-    "dialog:allow-save"
+    "dialog:allow-save",
+    "notification:default"
   ]
 }

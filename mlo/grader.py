@@ -10,6 +10,14 @@ from .lyrics import (
     _lrc_for, _canonical_lyrics, format_lyrics_text, has_lyrics_text,
     text_meets_sync_level,
 )
+# The genre list rules and the lyric-transform need rule each live in ONE
+# module the writers already use (mlo.genres for the import / scripts 8, 10,
+# mlo.lyrics_xlit for script 17), so the grader can never disagree with what
+# those produce: it asks the same functions.
+from .genres import issues as genre_issues
+from .lyrics_xlit import (
+    XLIT_SIDECAR, dominant_script, primary_translation_lang, xlit_needs,
+)
 from .cue import canonical_cue_text
 from .naming import (DEFAULT_NAMING_SCRIPT, UNKNOWN_RELEASE_TYPE,
                      lookup_style_release_type, mb_style_release_type)
@@ -345,6 +353,64 @@ def _grade_lyrics_present(embedded, lrc, lyrics_format):
         return embedded and lrc
 
     return embedded
+
+
+def _sidecar_ok(path):
+    """Whether the sidecar file exists AND actually holds lyric text.
+
+    An empty file left behind by an aborted run is not a stored transform —
+    the same rule the lyrics-presence check above applies to a .lrc sidecar.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return has_lyrics_text(fh.read())
+    except OSError:
+        return False
+
+
+def _xlit_stored(af, ap, kind):
+    """Language detail of the stored *kind* transforms on this file.
+
+    One entry per non-empty tag — the language suffix it carries, or "" for
+    the bare legacy name — plus the accepted sidecars on disk, read exactly
+    the way script 17 writes them (``TRANSLITERATION-JA-LATN`` + the
+    ``.romaji.lrc`` sidecar, ``TRANSLATION-EN`` + ``<stem>.en.lrc``). Both
+    storage places count, so a transform that lives in the sidecar alone is
+    present; and the language the name carries is what makes a per-language
+    check possible — a translation stored under the WRONG language is a
+    mismatch the grader has to be able to name, not a silent pass.
+    """
+    found = set()
+    for key, val in (af.all_tags() or {}).items():
+        k = str(key).upper().rsplit(":", 1)[-1]
+        if not str(val or "").strip():
+            continue
+        if k == kind:
+            found.add("")
+        elif k.startswith(kind + "-") and len(k) > len(kind) + 1:
+            found.add(k[len(kind) + 1:].lower())
+    base = os.path.splitext(ap)[0]
+    if kind == "TRANSLITERATION":
+        # One sidecar, one spelling, no language in its name.
+        if _sidecar_ok(base + XLIT_SIDECAR):
+            found.add("")
+        return found
+    # Translations: every <stem>.<lang>.lrc next to the file. The plain
+    # <stem>.lrc is the lyrics sidecar, not a translation, and .romaji.lrc
+    # belongs to the transliteration pass — neither names a target language.
+    stem = os.path.basename(base).lower()
+    try:
+        entries = os.listdir(os.path.dirname(base) or ".")
+    except OSError:
+        entries = []
+    for entry in entries:
+        low = entry.lower()
+        if not low.startswith(stem + ".") or not low.endswith(".lrc") \
+                or low == stem + ".lrc" or low.endswith(XLIT_SIDECAR):
+            continue
+        if _sidecar_ok(os.path.join(os.path.dirname(base), entry)):
+            found.add(low[len(stem) + 1:-len(".lrc")])
+    return found
 
 
 def _zero_target_allows_grader(cfg, is_for_lrc: bool) -> bool:
@@ -1602,6 +1668,38 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 add_issue(f"Genre count: {shown}, {want} expected", basename)
                 track["issues"].append("GENRE_COUNT")
 
+        # Genre ORDER (grade_check_genre_order) — the hierarchy half of the
+        # same contract: the parent genre comes first and no slot repeats
+        # ("Rock / Alternative Rock / Post-Britpop"). The rules themselves
+        # live in mlo.genres, which the import and scripts 8/10 also apply, so
+        # the grader cannot fail a list those would leave alone.
+        #
+        # Only the order and duplicate lines are reported here. The count line
+        # belongs to the check above: with that toggle off, a wrong count is
+        # simply not graded — the same rule every other switch in this pass
+        # follows (a disabled check does not reappear under another code) — and
+        # the spaces line is already the GENRE presence check's.
+        if cfg.get("grade_check_genre_order", True) \
+                and should_write_audio_tag(cfg, "GENRE", filepath=ap):
+            total_checks += 1
+            try:
+                want = int(cfg.get("mb_genre_count") or DEFAULT_CONFIG["mb_genre_count"])
+            except (TypeError, ValueError):
+                want = int(DEFAULT_CONFIG["mb_genre_count"])
+            values = [v for v in (str(x).strip() for x in af.tag_values("GENRE")) if v]
+            if len(values) == 1 and ";" in values[0]:
+                values = [p.strip() for p in values[0].split(";") if p.strip()]
+            order_issues = [
+                msg for msg in genre_issues(values, want)
+                if not msg.startswith("Genre count:")
+                and not msg.startswith("Genre has ")
+            ]
+            if order_issues:
+                failed_checks += 1
+                for msg in order_issues:
+                    add_issue(msg, basename)
+                track["issues"].append("GENRE_ORDER")
+
         # Key & BPM (script 12 output) — required when the check is on.
         # Excess tags: anything NEITHER this pipeline's scripts NOR beets
         # would have written — the optimizer's strip pass would remove every
@@ -2088,6 +2186,76 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     "(expected e.g. TRANSLATION-EN, TRANSLITERATION-JA-LATN)",
                     basename)
                 track["issues"].append("LYRICS")
+
+        # Lyric TRANSFORMS that should and should not be there
+        # (grade_check_xlit_transliteration / grade_check_xlit_translation):
+        # script 17's output is auditable only if a transform that tells the
+        # reader nothing new fails like a missing one. Both sides ask
+        # mlo.lyrics_xlit.xlit_needs, so grading can never disagree with what
+        # the script would write for the same track. An instrumental carries no
+        # lyrics by definition — the app's own marker excludes it either way.
+        xlit_text = str(lyr or "") if embedded else ""
+        if not xlit_text.strip() and lrc:
+            try:
+                with open(_lrc_for(ap), "r", encoding="utf-8",
+                          errors="replace") as _f:
+                    xlit_text = _f.read()
+            except OSError:
+                xlit_text = ""
+        xlit_text = xlit_text.strip()
+        if xlit_text and inst_val != "1" \
+                and should_write_audio_tag(cfg, "LYRICS", filepath=ap):
+            need = xlit_needs(xlit_text, cfg)
+            reader = primary_translation_lang(cfg)
+            srclatin = dominant_script(xlit_text) == "latin"
+
+            if cfg.get("grade_check_xlit_transliteration", True):
+                total_checks += 1
+                have = _xlit_stored(af, ap, "TRANSLITERATION")
+                if need["transliteration"]:
+                    if not have:
+                        failed_checks += 1
+                        add_issue("TRANSLITERATION missing for non-Latin lyrics "
+                                  "(run Lyrics xlit/translate)", basename)
+                        track["issues"].append("XLIT_MISSING")
+                elif have:
+                    failed_checks += 1
+                    add_issue(
+                        "TRANSLITERATION present but the lyrics are "
+                        + ("already Latin script" if srclatin
+                           else f"already in the reader's script ({reader})"),
+                        basename)
+                    track["issues"].append("XLIT_UNNEEDED")
+
+            if cfg.get("grade_check_xlit_translation", True):
+                total_checks += 1
+                have = _xlit_stored(af, ap, "TRANSLATION")
+                if need["translation"]:
+                    missing = [l for l in need["langs"] if l not in have]
+                    if missing:
+                        failed_checks += 1
+                        if have:
+                            # A translation under another language is a
+                            # mismatch, not a pass: the message names both
+                            # sides so the fix is unambiguous (the tag to
+                            # write, and the one that is there instead).
+                            stored = ", ".join(
+                                "TRANSLATION-" + l.upper() for l in sorted(have) if l
+                            ) or "the bare TRANSLATION tag"
+                            add_issue(
+                                "TRANSLATION-" + "/".join(l.upper() for l in missing)
+                                + f" missing for non-{reader} lyrics "
+                                + f"(stored: {stored})", basename)
+                        else:
+                            add_issue(
+                                f"TRANSLATION missing for non-{reader} lyrics",
+                                basename)
+                        track["issues"].append("XLIT_MISSING")
+                elif have:
+                    failed_checks += 1
+                    add_issue("TRANSLATION present but the lyrics are already in "
+                              f"the reader's language ({reader})", basename)
+                    track["issues"].append("XLIT_UNNEEDED")
 
         # Per-track cover — a manifest entry (one image shared by several
         # tracks, e.g. 7 and 8) or a same-stem sidecar for this track.

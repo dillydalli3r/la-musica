@@ -44,6 +44,9 @@ from server import exporter
 from server import api_discovery
 from server import api_imports
 from server import api_lyrics
+from server import api_auth
+from server import auth as auth_mod
+from server import events as events_mod
 from server import discovery
 from server import artcache
 from mlo.paths import (SKIP_DIRS, clear_track_covers, downloads_dir,
@@ -101,6 +104,65 @@ if _MLO_ENV_FOLDER:
         _cfg["music_folder"] = os.path.normpath(_MLO_ENV_FOLDER)
         save_config(_cfg)
 
+# The bind address is what decides whether the login gate applies
+# (server/auth.gate_required), and a launcher can bind somewhere the config
+# does not mention — the Docker image runs `uvicorn --host 0.0.0.0` while a
+# fresh config still says 127.0.0.1, which would leave the published port
+# ungated. MLO_SERVER_HOST/MLO_SERVER_PORT therefore seed the same keys the
+# launchers pass, so the config, the launcher and the gate can never disagree.
+_MLO_ENV_HOST = os.environ.get("MLO_SERVER_HOST")
+_MLO_ENV_PORT = os.environ.get("MLO_SERVER_PORT")
+if _MLO_ENV_HOST or _MLO_ENV_PORT:
+    _cfg = load_config()
+    changed = False
+    if _MLO_ENV_HOST and str(_cfg.get("server_host") or "") != _MLO_ENV_HOST:
+        _cfg["server_host"] = _MLO_ENV_HOST
+        changed = True
+    if _MLO_ENV_PORT:
+        try:
+            port = int(_MLO_ENV_PORT)
+        except ValueError:
+            port = None
+        if port and int(_cfg.get("server_port") or 0) != port:
+            _cfg["server_port"] = port
+            changed = True
+    if changed:
+        save_config(_cfg)
+
+# The login gate (v3). Registered BEFORE the CORS middleware on purpose:
+# Starlette applies the most recently added middleware outermost, and CORS
+# must be the outer one — a 401 has to carry Access-Control-Allow-Origin or
+# the desktop/mobile shell (whose origin is not the API's) sees an opaque
+# network failure instead of "sign in", and a preflight OPTIONS must be
+# answered by CORS rather than rejected by the gate. See server/auth.py for
+# what the gate is, and server/api_auth.py for the endpoints that open it.
+@app.middleware("http")
+async def _auth_gate(request: Request, call_next):
+    if request.method == "OPTIONS" or auth_mod.is_public(request.url.path):
+        return await call_next(request)
+    state = auth_mod.cached_state()
+    if state is None:
+        # Cache expired: the read touches config.json, so it goes off the
+        # event loop. A media seek issues many range requests back to back
+        # and only the first of a burst pays this.
+        state = await asyncio.to_thread(auth_mod.current_state)
+    if not state.get("required"):
+        return await call_next(request)
+    if not state.get("has_password"):
+        return JSONResponse(
+            {"detail": "this server has no password yet — finish setup to continue",
+             "needs_setup": True},
+            status_code=428,
+        )
+    token = auth_mod.token_from_request(request)
+    if token and await asyncio.to_thread(auth_mod.valid_session, token):
+        return await call_next(request)
+    return JSONResponse(
+        {"detail": "sign in required", "needs_login": True},
+        status_code=401,
+    )
+
+
 app.add_middleware(
     CORSMiddleware,
     # tauri.localhost is the Windows WebView2 form of the tauri:// origin.
@@ -128,6 +190,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.include_router(api_discovery.router)
 app.include_router(api_imports.router)
 app.include_router(api_lyrics.router)
+app.include_router(api_auth.router)
 
 # Script 8 (Auto tagging) writes MOOD from the audio itself and fills a
 # missing GENRE through a provider hook its caller supplies — the engine
@@ -371,11 +434,27 @@ def health():
 
 @app.get("/api/config")
 def get_config():
-    return load_config()
+    """The live configuration, minus the one secret in it.
+
+    `auth_password_hash` is a PBKDF2 hash, which is not a password but IS an
+    offline-cracking target for whoever holds it — and every client with a
+    session (or a `?token=` URL that leaked) can read this endpoint. Nothing
+    on the client side needs the value: /api/auth/status reports whether a
+    password exists at all.
+    """
+    cfg = load_config()
+    cfg.pop("auth_password_hash", None)
+    return cfg
 
 
 @app.post("/api/config")
 def set_config(cfg: dict):
+    # The password is not writable through this route: it would let any
+    # session replace the credential with a hash of its choosing, and the
+    # legitimate path (/api/auth/password) verifies the current password and
+    # re-issues the caller's own session. Dropped rather than rejected so a
+    # stale client echoing the whole config back does not fail the save.
+    cfg = {k: v for k, v in (cfg or {}).items() if k != "auth_password_hash"}
     ok = save_config(cfg)
     if not ok:
         reason = getattr(save_config, "last_error", "") or ""
@@ -391,6 +470,15 @@ def set_config(cfg: dict):
     except Exception:
         pass
     tagcache.invalidate_all()
+    # A settings save can change the auth gate itself (`auth_mode`,
+    # `server_host`, the password hash). The gate's state is cached for a few
+    # seconds so the media path does not re-read the config on every range
+    # request; refresh it here so turning the gate on/off takes effect on the
+    # very next request instead of up to three seconds later.
+    try:
+        auth_mod.current_state(refresh=True)
+    except Exception:
+        pass
     return load_config()
 
 
@@ -4213,21 +4301,150 @@ def _stamp_import_identity(album_dirs):
     return stamped
 
 
+# --------------------------------------------------------------------------- #
+# Importing what finished downloading
+# --------------------------------------------------------------------------- #
+# "Import" is one album's whole trip into the library, and it is deliberately
+# ONE function: convert the lossless sources, write MEDIA, stamp the
+# MusicBrainz identity, organize with the naming script, then run the
+# configured import chain. Every entry point that imports — the classic
+# one-click route, the per-album row, the sequential "import all completed"
+# runner, and a wish whose download has landed — goes through here, so what an
+# album ends up as cannot depend on which button was pressed.
+def _import_one_album(album, cfg, chain_async=True, progress=None):
+    """Take ONE downloaded album folder all the way into the library.
+
+    Returns a result dict (`album_root`, counts, `errors`); it never raises,
+    because the sequential runner reports per-album failures and must keep
+    going with the next album. `chain_async` false runs the import chain
+    inline — what "import all completed" needs, since it processes each album
+    to completion before touching the next one.
+    """
+    out = {"path": album, "album_root": album, "converted": 0,
+           "media_tagged": 0, "identity_stamped": 0, "organized": False,
+           "chain_started": False, "chain": None, "errors": []}
+    try:
+        # Lossless sources (WAV/APE/ALAC…) become the configured lossless
+        # codec before anything is tagged or named, so the naming script and
+        # the grader both see the final files.
+        from mlo.flac import convert_album_lossless
+        out["converted"] = int(
+            (convert_album_lossless(album, cfg) or {}).get("modified_count") or 0)
+    except Exception as e:
+        traceback.print_exc()
+        out["errors"].append(f"lossless conversion failed: {e}")
+    try:
+        # Classify the rip (CD / DVD-Video / Blu-ray / Digital Media) and
+        # write the tags BEFORE organizing, so they travel with the files.
+        out["media_tagged"] = _tag_media_for_albums([album])
+    except Exception as e:
+        traceback.print_exc()
+        out["errors"].append(f"media tagging failed: {e}")
+    try:
+        # Canonicalize the MusicBrainz identity (RELEASECOUNTRY etc.) BEFORE
+        # the naming script runs, or $releasecountry comes out empty.
+        out["identity_stamped"] = _stamp_import_identity([album])
+    except Exception as e:
+        traceback.print_exc()
+        out["errors"].append(f"MusicBrainz identity failed: {e}")
+    try:
+        # Best-effort: an organize failure must not lose the imported files
+        # (they stay in their import folder and can be organized later).
+        organized = organize(OrganizeRequest(paths=[album], dry_run=False))
+        if isinstance(organized, dict):
+            # organize RENAMES the album into the naming-script layout, so the
+            # path it was given is stale the moment it returns — the chain has
+            # to run on the root organize reports, or every script bails with
+            # "album folder not found".
+            roots = [r.get("album_root") or r.get("path")
+                     for r in (organized.get("results") or [])
+                     if isinstance(r, dict)]
+            roots = [r for r in roots if r]
+            if roots:
+                out["album_root"] = roots[0]
+        out["organized"] = True
+    except Exception as e:
+        traceback.print_exc()
+        out["errors"].append(f"organize failed: {e}")
+    from server import imports as imports_mod
+    if not out["organized"]:
+        # organize failed, so the album is still where it landed and the path
+        # in `album_root` is the only one that exists. Running the chain here
+        # would either be a no-op or act on a folder the organizer half-moved;
+        # the error is already in `errors` and the caller reports it.
+        return out
+    if chain_async:
+        # Fire-and-forget: the HTTP call returns at once and the chain runs on
+        # a background thread (what the one-click route has always done).
+        threading.Thread(target=imports_mod.finish_album,
+                         args=(out["album_root"], cfg), daemon=True).start()
+        out["chain_started"] = True
+    else:
+        try:
+            out["chain"] = imports_mod.finish_album(out["album_root"], cfg,
+                                                    progress=progress)
+        except Exception as e:
+            traceback.print_exc()
+            out["errors"].append(f"import chain failed: {e}")
+    return out
+
+
+def _folder_size(path):
+    """`(bytes, file count)` below `path` — the readout the Downloads page
+    shows beside an album waiting to be imported."""
+    total = 0
+    files = 0
+    for base, _dirs, names in os.walk(path):
+        for n in names:
+            try:
+                total += os.path.getsize(os.path.join(base, n))
+                files += 1
+            except OSError:
+                continue
+    return total, files
+
+
+def _importable_paths(paths, cfg):
+    """Keep the paths that really are albums inside the music folder.
+
+    A client-supplied path must never aim an import (which moves and renames
+    files) at an arbitrary directory, so every candidate is resolved and
+    checked against the download dir and the library root before use. The
+    returned list also drops anything that is not a directory.
+    """
+    from server import soulseek
+    allowed = [os.path.abspath(p) for p in
+               (soulseek.download_dir(cfg), str(cfg.get("music_folder") or ""))
+               if p]
+    out = []
+    for p in paths or []:
+        if not p:
+            continue
+        ap = os.path.abspath(str(p))
+        if not os.path.isdir(ap):
+            continue
+        if not any(_in_music_folder(ap, root) for root in allowed if os.path.isdir(root)):
+            continue
+        out.append(ap)
+    return out
+
+
 @app.post("/api/soulseek/import")
 def soulseek_import():
-    """Move completed downloads from the download dir into the library,
-    one album folder per shared folder, then immediately organize each
-    imported album with the naming script — one click takes a download
-    from slskd to a graded-library-ready album folder.
+    """Move completed downloads from the download dir into the library, one
+    album folder per shared folder, then immediately organize each imported
+    album with the naming script and start its import chain — one click takes
+    a download from slskd to a graded-library-ready album folder.
 
-    Albums whose transfers are still running stay in the download dir and
-    are reported in `skipped`, so the UI can say "still downloading".
+    Albums whose transfers are still running stay in the download dir and are
+    reported in `skipped`, so the UI can say "still downloading".
 
     A folder a player (or slskd) still holds open is not fatal: the albums
     that did move are kept and organized, and the one that could not is
-    reported in `failed` as {"path", "reason"} so the UI can name it and
-    tell the user to stop playback.
-    """
+    reported in `failed` as {"path", "reason"} so the UI can name it and tell
+    the user to stop playback. The per-album chain runs in the background
+    (see `/api/soulseek/import-all` for the "run every album through to the
+    end, one after another" behaviour)."""
     from server import soulseek
     try:
         moved = soulseek.import_completed()
@@ -4235,83 +4452,182 @@ def soulseek_import():
         raise HTTPException(400, str(e))
     skipped = soulseek.last_import_skipped()
     failed = soulseek.last_import_failed()
-    media_tagged = 0
-    converted = 0
-    identity_stamped = 0
-    if moved:
-        # Lossless sources (WAV/APE/ALAC...) become the configured lossless
-        # codec before anything is tagged or named, so the naming script and
-        # the grader both see the final files.
-        try:
-            from mlo.flac import convert_album_lossless
-            for album in moved:
-                converted += int((convert_album_lossless(album, load_config())
-                                  or {}).get("modified_count") or 0)
-        except Exception:
-            import traceback
-            traceback.print_exc()
-        # Classify each rip (CD / DVD-Video / Blu-ray / Digital Media) and
-        # write the tags BEFORE organizing, so they travel with the files.
-        try:
-            media_tagged = _tag_media_for_albums(moved)
-        except Exception:
-            import traceback
-            traceback.print_exc()
-        # Then canonicalize the MusicBrainz identity (RELEASECOUNTRY etc.)
-        # BEFORE the naming script runs, or $releasecountry comes out empty.
-        try:
-            identity_stamped = _stamp_import_identity(moved)
-        except Exception:
-            import traceback
-            traceback.print_exc()
-        try:
-            # Best-effort: organize failures must not lose the imported files
-            # (they stay in their import folders and can be organized later).
-            organized = organize(OrganizeRequest(paths=moved, dry_run=False))
-            # organize RENAMES each album into the naming-script layout, so the
-            # paths it was given are stale the moment it returns. Starting the
-            # chain on those made finish_album bail with "album folder not
-            # found" inside a daemon thread whose result nobody reads: the UI
-            # said the import succeeded and NO script ran on the album.
-            if isinstance(organized, dict):
-                roots = [r.get("album_root") or r.get("path")
-                         for r in (organized.get("results") or [])
-                         if isinstance(r, dict)]
-                roots = [r for r in roots if r]
-                if roots:
-                    moved = roots
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            tagcache.invalidate_all()
-            mbresolve.invalidate()
-            return {"ok": True, "moved": moved, "skipped": skipped,
-                    "failed": failed,
-                    "organized": False,
-                    "organize_error": str(e), "media_tagged": media_tagged,
-                    "converted": converted, "tagging_started": False,
-                    "identity_stamped": identity_stamped}
-        # Fire-and-forget: the configured import script chain per album
-        # (CUEs → FLACs → videos → lyrics → mood/genre → images → audit →
-        # DR & ReplayGain → AccurateRip → key & BPM → beets → format all →
-        # grade) on a background thread, so the HTTP call returns at once.
-        from server import imports as imports_mod
-        for album in moved:
-            threading.Thread(
-                target=imports_mod.finish_album,
-                args=(album, load_config()),
-                daemon=True,
-            ).start()
+    cfg = load_config()
+    results = [_import_one_album(a, cfg, chain_async=True) for a in moved]
+    moved = [r["album_root"] for r in results]
+    media_tagged = sum(r["media_tagged"] for r in results)
+    converted = sum(r["converted"] for r in results)
+    identity_stamped = sum(r["identity_stamped"] for r in results)
+    # `organized` must report what actually happened, per album: the UI
+    # branches on it ("organize failed: …"), and a batch where one album
+    # failed to organize is not a successful batch. The error text is handed
+    # back the same way the pre-per-album route handed its own back.
+    organize_errors = [e for r in results for e in r["errors"] if e.startswith("organize failed")]
     tagcache.invalidate_all()
     mbresolve.invalidate()
     return {"ok": True, "moved": moved, "skipped": skipped,
             "failed": failed,
-            "organized": bool(moved),
+            "organized": all(r["organized"] for r in results) if results else False,
+            "organize_error": "; ".join(organize_errors) or None,
             "media_tagged": media_tagged, "converted": converted,
             "identity_stamped": identity_stamped,
-            "tagging_started": bool(moved)}
+            "tagging_started": bool(moved),
+            "albums": results}
 
 
+@app.get("/api/soulseek/ready")
+def soulseek_ready():
+    """Every album sitting in the download dir that finished downloading and
+    is waiting to be imported, with its size.
+
+    The Downloads page polls this to offer the per-album Import button and
+    the "Import all completed" run; it is the same question
+    `import_completed()` asks (see `soulseek.ready_albums`), so an album
+    listed here is exactly one the import would move."""
+    from server import soulseek
+    cfg = load_config()
+    try:
+        paths = soulseek.ready_albums(cfg)
+    except Exception as e:
+        raise HTTPException(502, f"could not read the download dir: {e}")
+    ddir = soulseek.download_dir(cfg)
+    albums = []
+    for p in paths:
+        size, files = _folder_size(p)
+        try:
+            rel = os.path.relpath(p, ddir) if ddir else p
+        except ValueError:
+            rel = p  # different drive (Windows): a relative path does not exist
+        albums.append({"path": p, "name": os.path.basename(p.rstrip("\\/")) or p,
+                       "rel": rel, "files": files, "bytes": size})
+    return {"ok": True, "albums": albums, "download_dir": ddir}
+
+
+class ImportPathRequest(BaseModel):
+    path: str
+
+
+@app.post("/api/soulseek/import-one")
+def soulseek_import_one(req: ImportPathRequest):
+    """Import ONE album folder, all the way through, in the background.
+
+    The path must sit inside the download dir or the library — see
+    `_importable_paths`; anything else is refused rather than imported."""
+    from server import import_queue
+    cfg = load_config()
+    paths = _importable_paths([req.path], cfg)
+    if not paths:
+        raise HTTPException(400, "that path is not an album inside your music "
+                                 "folder or download folder")
+    res = import_queue.start(paths=paths)
+    if not res.get("ok"):
+        raise HTTPException(409, res.get("error") or "could not start the import")
+    return res
+
+
+@app.post("/api/soulseek/import-all")
+def soulseek_import_all():
+    """Import every album that finished downloading — one at a time.
+
+    Deliberately NOT one batch: each album is taken through the whole
+    pipeline (convert → tag → organize → chain) before the next one starts,
+    so a failure half way through leaves the albums after it untouched and
+    the UI can name exactly which one broke. Progress lives at
+    `/api/soulseek/import-all/status`."""
+    from server import import_queue
+    res = import_queue.start()
+    if not res.get("ok"):
+        raise HTTPException(409, res.get("error") or "could not start the import run")
+    return res
+
+
+@app.get("/api/soulseek/import-all/status")
+def soulseek_import_all_status():
+    from server import import_queue
+    return import_queue.status()
+
+
+@app.post("/api/soulseek/import-all/cancel")
+def soulseek_import_all_cancel():
+    """Stop after the album currently being imported (never mid-album: a
+    half-imported album is worse than a slow one)."""
+    from server import import_queue
+    return {"ok": import_queue.cancel(), "status": import_queue.status()}
+
+
+@app.post("/api/wishes/{wid}/import")
+def wishes_import(wid: int):
+    """Import the download a wish is waiting on.
+
+    A wish can be holding an album that has already landed (the pipeline
+    imported it, `album_path` is set) or one that finished downloading while
+    auto-import was off. Both cases end in the same place — the album goes
+    through `_import_one_album`, exactly like a manual import — and the wish
+    is marked imported with the resulting path when it lands, which is also
+    what raises the "wish found" notification the other clients show.
+
+    Runs in the background (the chain takes minutes); the caller polls
+    `/api/soulseek/import-all/status` or the wish list."""
+    from server import import_queue, wishes
+    wish = wishes.get_wish(wid)
+    if wish is None:
+        raise HTTPException(404, "wish not found")
+    cfg = load_config()
+    candidates = []
+    album_path = str(wish.get("album_path") or "").strip()
+    if album_path and os.path.isdir(album_path):
+        candidates.append(album_path)
+    # Anything in the download dir that names this wish's release: the artist
+    # and the title, in either order, is what a peer's folder is called.
+    from server import soulseek
+    want = {t for t in
+            (str(wish.get("artist") or "").lower().split()
+             + str(wish.get("title") or "").lower().split()) if len(t) > 2}
+    if want:
+        for p in soulseek.ready_albums(cfg):
+            name = os.path.basename(p.rstrip("\\/")).lower()
+            hits = sum(1 for t in want if t in name)
+            if hits >= min(2, len(want)):
+                candidates.append(p)
+    paths = _importable_paths(candidates, cfg)
+    if not paths:
+        raise HTTPException(
+            409,
+            "nothing downloaded for this wish yet — search for it (Search now) "
+            "or import the album from Downloads once it arrives")
+
+    def _landed(results):
+        """Mark the wish imported once its album really is in the library."""
+        ok = [r for r in (results or []) if r.get("ok")]
+        if not ok:
+            return
+        for r in ok:
+            try:
+                wishes.mark_imported(wid, r.get("album_root") or "")
+            except Exception:
+                traceback.print_exc()
+            try:
+                events_mod.emit("wish_found", f"Wish imported: {wish.get('artist') or '?'} — {wish.get('title') or '?'}",
+                                "The album is in your library now.",
+                                {"wish_id": wid, "album_path": r.get("album_root") or ""})
+            except Exception:
+                pass
+            break
+
+    res = import_queue.start(paths=paths, on_done=_landed)
+    if not res.get("ok"):
+        raise HTTPException(409, res.get("error") or "could not start the import")
+    return res
+
+
+# Wired here, after both sides exist: the queue asks these for what to import
+# and for how to import one album, instead of importing server.main (which
+# would be a cycle). Inline chains only — the runner's whole contract is that
+# one album is finished before the next starts.
+from server import import_queue as _import_queue  # noqa: E402
+_import_queue.set_importer(lambda path: _import_one_album(path, load_config(), chain_async=False))
+_import_queue.set_ready_provider(lambda: __import__(
+    "server.soulseek", fromlist=["soulseek"]).ready_albums())
 @app.get("/api/soulseek/user/{username}")
 def soulseek_user(username: str):
     """Remote user profile info (speed, slots, shared file count)."""
@@ -6604,6 +6920,25 @@ def library_layout():
 # --------------------------------------------------------------------------- #
 @app.websocket("/ws/progress")
 async def ws_progress(ws: WebSocket):
+    """The script-progress relay.
+
+    Gated exactly like /ws/events: the frames carry album and track paths and
+    the running step's own text, so an unauthenticated peer that could open
+    this socket would read the library's layout and live activity. The token
+    rides the query string for the same reason it does on /ws/events (a
+    browser WebSocket cannot set an Authorization header, and the shells'
+    origin is not the API's).
+    """
+    token = (ws.query_params.get("token") or "").strip() or (ws.cookies.get("mlo_session") or "")
+    state = await asyncio.to_thread(auth_mod.current_state)
+    if state.get("required") and not (token and await asyncio.to_thread(auth_mod.valid_session, token)):
+        # Accepted first, then closed: a close BEFORE accept is an HTTP 403
+        # handshake rejection, which the browser reports as error code 1006 —
+        # the client could then not tell "sign in again" (4401) from "server
+        # down" and would retry a stale token forever.
+        await ws.accept()
+        await ws.close(code=4401)
+        return
     await ws.accept()
     with _progress_lock:
         progress_clients.add(ws)
@@ -6623,6 +6958,63 @@ async def ws_progress(ws: WebSocket):
     finally:
         with _progress_lock:
             progress_clients.discard(ws)
+
+
+@app.websocket("/ws/events")
+async def ws_events(ws: WebSocket):
+    """The notification channel: every frame `server.events.emit()` publishes.
+
+    Separate from /ws/progress because the two have different consumers and
+    different lifetimes — the progress socket is the page that is running a
+    script, this one is every client that wants to know about wishes and
+    downloads, which may be a phone in another room. It is also the one route
+    where the token travels in the query string: a browser WebSocket cannot
+    set an Authorization header, and the desktop/mobile shell's origin is not
+    the API's, so neither the header nor a same-site cookie is available.
+
+    `?since=<unix seconds>` replays what the ring still holds, so a client
+    that was asleep or reconnecting does not miss the wish that landed while
+    it was away.
+    """
+    token = (ws.query_params.get("token") or "").strip() or (ws.cookies.get("mlo_session") or "")
+    state = await asyncio.to_thread(auth_mod.current_state)
+    if state.get("required") and not (token and await asyncio.to_thread(auth_mod.valid_session, token)):
+        # Accepted first, then closed — see ws_progress: a pre-accept close is
+        # an HTTP 403 the browser surfaces as 1006, which would hide the 4401
+        # the client's reconnect policy is built on.
+        await ws.accept()
+        await ws.close(code=4401)
+        return
+    await ws.accept()
+    try:
+        since = float(ws.query_params.get("since") or 0.0)
+    except (TypeError, ValueError):
+        since = 0.0
+    queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+    # The replay is snapshotted BEFORE subscribing, and the live queue then
+    # skips anything the snapshot already carried: subscribing first sent an
+    # event that arrived in between twice (once replayed, once live).
+    past = events_mod.recent(since)
+    high_water = max([int(e.get("seq") or 0) for e in past] or [0])
+    unsubscribe = events_mod.subscribe(queue, asyncio.get_running_loop())
+    try:
+        for frame in past:
+            await ws.send_json(frame)
+        while True:
+            try:
+                payload = await asyncio.wait_for(queue.get(), timeout=30)
+            except asyncio.TimeoutError:
+                # Same keep-alive idea as /ws/progress: a send on an idle
+                # socket is what detects a peer that went away.
+                await ws.send_json({"type": "ping"})
+                continue
+            if int(payload.get("seq") or 0) <= high_water:
+                continue  # already sent as part of the replay
+            await ws.send_json(payload)
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
+        unsubscribe()
 
 
 WEB_DIST = ROOT / "web" / "dist"
@@ -6658,4 +7050,15 @@ if WEB_DIST.is_dir():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server.main:app", host="127.0.0.1", port=8000, reload=True)
+    # Bind where the config says: `server_host` is also what decides whether
+    # the login gate applies (see server/auth.gate_required), so a server
+    # started from a shell obeys the same rule as one started by the tray.
+    _run_cfg = load_config()
+    _host = str(_run_cfg.get("server_host") or "127.0.0.1")
+    _port = int(_run_cfg.get("server_port") or 8000)
+    _warning = auth_mod.gate_warning(_run_cfg)
+    if _warning:
+        print(f"[mlo] auth: {_warning}")
+    if not auth_mod.is_loopback_host(_host):
+        print(f"[mlo] listening on {_host}:{_port} — reachable from the network")
+    uvicorn.run("server.main:app", host=_host, port=_port, reload=True)

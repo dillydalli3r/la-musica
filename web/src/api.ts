@@ -29,11 +29,123 @@ import type {
 } from "./types";
 import { toast } from "./store";
 
-// In the Tauri desktop shell the frontend is served from tauri://localhost,
-// so relative /api paths cannot reach the Python backend — use absolute.
-const IN_TAURI = !!(window as any).__TAURI_INTERNALS__;
-const BASE = IN_TAURI ? "http://127.0.0.1:8000" : "";
-const API = `${BASE}/api`;
+// The Tauri shell (desktop, iOS, Android) serves the frontend from
+// tauri://localhost, so relative /api paths cannot reach the Python backend:
+// the shell talks to a backend by absolute URL — 127.0.0.1 for the desktop
+// app (which spawns its own), and whatever address the user entered on the
+// login screen for a phone or tablet, which has no backend of its own to
+// spawn and must be told where the server is.
+export const IN_TAURI = !!(window as any).__TAURI_INTERNALS__;
+
+/** True inside the Tauri shell ON A PHONE OR TABLET.
+ *
+ *  The mobile builds register no Tauri commands at all (see
+ *  desktop/src-tauri/capabilities/mobile.json): there is no native folder
+ *  dialog to call, and `invoke("pick_folder")` would reject. Anything that
+ *  asks the shell for a desktop-only capability must check this first.
+ *  iPadOS reports itself as "Macintosh", so a touch-capable Mac is counted as
+ *  a tablet — the same case, as far as a folder dialog goes. */
+export const IN_MOBILE_SHELL = IN_TAURI && (() => {
+  const ua = navigator.userAgent || "";
+  return /android|iphone|ipad|ipod/i.test(ua)
+    || (/macintosh/i.test(ua) && (navigator.maxTouchPoints || 0) > 1);
+})();
+
+const SERVER_KEY = "mlo.server";
+const TOKEN_KEY = "mlo.token";
+
+function readStore(key: string): string {
+  try {
+    return localStorage.getItem(key) || "";
+  } catch {
+    return ""; // private mode / storage disabled: same-origin + cookie still works
+  }
+}
+
+function writeStore(key: string, value: string | null) {
+  try {
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  } catch {
+    /* nothing to do: the session simply will not survive a reload */
+  }
+}
+
+function resolveBase(): string {
+  const saved = readStore(SERVER_KEY).replace(/\/+$/, "");
+  if (saved) return saved;
+  return IN_TAURI ? "http://127.0.0.1:8000" : "";
+}
+
+/** The server address this client talks to. "" means "the origin that served
+ *  this page" (the web app, where the session cookie is same-site). */
+let BASE = resolveBase();
+let API = `${BASE}/api`;
+
+/** Point this client at another server (the login screen's server field). */
+export function setServerUrl(url: string | null) {
+  const clean = (url || "").trim().replace(/\/+$/, "");
+  writeStore(SERVER_KEY, clean || null);
+  BASE = clean || (IN_TAURI ? "http://127.0.0.1:8000" : "");
+  API = `${BASE}/api`;
+}
+
+export function serverUrl(): string {
+  return BASE;
+}
+
+export function getToken(): string {
+  return readStore(TOKEN_KEY);
+}
+
+export function setToken(token: string | null) {
+  writeStore(TOKEN_KEY, token || null);
+}
+
+/** The API returns 401 when the session is gone (expired, revoked, or the
+ *  server was restarted with a new password). The shell listens for this and
+ *  shows the login screen instead of a page full of "failed to load". */
+export class AuthError extends Error {
+  readonly auth = true;
+  constructor(message: string) {
+    super(message);
+    this.name = "AuthError";
+  }
+}
+
+type AuthListener = (reason: string) => void;
+const authListeners = new Set<AuthListener>();
+
+export function onAuthLost(fn: AuthListener): () => void {
+  authListeners.add(fn);
+  return () => authListeners.delete(fn);
+}
+
+function authLost(reason: string) {
+  setToken(null);
+  for (const fn of authListeners) {
+    try {
+      fn(reason);
+    } catch {
+      /* a listener must never break the request that reported 401 */
+    }
+  }
+}
+
+/** A URL for an <img>/<audio>/<video> src.
+ *
+ *  A session cookie is same-site only, so a media element served by a
+ *  *different* origin — every Tauri build, and any client pointed at a remote
+ *  server — cannot send it and cannot set an Authorization header either.
+ *  Those clients carry the token in the query string instead. On the web app
+ *  (BASE === "") nothing is appended: the cookie does the job and the token
+ *  stays out of URLs, logs and history. */
+function media(url: string): string {
+  if (!BASE) return url;
+  const token = getToken();
+  if (!token) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+}
 
 /** `track=` (one file) plus the comma-separated `tracks=` list — each name
  *  URL-encoded on its own, so commas inside a name survive. */
@@ -45,12 +157,23 @@ function coverQuery(track?: string, tracks?: string[]): string {
   );
 }
 
+/** One place every request goes through: the deadline, the session token and
+ *  the 401 that means "sign in again".
+ *
+ *  `credentials: "include"` matters for the Tauri/mobile shells: the login
+ *  response sets an HttpOnly cookie, and although a cross-site cookie is not
+ *  sent on media requests (hence the query token above), the shell still
+ *  wants the cookie for anything same-site it happens to do. On the web app
+ *  it makes the session cookie travel on every call. */
 async function json<T>(url: string, init?: RequestInit, timeoutMs = 20000): Promise<T> {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const token = getToken();
+  const headers = new Headers(init?.headers);
+  if (token) headers.set("Authorization", `Bearer ${token}`);
   let r: Response;
   try {
-    r = await fetch(url, { ...init, signal: ctrl.signal });
+    r = await fetch(url, { credentials: "include", ...init, headers, signal: ctrl.signal });
   } catch (e) {
     // an aborted fetch is OUR timeout, not the network being down — say which
     if (ctrl.signal.aborted) throw new Error(`no answer within ${Math.round(timeoutMs / 1000)}s`);
@@ -60,11 +183,24 @@ async function json<T>(url: string, init?: RequestInit, timeoutMs = 20000): Prom
   }
   if (!r.ok) {
     let detail = r.statusText;
+    let body: Record<string, unknown> = {};
     try {
-      const j = await r.json();
-      detail = j.detail || detail;
+      body = (await r.json()) as Record<string, unknown>;
+      detail = (body.detail as string) || detail;
     } catch {
       /* keep statusText */
+    }
+    if (r.status === 401 || r.status === 428) {
+      // The session is gone, or nobody has claimed this server yet. Both mean
+      // "show the login screen" — the shell listens for this instead of
+      // rendering a page of failed requests.
+      const reason = body.needs_setup ? "setup" : "expired";
+      // …except on the endpoints whose 401 means "that password was wrong".
+      // Treating those as a lost session signed the user out of Settings
+      // mid-edit (and of the login screen itself) while they were typing.
+      const passwordRoute = /\/api\/auth\/(login|password|setup)$/.test(url);
+      if (r.status === 401 && !passwordRoute) authLost(reason);
+      throw new AuthError(String(detail || (reason === "setup" ? "setup required" : "sign in required")));
     }
     throw new Error(detail);
   }
@@ -517,8 +653,92 @@ export interface MetadataFetchItem {
  *  caller leaves it off and stays as strict as before. */
 const stagedQ = (staged?: boolean) => (staged ? "&staged=1" : "");
 
+/** `/api/auth/status`. `required` is the server's own decision (a non-loopback
+ *  bind always demands a login); `has_password` false means nobody has
+ *  claimed this server yet, so the screen that makes sense is "create a
+ *  password", not "sign in". */
+export interface AuthStatus {
+  required: boolean;
+  has_password: boolean;
+  authenticated: boolean;
+  username: string;
+  public_url: string;
+  session_days: number;
+  /** A sentence when the server's configuration is unsafe (gate off on a
+   *  network address, etc), else "". */
+  setup_hint: string;
+}
+
+/** What login/setup/password-change answer with: the token this client keeps
+ *  (the cookie is already set for the browser). */
+export interface AuthSession {
+  token: string;
+  expires_at: number;
+  session_days: number;
+  username: string;
+}
+
+/** One completed download waiting to be imported. */
+export interface ReadyAlbum {
+  path: string;
+  name: string;
+  /** Path relative to the download dir, for display. */
+  rel: string;
+  files: number;
+  bytes: number;
+}
+
+export interface ReadyAlbums {
+  ok: boolean;
+  albums: ReadyAlbum[];
+  download_dir: string;
+}
+
+/** A started import run (one album, or all of them). */
+export interface ImportRun {
+  ok: boolean;
+  error?: string;
+  status: ImportRunStatus;
+}
+
+/** Progress of the sequential import run: one album at a time, in order. */
+export interface ImportRunStatus {
+  state: "idle" | "running" | "done" | "error" | "cancelled";
+  total: number;
+  done: number;
+  current: string | null;
+  results: { path: string; ok: boolean; album_root: string; error: string }[];
+  errors: string[];
+  started_at: number;
+  finished_at: number;
+}
+
 export const api = {
   health: () => json<{ status: string; version: string }>(`${API}/health`),
+
+  // ── session ────────────────────────────────────────────────────────────
+  /** Does this server want a login, has anyone claimed it, and are we in? */
+  authStatus: () => json<AuthStatus>(`${API}/auth/status`),
+  authLogin: (password: string) =>
+    json<AuthSession>(`${API}/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    }, 30000),
+  authSetup: (password: string, confirm: string, username?: string) =>
+    json<AuthSession>(`${API}/auth/setup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password, confirm, username }),
+    }, 30000),
+  authLogout: () => json<{ ok: boolean }>(`${API}/auth/logout`, { method: "POST" }),
+  authChangePassword: (current: string, password: string, confirm: string) =>
+    json<AuthSession>(`${API}/auth/password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ current, password, confirm }),
+    }, 60000),
+  authRevokeAll: () => json<{ ok: boolean; revoked: number }>(`${API}/auth/revoke-all`, { method: "POST" }),
   config: () => json<Record<string, unknown>>(`${API}/config`),
   configDefaults: () => json<Record<string, unknown>>(`${API}/config/defaults`),
   saveConfig: (cfg: Record<string, unknown>) =>
@@ -584,11 +804,11 @@ export const api = {
       body: JSON.stringify({ paths, dry_run: dryRun }),
     }),
 
-  streamUrl: (path: string) => `${API}/stream?path=${encodeURIComponent(path)}`,
+  streamUrl: (path: string) => media(`${API}/stream?path=${encodeURIComponent(path)}`),
   /** Library music-video stream: direct bytes by default (?transcode=1 pipes
    * MPEG-2/VC-1/etc. through ffmpeg into playable H.264/AAC MP4). */
   videoStreamUrl: (path: string, transcode = false) =>
-    `${API}/videos/stream?path=${encodeURIComponent(path)}${transcode ? "&transcode=1" : ""}`,
+    media(`${API}/videos/stream?path=${encodeURIComponent(path)}${transcode ? "&transcode=1" : ""}`),
   /** Playback decision for a video: native (browser-decodable container +
    * codecs) vs live transcode, plus ffprobe's real duration — fragmented
    * live transcodes report Infinity on the media element, so this is the
@@ -602,7 +822,7 @@ export const api = {
       `${API}/videos/subtitles?path=${encodeURIComponent(path)}`
     ),
   subtitleUrl: (path: string, sidecar?: string, n?: number) =>
-    `${API}/videos/subtitle?path=${encodeURIComponent(path)}${sidecar ? `&sidecar=${encodeURIComponent(sidecar)}` : ""}${typeof n === "number" && n >= 0 ? `&n=${n}` : ""}`,
+    media(`${API}/videos/subtitle?path=${encodeURIComponent(path)}${sidecar ? `&sidecar=${encodeURIComponent(sidecar)}` : ""}${typeof n === "number" && n >= 0 ? `&n=${n}` : ""}`),
   // Read-only tag view (tag writing was removed; grading scripts own writes).
   // `staged` reads a track of an album the import wizard is editing before it
   // is in the library.
@@ -696,7 +916,7 @@ export const api = {
       body: JSON.stringify({ filter }),
     }),
   playlistEvaluate: (id: number) => json<{ paths: string[] }>(`${API}/playlists/${id}/evaluate`, { method: "POST" }),
-  playlistExportUrl: (id: number) => `${API}/playlists/${id}/export`,
+  playlistExportUrl: (id: number) => media(`${API}/playlists/${id}/export`),
   playlistImport: (name: string, file: File) => {
     const fd = new FormData();
     fd.append("file", file);
@@ -792,7 +1012,7 @@ export const api = {
     ),
 
   coverUrl: (albumPath: string, coverFile?: string | null) =>
-    `${API}/cover?album=${encodeURIComponent(albumPath)}${coverFile ? `&file=${encodeURIComponent(coverFile)}` : ""}`,
+    media(`${API}/cover?album=${encodeURIComponent(albumPath)}${coverFile ? `&file=${encodeURIComponent(coverFile)}` : ""}`),
   /** A remote provider image (`/api/art`), proxied and cached by the backend —
    *  NEVER the provider URL itself. Several cover CDNs (Deezer's among them)
    *  refuse the browser outright, and the app can both get past them and fall
@@ -812,7 +1032,7 @@ export const api = {
     if (opts?.artist) q.set("artist", opts.artist);
     if (opts?.album) q.set("album", opts.album);
     if (opts?.rg) q.set("rg", opts.rg);
-    return `${API}/art?${q}`;
+    return media(`${API}/art?${q}`);
   },
   coverColor: (albumPath: string) =>
     json<{ color: string; album: string }>(
@@ -1129,10 +1349,10 @@ export const api = {
     json<{ dir: string; files: { path: string; file: string; ext: string; is_video: boolean; size: number; mtime: number; user: string; tags: Record<string, string | null>; tech: Record<string, number | string> }[] }>(
       `${API}/soulseek/review`, undefined, 60000
     ),
-  soulseekLocalFileUrl: (path: string) => `${API}/soulseek/local-file?path=${encodeURIComponent(path)}`,
+  soulseekLocalFileUrl: (path: string) => media(`${API}/soulseek/local-file?path=${encodeURIComponent(path)}`),
   // Playable video preview — native stream when the browser can decode the
   // container, otherwise a live ffmpeg transcode (DVD VOB / Blu-ray M2TS).
-  soulseekPreviewStreamUrl: (path: string) => `${API}/soulseek/preview-stream?path=${encodeURIComponent(path)}`,
+  soulseekPreviewStreamUrl: (path: string) => media(`${API}/soulseek/preview-stream?path=${encodeURIComponent(path)}`),
   soulseekDeleteLocal: (path: string) =>
     json<{ ok: boolean }>(`${API}/soulseek/local-file/delete`, {
       method: "POST",
@@ -1178,9 +1398,9 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ paths, count }),
     }, 120000),
-  trackDownloadUrl: (path: string) => `${API}/track/download?path=${encodeURIComponent(path)}`,
+  trackDownloadUrl: (path: string) => media(`${API}/track/download?path=${encodeURIComponent(path)}`),
   trackExportUrl: (path: string, codec: string, bitrate: number, level = 5) =>
-    `${API}/track/export?path=${encodeURIComponent(path)}&codec=${encodeURIComponent(codec)}&bitrate=${bitrate}&level=${level}`,
+    media(`${API}/track/export?path=${encodeURIComponent(path)}&codec=${encodeURIComponent(codec)}&bitrate=${bitrate}&level=${level}`),
 
   likes: () => json<{ paths: string[] }>(`${API}/likes`),
   likeToggle: (path: string, mbid?: string) =>
@@ -1245,6 +1465,27 @@ export const api = {
   wishSearch: (id: number) => json<{ ok: boolean; error?: string }>(`${API}/wishes/${id}/search`, { method: "POST" }, 30000),
   wishesSearchAll: () => json<{ ok: boolean; error?: string }>(`${API}/wishes/search-all`, { method: "POST" }, 30000),
   wishesReconcile: () => json<{ ok: boolean; resolved: number }>(`${API}/wishes/reconcile`, { method: "POST" }, 120000),
+  /** Import the download a wish is waiting on (its album, all the way
+   *  through: convert → tag → organize → the configured script chain). The
+   *  wish turns `imported` when it lands, which raises the "wish found"
+   *  notification. 409 = nothing has downloaded for it yet. */
+  wishImport: (id: number) =>
+    json<ImportRun>(`${API}/wishes/${id}/import`, { method: "POST" }, 30000),
+
+  /** Albums sitting in the download dir, done downloading, waiting to be
+   *  imported (the "Import all completed" worklist). */
+  soulseekReady: () => json<ReadyAlbums>(`${API}/soulseek/ready`, undefined, 60000),
+  /** Import ONE album, in the background (progress: importAllStatus). */
+  soulseekImportOne: (path: string) =>
+    json<ImportRun>(`${API}/soulseek/import-one`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    }, 30000),
+  /** Import every finished download, one album at a time. */
+  soulseekImportAll: () => json<ImportRun>(`${API}/soulseek/import-all`, { method: "POST" }, 30000),
+  importAllStatus: () => json<ImportRunStatus>(`${API}/soulseek/import-all/status`),
+  importAllCancel: () => json<ImportRun>(`${API}/soulseek/import-all/cancel`, { method: "POST" }),
 
   // Home page (recommendations + highlights)
   home: () => json<HomeData>(`${API}/home`, undefined, 60000),
@@ -1261,7 +1502,7 @@ export const api = {
    *  plain artist name. */
   artistArtwork: (artist: string) =>
     json<ArtistArtwork>(`${API}/artist/artwork?artist=${encodeURIComponent(artist)}`),
-  artistImageUrl: (artist: string) => `${API}/artist/image?artist=${encodeURIComponent(artist)}`,
+  artistImageUrl: (artist: string) => media(`${API}/artist/image?artist=${encodeURIComponent(artist)}`),
   artistImageCandidates: (artist: string) =>
     json<{ artist: string; rows: DiscoveryImageRow[] }>(
       `${API}/artist/image/candidates?artist=${encodeURIComponent(artist)}`, undefined, 45000
@@ -1540,7 +1781,7 @@ export const api = {
    *  reuse one cache entry; 404s for a non-video or a path outside the
    *  music folder, which the caller swallows. */
   videoThumbUrl: (path: string, t: number, w = 160) =>
-    `${API}/videos/thumb?path=${encodeURIComponent(path)}&t=${Math.max(0, Math.floor(t))}&w=${Math.round(w)}`,
+    media(`${API}/videos/thumb?path=${encodeURIComponent(path)}&t=${Math.max(0, Math.floor(t))}&w=${Math.round(w)}`),
   /** Download a music video from YouTube for one track (web/digital media). */
   videosDownloadYoutube: (body: { path?: string; artist: string; title: string; duration?: number }) =>
     json<{ ok: boolean; file?: string; candidate?: Record<string, unknown> }>(`${API}/videos/download-youtube`, {

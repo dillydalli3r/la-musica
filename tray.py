@@ -25,8 +25,35 @@ import time
 import webbrowser
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-PORT = 8000
-URL = f"http://127.0.0.1:{PORT}"
+
+
+def _bind():
+    """`(host, port)` from the app's config (see start_app._bind).
+
+    `server_host` is not cosmetic: the login gate keys off it (server/auth.py),
+    so a launcher that always bound loopback would silently disable the very
+    configuration the user asked for.
+    """
+    host, port = "127.0.0.1", 8000
+    try:
+        if ROOT not in sys.path:
+            sys.path.insert(0, ROOT)
+        from mlo.config import load_config
+        cfg = load_config()
+        host = str(cfg.get("server_host") or host).strip() or host
+        port = int(cfg.get("server_port") or port)
+    except Exception:
+        pass
+    return host, port
+
+
+def _dialable(host):
+    """The address to probe/open: a wildcard bind is not dialable as written."""
+    return "127.0.0.1" if host in ("0.0.0.0", "::", "*", "") else host
+
+
+HOST, PORT = _bind()
+URL = f"http://{_dialable(HOST)}:{PORT}"
 
 try:
     import pystray
@@ -93,7 +120,7 @@ class Backend:
         env["MLO_ALLOW_SHUTDOWN"] = "1"  # lets any launcher stop this backend
         self.proc = subprocess.Popen(
             [exe, "-m", "uvicorn", "server.main:app",
-             "--host", "127.0.0.1", "--port", str(PORT)],
+             "--host", HOST, "--port", str(PORT)],
             cwd=ROOT,
             creationflags=flags,
             stdout=subprocess.DEVNULL,
