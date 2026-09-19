@@ -992,6 +992,14 @@ def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSls
     itself is on JobRun.stub (its query journal, cancellation log, ...)."""
     saved = _snapshot_job()
     saved_time = soulseek_auto.time
+    # Every worker this call starts, joined before the global job state is
+    # restored below: a thread still running after the restore writes its own
+    # result into the module-wide `_job`, and the NEXT block's assertion then
+    # reads that instead of its own job. On a loaded CI runner that is exactly
+    # what happened (the wish block saw a "slskd is not running" error from a
+    # previous call's thread, whose patch had already been restored), which is
+    # why this suite could pass locally and fail in CI.
+    started = []
     ddir = tempfile.mkdtemp(prefix="mlo-run-")
     try:
         for f in rows:
@@ -1040,6 +1048,7 @@ def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSls
                 drv()
             else:
                 worker = threading.Thread(target=drv, daemon=True)
+                started.append(worker)
                 worker.start()
                 # One answer per prompt the job parks on (a job can park twice:
                 # the CD-vs-Digital decision, then the wishes offer a decline
@@ -1099,6 +1108,15 @@ def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSls
         run.stub = stub
         return run
     finally:
+        # Quiesce before restoring: cancel whatever is still parked, then wait
+        # for every worker this call started. Nothing of this call may write
+        # into the global job state after the restore.
+        try:
+            soulseek_auto.cancel()
+        except Exception:
+            pass
+        for _w in started:
+            _w.join(30)
         soulseek_auto.time = saved_time
         soulseek_auto._confirm_event.clear()
         soulseek_auto._job.clear()
