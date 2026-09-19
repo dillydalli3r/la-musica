@@ -157,7 +157,7 @@ jobs:
         # is where the reason lives — rather than a reason to publish nothing.
         run: |
           find clients -type f 2>/dev/null | sort || true
-          for want in Windows macOS Linux android ios-unsigned; do
+          for want in Windows macOS Linux android-debug ios-unsigned; do
             if ! find clients -type f -name "*${want}*" -print -quit 2>/dev/null | grep -q .; then
               echo "::warning::no ${want} build in this release — see the desktop/mobile jobs for why"
             fi

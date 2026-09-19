@@ -36,10 +36,26 @@ jobs:
           java-version: "17"
 
       - name: Set up the Android SDK
-        # Installs the command-line tools and exports ANDROID_HOME, which both
-        # the generated Gradle project and tauri's Rust→Android linker setup
-        # read.
-        uses: android-actions/setup-android@v3
+        # The runner image already carries the SDK and its command-line tools,
+        # so this only exports ANDROID_HOME (both the generated Gradle project
+        # and tauri's Rust→Android linker read it) and installs the platform
+        # and build-tools the project asks for.
+        #
+        # `android-actions/setup-android@v3` is NOT used: it asks sdkmanager
+        # for the legacy `tools` package, which no longer exists in the SDK
+        # repository, so the whole step dies with exit code 1 ("Failed to find
+        # package 'tools'"). Asking for exactly what is needed is what works.
+        run: |
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          test -n "$SDK" || { echo "::error::no Android SDK on this runner"; exit 1; }
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          SDKMANAGER="$(ls "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)"
+          test -n "$SDKMANAGER" || { echo "::error::no sdkmanager under $SDK"; exit 1; }
+          # Licences first (the install refuses without them), then the two
+          # packages the generated project names.
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" --install "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Set up the Android NDK
         # The NDK is what cross-links the Rust code for the Android targets
@@ -70,23 +86,21 @@ jobs:
         run: npx tauri android init --ci
 
       - name: Build the APK
+        # `--debug` on purpose: a debug APK is signed with the SDK's debug
+        # keystore and therefore INSTALLS on a device, while a release APK is
+        # only signed when gen/android/keystore.properties exists — a keystore
+        # generated locally and never committed, so a release build here would
+        # be an unsigned APK no phone will install. A release APK is one
+        # keystore away: add the signing config and swap the flag.
         working-directory: desktop
         env:
           NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: npx tauri android build --apk
+        run: npx tauri android build --apk --debug
 
       - name: Upload the APK
         uses: actions/upload-artifact@v4
         with:
-          name: la-musica-android
-          # tauri names this artifact app-universal-release-unsigned.apk: a
-          # release APK is only signed when gen/android/keystore.properties
-          # exists, and that file holds a keystore which is generated locally
-          # and never committed. An unsigned APK cannot be installed by a
-          # device as-is — it needs re-signing (apksigner with a release
-          # keystore, see desktop/README.md). For an installable build straight
-          # out of CI, swap the build step to `--apk --debug`, which signs with
-          # the SDK's debug key.
+          name: la-musica-android-debug
           if-no-files-found: error
           path: desktop/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
 
@@ -136,7 +150,11 @@ jobs:
           CODE_SIGNING_ALLOWED: "NO"
           CODE_SIGNING_REQUIRED: "NO"
           CODE_SIGN_IDENTITY: ""
-        run: npx tauri ios build --target aarch64-apple-ios --no-sign
+        # tauri's own target names, not cargo's: `aarch64` is the device
+        # (arm64-apple-ios), `aarch64-sim`/`x86_64` the simulators. Passing the
+        # cargo triple here is rejected outright ("invalid value
+        # 'aarch64-apple-ios'"), which is what failed the first CI run.
+        run: npx tauri ios build --target aarch64 --no-sign
 
       - name: Package the .app into an unsigned .ipa
         # An .ipa is a zip with the app bundle inside a Payload/ directory and
