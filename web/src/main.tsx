@@ -31,7 +31,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
     const { error } = this.state;
     if (!error) return this.props.children;
     return (
-      <div className="min-h-screen flex items-center justify-center bg-bg p-6 text-zinc-100">
+      <div className="min-h-dvh flex items-center justify-center bg-bg p-6 text-zinc-100">
         <div className="w-full max-w-lg rounded-xl border border-border bg-card p-5 space-y-3">
           <div className="flex items-center gap-2 text-sm font-semibold">
             <CircleAlert className="h-4 w-4 text-red-400" /> Something went wrong

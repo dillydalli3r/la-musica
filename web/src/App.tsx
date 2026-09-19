@@ -641,7 +641,7 @@ export default function App() {
     // The sidebar owns the entire left edge, top to bottom (brand header, nav,
     // footer); the top bar, content and player bar all live in the column to
     // its right.
-    <div className="h-screen overflow-hidden bg-bg text-zinc-100 flex">
+    <div className="h-dvh overflow-hidden bg-bg text-zinc-100 flex">
       <aside
         className={`${collapsed ? "w-14" : "w-48"} hidden md:flex h-full shrink-0 border-r border-border bg-panel p-2 flex-col gap-1 overflow-y-auto transition-[width] duration-150 relative z-20`}
       >
@@ -747,7 +747,7 @@ export default function App() {
             role="dialog"
             aria-modal="true"
             aria-label={t("topbar.menu_open")}
-            className="anim-pop fixed left-0 top-0 bottom-0 z-50 w-52 bg-panel border-r border-border p-2 flex flex-col gap-1 overflow-y-auto md:hidden shadow-2xl"
+            className="anim-pop fixed left-0 top-0 bottom-0 z-50 w-52 bg-panel border-r border-border p-2 flex flex-col gap-1 overflow-y-auto overscroll-contain md:hidden shadow-2xl"
           >
             <div className="flex items-center gap-2 border-b border-border pb-2 mb-1 px-1">
               <img src="/icon.png" alt="la musica" className="h-7 w-7 rounded-md object-cover ring-1 ring-border shadow-sm" />
@@ -918,7 +918,7 @@ export default function App() {
           <LiveProgress />
         </header>
 
-        <main className="flex-1 overflow-auto min-w-0 pt-12">
+        <main className="flex-1 overflow-auto overscroll-contain min-w-0 pt-12">
           {/* keyed by pathname so each navigation eases the new page in */}
           <div key={location.pathname} className="page-enter">
             {/* lazy routes: the page chunk is fetched on first visit */}

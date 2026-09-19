@@ -90,7 +90,7 @@ export default function ClientSetup({ onDone }: { onDone: () => void }) {
   };
 
   return (
-    <div className="min-h-screen bg-bg text-zinc-100 flex flex-col items-center justify-center p-6">
+    <div className="min-h-dvh bg-bg text-zinc-100 flex flex-col items-center justify-center p-6">
       <div className="w-full max-w-2xl space-y-4">
         <PageHeader icon={Server} title={t("client.title")} subtitle={t("client.subtitle")} />
 

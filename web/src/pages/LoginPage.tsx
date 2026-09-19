@@ -83,7 +83,7 @@ export default function LoginPage({ onSignedIn }: { onSignedIn: () => void }) {
   };
 
   return (
-    <div className="min-h-screen bg-bg text-zinc-100 flex items-center justify-center p-6">
+    <div className="min-h-dvh bg-bg text-zinc-100 flex items-center justify-center p-6">
       <div className="w-full max-w-md">
         <div className="flex items-center gap-3 mb-6">
           <div className="h-11 w-11 rounded-xl bg-accent/15 border border-accent/30 flex items-center justify-center">

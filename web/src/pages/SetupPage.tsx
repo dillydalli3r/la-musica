@@ -139,7 +139,7 @@ export default function SetupPage() {
   };
 
   return (
-    <div className="min-h-screen bg-bg text-zinc-100 flex flex-col items-center justify-center p-6">
+    <div className="min-h-dvh bg-bg text-zinc-100 flex flex-col items-center justify-center p-6">
       <div className="w-full max-w-2xl">
         <div className="flex items-center gap-2 mb-6">
           <img

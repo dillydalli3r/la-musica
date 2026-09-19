@@ -168,8 +168,21 @@ body {
   letter-spacing: -0.011em;
 }
 
+/* App shell height: the document is exactly the visual viewport, so a page
+   that fits has nothing to scroll — including on iOS, where `100vh` is the
+   LARGE viewport (taller than the screen while the URL bar is showing) and
+   left the document scrollable by the difference on every page.
+   `height: 100%` follows the small viewport; the shell itself uses `dvh`
+   (`h-dvh`), the pre-shell screens (login / first-run wizard / crash card)
+   `min-h-dvh`, and html/body keep their default overflow so those screens
+   still scroll when their content genuinely exceeds the visible area. */
+html,
+body {
+  height: 100%;
+}
+
 #root {
-  min-height: 100vh;
+  height: 100%;
 }
 
 @layer components {
