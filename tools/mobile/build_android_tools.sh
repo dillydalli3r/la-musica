@@ -26,6 +26,10 @@
 set -euo pipefail
 
 OUT="${1:?usage: build_android_tools.sh <out-dir> [jobs]}"
+# Absolute before anything cd's: the build steps below run inside $WORK, so a
+# relative out-dir would resolve against the wrong directory and the final copy
+# would fail with "No such file or directory" — after a ten-minute ffmpeg build
+# that had already succeeded.
 JOBS="${2:-$(nproc 2>/dev/null || echo 4)}"
 API=24
 TRIPLE="aarch64-linux-android"
@@ -41,6 +45,7 @@ FLAC_SHA256="f2c1c76592a82ffff8413ba3c4a1299b6c7ab06c734dee03fd88630485c2b920"
 
 WORK="$(pwd)/.mobile-tools-build"
 mkdir -p "$WORK" "$OUT"
+OUT="$(cd "$OUT" && pwd)"
 
 # --- locate the NDK -----------------------------------------------------------
 NDK="${NDK_HOME:-${ANDROID_NDK_HOME:-}}"

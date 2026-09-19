@@ -130,11 +130,18 @@ PINS = {
 # fastapi/starlette/pydantic/uvicorn are the framework; the rest are the
 # transitive imports those make on the way in. pydantic_core is the one that
 # has no wheel anywhere and is why the pipeline refuses to stage without it.
+# The import closure the backend needs, taken from what the pinned
+# requirements actually resolve to (verified by installing them for this
+# interpreter and listing the tree) — NOT from a package's dependency list as
+# remembered. `sniffio` sat here for a run and failed the iOS build on a tree
+# that was perfectly good: modern anyio/httpcore no longer install it, so the
+# check demanded an import nothing provides. Re-derive this list from the
+# closure whenever the requirements move.
 REQUIRED_IMPORTS = [
     "fastapi", "starlette", "pydantic", "pydantic_core", "uvicorn",
-    "click", "h11", "anyio", "httpx", "httpcore", "idna", "sniffio",
+    "click", "h11", "anyio", "httpx", "httpcore", "idna",
     "certifi", "aiofiles", "mutagen", "multipart", "websockets",
-    "typing_extensions", "annotated_types",
+    "typing_extensions", "typing_inspection", "annotated_types",
 ]
 
 # Present when the platform allows it; the backend runs without them and

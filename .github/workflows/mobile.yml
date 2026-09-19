@@ -218,7 +218,7 @@ jobs:
         # Android may execute a binary it ships, which is the one thing the
         # platform can do that iOS cannot — so the tools it needs are built for
         # arm64 and shipped inside the APK.
-        run: bash tools/mobile/build_android_tools.sh desktop/src-tauri/target/mobile-tools
+        run: bash tools/mobile/build_android_tools.sh "$GITHUB_WORKSPACE/desktop/src-tauri/target/mobile-tools"
 
       - name: Stage the bundled Python runtime
         # BEFORE `android init`: the runtime is staged as a single
