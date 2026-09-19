@@ -60,6 +60,11 @@ HOST_TAG="linux-x86_64"
 TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/$HOST_TAG"
 [ -d "$TOOLCHAIN" ] || { echo "ERROR: $TOOLCHAIN does not exist (unexpected NDK layout)" >&2; exit 1; }
 CC="$TOOLCHAIN/bin/${TRIPLE}${API}-clang"
+# The C++ driver matters: flac's build links a C++ EXAMPLE program against the
+# library it just cross-compiled, and without CXX that link falls back to the
+# HOST linker, which rejects the Android objects with "file in wrong format".
+# The examples are disabled below, but the toolchain stays correct either way.
+CXX="$TOOLCHAIN/bin/${TRIPLE}${API}-clang++"
 AR="$TOOLCHAIN/bin/llvm-ar"
 RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
 STRIP="$TOOLCHAIN/bin/llvm-strip"
@@ -113,9 +118,10 @@ build_flac() {
   tar -xf "$WORK/$tarball" -C "$WORK"
   cd "$WORK/flac-$FLAC_VERSION"
   ./configure --host="$TRIPLE" --prefix="$WORK/flac-prefix" \
-    --disable-shared --enable-static --disable-ogg --disable-docs \
-    CC="$CC" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" \
-    CFLAGS="-O2 -fPIC"
+    --disable-shared --enable-static --disable-ogg \
+    --disable-examples \
+    CC="$CC" CXX="$CXX" AR="$AR" RANLIB="$RANLIB" STRIP="$STRIP" \
+    CFLAGS="-O2 -fPIC" CXXFLAGS="-O2 -fPIC"
   make -j"$JOBS"
   make install
   cp "$WORK/flac-prefix/bin/flac" "$OUT/flac"
