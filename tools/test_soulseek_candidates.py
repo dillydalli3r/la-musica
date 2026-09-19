@@ -1047,7 +1047,13 @@ def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSls
                 # case; run.prompt stays the FIRST payload the job published.
                 for ans in (answer if isinstance(answer, (list, tuple)) else [answer]):
                     parked = None
-                    deadline = real_time.time() + 10
+                    # The job sleeps on its own search waits between prompts
+                    # (soulseek_auto_search_wait, 5 s in JOB_CFG, once per
+                    # attempt) and a loaded CI runner runs three jobs at once,
+                    # so a flat 10 s window made this suite fail on timing
+                    # alone. Budget the job's own waits plus slack.
+                    _wait = (cfg or JOB_CFG).get("soulseek_auto_search_wait", 5)
+                    deadline = real_time.time() + max(30, 4 * float(_wait) + 15)
                     while real_time.time() < deadline:
                         st = soulseek_auto.job_state()
                         if st["state"] == "confirm":
