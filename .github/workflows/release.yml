@@ -15,6 +15,12 @@ name: Release
 # draft/prerelease flags below are just the default "this is a real release"
 # choice.
 
+# A release run is never cancelled by a newer one: it is the thing that
+# publishes the artifacts. Two releases therefore queue rather than overlap.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 on:
   push:
     tags:

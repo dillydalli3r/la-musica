@@ -13,6 +13,11 @@ on:
   workflow_dispatch:
   workflow_call:
 
+# See desktop.yml: the same ref must not build twice in parallel.
+concurrency:
+  group: mobile-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   android:
     runs-on: ubuntu-latest
@@ -85,6 +90,16 @@ jobs:
         working-directory: desktop
         run: npx tauri android init --ci
 
+      - name: Cache the Rust crate graph
+        # The cross-compile of every dependency for four Android ABIs is what
+        # makes this job long; the cache takes it back to compiling just the
+        # shell. Keyed by NDK version as well, because the linker inputs
+        # change with it.
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+          key: android-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
+
       - name: Build the APK
         # `--debug` on purpose: a debug APK is signed with the SDK's debug
         # keystore and therefore INSTALLS on a device, while a release APK is
@@ -137,6 +152,12 @@ jobs:
       - name: Initialize the iOS project
         working-directory: desktop
         run: npx tauri ios init --ci
+
+      - name: Cache the Rust crate graph
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+          key: ios-${{ hashFiles('desktop/src-tauri/Cargo.lock') }}
 
       - name: Build the unsigned app
         # No signing identity here: the repository carries no Apple

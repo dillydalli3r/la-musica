@@ -17,9 +17,25 @@ on:
   pull_request:
   workflow_call:
 
+# A pushed commit supersedes the run that is still testing its predecessor:
+# three shards of Python suites plus a Rust check are minutes of runner time
+# per push, and the older answer is never the one anybody wants.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   python:
     runs-on: ubuntu-latest
+    # Four shards, dealt by index. The suites are independent scripts, and the
+    # slow ones (soulseek, grading, import) dominate the total, so a fixed
+    # split keeps every leg within a few minutes of the others without
+    # maintaining a per-suite list: a new tools/test_*.py file lands in a
+    # shard by itself.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
 
@@ -51,10 +67,16 @@ jobs:
           mkdir -p ".dependencies/flac v${FLAC_VERSION}"
           ln -s "$(command -v flac)" ".dependencies/flac v${FLAC_VERSION}/flac.exe"
 
-      - name: Run the test suites
+      - name: Run the test suites (shard ${{ matrix.shard }} of 4)
         run: |
+          files=(tools/test_*.py)
+          echo "${#files[@]} suites total, this shard runs every 4th"
           fail=0
-          for suite in tools/test_*.py; do
+          ran=0
+          for i in "${!files[@]}"; do
+            if (( i % 4 != ${{ matrix.shard }} )); then continue; fi
+            suite="${files[$i]}"
+            ran=$((ran + 1))
             echo "::group::$suite"
             code=0
             python "$suite" || code=$?
@@ -66,6 +88,8 @@ jobs:
               fail=1
             fi
           done
+          echo "ran $ran suite(s)"
+          test "$ran" -gt 0 || { echo "::error::this shard ran nothing"; fail=1; }
           exit "$fail"
 
   web:
@@ -131,6 +155,15 @@ jobs:
       - name: npm ci
         working-directory: desktop
         run: npm ci
+
+      - name: Cache the Rust crate graph
+        # `cargo check` on a cold runner compiles the whole crate graph, which
+        # is minutes for four crates of our own. Cached, it is the shell that
+        # gets checked.
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+          key: ci-check
 
       - name: cargo check
         # The runner image ships a stable Rust toolchain (rustup), so no

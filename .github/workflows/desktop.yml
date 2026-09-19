@@ -21,6 +21,14 @@ on:
   workflow_dispatch:
   workflow_call:
 
+# One run per ref: a workflow_dispatch fired while a tag's release is building
+# the same bundles waits for nothing and cancels nothing useful, but a second
+# push to the same branch supersedes its predecessor instead of queueing three
+# more OS runners behind it.
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   desktop:
     strategy:
@@ -76,6 +84,25 @@ jobs:
         # is the expensive half of this job.
         working-directory: web
         run: npm run build
+
+      # The Rust build is the expensive part of this job and it is almost
+
+      # entirely dependencies: with the crate graph cached, a bundle build
+
+      # drops from ~10 minutes to ~2, and only the shell crate itself is
+
+      # recompiled. Keyed per platform — the compiled artifacts are not
+
+      # portable between them.
+
+      - uses: Swatinem/rust-cache@v2
+
+        with:
+
+          workspaces: desktop/src-tauri -> target
+
+          key: ${{ matrix.os }}
+
 
       - name: Build the bundles
         working-directory: desktop
