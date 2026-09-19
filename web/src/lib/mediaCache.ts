@@ -144,8 +144,10 @@ export async function uncacheTrack(path: string): Promise<void> {
   const urls = cacheUrls(path);
   await Promise.all(urls.map((u) => c.delete(u)));
   // A live blob: URL keeps its bytes alive after the cache entry is gone, and
-  // would keep feeding an element a track the user just removed.
-  for (const u of urls) {
+  // would keep feeding an element a track the user just removed. The album
+  // cover and artist image downloaded alongside it go the same way: their
+  // blobs (offlineArtworkUrl) are keyed as artworkUrls() warms them.
+  for (const u of [...urls, ...artworkUrls(path)]) {
     const blob = blobUrls.get(u);
     if (blob) {
       URL.revokeObjectURL(blob);
@@ -244,6 +246,7 @@ export async function cachedBytes(): Promise<number> {
 
 /** Evict everything (offline cache reset). */
 export async function clearMediaCache(): Promise<void> {
+  // One map holds the stream AND artwork blobs, so this sweep covers both.
   for (const url of blobUrls.values()) URL.revokeObjectURL(url);
   blobUrls.clear();
   await caches.delete(CACHE_NAME);
@@ -268,6 +271,47 @@ export async function offlineMediaUrl(path: string): Promise<string | null> {
       if (existing) return existing;
       const blob = URL.createObjectURL(await hit.blob());
       blobUrls.set(url, blob);
+      return blob;
+    }
+    return null;
+  } catch {
+    return null; // Cache Storage unavailable (insecure context), or no entry
+  }
+}
+
+/** A `blob:` URL for an image already in the offline cache, or null when its
+ *  bytes were never downloaded.
+ *
+ *  The image twin of offlineMediaUrl: in a shell nothing serves Cache Storage
+ *  back to the webview, so a cover sitting in the cache is still requested
+ *  over the network. With the server down that request fails and every
+ *  thumbnail falls back to the placeholder, even for a downloaded album.
+ *
+ *  Keyed exactly as `cacheTrack`'s warm() wrote it — with one wrinkle: warm()
+ *  caches an album cover WITHOUT the `&file=` a page requests it with (the
+ *  folder's default art), so the same picture is stored under two keys. The
+ *  requested key is tried first, then the same key minus `file=`, or a
+ *  downloaded cover would never be found. Created once per key and revoked
+ *  with the other blob URLs. */
+export async function offlineArtworkUrl(url: string): Promise<string | null> {
+  try {
+    const key = absolute(url);
+    // Not `searchParams.delete`: re-serializing would rewrite `%20` as `+` and
+    // never match the warmed key for an album path with a space in it.
+    const cut = key.indexOf("&file=");
+    const keys = [key];
+    if (cut > 0) {
+      const next = key.indexOf("&", cut + 1);
+      keys.push(key.slice(0, cut) + (next < 0 ? "" : key.slice(next)));
+    }
+    const c = await cache();
+    for (const k of keys) {
+      const hit = await c.match(k);
+      if (!hit) continue;
+      const existing = blobUrls.get(k);
+      if (existing) return existing;
+      const blob = URL.createObjectURL(await hit.blob());
+      blobUrls.set(k, blob);
       return blob;
     }
     return null;

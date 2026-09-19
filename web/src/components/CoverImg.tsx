@@ -1,9 +1,16 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Disc3 } from "lucide-react";
 import { api } from "../api";
+import { offlineArtworkUrl } from "../lib/mediaCache";
 
 /** Cover thumbnail with a graceful fallback when the art is missing or
- * fails to load. `wrapperClass` sizes the box; the image fills it. */
+ * fails to load. `wrapperClass` sizes the box; the image fills it.
+ *
+ * When the image's bytes are in the offline cache (the album was downloaded),
+ * the network URL paints first and the cached copy swaps in behind it — the
+ * first paint MUST NOT wait on Cache Storage, so the online path looks and
+ * times exactly as it does without the cache. Offline, that swap is what
+ * keeps a downloaded album's art from collapsing to the Disc3 placeholder. */
 export default function CoverImg({
   albumPath,
   coverFile,
@@ -13,8 +20,28 @@ export default function CoverImg({
   coverFile?: string | null;
   wrapperClass?: string;
 }) {
-  const [failed, setFailed] = useState(false);
-  if (!coverFile || failed) {
+  // Remembered per URL, not as a bare flag: a row recycled onto another album
+  // must not inherit the previous cover's failure.
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const networkUrl = coverFile ? api.coverUrl(albumPath, coverFile) : null;
+  const [offlineUrl, setOfflineUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!networkUrl) return;
+    let live = true;
+    setOfflineUrl(null); // a different cover must not inherit the old blob
+    offlineArtworkUrl(networkUrl).then((u) => {
+      if (live) setOfflineUrl(u);
+    });
+    return () => {
+      live = false;
+    };
+  }, [networkUrl]);
+
+  // A blob URL from Cache Storage still wins over a failed network load: the
+  // request that failed was made precisely because the cached copy was not
+  // consulted first.
+  if (!networkUrl || (failedUrl === networkUrl && !offlineUrl)) {
     return (
       <div className={`${wrapperClass} flex items-center justify-center text-zinc-700`}>
         <Disc3 className="h-1/2 w-1/2 max-h-5 max-w-5" />
@@ -24,11 +51,11 @@ export default function CoverImg({
   return (
     <div className={wrapperClass}>
       <img
-        src={api.coverUrl(albumPath, coverFile)}
+        src={offlineUrl ?? networkUrl}
         alt=""
         loading="lazy"
         decoding="async"
-        onError={() => setFailed(true)}
+        onError={() => setFailedUrl(networkUrl)}
         className="h-full w-full object-cover"
       />
     </div>
