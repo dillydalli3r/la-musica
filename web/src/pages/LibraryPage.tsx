@@ -1007,7 +1007,11 @@ export default function LibraryPage() {
                   </span>
                   <span className="text-[10px] text-zinc-600 shrink-0 w-8 text-right">{al.track_count}t</span>
                   <div className="opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 flex gap-1 shrink-0 transition-opacity" onClick={(e) => e.stopPropagation()}>
-                    <button className="btn-ghost !px-1.5 !py-0.5" title={isExp ? "Collapse" : "Show tracks"}>
+                    <button
+                      className="btn-ghost !px-1.5 !py-0.5"
+                      title={isExp ? "Collapse" : "Show tracks"}
+                      onClick={() => toggleExpand(al.path)}
+                    >
                       {isExp ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
                     </button>
                   </div>

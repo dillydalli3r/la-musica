@@ -86,9 +86,20 @@ def _start_next():
         if not _queue or job_active():
             return
         item = _queue.pop(0)
-        if not start_job(**item).get("ok"):
-            # the pipeline got taken between the check and the start: put it back
-            _queue.insert(0, item)
+        res = start_job(**item)
+        if not res.get("ok"):
+            # Only the TRANSIENT refusal ("a job is already running" — the
+            # pipeline got taken between the check and the start) puts the
+            # item back. Permanent ones ("already in your library", "already
+            # queued") used to be re-inserted at the head too, so a bulk
+            # download that reached a release imported in the meantime
+            # retried that same item forever: the pipeline went idle and the
+            # queue could not be emptied from the UI.
+            if "already running" in str(res.get("error") or ""):
+                _queue.insert(0, item)
+            else:
+                _log(f"queue: dropped {item.get('release_mbid') or item.get('target_dir') or 'item'}"
+                     f" — {res.get('error') or 'could not start'}")
 
 
 def _release_key(release_mbid, release=None):

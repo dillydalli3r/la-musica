@@ -76,15 +76,19 @@ LEGACY_DEFAULT_DIGITAL_QUERIES = (
     ["artist album year", "artist album"],
 )
 
-# Run All order — strict pipeline v1.7.0: 1 Lyrics → 2 CUEs → 8 Auto Tagging → 3 FLAC → 5 Images → 9 AccurateRip → 6 Audit → 4 Grade → 7 DR/ReplayGain → 10 Format All.
-# AccurateRip must run before Audit/Grade so the .accurip is present for real-time AUDIT; Grade after Audit so AUDIT tags are fresh; Format All at end does final canonical trims.
-# User's strict config default as of v1.6.0; reorder via Settings → Run All Order.
-# Run All pipeline: remux first, then beets tagging (MusicBrainz), then the
-# release tracklist manifest (15 — it reads the release id beets just wrote,
-# and grading requires the manifest), then formatting/tagging scripts, lyric
-# fetching and the AI transforms that read those lyrics (before grade sees
-# them), and analysis/audit/grade at the end.
-DEFAULT_RUN_ALL_ORDER = [11, 14, 15, 1, 2, 8, 13, 18, 17, 12, 16, 3, 5, 9, 6, 4, 7, 10]
+# Run All order — PATH-CHANGING SCRIPTS FIRST (11 videos → 3 FLACs → 14
+# beets, whose generated config sets `move: yes`), then the sidecar namers
+# that must see final audio names (15 manifest → 2 CUEs → 1 lyrics format),
+# then content: 13 fetch lyrics → 18 publish → 17 AI transforms, 8 auto
+# tagging (mood/genre/advisory), 5 images, 6 audit, 7 DR & ReplayGain, 9
+# AccurateRip, 12 key & BPM, 16 mood & energy, and finally 10 Format all
+# (the canonical trim) then 4 Grade last.
+# The order this replaced ran CUEs before the converters — a cue could name
+# "….wav" for an album that had become FLAC — and beets fourth-from-last, so
+# the album was moved after images/audit/DR had been computed for paths that
+# no longer existed. 15 stays right after 14: it reads the release id beets
+# matched. Keep in step with web/src/lib/scripts.ts (tests/test_script_menus).
+DEFAULT_RUN_ALL_ORDER = [11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 6, 7, 9, 12, 16, 10, 4]
 
 # The genre-source order that shipped before the two-source default: recognizing
 # it lets normalize_config treat it as "never customized" (see below).
@@ -421,6 +425,9 @@ DEFAULT_CONFIG = {
     "grade_check_cd_format": True,
     "grade_check_cover": True,
     "grade_check_cue_format": True,
+    # ...and that the sheet's FILE lines name files the album actually has
+    # (a converted or renamed album used to keep "….wav" forever).
+    "grade_check_cue_files": True,
     "grade_check_disallowed": True,
     # A library folder with nothing at all beneath it (no file anywhere in
     # its subtree) counts against grading as an EMPTY_FOLDER failure. Albums
@@ -498,9 +505,11 @@ DEFAULT_CONFIG = {
     "audit_cutoff_allow": 0,
     # For MEDIA=CD rips, verify tracks against the CRC-32 checksums printed
     # in the .log and write AUDIT=REAL/FAKE from that (authoritative over
-    # AudioAuditor for those files). When audit_cd_require_both is True
-    # (now the default), BOTH the .log CRC and AudioAuditor must be REAL
-    # for the final AUDIT to be REAL; if either is FAKE, the result is FAKE.
+    # AudioAuditor for those files: a synthetic-tone fixture survives a real
+    # AudioAuditor's "fake lossless" verdict). audit_cd_require_both (default
+    # on) additionally runs AudioAuditor over CD files — its warnings are
+    # kept, and it decides for a disc neither the .log CRC nor a REAL
+    # .accurip could verify.
     "audit_verify_cd_checksums": True,
     "audit_cd_require_both": True,
     "audit_integrity": True,
@@ -699,6 +708,9 @@ DEFAULT_CONFIG = {
     "import_acoustid": True,
     "acoustid_enabled": True,
     "acoustid_api_key": "",
+    # The override mlo/acoustid.py already honours; without a default (and so
+    # without a Settings field) the documented escape hatch could not be set.
+    "acoustid_fpcalc_path": "",
     "acoustid_min_score": 0.75,
 
     # Soulseek via managed slskd (shares = music folder).
@@ -877,8 +889,6 @@ DEFAULT_CONFIG = {
 
     # First run / updates
     "first_run_done": False,
-    "last_update_check": 0,
-    "update_check_interval_days": 7,
     # Install tools that are missing or behind their upstream release without
     # waiting for the Dependencies page. OFF by default: it downloads binaries
     # on its own schedule, which is a decision the user makes, not one the app
@@ -921,7 +931,6 @@ _INT_RANGES = {
     "grade_log_score_threshold": (0, 100),
     "audit_log_score_threshold": (0, 100),
     "worker_limit": (0, 64),
-    "update_check_interval_days": (1, 30),
     "cover_target_size": (0, 4000),
     "cover_jpeg_target_size": (0, 4000),
     "cover_png_target_size": (0, 4000),
@@ -1009,11 +1018,12 @@ def normalize_config(user=None) -> dict:
         str(source).strip() or DEFAULT_DIGITAL_SOURCE
     )
 
-    try:
-        last_check = float(cfg.get("last_update_check", 0) or 0)
-        cfg["last_update_check"] = max(0.0, last_check)
-    except (TypeError, ValueError):
-        cfg["last_update_check"] = 0.0
+    # `last_update_check` / `update_check_interval_days` belonged to an
+    # app-update checker that no longer exists; nothing reads them, so they
+    # are not written back (the app's update story is the dependency check in
+    # mlo/fetchdeps.py).
+    cfg.pop("last_update_check", None)
+    cfg.pop("update_check_interval_days", None)
 
     try:
         thr = float(cfg.get("cover_crop_threshold", 0.05))

@@ -463,7 +463,13 @@ def run_auto_tagging(config):
                 if raw_genre is not None:
                     stripped = str(raw_genre).strip()
                     if str(raw_genre) != stripped:
-                        if d["af"].set_tag("GENRE", stripped):
+                        # A multi-valued GENRE reads back "; "-joined (see
+                        # get_tag), so write it back as the list it was —
+                        # otherwise trimming the whitespace would COLLAPSE
+                        # three genres into one tag named "A; B; C".
+                        value = ([g.strip() for g in stripped.split(";") if g.strip()]
+                                 if ";" in stripped else stripped)
+                        if d["af"].set_tag("GENRE", value):
                             modified += 1
                             d["af"] = AudioFile(d["af"].path)  # refresh
             except Exception:
@@ -600,7 +606,10 @@ def run_auto_tagging(config):
                 except Exception:
                     names = []
                 if names and should_write_audio_tag(config, "GENRE", filepath=path):
-                    if af.set_tag("GENRE", "; ".join(names)):
+                    # The list goes in as a list: set_tag writes repeated
+                    # GENRE fields, so players see several genres instead of
+                    # one called "Dance-Punk; Electronic; Funk Rock".
+                    if af.set_tag("GENRE", names):
                         genre_modified += 1
                         af = d["af"] = AudioFile(path)  # refresh for the mood prior
             if do_mood:

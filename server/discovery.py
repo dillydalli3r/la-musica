@@ -69,7 +69,7 @@ SOURCE_LABELS = {
     "musicbrainz": "MusicBrainz",
 }
 SOURCE_NOTES = {
-    "deezer": "Popularity-ranked catalogue, related artists and 1000px artist photos.",
+    "deezer": "Popularity-ranked catalogue and 1000px artist photos.",
     "listenbrainz": "What people are listening to right now (MetaBrainz, MBID-native).",
     "itunes": "Apple catalogue search and high-resolution artwork.",
     "audiodb": "Artist biographies, album notes and press photos.",
@@ -229,6 +229,15 @@ def _json(url, params=None, headers=None, timeout=None, ttl=TTL_META, host=None)
         sent = {"User-Agent": APP_UA if polite else BROWSER_UA,
                 "Accept": "application/json"}
         sent.update(headers or {})
+        # A caller's own timeout wins; otherwise the configured one
+        # (Settings → Discovery → Request timeout). That key used to be
+        # written and never read, so every source waited the hardcoded 12 s.
+        if not timeout:
+            try:
+                from mlo.config import load_config
+                timeout = float(load_config().get("discovery_timeout_s") or 12.0)
+            except (TypeError, ValueError):
+                timeout = 12.0
         resp = httpx.get(
             url,
             params=params or {},

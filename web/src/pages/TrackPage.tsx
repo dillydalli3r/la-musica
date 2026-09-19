@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { Save, Play, Disc3, ListPlus, ListStart, ListMusic, ShieldCheck, ImageUp, Clapperboard, Search, FolderOpen } from "lucide-react";
+import { Save, Play, Disc3, ListPlus, ListStart, ListMusic, ShieldCheck, ImageUp, Clapperboard, Search, FolderOpen, Users } from "lucide-react";
 import { api } from "../api";
 import { fmtTech, fmtDuration, isVideoFile } from "../lib/fmt";
 import { uncacheTrack } from "../lib/mediaCache";
@@ -17,6 +17,8 @@ import LyricsEditorModal from "./../components/LyricsEditorModal";
 import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
 import TagActionsMenu from "../components/TagActionsMenu";
+import Modal from "../components/Modal";
+import { CreditsPanel, creditTagsFrom } from "../components/TrackDetails";
 
 export default function TrackPage() {
   const { path = "" } = useParams();
@@ -52,6 +54,7 @@ export default function TrackPage() {
   const [editorOpen, setEditorOpen] = useState(false);
   const [coverBusy, setCoverBusy] = useState(false);
   const [videoOpen, setVideoOpen] = useState(false);
+  const [creditsOpen, setCreditsOpen] = useState(false);
   const coverInput = useRef<HTMLInputElement>(null);
 
   const tags: Record<string, string> = {};
@@ -248,6 +251,7 @@ export default function TrackPage() {
                 {
                   title: "Track",
                   items: [
+                    { label: "Credits", icon: Users, onClick: () => setCreditsOpen(true) },
                     { label: "Watch video", icon: Clapperboard, hidden: !isVideo, onClick: () => setVideoOpen(true) },
                     { label: "Open album folder", icon: FolderOpen, onClick: openFolder },
                   ],
@@ -449,6 +453,24 @@ export default function TrackPage() {
           onSaved={refreshAfterEditor}
           onClose={() => setManagerOpen(false)}
         />
+      )}
+
+      {creditsOpen && (
+        <Modal
+          onClose={() => setCreditsOpen(false)}
+          icon={Users}
+          title="Credits"
+          subtitle={tags.TITLE ?? fileName}
+          width="max-w-lg"
+          bodyClass="px-5 py-5"
+        >
+          {/* The file's own credit tags are the fallback the panel shows when
+              MusicBrainz has no relations — pass them, or that line is dead. */}
+          <CreditsPanel
+            path={track?.path ?? realPath}
+            tags={creditTagsFrom(tags as Record<string, unknown>)}
+          />
+        </Modal>
       )}
 
       {editorOpen && (

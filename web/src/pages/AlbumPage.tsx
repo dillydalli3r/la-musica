@@ -21,7 +21,7 @@ import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
 import TagActionsMenu from "../components/TagActionsMenu";
 import StatsPanel from "../components/StatsPanel";
-import TrackDetails, { CreditsPanel } from "../components/TrackDetails";
+import TrackDetails, { CreditsPanel, creditTagsFrom } from "../components/TrackDetails";
 import { SortHeader, sortRows, toggleSort, groupByDisc, type SortState } from "../lib/sort.tsx";
 import { ColumnsMenu, ColumnResizer, useColumnPrefs, useColumnWidths, useCustomColumns, customCols, customColValue, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, type Col } from "../lib/columns";
 import { toast, useStore } from "../store";
@@ -925,7 +925,14 @@ export default function AlbumPage() {
           width="max-w-lg"
           bodyClass="px-5 py-5"
         >
-          <CreditsPanel album={data.path} />
+          {/* The album-wide lookup: no track path (the server answers for the
+              whole release), but with the same tag fallback a track panel
+              gets, so an album MusicBrainz does not describe still shows the
+              file's own PERFORMER/COMPOSER instead of an empty box. */}
+          <CreditsPanel
+            album={data.path}
+            tags={creditTagsFrom(data.tracks[0]?.tags as Record<string, unknown> | undefined)}
+          />
         </Modal>
       )}
 

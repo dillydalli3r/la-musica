@@ -149,7 +149,12 @@ def transform_lines(config, lines, mode, lang=""):
     if mode not in ("translate", "transliterate"):
         raise ValueError(f"unknown mode: {mode}")
     if not lang:
-        lang = str(config.get("ai_translate_lang") or "en").strip() or "en"
+        # The configured target languages, not the never-written
+        # `ai_translate_lang`: `lyrics_translation_langs` is the key the
+        # transliteration settings own ("en,de"), so the first one is what a
+        # bare translate call means.
+        langs = str(config.get("lyrics_translation_langs") or "en").strip()
+        lang = (langs.split(",")[0].strip() or "en")
 
     cache = _cache_path(mode, lang, lines)
     with _CACHE_LOCK:

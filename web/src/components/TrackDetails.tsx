@@ -315,6 +315,16 @@ function AuditOverride({ path, current }: { path: string; current: string | null
  *  the shared TrackTags type, so the panel accepts just what it shows. */
 type CreditTags = { PERFORMER?: string | null; COMPOSER?: string | null };
 
+/** Read those two tags off a track's tag record (TrackTags does not declare
+ *  PERFORMER — it is not in the standard map), for the callers that mount the
+ *  panel outside a track details modal. */
+export function creditTagsFrom(tags: Record<string, unknown> | null | undefined): CreditTags {
+  return {
+    PERFORMER: tags?.PERFORMER as string | undefined,
+    COMPOSER: tags?.COMPOSER as string | undefined,
+  };
+}
+
 /** Role-grouped credits for one track (`path`) or a whole album (`album`),
  *  labelled with the source they came from.
  *

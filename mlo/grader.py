@@ -2980,11 +2980,11 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
 
     # CUE sheet FORMATTING compliance (when a cue exists): every cue must
     # already be in the canonical form the CUE formatter would produce.
+    cue_files = sorted(
+        os.path.join(album_dir, f) for f in all_files
+        if f.lower().endswith(".cue")
+    )
     if has_cue and cfg.get("grade_check_cue_format", True):
-        cue_files = sorted(
-            os.path.join(album_dir, f) for f in all_files
-            if f.lower().endswith(".cue")
-        )
         total_checks += 1
         cue_ok = True
         for cue_path in cue_files:
@@ -2995,6 +2995,27 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             failed_checks += 1
             add_issue("CUE sheet not optimally formatted "
                       "(run CUE Sheets script)", "album")
+
+    # ...and its FILE lines must name files this album actually holds. The
+    # formatter carries the name through verbatim, so a converted (wav→flac)
+    # or renamed album used to keep a sheet pointing at a file that is not
+    # there — playable nowhere, invisible to every other check.
+    if has_cue and cfg.get("grade_check_cue_files", True):
+        from .discs import cue_file_refs
+        on_disk = {f.lower() for f in all_files}
+        missing = []
+        for cue_path in cue_files:
+            for ref in cue_file_refs(cue_path):
+                base = ref.replace("/", "\\").split("\\")[-1]
+                if base and base.lower() not in on_disk:
+                    missing.append(f"{os.path.basename(cue_path)}: {ref}")
+        total_checks += 1
+        if missing:
+            failed_checks += 1
+            add_issue("CUE references a file the album does not have "
+                      f"({', '.join(missing[:3])}"
+                      f"{', …' if len(missing) > 3 else ''}) — run CUE Sheets",
+                      "album")
 
     # .accurip FORMATTING compliance (when .accurip exists): trim each line, outer blanks only
     # Per user: delete leading/trailing spaces per line, only outer blanks. Counts towards grading.

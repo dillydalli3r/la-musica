@@ -491,9 +491,17 @@ def run_calc_dr_replaygain(config):
 
 
 def _file_missing_dr(path):
+    """True when either DR tag is missing.
+
+    The ALBUM tag is written by the same pass and the grader requires it
+    (ALBUM_TAGS → "Missing album tag ALBUM DYNAMIC RANGE" fails the album), so
+    requiring only the per-track tag let script 7 skip a whole album that
+    could never pass grading — and the skip is by design, so re-running the
+    script could not repair it without Force."""
     try:
         af = AudioFile(path)
-        return not (str(af.get_tag("DYNAMIC RANGE") or "").strip())
+        return not (str(af.get_tag("DYNAMIC RANGE") or "").strip()
+                    and str(af.get_tag("ALBUM DYNAMIC RANGE") or "").strip())
     except Exception:
         return True
 

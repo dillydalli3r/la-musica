@@ -1410,6 +1410,18 @@ class AudioFile:
         name = str(name).upper()
         if name == "LYRICS":
             return self.set_lyrics(value)
+        # A LIST means several answers for one field (two genres, say). They go
+        # to disk as REPEATED fields — Vorbis comments, ID3v2.4 text frames and
+        # MP4 atoms all carry repeats natively — because writing one
+        # "Dance-Punk; Electronic; Funk Rock" string is exactly what makes every
+        # player list a single genre of that name. get_tag() already joins
+        # repeats back with "; ", so nothing downstream changes.
+        values = None
+        if isinstance(value, (list, tuple, set)):
+            values = [str(v).strip() for v in value if str(v).strip()]
+            if not values:
+                return False
+            value = "; ".join(values)
         # User request: all written tags must have no leading/trailing spaces.
         # Trim every value (except LYRICS which is handled separately) and
         # enforce ITUNESADVISORY 0/1/2.
@@ -1433,7 +1445,7 @@ class AudioFile:
                         self.audio.add_tags()
                     else:
                         return False
-                self.audio.tags[spec["flac"]] = value
+                self.audio.tags[spec["flac"]] = values if values and len(values) > 1 else value
                 self._save()
                 return True
 
@@ -1473,7 +1485,7 @@ class AudioFile:
                             except Exception:
                                 pass
                     self.audio.tags.add(
-                        TXXX(encoding=Encoding.UTF8, desc=desc, text=[value])
+                        TXXX(encoding=Encoding.UTF8, desc=desc, text=values or [value])
                     )
                 else:
                     if frame_type == "COMM":
@@ -1495,7 +1507,7 @@ class AudioFile:
                         if frame_cls is None:
                             return False
                         self.audio.tags.add(
-                            frame_cls(encoding=Encoding.UTF8, text=[value])
+                            frame_cls(encoding=Encoding.UTF8, text=values or [value])
                         )
                 self._save()
                 return True
@@ -1552,7 +1564,7 @@ class AudioFile:
                     except (TypeError, ValueError):
                         return False
                 else:
-                    self.audio[atom] = [value]
+                    self.audio[atom] = values if values and len(values) > 1 else [value]
 
                 self._save()
                 return True

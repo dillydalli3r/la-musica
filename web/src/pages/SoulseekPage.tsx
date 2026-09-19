@@ -1551,6 +1551,9 @@ function SharingCard({ running }: { running: boolean }) {
   const toggleAutostart = async () => {
     setBusy(true);
     try {
+      // `dirs` is null until the shares query answers: saving then would post
+      // an empty list, and the server stores it verbatim (every configured
+      // share folder would be gone). The checkbox is disabled in that window.
       await api.soulseekSharesSave(dirs ?? [], !autostart, false);
       qc.invalidateQueries({ queryKey: ["soulseekShares"] });
       qc.invalidateQueries({ queryKey: ["soulseekStatus"] });
@@ -1572,7 +1575,13 @@ function SharingCard({ running }: { running: boolean }) {
         )}
         <div className="ml-auto flex items-center gap-2.5">
           <label className="flex items-center gap-1.5 cursor-pointer text-zinc-400" title="Start slskd automatically when the app starts">
-            <input type="checkbox" checked={autostart} onChange={() => toggleAutostart()} disabled={busy} />
+            <input
+              type="checkbox"
+              checked={autostart}
+              onChange={() => toggleAutostart()}
+              disabled={busy || dirs === null}
+              title={dirs === null ? "Waiting for the share list to load" : undefined}
+            />
             Start with the app
           </label>
           <button className="btn-ghost !py-1 text-xs" onClick={rescan} disabled={busy || !running}>
@@ -3261,7 +3270,7 @@ function StagingPanel() {
   // No refetch interval: the server sizes every entry recursively, so polling
   // would walk the whole staging tree on a timer. Mount + every action is
   // enough — this panel is the thing that changes it.
-  const { data } = useQuery({
+  const { data, isError, refetch } = useQuery({
     queryKey: ["soulseekStaging"],
     queryFn: api.soulseekStaging,
   });
@@ -3321,7 +3330,15 @@ function StagingPanel() {
           what is actually in slskd's two staging folders — deleting here touches the disk, not the transfer list
         </span>
       </div>
-      {!data ? (
+      {isError ? (
+        <div className="text-xs text-amber-300">
+          Could not read the staging folders — the server may be restarting (the walk can also take a
+          while on a large queue).{" "}
+          <button className="btn-ghost !py-0.5 text-xs" onClick={() => refetch()}>
+            Retry
+          </button>
+        </div>
+      ) : !data ? (
         <PageLoading />
       ) : (
         <div className="grid gap-2 lg:grid-cols-2">

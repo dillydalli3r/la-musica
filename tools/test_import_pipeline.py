@@ -68,7 +68,10 @@ CFG = {"music_folder": MF, "import_auto_scripts": False, "import_scripts": [],
 # --------------------------------------------------------------------------- #
 # The chain a config describes
 # --------------------------------------------------------------------------- #
-assert imports.DEFAULT_CHAIN == [2, 3, 11, 1, 13, 18, 8, 5, 6, 7, 9, 12, 14, 15, 10, 4], \
+# Path-changing scripts first (11 videos → 3 FLACs → 14 beets, which moves),
+# then the sidecar namers that must see final audio names (15 manifest → 2
+# CUEs → 1 lyrics format), then content, then 10 Format all, then 4 Grade.
+assert imports.DEFAULT_CHAIN == [11, 3, 14, 15, 2, 1, 13, 18, 8, 5, 6, 7, 9, 12, 10, 4], \
     imports.DEFAULT_CHAIN
 assert imports.chain_for({}) == imports.DEFAULT_CHAIN
 assert imports.chain_for({"import_auto_scripts": True, "import_scripts": []}) \

@@ -6,7 +6,7 @@ mb_get_cached and tagcache.read_track; no socket is opened):
 
   * an ALBUM dir costs exactly ONE MusicBrainz request (`release/<id>` with
     the relations included) however many tracks it holds, answers
-    `release_mbid` + `cached: true`, groups rows by role and keeps a player
+    `release_mbid`, groups rows by role and keeps a player
     who appears on two tracks ONCE;
   * a track FILE asks `recording/<mbid>` and answers `track_mbid` (never a
     `release_mbid`);
@@ -174,7 +174,11 @@ def test_album_one_request_and_rows():
     assert MB_CALLS == [f"release/{REL_MBID}"], MB_CALLS
     assert body["release_mbid"] == REL_MBID, body
     assert "track_mbid" not in body, body
-    assert body["cached"] is True and body["source"] == "musicbrainz", body
+    # `cached` used to answer "did this come from MusicBrainz?" — which is what
+    # `source` already says and the UI already renders. Gone rather than kept
+    # as a second name for the same fact.
+    assert "cached" not in body, body
+    assert body["source"] == "musicbrainz", body
     assert body["artist"] == "Credits Artist" and body["album"] == "Credits Album", body
 
 
@@ -224,7 +228,9 @@ def test_track_recording_request():
     assert MB_CALLS == [f"recording/{TRACK_MBID}"], MB_CALLS
     assert body["track_mbid"] == TRACK_MBID, body
     assert "release_mbid" not in body, body
-    assert body["source"] == "musicbrainz" and body["cached"] is True, body
+    # `cached` was a second name for `source`; it is gone (and the UI never
+    # read it), so the source label is the whole contract here.
+    assert body["source"] == "musicbrainz" and "cached" not in body, body
     assert {"role": "performer", "attributes": ["lead vocals"],
             "artist": "Carol", "mbid": "c-1"} in body["rows"], body
 
@@ -239,7 +245,7 @@ def test_tag_fallback_no_request():
     body = r.json()
     assert MB_CALLS == [], MB_CALLS                     # the fallback is offline
     assert body["source"] == "tags", body
-    assert body["cached"] is False, body
+    assert "cached" not in body, body
     assert body["track_mbid"] == "" and "release_mbid" not in body, body
     # Vorbis' "Name (instrument)" comes back apart: artist + attribute
     assert {"role": "performer", "attributes": ["double bass"],

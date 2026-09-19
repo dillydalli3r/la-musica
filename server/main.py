@@ -1076,13 +1076,21 @@ def get_tags(path: str = Query(...), staged: bool = Query(False)):
         """
         folder, name = os.path.split(p)
         stem = os.path.splitext(name)[0].lower() + "."
+        main = os.path.splitext(name)[0].lower() + ".lrc"
         try:
             names = sorted(n for n in os.listdir(folder)
                            if n.lower().startswith(stem) and n.lower().endswith(".lrc"))
         except OSError:
             return None
         for cand in names:
-            if not cand.lower().endswith(XLIT_SIDECAR):
+            low = cand.lower()
+            # The track's OWN sidecar is the main lyrics file, not a
+            # translation — a both-tag-and-sidecar library has it sitting right
+            # here, and returning it made the player render the same lyrics
+            # twice (once as the song, once as its "translation").
+            if low == main:
+                continue
+            if not low.endswith(XLIT_SIDECAR):
                 return _read_text(os.path.join(folder, cand))
         return None
 
@@ -1516,7 +1524,11 @@ def _sniff_image_ext(data: bytes, content_type: str) -> str:
     magic = _image_magic_ext(data)
     if magic:
         return magic
-    ct = (content_type or "").split("/")[1].strip().lower()
+    # split("/")[-1], not [1]: a missing or malformed Content-Type (an empty
+    # string, or a bare "image") has no second part, and indexing it raised
+    # IndexError -> a 500 out of /api/cover/fromurl for a remote image that
+    # simply did not say what it was.
+    ct = (content_type or "").split("/")[-1].strip().lower()
     if ct in ("jpeg", "jpg"):
         return ".jpg"
     if ct in ("png", "webp", "jxl", "bmp"):
@@ -2115,6 +2127,13 @@ def tags_bulk(req: BulkTagsRequest):
                         removed += 1
                 elif af.set_tag(name, v):
                     added += 1
+                else:
+                    # A refused write (a custom key on a container that cannot
+                    # hold it, a read-only file) used to vanish: the dialog
+                    # reported ok=true with "0 set, 0 removed" and no error row,
+                    # which reads as "nothing to do" instead of "it failed".
+                    failed += 1
+                    errors.append(f"{os.path.basename(rp)}: {name} was not written")
             af.defer_save(False)
             tagcache.invalidate_path(p)
         except Exception as e:
@@ -2894,7 +2913,7 @@ def credits(path: str = Query(""), album: str = Query("")):
         raise HTTPException(404, "no MusicBrainz id and no credit tags on "
                                  + ("this track" if path else "these files"))
     return {"artist": artist, "album": album_name, "rows": rows,
-            "source": source, "cached": source == "musicbrainz",
+            "source": source,
             "track_mbid" if path else "release_mbid": track_mbid or release_mbid}
 
 
@@ -4189,7 +4208,19 @@ def soulseek_import():
         try:
             # Best-effort: organize failures must not lose the imported files
             # (they stay in their import folders and can be organized later).
-            organize(OrganizeRequest(paths=moved, dry_run=False))
+            organized = organize(OrganizeRequest(paths=moved, dry_run=False))
+            # organize RENAMES each album into the naming-script layout, so the
+            # paths it was given are stale the moment it returns. Starting the
+            # chain on those made finish_album bail with "album folder not
+            # found" inside a daemon thread whose result nobody reads: the UI
+            # said the import succeeded and NO script ran on the album.
+            if isinstance(organized, dict):
+                roots = [r.get("album_root") or r.get("path")
+                         for r in (organized.get("results") or [])
+                         if isinstance(r, dict)]
+                roots = [r for r in roots if r]
+                if roots:
+                    moved = roots
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -4695,8 +4726,12 @@ def soulseek_test_log(req: SoulseekTestLogRequest):
                 os.rmdir(root)
     except OSError:
         pass
-    scored = [e for e in out if e["score"] is not None]
-    ok = bool(scored) and all((e["score"] or 0) >= threshold for e in scored)
+    # An UNGRADED log (download or grade timed out) is not a pass: the verdict
+    # is about every log in the folder reaching the threshold, and the auto
+    # importer already treats an unscorable log as a failure.
+    ok = bool(out) and all(
+        e["score"] is not None and (e["score"] or 0) >= threshold for e in out
+    )
     return {"ok": ok, "threshold": threshold, "logs": out}
 
 
@@ -4919,7 +4954,9 @@ def _write_album_genres(files, names, per_track=None, limit=None):
                     merged.append(text)
             if limit:
                 merged = merged[:limit]
-            if merged and af.set_tag("GENRE", "; ".join(merged)):
+            # A list, so set_tag writes repeated GENRE fields (one "A; B"
+            # string is what makes players show a single genre by that name).
+            if merged and af.set_tag("GENRE", merged):
                 updated += 1
         except Exception:
             continue
@@ -5639,6 +5676,12 @@ async def import_upload(
     if not folder or not os.path.isdir(folder):
         raise HTTPException(400, "music_folder not set or not found")
     safe = re_safe_filename(os.path.basename(target_dir)) or "Imported"
+    # `re_safe_filename` strips \\/*?:"<>| but not a dot, and
+    # os.path.basename("..") is "..": joined to the Artists folder that
+    # resolves to the MUSIC FOLDER itself, which the containment guard
+    # accepts — uploads and ingests would land in the library root.
+    if safe in ("", ".", ".."):
+        raise HTTPException(400, "invalid album name")
     target = os.path.normpath(os.path.join(library_root(folder), safe))
     if not _in_music_folder(target, folder):
         raise HTTPException(400, "target outside music folder")
@@ -5712,6 +5755,8 @@ def import_ingest(source: str = Query(...), target: str = Query(...)):
     if not os.path.isdir(src):
         raise HTTPException(404, "source folder not found")
     name = re_safe_filename(os.path.basename(target or os.path.basename(src)))
+    if name in ("", ".", ".."):
+        raise HTTPException(400, "invalid album name")
     if not name:
         raise HTTPException(400, "invalid target name")
     dest = os.path.normpath(os.path.join(library_root(folder), name))
@@ -5994,6 +6039,8 @@ def downloads_import(req: DownloadsImport = DownloadsImport()):
             err = "not found in downloads"
         if err is None:
             safe = re_safe_filename(os.path.basename(name)) or "Download"
+            if safe in ("", ".", ".."):
+                safe = "Download"
             dest = os.path.normpath(os.path.join(lib, safe))
             if not _in_music_folder(dest, folder):
                 err = "target outside music folder"

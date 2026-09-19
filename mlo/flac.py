@@ -318,6 +318,15 @@ def _convert_lossless_source(args):
             except OSError:
                 pass
         b_add = out_size
+        # The audio just changed name (extension) under a cue sheet that
+        # names the file it was ripped from — repoint it here, where the
+        # rename happens, instead of hoping a later CUE script runs (a
+        # standalone "Optimize FLACs" used to leave the sheet dead).
+        try:
+            from .discs import fix_cue_filenames
+            fix_cue_filenames(os.path.dirname(dest) or ".", config=config)
+        except Exception:
+            pass
         src_label = os.path.splitext(filepath)[1].lstrip(".").upper()
         dst_label = out_ext.lstrip(".").upper()
         return (filename, True,

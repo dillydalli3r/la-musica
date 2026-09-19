@@ -179,6 +179,13 @@ def _format_accurip_file(path, cfg=None, force=False):
 
 
 def _format_cue_file(path, cfg, force=False):
+    # Repoint FILE lines first: this pass bakes the sheet into canonical form
+    # verbatim, so a stale name would be written in as if it were correct.
+    try:
+        from .discs import fix_cue_filenames
+        fix_cue_filenames(os.path.dirname(path) or ".", config=cfg)
+    except Exception:
+        pass
     try:
         with open(path, "rb") as raw:
             data = raw.read()

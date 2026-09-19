@@ -445,6 +445,17 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
             if len(out["errors"]) < 25:
                 out["errors"].append(f"{os.path.basename(str(path))}: {e}")
 
+    # Cue sheets were mirrored BEFORE their folder's audio existed, and
+    # fix_cue_filenames reads the folder to match against — so the repoint has
+    # to happen here, once every track is written. Without it an album exported
+    # as MP3 shipped a .cue naming the library's .flac files.
+    for folder in {os.path.dirname(d) for d in written}:
+        try:
+            from mlo.discs import fix_cue_filenames
+            fix_cue_filenames(folder, config=cfg)
+        except Exception:
+            pass
+
     if callable(progress_hook):
         try:
             progress_hook(out["total"], out["total"], "Export finished")

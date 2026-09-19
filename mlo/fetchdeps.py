@@ -1169,9 +1169,25 @@ def install_dependency(key, log=print, progress=None):
 
 
 def refresh_tool_cache():
-    """Force re-detection of .dependencies on the next detect_all_tools()."""
+    """Force re-detection of .dependencies on the next detect_all_tools().
+
+    The per-module latency caches latch too: mlo.audio and mlo.loudness each
+    remember "no ffprobe/ffmpeg" for the life of the process, so installing
+    ffmpeg from the Dependencies UI mid-session used to leave video tag reads
+    and on-demand ReplayGain failing until the app restarted."""
     import mlo.tools as tools_mod
     tools_mod._TOOLS_CACHE = None
+    for module_name, attr in (("mlo.audio", "_FFPROBE_CACHE"),
+                              ("mlo.loudness", "_FFMPEG_CACHE")):
+        try:
+            import importlib
+            mod = importlib.import_module(module_name)
+            cache = getattr(mod, attr, None)
+            if isinstance(cache, dict):
+                cache["exe"] = None
+                cache["checked"] = False
+        except Exception:
+            pass
     return detect_all_tools()
 
 
@@ -1217,6 +1233,13 @@ def auto_update_pass(log=print):
     changed = 0
     for row in rows:
         if row["state"] not in ("missing", "update"):
+            continue
+        # An "update" can mean only that UPSTREAM moved past the pin this app
+        # ships (the pin is what install_dependency fetches). Re-installing it
+        # every pass would download the same archive forever and change
+        # nothing — the pin only moves with an app release.
+        if (row.get("installed_version") and row.get("latest_version")
+                and _version_label(row["installed_version"]) == _version_label(row["latest_version"])):
             continue
         try:
             install_dependency(row["key"], log=lambda m: None)

@@ -884,22 +884,90 @@ def _track_num_of(name):
     return int(m.group(1)) if m else None
 
 
+def cue_file_refs(path):
+    """Every FILE reference a cue sheet names, verbatim (no disk access).
+
+    Read the same way fix_cue_filenames reads it (utf-8-sig, then latin-1 so
+    an EAC ANSI sheet does not come back as replacement characters), so the
+    grader and the rewriter can never disagree about what a sheet points at.
+    """
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return []
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("latin-1")
+    refs = []
+    for line in text.splitlines():
+        m = CUE_FILE_RE.match(line.rstrip("\r\n"))
+        if m:
+            refs.append(m.group(1))
+    return refs
+
+
+def _converted_twin(ref_base, album_dir, audio):
+    """The one audio file sharing `ref_base`'s stem under a different extension.
+
+    A converted album keeps its cue pointing at the file it was ripped from —
+    "…CDImage.wav" — while the library holds "…CDImage.flac". With
+    ``lossless_remove_original`` off the referenced name still EXISTS, which is
+    exactly the case an existence test skips, so the sheet would name a file
+    the player never touches.
+
+    "Alone" is measured over EVERY file sharing the stem, not just the ones
+    this library calls audio: a folder holding "img.wav" + "img.flac" +
+    "img.mp3" is ambiguous and stays as the sheet wrote it, while the plain
+    conversion case (the source plus the file that replaced it) resolves.
+    """
+    stem = os.path.splitext(ref_base)[0].lower()
+    if not stem:
+        return None
+    ext = os.path.splitext(ref_base)[1].lower()
+    try:
+        siblings = [f for f in os.listdir(album_dir)
+                    if os.path.splitext(f)[0].lower() == stem
+                    and os.path.splitext(f)[1].lower() != ext]
+    except OSError:
+        return None
+    if len(siblings) != 1 or siblings[0] not in audio:
+        return None
+    return siblings[0]
+
+
+# One cue at a time: a conversion (script 3) fixes the sheet from several
+# worker threads as it walks an album's files, and two writers computing
+# different texts for the same sheet would let the last one win with a
+# half-converted view of the folder.
+_CUE_FIX_LOCK = threading.Lock()
+
+
 def fix_cue_filenames(album_dir, log_fn=None, config=None):
     """Correct FILE entries inside .cue sheets to match the actual audio
     filenames in *album_dir* — with minimal assumptions.
 
-    A FILE entry is only rewritten when ALL of these hold:
+    A FILE entry is rewritten when:
       1. the referenced file does not exist on disk (any letter-case), and
-      2. exactly ONE candidate audio file matches by normalized name
+         exactly ONE candidate audio file matches by normalized name
          (punctuation/space-insensitive), OR exactly one candidate shares
          the same leading track number AND the cue references exactly the
-         tracks of one album folder (single-cue sanity).
+         tracks of one album folder (single-cue sanity); or
+      2. the referenced file exists but a conversion left exactly one
+         same-stem twin under another extension — the file the library
+         actually holds (see _converted_twin).
     Ambiguous or missing matches are left untouched and reported.
 
     Returns a list of note strings describing every change.
     """
     if config is not None and not config.get("cue_fix_filenames", True):
         return []
+    with _CUE_FIX_LOCK:
+        return _fix_cue_filenames_locked(album_dir, log_fn, config)
+
+
+def _fix_cue_filenames_locked(album_dir, log_fn, config):
     notes = []
     cues = [f for f in sorted(os.listdir(album_dir))
             if f.lower().endswith(".cue")]
@@ -953,34 +1021,48 @@ def fix_cue_filenames(album_dir, log_fn=None, config=None):
                 or ref_base.lower() in exact
                 or any(f.lower() == ref_base.lower() for f in audio)
             )
-            if not exists:
-                candidates = None
-                # 1) unique normalized-name match
-                c = norm.get(_norm_name(ref_base), [])
-                if len(c) == 1:
-                    candidates = c
-                else:
-                    # 2) unique leading-track-number match
-                    tn = _track_num_of(ref_base)
-                    if tn is not None:
-                        c2 = nums.get(tn, [])
-                        if len(c2) == 1:
-                            candidates = c2
-                if candidates:
-                    actual = candidates[0]
-                    # Keep any directory part of the original reference.
+            if exists:
+                # The name is there — but a conversion may have left the file
+                # this album actually plays under a different extension. The
+                # sheet must name that one, not the rip source it came from.
+                twin = _converted_twin(ref_base, album_dir, audio)
+                if twin is not None and twin.lower() != ref_base.lower():
                     head = ref[: len(ref) - len(ref_base)] if ref_base else ""
-                    new_ref = head + actual
-                    if new_ref != ref:
-                        new_line = line.replace(
-                            f'"{ref}"', f'"{new_ref}"', 1)
-                        if new_line != line:
-                            notes.append(
-                                f"{cue}: FILE \"{ref}\" -> \"{new_ref}\"")
-                            changed = True
-                else:
-                    notes.append(
-                        f"{cue}: unresolved FILE \"{ref}\" left as-is")
+                    new_ref = head + twin
+                    new_line = line.replace(f'"{ref}"', f'"{new_ref}"', 1)
+                    if new_line != line:
+                        notes.append(
+                            f'{cue}: FILE "{ref}" -> "{new_ref}" (converted)')
+                        changed = True
+                out_lines.append(new_line)
+                continue
+            candidates = None
+            # 1) unique normalized-name match
+            c = norm.get(_norm_name(ref_base), [])
+            if len(c) == 1:
+                candidates = c
+            else:
+                # 2) unique leading-track-number match
+                tn = _track_num_of(ref_base)
+                if tn is not None:
+                    c2 = nums.get(tn, [])
+                    if len(c2) == 1:
+                        candidates = c2
+            if candidates:
+                actual = candidates[0]
+                # Keep any directory part of the original reference.
+                head = ref[: len(ref) - len(ref_base)] if ref_base else ""
+                new_ref = head + actual
+                if new_ref != ref:
+                    new_line = line.replace(
+                        f'"{ref}"', f'"{new_ref}"', 1)
+                    if new_line != line:
+                        notes.append(
+                            f"{cue}: FILE \"{ref}\" -> \"{new_ref}\"")
+                        changed = True
+            else:
+                notes.append(
+                    f"{cue}: unresolved FILE \"{ref}\" left as-is")
             out_lines.append(new_line)
 
         if changed:

@@ -29,12 +29,20 @@ export const SCRIPT_LABEL: Record<number, string> = Object.fromEntries(
   SCRIPTS.map((s) => [s.ids[0], s.label])
 );
 
-/** Default Run All order: videos first (slow, bit-exact), grading last.
- *  15 sits with the tagging work — the manifest it records is what makes a
- *  partial import legible, and the grader now requires it. 18 publishes the
- *  fetched lyrics and 17 transforms them, both right after 13 (fetch lyrics)
- *  and before the analysis passes. */
-export const DEFAULT_RUN_ALL = [11, 14, 15, 1, 2, 8, 13, 18, 17, 12, 16, 3, 5, 9, 6, 4, 7, 10];
+/** Default Run All order: PATH-CHANGING SCRIPTS FIRST, then content, then the
+ *  library-wide grader.
+ *
+ *  11 videos → 3 FLACs (a lossless conversion changes the extension) → 14
+ *  beets (`move: yes`: it renames and moves the album) → 2 CUEs (canonical
+ *  sidecar names AND the cue's FILE lines, now pointed at the names the album
+ *  actually has) → 1 lyrics format (writes .lrc named after the track). From
+ *  there every script reads or writes final paths: 13 fetch lyrics → 18
+ *  publish → 17 transliterate, 8 auto tagging, 5 images, 6 audit, 7 DR &
+ *  ReplayGain, 9 AccurateRip (its own sidecar names), 12 key & BPM, 16 mood,
+ *  15 the release manifest (after the tagger that gives it its release id),
+ *  10 format all, and 4 grade last. This mirrors server/imports.py's
+ *  DEFAULT_CHAIN, which lists the same steps minus the opt-in 16/17. */
+export const DEFAULT_RUN_ALL = [11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 6, 7, 9, 12, 16, 10, 4];
 
 /** True when the id is a script the runner knows about. */
 export function isScriptId(n: unknown): n is number {

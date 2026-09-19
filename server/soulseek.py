@@ -193,8 +193,15 @@ def generate_yaml(cfg=None):
     web_port = int(cfg.get("soulseek_web_port") or 5030)
     dl_slots = max(1, min(20, int(cfg.get("soulseek_download_slots") or 3)))
     ul_slots = max(0, min(20, int(cfg.get("soulseek_upload_slots") or 2)))
-    up_kib = max(0, int(cfg.get("soulseek_upload_limit_kib") or 0))
-    down_kib = max(0, int(cfg.get("soulseek_download_limit_kib") or 0))
+    # Speed limits, in KiB/s (0 = unlimited, emitted as slskd's int.MaxValue
+    # default). The Settings UI's "kB/s" fields write soulseek_up_limit /
+    # soulseek_down_limit, which the old YAML never read at all — so a limit
+    # typed there was silently ignored. They are the fallback now (kB/s and
+    # KiB/s differ by 2.4%, immaterial for a throttle).
+    up_kib = max(0, int(cfg.get("soulseek_upload_limit_kib") or 0)
+                 or int(cfg.get("soulseek_up_limit") or 0) * 1000)
+    down_kib = max(0, int(cfg.get("soulseek_download_limit_kib") or 0)
+                   or int(cfg.get("soulseek_down_limit") or 0) * 1000)
     downloads = download_dir(cfg)
     shared = share_dirs(cfg)
     exclude = share_exclude(cfg)

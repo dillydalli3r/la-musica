@@ -65,7 +65,12 @@ def read_track(path, tag_list=None):
     tag_list: subset of semantic tag names; None reads all_tags() (raw +
     semantic) — used by scan endpoints.
     """
-    key = _stat_key(path)
+    # The read MODE is part of the key: the library builder caches a track
+    # under the TRACK_TAGS subset, and a later /api/tags read of the same file
+    # (None: raw + semantic) used to be served that narrower entry — the track
+    # page then showed MOOD/REPLAYGAIN/AUDIO_MD5 as untagged while the library
+    # list was loaded.
+    key = (*_stat_key(path), tuple(sorted(tag_list)) if tag_list else None)
     with _lock:
         hit = _tag_cache.get(key)
         if hit is not None:

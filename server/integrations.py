@@ -1502,12 +1502,16 @@ def _rym_warm(cfg=None):
     paste = _rym_cookie(cfg)
     if not paste or _rym_warmed == paste:
         return
-    _rym_warmed = paste
     try:
         r = _rym_fetch(RYM_BASE + "/", None, _rym_headers(warm=True),
                        _rym_cookiejar(cfg))
     except httpx.HTTPError:
+        # Marked warmed only AFTER the navigation comes back: latching first
+        # meant one timeout (a flaky DNS, a busy WAF) disabled the warm-up for
+        # that paste until the app restarted, and every later RYM request went
+        # out cold — which is the state the challenge detection exists for.
         return
+    _rym_warmed = paste
     # `Response.cookies` is httpx's own parse of this answer's Set-Cookie.
     _rym_cookiejar(cfg).update(getattr(r, "cookies", None) or {})
 
@@ -1762,9 +1766,6 @@ def _rym_slug(value):
     return text
 
 
-def _rym_genres_from(html):
-    """Genres (the /genre/ anchors) from a RYM release or artist page."""
-    return _rym_labels(_RYM_GENRE_RE, html)
 
 
 def rym_genres(artist, album):

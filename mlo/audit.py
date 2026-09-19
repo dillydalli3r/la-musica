@@ -349,13 +349,15 @@ def run_audit_library(config):
     verbose = config.get("grade_verbose", True)
 
     # ------------------------------------------------------------------
-    # CD rip verification — by default the .log CRC is the ONLY integrity
-    # source for MEDIA=CD. When audit_cd_require_both is True, BOTH the
-    # .log CRC and AudioAuditor must be REAL for the final AUDIT to be REAL;
-    # if either is FAKE the result is FAKE (conservative). Files that cannot
-    # be verified get NO verdict at all (grading fails them). AudioAuditor
-    # is otherwise never run on CD rips; it is reserved for every other
-    # release type.
+    # CD rip verification — the .log CRC is the AUTHORITATIVE integrity source
+    # for MEDIA=CD: a rip whose printed CRCs match the audio is REAL even when
+    # AudioAuditor's spectral read disagrees (a synthetic tone, an unusual
+    # master — AudioAuditor is not a fact). `audit_cd_require_both` decides
+    # only whether AudioAuditor is ALSO run over CD files, where its warnings
+    # are kept and its verdict decides for a disc neither the .log nor a REAL
+    # .accurip could verify. Files that cannot be verified get NO verdict at
+    # all (grading fails them). AudioAuditor is otherwise never run on CD
+    # rips; it is reserved for every other release type.
     # ------------------------------------------------------------------
     # Default True, matching mlo.config.DEFAULT_CONFIG: a partial cfg must
     # not audit a CD more leniently than the shipped app does.
@@ -689,36 +691,25 @@ def run_audit_library(config):
                 # which left the AA verdict standing on its own.
                 _ck = canon(path)
                 chk = checksum_verified_canon.get(_ck)
-                aa_real = (tag_value == "REAL" and severity != "fail")
                 orig_severity = severity
                 orig_reason = reason
                 # Integrity first: a rip whose .log CRC verifies is REAL, and
-                # so is one whose .accurip verifies. AudioAuditor's verdict is
-                # spectrogram evidence, not a fact — on a CD rip it can only
-                # add WARNING flags (clipping, MQA-style markers) to a rip the
-                # log or AccurateRip has already proven intact.
+                # so is one whose .accurip verifies. The CRC is authoritative
+                # for a CD — the user's rule, and what makes a synthetic-tone
+                # fixture survive a real AudioAuditor's "fake lossless"
+                # verdict. `audit_cd_require_both` decides only whether AA is
+                # ALSO run over these files (its warnings are kept, and it
+                # decides when neither source verified); it is not a veto, and
+                # the branch that read it as one was unreachable — `chk !=
+                # "REAL"` is the exact negation of this test.
                 if chk == "REAL" or _album_accurip_verified(os.path.dirname(path)):
                     tag_value = "REAL"
                     severity = "warn" if orig_severity == "warn" else "ok"
                     reason = orig_reason if severity == "warn" else ""
-                elif chk != "REAL":
+                else:
                     tag_value = "FAKE"
                     severity = "fail"
                     reason = f"CD log not REAL ({unverified_cd.get(path, chk or 'no CRC')})"
-                elif not aa_real:
-                    tag_value = "FAKE"
-                    severity = "fail"
-                    # keep AA reason but note log was REAL
-                    reason = f"{orig_reason} (log REAL but AA {cli_status})" if orig_reason else f"AA {cli_status} (log REAL)"
-                else:
-                    tag_value = "REAL"
-                    # Both REAL: keep original warn if AA had flags, else ok
-                    if orig_severity == "warn":
-                        severity = "warn"
-                        reason = orig_reason
-                    else:
-                        severity = "ok"
-                        reason = ""
                 # Ensure status counts reflect the AA side already counted;
                 # the final tag is what grading will use.
 

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ClipboardCheck, RotateCcw, Save, ShieldCheck, SunMedium, ToggleRight } from "lucide-react";
+import { ClipboardCheck, RefreshCw, RotateCcw, Save, ShieldCheck, SunMedium, ToggleRight } from "lucide-react";
 import { api } from "../api";
 import { toast } from "../store";
 import ConfirmButton from "../components/ConfirmButton";
@@ -163,12 +163,20 @@ const GRADING_KEYS = [
   ...NUMBERS.map((n) => n.k),
 ];
 
+/** The same list WITHOUT the numeric settings: Enable/Disable all may only
+ *  write booleans. Writing them over grade_log_score_threshold turned a tuned
+ *  threshold into `false` (rendered as 0, which disables the check). */
+const GRADING_TOGGLES = GROUPS.flatMap((g) => g.items.map((i) => i.k));
+
 /** The real toggles, minus the file-category permissions: a preset may force
  * checks on, but choosing what counts toward a grade is the user's call. */
 const CHECK_KEYS = GROUPS.filter((g) => g.id !== "categories").flatMap((g) => g.items.map((i) => i.k));
 
 export default function GradingPage() {
-  const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
+  const { data: config, isError: configError, refetch: refetchConfig } = useQuery({
+    queryKey: ["config"],
+    queryFn: api.config,
+  });
   const { data: defaults } = useQuery({ queryKey: ["configDefaults"], queryFn: api.configDefaults });
   const qc = useQueryClient();
   const [local, setLocal] = useState<Record<string, unknown> | null>(null);
@@ -230,7 +238,7 @@ export default function GradingPage() {
   const setBulk = (v: boolean) =>
     setLocal((c) => {
       const next = { ...(c ?? {}) };
-      for (const k of GRADING_KEYS) next[k] = v;
+      for (const k of GRADING_TOGGLES) next[k] = v;
       return next;
     });
 
@@ -319,7 +327,20 @@ export default function GradingPage() {
       </PageHeader>
 
       {!local ? (
-        <PageLoading label="Loading grading settings…" />
+        <div className="panel text-sm text-zinc-400 space-y-2">
+          {configError ? (
+            <>
+              <div className="text-amber-300">
+                Could not load the grading settings — the server may be restarting.
+              </div>
+              <button className="btn-ghost !py-1.5 text-xs" onClick={() => refetchConfig()}>
+                <RefreshCw className="h-3.5 w-3.5" /> Retry
+              </button>
+            </>
+          ) : (
+            <PageLoading label="Loading grading settings…" />
+          )}
+        </div>
       ) : (
         GROUPS.map((g) => {
           const rows = visible(g.items);

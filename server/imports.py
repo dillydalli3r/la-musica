@@ -34,17 +34,23 @@ from mlo.paths import library_root, move_path
 from server import script_runners
 from server import tagcache
 
-# CUEs → FLACs → videos → lyrics format → fetch lyrics → publish lyrics →
-# auto tagging (mood/genre/advisory) → images → audit → DR & ReplayGain →
-# AccurateRip → key & BPM → beets → release tracklist → format all → grade.
-# Cheap, path-independent work first, the slow re-encodes and the
-# library-wide grader last. 18 (publish to LRCLIB) sits right after the fetch
-# (13) whose result it gives back. 15 (the .mlo_expected.json manifest) must
-# run AFTER the tagging step (14, beets): it reads the release id off the
-# album's own MUSICBRAINZ_ALBUMID tags, so a tagger that has not matched the
-# release yet would leave it nothing to fetch — and grading (4) requires the
-# manifest.
-DEFAULT_CHAIN = [2, 3, 11, 1, 13, 18, 8, 5, 6, 7, 9, 12, 14, 15, 10, 4]
+# PATH-CHANGING SCRIPTS FIRST, then content, then the library-wide grader.
+# 11 videos → 3 FLACs (a lossless conversion changes the extension) → 14 beets
+# (its config sets `move: yes`, so it renames and moves the album) → 2 CUEs
+# (canonical sidecar names AND the cue's FILE lines, now pointed at the names
+# the album actually has) → 1 lyrics format (writes .lrc named after the
+# track). Everything after that reads or writes FINAL paths.
+# The old order had CUEs before the converters and beets fourth-from-last, so
+# a cue could name "…file.wav" for an album that had become FLAC, and beets
+# moved the folder after images/audit/DR had all been computed for the paths
+# that no longer existed.
+# Later constraints that still hold: 15 (the .mlo_expected.json manifest) must
+# run AFTER 14 (beets), because it reads the release id off the album's own
+# MUSICBRAINZ_ALBUMID tags and a tagger that has not matched the release would
+# leave it nothing to fetch — and grading (4) requires the manifest. 18
+# (publish to LRCLIB) sits right after the fetch (13) whose result it gives
+# back, 10 (Format all) is the final formatting pass, and 4 (grade) is last.
+DEFAULT_CHAIN = [11, 3, 14, 15, 2, 1, 13, 18, 8, 5, 6, 7, 9, 12, 10, 4]
 
 # The ids a configured chain may name, kept in step with the registry itself
 # (a bound that still advertised a removed id let a saved one come back as an

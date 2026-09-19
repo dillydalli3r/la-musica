@@ -46,9 +46,12 @@ function artworkUrls(trackPath: string): string[] {
 }
 
 /** The JSON a downloaded track needs offline: its album payload (description,
- *  credits, cover reference — the album page's whole body) and its artist
- *  payload. Same shape of GET as artwork, and the service worker serves them
- *  from this cache too, so an album page opens with the server down.
+ *  credits-of-the-page, cover reference — the album page's body) and its
+ *  artist payload. MusicBrainz credit ROWS are not part of either (they come
+ *  from /api/credits, which needs the network), so the credits menu is the one
+ *  part of an album page that needs the server. Same shape of GET as artwork,
+ *  and the service worker serves them from this cache too, so an album page
+ *  opens with the server down.
  *  The URLs must stay identical to `api.album()` / `api.artist()`. */
 function entityUrls(trackPath: string): string[] {
   const album = parentDir(trackPath);
@@ -182,12 +185,18 @@ export async function cachedUrls(): Promise<string[]> {
 /** Library-relative paths behind those keys — the cache key IS the stream URL,
  *  so the path has to be read back out of its query string. Artwork keys carry
  *  `album=`/`artist=` instead and are skipped; a video cached under both its
- *  direct and its transcoded URL collapses to one path. */
+ *  direct and its transcoded URL collapses to one path.
+ *
+ *  The album/artist PAYLOAD keys (see entityUrls) carry `path=` too, and they
+ *  are JSON for a whole folder rather than a track — they are excluded by
+ *  endpoint, or the downloads page counts each downloaded album twice. */
 export async function cachedPaths(): Promise<string[]> {
   const paths = new Set<string>();
   for (const u of await cachedUrls()) {
     try {
-      const p = new URL(u).searchParams.get("path");
+      const url = new URL(u);
+      if (url.pathname === "/api/album" || url.pathname === "/api/artist") continue;
+      const p = url.searchParams.get("path");
       if (p) paths.add(p);
     } catch {
       /* not a URL this module wrote */

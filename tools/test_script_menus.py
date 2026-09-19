@@ -123,12 +123,13 @@ def force_defaults_are_false():
 
 
 def check_run_all_migration(check):
-    """A saved Run All order must not keep ids that mean something else now.
+    """A saved Run All order must keep the user's sequence and be repaired.
 
-    The legacy order below names 15 where the REMOVED lyrics xlit/translate
-    script sat (before beets). Loading it must shed that stale entry — 15 is
-    the Tracklist script today — and put the current 15 where the pipeline
-    wants it (right after beets), which is the shipped default."""
+    The ids added after a saved order was written are shed and re-inserted at
+    their canonical anchors — never trusted to mean what they meant back then.
+    The legacy list below names 15 where the REMOVED lyrics xlit/translate
+    script sat (before beets); loading it must shed that stale entry (15 is
+    the Tracklist script today) and re-anchor it after beets."""
     sys.path.insert(0, ROOT)
     import mlo.config as cfg  # noqa: PLC0415 - needs ROOT on sys.path first
 
@@ -137,10 +138,14 @@ def check_run_all_migration(check):
         "run_all_order": [11, 14, 1, 2, 8, 13, 15, 12, 3, 5, 9, 6, 4, 7, 10],
     }
     got = cfg.normalize_config(legacy)["run_all_order"]
-    check("a saved order's stale script-15 entry is shed and 15 is re-inserted "
-          "at its canonical position (after beets)",
-          got == list(cfg.DEFAULT_RUN_ALL_ORDER)
-          and got.index(15) == got.index(14) + 1, str(got))
+    # The saved 1..14 sequence survives verbatim; the later ids are anchored.
+    saved_seq = [i for i in got if i <= 14]
+    check("a saved order keeps its 1..14 sequence",
+          saved_seq == [11, 14, 1, 2, 8, 13, 12, 3, 5, 9, 6, 4, 7, 10], str(saved_seq))
+    check("the stale script-15 entry is shed and 15 is re-anchored after beets",
+          got.count(15) == 1 and got.index(15) == got.index(14) + 1, str(got))
+    check("every script lands exactly once in a normalized order",
+          sorted(got) == list(range(1, 19)), str(sorted(got)))
     # 17/18 were never in a saved order before they existed; the same
     # shed-and-anchor rule has to place them after the fetch they read from.
     check("18 (publish) lands after 13 (fetch lyrics) in a normalized order",

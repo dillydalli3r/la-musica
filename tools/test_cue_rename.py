@@ -167,6 +167,36 @@ def test_format_cues_recollect(base):
     print("PASS  run_format_cues formats cues after renaming (re-collect)")
 
 
+def test_converted_source_repoints(base):
+    """A lossless conversion renames the audio under the sheet.
+
+    With the rip source kept next to the converted file the referenced name
+    still EXISTS, which is why the fix used to skip it: the sheet named a .wav
+    the library would never play. And when the folder holds more than one
+    candidate the sheet must be left exactly as written."""
+    from mlo.discs import cue_file_refs, fix_cue_filenames
+
+    d = make_album(base, "Converted", {1: [2.0]})
+    for name, magic in (("img.wav", b"RIFF"), ("img.flac", b"fLaC")):
+        with open(os.path.join(d, name), "wb") as fh:
+            fh.write(magic)
+    write_cue(d, "Album.cue", "img.wav", [2.0])
+    notes = fix_cue_filenames(d, config=CFG)
+    refs = cue_file_refs(os.path.join(d, "Album.cue"))
+    assert refs == ["img.flac"], (notes, refs)
+    print("PASS  a converted source is repointed to the file the album holds")
+
+    d2 = make_album(base, "Ambiguous", {1: [2.0]})
+    for name in ("img.wav", "img.flac", "img.mp3"):
+        with open(os.path.join(d2, name), "wb") as fh:
+            fh.write(b"x")
+    write_cue(d2, "Album.cue", "img.wav", [2.0])
+    notes = fix_cue_filenames(d2, config=CFG)
+    refs = cue_file_refs(os.path.join(d2, "Album.cue"))
+    assert refs == ["img.wav"], (notes, refs)
+    print("PASS  an ambiguous folder leaves the FILE line alone")
+
+
 def main():
     flac = find_flac()
     if flac is None:
@@ -178,6 +208,7 @@ def main():
         test_track_count_match(base)
         test_case_only_rename(base)
         test_format_cues_recollect(base)
+        test_converted_source_repoints(base)
         print("All cue-rename tests passed.")
         return 0
     finally:

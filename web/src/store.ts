@@ -108,6 +108,16 @@ export const useStore = create<Store>((set) => ({
       if (i < 0 || i >= st.queue.length) return {};
       const queue = [...st.queue];
       queue.splice(i, 1);
+      // Removing the PLAYING row: the audio element is still the one the
+      // player loaded, so the queue and the UI would disagree about what is
+      // playing (title/cover/seek move to the next entry while the old track
+      // keeps sounding, and an emptied queue leaves audio nobody can pause).
+      // Bumping queueId makes the player reload — onto the row that took its
+      // place, or onto nothing when the queue ran out.
+      if (i === st.index) {
+        if (!queue.length) return { queue, index: 0, queueId: st.queueId + 1 };
+        return { queue, index: Math.min(i, queue.length - 1), queueId: st.queueId + 1 };
+      }
       const index = i < st.index ? st.index - 1 : st.index;
       return { queue, index };
     }),

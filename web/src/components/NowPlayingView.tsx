@@ -448,6 +448,12 @@ export default function NowPlayingView(p: Props) {
       .catch(() => {
         if (!dead) {
           setTags({});
+          // A failed read must not leave the PREVIOUS track's lines on
+          // screen un-gated: `staleLyrics` compares paths, so marking the
+          // path fresh would make them look current — highlightable, and
+          // clickable into a seek the new track never had.
+          setLyricsText(null);
+          setTransforms({});
           setTagsFor(p.current.path);
           setLyricsFor(p.current.path);
         }

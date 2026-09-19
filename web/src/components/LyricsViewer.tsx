@@ -309,7 +309,14 @@ export default function LyricsViewer({
   const listRef = useRef<HTMLDivElement>(null);
   const lineRefs = useRef<Record<number, HTMLDivElement | null>>({});
 
+  // The host round-trips the text back in through this prop on every edit
+  // (commit -> onChange -> parent state -> new initialLyrics), so resetting
+  // here would wipe the undo stack after each change and Undo would always
+  // answer "Nothing to undo". Reset only when the text came from somewhere
+  // else — a different track, or a save/reload.
+  const lastEmitted = useRef<string | null>(null);
   useEffect(() => {
+    if (initialLyrics === lastEmitted.current) return;
     setLines(parseLrc(initialLyrics));
     setRaw(initialLyrics);
     historyRef.current = [];
@@ -376,7 +383,13 @@ export default function LyricsViewer({
     a.volume = vol;
   }, [speed, vol, playing]);
 
-  const emit = (ls: LrcLine[]) => onChange(serializeLrc(ls, dec));
+  const emit = (ls: LrcLine[]) => {
+    const text = serializeLrc(ls, dec);
+    // Remember what left this component: the host echoes it straight back
+    // through initialLyrics, and that echo must not reset the undo history.
+    lastEmitted.current = text;
+    onChange(text);
+  };
 
   /** Every mutating path goes through commit() so Undo works. */
   const commit = (next: LrcLine[]) => {
@@ -831,6 +844,7 @@ export default function LyricsViewer({
           value={raw}
           onChange={(e) => {
             setRaw(e.target.value);
+            lastEmitted.current = e.target.value;
             onChange(e.target.value);
           }}
         />

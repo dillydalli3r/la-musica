@@ -2086,6 +2086,18 @@ const finish = async () => {
     setCoverUrl("");
     setTrackCoverUrl("");
     setCoverSearch(null);
+    // Results fetched for album A must not sit on album B's steps: the
+    // metadata rows, the advisory/genre answers, the per-script run report
+    // and the fingerprint match are all per-album reads.
+    setMetaReply(null);
+    setMetaError(null);
+    setAdvReply(null);
+    setAdvError(null);
+    setGenreJobResult(null);
+    setGenreError(null);
+    setRunRows(null);
+    setFinishMsg(null);
+    setAcoustid(null);
   };
 
   const totalFiles = albums.reduce((n, g) => n + g.files.length, 0);

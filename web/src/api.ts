@@ -114,7 +114,6 @@ export interface Credits {
   source: "musicbrainz" | "tags";
   track_mbid?: string;
   release_mbid?: string;
-  cached: boolean;
 }
 
 /** One item in <music folder>/.mlo/trash. `cover` is false when the cover

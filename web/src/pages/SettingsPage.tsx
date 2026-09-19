@@ -292,7 +292,7 @@ function CoverDefaults() {
 
 export default function SettingsPage() {
   const navigate = useNavigate();
-  const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
+  const { data: config, isError: configError } = useQuery({ queryKey: ["config"], queryFn: api.config });
   // open-source credits (vendored tools + packages), rendered at the bottom
   const { data: credits } = useQuery({
     queryKey: ["credits"],
@@ -1903,9 +1903,24 @@ export default function SettingsPage() {
             >
               <LayoutGrid className="h-4 w-4" /> Reset UI & layout
             </ConfirmButton>
-            <button className="btn-primary" onClick={save}>
+            <button
+              className="btn-primary"
+              onClick={save}
+              // The form is seeded FROM the config; saving before it loaded
+              // posts empty strings over live values (an empty music_folder
+              // survives the server's merge and costs the library root).
+              disabled={!loaded}
+              title={loaded ? "Write these settings to the config" : "Waiting for the current configuration to load"}
+            >
               <Save className="h-4 w-4" /> Save all settings
             </button>
+            {(configError || !loaded) && (
+              <span className="text-xs text-amber-400/90 self-center">
+                {configError
+                  ? "Could not load the configuration — saving is disabled so a failed load cannot overwrite it. Retry by reloading the page."
+                  : "Loading the current configuration…"}
+              </span>
+            )}
           </div>
 
           <details className="panel">

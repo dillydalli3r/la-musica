@@ -12,6 +12,10 @@ export function invalidateLibrary(qc: QueryClient): void {
     ["album"],
     ["artist"],
     ["track-tags"],
+    // The player bar and the lyrics panes read the CURRENT track's tags with
+    // a 5-minute staleTime; without this a tag write leaves the playing track
+    // showing its old TITLE/tech for minutes.
+    ["tags"],
   ]) {
     qc.invalidateQueries({ queryKey });
   }
