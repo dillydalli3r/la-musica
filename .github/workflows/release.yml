@@ -156,19 +156,36 @@ jobs:
           merge-multiple: true
 
       - name: Every platform must be present
+        # Matched by FILE EXTENSION, not by artifact name: `merge-multiple`
+        # flattens each uploaded artifact, so the `la-musica-Windows` folder
+        # name is gone by now and the installer is just
+        # `la.musica_3.0.0_x64_en-US.msi`. A name-based check ("does anything
+        # mention Windows?") therefore fails on a release that is perfectly
+        # complete — which is exactly how this step broke the first time it
+        # ran for real.
+        #
         # The release IS the five-platform deliverable, so a missing installer
-        # is a failed release, not a warning: without this the publish would
-        # quietly leave the previous release's asset in place (same name) and
-        # the run would look green.
+        # is a failed release rather than a warning: without this the publish
+        # would quietly leave the PREVIOUS release's asset in place under the
+        # same name and the run would look green.
         run: |
           find clients -type f | sort
           missing=0
-          for want in Windows macOS Linux android-debug ios-unsigned; do
-            if ! find clients -type f -name "*${want}*" -print -quit | grep -q .; then
-              echo "::error::no ${want} build in this release — see the desktop/mobile jobs for why"
+          check() {  # label, glob
+            if find clients -type f -name "$2" -print -quit | grep -q .; then
+              echo "ok: $1 ($2)"
+            else
+              echo "::error::no $1 installer in this release — see the desktop/mobile jobs for why"
               missing=1
             fi
-          done
+          }
+          check Windows '*.msi'
+          check Windows-portable '*.exe'
+          check macOS '*.dmg'
+          check Linux-deb '*.deb'
+          check Linux-appimage '*.AppImage'
+          check Android '*.apk'
+          check iOS '*.ipa'
           exit "$missing"
 
       - name: Create GitHub release
