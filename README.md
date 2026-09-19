@@ -16,6 +16,19 @@ trash (`.mlo/trash`) beside it — one folder to back up or carry between
 machines.
 
 ## Highlights
+- **The optimizer removes excess tags instead of leaving them to fail grading, and the mood score is
+  calibrated against its own inputs** (new in 2.8.1) — script 3 (Optimize FLACs) now strips every tag
+  outside the shared vocabulary while it is already rewriting the file, using the *same* predicate the
+  grader fails a track for (*Excess tags*) and Format All's canonical pass strips (`mlo.grader.
+  tag_key_allowed`: the script's own tags in every container spelling, the encoder identity tags,
+  beets/Picard's spellings and the app's AUDIOAUDITOR_OVERRIDE). One vocabulary, so the optimizer can
+  never keep what the grade flags, and the grade can never demand what the optimizer deletes — and an
+  album that carries `ENCODED_BY`/`RIPPER_NOTE`-style junk is fixed by running the optimizer, not by
+  hand. The mood classifier got two calibration fixes: onsets are no longer detected on a noise floor
+  (a near-silent file used to score a mid ENERGY, ~45, from 16-bit dither) and a tempo that could not be
+  measured no longer counts as 120 BPM — the arousal/valence axes renormalize over the features that
+  exist, so a drone or a quiet ambient track scores low instead of landing at "energetic".
+  `tools/test_moods.py`, `tools/test_grading_paths.py` and the new `tools/test_export.py` pin all three.
 - **Export that fits the player, and an audit that stops guessing** (new in 2.8.0) — the Export page
   grew the options a real device needs and every one of them is saved as a default: **cover art is
   embedded** at a JPEG quality (60-100, default 90) and a longest-side cap (default 1200 px) you set,

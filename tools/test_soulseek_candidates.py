@@ -1065,14 +1065,21 @@ def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSls
                             break
                         real_time.sleep(0.01)
                     if parked is None:
-                        state = soulseek_auto.job_state().get("state")
+                        # The whole state, not just its name: an unexpected
+                        # `error` here is a job-side failure and its message
+                        # ("stage") is the only thing that says which step
+                        # died and why.
+                        _st = soulseek_auto.job_state()
+                        _detail = {k: _st.get(k) for k in ("state", "stage", "error")
+                                   if _st.get(k) not in (None, "")}
+                        _detail["wishes_db"] = wishes_store.db_path()
                         if worker.is_alive():
                             raise AssertionError(
                                 "the job never parked on its prompt within "
-                                f"{max(120, 8 * float(_wait)):.0f}s (state {state!r})")
+                                f"{max(120, 8 * float(_wait)):.0f}s — {_detail!r}")
                         raise AssertionError(
-                            f"the job finished (state {state!r}) without parking "
-                            "on its prompt")
+                            "the job finished without parking on its prompt — "
+                            f"{_detail!r}")
                     prompts.append(parked)
                     if ans == "cancel":
                         assert soulseek_auto.cancel() is True, "the parked job took no cancel"

@@ -179,6 +179,28 @@ def _clean_flac_tags(filepath, config=None, enabled=None):
             for k in list(audio.tags.keys()):
                 if str(k).lower() == "encoder_program" and k not in to_remove:
                     to_remove.append(k)
+        # EXCESS TAGS — everything outside the shared vocabulary the grader
+        # fails a track for ("Excess tags") and Format All's canonical pass
+        # strips. This path rewrites the file anyway, so leaving junk a vendor
+        # or ripper wrote behind would mean the very next grade fails a file
+        # the optimizer just touched. One predicate for both halves
+        # (mlo.grader.tag_key_allowed: TAG_MAP names in every container
+        # spelling, the encoder identity tags, beets/Picard's own spellings,
+        # the app's AUDIOAUDITOR_OVERRIDE and the language-suffixed lyrics
+        # transforms), so a strip can never delete a tag the grade requires or
+        # keep one it flags. Off with `strip_unknown_tags` — the same switch
+        # that silences the grade — and a partial cfg strips like the app does.
+        if config is None or config.get("strip_unknown_tags", True):
+            try:
+                from .grader import tag_key_allowed
+            except Exception:
+                tag_key_allowed = None
+            if tag_key_allowed is not None:
+                for k in list(audio.tags.keys()):
+                    if k in to_remove:
+                        continue
+                    if not tag_key_allowed(str(k)):
+                        to_remove.append(k)
         if not to_remove:
             return False
         for k in to_remove:

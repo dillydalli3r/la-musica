@@ -81,6 +81,12 @@ MIN_SECONDS = 2.0
 
 # --- feature break points (value -> 0..1); the tunable knobs -----------
 RMS_DB_LO, RMS_DB_HI = -35.0, -12.0
+# Below this level nothing musical is happening, so onset detection is not run
+# at all. On a near-silent file (a fade-out tail, 16-bit dither, a very quiet
+# master) librosa's onset detector reports a dozen "onsets" per second from the
+# noise floor, and those pushed a silent track to mid ENERGY. Silence is judged
+# by its level, not by its dither.
+ONSET_FLOOR_DB = -45.0
 ONSET_RATE_LO, ONSET_RATE_HI = 0.5, 6.0
 TEMPO_LO, TEMPO_HI = 70.0, 170.0
 CENTROID_LO, CENTROID_HI = 500.0, 4000.0
@@ -184,12 +190,15 @@ def _features(y, sr):
     else:
         dyn_db = 0.0
 
-    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
-    try:
-        onsets = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr)
-        onset_rate = float(len(onsets)) / max(duration, 1e-6)
-    except Exception:
-        onset_rate = 0.0
+    level_db = 20.0 * math.log10(max(rms_mean, 1e-9))
+    onset_rate = 0.0
+    if level_db >= ONSET_FLOOR_DB:
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+        try:
+            onsets = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr)
+            onset_rate = float(len(onsets)) / max(duration, 1e-6)
+        except Exception:
+            onset_rate = 0.0
 
     centroid_hz = float(np.asarray(librosa.feature.spectral_centroid(y=y, sr=sr)).mean())
     try:
@@ -213,10 +222,27 @@ def _features(y, sr):
     }
 
 
+def _weighted(pairs):
+    """Weighted mean over the terms that EXIST, renormalized.
+
+    A feature that could not be measured must not be scored as if it were a
+    middle value: an undetectable tempo (a drone, a spoken-word track, a
+    40 Hz tone) used to be counted as 120 BPM, which put a fixed mid-arousal
+    floor into every rhythm-less file — a quiet ambient album could not score
+    below ~0.3 and a steady sine tone landed at "energetic". Dropping the term
+    and dividing by the weight that is left scores what the audio actually
+    shows."""
+    known = [(w, v) for w, v in pairs if v is not None]
+    total = sum(w for w, _ in known)
+    if total <= 0:
+        return 0.0
+    return sum(w * v for w, v in known) / total
+
+
 def _score(features):
     """(arousal, valence, confidence) from a feature dict."""
-    tempo = features.get("tempo") or 120.0
-    tempo_s = _norm(tempo, TEMPO_LO, TEMPO_HI)
+    tempo = features.get("tempo")
+    tempo_s = _norm(tempo, TEMPO_LO, TEMPO_HI) if tempo else None
     rms_s = _norm(features.get("rms_db", RMS_DB_LO), RMS_DB_LO, RMS_DB_HI)
     onset_s = _norm(features.get("onset_rate", 0.0), ONSET_RATE_LO, ONSET_RATE_HI)
     dyn_s = _norm(features.get("dynamic_range_db", 0.0), DYN_RANGE_LO, DYN_RANGE_HI)
@@ -231,16 +257,16 @@ def _score(features):
     else:
         key_s = VALENCE_UNKNOWN_KEY
 
-    arousal = (W_AROUSAL_RMS * rms_s + W_AROUSAL_ONSET * onset_s +
-               W_AROUSAL_TEMPO * tempo_s + W_AROUSAL_DYN * (1.0 - dyn_s))
-    valence = (W_VALENCE_BRIGHT * bright_s + W_VALENCE_KEY * key_s +
-               W_VALENCE_TEMPO * tempo_s + W_VALENCE_PERC * perc_s)
+    arousal = _weighted([(W_AROUSAL_RMS, rms_s), (W_AROUSAL_ONSET, onset_s),
+                         (W_AROUSAL_TEMPO, tempo_s), (W_AROUSAL_DYN, 1.0 - dyn_s)])
+    valence = _weighted([(W_VALENCE_BRIGHT, bright_s), (W_VALENCE_KEY, key_s),
+                         (W_VALENCE_TEMPO, tempo_s), (W_VALENCE_PERC, perc_s)])
 
     margin = max(abs(arousal - AROUSAL_MID), abs(valence - VALENCE_MID))
     conf = min(CONF_MAX, CONF_BASE + CONF_SLOPE * min(1.0, margin * 2.0))
     if not key:
         conf *= CONF_NO_KEY
-    if not features.get("tempo"):
+    if not tempo:
         conf *= CONF_NO_TEMPO
     return arousal, valence, max(CONF_MIN, conf), bright_s, perc_s, tempo
 
@@ -248,7 +274,8 @@ def _score(features):
 def _verdict(features):
     """Mood label for a feature dict (see the module docstring rules)."""
     a, v, conf, bright, perc, tempo = _score(features)
-    if a >= PARTY_AROUSAL and v >= PARTY_VALENCE and perc >= PARTY_PERCUSSIVE and tempo >= PARTY_TEMPO:
+    if (a >= PARTY_AROUSAL and v >= PARTY_VALENCE and perc >= PARTY_PERCUSSIVE
+            and (tempo or 0.0) >= PARTY_TEMPO):
         mood = "party"
     elif a >= AGGRESSIVE_AROUSAL and v < AGGRESSIVE_VALENCE and perc >= AGGRESSIVE_PERCUSSIVE:
         mood = "aggressive"
@@ -268,7 +295,7 @@ def _verdict(features):
         "mood": mood,
         "energy": round(a, 3),
         "valence": round(v, 3),
-        "tempo": round(tempo, 1),
+        "tempo": round(tempo, 1) if tempo else None,
         "confidence": round(conf, 3),
         "features": features,
     }
