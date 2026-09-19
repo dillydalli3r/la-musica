@@ -73,12 +73,13 @@ LEGACY_DEFAULT_CD_QUERIES = (
     ["catalognumber", "artist album catalognumber", "artist album"],
 )
 
-# Genres-per-track defaults this app shipped BEFORE the current one (2). A
+# Genres-per-track defaults this app shipped BEFORE the current one (3). A
 # config still holding one of these was never a decision — Settings carried the
 # shipped default — so it follows the new value, the same rule the naming
 # script, the genre-source order and the query templates above already use. A
-# number the user actually chose is any other value and is kept.
-LEGACY_DEFAULT_GENRE_COUNTS = (3,)
+# number the user actually chose is any other value and is kept. (2 was the
+# shipped default in this release's own 2.8.0/2.8.1 builds.)
+LEGACY_DEFAULT_GENRE_COUNTS = (2,)
 LEGACY_DEFAULT_DIGITAL_QUERIES = (
     ["artist album year", "artist album"],
 )
@@ -861,10 +862,11 @@ DEFAULT_CONFIG = {
     # source first), how many a track may KEEP (script 8's auto tagging, the
     # genre import and script 10's canonical pass all trim the rest off), and
     # what grading requires (`grade_check_genre_count`: a track with fewer or
-    # more than this fails). Default 2: a primary genre plus its most useful
-    # sub-genre is the most a player shows, and a merged
-    # "Rock; Alternative Rock; Indie; Shoegaze" list helps no one.
-    "mb_genre_count": 2,
+    # more than this fails). Default 3: a primary genre plus the two that say
+    # the most about it (which source ranked them first decides which three),
+    # because a player shows a handful and a merged
+    # "Rock; Alternative Rock; Indie; Shoegaze; Post-Rock" list helps no one.
+    "mb_genre_count": 3,
     # Genre sources, in priority order. Two by default — RateYourMusic (what
     # the release page itself says, the user's own first preference) and
     # MusicBrainz (open data, keyless) — because they are the two the library

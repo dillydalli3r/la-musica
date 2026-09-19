@@ -16,6 +16,17 @@ trash (`.mlo/trash`) beside it — one folder to back up or carry between
 machines.
 
 ## Highlights
+- **Genres per track is 3 by default, and the app can now REACH that number** (new in 2.8.2) — the
+  count is one value (`mb_genre_count`) for the import, the trimming scripts and the *Genre count*
+  grade, and the default is 3: a primary genre plus the two that say the most about it (which source
+  ranked them first decides which three). Auto tagging (and the genre chain it calls) now **tops a
+  track UP to the count** instead of only filling an empty GENRE — the track's own genres stay first
+  because they are deliberate, the provider answers are appended (case-insensitively de-duplicated)
+  until the cap is reached — so a track that carries one genre, or was tagged by a build whose default
+  was lower, can satisfy the grade by running the script instead of by hand. A saved default of 2 (what
+  2.8.0/2.8.1 shipped) follows the new value; any other number is a choice and is kept. The track page
+  also shows **MOOD · ENERGY together** now — the label and the 0-100 arousal it was scored from — and
+  both tags ride in the library payload, so `tag:MOOD` / `tag:ENERGY` columns work.
 - **The optimizer removes excess tags instead of leaving them to fail grading, and the mood score is
   calibrated against its own inputs** (new in 2.8.1) — script 3 (Optimize FLACs) now strips every tag
   outside the shared vocabulary while it is already rewriting the file, using the *same* predicate the
@@ -810,11 +821,18 @@ requires them:
   `audio_tag_writes[<filetype>]["ENERGY"]` switch gates the tag alone), so
   switching ENERGY on for one format backfills exactly that format and
   leaves its MOOD untouched. Music videos get both tags too — the mood
-  writer covers video containers, in one write per file.
-- **GENRE** — filled only when the tags carry none, from `genre_sources`,
-  merged per track: the source order, then each source's names, then a
+  writer covers video containers, in one write per file. The track page shows
+  the pair on one row (**MOOD · ENERGY**, the label and the number it was
+  scored from), and both ride in the library payload so `tag:MOOD` /
+  `tag:ENERGY` columns work.
+- **GENRE** — topped up to `mb_genre_count` from `genre_sources` whenever a
+  track carries fewer (an empty tag is the common case), merged per track:
+  the track's own genres first, then the source order, then each source's
+  names, then a
   case-insensitive de-duplication, Title Case, and a cap of
-  `mb_genre_count` (**genres per track**, default **2**) **per track**. That
+  `mb_genre_count` (**genres per track**, default **3**) per track — and a
+  track that carries FEWER genres than that is topped up to the count (its own
+  values first, the provider's appended) That
   one number is the whole policy: an import writes at most this many genres
   onto a track (the best-voted source's names first, so what survives is what
   that source ranked highest), script 8, the genre import buttons and script 10

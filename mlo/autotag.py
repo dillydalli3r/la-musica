@@ -27,8 +27,10 @@ filled in by hand:
    (mlo.moods extracts their audio through ffmpeg), and the GENRE they carry
    is written through the same video tag writer.
 
-4) GENRE autofill when the tags carry none, through a caller-supplied
-   provider hook (``set_genre_lookup``). The engine deliberately does not
+4) GENRE top-up: the tags are brought UP TO ``mb_genre_count`` (the track's
+   own values first, they are deliberate) through a caller-supplied provider
+   hook (``set_genre_lookup``), never past it — the same count the trimmer and
+   the grader's "Genre count" check use. The engine deliberately does not
    ship an HTTP client for this: the server and the import pipeline register
    their discovery/MusicBrainz chain, the CLI leaves it unset and step 4 is
    skipped.
@@ -461,7 +463,7 @@ def run_auto_tagging(config):
             " (refined by GENRE)" if config.get("mood_source", "hybrid") == "hybrid"
             else f" (source: {config.get('mood_source', 'hybrid')})"))
     if config.get("genre_autofill", True):
-        log("  GENRE: filled from the provider chain when missing"
+        log("  GENRE: topped up to the configured count from the provider chain"
             if _genre_lookup else
             "  GENRE: autofill skipped (no provider chain in this runner)")
 
@@ -675,23 +677,44 @@ def run_auto_tagging(config):
         for d in info:
             af = d["af"]
             path = af.path
-            if do_genre and not str(af.get_tag("GENRE") or "").strip():
-                artist = af.get_tag("ALBUMARTIST") or af.get_tag("ARTIST") or ""
-                album_tag = af.get_tag("ALBUM") or ""
-                try:
-                    names = _genre_lookup(artist, album_tag, path) or []
-                except Exception:
-                    names = []
-                if names:
-                    # The list goes in as a list: set_tag writes repeated
-                    # GENRE fields, so players see several genres instead of
-                    # one called "Dance-Punk; Electronic; Funk Rock".
-                    # (No should_write_audio_tag() here: GENRE belongs to no
-                    # family, so that gate could only ever return True —
-                    # genre_autofill, checked above, is the real switch.)
-                    if af.set_tag("GENRE", names):
-                        genre_modified += 1
-                        af = d["af"] = AudioFile(path)  # refresh for the mood prior
+            if do_genre:
+                # GENRE is topped UP to the configured count, not only filled
+                # from empty: `mb_genre_count` is what grading requires, and a
+                # track carrying one genre (hand-picked, or written by a build
+                # whose default was lower) could otherwise never satisfy the
+                # count check — no pass would add anything. The track's own
+                # values come first because they are deliberate, then the
+                # provider chain appends what it knows, case-insensitively
+                # de-duplicated, until the cap is reached.
+                current = [g for g in (af.tag_values("GENRE") or [])
+                           if str(g).strip()]
+                if len(current) < genre_count:
+                    artist = af.get_tag("ALBUMARTIST") or af.get_tag("ARTIST") or ""
+                    album_tag = af.get_tag("ALBUM") or ""
+                    try:
+                        names = _genre_lookup(artist, album_tag, path) or []
+                    except Exception:
+                        names = []
+                    merged = list(current)
+                    seen = {str(g).strip().casefold() for g in current}
+                    for name in names:
+                        name = str(name).strip()
+                        if not name or name.casefold() in seen:
+                            continue
+                        seen.add(name.casefold())
+                        merged.append(name)
+                        if len(merged) >= genre_count:
+                            break
+                    if merged != current:
+                        # The list goes in as a list: set_tag writes repeated
+                        # GENRE fields, so players see several genres instead
+                        # of one called "Dance-Punk; Electronic; Funk Rock".
+                        # (No should_write_audio_tag() here: the per-filetype
+                        # GENRE gate is checked where the family is written —
+                        # genre_autofill, checked above, is the global switch.)
+                        if af.set_tag("GENRE", merged):
+                            genre_modified += 1
+                            af = d["af"] = AudioFile(path)  # refresh for the mood prior
             if do_genre:
                 # The cap is enforced on EVERY track, not only on the ones
                 # filled above: a library that already carries three genres is

@@ -326,19 +326,40 @@ export default function TrackPage() {
                 </div>
               </>
             )}
-            {/* MOOD is written by the auto-tagging script (8), or by the
-                mood & energy script (16) on its own — absent until one of
-                them has run, so the empty case says what would fill it */}
+            {/* MOOD and ENERGY are written together by the auto-tagging
+                script (8), or by the mood & energy script (16) on its own —
+                absent until one of them has run, so the empty case says what
+                would fill it. Both are shown on ONE row: ENERGY is the 0-100
+                arousal the mood was scored from, and a label without its
+                number hides why the track landed there. */}
             <div className="flex items-center gap-2 pt-2 border-t border-border/60 mt-1">
-              <span className="text-[10px] text-zinc-500 uppercase w-44 shrink-0">MOOD</span>
-              {tags.MOOD ? (
-                <span className="chip bg-zinc-800/70 border border-border text-zinc-300" title="Written by the auto-tagging script, or by Mood & Energy (script 16)">
-                  {tags.MOOD}
+              <span className="text-[10px] text-zinc-500 uppercase w-44 shrink-0">MOOD · ENERGY</span>
+              {tags.MOOD || tags.ENERGY ? (
+                <span className="flex items-center gap-2 flex-wrap">
+                  {tags.MOOD ? (
+                    <span className="chip bg-zinc-800/70 border border-border text-zinc-300" title="Written by the auto-tagging script, or by Mood & Energy (script 16)">
+                      {tags.MOOD}
+                    </span>
+                  ) : null}
+                  {tags.ENERGY ? (
+                    <span className="chip bg-zinc-800/70 border border-border text-zinc-300" title="The arousal (0-100) the mood was scored from — classified from the track's own audio">
+                      {tags.ENERGY}
+                      <span className="text-zinc-500">/100</span>
+                    </span>
+                  ) : null}
+                  {tags.MOOD && tags.ENERGY ? null : (
+                    <span
+                      className="text-xs text-zinc-600"
+                      title="Mood & Energy (script 16) backfills the missing half without touching the other"
+                    >
+                      {tags.MOOD ? "no energy yet" : "no mood yet"} — run mood &amp; energy (script 16) or auto tagging (script 8)
+                    </span>
+                  )}
                 </span>
               ) : (
                 <span
                   className="text-xs text-zinc-600"
-                  title="Auto tagging (script 8) writes MOOD from the audio and its metadata; Mood & Energy (script 16) runs the same classifier on its own"
+                  title="Auto tagging (script 8) writes MOOD and ENERGY from the audio and its metadata; Mood & Energy (script 16) runs the same classifier on its own"
                 >
                   no mood yet — run auto tagging (script 8) or mood &amp; energy (script 16)
                 </span>

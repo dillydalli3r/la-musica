@@ -30,6 +30,9 @@ TRACK_TAGS = [
     "TRACKTOTAL", "DISCTOTAL",
     "COMPOSER", "COPYRIGHT", "ISRC", "LYRICIST", "REMIXER",
     "DYNAMIC RANGE",
+    # MOOD/ENERGY (script 8 or 16) ride along so the track page and the
+    # `tag:MOOD` / `tag:ENERGY` columns show the pair without a second read.
+    "MOOD", "ENERGY",
     # read on every track so _album_meta can lift the album-level value
     "ALBUM DYNAMIC RANGE",
 ]

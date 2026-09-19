@@ -30,7 +30,7 @@ const TAG_FAMILIES = ["AUDIT", "LOG_GRADE", "REPLAYGAIN", "DYNAMIC_RANGE", "MEDI
  *  this map so a fresh install shows the real default (the backend fills in
  *  the same values when it loads the file) instead of an empty field. */
 const CFG_DEFAULTS: Record<string, unknown> = {
-  mb_genre_count: 2,
+  mb_genre_count: 3,
   genre_sources: ["rateyourmusic", "listenbrainz", "musicbrainz", "itunes", "wikidata", "lastfm", "discogs", "theaudiodb", "deezer"],
   advisory_auto_fetch: true,
   metadata_auto_fetch: true,
@@ -787,7 +787,7 @@ export default function SettingsPage() {
       fields: [
         {
           k: "mb_genre_count", label: "Genres per track (import, trimming and grading)", type: "number", min: 1, max: 10,
-          help: "One value, three consumers: an import writes this many genres onto a track (the best-voted source first), script 8 / the genre import / script 10 trim any excess off, and grading fails a track that carries fewer or more than this. Default 2 — a primary genre plus its most useful sub-genre.",
+          help: "One value, three consumers: an import writes this many genres onto a track (the best-voted source first), script 8 / the genre import / script 10 trim any excess off, and grading fails a track that carries fewer or more than this. Default 3 — a primary genre plus the two that say the most about it.",
         },
         {
           k: "genre_sources", label: "Genre sources — every ticked source is asked; unticked ones are never used", type: "multi",
