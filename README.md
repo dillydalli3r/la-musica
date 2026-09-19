@@ -2477,8 +2477,11 @@ plus Playwright (`npm i -D playwright`). `tools/check_menus.cjs` walks every
 sidebar entry and route and fails on a page error. `tools/check_responsive.cjs`
 re-measures every top-level route at **390×780, 834×1112 and 1440×900** and
 fails on sideways scroll, on an element that sticks out past the viewport with
-no scroll box of its own, and — at phone width only, because the desktop look is
-deliberately compact — on a control shorter than 32 px; it prints
+no scroll box of its own, on **text crushed into a column** — a box narrower
+than its own longest word, or a zero-width cell holding text, which is how a
+`w-full` table inside a scroll box squeezes instead of scrolling — and — at
+phone width only, because the desktop look is deliberately compact — on a
+control shorter than 32 px; it prints
 `N/M checks passed` and exits non-zero. It exits **2** when Playwright is not
 resolvable (set `PLAYWRIGHT` to a module path, or install it), the same
 convention as the other `check_*.cjs` tools, so a missing browser is never
@@ -2514,7 +2517,7 @@ else's. It also pins the trash folder's per-user segments and the username rules
 (a name becomes a folder, so a separator or a `..` is refused).
 
 `python tools/check_versions.py` is the release gate that costs nothing: it
-compares all seven version strings (the app's own, `tauri.conf.json`,
+compares all ten version strings (the app's own, `tauri.conf.json`,
 `Cargo.toml`, both `package.json`s, the Dockerfile's `MLO_VERSION` and this
 README's header) and fails on any drift, so a release cannot ship an installer
 that disagrees with itself. CI runs it on every push; the release workflow runs
