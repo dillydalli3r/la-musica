@@ -31,23 +31,24 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   # The client bundles, built from the same reusable workflows the manual runs
-  # use. They are `continue-on-error` on purpose: a tag should still publish
-  # the app (source zip + Docker image) when a platform's own toolchain is
-  # having a bad day, and the failing job is red in the run either way. The
-  # artifacts that did build are attached; the check below says which are
-  # missing rather than pretending the release is complete.
+  # use. A tag should still publish the app (source zip + Docker image) when a
+  # platform's own toolchain is having a bad day: the failing job is red in the
+  # run either way, and `if: always()` below is what lets the release job run
+  # after it instead of being skipped. (Note: `continue-on-error` is NOT usable
+  # on a job that calls a reusable workflow — the workflow file fails to load,
+  # which is how this shipped once and published nothing.)
   desktop:
     needs: ci
-    continue-on-error: true
     uses: ./.github/workflows/desktop.yml
 
   mobile:
     needs: ci
-    continue-on-error: true
     uses: ./.github/workflows/mobile.yml
 
   release:
     needs: [ci, desktop, mobile]
+    # Run whenever CI itself passed, whatever the client builds did.
+    if: always() && needs.ci.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
