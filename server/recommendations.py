@@ -56,10 +56,17 @@ def _top_rated(albums, limit):
     return [_owned_row(a, reason="Best graded") for a in rated[:limit]]
 
 
-def _favorites(lib, limit):
+def _favorites(lib, limit, user=""):
+    """The signed-in user's favourite ALBUMS.
+
+    Scoped, like every other reader of that table: the sidebar's Favourites
+    page shows this user's albums, so a Home shelf built from the default
+    scope would be a different person's list beside it — and a cross-user read
+    the per-user work exists to prevent.
+    """
     try:
         from server import playlists as pl
-        favs = (pl.list_favorites() or {}).get("albums", [])
+        favs = (pl.list_favorites(user) or {}).get("albums", [])
     except Exception:
         favs = []
     if not favs:
@@ -143,13 +150,19 @@ def _needs_attention(albums, limit):
     return [_owned_row(a, reason="Needs attention") for a in bad[:limit]]
 
 
-def build_home(cfg):
-    """Full Home payload for the given config (TTL-cached)."""
+def build_home(cfg, user=""):
+    """Full Home payload for the given config and user (TTL-cached).
+
+    The cache key carries the user: the payload holds that person's favourites
+    and their playlist count, so a shared entry would serve the first caller's
+    rows to everyone else for the TTL.
+    """
     from server import library as lib_mod
 
+    user = str(user or "")
     folder = str(cfg.get("music_folder") or "")
     recent_count = int(cfg.get("home_recent_count", 12) or 12)
-    cache_key = (folder, recent_count)
+    cache_key = (folder, recent_count, user)
     now = time.time()
     with _lock:
         if _cache["data"] and _cache["key"] == cache_key and now - _cache["t"] < _TTL:
@@ -166,7 +179,7 @@ def build_home(cfg):
     }
     try:
         from server import playlists as pl
-        stats["playlists"] = len(pl.list_playlists() or [])
+        stats["playlists"] = len(pl.list_playlists(user) or [])
     except Exception:
         stats["playlists"] = 0
     passes = sum((a.get("pass_count") or 0) for a in albums)
@@ -175,7 +188,7 @@ def build_home(cfg):
 
     recent = _recent(albums, recent_count)
     top = _top_rated(albums, max(4, recent_count // 2))
-    favorites = _favorites(lib, max(4, recent_count // 2))
+    favorites = _favorites(lib, max(4, recent_count // 2), user)
 
     # Discover: a random slice of the library that isn't already featured.
     featured = {os.path.normcase(os.path.normpath(r["path"])) for r in recent + top}
@@ -203,3 +216,10 @@ def invalidate():
     with _lock:
         _cache["t"] = 0.0
         _cache["data"] = None
+    # The "more like this" index reads the same library payload the shelves
+    # below are built from, so one invalidation covers both.
+    try:
+        from server import recommend
+        recommend.invalidate()
+    except Exception:
+        pass

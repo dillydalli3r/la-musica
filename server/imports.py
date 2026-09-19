@@ -28,7 +28,7 @@ import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from mlo.config import DEFAULT_CONFIG, load_config
+from mlo.config import load_config
 from mlo.paths import library_root, move_path
 
 from server import script_runners
@@ -914,7 +914,8 @@ def _stamp_release(album_dir, release, cfg):
     Returns the number of files written; a tag failure never fails an import.
     """
     from mlo.audio import AudioFile
-    from mlo.autotag import trim_genres
+    from mlo.autotag import genre_count, trim_genres
+    from mlo.genres import normalize_genres
     from server import integrations as intg
     from server import soulseek_auto
 
@@ -925,6 +926,11 @@ def _stamp_release(album_dir, release, cfg):
     except Exception:
         traceback.print_exc()
     files = _audio_files(album_dir)
+    # The same per-track cap the other writers keep — the one helper reads
+    # `mb_genre_count` (and clamps it to its ceiling), with the shipped default
+    # behind it so an import can never leave a file the app's own grader would
+    # fail.
+    cap = genre_count(cfg)
     genres = {}
     if rel.get("release_group_id") or rel.get("id"):
         try:
@@ -938,17 +944,12 @@ def _stamp_release(album_dir, release, cfg):
                 artist=next((a.get("name") for a in rel.get("artists") or []
                              if a.get("name")), ""),
                 album=rel.get("title") or "",
-                release=rel, limit=cfg.get("mb_genre_count"), cfg=cfg,
-                files=files)
+                release=rel, limit=cap, cfg=cfg, files=files)
             genres = chain.get("per_track") or {}
         except Exception:
             traceback.print_exc()
 
     failed = 0
-    # The same per-track cap the other writers keep — read from the one config
-    # key, with the shipped default as the fallback so an import can never
-    # leave a file the app's own grader would fail.
-    cap = cfg.get("mb_genre_count") or DEFAULT_CONFIG["mb_genre_count"]
     for path in files:
         try:
             af = AudioFile(path)
@@ -959,18 +960,21 @@ def _stamp_release(album_dir, release, cfg):
             disc, pos = soulseek_auto._parse_trackno(path)
             names = genres.get((disc, pos)) or []
             if names and not str(af.get_tag("GENRE") or "").strip():
-                # The LIST goes in as a list: set_tag writes repeated GENRE
-                # fields, so the grader counts every genre this step wrote
-                # instead of reading one value literally named "A; B".
-                tags["GENRE"] = list(names)
+                # Canonical, and a LIST: `normalize_genres` resolves each name
+                # to MusicBrainz's own spelling, derives the family and puts it
+                # last, and set_tag writes one repeated GENRE field per name —
+                # the grader counts every genre this step wrote instead of
+                # reading one value literally named "A; B".
+                tags["GENRE"] = normalize_genres(names, cap)
             for key, value in tags.items():
                 af.set_tag(key, value)
             if tags:
                 written += 1
             try:
                 # Cap on EVERY track, not just the ones written above: an
-                # album that arrived carrying three genres comes down to
-                # `mb_genre_count` here (the trimmer script 8/10 also use).
+                # album that arrived carrying more genres than the setting
+                # allows comes down to `mb_genre_count` here (the trimmer
+                # script 8/10 also use).
                 trim_genres(af, cap)
             except Exception:
                 pass

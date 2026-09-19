@@ -14,7 +14,8 @@ import wave
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from mlo.grader import (EMPTY_FOLDER, EXPECTED_TRACKS_MISSING, REPLAYGAIN_TAGS,
+from mlo.grader import (ALBUM_TAGS, EMPTY_FOLDER, EXPECTED_TRACKS_MISSING,
+                        PER_TRACK_TAGS, REPLAYGAIN_TAGS,
                         _grade_album, _naming_mismatch, _release_type_candidates,
                         run_grade_library, tag_key_allowed)
 from mlo.paths import save_expected_tracks
@@ -90,7 +91,7 @@ BASE_TAGS = {
     "DATE": "2020",
     "TRACKNUMBER": "1",
     "DISCNUMBER": "1",
-    "GENRE": "Test",
+    "GENRE": "shoegaze",
     "INSTRUMENTAL": "0",
 }
 
@@ -422,7 +423,7 @@ ok("GENRE_MISSING" in res["tracks"][0]["issues"]
 set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
 
 # ----------------------------------------------------------------------
-# Genre count (grade_check_genre_count) — EXACTLY mb_genre_count values
+# Genre count (grade_check_genre_count) — AT MOST mb_genre_count values
 # ----------------------------------------------------------------------
 print("== genre count ==")
 # The fixture carries one genre, so these cases pin the configured number to
@@ -442,13 +443,13 @@ ok(res_off["total_checks"] == res["total_checks"] - 1
    f"the check counts while on and disappears with the toggle off "
    f"({res['total_checks']} vs {res_off['total_checks']})")
 
-set_multi(flac, "GENRE", ["Rock", "Alternative Rock"])
+set_multi(flac, "GENRE", ["shoegaze", "dream pop"])
 res = _grade_album(album, "EMBEDDED", cnt_cfg)
 ok(res["tracks"][0]["issues"] == ["GENRE_COUNT"],
    f"two genres pass the presence check and fail only the count "
    f"(got {res['tracks'][0]['issues']})")
-ok(any("2 genres, 1 expected" in i for i in res["issues"]),
-   f"the issue names both numbers (got {res['issues']})")
+ok(any("2 genres, at most 1 allowed" in i for i in res["issues"]),
+   f"the issue names the count and the cap (got {res['issues']})")
 ok(res["total_checks"] - res["pass_count"] == 1,
    f"and costs exactly one grade point ({res['pass_count']}/{res['total_checks']})")
 # Raising the configured value clears it — the check reads the config, it does
@@ -456,48 +457,56 @@ ok(res["total_checks"] - res["pass_count"] == 1,
 res = _grade_album(album, "EMBEDDED", dict(cnt_cfg, mb_genre_count=2))
 ok(res["pass_count"] == res["total_checks"],
    f"two genres pass when 2 are configured ({res['pass_count']}/{res['total_checks']})")
-# ... and a single genre then fails naming the OTHER number too.
-set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
-res = _grade_album(album, "EMBEDDED", dict(cnt_cfg, mb_genre_count=2))
-ok(any("1 genre, 2 expected" in i for i in res["issues"]),
-   f"a lone genre fails when 2 are configured (got {res['issues']})")
+# The check is a CEILING, not a quota: one specific genre is a complete answer
+# (the family is the writers' to derive), so there is nothing to top up and no
+# lower bound to fail.
+set_multi(flac, "GENRE", ["shoegaze"])
+res = _grade_album(album, "EMBEDDED", dict(cnt_cfg, mb_genre_count=3))
+ok("GENRE_COUNT" not in res["tracks"][0]["issues"]
+   and res["pass_count"] == res["total_checks"],
+   f"a lone genre passes under any cap >= 1 ({res['pass_count']}/{res['total_checks']})")
+ok(not any("at most" in i for i in res["issues"]), f"and nothing is reported (got {res['issues']})")
 
-# No genre at all is graded by the count check too — independently of the
-# presence toggle, with its own wording (never a second 'Missing GENRE').
+# No genre at all is the PRESENCE check's business, not this one's: with that
+# toggle off, an absent tag is nothing this check has an opinion about (there
+# is no lower bound to violate).
 del_tags(flac, ["GENRE"])
 res = _grade_album(album, "EMBEDDED", dict(cnt_cfg, grade_check_genre=False))
-ok(res["tracks"][0]["issues"] == ["GENRE_COUNT"],
-   f"an absent genre fails the count check on its own "
-   f"(got {res['tracks'][0]['issues']})")
-ok(any("no genre, 1 expected" in i for i in res["issues"]),
-   f"and says 'no genre' (got {res['issues']})")
+ok("GENRE_COUNT" not in res["tracks"][0]["issues"],
+   f"an absent genre is not a count failure (got {res['tracks'][0]['issues']})")
 set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
 
 # ----------------------------------------------------------------------
-# Genre ORDER (grade_check_genre_order) — parent first, no repeated slot
+# Genre ORDER (grade_check_genre_order) — the family, if present, is LAST
 # ----------------------------------------------------------------------
 print("== genre order ==")
 # The count check is off in every case here: order and count are separate
-# questions, and the order check must not re-report a count it was told not
-# to grade (its fixtures are three genres long so the count would be clean
+# questions, and the order check must not re-report a count it was told not to
+# grade (its fixtures are three genres long so the count would be clean
 # anyway, which is what makes this wording independent of the count rule).
 ord_cfg = dict(mood_cfg, grade_check_genre_count=False, mb_genre_count=3,
                grade_check_genre_order=True)
-set_multi(flac, "GENRE", ["Alternative Rock", "Rock", "Post-Britpop"])
+set_multi(flac, "GENRE", ["rock", "shoegaze", "dream pop"])
 res = _grade_album(album, "EMBEDDED", ord_cfg)
 ok(res["tracks"][0]["issues"] == ["GENRE_ORDER"],
-   f"a parent in the middle slot fails the order check "
+   f"a family in the first slot fails the order check "
    f"(got {res['tracks'][0]['issues']})")
-ok(any(i.startswith("Genre order: the parent genre must come first") for i in res["issues"]),
-   f"the issue names the rule and the slot (got {res['issues']})")
+ok(any(i.startswith("family genre must be the last one") for i in res["issues"]),
+   f"the issue names the rule (got {res['issues']})")
 ok(res["total_checks"] - res["pass_count"] == 1,
    f"and costs exactly one grade point ({res['pass_count']}/{res['total_checks']})")
 
-set_multi(flac, "GENRE", ["Rock", "Alternative Rock", "Post-Britpop"])
+set_multi(flac, "GENRE", ["shoegaze", "dream pop", "rock"])
 res = _grade_album(album, "EMBEDDED", ord_cfg)
 ok("GENRE_ORDER" not in res["tracks"][0]["issues"]
    and res["pass_count"] == res["total_checks"],
-   f"the hierarchy order passes ({res['pass_count']}/{res['total_checks']})")
+   f"specifics first, family last passes ({res['pass_count']}/{res['total_checks']})")
+# No family at all is fine too — it is derived, never required.
+set_multi(flac, "GENRE", ["shoegaze", "dream pop"])
+res = _grade_album(album, "EMBEDDED", ord_cfg)
+ok("GENRE_ORDER" not in res["tracks"][0]["issues"]
+   and res["pass_count"] == res["total_checks"],
+   f"a list with no family passes ({res['pass_count']}/{res['total_checks']})")
 
 # ... and the switch removes it from the grade (and from the denominator).
 res_off = _grade_album(album, "EMBEDDED", dict(ord_cfg, grade_check_genre_order=False))
@@ -506,21 +515,101 @@ ok("GENRE_ORDER" not in res_off["tracks"][0]["issues"]
    and res_off["pass_count"] == res_off["total_checks"],
    f"grade_check_genre_order=False stops grading it ({res_off['total_checks']})")
 
-set_multi(flac, "GENRE", ["Rock", "Rock", "Post-Britpop"])
+set_multi(flac, "GENRE", ["shoegaze", "shoegaze", "rock"])
 res = _grade_album(album, "EMBEDDED", ord_cfg)
 ok("GENRE_ORDER" in res["tracks"][0]["issues"]
-   and any(i.startswith("Genre slots repeat: Rock") for i in res["issues"]),
-   f"a repeated slot fails with the duplicate wording (got {res['issues']})")
+   and any(i.startswith("duplicate") for i in res["issues"]),
+   f"a repeated genre fails with the duplicate wording (got {res['issues']})")
 
-# A head this app's vocabulary cannot vouch for is never a failure: the check
-# judges order, it does not invent a parent for the list.
-set_multi(flac, "GENRE", ["Kwaito", "Amapiano", "Deep House"])
+# The OVERFLOW is the count check's business, not this one's: two checks may
+# not both fail one track over the same list.
+set_multi(flac, "GENRE", ["shoegaze", "dream pop", "post-britpop", "rock"])
 res = _grade_album(album, "EMBEDDED", ord_cfg)
 ok("GENRE_ORDER" not in res["tracks"][0]["issues"]
+   and "GENRE_COUNT" not in res["tracks"][0]["issues"],
+   f"with the count check off an overflow is not re-reported as order "
+   f"(got {res['tracks'][0]['issues']})")
+res = _grade_album(album, "EMBEDDED", dict(ord_cfg, grade_check_genre_count=True))
+ok(res["tracks"][0]["issues"] == ["GENRE_COUNT"],
+   f"with it on the overflow fails that check ONLY "
+   f"(got {res['tracks'][0]['issues']})")
+
+# ----------------------------------------------------------------------
+# Genre VOCABULARY (grade_check_genre_vocab) — MusicBrainz's own names
+# ----------------------------------------------------------------------
+print("== genre vocabulary ==")
+# A name MusicBrainz does not publish is reported, one line per name: the
+# writers keep what a source said (dropping evidence is worse) and this is
+# where it surfaces.
+set_multi(flac, "GENRE", ["shoegaze", "Nonsense"])
+voc_cfg = dict(mood_cfg, grade_check_genre_count=False, grade_check_genre_vocab=True)
+res = _grade_album(album, "EMBEDDED", voc_cfg)
+ok(res["tracks"][0]["issues"] == ["GENRE_VOCAB"],
+   f"an unknown name fails the vocabulary check (got {res['tracks'][0]['issues']})")
+ok(any("Not a MusicBrainz genre: Nonsense" in i for i in res["issues"]),
+   f"the issue names the genre (got {res['issues']})")
+ok(res["total_checks"] - res["pass_count"] == 1,
+   f"and costs exactly one grade point ({res['pass_count']}/{res['total_checks']})")
+# A spelling the vocabulary DOES know is not a failure, whatever its case: the
+# writers canonicalize it (mlo.genres.canonical), so a library tagged by an
+# older build does not start failing.
+set_multi(flac, "GENRE", ["Shoegaze", "Rock"])
+res = _grade_album(album, "EMBEDDED", voc_cfg)
+ok("GENRE_VOCAB" not in res["tracks"][0]["issues"]
    and res["pass_count"] == res["total_checks"],
-   "an unknown parent is not a failure (order is left as found)")
+   f"'Shoegaze' is a known name ({res['pass_count']}/{res['total_checks']})")
+# The switch: with it off the same file passes and one check leaves the
+# denominator.
+set_multi(flac, "GENRE", ["shoegaze", "Nonsense"])
+res_off = _grade_album(album, "EMBEDDED", dict(voc_cfg, grade_check_genre_vocab=False))
+ok("GENRE_VOCAB" not in res_off["tracks"][0]["issues"]
+   and res_off["total_checks"] == res["total_checks"] - 1
+   and res_off["pass_count"] == res_off["total_checks"],
+   f"grade_check_genre_vocab=False stops grading it ({res_off['total_checks']})")
+# …and with the ORDER check off too, the vocabulary is not re-reported under
+# the other code (a disabled check never reappears elsewhere).
+res = _grade_album(album, "EMBEDDED",
+                   dict(voc_cfg, grade_check_genre_vocab=False,
+                        grade_check_genre_order=True))
+ok("GENRE_ORDER" not in res["tracks"][0]["issues"],
+   f"an unknown name is not an ORDER failure (got {res['tracks'][0]['issues']})")
 
 set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
+
+# ----------------------------------------------------------------------
+# The excess-tag vocabulary vs the tags this grader REQUIRES
+# ----------------------------------------------------------------------
+print("== excess tags ==")
+# The invariant the two halves of the audit rest on: a tag the grader DEMANDS
+# (PER_TRACK_TAGS / ALBUM_TAGS) must never be one the strip passes would
+# remove. `tag_key_allowed` is what Optimize FLACs (mlo.containers) and Format
+# all (mlo.format_all) apply, so a name that fails it here is a tag the app
+# writes and then strips — a grade no run could ever clear.
+_not_allowed = [t for t in list(PER_TRACK_TAGS) + list(ALBUM_TAGS)
+                if not tag_key_allowed(t)]
+ok(not _not_allowed,
+   f"every graded tag survives the strip pass (got {_not_allowed})")
+
+# …and the report names EVERY excess tag it finds, plus the script that
+# removes them: the names are what the user acts on, so a truncated list (it
+# used to stop at six) hides the ones that matter.
+from mutagen.flac import FLAC
+
+_junk = FLAC(flac)
+_junk["VENDOR_JUNK"] = ["1"]
+_junk["RIPPED_BY"] = ["some ripper"]
+_junk.save()
+res = _grade_album(album, "EMBEDDED", dict(cfg, grade_check_excess_tags=True))
+_excess = [i for i in res["issues"] if i.startswith("Excess tags:")]
+ok(len(_excess) == 1
+   and "ripped_by" in _excess[0].lower() and "vendor_junk" in _excess[0].lower(),
+   f"the excess report names every tag (got {_excess})")
+ok("Optimize FLACs (script 3)" in _excess[0] and "Format all (script 10)" in _excess[0],
+   f"and the scripts that strip it (got {_excess})")
+ok("TAGS" in res["tracks"][0]["issues"],
+   f"the track carries the TAGS issue code (got {res['tracks'][0]['issues']})")
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
+del_tags(flac, ["VENDOR_JUNK", "RIPPED_BY"])
 
 # ----------------------------------------------------------------------
 # ReplayGain family (grade_check_replaygain) — opt-in like AcoustID

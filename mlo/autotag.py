@@ -27,10 +27,13 @@ filled in by hand:
    (mlo.moods extracts their audio through ffmpeg), and the GENRE they carry
    is written through the same video tag writer.
 
-4) GENRE top-up: the tags are brought UP TO ``mb_genre_count`` (the track's
-   own values first, they are deliberate) through a caller-supplied provider
-   hook (``set_genre_lookup``), never past it — the same count the trimmer and
-   the grader's "Genre count" check use. The engine deliberately does not
+4) GENRE completion: the tags are canonicalized up to ``mb_genre_count`` (the
+   track's own values first, they are deliberate) — the family of the specific
+   genre is DERIVED and appended last, and only when a slot is still free is a
+   caller-supplied provider hook (``set_genre_lookup``) asked for one more
+   specific genre. Never past the cap — the same count the trimmer and the
+   grader's "Genre count" check use (which accepts AT MOST this many). The
+   engine deliberately does not
    ship an HTTP client for this: the server and the import pipeline register
    their discovery/MusicBrainz chain, the CLI leaves it unset and step 4 is
    skipped.
@@ -46,7 +49,7 @@ from .audio import AudioFile
 from .config import DEFAULT_CONFIG, should_write_audio_tag
 # one genre list policy for every writer: the trimmer, the top-up below and
 # the import all keep order, drop case-insensitive repeats and cap the same way
-from .genres import normalize_genres
+from .genres import GENRE_COUNT_MAX, normalize_genres, split_stored
 # the app's RELEASETYPE spelling ("album+live" -> "Album; Live"), shared with
 # the organizer and the grader so one release_type reads the same everywhere;
 # fuller_date is the same shared rule for the two DATE tags the album folder
@@ -110,6 +113,38 @@ def set_genre_lookup(fn):
     """
     global _genre_lookup
     _genre_lookup = fn
+
+
+def genre_count(cfg, requested=None):
+    """`mb_genre_count` — the one cap every genre writer clamps to.
+
+    *cfg* is a config dict; *requested* is a caller's own limit (the import
+    wizard's per-run "Max genres"). A request may only LOWER the cap:
+    `mb_genre_count` is the user's setting, so no per-run control can write
+    more genres than it, and a hand-edited config file cannot go past
+    `GENRE_COUNT_MAX` either. A missing or unparsable value is the shipped
+    default, never a literal that drifts from it.
+    """
+    try:
+        cap = int((cfg or {}).get("mb_genre_count") or DEFAULT_CONFIG["mb_genre_count"])
+    except (TypeError, ValueError):
+        cap = int(DEFAULT_CONFIG["mb_genre_count"])
+    cap = max(1, min(GENRE_COUNT_MAX, cap))
+    if requested is None:
+        return cap
+    try:
+        want = int(requested)
+    except (TypeError, ValueError):
+        # Handled by the caller (`server.main` answers 400 for a limit that is
+        # not a number); the helper itself falls back to the setting so a
+        # direct caller in Python never gets an exception for it.
+        return cap
+    if want <= 0:
+        # 0 is "no per-run limit" in the API, not "one genre": clamping it up
+        # to 1 would silently write a single genre for a request that asked
+        # for no narrowing at all.
+        return cap
+    return max(1, min(cap, want))
 
 
 def trim_genres(af, count):
@@ -477,7 +512,8 @@ def run_auto_tagging(config):
             " (refined by GENRE)" if config.get("mood_source", "hybrid") == "hybrid"
             else f" (source: {config.get('mood_source', 'hybrid')})"))
     if config.get("genre_autofill", True):
-        log("  GENRE: topped up to the configured count from the provider chain"
+        log("  GENRE: completed to the configured count (family derived, "
+            "provider chain when a slot is free)"
             if _genre_lookup else
             "  GENRE: autofill skipped (no provider chain in this runner)")
 
@@ -486,10 +522,10 @@ def run_auto_tagging(config):
     do_instrumental = config.get("auto_instrumental", True)
     do_mood = config.get("mood_enabled", True)
     do_genre = config.get("genre_autofill", True) and _genre_lookup is not None
-    # The per-track cap this app's writers keep (`mb_genre_count`, one value,
-    # default read from DEFAULT_CONFIG so it cannot drift from the shipped
-    # default); grading requires exactly this many genres per track.
-    genre_count = int(config.get("mb_genre_count") or DEFAULT_CONFIG["mb_genre_count"])
+    # The per-track cap this app's writers keep (`mb_genre_count`, clamped to
+    # its own ceiling by the one helper above); grading accepts at most this
+    # many genres per track.
+    genre_cap = genre_count(config)
     if do_mood:
         from . import moods  # local: keeps librosa discovery out of import time
     # Advisory zero-fill is OFF by default: a missing ITUNESADVISORY means
@@ -555,12 +591,12 @@ def run_auto_tagging(config):
                 if raw_genre is not None:
                     stripped = str(raw_genre).strip()
                     if str(raw_genre) != stripped:
-                        # A multi-valued GENRE reads back "; "-joined (see
-                        # get_tag), so write it back as the list it was —
-                        # otherwise trimming the whitespace would COLLAPSE
-                        # three genres into one tag named "A; B; C".
-                        value = ([g.strip() for g in stripped.split(";") if g.strip()]
-                                 if ";" in stripped else stripped)
+                        # A stored value another tagger joined is written back
+                        # as the names INSIDE it (";" or " / ", see
+                        # split_stored) — otherwise trimming the whitespace
+                        # would COLLAPSE three genres into one tag named
+                        # "A; B; C".
+                        value = split_stored(stripped) or stripped
                         if d["af"].set_tag("GENRE", value):
                             modified += 1
                             d["af"] = AudioFile(d["af"].path)  # refresh
@@ -692,46 +728,45 @@ def run_auto_tagging(config):
             af = d["af"]
             path = af.path
             if do_genre:
-                # GENRE is topped UP to the configured count, not only filled
-                # from empty: `mb_genre_count` is what grading requires, and a
-                # track carrying one genre (hand-picked, or written by a build
-                # whose default was lower) could otherwise never satisfy the
-                # count check — no pass would add anything. The track's own
-                # values come first because they are deliberate, then the
-                # provider chain appends what it knows, case-insensitively
-                # de-duplicated, until the cap is reached.
+                # GENRE is top-up-and-canonicalize, not just fill-from-empty:
+                # the track's own values come first (they are deliberate), and
+                # the shared normalizer completes them — it derives the FAMILY
+                # of the specific genre it finds (mlo.genre_vocab.parent_of)
+                # and appends it last, which is what makes a track carrying one
+                # specific genre already complete.
                 current = [g for g in (af.tag_values("GENRE") or [])
                            if str(g).strip()]
-                if len(current) < genre_count:
+                merged = normalize_genres(current, genre_cap)
+                if len(merged) < genre_cap:
+                    # Still short of the cap, so only a provider can add
+                    # anything: one more SPECIFIC genre is what is missing
+                    # (the family came free from the normalizer above). The
+                    # chain's names follow in its own priority order and the
+                    # cap is the same `mb_genre_count` the trimmer and the
+                    # grader use.
                     artist = af.get_tag("ALBUMARTIST") or af.get_tag("ARTIST") or ""
                     album_tag = af.get_tag("ALBUM") or ""
                     try:
                         names = _genre_lookup(artist, album_tag, path) or []
                     except Exception:
                         names = []
-                    # `normalize_genres` is the append: the track's own values
-                    # stay first (they are deliberate), the provider's names
-                    # follow in its own priority order, a case-insensitive
-                    # repeat collapses and the cap is the same `mb_genre_count`
-                    # the trimmer and the grader use.
-                    merged = normalize_genres(list(current) + list(names),
-                                              genre_count)
-                    if merged != current:
-                        # The list goes in as a list: set_tag writes repeated
-                        # GENRE fields, so players see several genres instead
-                        # of one called "Dance-Punk; Electronic; Funk Rock".
-                        # (No should_write_audio_tag() here: the per-filetype
-                        # GENRE gate is checked where the family is written —
-                        # genre_autofill, checked above, is the global switch.)
-                        if af.set_tag("GENRE", merged):
-                            genre_modified += 1
-                            af = d["af"] = AudioFile(path)  # refresh for the mood prior
+                    merged = normalize_genres(current + list(names), genre_cap)
+                if merged != current:
+                    # The list goes in as a list: set_tag writes repeated
+                    # GENRE fields, so players see several genres instead
+                    # of one called "Dance-Punk; Electronic; Funk Rock".
+                    # (No should_write_audio_tag() here: the per-filetype
+                    # GENRE gate is checked where the family is written —
+                    # genre_autofill, checked above, is the global switch.)
+                    if af.set_tag("GENRE", merged):
+                        genre_modified += 1
+                        af = d["af"] = AudioFile(path)  # refresh for the mood prior
             if do_genre:
                 # The cap is enforced on EVERY track, not only on the ones
-                # filled above: a library that already carries three genres is
-                # brought down to `mb_genre_count` by re-running Auto tagging.
+                # filled above: a library that already carries more genres than
+                # `mb_genre_count` is brought down by re-running Auto tagging.
                 try:
-                    if trim_genres(af, genre_count):
+                    if trim_genres(af, genre_cap):
                         genre_trimmed += 1
                 except Exception:
                     pass
@@ -761,7 +796,7 @@ def run_auto_tagging(config):
         if genre_modified:
             notes.append("genre")
         if genre_trimmed:
-            notes.append(f"genre trimmed to {genre_count}")
+            notes.append(f"genre trimmed to {genre_cap}")
         return album, modified, notes, advisory_value, info
 
     counts = {"ok": 0, "skip": 0, "fail": 0}

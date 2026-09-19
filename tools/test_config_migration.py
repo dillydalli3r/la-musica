@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Regression: app state lives in <music>/.mlo/data, downloads in
-<music>/.mlo/downloads and the trash bin in <music>/.mlo/trash.
+<music>/.mlo/downloads (one shared queue) and the trash bin in
+<music>/.mlo/trash/<user> (the default/admin scope's segment is literally
+`default`).
 
 Covers the move off the previous layouts (<music>/Data plus the intermediate
 <music>/.mlo_data, and <music>/.mlo_downloads / <music>/.mlo_trash), the
@@ -64,7 +66,7 @@ def legacy_mlo_data(mf):
 
 
 def bin_dir(mf):
-    return os.path.join(mf, ".mlo", "trash")
+    return os.path.join(mf, ".mlo", "trash", "default")
 
 
 def make_folder(name):

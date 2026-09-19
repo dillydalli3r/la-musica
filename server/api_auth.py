@@ -40,6 +40,15 @@ class SetupBody(BaseModel):
 
 class LoginBody(BaseModel):
     password: str
+    # Optional: omitted means "the only user there is", which is what every
+    # existing client sends (and what a single-user install wants).
+    username: str = None
+
+
+class UserBody(BaseModel):
+    username: str
+    password: str
+    confirm: str = None
 
 
 class PasswordBody(BaseModel):
@@ -69,14 +78,15 @@ def _set_cookie(response: Response, request: Request, token: str, days: int) -> 
     )
 
 
-def _issue(request: Request, response: Response, days: int, label: str = "") -> dict:
-    token, expires = auth_mod.create_session(days, label=label)
+def _issue(request: Request, response: Response, days: int, label: str = "",
+           username: str = "") -> dict:
+    token, expires = auth_mod.create_session(days, label=label, username=username)
     _set_cookie(response, request, token, days)
     return {
         "token": token,
         "expires_at": expires,
         "session_days": int(days),
-        "username": auth_mod.current_state()["username"],
+        "username": str(username or ""),
     }
 
 
@@ -106,7 +116,9 @@ def status(request: Request):
         "required": bool(state["required"]),
         "has_password": bool(state["has_password"]),
         "authenticated": bool(token and auth_mod.valid_session(token)),
-        "username": state["username"],
+        # The signed-in user's own name; before that it is the config's
+        # display name (the claim that gave this server its password).
+        "username": auth_mod.session_username(token) or state["username"],
         "public_url": state["public_url"],
         "session_days": int(state["session_days"]),
         "setup_hint": auth_mod.gate_warning(_config_for_hint()),
@@ -144,11 +156,14 @@ def setup(body: SetupBody, request: Request, response: Response):
     if problem:
         raise HTTPException(status_code=400, detail=problem)
 
-    auth_mod.set_password(body.password, body.username)
+    try:
+        name = auth_mod.set_password(body.password, body.username)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     # set_password revokes every session (a password change must sign old
     # clients out), so the caller gets a fresh one to keep working with.
     return _issue(request, response, auth_mod.current_state(refresh=True)["session_days"],
-                  label="setup")
+                  label="setup", username=name)
 
 
 @router.post("/login")
@@ -158,18 +173,14 @@ def login(body: LoginBody, request: Request, response: Response):
     if not state["has_password"]:
         raise HTTPException(status_code=428, detail="no password set yet",
                             headers={"X-MLO-Needs-Setup": "1"})
-    from mlo.config import load_config
-    try:
-        stored = str(load_config().get("auth_password_hash") or "")
-    except Exception:
-        stored = ""
-    if not auth_mod.verify_password(body.password, stored):
+    user = auth_mod.login_user(body.password, body.username)
+    if user is None:
         auth_mod.note_failure(ip)
-        # Same message and shape for "wrong password" and "no password set":
-        # an attacker learns nothing about the server's state from a failure.
+        # Same message and shape for "wrong password", "no such user" and "no
+        # password set": an attacker learns nothing about the server's state.
         raise HTTPException(status_code=401, detail="wrong password")
     auth_mod.note_success(ip)
-    return _issue(request, response, state["session_days"])
+    return _issue(request, response, state["session_days"], username=user)
 
 
 @router.post("/logout")
@@ -185,21 +196,71 @@ def change_password(body: PasswordBody, request: Request, response: Response):
     """Change the password. Requires the current one, and re-issues the
     caller's own session so they are not signed out of the tab they are in."""
     ip = _guard_rate(request)
-    from mlo.config import load_config
-    try:
-        cfg = load_config()
-    except Exception:
-        cfg = {}
-    if not auth_mod.verify_password(body.current, str(cfg.get("auth_password_hash") or "")):
+    user = auth_mod.current_user(request)
+    if auth_mod.login_user(body.current, user) is None:
         auth_mod.note_failure(ip)
         raise HTTPException(status_code=401, detail="current password is wrong")
     problem = auth_mod.password_problem(body.password, body.confirm)
     if problem:
         raise HTTPException(status_code=400, detail=problem)
     auth_mod.note_success(ip)
-    auth_mod.set_password(body.password, None)
+    # The same user whose password was just proved — never the config's
+    # display name, which on a multi-user server is not who is asking.
+    try:
+        name = auth_mod.set_password(body.password, user)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return _issue(request, response, auth_mod.current_state(refresh=True)["session_days"],
-                  label="password change")
+                  label="password change", username=name)
+
+
+@router.get("/users")
+def users(request: Request):
+    """Every user on this server, and which one is asking.
+
+    The default/admin scope ("") is not a user row and is not listed: it is
+    where an unclaimed install's playlists, likes and favourites live, and the
+    login screen already offers it to whoever has no name of their own.
+    """
+    return {"users": auth_mod.list_users(),
+            "you": auth_mod.current_user(request)}
+
+
+@router.post("/users")
+def add_user(body: UserBody):
+    """Add a user, or set an existing one's password — a server operator act.
+
+    Behind the same gate as changing a password (it needs a session), but
+    deliberately different from `/password`: it does NOT sign anyone out, and
+    it does not touch the config's own claim, because adding a second person
+    must not disconnect the first.
+    """
+    name = str(body.username or "").strip()
+    problem = auth_mod.user_problem(name)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+    if body.confirm is not None and body.password != body.confirm:
+        raise HTTPException(status_code=400, detail="the passwords do not match")
+    problem = auth_mod.password_problem(body.password)
+    if problem:
+        raise HTTPException(status_code=400, detail=problem)
+    auth_mod.create_user(name, body.password)
+    return {"ok": True, "username": name, "users": auth_mod.list_users()}
+
+
+@router.delete("/users/{username}")
+def remove_user(username: str):
+    """Remove a user and every session they hold.
+
+    The last user is refused — with no users left the server falls back to its
+    config claim, so removing the only one would change which password opens
+    the library rather than closing it. The rows they own stay on disk.
+    """
+    if not auth_mod.delete_user(username):
+        raise HTTPException(
+            status_code=400,
+            detail="cannot remove that user: it is the last one, or it does not exist")
+    return {"ok": True, "users": auth_mod.list_users()}
 
 
 @router.post("/revoke-all")

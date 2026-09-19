@@ -21,8 +21,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .accurip import _canonical_accurip_text
 from .audio import AudioFile
-from .autotag import trim_genres
-from .config import DEFAULT_CONFIG, should_write_audio_tag
+from .autotag import genre_count, trim_genres
+from .config import should_write_audio_tag
 from .cue import canonical_cue_text
 from .deps import HAS_PIL, Image
 from .images import _exif_transposed
@@ -421,15 +421,16 @@ def _format_audio_tags(path, cfg, force=False, af=None):
                     af.defer_save(False)
                     return (path, False, af.error or "set_tag failed", 0)
         # The per-track genre cap (`mb_genre_count`) is swept here too, over
-        # the whole library, so an existing album that carries "Rock;
-        # Alternative Rock; Indie" is fixed by running this one script — the
-        # same value the import and Auto tagging keep, from one config key.
-        # GENRE goes through the write gate the loop above applies to it.
+        # the whole library, so an existing album that carries more genres than
+        # the setting allows is fixed by running this one script — the same cap
+        # (and the same canonicalization: the family lands last and unknown
+        # spellings are resolved) the import and Auto tagging apply, from one
+        # config key. GENRE goes through the write gate the loop above applies
+        # to it.
         trimmed = 0
         if should_write_audio_tag(cfg, "GENRE", filepath=path):
             try:
-                trimmed = trim_genres(
-                    af, cfg.get("mb_genre_count") or DEFAULT_CONFIG["mb_genre_count"])
+                trimmed = trim_genres(af, genre_count(cfg))
             except Exception:
                 trimmed = 0
             if trimmed:
@@ -697,6 +698,6 @@ def run_format_all(config):
     if trimmed_total:
         # What the canonical genre sweep removed, against the one knob
         # (Settings → Import) that defines it.
-        cap = config.get("mb_genre_count") or DEFAULT_CONFIG["mb_genre_count"]
+        cap = genre_count(config)
         log(f"  GENRE: {trimmed_total} extra genre value(s) trimmed — genres per track is {cap} (Settings → Import)")
     return stats

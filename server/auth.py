@@ -1,10 +1,14 @@
 """Login gate: one password, hashed on disk, sessions in SQLite.
 
-The server is a single-user appliance — there is no user table, no roles and
-no signup. What it needs is the *gate*: anyone who can reach the port can
-otherwise read the whole library, edit tags, delete files and start downloads,
-so as soon as the backend is reachable from anywhere but this machine's own
-loopback it must demand a password before doing any of that.
+The server is an appliance for one household, not a hosting platform: there is
+no signup, no roles and no per-user permissions. What it needs is the *gate*:
+anyone who can reach the port can otherwise read the whole library, edit tags,
+delete files and start downloads, so as soon as the backend is reachable from
+anywhere but this machine's own loopback it must demand a password before
+doing any of that. The `users` table is the identity a session carries, so the
+playlists, likes and favorites can be scoped per person; `""` is the
+default/admin scope — the one an unclaimed install uses, and where every row
+written before that table existed lives.
 
 Everything here is deliberately small and boring:
 
@@ -14,7 +18,12 @@ Everything here is deliberately small and boring:
 * **Sessions** are random 32-byte tokens. Only the SHA-256 of a token is
   stored (`auth.db`, next to playlists.db), so reading that file does not hand
   anyone a working login. They expire (`auth_session_days`) and are pruned on
-  every write.
+  every write. A session also carries the username it was opened for, which is
+  what `current_user(request)` hands to the rest of the API.
+* **Users** are `(username, hash, created)` rows in the same database. The
+  config's `auth_password_hash`/`auth_username` stay the claim of an install
+  that predates the table (and the display name), so an old install logs in
+  exactly as before.
 * **Brute force** is answered with per-client backoff: a handful of wrong
   passwords from the same address and that address waits, doubling up to a
   ceiling. A correct password clears it.
@@ -96,8 +105,21 @@ def _init():
                     expires_at REAL NOT NULL,
                     label      TEXT
                 );
+                CREATE TABLE IF NOT EXISTS users (
+                    username TEXT PRIMARY KEY,
+                    hash     TEXT,
+                    created  REAL NOT NULL
+                );
                 """
             )
+            # Migrations for databases written before users existed: the
+            # session's username is added in place, and rows that predate it
+            # read back as "" — the default/admin scope.
+            for stmt in ("ALTER TABLE sessions ADD COLUMN username TEXT",):
+                try:
+                    conn.execute(stmt)
+                except sqlite3.OperationalError:
+                    pass  # column already exists
             conn.commit()
         finally:
             conn.close()
@@ -151,15 +173,169 @@ def password_problem(password: str, confirmation: str = None) -> str:
     return ""
 
 
+# ── users ───────────────────────────────────────────────────────────────────
+
+def list_users() -> list:
+    """Every claimed username, oldest first (the default scope is "")."""
+    with _lock:
+        conn = _conn()
+        try:
+            rows = conn.execute(
+                "SELECT username FROM users ORDER BY created, username").fetchall()
+            return [str(r["username"]) for r in rows]
+        finally:
+            conn.close()
+
+
+def user_hash(username: str) -> str:
+    """The stored hash for `username`, or "" when there is no such row."""
+    with _lock:
+        conn = _conn()
+        try:
+            row = conn.execute("SELECT hash FROM users WHERE username=?",
+                               (str(username or "").strip(),)).fetchone()
+            return str(row["hash"] or "") if row else ""
+        finally:
+            conn.close()
+
+
+def user_problem(username) -> str:
+    """Why *username* cannot be a user, or "" when it can.
+
+    A username is not just a label: it is a SQLite key and a **folder name**
+    (the trash bin is `<music>/.mlo/trash/<user>/`), so a name carrying a
+    separator, a traversal segment or a control character would write outside
+    the bin it names. Rejected here, once, for every caller.
+    """
+    name = str(username or "").strip()
+    if not name:
+        return "a username cannot be empty"
+    if len(name) > 64:
+        return "a username is at most 64 characters"
+    if any(ord(c) < 32 for c in name):
+        return "a username cannot contain control characters"
+    if "/" in name or "\\" in name or name in (".", ".."):
+        return "a username cannot contain a path separator"
+    return ""
+
+
+def create_user(username, password) -> str:
+    """Add a user, or change an existing one's password. Returns the name.
+
+    Deliberately different from `set_password`: adding a second person must
+    not sign the first one out, and must not rewrite the config's own claim
+    (which is the display name, and the only credential an install that
+    predates the users table has). The caller checks the password rules and
+    the name with `password_problem` / `user_problem`.
+    """
+    name = str(username or "").strip()
+    stored = hash_password(password)
+    with _lock:
+        conn = _conn()
+        try:
+            cur = conn.execute("UPDATE users SET hash=? WHERE username=?", (stored, name))
+            if not cur.rowcount:
+                conn.execute(
+                    "INSERT INTO users (username, hash, created) VALUES (?, ?, ?)",
+                    (name, stored, time.time()))
+            conn.commit()
+        finally:
+            conn.close()
+    current_state(refresh=True)
+    return name
+
+
+def delete_user(username) -> bool:
+    """Remove a user and every session opened for them.
+
+    The LAST user is refused: with no users left the server falls back to the
+    config's claim, so "delete the only user" would silently change which
+    password opens the library instead of closing it. Emptying the server is
+    a config operation, not a user one. Their rows stay in the databases —
+    this removes the identity, not the data someone may still want to export.
+    """
+    name = str(username or "").strip()
+    if not name or name not in list_users():
+        return False
+    if len(list_users()) <= 1:
+        return False
+    with _lock:
+        conn = _conn()
+        try:
+            conn.execute("DELETE FROM users WHERE username=?", (name,))
+            conn.execute("DELETE FROM sessions WHERE username=?", (name,))
+            conn.commit()
+        finally:
+            conn.close()
+    current_state(refresh=True)
+    return True
+
+
+def _config_claim() -> tuple:
+    """`(username, hash)` as the config records them.
+
+    The claim of an install that predates the users table, and still the
+    display name a client is shown; login falls back to it so such an install
+    keeps working without a users row.
+    """
+    try:
+        from mlo.config import load_config
+        cfg = load_config()
+    except Exception:
+        return "", ""
+    return (str(cfg.get("auth_username") or "").strip(),
+            str(cfg.get("auth_password_hash") or ""))
+
+
+def login_user(password: str, username: str = None):
+    """The username `password` logs in as, or None when it does not match.
+
+    Two places a credential can live, and the order matters:
+
+    1. **A users row**: authoritative for the name it holds. Naming a user
+       logs in as them; naming nobody on a single-user server logs in as the
+       only one there is (which is what every client does — the name field is
+       optional).
+    2. **The config's own claim**, which is the DEFAULT scope's credential:
+       `""` for an install claimed without a name, and the `auth_username` of
+       one claimed before the users table existed. It is consulted only for a
+       name no row holds, so a stale config hash can never override a row.
+
+    The second case is what keeps an install reachable: claim with no name,
+    add a second user, and the original password must still open the default
+    scope — otherwise the first person's playlists, likes and favourites are
+    behind a name nobody can type.
+    """
+    want = str(username or "").strip()
+    names = list_users()
+    if want and want in names:
+        stored = user_hash(want)
+        return want if stored and verify_password(password, stored) else None
+    if not want and len(names) == 1:
+        # Only a MATCH returns here: a single user whose password does not
+        # match must still fall through to the config's claim, or adding one
+        # named user would lock the original owner out of the default scope.
+        stored = user_hash(names[0])
+        if stored and verify_password(password, stored):
+            return names[0]
+    claim_name, claim_hash = _config_claim()
+    if want in ("", claim_name) and claim_name not in names \
+            and claim_hash and verify_password(password, claim_hash):
+        return claim_name
+    return None
+
+
 # ── sessions ────────────────────────────────────────────────────────────────
 
 def _token_hash(token: str) -> str:
     return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
 
 
-def create_session(days=30, label: str = "") -> tuple:
+def create_session(days=30, label: str = "", username: str = "") -> tuple:
     """A new session token. Returns `(token, expires_at)` — the caller gets
-    the token once and cannot read it back: only its hash is stored."""
+    the token once and cannot read it back: only its hash is stored. The row
+    carries the username the session was opened for, which is what the API
+    scopes everything by ("" = the default/admin scope)."""
     try:
         days = max(1, int(days))
     except (TypeError, ValueError):
@@ -172,14 +348,37 @@ def create_session(days=30, label: str = "") -> tuple:
         try:
             conn.execute("DELETE FROM sessions WHERE expires_at <= ?", (now,))
             conn.execute(
-                "INSERT OR REPLACE INTO sessions (token_hash, created_at, expires_at, label)"
-                " VALUES (?, ?, ?, ?)",
-                (_token_hash(token), now, expires, label or ""),
+                "INSERT OR REPLACE INTO sessions"
+                " (token_hash, created_at, expires_at, label, username)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (_token_hash(token), now, expires, label or "",
+                 str(username or "").strip()),
             )
             conn.commit()
         finally:
             conn.close()
     return token, expires
+
+
+def session_username(token: str) -> str:
+    """The user this LIVE session was opened for, "" when it is not a session.
+
+    An expired token answers "" here (and is left for the next write to
+    prune); callers that only need "is this a session at all" use
+    `valid_session`.
+    """
+    if not token:
+        return ""
+    with _lock:
+        conn = _conn()
+        try:
+            row = conn.execute(
+                "SELECT username FROM sessions WHERE token_hash = ? AND expires_at > ?",
+                (_token_hash(token), time.time()),
+            ).fetchone()
+            return str(row["username"] or "") if row else ""
+        finally:
+            conn.close()
 
 
 def valid_session(token: str) -> bool:
@@ -308,6 +507,27 @@ def client_ip(request) -> str:
         return ""
 
 
+def normalize_public_url(url: str) -> str:
+    """A configured `server_public_url` as an address a client can dial.
+
+    The wizard and Settings accept a bare host ("music.example.com:8443"), so
+    the server normalises rather than handing a scheme-less string to a
+    client: https when the port is 443, http otherwise. A value that already
+    carries a scheme — and "" (no public URL configured) — is returned as it
+    is, minus a trailing slash.
+    """
+    text = str(url or "").strip().rstrip("/")
+    if not text or "://" in text:
+        return text
+    from urllib.parse import urlsplit
+    try:
+        # Parsed as a netloc so a bracketed IPv6 host reads its port too.
+        port = urlsplit("//" + text).port
+    except ValueError:
+        port = None
+    return ("https://" if port == 443 else "http://") + text
+
+
 def is_loopback_host(host: str) -> bool:
     """True for "127.0.0.1", "::1", "localhost" and the rest of 127/8."""
     text = str(host or "").strip().lower()
@@ -360,6 +580,19 @@ def token_from_request(request) -> str:
     return (request.query_params.get("token") or "").strip()
 
 
+def current_user(request) -> str:
+    """The user behind this request, "" for the default/admin scope.
+
+    "" covers both "no session" (a loopback install with the gate off) and a
+    session opened before the server had users; both own the rows and files
+    written before user scoping existed, so they must keep seeing them.
+    """
+    try:
+        return session_username(token_from_request(request))
+    except Exception:
+        return ""
+
+
 # ── gate state ──────────────────────────────────────────────────────────────
 
 # The gate runs on EVERY API request, including a media stream's range
@@ -404,23 +637,56 @@ def current_state(refresh: bool = False) -> dict:
         has_password=bool(cfg.get("auth_password_hash")),
         username=str(cfg.get("auth_username") or ""),
         host=str(cfg.get("server_host") or ""),
-        public_url=str(cfg.get("server_public_url") or ""),
+        public_url=normalize_public_url(cfg.get("server_public_url") or ""),
         session_days=int(cfg.get("auth_session_days") or 30),
     )
     return dict(_state)
 
 
-def set_password(password: str, username: str = None) -> None:
-    """Store a new password hash (and optional label) in the config, then
-    invalidate the cached gate state so the next request sees it."""
+def set_password(password: str, username: str = None) -> str:
+    """Store a new password hash and return the username it was stored for.
+
+    The hash lives in the users table (the row is created for a new user) and
+    the config keeps its copy as the display/migration source. `username=None`
+    keeps the config's own `auth_username` — the claim of an install that
+    predates the users table. The cached gate state is invalidated so the next
+    request sees the change, and every session is revoked (a password change
+    must sign old clients out).
+    """
     from mlo.config import load_config, save_config
     cfg = load_config()
-    cfg["auth_password_hash"] = hash_password(password)
+    stored = hash_password(password)
+    name = (str(cfg.get("auth_username") or "").strip() if username is None
+            else str(username).strip())
+    problem = user_problem(name)
+    if problem and name:
+        raise ValueError(problem)
+    with _lock:
+        conn = _conn()
+        try:
+            # A BLANK claim creates no users row. It is what a fresh install
+            # produces — the name field is optional and empty on a server that
+            # has never had one — and a row named "" would be the original
+            # owner's identity: as soon as a second user existed, `login_user`
+            # would refuse the ambiguous blank name and their playlists, likes
+            # and favourites would be unreachable behind a name nobody can
+            # type. With no row the config's own hash stays the credential,
+            # which is the branch `login_user` already authenticates.
+            if name:
+                cur = conn.execute("UPDATE users SET hash=? WHERE username=?", (stored, name))
+                if not cur.rowcount:
+                    conn.execute("INSERT INTO users (username, hash, created) VALUES (?, ?, ?)",
+                                 (name, stored, time.time()))
+            conn.commit()
+        finally:
+            conn.close()
+    cfg["auth_password_hash"] = stored
     if username is not None:
-        cfg["auth_username"] = str(username).strip()
+        cfg["auth_username"] = name
     save_config(cfg)
     current_state(refresh=True)
     revoke_all()
+    return name
 
 
 # Paths that answer without a session. Everything else under the API does not.

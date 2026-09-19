@@ -19,9 +19,10 @@ MULTI-VALUE RULE (the "does a tag hold a list?" problem):
   could survive as a dangling "[]" (sanitize_path also removes empty []/{}).
 
 Example (the default): the ARTIST folder ends with the artist id, the ALBUM
-folder ends with the release id, and the FILE name ends with the track id —
-every level is identifiable without reading tags:
-  Slowdive [a16371b9-…]/$if(%releasetype%,[%releasetype%] ,)$if(%date%,%date% - ,)%album% {…}[%label%] [%musicbrainz_albumid%]/1-01 Title [trackid].flac
+folder ends with the release id and the release group id, and the FILE name
+ends with the track's recording id and the release group id — every level is
+identifiable without reading tags:
+  Slowdive [a16371b9-…]/$if(%releasetype%,[%releasetype%] ,)$if(%date%,%date% - ,)%album% {…}[%label%] [%musicbrainz_albumid%] [%musicbrainz_releasegroupid%]/1-01 Title [trackid] [releasegroupid].flac
 """
 import os
 import re
@@ -47,12 +48,20 @@ DEFAULT_NAMING_SCRIPT = (
     "%album% {$if(%releasecountry%,%releasecountry%)"
     "$if(%media%,$if(%releasecountry%, - ,)%media%)"
     "$if(%catalognumber%,$if(%media%, - ,$if(%releasecountry%, - ,))%catalognumber%)}"
-    # label then the release id, each its own optional bracket group
+    # label, the RELEASE id and the RELEASE GROUP id, each its own optional
+    # bracket group. The release group is the album's own identity across its
+    # pressings; the release id names this pressing.
     "$if(%label%, [%label%])"
-    "$if(%musicbrainz_albumid%, [%musicbrainz_albumid%])/"
-    # file name carries the track's own id (%musicbrainz_trackid% = recording)
+    "$if(%musicbrainz_albumid%, [%musicbrainz_albumid%])"
+    "$if(%musicbrainz_releasegroupid%, [%musicbrainz_releasegroupid%])/"
+    # The file name carries the track's own ids: %musicbrainz_trackid% is the
+    # RECORDING, and the release group ties the file back to its album even
+    # after it is pulled out of the folder. The release id itself is not
+    # repeated here — the folder above already names it, and a second copy of
+    # a 36-character uuid is exactly the path length this app fights.
     "%discnumber%-$num(%tracknumber%,2) %title%"
     "$if(%musicbrainz_trackid%, [%musicbrainz_trackid%])"
+    "$if(%musicbrainz_releasegroupid%, [%musicbrainz_releasegroupid%])"
 )
 
 _ILLEGAL = '<>:"\\|?*'
@@ -378,6 +387,7 @@ def track_variables(tags, release_type=None):
         "musicbrainz_albumartistid": tags.get("MUSICBRAINZ_ALBUMARTISTID") or "",
         "musicbrainz_artistid": tags.get("MUSICBRAINZ_ARTISTID") or "",
         "musicbrainz_albumid": tags.get("MUSICBRAINZ_ALBUMID") or "",
+        "musicbrainz_releasegroupid": tags.get("MUSICBRAINZ_RELEASEGROUPID") or "",
         "musicbrainz_trackid": tags.get("MUSICBRAINZ_TRACKID") or "",
         "musicbrainz_releasetrackid": tags.get("MUSICBRAINZ_RELEASETRACKID") or "",
         "releasetype": release_type or tags.get("RELEASETYPE") or "",

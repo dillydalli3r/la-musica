@@ -8,6 +8,11 @@ Dual storage:
 Playlist kinds:
   * manual — explicit ordered list of track paths.
   * smart  — saved filter (JSON) re-evaluated against the library payload.
+
+Every row (playlists, their tracks, likes, favorites) belongs to a user and
+every read/write filters on it, so two people on one server never see each
+other's data. `user=""` is the default/admin scope: the rows written before
+users existed, and what an install that has never claimed a user works in.
 """
 import json
 import os
@@ -17,7 +22,10 @@ import threading
 import time
 from pathlib import Path
 
-_lock = threading.Lock()
+# Re-entrant: a write holds it and then opens the connection, whose first call
+# runs `_init()` — under this same lock. A plain Lock deadlocked the very first
+# write on a fresh database (it waited out sqlite's 30 s timeout, then hung).
+_lock = threading.RLock()
 
 
 def db_path():
@@ -103,34 +111,81 @@ def _init():
                     c.execute(stmt)
                 except sqlite3.OperationalError:
                     pass  # column already exists
+            # Per-user scope, added in place: every row predating it has no
+            # scope of its own and becomes the default one (''), so an
+            # existing install keeps its playlists, likes and favorites.
+            for table in ("playlists", "playlist_tracks", "likes", "favorites"):
+                try:
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN user TEXT NOT NULL DEFAULT ''")
+                except sqlite3.OperationalError:
+                    pass  # column already exists
+            # `likes`/`favorites` were keyed by the entity alone, and on a
+            # shared server two users may hold the same track or album, so the
+            # key has to start with the user. SQLite cannot change a key in
+            # place, so those two are rebuilt once, empty scope carried over.
+            _ensure_user_key(c, "likes", ("path", "liked_at", "mbid"), """
+                user TEXT NOT NULL DEFAULT '',
+                path TEXT NOT NULL,
+                liked_at REAL NOT NULL,
+                mbid TEXT,
+                PRIMARY KEY (user, path)
+            """)
+            _ensure_user_key(c, "favorites", ("kind", "key", "created_at", "mbid"), """
+                user TEXT NOT NULL DEFAULT '',
+                kind TEXT NOT NULL,
+                key TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                mbid TEXT,
+                PRIMARY KEY (user, kind, key)
+            """)
+
+
+def _ensure_user_key(c, table, columns, body):
+    """Rebuild `table` when its primary key does not start with `user`.
+
+    Called once per process on the tables above; an already-migrated database
+    matches `user` in the key and is left alone.
+    """
+    if any(r[1] == "user" and r[5] for r in c.execute(f"PRAGMA table_info({table})")):
+        return
+    new = f"{table}_user"
+    cols = ", ".join(columns)
+    c.execute(f"CREATE TABLE {new} ({body})")
+    c.execute(f"INSERT INTO {new} (user, {cols}) SELECT '', {cols} FROM {table}")
+    c.execute(f"DROP TABLE {table}")
+    c.execute(f"ALTER TABLE {new} RENAME TO {table}")
 
 
 # --------------------------------------------------------------------------- #
 # CRUD
 # --------------------------------------------------------------------------- #
-def list_playlists():
+def list_playlists(user=""):
     with _conn() as c:
-        rows = c.execute("SELECT * FROM playlists ORDER BY name COLLATE NOCASE").fetchall()
+        rows = c.execute(
+            "SELECT * FROM playlists WHERE user=? ORDER BY name COLLATE NOCASE", (user,)
+        ).fetchall()
         out = []
         for r in rows:
             item = dict(r)
             item["filter"] = json.loads(item.pop("filter_json")) if item.get("filter_json") else None
-            n = c.execute("SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id=?", (item["id"],)).fetchone()[0]
+            n = c.execute("SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id=? AND user=?",
+                          (item["id"], user)).fetchone()[0]
             item["track_count"] = n
             out.append(item)
         return out
 
 
-def get_playlist(pid):
+def get_playlist(pid, user=""):
     from server import mbresolve
     with _conn() as c:
-        r = c.execute("SELECT * FROM playlists WHERE id=?", (pid,)).fetchone()
+        r = c.execute("SELECT * FROM playlists WHERE id=? AND user=?", (pid, user)).fetchone()
         if r is None:
             return None
         item = dict(r)
         item["filter"] = json.loads(item.pop("filter_json")) if item.get("filter_json") else None
         rows = c.execute(
-            "SELECT path, mbid FROM playlist_tracks WHERE playlist_id=? ORDER BY position", (pid,)
+            "SELECT path, mbid FROM playlist_tracks WHERE playlist_id=? AND user=? ORDER BY position",
+            (pid, user),
         ).fetchall()
     tracks = []
     updates = []
@@ -147,32 +202,35 @@ def get_playlist(pid):
         with _lock:
             with _conn() as c:
                 for new, old in updates:
-                    c.execute("UPDATE playlist_tracks SET path=? WHERE playlist_id=? AND path=?",
-                              (new, pid, old))
+                    c.execute("UPDATE playlist_tracks SET path=?"
+                              " WHERE playlist_id=? AND path=? AND user=?",
+                              (new, pid, old, user))
     item["tracks"] = tracks
     return item
 
 
-def create_playlist(name, kind="manual", filter_spec=None):
+def create_playlist(name, kind="manual", filter_spec=None, user=""):
     with _lock:
         with _conn() as c:
             now = time.time()
             cur = c.execute(
-                "INSERT INTO playlists (name, kind, filter_json, created, updated) VALUES (?,?,?,?,?)",
-                (name, kind, json.dumps(filter_spec) if filter_spec else None, now, now),
+                "INSERT INTO playlists (name, kind, filter_json, created, updated, user)"
+                " VALUES (?,?,?,?,?,?)",
+                (name, kind, json.dumps(filter_spec) if filter_spec else None, now, now, user),
             )
             return cur.lastrowid
 
 
-def update_playlist(pid, fields):
+def update_playlist(pid, fields, user=""):
     """Partial update from a dict of ONLY the fields being changed — rename,
     set the cover icon (None clears it back to the default), and/or grade
     the playlist complete."""
     if not fields:
-        return get_playlist(pid)
+        return get_playlist(pid, user)
     with _lock:
         with _conn() as c:
-            row = c.execute("SELECT id FROM playlists WHERE id=?", (pid,)).fetchone()
+            row = c.execute("SELECT id FROM playlists WHERE id=? AND user=?",
+                            (pid, user)).fetchone()
             if not row:
                 return None
             sets, vals = [], []
@@ -180,25 +238,26 @@ def update_playlist(pid, fields):
                 sets.append("name=?")
                 vals.append(str(fields["name"]).strip())
             if not sets:
-                return get_playlist(pid)
+                return get_playlist(pid, user)
             sets.append("updated=?")
             vals.append(time.time())
-            vals.append(pid)
-            c.execute(f"UPDATE playlists SET {', '.join(sets)} WHERE id=?", vals)
-            return get_playlist(pid)
+            vals.extend((pid, user))
+            c.execute(f"UPDATE playlists SET {', '.join(sets)} WHERE id=? AND user=?", vals)
+            return get_playlist(pid, user)
 
 
-def rename_playlist(pid, name):
+def rename_playlist(pid, name, user=""):
     with _conn() as c:
-        cur = c.execute("UPDATE playlists SET name=?, updated=? WHERE id=?", (name, time.time(), pid))
+        cur = c.execute("UPDATE playlists SET name=?, updated=? WHERE id=? AND user=?",
+                        (name, time.time(), pid, user))
         return cur.rowcount > 0
 
 
-def delete_playlist(pid):
+def delete_playlist(pid, user=""):
     with _lock:
         with _conn() as c:
-            c.execute("DELETE FROM playlist_tracks WHERE playlist_id=?", (pid,))
-            cur = c.execute("DELETE FROM playlists WHERE id=?", (pid,))
+            c.execute("DELETE FROM playlist_tracks WHERE playlist_id=? AND user=?", (pid, user))
+            cur = c.execute("DELETE FROM playlists WHERE id=? AND user=?", (pid, user))
             # rowcount lives on the cursor, not the connection
             return cur.rowcount > 0
 
@@ -215,6 +274,16 @@ def _pathkey(path):
     return os.path.normcase(os.path.normpath(str(path)))
 
 
+def _owned(c, pid, user):
+    """Whether `pid` is a playlist of `user`'s.
+
+    The track writers check this first: a playlist id from another user must
+    leave no row behind, on top of being invisible to every read.
+    """
+    return c.execute("SELECT 1 FROM playlists WHERE id=? AND user=?",
+                     (pid, user)).fetchone() is not None
+
+
 def _mbid_for(path):
     """Recording MBID for a library track path ("" when untagged)."""
     try:
@@ -224,14 +293,16 @@ def _mbid_for(path):
         return ""
 
 
-def add_tracks(pid, paths, position=None):
+def add_tracks(pid, paths, position=None, user=""):
     """Append (or insert at position) track paths, deduplicating. The
     track's MusicBrainz recording ID is stored alongside the path so the
     entry survives later reorganizations."""
     with _lock:
         with _conn() as c:
+            if not _owned(c, pid, user):
+                return 0
             existing = {_pathkey(r["path"]) for r in c.execute(
-                "SELECT path FROM playlist_tracks WHERE playlist_id=?", (pid,))}
+                "SELECT path FROM playlist_tracks WHERE playlist_id=? AND user=?", (pid, user))}
             new = []
             for p in dict.fromkeys(paths):  # dedupe within the request too
                 k = _pathkey(p)
@@ -242,50 +313,64 @@ def add_tracks(pid, paths, position=None):
             if not new:
                 return 0
             if position is None:
-                base = c.execute("SELECT COALESCE(MAX(position),0) FROM playlist_tracks WHERE playlist_id=?",
-                                 (pid,)).fetchone()[0]
+                base = c.execute("SELECT COALESCE(MAX(position),0) FROM playlist_tracks"
+                                 " WHERE playlist_id=? AND user=?",
+                                 (pid, user)).fetchone()[0]
                 start = base + 1
                 for i, p in enumerate(new):
-                    c.execute("INSERT INTO playlist_tracks (playlist_id, path, position, mbid) VALUES (?,?,?,?)",
-                              (pid, p, start + i, _mbid_for(p)))
+                    c.execute("INSERT INTO playlist_tracks"
+                              " (playlist_id, path, position, mbid, user) VALUES (?,?,?,?,?)",
+                              (pid, p, start + i, _mbid_for(p), user))
             else:
-                c.execute("UPDATE playlist_tracks SET position = position + ? WHERE playlist_id=? AND position >= ?",
-                          (len(new), pid, position))
+                c.execute("UPDATE playlist_tracks SET position = position + ?"
+                          " WHERE playlist_id=? AND position >= ? AND user=?",
+                          (len(new), pid, position, user))
                 for i, p in enumerate(new):
-                    c.execute("INSERT INTO playlist_tracks (playlist_id, path, position, mbid) VALUES (?,?,?,?)",
-                              (pid, p, position + i, _mbid_for(p)))
-            c.execute("UPDATE playlists SET updated=? WHERE id=?", (time.time(), pid))
+                    c.execute("INSERT INTO playlist_tracks"
+                              " (playlist_id, path, position, mbid, user) VALUES (?,?,?,?,?)",
+                              (pid, p, position + i, _mbid_for(p), user))
+            c.execute("UPDATE playlists SET updated=? WHERE id=? AND user=?",
+                      (time.time(), pid, user))
             return len(new)
 
 
-def set_order(pid, paths):
+def set_order(pid, paths, user=""):
     """Replace the entire ordering with `paths` (reorder / full replace)."""
     with _lock:
         with _conn() as c:
+            if not _owned(c, pid, user):
+                return
             known = {}
-            for r in c.execute("SELECT path, mbid FROM playlist_tracks WHERE playlist_id=?", (pid,)):
+            for r in c.execute("SELECT path, mbid FROM playlist_tracks"
+                               " WHERE playlist_id=? AND user=?", (pid, user)):
                 known.setdefault(_pathkey(r["path"]), r["mbid"] or "")
-            c.execute("DELETE FROM playlist_tracks WHERE playlist_id=?", (pid,))
+            c.execute("DELETE FROM playlist_tracks WHERE playlist_id=? AND user=?", (pid, user))
             for i, p in enumerate(paths):
                 mbid = known.get(_pathkey(p)) or _mbid_for(p)
-                c.execute("INSERT INTO playlist_tracks (playlist_id, path, position, mbid) VALUES (?,?,?,?)",
-                          (pid, p, i, mbid))
-            c.execute("UPDATE playlists SET updated=? WHERE id=?", (time.time(), pid))
+                c.execute("INSERT INTO playlist_tracks"
+                          " (playlist_id, path, position, mbid, user) VALUES (?,?,?,?,?)",
+                          (pid, p, i, mbid, user))
+            c.execute("UPDATE playlists SET updated=? WHERE id=? AND user=?",
+                      (time.time(), pid, user))
 
 
-def remove_tracks(pid, paths):
+def remove_tracks(pid, paths, user=""):
     with _lock:
         with _conn() as c:
+            if not _owned(c, pid, user):
+                return
             stored = [r["path"] for r in c.execute(
-                "SELECT path FROM playlist_tracks WHERE playlist_id=?", (pid,))]
+                "SELECT path FROM playlist_tracks WHERE playlist_id=? AND user=?", (pid, user))]
             for p in paths:
                 k = _pathkey(p)
                 for s in stored:
                     if _pathkey(s) == k:
                         # DELETE with the value as stored, not as requested
-                        c.execute("DELETE FROM playlist_tracks WHERE playlist_id=? AND path=?",
-                                  (pid, s))
-            c.execute("UPDATE playlists SET updated=? WHERE id=?", (time.time(), pid))
+                        c.execute("DELETE FROM playlist_tracks"
+                                  " WHERE playlist_id=? AND path=? AND user=?",
+                                  (pid, s, user))
+            c.execute("UPDATE playlists SET updated=? WHERE id=? AND user=?",
+                      (time.time(), pid, user))
 
 
 # --------------------------------------------------------------------------- #
@@ -358,13 +443,13 @@ def _track_value(track, field):
     return None
 
 
-def evaluate_smart(pid, library, base_paths=None):
+def evaluate_smart(pid, library, base_paths=None, user=""):
     """Evaluate a smart playlist against the library payload.
 
     filter spec: {"conditions": [{field, op, value}], "match": "all"|"any"}
     Returns ordered list of matching track paths (respecting optional base_paths).
     """
-    pl = get_playlist(pid)
+    pl = get_playlist(pid, user)
     if pl is None or pl["kind"] != "smart":
         return None
     spec = pl.get("filter") or {}
@@ -393,32 +478,33 @@ def evaluate_smart(pid, library, base_paths=None):
     return hits
 
 
-def set_smart_filter(pid, filter_spec):
+def set_smart_filter(pid, filter_spec, user=""):
     with _lock:
         with _conn() as c:
-            cur = c.execute("UPDATE playlists SET filter_json=?, updated=? WHERE id=?",
-                            (json.dumps(filter_spec), time.time(), pid))
+            cur = c.execute("UPDATE playlists SET filter_json=?, updated=? WHERE id=? AND user=?",
+                            (json.dumps(filter_spec), time.time(), pid, user))
             return cur.rowcount > 0  # rowcount lives on the cursor
 
 
 # --------------------------------------------------------------------------- #
 # .m3u8 export / import
 # --------------------------------------------------------------------------- #
-def export_m3u8(pid):
+def export_m3u8(pid, user=""):
     """Render a playlist as an .m3u8 string.
 
     Each entry carries its tagged title and — when known — the track's
     MusicBrainz recording MBID in an ``#MLO-MBID:`` comment, so re-import
     (or another app honoring the convention) can follow the recording even
     after the library has been reorganized."""
-    pl = get_playlist(pid)
+    pl = get_playlist(pid, user)
     if pl is None:
         return None
     with _conn() as c:
         # Stored rows use os.path.normpath (backslash on Windows) while
         # pl["tracks"] is forward-slashed — match under one normalization.
         rows = {_pathkey(r["path"]): (r["mbid"] or "") for r in c.execute(
-            "SELECT path, mbid FROM playlist_tracks WHERE playlist_id=?", (pid,))}
+            "SELECT path, mbid FROM playlist_tracks WHERE playlist_id=? AND user=?",
+            (pid, user))}
     lines = ["#EXTM3U"]
     for path in pl["tracks"]:
         dur = _duration_of(path)
@@ -443,7 +529,7 @@ def export_m3u8(pid):
     return "\n".join(lines) + "\n"
 
 
-def import_m3u8(name, content, base_dir=None):
+def import_m3u8(name, content, base_dir=None, user=""):
     """Parse .m3u8 content into a new manual playlist. Returns playlist id.
 
     Relative paths resolve against base_dir; ``#MLO-MBID:`` comments attach
@@ -473,24 +559,27 @@ def import_m3u8(name, content, base_dir=None):
         elif pending_mbid:
             missing_by_mbid.append(pending_mbid)
         pending_mbid = ""
-    pid = create_playlist(name, kind="manual")
-    add_tracks(pid, found)
+    pid = create_playlist(name, kind="manual", user=user)
+    add_tracks(pid, found, user=user)
     # stamp explicit MBIDs + heal vanished paths via the tag index
     with _lock:
         with _conn() as c:
             for p, mbid in zip(found, mbids):
                 if mbid:
-                    c.execute("UPDATE playlist_tracks SET mbid=? WHERE playlist_id=? AND path=?",
-                              (mbid, pid, p))
+                    c.execute("UPDATE playlist_tracks SET mbid=?"
+                              " WHERE playlist_id=? AND path=? AND user=?",
+                              (mbid, pid, p, user))
             for mbid in missing_by_mbid:
                 healed = mbresolve.heal_row("track", "", mbid)
                 if healed and os.path.isfile(healed):
                     healed = os.path.normpath(healed)  # same form as other writers
                     maxpos = c.execute(
-                        "SELECT COALESCE(MAX(position),-1)+1 FROM playlist_tracks WHERE playlist_id=?",
-                        (pid,)).fetchone()[0]
-                    c.execute("INSERT INTO playlist_tracks (playlist_id, path, position, mbid) VALUES (?,?,?,?)",
-                              (pid, healed, maxpos, mbid))
+                        "SELECT COALESCE(MAX(position),-1)+1 FROM playlist_tracks"
+                        " WHERE playlist_id=? AND user=?",
+                        (pid, user)).fetchone()[0]
+                    c.execute("INSERT INTO playlist_tracks"
+                              " (playlist_id, path, position, mbid, user) VALUES (?,?,?,?,?)",
+                              (pid, healed, maxpos, mbid, user))
     return pid
 
 
@@ -507,7 +596,7 @@ def _duration_of(path):
 # --------------------------------------------------------------------------- #
 # Liked tracks (heart)
 # --------------------------------------------------------------------------- #
-def list_likes():
+def list_likes(user=""):
     """Paths of all liked tracks, newest first, forward-slash normalized.
 
     Rows that carry a MusicBrainz recording ID resolve against the live
@@ -517,7 +606,8 @@ def list_likes():
     from server import mbresolve
     out = []
     with _conn() as c:
-        rows = c.execute("SELECT path, mbid FROM likes ORDER BY liked_at DESC").fetchall()
+        rows = c.execute("SELECT path, mbid FROM likes WHERE user=? ORDER BY liked_at DESC",
+                         (user,)).fetchall()
     for r in rows:
         path = r["path"]
         mbid = (r["mbid"] if "mbid" in r.keys() else None) or ""
@@ -525,29 +615,32 @@ def list_likes():
         if mbid and cur and os.path.normpath(cur) != os.path.normpath(path):
             with _lock:
                 with _conn() as c2:
-                    c2.execute("UPDATE likes SET path=? WHERE path=?", (cur, path))
+                    c2.execute("UPDATE likes SET path=? WHERE path=? AND user=?",
+                               (cur, path, user))
             path = cur
         out.append(path.replace("\\", "/"))
     return out
 
 
-def is_liked(path):
+def is_liked(path, user=""):
     with _conn() as c:
-        return c.execute("SELECT 1 FROM likes WHERE path=?", (path,)).fetchone() is not None
+        return c.execute("SELECT 1 FROM likes WHERE path=? AND user=?",
+                         (path, user)).fetchone() is not None
 
 
-def toggle_like(path, mbid=None):
+def toggle_like(path, mbid=None, user=""):
     path = str(path or "").strip()
     if not path:
         raise ValueError("path required")
     with _lock:
         with _conn() as c:
-            if c.execute("SELECT 1 FROM likes WHERE path=?", (path,)).fetchone():
-                c.execute("DELETE FROM likes WHERE path=?", (path,))
+            if c.execute("SELECT 1 FROM likes WHERE path=? AND user=?",
+                         (path, user)).fetchone():
+                c.execute("DELETE FROM likes WHERE path=? AND user=?", (path, user))
                 return False
             c.execute(
-                "INSERT INTO likes (path, liked_at, mbid) VALUES (?, ?, ?)",
-                (path, time.time(), str(mbid or "").strip() or None),
+                "INSERT INTO likes (path, liked_at, mbid, user) VALUES (?, ?, ?, ?)",
+                (path, time.time(), str(mbid or "").strip() or None, user),
             )
             return True
 
@@ -558,7 +651,7 @@ def toggle_like(path, mbid=None):
 FAV_KINDS = ("album", "artist", "playlist")
 
 
-def list_favorites():
+def list_favorites(user=""):
     """Favorites per kind, newest first, keyed by current path (or playlist
     id as a string). Response keys are plural (albums/artists/playlists) to
     match the frontend contract; stored kinds are singular. Rows carrying a
@@ -569,7 +662,8 @@ def list_favorites():
     out = {p: [] for p in plural.values()}
     seen = set()
     with _conn() as c:
-        rows = c.execute("SELECT kind, key, mbid FROM favorites ORDER BY created_at DESC").fetchall()
+        rows = c.execute("SELECT kind, key, mbid FROM favorites WHERE user=? ORDER BY created_at DESC",
+                         (user,)).fetchall()
     for r in rows:
         kind = r["kind"]
         p = plural.get(kind)
@@ -583,8 +677,8 @@ def list_favorites():
                 with _lock:
                     with _conn() as c2:
                         c2.execute(
-                            "UPDATE favorites SET key=? WHERE kind=? AND key=?",
-                            (cur, kind, key),
+                            "UPDATE favorites SET key=? WHERE kind=? AND key=? AND user=?",
+                            (cur, kind, key, user),
                         )
                 key = cur
         key = key.replace("\\", "/")
@@ -594,14 +688,15 @@ def list_favorites():
         if dedupe in seen:
             with _lock:
                 with _conn() as c2:
-                    c2.execute("DELETE FROM favorites WHERE kind=? AND key=?", (kind, r["key"]))
+                    c2.execute("DELETE FROM favorites WHERE kind=? AND key=? AND user=?",
+                               (kind, r["key"], user))
             continue
         seen.add(dedupe)
         out[p].append(key)
     return out
 
 
-def toggle_favorite(kind, key, mbid=None):
+def toggle_favorite(kind, key, mbid=None, user=""):
     kind = str(kind or "").strip().lower()
     key = str(key or "").strip()
     if kind not in FAV_KINDS:
@@ -610,11 +705,13 @@ def toggle_favorite(kind, key, mbid=None):
         raise ValueError("key required")
     with _lock:
         with _conn() as c:
-            if c.execute("SELECT 1 FROM favorites WHERE kind=? AND key=?", (kind, key)).fetchone():
-                c.execute("DELETE FROM favorites WHERE kind=? AND key=?", (kind, key))
+            if c.execute("SELECT 1 FROM favorites WHERE kind=? AND key=? AND user=?",
+                         (kind, key, user)).fetchone():
+                c.execute("DELETE FROM favorites WHERE kind=? AND key=? AND user=?",
+                          (kind, key, user))
                 return False
             c.execute(
-                "INSERT INTO favorites (kind, key, created_at, mbid) VALUES (?, ?, ?, ?)",
-                (kind, key, time.time(), str(mbid or "").strip() or None),
+                "INSERT INTO favorites (kind, key, created_at, mbid, user) VALUES (?, ?, ?, ?, ?)",
+                (kind, key, time.time(), str(mbid or "").strip() or None, user),
             )
             return True

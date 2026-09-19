@@ -442,18 +442,18 @@ got = chain(limit=20)
 # row, then the album row), Wikidata and Bandcamp.
 assert got["per_track"][(1, 1)] == [
     "Heavy Metal", "Groove Metal",                    # rateyourmusic (album)
-    "Alternative Metal", "Post-Metal", "Sludge Metal",  # listenbrainz recording
-    "Progressive Rock", "Art Rock",                   # listenbrainz rg → artist
+    "alternative metal", "post-metal", "sludge metal",  # listenbrainz recording
+    "progressive rock", "art rock",                   # listenbrainz rg → artist
     "Rock",                                           # musicbrainz (release)
     "Hard Rock",                                      # itunes (per track)
     "Shoegaze", "Dream Pop",                          # theaudiodb (per track)
     "Post-Rock", "Epic",                              # theaudiodb (album)
     "Space Rock",                                     # wikidata (P136)
-    "Doom Metal", "Stoner Rock",                      # bandcamp (album tags)
+    "doom metal", "Stoner Rock",                      # bandcamp (album tags)
 ], got["per_track"][(1, 1)]
 # The tier order inside ListenBrainz holds: the release-group bucket is ahead
 # of MusicBrainz, and a later source cannot jump an earlier one.
-assert got["per_track"][(1, 1)].index("Progressive Rock") < got["per_track"][(1, 1)].index("Rock")
+assert got["per_track"][(1, 1)].index("progressive rock") < got["per_track"][(1, 1)].index("Rock")
 # Mood words and tag-spam never become genres, at any level — the "melancholic"
 # tag Bandcamp's page carries is dropped here exactly like ListenBrainz's.
 for names in list(got["per_track"].values()) + list(got["per_source"].values()):
@@ -461,7 +461,7 @@ for names in list(got["per_track"].values()) + list(got["per_source"].values()):
     assert "melancholic" not in joined and "dreamy" not in joined, names
     assert "vyrzukhisuc" not in joined, names
     assert "doommetal" not in joined, names     # the slug duplicate of its own tag
-assert "Sludge Metal" in got["per_track"][(1, 1)]     # count 4 free tag kept
+assert "sludge metal" in got["per_track"][(1, 1)]     # count 4 free tag kept
 
 # Provenance: the contributing sources, in ask order, per PATH — and the
 # per-track map is keyed the same way the ONE writer (`_write_album_genres`)
@@ -509,7 +509,7 @@ full_stack()
 got = chain()
 assert len(got["per_track"][(1, 1)]) == 3 and len(got["per_track"][(1, 2)]) == 3, got["per_track"]
 assert got["per_track"][(1, 1)] == ["Heavy Metal", "Groove Metal",
-                                    "Alternative Metal"], got["per_track"]
+                                    "alternative metal"], got["per_track"]
 assert len(got["genres"]) == 3, got["genres"]
 # A different cap is honoured too.
 clear()
@@ -545,7 +545,7 @@ buf = io.StringIO()
 with contextlib.redirect_stdout(buf):
     got = chain(limit=6)
 assert got["notes"]["rateyourmusic"] == "no data", got["notes"]
-assert got["per_track"][(1, 1)][0] == "Alternative Metal", got["per_track"]
+assert got["per_track"][(1, 1)][0] == "alternative metal", got["per_track"]
 assert "rateyourmusic" not in got["sources"][FILE_ONE], got["sources"]
 assert buf.getvalue().count("rateyourmusic") == 1, buf.getvalue()
 
@@ -579,7 +579,7 @@ try:
 finally:
     intg.rym_genres = _real_rym
 assert got["notes"]["rateyourmusic"].startswith("failed: "), got["notes"]
-assert got["per_track"][(1, 1)][0] == "Alternative Metal", got["per_track"]
+assert got["per_track"][(1, 1)][0] == "alternative metal", got["per_track"]
 
 # --------------------------------------------------------------------------- #
 # 3) RateYourMusic — per-track rows, title mapping, album fallback
@@ -922,7 +922,7 @@ got = chain(limit=8, release=BARE_RELEASE)
 # Bandcamp states no per-track genre at all: its tags are the album's, and the
 # provenance says album — never track.
 assert got["per_source"]["bandcamp"] == ["doom metal", "Stoner Rock"], got["per_source"]
-assert got["per_track"][(1, 1)] == ["Doom Metal", "Stoner Rock"], got["per_track"]
+assert got["per_track"][(1, 1)] == ["doom metal", "Stoner Rock"], got["per_track"]
 assert got["levels"] == {FILE_ONE: "album", FILE_TWO: "album"}, got["levels"]
 # One request per album; the second run is answered from the cache.
 pages = [u for u in fake.calls if "bandcamp.com/album/" in u]

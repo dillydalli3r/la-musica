@@ -47,7 +47,9 @@ LEGACY_DATA_DIR = os.path.join(SCRIPT_DIR, "server", "data")
 
 # Layout inside the music folder: <music>/Artists (library) and ONE hidden
 # <music>/.mlo folder holding everything else — data/ (all app state),
-# downloads/ (completed transfers), incomplete/ (in-flight ones), trash/.
+# downloads/ (completed transfers: one queue for the appliance, shared by
+# every user), incomplete/ (in-flight ones), trash/<user>/ (the
+# remove-from-library bin, one per user).
 # The old top-level <music>/.mlo_data is now only a migration source
 # (LEGACY_MLO_DATA_DIR_NAME below).
 ARTISTS_DIR_NAME = "Artists"
@@ -141,9 +143,61 @@ def app_data_dir(music_folder=None):
     return LEGACY_DATA_DIR
 
 
+# The default/admin scope's name on disk: the rows and sessions that carry
+# `""` (an install that never claimed a user, and everything written before
+# users existed). A path segment is never left empty, so this scope gets a
+# literal folder of its own instead of the base folder's trailing separator.
+DEFAULT_SCOPE = "default"
+
+
+def user_segment(user):
+    """The path segment for a user scope: `user`, or `default` for `""`.
+
+    A username reaches this function from a session, and a session's username
+    can come from `POST /api/auth/setup`, which is PUBLIC while no password is
+    set yet. So this is a trust boundary, not a formatting helper: a name that
+    is not one plain segment (`..`, `a/b`, `C:`, a NUL) would walk out of the
+    folder it names — `trash_dir(mf, "..")` is `<mf>/.mlo/trash/..`, i.e.
+    `<mf>/.mlo`, and the trash page's own "delete" would then remove the app's
+    data directory. Anything unsafe falls back to the default scope instead of
+    being honoured, and `server.auth.user_problem` refuses such a name at the
+    door so it can never become a session in the first place.
+    """
+    text = str(user or "").strip()
+    if not text:
+        return DEFAULT_SCOPE
+    if text in (".", "..") or "\x00" in text:
+        return DEFAULT_SCOPE
+    if any(c in text for c in "/\\:"):
+        return DEFAULT_SCOPE
+    return text
+
+
+# The old name, kept because the tests and a sibling module import it.
+_user_segment = user_segment
+
+
+def trash_root(music_folder=None):
+    """The bin's own directory: <music folder>/.mlo/trash.
+
+    The PARENT of the per-user bins, and the thing a music-folder change has
+    to carry: moving `trash_dir()` alone would carry the `default` scope and
+    strand every named user's bin in the old folder.
+    """
+    root = mlo_root(music_folder)
+    return os.path.join(root, TRASH_DIR_NAME) if root else None
+
+
 def downloads_dir(music_folder=None):
     """Where slskd saves COMPLETED files: <music folder>/.mlo/downloads
-    (None = no music folder; the caller decides the fallback)."""
+    (None = no music folder; the caller decides the fallback).
+
+    NOT scoped by user, deliberately: slskd is one queue for the whole
+    appliance, and `soulseek._incomplete_dir` derives its staging dir as this
+    folder's SIBLING — a per-user segment here would nest `incomplete/`
+    inside `downloads/`, where the listing and the import sweep would treat
+    it as another album folder.
+    """
     root = mlo_root(music_folder)
     return os.path.join(root, DOWNLOADS_DIR_NAME) if root else None
 
@@ -161,11 +215,18 @@ def incomplete_dir(music_folder=None):
     return os.path.join(root, INCOMPLETE_DIR_NAME) if root else None
 
 
-def trash_dir(music_folder=None):
-    """Remove-from-library bin: <music folder>/.mlo/trash (None = no music
-    folder)."""
-    root = mlo_root(music_folder)
-    return os.path.join(root, TRASH_DIR_NAME) if root else None
+def trash_dir(music_folder=None, user=""):
+    """Remove-from-library bin: <music folder>/.mlo/trash/<user> (None = no
+    music folder).
+
+    The empty scope — an unclaimed install, and everything written before
+    users existed — is the literal `default` segment, so a bin path is never
+    empty and one user's entries never surface in another's (each bin carries
+    its own origin manifest). A bin written before users existed sits at
+    `<music>/.mlo/trash` and is moved into the `default` segment on the next
+    start (see mlo.config._adopt_legacy_trash)."""
+    root = trash_root(music_folder)
+    return os.path.join(root, user_segment(user)) if root else None
 
 
 def previous_state_dirs(music_folder=None):

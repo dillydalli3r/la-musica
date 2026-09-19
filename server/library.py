@@ -12,7 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 from mlo.stats import _find_albums, worker_count
 from mlo.grader import _empty_folder_result, _find_empty_folders, _grade_album
 from mlo.audio import AudioFile
-from mlo.paths import LIB_VIDEO_EXTS, get_track_cover, load_expected_tracks
+from mlo.paths import (LIB_VIDEO_EXTS, load_expected_tracks,
+                       load_track_covers, _album_file, SIDECAR_COVER_EXTS)
 from server import tagcache
 
 # Tags surfaced per track for sorting/filtering on the frontend.
@@ -102,8 +103,61 @@ def _video_title_from_filename(filename):
     return stem or os.path.basename(filename)
 
 
-def _enrich_track(tr, album_dir):
-    """Add path, tech info, tags and per-track sidecar cover (cached reads)."""
+def _album_cover_lookup(album_dir):
+    """A `track filename -> cover path` function for ONE album folder.
+
+    mlo.paths.get_track_cover answers this per track, and each answer re-reads
+    the album's manifest and walks the folder's image extensions (a listdir
+    per miss): a 12-track album paid that 12 times, a full scan 2000 times.
+    Both the manifest and the folder listing belong to the FOLDER, so they are
+    read once here. The per-track answer is the one get_track_cover gives —
+    manifest entry first (and only when that image is really there), then the
+    same-stem sidecar with mlo.paths.SIDECAR_COVER_EXTS order deciding.
+    """
+    try:
+        manifest = {str(k).lower(): v
+                    for k, v in load_track_covers(album_dir).items()}
+    except Exception:
+        manifest = {}
+    listing = {}
+    try:
+        for name in os.listdir(album_dir):
+            listing.setdefault(name.lower(), []).append(name)
+    except OSError:
+        listing = {}
+
+    def cover_for(track_filename):
+        name = os.path.basename(str(track_filename))
+        image = manifest.get(name.lower())
+        if image:
+            found = _album_file(album_dir, image)
+            if found:
+                return found
+        base = os.path.splitext(name)[0]
+        for ext in SIDECAR_COVER_EXTS:
+            entries = listing.get((base + ext).lower())
+            if not entries:
+                # Not in the listing means the file is not in the folder —
+                # the isfile probe get_sidecar_cover_path makes here could
+                # only ever fail.
+                continue
+            exact = base + ext
+            for cand in ([exact] if exact in entries else entries):
+                full = os.path.join(album_dir, cand)
+                if os.path.isfile(full):
+                    return full
+        return None
+
+    return cover_for
+
+
+def _enrich_track(tr, album_dir, cover_for=None):
+    """Add path, tech info, tags and per-track sidecar cover (cached reads).
+
+    `cover_for` is the album's shared cover lookup (`_album_cover_lookup`);
+    without it each track builds its own, which is what a single-track caller
+    (the tag editor) still wants.
+    """
     p = os.path.join(album_dir, tr["file"])
     tr["path"] = p.replace("\\", "/")
     tags, tech = tagcache.read_track(p, TRACK_TAGS)
@@ -112,7 +166,7 @@ def _enrich_track(tr, album_dir):
     # Per-track cover: manifest entry ("01 - Song.jpg", possibly shared with
     # other tracks) or a same-stem sidecar next to "01 - Song.flac".
     try:
-        sc = get_track_cover(album_dir, tr["file"])
+        sc = (cover_for or _album_cover_lookup(album_dir))(tr["file"])
         tr["cover_file"] = os.path.basename(sc) if sc else None
     except Exception:
         tr["cover_file"] = None
@@ -219,8 +273,10 @@ def build_album(album_dir, cfg, light=False):
         res["artwork"] = _album_artwork(album_dir, light=True)
         return res
     res["path"] = res["path"].replace("\\", "/")
+    # One folder listing + one manifest read for the album's tracks.
+    cover_for = _album_cover_lookup(album_dir)
     for tr in res.get("tracks", []):
-        _enrich_track(tr, album_dir)
+        _enrich_track(tr, album_dir, cover_for)
     res["meta"] = _album_meta(album_dir, res.get("tracks", []))
     _add_expected_tracks(res, album_dir)
     res["artwork"] = _album_artwork(album_dir, light=light)

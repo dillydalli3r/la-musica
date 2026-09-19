@@ -60,10 +60,11 @@ from fastapi import HTTPException  # noqa: E402
 from server import main as mlo_main  # noqa: E402  (heavy import, only for this)
 
 # --------------------------------------------------------------------------- #
-# fixture: a temp music folder with a .mlo/trash inside it
+# fixture: a temp music folder with a .mlo/trash/default inside it (the
+# default/admin scope — a signed-in user gets a bin of their own)
 # --------------------------------------------------------------------------- #
 MF = tempfile.mkdtemp(prefix="mlo-trash-test-")
-TRASH = os.path.join(MF, ".mlo", "trash")
+TRASH = os.path.join(MF, ".mlo", "trash", "default")
 ALBUM = "[Album] 2010-12-15 - 2010-12-15 - Aimai Elegy {JP - CD - XECJ-1011}"
 LOOSE = "Loose (2)"          # dedupe suffix, no [Album] convention
 STRAY = "stray.flac"         # a bare file dumped in the bin
@@ -402,7 +403,7 @@ def test_missing_bin():
         res = mlo_main.trash_list()
         assert res["exists"] is False, res
         assert res["entries"] == [] and res["count"] == 0 and res["bytes"] == 0, res
-        assert res["folder"] == os.path.join(empty, ".mlo", "trash").replace("\\", "/"), res
+        assert res["folder"] == os.path.join(empty, ".mlo", "trash", "default").replace("\\", "/"), res
         try:
             mlo_main.trash_delete(mlo_main.TrashDelete(names=["x"]))
         except HTTPException as e:

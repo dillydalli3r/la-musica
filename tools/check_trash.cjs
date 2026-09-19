@@ -77,7 +77,7 @@ const mkFixture = (dir) => {
     // here and nowhere else.
     const binFilesBefore = fs.readdirSync(bin).length;
     check("trash endpoint answers", typeof before.exists === "boolean", JSON.stringify(before).slice(0, 140));
-    check("trash folder is the app's bin", bin.endsWith("/.mlo/trash"), bin);
+    check("trash folder is the app's bin", bin.endsWith("/.mlo/trash/default"), bin);
     check("payload carries the music folder for restore prompts", !!library, library);
     check("path escapes are refused",
       (await post("/api/trash/delete", { names: ["../outside.txt", "..\\outside.txt", "a/b", ".", "..", ""] }))

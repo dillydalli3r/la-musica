@@ -45,10 +45,12 @@ from server import api_discovery
 from server import api_imports
 from server import api_lyrics
 from server import api_auth
+from server import api_recommend
 from server import auth as auth_mod
 from server import events as events_mod
 from server import discovery
 from server import artcache
+from server import version as version_mod
 from mlo.paths import (SKIP_DIRS, clear_track_covers, downloads_dir,
                        is_video_file, library_root, load_track_covers, move_path,
                        save_track_covers, set_track_covers, trash_dir)
@@ -136,6 +138,11 @@ if _MLO_ENV_HOST or _MLO_ENV_PORT:
 # network failure instead of "sign in", and a preflight OPTIONS must be
 # answered by CORS rather than rejected by the gate. See server/auth.py for
 # what the gate is, and server/api_auth.py for the endpoints that open it.
+#
+# Handlers that scope their data by user take `request: Request = None` and
+# ask `auth_mod.current_user(request)`: FastAPI always injects the request over
+# HTTP, and a direct call (a test, or another module's helper) answers with the
+# default scope instead of a TypeError.
 @app.middleware("http")
 async def _auth_gate(request: Request, call_next):
     if request.method == "OPTIONS" or auth_mod.is_public(request.url.path):
@@ -191,6 +198,7 @@ app.include_router(api_discovery.router)
 app.include_router(api_imports.router)
 app.include_router(api_lyrics.router)
 app.include_router(api_auth.router)
+app.include_router(api_recommend.router)
 
 # Script 8 (Auto tagging) writes MOOD from the audio itself and fills a
 # missing GENRE through a provider hook its caller supplies — the engine
@@ -429,7 +437,28 @@ def shutdown_backend():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "version": APP_VERSION}
+    """Liveness for the launchers (tray.py, start_app.py, the Tauri shell),
+    plus the update fields — a client that already polls this can show the
+    "newer release" banner without a second request.
+
+    The reply comes from the cached check and NEVER waits on the network: the
+    launchers give this route two seconds to say the port is ours, so a stale
+    cache only starts a background refresh for the next poll. See
+    server.version.
+    """
+    version_mod.refresh_soon()
+    return {"status": "ok", **version_mod.cached()}
+
+
+@app.get("/api/version")
+def version_check():
+    """What this build is and whether a newer release exists.
+
+    Cached on disk for six hours and never fatal: `source` is `"github"` or
+    `"unavailable"`, and an unreachable GitHub answers `latest: null`,
+    `update_available: false` rather than an error.
+    """
+    return version_mod.check()
 
 
 @app.get("/api/config")
@@ -604,13 +633,17 @@ def library():
 
 
 @app.get("/api/home")
-def home():
+def home(request: Request):
     """Home page: stats, recent additions, top grades, favorites, a random
     rediscovery shelf, most-collected artists, open wishes and albums failing
-    their checks."""
+    their checks.
+
+    Scoped by the session's user: the shelves carry that person's favourites
+    and playlist count, and the cache is keyed on the user for the same reason.
+    """
     from server import recommendations
     try:
-        return recommendations.build_home(load_config())
+        return recommendations.build_home(load_config(), auth_mod.current_user(request))
     except Exception as e:
         raise HTTPException(502, f"home payload failed: {e}")
 
@@ -2074,15 +2107,16 @@ class LikeToggleRequest(BaseModel):
 
 
 @app.get("/api/likes")
-def likes_list():
+def likes_list(request: Request = None):
     """Paths of all liked (hearted) tracks, newest first. Stored paths are
     normalized to forward slashes and MBID-backed rows self-heal after
     reorganization, so they always match the library payload."""
-    return {"paths": [p.replace("\\", "/") for p in pl_mod.list_likes()]}
+    user = auth_mod.current_user(request)
+    return {"paths": [p.replace("\\", "/") for p in pl_mod.list_likes(user)]}
 
 
 @app.post("/api/likes/toggle")
-def likes_toggle(req: LikeToggleRequest):
+def likes_toggle(req: LikeToggleRequest, request: Request = None):
     p = os.path.normpath(mbresolve.resolve_track(req.path) or req.path)
     if not os.path.isfile(p):
         raise HTTPException(404, "file not found")
@@ -2091,7 +2125,7 @@ def likes_toggle(req: LikeToggleRequest):
         raise HTTPException(400, "file outside music folder")
     p = p.replace("\\", "/")
     try:
-        liked = pl_mod.toggle_like(p, mbid=req.mbid)
+        liked = pl_mod.toggle_like(p, mbid=req.mbid, user=auth_mod.current_user(request))
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"ok": True, "liked": liked}
@@ -2104,22 +2138,23 @@ class FavoriteToggleRequest(BaseModel):
 
 
 @app.get("/api/favorites")
-def favorites_list():
+def favorites_list(request: Request = None):
     """Favorite albums / artists / playlists, keyed by path (or playlist id),
     newest first — powers the sidebar Favorites section. MBID-backed rows
     self-heal when files move."""
-    return pl_mod.list_favorites()
+    return pl_mod.list_favorites(auth_mod.current_user(request))
 
 
 @app.post("/api/favorites/toggle")
-def favorites_toggle(req: FavoriteToggleRequest):
+def favorites_toggle(req: FavoriteToggleRequest, request: Request = None):
     # album/artist keys are library folders; "playlist" keys are playlist ids,
     # not paths, so only the path-valued kinds get the containment guard.
     if str(req.kind or "").strip().lower() in ("album", "artist"):
         if not _in_music_folder(req.key, _music_folder()):
             raise HTTPException(400, "folder outside music folder")
     try:
-        fav = pl_mod.toggle_favorite(req.kind, req.key, mbid=req.mbid)
+        fav = pl_mod.toggle_favorite(req.kind, req.key, mbid=req.mbid,
+                                     user=auth_mod.current_user(request))
     except ValueError as e:
         raise HTTPException(400, str(e))
     return {"ok": True, "fav": fav}
@@ -2189,6 +2224,10 @@ def tags_bulk(req: BulkTagsRequest):
         raise HTTPException(400, "nothing to do — pick tags to remove or set")
     removed = added = failed = 0
     errors: list = []
+    # A GENRE value is a LIST of canonical names, never one joined string (see
+    # `_genre_names`); the cap comes from the one setting, read once for the
+    # whole batch.
+    genre_cap = _autotag.genre_count(load_config())
     for rp in paths:
         try:
             p = os.path.normpath(mbresolve.resolve_track(rp) or rp)
@@ -2209,6 +2248,35 @@ def tags_bulk(req: BulkTagsRequest):
                 if name in present and af.delete_tag(name):
                     removed += 1
             for name, val in sets.items():
+                if name == "GENRE":
+                    # One field per genre name: a dialog that sends
+                    # "shoegaze; rock" (or a list) must not end up as a single
+                    # genre called that. Canonicalized like every other write.
+                    names = _genre_names(val, genre_cap)
+                    if names:
+                        if af.set_tag(name, names):
+                            added += 1
+                        else:
+                            failed += 1
+                            errors.append(f"{os.path.basename(rp)}: {name} was not written")
+                    elif name in present and af.delete_tag(name):
+                        removed += 1
+                    continue
+                if isinstance(val, (list, tuple)):
+                    # A list means several values for one field (three GENREs,
+                    # two ARTISTs): set_tag() writes each as a repeated field.
+                    # `str(val)` stored the Python repr as one value, which is
+                    # the same defect as the GENRE one above.
+                    values = [str(x).strip() for x in val if str(x).strip()]
+                    if values:
+                        if af.set_tag(name, values):
+                            added += 1
+                        else:
+                            failed += 1
+                            errors.append(f"{os.path.basename(rp)}: {name} was not written")
+                    elif name in present and af.delete_tag(name):
+                        removed += 1
+                    continue
                 v = str(val).strip()
                 if not v:
                     if name in present and af.delete_tag(name):
@@ -2402,104 +2470,112 @@ def export_run(req: ExportRequest):
 # Playlists
 # --------------------------------------------------------------------------- #
 @app.get("/api/playlists")
-def playlists_list():
-    return pl_mod.list_playlists()
+def playlists_list(request: Request = None):
+    return pl_mod.list_playlists(auth_mod.current_user(request))
 
 
 @app.post("/api/playlists")
-def playlists_create(req: PlaylistCreate):
+def playlists_create(req: PlaylistCreate, request: Request = None):
     if not req.name.strip():
         raise HTTPException(400, "name required")
-    pid = pl_mod.create_playlist(req.name.strip(), req.kind, req.filter)
-    return pl_mod.get_playlist(pid)
+    user = auth_mod.current_user(request)
+    pid = pl_mod.create_playlist(req.name.strip(), req.kind, req.filter, user)
+    return pl_mod.get_playlist(pid, user)
 
 
 @app.get("/api/playlists/{pid}")
-def playlists_get(pid: int):
-    pl = pl_mod.get_playlist(pid)
+def playlists_get(pid: int, request: Request = None):
+    pl = pl_mod.get_playlist(pid, auth_mod.current_user(request))
     if pl is None:
         raise HTTPException(404, "playlist not found")
     return pl
 
 
 @app.patch("/api/playlists/{pid}")
-def playlists_rename(pid: int, req: PlaylistUpdate):
+def playlists_rename(pid: int, req: PlaylistUpdate, request: Request = None):
     # only the fields the client actually sent (icon: null CLEARS the icon)
     fields = {k: getattr(req, k) for k in req.model_fields_set}
-    if not pl_mod.update_playlist(pid, fields):
+    user = auth_mod.current_user(request)
+    if not pl_mod.update_playlist(pid, fields, user):
         raise HTTPException(404, "playlist not found")
-    return pl_mod.get_playlist(pid)
+    return pl_mod.get_playlist(pid, user)
 
 
 @app.delete("/api/playlists/{pid}")
-def playlists_delete(pid: int):
-    if not pl_mod.delete_playlist(pid):
+def playlists_delete(pid: int, request: Request = None):
+    if not pl_mod.delete_playlist(pid, auth_mod.current_user(request)):
         raise HTTPException(404, "playlist not found")
     return {"ok": True}
 
 
 @app.post("/api/playlists/{pid}/tracks")
-def playlists_add(pid: int, req: PlaylistTracks):
-    if pl_mod.get_playlist(pid) is None:
+def playlists_add(pid: int, req: PlaylistTracks, request: Request = None):
+    user = auth_mod.current_user(request)
+    if pl_mod.get_playlist(pid, user) is None:
         raise HTTPException(404, "playlist not found")
     paths = [os.path.normpath(p) for p in req.paths]
     for p in paths:
         if not _in_music_folder(p, _music_folder()):
             raise HTTPException(400, f"file outside music folder: {p}")
-    n = pl_mod.add_tracks(pid, paths, req.position)
+    n = pl_mod.add_tracks(pid, paths, req.position, user)
     return {"added": n}
 
 
 @app.put("/api/playlists/{pid}/tracks")
-def playlists_order(pid: int, req: PlaylistTracks):
+def playlists_order(pid: int, req: PlaylistTracks, request: Request = None):
     """Full reorder: body paths replace the playlist order entirely."""
-    if pl_mod.get_playlist(pid) is None:
+    user = auth_mod.current_user(request)
+    if pl_mod.get_playlist(pid, user) is None:
         raise HTTPException(404, "playlist not found")
     paths = [os.path.normpath(p) for p in req.paths]
     for p in paths:
         if not _in_music_folder(p, _music_folder()):
             raise HTTPException(400, f"file outside music folder: {p}")
-    pl_mod.set_order(pid, paths)
+    pl_mod.set_order(pid, paths, user)
     return {"ok": True}
 
 
 @app.delete("/api/playlists/{pid}/tracks")
-def playlists_remove(pid: int, req: PlaylistTracks):
-    if pl_mod.get_playlist(pid) is None:
+def playlists_remove(pid: int, req: PlaylistTracks, request: Request = None):
+    user = auth_mod.current_user(request)
+    if pl_mod.get_playlist(pid, user) is None:
         raise HTTPException(404, "playlist not found")
-    pl_mod.remove_tracks(pid, [os.path.normpath(p) for p in req.paths])
+    pl_mod.remove_tracks(pid, [os.path.normpath(p) for p in req.paths], user)
     return {"ok": True}
 
 
 @app.post("/api/playlists/{pid}/filter")
-def playlists_filter(pid: int, req: SmartFilter):
-    pl = pl_mod.get_playlist(pid)
+def playlists_filter(pid: int, req: SmartFilter, request: Request = None):
+    user = auth_mod.current_user(request)
+    pl = pl_mod.get_playlist(pid, user)
     if pl is None:
         raise HTTPException(404, "playlist not found")
     if pl["kind"] != "smart":
         raise HTTPException(400, "not a smart playlist")
-    pl_mod.set_smart_filter(pid, req.filter)
-    return pl_mod.get_playlist(pid)
+    pl_mod.set_smart_filter(pid, req.filter, user)
+    return pl_mod.get_playlist(pid, user)
 
 
 @app.post("/api/playlists/{pid}/evaluate")
-def playlists_evaluate(pid: int):
-    pl = pl_mod.get_playlist(pid)
+def playlists_evaluate(pid: int, request: Request = None):
+    user = auth_mod.current_user(request)
+    pl = pl_mod.get_playlist(pid, user)
     if pl is None:
         raise HTTPException(404, "playlist not found")
     if pl["kind"] != "smart":
         raise HTTPException(400, "not a smart playlist")
     library = lib_mod.build_library(load_config())
-    hits = pl_mod.evaluate_smart(pid, library)
+    hits = pl_mod.evaluate_smart(pid, library, user=user)
     return {"paths": hits or []}
 
 
 @app.get("/api/playlists/{pid}/export")
-def playlists_export(pid: int):
-    content = pl_mod.export_m3u8(pid)
+def playlists_export(pid: int, request: Request = None):
+    user = auth_mod.current_user(request)
+    content = pl_mod.export_m3u8(pid, user)
     if content is None:
         raise HTTPException(404, "playlist not found")
-    pl = pl_mod.get_playlist(pid)
+    pl = pl_mod.get_playlist(pid, user)
     name = re_safe_filename(pl["name"]) or "playlist"
     return PlainTextResponse(
         content,
@@ -2509,11 +2585,13 @@ def playlists_export(pid: int):
 
 
 @app.post("/api/playlists/import")
-async def playlists_import(name: str = Query(...), file: UploadFile = File(...)):
+async def playlists_import(name: str = Query(...), file: UploadFile = File(...),
+                           request: Request = None):
     content = (await file.read()).decode("utf-8", errors="replace")
     base = load_config().get("music_folder") or os.getcwd()
-    pid = pl_mod.import_m3u8(name.strip() or file.filename or "imported", content, base)
-    return pl_mod.get_playlist(pid)
+    user = auth_mod.current_user(request)
+    pid = pl_mod.import_m3u8(name.strip() or file.filename or "imported", content, base, user)
+    return pl_mod.get_playlist(pid, user)
 
 
 def re_safe_filename(name):
@@ -2680,6 +2758,10 @@ def mb_assign(req: AssignTagsRequest):
     # above any wizard batch, raise it if a real flow ever hits the cap.
     if len(req.tracks or {}) > 500:
         raise HTTPException(400, "too many tracks (max 500 per request)")
+    # GENRE can be assigned through this route (the wizard's tag step writes
+    # it here), so the canonicalization cap comes from mb_genre_count once for
+    # the whole request.
+    genre_cap = _autotag.genre_count(load_config())
     errors = []
     changed = 0
     folder = _music_folder()
@@ -2710,7 +2792,19 @@ def mb_assign(req: AssignTagsRequest):
         if getattr(af, "is_video", False):
             # Video containers: batch all tags into ONE lossless ffmpeg
             # rewrite (a per-tag rewrite remuxes the whole file each time).
-            clean = {k: v for k, v in tag_map.items() if str(v or "").strip()}
+            # GENRE is canonicalized like any other write, but an MKV holds
+            # ONE genre string (the batch writer takes a value per key), so
+            # the list goes in joined with "; " — the spelling tag_values()
+            # reads back as the same names (see _genre_names).
+            clean = {}
+            for k, v in tag_map.items():
+                if str(k).upper() == "GENRE":
+                    names = _genre_names(v, genre_cap)
+                    if names:
+                        clean[k] = "; ".join(names)
+                    continue
+                if str(v or "").strip():
+                    clean[k] = v
             deletes = [k for k, v in tag_map.items() if not str(v or "").strip()]
             if deletes and not clean:
                 errors.append(f"{p}: video containers cannot delete tags — overwrite instead")
@@ -2726,6 +2820,30 @@ def mb_assign(req: AssignTagsRequest):
         af.defer_save(True)
         for k, v in tag_map.items():
             try:
+                if str(k).upper() == "GENRE":
+                    # GENRE is the one tag whose value is a LIST: every writer
+                    # stores one repeated field per genre, so a value that
+                    # arrives as a list, or as one "A; B" string the caller
+                    # joined, is split and canonicalized here (an empty one
+                    # deletes the tag). `str(v)` wrote the whole thing as a
+                    # single genre literally named "['shoegaze', 'rock']".
+                    names = _genre_names(v, genre_cap)
+                    if names:
+                        if not af.set_tag("GENRE", names):
+                            errors.append(f"{p} GENRE: {af.error or 'write failed'}")
+                    elif not af.delete_tag("GENRE"):
+                        errors.append(f"{p} GENRE: {af.error or 'delete failed'}")
+                    continue
+                if isinstance(v, (list, tuple)):
+                    # Several values for one field: set_tag() writes each as a
+                    # repeated field, where `str(v)` stored the Python repr as
+                    # one value (the GENRE case above, for every other tag).
+                    values = [str(x).strip() for x in v if str(x).strip()]
+                    if values and not af.set_tag(k, values):
+                        errors.append(f"{p} {k}: {af.error or 'write failed'}")
+                    elif not values and not af.delete_tag(k):
+                        errors.append(f"{p} {k}: {af.error or 'delete failed'}")
+                    continue
                 if v is None or str(v) == "":
                     if not af.delete_tag(k):
                         errors.append(f"{p} {k}: {af.error or 'delete failed'}")
@@ -3063,9 +3181,9 @@ def is_audio_file(name):
 
 
 @app.post("/api/album/remove")
-def album_remove(req: AlbumRemove):
+def album_remove(req: AlbumRemove, request: Request = None):
     """Remove an album from the library by moving it into
-    <music_folder>/.mlo/trash/ (recoverable, nothing is deleted)."""
+    <music_folder>/.mlo/trash/<user>/ (recoverable, nothing is deleted)."""
     cfg = load_config()
     folder = cfg.get("music_folder") or ""
     if not folder or not os.path.isdir(folder):
@@ -3075,7 +3193,7 @@ def album_remove(req: AlbumRemove):
         raise HTTPException(404, "album not found")
     if not _in_music_folder(p, folder):
         raise HTTPException(400, "album outside music folder")
-    trash = os.path.normpath(trash_dir(folder))
+    trash = os.path.normpath(trash_dir(folder, auth_mod.current_user(request)))
     os.makedirs(trash, exist_ok=True)
     name = os.path.basename(p) or "album"
     dest = os.path.normpath(os.path.join(trash, name))
@@ -3118,8 +3236,8 @@ _ALBUM_NAME_RE = re.compile(
     r"(.+?)\s*\{[^{}]*\}(?:\s*\[[^\[\]]*\])*\s*$")
 
 
-def _trash_dir(folder):
-    return os.path.normpath(trash_dir(folder))
+def _trash_dir(folder, user=""):
+    return os.path.normpath(trash_dir(folder, user))
 
 
 # Origin manifest: lives INSIDE the bin (it is part of the data and must
@@ -3273,10 +3391,14 @@ def _trash_entry(trash, name, root):
 
 
 @app.get("/api/trash")
-def trash_list():
-    """Contents of <music_folder>/.mlo/trash, newest entry first."""
+def trash_list(request: Request = None):
+    """Contents of <music_folder>/.mlo/trash/<user>, newest entry first.
+
+    Each user has a bin of their own; the empty scope (an unclaimed install,
+    and a session older than the users table) reads `.../trash/default` — the
+    segment a pre-users bin at `.../trash` was migrated into."""
     folder = load_config().get("music_folder") or ""
-    trash = _trash_dir(folder) if folder else ""
+    trash = _trash_dir(folder, auth_mod.current_user(request)) if folder else ""
     out = {"folder": trash.replace("\\", "/"), "exists": False,
            "count": 0, "bytes": 0, "entries": [],
            "music_folder": folder.replace("\\", "/")}
@@ -3325,7 +3447,7 @@ def _trash_name_error(name, root):
 
 
 @app.post("/api/trash/delete")
-def trash_delete(req: TrashDelete = TrashDelete()):
+def trash_delete(req: TrashDelete = TrashDelete(), request: Request = None):
     """Permanently delete trash entries by basename. Unknown names and
     refused names land in `failed`; nothing else is an error."""
     import shutil
@@ -3333,7 +3455,7 @@ def trash_delete(req: TrashDelete = TrashDelete()):
     folder = cfg.get("music_folder") or ""
     if not folder or not os.path.isdir(folder):
         raise HTTPException(400, "music_folder not set or not found")
-    trash = _trash_dir(folder)
+    trash = _trash_dir(folder, auth_mod.current_user(request))
     if not os.path.isdir(trash):
         raise HTTPException(404, "trash folder not found")
     root = os.path.realpath(trash)
@@ -3376,7 +3498,7 @@ def trash_delete(req: TrashDelete = TrashDelete()):
 
 
 @app.post("/api/trash/restore")
-def trash_restore(req: TrashRestore = TrashRestore()):
+def trash_restore(req: TrashRestore = TrashRestore(), request: Request = None):
     """Move trash entries back into the library: each returns to the location
     it was trashed from, or — when it has no manifest record — into `dest`.
     Per-entry problems land in `failed`; an unusable `dest` is a 400 for the
@@ -3385,7 +3507,7 @@ def trash_restore(req: TrashRestore = TrashRestore()):
     folder = cfg.get("music_folder") or ""
     if not folder or not os.path.isdir(folder):
         raise HTTPException(400, "music_folder not set or not found")
-    trash = _trash_dir(folder)
+    trash = _trash_dir(folder, auth_mod.current_user(request))
     if not os.path.isdir(trash):
         raise HTTPException(404, "trash folder not found")
     dest = ""
@@ -5308,27 +5430,43 @@ def _tag_paths_guard(paths, staged=False):
             raise HTTPException(400, f"path outside music folder: {p}")
 
 
+def _genre_names(value, cap):
+    """The canonical genre list one caller's GENRE value holds.
+
+    A caller may send the value as a list (`["shoegaze", "rock"]`) or as one
+    string another surface joined ("Rock; Shoegaze"), and both have to land as
+    repeated GENRE fields holding MusicBrainz's own names. `str(v)` stored the
+    first as ONE genre literally named "['shoegaze', 'rock']" and the second as
+    one named "Rock; Shoegaze" — one field, and a genre no reader recognises.
+    `normalize_genres` splits it, resolves each name, derives the family and
+    puts it last, capped at *cap*.
+    """
+    from mlo.genres import normalize_genres
+    return normalize_genres(value, cap)
+
+
 def _write_album_genres(files, names, per_track=None, limit=None):
     """Write GENRE per track: the track's own genres first (MusicBrainz
     recording genres, when the release has them), then the album-level merged
-    list, deduped Title-Case and capped. Returns the files written."""
+    list, canonicalized and capped through `mlo.genres.normalize_genres`
+    (MusicBrainz's own spelling, the family last, at most *limit* names) — so
+    the file holds the same list the import and the trimming scripts keep.
+    Returns the files written."""
     from mlo.audio import AudioFile
+    from mlo.genres import DEFAULT_GENRE_COUNT, normalize_genres
     from server import soulseek_auto
 
     per_track = per_track or {}
+    count = limit or DEFAULT_GENRE_COUNT
     updated = 0
     for p in files:
         try:
             af = AudioFile(p)
             if af.audio is None:
                 continue
-            merged = []
-            for name in list(per_track.get(soulseek_auto._parse_trackno(p)) or []) + list(names):
-                text = str(name).strip().title()
-                if text and text.lower() not in {g.lower() for g in merged}:
-                    merged.append(text)
-            if limit:
-                merged = merged[:limit]
+            merged = normalize_genres(
+                list(per_track.get(soulseek_auto._parse_trackno(p)) or [])
+                + list(names or []), count)
             # A list, so set_tag writes repeated GENRE fields (one "A; B"
             # string is what makes players show a single genre by that name).
             if merged and af.set_tag("GENRE", merged):
@@ -5347,15 +5485,15 @@ def mb_genres_import(req: GenreImportRequest):
 
     The release (MUSICBRAINZ_ALBUMID) or release group (RELEASEGROUPID) on the
     first track identifies the entity; per-track recording genres win over the
-    release's list, and the count follows Settings → Import (`mb_genre_count`,
-    shipped default `DEFAULT_CONFIG["mb_genre_count"]`). Other sources are
+    release's list, and the count is `mb_genre_count` (Settings → Import) —
+    the requested `count` may only LOWER it, never raise it past what grading
+    accepts. Other sources are
     deliberately not consulted here — use
     /api/genres/import for the full chain."""
     from mlo.audio import AudioFile
 
     cfg = load_config()
-    n = max(1, min(10, int(req.count or cfg.get("mb_genre_count")
-                           or DEFAULT_CONFIG["mb_genre_count"])))
+    n = _autotag.genre_count(cfg, req.count)
     _tag_paths_guard(req.paths)
     files = _genre_files(req.paths)
 
@@ -5406,11 +5544,12 @@ def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=Fals
     """Import GENRE from EVERY configured genre source, per track.
 
     The chain runs in the order of `genre_sources` (RateYourMusic → Soulseek
-    signals → Discogs/Last.fm/TheAudioDB → Deezer/iTunes → MusicBrainz),
-    merges what each source answers, dedupes case-insensitively, Title-Cases
-    the names and caps them at `limit`/`mb_genre_count` (the shipped default
-    lives in `DEFAULT_CONFIG["mb_genre_count"]`, read here — never repeated as
-    a literal). Sources
+    signals → Discogs/Last.fm/TheAudioDB → Deezer/iTunes → MusicBrainz), merges
+    what each source answers, dedupes case-insensitively and caps them at
+    `mb_genre_count` — the requested `limit` (the wizard's per-run "Max
+    genres") may only LOWER it, through the one helper that reads the setting
+    (`mlo.autotag.genre_count`), so a per-run control can never write more
+    genres than the user configured. Sources
     that cannot answer are reported in `notes` (a blocked RYM, a Discogs or
     Last.fm source without its token/key) — nothing is filled in from a guess.
     MusicBrainz recording genres refine each track when the album names a
@@ -5422,6 +5561,16 @@ def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=Fals
     from mlo.audio import AudioFile
 
     cfg = load_config()
+    # Validate BEFORE the helper, which swallows a bad value rather than
+    # raising (so a direct Python caller cannot be broken by one): the API
+    # still answers 400 for a limit that is not a number instead of quietly
+    # running with the setting.
+    if limit is not None:
+        try:
+            int(limit)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "limit must be a number")
+    cap = _autotag.genre_count(cfg, limit)
     _tag_paths_guard(paths, staged)
     files = _genre_files(paths)
 
@@ -5436,16 +5585,12 @@ def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=Fals
         except Exception:
             release = None
 
-    try:
-        limit = int(limit) if limit else None
-    except (TypeError, ValueError):
-        raise HTTPException(400, "limit must be a number")
     # The per-source hook ships with the chain itself; a checkout that has not
     # landed it yet still runs, just without the `source i/N` steps.
     hook = {"progress": progress} if progress is not None and \
         "progress" in inspect.signature(intg.genre_chain).parameters else {}
     chain = intg.genre_chain(artist=artist, album=album, release=release,
-                             limit=limit, cfg=cfg, files=files, sources=sources,
+                             limit=cap, cfg=cfg, files=files, sources=sources,
                              **hook)
     names = chain.get("genres") or []
     # The chain already merged every track's own genres ahead of the
@@ -5453,13 +5598,12 @@ def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=Fals
     # ONE writer, is what applies the cap to the file.
     per_track = chain.get("per_track") or {}
 
-    cap = limit or int(cfg.get("mb_genre_count") or DEFAULT_CONFIG["mb_genre_count"])
     updated = _write_album_genres(files, names, per_track, limit=cap)
     # The cap is a per-track contract the import has to LEAVE BEHIND, not just
-    # apply to what it writes: a track that already carried three genres comes
-    # down to `mb_genre_count` here, through the one trimmer script 8 and
-    # script 10 also use. Counts are extra values / tracks touched, so the
-    # caller can say what the cap actually did.
+    # apply to what it writes: a track that already carried more genres than
+    # the setting allows comes down to `mb_genre_count` here, through the one
+    # trimmer script 8 and script 10 also use. Counts are extra values / tracks
+    # touched, so the caller can say what the cap actually did.
     from mlo.autotag import trim_genres
     trimmed = extra = 0
     for p in files:
@@ -5513,7 +5657,11 @@ def genres_facets():
     (descending), which is the "all genres" list; `categories` groups those
     names into the fixed buckets the UI filters by (Metal, Rock, Electronic,
     Hip-Hop, Jazz, Classical, Folk, Soul & Funk, Pop, Other) — a genre lands in
-    exactly one bucket, so the counts stay honest."""
+    exactly one bucket, so the counts stay honest. A name is reported in
+    MusicBrainz's own spelling (`mlo.genres.canonical`) and a stored value
+    another tagger joined ("Rock / Shoegaze") counts as the two genres it
+    names, exactly as the writers and the grader read it."""
+    from mlo.genres import canonical, split_stored
     from server import library as lib_mod
 
     cfg = load_config()
@@ -5525,11 +5673,10 @@ def genres_facets():
     for artist in lib.get("artists", []):
         for alb in artist.get("albums", []):
             for tr in alb.get("tracks", []):
-                raw = str((tr.get("tags") or {}).get("GENRE") or "")
-                for name in re.split(r"[;,]", raw):
-                    text = name.strip().title()
-                    if text:
-                        counts[text] = counts.get(text, 0) + 1
+                raw = (tr.get("tags") or {}).get("GENRE")
+                for piece in split_stored(raw):
+                    text = canonical(piece) or piece
+                    counts[text] = counts.get(text, 0) + 1
     genres = [{"name": n, "count": c}
               for n, c in sorted(counts.items(), key=lambda x: (-x[1], x[0].lower()))]
     buckets = {}

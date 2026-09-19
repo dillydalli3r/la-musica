@@ -15,6 +15,9 @@ from .lyrics import (
 # mlo.lyrics_xlit for script 17), so the grader can never disagree with what
 # those produce: it asks the same functions.
 from .genres import issues as genre_issues
+# The vocabulary predicate the genre writers canonicalize with, so the
+# grade_check_genre_vocab check asks the SAME question of a name they do.
+from .genres import canonical as genre_canonical, iter_names
 from .lyrics_xlit import (
     XLIT_SIDECAR, dominant_script, primary_translation_lang, xlit_needs,
 )
@@ -1634,13 +1637,16 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                         track["issues"].append(t)
 
         # Genre COUNT (grade_check_genre_count) — a different question from
-        # the presence check above: a track may hold EXACTLY the configured
+        # the presence check above: a track may hold AT MOST the configured
         # number of GENRE values, the same cap the import and the trimming
-        # scripts apply (mb_genre_count, Settings → Import). Fewer or more
-        # fails, so the three consumers can never disagree. A filetype the
-        # genre write gate excludes is never failed for a genre this app was
-        # told never to write, and with the toggle off nothing is counted —
-        # same rule as every other check.
+        # scripts apply (mb_genre_count, Settings → Import). Only an OVERFLOW
+        # fails: one specific genre is a complete answer, so there is no
+        # exact-count quota and nothing is ever topped up to fill a slot (the
+        # slot would be filler, and the family is derived by the writers
+        # anyway — see mlo.genres). A filetype the genre write gate excludes
+        # is never failed for a genre this app was told never to write, and
+        # with the toggle off nothing is counted — same rule as every other
+        # check.
         if cfg.get("grade_check_genre_count", True) \
                 and should_write_audio_tag(cfg, "GENRE", filepath=ap):
             total_checks += 1
@@ -1661,24 +1667,22 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             if len(values) == 1 and ";" in values[0]:
                 values = [p.strip() for p in values[0].split(";") if p.strip()]
             have = len(values)
-            if have != want:
+            if have > want:
                 failed_checks += 1
-                shown = "no genre" if not have else (
-                    f"{have} genre" + ("" if have == 1 else "s"))
-                add_issue(f"Genre count: {shown}, {want} expected", basename)
+                add_issue(f"Genre count: {have} genres, at most {want} allowed",
+                          basename)
                 track["issues"].append("GENRE_COUNT")
 
         # Genre ORDER (grade_check_genre_order) — the hierarchy half of the
-        # same contract: the parent genre comes first and no slot repeats
-        # ("Rock / Alternative Rock / Post-Britpop"). The rules themselves
-        # live in mlo.genres, which the import and scripts 8/10 also apply, so
-        # the grader cannot fail a list those would leave alone.
+        # same contract: the specific genres come first and the FAMILY, if
+        # present, is the LAST one ("shoegaze / dream pop / rock"). The rules
+        # themselves live in mlo.genres, which the import and scripts 8/10
+        # also apply, so the grader cannot fail a list those would leave alone.
         #
-        # Only the order and duplicate lines are reported here. The count line
-        # belongs to the check above: with that toggle off, a wrong count is
-        # simply not graded — the same rule every other switch in this pass
-        # follows (a disabled check does not reappear under another code) — and
-        # the spaces line is already the GENRE presence check's.
+        # Only the order and duplicate lines are reported here. The count and
+        # the vocabulary belong to their own checks — a disabled check must not
+        # reappear under another code — and the spaces line is already the
+        # GENRE presence check's.
         if cfg.get("grade_check_genre_order", True) \
                 and should_write_audio_tag(cfg, "GENRE", filepath=ap):
             total_checks += 1
@@ -1691,7 +1695,11 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 values = [p.strip() for p in values[0].split(";") if p.strip()]
             order_issues = [
                 msg for msg in genre_issues(values, want)
-                if not msg.startswith("Genre count:")
+                # Absence is the PRESENCE check's code (GENRE_MISSING), and a
+                # switched-off presence check must not reappear here.
+                if msg != "missing"
+                and not msg.startswith("too many")
+                and not msg.startswith("not a known genre")
                 and not msg.startswith("Genre has ")
             ]
             if order_issues:
@@ -1700,29 +1708,56 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     add_issue(msg, basename)
                 track["issues"].append("GENRE_ORDER")
 
+        # Genre VOCABULARY (grade_check_genre_vocab) — every stored name must
+        # be a MusicBrainz genre (mlo.genres.canonical). The app's writers only
+        # ever store names MusicBrainz publishes, so an unknown one is a
+        # source's own spelling that nothing canonicalized; the report names
+        # each of them rather than accepting it silently. The tag is never
+        # rewritten from here — the writers own that (mlo.genres.normalize_genres).
+        if cfg.get("grade_check_genre_vocab", True) \
+                and should_write_audio_tag(cfg, "GENRE", filepath=ap):
+            total_checks += 1
+            # Read through the SAME splitter the order check uses
+            # (mlo.genres.split_stored): a file whose single value is the
+            # rendered "Shoegaze / Rock" holds two names, and testing it as
+            # one would fail this check while the order check passed the same
+            # file — two checks, two readings of one list.
+            values = iter_names(af.tag_values("GENRE"))
+            unknown = [n for n in values if genre_canonical(n) is None]
+            if unknown:
+                failed_checks += 1
+                for name in unknown:
+                    add_issue(f"Not a MusicBrainz genre: {name}", basename)
+                track["issues"].append("GENRE_VOCAB")
+
         # Key & BPM (script 12 output) — required when the check is on.
         # Excess tags: anything NEITHER this pipeline's scripts NOR beets
         # would have written — the optimizer's strip pass would remove every
         # key outside the shared vocabulary. Their presence counts against
-        # grading so unoptimized files surface. Gated on `strip_unknown_tags`
-        # as well: with the strip pass switched off nothing in the pipeline
-        # can clear an excess tag, so demanding it would be a permanent FAIL.
+        # grading so unoptimized files surface, and the report names EVERY one
+        # of them (the tag names are what the user acts on) plus the script
+        # that removes it. Gated on `strip_unknown_tags` as well: with the
+        # strip pass switched off nothing in the pipeline can clear an excess
+        # tag, so demanding it would be a permanent FAIL.
         if cfg.get("grade_check_excess_tags", True) \
                 and cfg.get("strip_unknown_tags", True) and not is_video_track:
             # Script vocabulary: TAG_MAP keys, the encoder identity tags,
             # beets/mediafile's own spellings and Picard's — the SAME
-            # predicate the Optimize strip pass applies (mlo.format_all), so
-            # a strip can never leave a tag that is then flagged, or delete
-            # one the grader requires. Language-specific lyrics transforms
-            # (TRANSLATION-EN, TRANSLITERATION-JA-LATN, …) and the app's own
-            # AUDIOAUDITOR_OVERRIDE are first-class, not excess.
+            # predicate the strip passes apply (mlo.containers for Optimize
+            # FLACs, mlo.format_all for Format all), so a strip can never
+            # leave a tag that is then flagged, or delete one the grader
+            # requires (every graded name is in TAG_MAP — see
+            # tools/test_grading_paths.py). Language-specific lyrics
+            # transforms (TRANSLATION-EN, TRANSLITERATION-JA-LATN, …) and the
+            # app's own AUDIOAUDITOR_OVERRIDE are first-class, not excess.
             _extra = sorted({str(_k) for _k in af.all_tags().keys()
                              if not tag_key_allowed(_k)})
             if _extra:
                 total_checks += 1
                 failed_checks += 1
-                shown = ", ".join(_extra[:6]) + ("…" if len(_extra) > 6 else "")
-                add_issue(f"Excess tags: {shown}", basename)
+                add_issue("Excess tags: " + ", ".join(_extra)
+                          + " (run Optimize FLACs (script 3) or Format all "
+                            "(script 10) to strip them)", basename)
                 track["issues"].append("TAGS")
 
         if cfg.get("grade_check_key_bpm", True) and not is_video_track:

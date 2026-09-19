@@ -243,18 +243,14 @@ def _mbid(value):
 
 
 def _genres(node):
+    """MusicBrainz's own genre names for one entity, in its own order.
+
+    The spelling is left exactly as MusicBrainz publishes it (lowercase): the
+    writers canonicalize through `mlo.genres.normalize_genres`, and a second
+    casing rule here is what used to make the same genre land under two names
+    ("Shoegaze" from the tagger, "shoegaze" from the vocabulary).
+    """
     return [g["name"] for g in (node.get("genres") or [])]
-
-
-def _title_genres(node):
-    """Genres in Title Case ('nu metal' -> 'Nu Metal') for tag import."""
-    seen, out = set(), []
-    for g in _genres(node):
-        key = g.strip().lower()
-        if key and key not in seen:
-            seen.add(key)
-            out.append(g.strip().title())
-    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -291,7 +287,7 @@ def release_lookup(mbid):
                     (ac.get("name", "") + (ac.get("joinphrase", "") or ""))
                     for ac in trk.get("artist-credit", [])
                 ),
-                "genres": _title_genres(rec),
+                "genres": _genre_names(_genres(rec)),
                 # ISRCs come free with this request (inc=isrcs) and are what
                 # the advisory fetch looks a track up by.
                 "isrcs": [v for v in (_isrc(i) for i in (rec.get("isrcs") or [])) if v],
@@ -350,7 +346,7 @@ def release_lookup(mbid):
         "primary_type": rg_obj.get("primary-type") or "",
         "secondary_types": [s for s in (rg_obj.get("secondary-types") or [])],
         "artists": release_artists,
-        "genres": _title_genres(data),
+        "genres": _genre_names(_genres(data)),
         "media": tracks,
         "medium_count": len(data.get("media", [])),
         "medium_formats": [m.get("format") or "" for m in data.get("media", [])],
@@ -1185,10 +1181,12 @@ def artist_genres(artist_mbid):
 def genre_cascade(release, limit=None):
     """Cascading genre import: track -> release -> release-group -> artist.
 
-    Genres are merged across levels (deduped, in popularity order, Title
-    Case) and capped at `limit` per track. limit=None imports everything.
-    Returns per-track genres plus the fallback chain used for each track.
-    """
+    Genres are merged across levels (deduped, in popularity order, in
+    MusicBrainz's own spelling) and capped at `limit` per track. limit=None
+    imports everything. Returns per-track genres plus the fallback chain used
+    for each track. The caller that writes these to a file canonicalizes them
+    (`_write_album_genres` in server.main), so the family slot and the cap are
+    applied once, by the one writer."""
     rg = release.get("release_group_id")
     rg_genres = release_group_genres(rg) if rg else []
     artist_genres_all = []
@@ -3038,8 +3036,10 @@ def _genre_ai_rank(cfg, artist, album, title, candidates, count, extra=None):
     module for the User-Agent, so a module-level import would be a cycle.
 
     The answer goes through `mlo.genres.normalize_genres` before anyone sees
-    it — the shared canonical list (order kept, case-insensitive duplicates
-    dropped, capped) is what the writers store and the grader reads.
+    it: the model named the SPECIFIC genres, and the normalizer resolves each
+    to MusicBrainz's own spelling, derives the FAMILY of the first one and
+    appends it last — so the list this returns is the full one the writers
+    store and the grader reads.
     """
     if not (cfg or {}).get("ai_genre_inference"):
         return None
@@ -3073,9 +3073,12 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
     list is honoured as written.
 
     Every source that answers contributes; the merged list is deduped
-    case-insensitively, Title-Cased and capped at `limit` (default
-    `mb_genre_count` from Settings → Import, whose shipped value lives in
-    `mlo.config.DEFAULT_CONFIG`) **per track**.
+    case-insensitively and capped at `limit` (default `mb_genre_count` from
+    Settings → Import, whose shipped value lives in
+    `mlo.config.DEFAULT_CONFIG`) **per track**. The names keep the spelling
+    their source used — this is the merge point, not a writer: the tag writers
+    canonicalize through `mlo.genres.normalize_genres` (which resolves each
+    name to MusicBrainz's own, derives the family and puts it last).
 
     Each track's own answer is merged first, then the release-wide one, so a
     track that states its own genre keeps it ahead of the album's fallback.
@@ -3097,8 +3100,8 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
     With `ai_genre_inference` on AND an AI endpoint configured, the merged
     list is then handed to `server.genre_ai.infer_genres` together with the
     release identity, and a usable answer REPLACES it — the model is what
-    puts the three slots in hierarchy order (parent / main / sub), which no
-    source orders on its own. The answer is canonicalized through
+    ranks the SPECIFIC genres (never the family, which the app derives) and
+    which no source orders on its own. The answer is canonicalized through
     `mlo.genres.normalize_genres` and its path gains "ai" in `sources`. With
     the setting off, no endpoint, or an unusable answer, every field is
     exactly what the sources alone produced.
@@ -3183,7 +3186,7 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
                     rows.append(wide)
             for row in rows:
                 for name in row.get("genres") or []:
-                    pairs.append((str(name).strip().title(), source,
+                    pairs.append((str(name).strip(), source,
                                   row.get("level") or "album"))
         kept, seen = [], set()
         for name, source, level in pairs:
@@ -3512,7 +3515,7 @@ def artist_identity(mbid):
             (data.get("life-span") or {}).get("begin") or "",
             (data.get("life-span") or {}).get("end") or "",
         ],
-        "genres": _title_genres(data),
+        "genres": _genre_names(_genres(data)),
         "tags": [t.get("name") for t in (data.get("tags") or [])[:8]],
     }
 
@@ -3874,7 +3877,7 @@ def release_group_browse(mbid, limit=300, offset=0):
         ),
         "primary_type": data.get("primary-type") or "",
         "secondary_types": data.get("secondary-types") or [],
-        "genres": _title_genres(data),
+        "genres": _genre_names(_genres(data)),
         "first_release_date": data.get("first-release-date") or "",
         "total": total,
         "offset": offset,

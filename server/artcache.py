@@ -96,6 +96,14 @@ _CACHE_KEEP = 0.8
 # to try a provider again.
 _FAILS: dict = {}
 
+# Bytes the cache dir holds, per directory, maintained from what _write() puts
+# there and from the last authoritative scan. A full scan costs a listdir +
+# stat of EVERY entry (176 ms measured on a 3000-image cache) and used to run
+# after every single download: fetching 200 covers spent 35 s re-measuring a
+# cache that had grown by 200 files. None means "never measured here" — the
+# first write pays one scan, every later write a dict lookup.
+_CACHE_TOTALS: dict = {}
+
 _MAGIC = (
     (b"\xff\xd8\xff", "image/jpeg"),
     (b"\x89PNG\r\n\x1a\n", "image/png"),
@@ -202,6 +210,7 @@ def _write(key, d, data, ctype, source, url):
     except OSError:
         return
     fp, meta = _paths(d, key)
+    written = 0
     for path, blob in ((fp, data), (meta, json.dumps(
             {"content_type": ctype, "source": source, "url": url}).encode("utf-8"))):
         fd, tmp = tempfile.mkstemp(dir=d, suffix=".part")
@@ -209,18 +218,29 @@ def _write(key, d, data, ctype, source, url):
             with os.fdopen(fd, "wb") as fh:
                 fh.write(blob)
             os.replace(tmp, path)
+            written += len(blob)
         except OSError:
             try:
                 os.remove(tmp)
             except OSError:
                 pass
-    _prune(d)
+    # Only these bytes changed the cache's size, so the full scan is owed only
+    # when they push it past the ceiling (the first write of the process
+    # measures the directory once). A repeated URL over-counts — the replaced
+    # file's old bytes are still counted — which prunes a little early, never
+    # late, and the scan below resets the number to the truth.
+    total = _CACHE_TOTALS.get(d)
+    if total is None:
+        total = _scan(d)[1]
+    _CACHE_TOTALS[d] = total + written
+    if _CACHE_TOTALS[d] > _CACHE_BYTES:
+        _prune(d)
 
 
-def _prune(d):
-    """Drop the oldest entries once the cache outgrows its ceiling."""
+def _scan(d):
+    """(entries, total bytes) of the cache dir — the authoritative measure."""
+    entries, total = [], 0
     try:
-        entries, total = [], 0
         for name in os.listdir(d):
             if not name.endswith((".bin", ".json", ".part")):
                 continue
@@ -232,7 +252,14 @@ def _prune(d):
             entries.append((st.st_mtime, st.st_size, fp))
             total += st.st_size
     except OSError:
-        return
+        return entries, total
+    return entries, total
+
+
+def _prune(d):
+    """Drop the oldest entries once the cache outgrows its ceiling."""
+    entries, total = _scan(d)
+    _CACHE_TOTALS[d] = total
     if total <= _CACHE_BYTES:
         return
     keep = _CACHE_BYTES * _CACHE_KEEP
@@ -244,6 +271,7 @@ def _prune(d):
             total -= size
         except OSError:
             pass
+    _CACHE_TOTALS[d] = total
 
 
 def _get(url, headers, timeout):

@@ -62,7 +62,8 @@ from server import main as mlo_main  # noqa: E402
 from server import library as mlo_library  # noqa: E402
 
 # --------------------------------------------------------------------------- #
-# fixture A: a music folder whose .mlo/downloads is being triaged
+# fixture A: a music folder whose .mlo/downloads (one shared queue, where
+# slskd writes) is being triaged
 # --------------------------------------------------------------------------- #
 MF = tempfile.mkdtemp(prefix="mlo-dl-test-")
 DOWNLOADS = os.path.join(MF, ".mlo", "downloads")

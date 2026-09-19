@@ -1,5 +1,7 @@
 """Unified tag abstraction over FLAC / OGG / Opus / MP3 / AAC / MP4 files."""
 import os
+import threading
+from collections import OrderedDict
 
 from .deps import (
     FLAC, OggVorbis, OggOpus, MP3, MP4, MP4FreeForm,
@@ -458,6 +460,29 @@ def _mp4_specs(spec):
     return (raw,)
 
 
+def _canonical_indexes():
+    """Reverse TAG_MAP lookups: stored spelling -> semantic name.
+
+    all_tags() used to answer "which semantic name is this Vorbis comment /
+    MP4 atom?" by scanning every TAG_MAP entry for every key of every file —
+    71 string compares per tag, thousands of times over a Format All run. The
+    indexes are the same scan, done once. First spelling wins, which is what
+    the ``next(...)`` lookup they replace returned.
+    """
+    flac, atoms, freeform = {}, {}, {}
+    for name, spec in TAG_MAP.items():
+        flac.setdefault(str(spec.get("flac", "")).lower(), name)
+        for atom in _mp4_specs(spec):
+            if isinstance(atom, tuple) and atom[0] == "freeform":
+                freeform.setdefault(str(atom[2]).lower(), name)
+            elif not isinstance(atom, tuple):
+                atoms.setdefault(str(atom), name)
+    return flac, atoms, freeform
+
+
+_FLAC_CANONICAL, _MP4_ATOM_CANONICAL, _MP4_FREEFORM_CANONICAL = _canonical_indexes()
+
+
 # Video containers routed through ffprobe/ffmpeg (MP4/M4V stay on mutagen).
 VIDEO_FFMPEG_EXTS = (
     ".mkv", ".webm", ".mov", ".vob", ".mpg", ".mpeg", ".m2v",
@@ -500,6 +525,30 @@ def _to_mkv_meta(tags):
 
 
 _FFPROBE_CACHE = {"exe": None, "checked": False}
+
+# A music-video container costs one ffprobe process per read (~35 ms measured
+# on a 2 s MKV, and it grows with the file), and a single pass over the
+# library can construct the SAME video's AudioFile several times: the grader
+# reads it, the library payload reads it again, then every album/track view
+# does. The probe result is a pure function of the file's bytes, so it is
+# cached on (path, mtime_ns, size) — a tag write changes both, which is what
+# keeps a rewritten video from serving its old tags.
+_VIDEO_PROBE_MAX = 4096
+_video_probe = OrderedDict()
+_video_probe_lock = threading.Lock()
+
+
+def _video_probe_key(path):
+    """Cache key for a video probe, or None when the file cannot be stat'ed.
+
+    An un-stat'able path is never cached: a stable key would pin whatever the
+    first (failed) probe saw and serve it for a file that may since exist.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (os.path.normcase(path), st.st_mtime_ns, st.st_size)
 
 
 def _ffprobe_exe():
@@ -577,6 +626,12 @@ class AudioFile:
         self.error = None
         self.tech = {}
         self._tag_cache = None
+        # all_tags()/tag_values() answers for THIS instance, dropped by every
+        # tag write alongside _tag_cache: the tag editor, the grader's
+        # excess-tag check and Format All all re-read the same file several
+        # times per pass, and each read rebuilt the whole mapping.
+        self._all_tags_cache = None
+        self._tag_values_cache = {}
         # Video containers: True once ffprobe supplied tags/tech, and the
         # path actually holding the data after a tag write (tagging a VOB
         # remuxes it into a same-stem MKV, so the file name can change).
@@ -636,8 +691,10 @@ class AudioFile:
         return True
 
     def _invalidate_cache(self):
-        """Drop the vorbis tag-read cache after any tag write."""
+        """Drop the per-instance read caches after any tag write."""
         self._tag_cache = None
+        self._all_tags_cache = None
+        self._tag_values_cache = {}
 
     def defer_save(self, on=True):
         """Defer container writes until flush() (or defer_save(False)).
@@ -730,6 +787,20 @@ class AudioFile:
         aliases folded onto the semantic names) and tech carries the
         video codec plus dimensions alongside the usual audio fields.
         """
+        key = _video_probe_key(self.path)
+        cached = None
+        if key is not None:
+            with _video_probe_lock:
+                cached = _video_probe.get(key)
+                if cached is not None:
+                    _video_probe.move_to_end(key)
+            if cached is not None:
+                # Copies: this instance may be edited while the cache entry
+                # still has to describe what is on disk.
+                self._video_tags = dict(cached[0])
+                self.tech = dict(cached[1])
+                self.audio = VideoHandle(self._video_tags, self.tech)
+                return
         try:
             import json as _json
             ffprobe = _ffprobe_exe()
@@ -801,6 +872,12 @@ class AudioFile:
         # Truthy stub: get_tag/tech consumers treat `audio is None` as an
         # unreadable file, so video files present a lightweight handle.
         self.audio = VideoHandle(tags, self.tech)
+        if key is not None:
+            with _video_probe_lock:
+                _video_probe[key] = (dict(tags), dict(self.tech))
+                _video_probe.move_to_end(key)
+                while len(_video_probe) > _VIDEO_PROBE_MAX:
+                    _video_probe.popitem(last=False)
 
     def _video_canonical(self, name):
         """Semantic tag name for a video lookup: aliases -> canonical."""
@@ -943,6 +1020,9 @@ class AudioFile:
         self.kind = self._kind() or self.kind
         self.is_video = self.kind == "video"
         self.container_changed = self.ext != os.path.splitext(src)[1].lower()
+        # The tag reads (all_tags/get_tag) are memoized per instance, and this
+        # write changed what is on disk — reload through an invalidated cache.
+        self._invalidate_cache()
         self._load_video()
         return True
 
@@ -1237,9 +1317,16 @@ class AudioFile:
         ``TRACKNUMBER`` so callers can read or write the correct ID3 frame,
         Vorbis comment, or MP4 atom for each container. Binary artwork is
         omitted; textual custom tags remain available under their raw key.
+
+        The mapping is remembered per instance (see _invalidate_cache) — a
+        format pass reads the same file's tags several times. A fresh dict is
+        returned every call, so a caller may edit what it got back without
+        touching the next reader.
         """
         if self.audio is None or self.audio.tags is None:
             return {}
+        if self._all_tags_cache is not None:
+            return dict(self._all_tags_cache)
 
         out = {}
         try:
@@ -1260,11 +1347,7 @@ class AudioFile:
                     if isinstance(val, bytes):
                         continue
                     raw = str(k)
-                    canonical = next(
-                        (name for name, spec in TAG_MAP.items()
-                         if str(spec.get("flac", "")).lower() == raw.lower()),
-                        raw,
-                    )
+                    canonical = _FLAC_CANONICAL.get(raw.lower(), raw)
                     out[canonical] = str(val)
 
             elif self.kind in _ID3_KINDS:
@@ -1318,25 +1401,15 @@ class AudioFile:
                     # "; " (and renders a trkn/disk pair as "n/total")
                     # instead of dropping every value but the first.
                     raw = str(k)
-                    canonical = raw
                     if raw.startswith("----:com.apple.iTunes:"):
                         name = raw.rsplit(":", 1)[-1]
-                        canonical = next(
-                            (n for n, spec in TAG_MAP.items()
-                             if any(isinstance(a, tuple) and a[0] == "freeform"
-                                    and a[2].lower() == name.lower()
-                                    for a in _mp4_specs(spec))),
-                            raw,
-                        )
+                        canonical = _MP4_FREEFORM_CANONICAL.get(name.lower(), raw)
                     else:
-                        canonical = next(
-                            (n for n, spec in TAG_MAP.items()
-                             if any(not isinstance(a, tuple) and a == raw
-                                    for a in _mp4_specs(spec))), raw
-                        )
+                        canonical = _MP4_ATOM_CANONICAL.get(raw, raw)
                     out[canonical] = self._mp4_text(vals) or ""
         except Exception:
             return {}
+        self._all_tags_cache = dict(out)
         return out
 
     def tag_values(self, name):
@@ -1349,7 +1422,22 @@ class AudioFile:
         named "Rock; Pop". *name* is a semantic TAG_MAP name or, for a
         custom tag, the raw key all_tags() emits ("TXXX:FOO",
         "----:com.apple.iTunes:FOO").
+
+        Remembered per instance like all_tags(): a writer asks for the same
+        tag's pieces more than once per pass. Each caller gets its own list,
+        so two writers holding one track cannot corrupt each other's pieces.
         """
+        if self.audio is None:
+            return []
+        name = str(name)
+        hit = self._tag_values_cache.get(name)
+        if hit is None:
+            hit = self._tag_values_uncached(name)
+            self._tag_values_cache[name] = hit
+        return list(hit)
+
+    def _tag_values_uncached(self, name):
+        """tag_values() for one name, read straight from the container."""
         if self.audio is None:
             return []
         name = str(name)

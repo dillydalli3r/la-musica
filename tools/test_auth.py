@@ -108,6 +108,15 @@ for mode, host, want in (
 check("off + LAN warns", bool(auth_mod.gate_warning({"auth_mode": "off", "server_host": "0.0.0.0"})))
 check("loopback auto is quiet", auth_mod.gate_warning({"auth_mode": "auto", "server_host": "127.0.0.1"}) == "")
 
+print("== the configured public URL is something a client can dial ==")
+check("a bare host gets http",
+      auth_mod.normalize_public_url("music.example.com:8000") == "http://music.example.com:8000")
+check("port 443 gets https",
+      auth_mod.normalize_public_url("music.example.com:443") == "https://music.example.com:443")
+check("a scheme is left alone",
+      auth_mod.normalize_public_url("https://music.example.com/") == "https://music.example.com")
+check("nothing configured stays empty", auth_mod.normalize_public_url("") == "")
+
 print("== what is public ==")
 check("/api/health public", auth_mod.is_public("/api/health"))
 check("/api/auth/status public", auth_mod.is_public("/api/auth/status"))
@@ -273,6 +282,35 @@ check("/api/config/defaults has no real hash",
       not client.get("/api/config/defaults").json().get("auth_password_hash"))
 
 config_mod.load_config = _real_load
+
+print("== users (each session carries one; playlists like data scope by it) ==")
+users_tmp = tempfile.mkdtemp(prefix="mlo-users-")
+auth_mod.db_path = lambda: os.path.join(users_tmp, "auth.db")
+auth_mod._initialized = False
+conn = sqlite3.connect(auth_mod.db_path())
+conn.executescript(
+    "CREATE TABLE users (username TEXT PRIMARY KEY, hash TEXT, created REAL NOT NULL);")
+conn.executemany("INSERT INTO users (username, hash, created) VALUES (?, ?, ?)", [
+    ("alice", auth_mod.hash_password("alice-password"), time.time()),
+    ("bob", auth_mod.hash_password("bob-password"), time.time() + 1),
+])
+conn.commit()
+conn.close()
+check("users are listed oldest first", auth_mod.list_users() == ["alice", "bob"],
+      str(auth_mod.list_users()))
+check("a known user logs in by name",
+      auth_mod.login_user("alice-password", "alice") == "alice")
+check("the wrong password does not", auth_mod.login_user("bob-password", "alice") is None)
+check("an unknown username does not", auth_mod.login_user("alice-password", "carol") is None)
+check("an omitted username is ambiguous with two users, and refused",
+      auth_mod.login_user("alice-password") is None)
+check("the empty scope is itself a user", auth_mod.login_user("x", "") is None)
+token, _ = auth_mod.create_session(1, username="alice")
+check("a session reports the user it was opened for",
+      auth_mod.session_username(token) == "alice")
+check("a made-up token reports no user", auth_mod.session_username("nope") == "")
+check("a session with no user reports the default scope",
+      auth_mod.session_username(auth_mod.create_session(1)[0]) == "")
 
 print(f"\n{len(FAILED)} failure(s)")
 sys.exit(1 if FAILED else 0)

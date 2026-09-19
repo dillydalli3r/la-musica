@@ -5,8 +5,12 @@ import os
 import tempfile
 
 from .paths import (CONFIG_FILE, DEFAULT_DIGITAL_SOURCE, app_data_dir, downloads_dir,
-                    legacy_state_dirs, read_music_folder_guess, trash_dir)
+                    legacy_state_dirs, read_music_folder_guess, trash_dir,
+                    trash_root)
 from .naming import DEFAULT_NAMING_SCRIPT
+# The genre-list ceiling, so `mb_genre_count`'s validated range below and the
+# value mlo.genres enforces can never drift apart: one number, one home.
+from .genres import GENRE_COUNT_MAX
 from .ui import c, Color
 
 # Shipped default naming scripts from BEFORE the current one. A config that
@@ -33,6 +37,16 @@ LEGACY_DEFAULT_NAMING_SCRIPTS = (
     "$if(%originaldate%,%originaldate% - ,)$if(%date%,%date% - ,)"
     "%album% {$if(%releasecountry%,%releasecountry%)"
     "$if(%catalognumber%,$if(%releasecountry%, - ,)%catalognumber%)}"
+    "$if(%label%, [%label%])$if(%musicbrainz_albumid%, [%musicbrainz_albumid%])/"
+    "%discnumber%-$num(%tracknumber%,2) %title%$if(%musicbrainz_trackid%, [%musicbrainz_trackid%])",
+    #   [3] the release-id-only default, retired when the release GROUP id
+    #       joined the album folder and the file name (a track that leaves its
+    #       folder still names the album it came from)
+    "%albumartist% [%musicbrainz_albumartistid%]/$if(%releasetype%,[%releasetype%] ,)"
+    "$if(%originaldate%,%originaldate% - ,)$if(%date%,%date% - ,)"
+    "%album% {$if(%releasecountry%,%releasecountry%)"
+    "$if(%media%,$if(%releasecountry%, - ,)%media%)"
+    "$if(%catalognumber%,$if(%media%, - ,$if(%releasecountry%, - ,))%catalognumber%)}"
     "$if(%label%, [%label%])$if(%musicbrainz_albumid%, [%musicbrainz_albumid%])/"
     "%discnumber%-$num(%tracknumber%,2) %title%$if(%musicbrainz_trackid%, [%musicbrainz_trackid%])",
 )
@@ -73,13 +87,14 @@ LEGACY_DEFAULT_CD_QUERIES = (
     ["catalognumber", "artist album catalognumber", "artist album"],
 )
 
-# Genres-per-track defaults this app shipped BEFORE the current one (3). A
-# config still holding one of these was never a decision — Settings carried the
-# shipped default — so it follows the new value, the same rule the naming
-# script, the genre-source order and the query templates above already use. A
-# number the user actually chose is any other value and is kept. (2 was the
-# shipped default in this release's own 2.8.0/2.8.1 builds.)
-LEGACY_DEFAULT_GENRE_COUNTS = (2,)
+# Genres-per-track defaults this app shipped BEFORE the current one (2: one
+# specific genre and its family). A config still holding one of these was
+# never a decision — Settings carried the shipped default — so it follows the
+# new value, the same rule the naming script, the genre-source order and the
+# query templates above already use. A number the user actually chose is any
+# other value and is kept. (3 was the shipped default up to 2.8.x, back when
+# the slots were parent / main / sub.)
+LEGACY_DEFAULT_GENRE_COUNTS = (3,)
 LEGACY_DEFAULT_DIGITAL_QUERIES = (
     ["artist album year", "artist album"],
 )
@@ -504,15 +519,24 @@ DEFAULT_CONFIG = {
     "grade_check_mood": True,
     "grade_check_energy": True,   # ENERGY (0-100), written next to MOOD by script 8
     "grade_check_genre": True,
-    # Genre COUNT per track: fewer or more than mb_genre_count fails. The
-    # same value the import writes and the scripts trim to, so a library this
-    # app tagged can never fail this check.
+    # Genre COUNT per track: a track may hold AT MOST mb_genre_count values,
+    # the same cap the import and the trimming scripts apply (mb_genre_count,
+    # Settings → Import). Only an overflow fails — a track with one specific
+    # genre is a complete answer (the family is optional), so there is no
+    # exact-count quota and nothing is ever topped up to fill a slot.
     "grade_check_genre_count": True,
-    # Genre ORDER: the three slots are a hierarchy — parent, main, sub
-    # ("Rock / Alternative Rock / Post-Britpop"). Fails a list whose parent
-    # sits in the wrong slot or repeats; a head this app's vocabulary cannot
-    # vouch for ("Kwaito") is never a failure (see mlo/genres.py).
+    # Genre ORDER: the list is a hierarchy of specific genres with the FAMILY
+    # LAST ("shoegaze / dream pop / rock"). Fails a list whose family sits in
+    # an earlier slot or repeats; the names themselves are graded by
+    # grade_check_genre_vocab below (see mlo/genres.py).
     "grade_check_genre_order": True,
+    # Genre VOCABULARY: every stored name must be a MusicBrainz genre
+    # (mlo.genres.canonical). The app's own writers only ever store names
+    # MusicBrainz publishes, so a name it does not know is either a source's
+    # own spelling that nothing canonicalized or a typo — the report names it
+    # instead of silently accepting it. Off makes grading accept any name (the
+    # tag is kept either way: dropping what a source said would be worse).
+    "grade_check_genre_vocab": True,
     # Lyric transforms that should not be there, and the ones that should.
     # A track whose lyrics are already in the reader's own script must NOT
     # carry a TRANSLITERATION tag, and a track that needs one must — the
@@ -707,16 +731,17 @@ DEFAULT_CONFIG = {
     # AI genre inference — the one AI feature that runs during importing and
     # tagging. The model is given the genres MusicBrainz and RateYourMusic
     # already answered with (plus whatever the other configured sources know)
-    # and returns exactly `mb_genre_count` genres in hierarchy order: the
-    # parent first, then the genre that describes the track, then the
-    # subgenre. On by default *when an AI endpoint is configured* — with no
-    # base URL/model the import simply uses the source list as-is.
+    # and returns at most `mb_genre_count - 1` SPECIFIC genres, most specific
+    # first: the family is not its to answer — the app derives it
+    # (mlo.genre_vocab.parent_of) and appends it last, see mlo.genres. On by
+    # default *when an AI endpoint is configured* — with no base URL/model the
+    # import simply uses the source list as-is.
     "ai_genre_inference": True,
     # Thinking budget for the inference. HIGH is the default: the model is
     # told to reason about the ranking and to look up anything the fetched
-    # list does not cover before answering, which is what makes the three
-    # slots land in the right order. MINIMAL answers from the fetched list
-    # alone, for a fast import on a big backlog.
+    # list does not cover before answering, which is what makes the specific
+    # genres worth having over the source order. MINIMAL answers from the
+    # fetched list alone, for a fast import on a big backlog.
     "ai_genre_effort": "high",
     # Let the model consult its own knowledge of the artist/album beyond the
     # genres it was handed (rather than re-ranking only what it was given).
@@ -891,12 +916,14 @@ DEFAULT_CONFIG = {
     # disagree: how many genres an import writes onto a track (highest-voted
     # source first), how many a track may KEEP (script 8's auto tagging, the
     # genre import and script 10's canonical pass all trim the rest off), and
-    # what grading requires (`grade_check_genre_count`: a track with fewer or
-    # more than this fails). Default 3: a primary genre plus the two that say
-    # the most about it (which source ranked them first decides which three),
-    # because a player shows a handful and a merged
-    # "Rock; Alternative Rock; Indie; Shoegaze; Post-Rock" list helps no one.
-    "mb_genre_count": 3,
+    # the most grading accepts (`grade_check_genre_count`). Default 2: one
+    # specific genre and its family ("shoegaze / rock"). The family is DERIVED
+    # (mlo.genre_vocab.parent_of), never asked of a model and never invented,
+    # and it takes the LAST slot — so 3 means "two specific genres and the
+    # family", not a third synonym. Raising it past 3 would say less about the
+    # music, not more (GENRE_COUNT_MAX), and a merged "Rock; Alternative Rock;
+    # Indie; Shoegaze; Post-Rock" list helps no one.
+    "mb_genre_count": 2,
     # Genre sources, in priority order. Two by default — RateYourMusic (what
     # the release page itself says, the user's own first preference) and
     # MusicBrainz (open data, keyless) — because they are the two the library
@@ -1110,7 +1137,7 @@ _INT_RANGES = {
     "artist_image_target_size": (0, 4000),
     "discovery_timeout_s": (3, 30),
     "import_bulk_concurrency": (1, 8),
-    "mb_genre_count": (1, 10),
+    "mb_genre_count": (1, GENRE_COUNT_MAX),
     "export_embed_cover_jpeg_quality": (1, 100),
     "export_embed_cover_resolution": (0, 8000),
     "export_workers": (0, 64),
@@ -1306,6 +1333,16 @@ def normalize_config(user=None) -> dict:
                  "discovery_search_sources", "mb_search_source",
                  "soulseek_auto_max_attempts"):
         cfg.pop(dead, None)
+
+    # `auth_username` is a display name AND, on an install with no users row,
+    # the name its claim logs in under — which makes it a path segment
+    # (`trash/<user>/`) and a SQLite key. A value that is not one plain segment
+    # is blanked rather than honoured: a hand-edited config must not be able to
+    # name a user `..` and hand that session the app's own data directory.
+    from .paths import user_segment
+    name = str(cfg.get("auth_username") or "").strip()
+    if name and user_segment(name) != name:
+        cfg["auth_username"] = ""
 
     # Shared-folder lists (Settings → Soulseek, Soulseek → Sharing). Accept a
     # ";"/newline separated string from hand-edited config files.
@@ -1532,8 +1569,51 @@ def _migrate_to_data_dir():
         print(f"WARNING: state migration to {d} failed: {e}")
 
 
+_TRASH_ADOPTED = False
+
+
+def _adopt_legacy_trash():
+    """Move a bin written before users existed into the `default` scope.
+
+    `<music>/.mlo/trash` used to BE the bin; it is now the PARENT of the
+    per-user bins (`<music>/.mlo/trash/<user>`). Without this an upgraded
+    install opens an empty bin while every deleted file is still on disk one
+    level up — the worst version of this bug, because the page says there is
+    nothing to restore and nothing looks broken. Runs once per process, lists
+    the entries BEFORE creating the destination, and never clobbers.
+    """
+    global _TRASH_ADOPTED
+    if _TRASH_ADOPTED:
+        return
+    _TRASH_ADOPTED = True
+    import shutil
+
+    try:
+        mf = read_music_folder_guess()
+        if not mf or not os.path.isdir(mf):
+            return
+        dst = trash_dir(mf)
+        src = os.path.dirname(dst) if dst else None
+        # A bin that is already per-user (or absent) has nothing to adopt.
+        if not src or os.path.isdir(dst) or not os.path.isdir(src):
+            return
+        entries = [n for n in os.listdir(src) if n != os.path.basename(dst)]
+        if not entries:
+            return
+        os.makedirs(dst, exist_ok=True)
+        for name in entries:
+            s, d = os.path.join(src, name), os.path.join(dst, name)
+            if os.path.exists(d):
+                continue
+            shutil.move(s, d)
+    except Exception as e:
+        print(c(f"WARNING: could not move the old bin into the default scope: {e}",
+                Color.YELLOW))
+
+
 def load_config() -> dict:
     _migrate_to_data_dir()
+    _adopt_legacy_trash()
     path = active_config_file()
     user = None
     if os.path.exists(path):
@@ -1697,7 +1777,12 @@ def save_config(cfg: dict) -> bool:
             for src in (app_data_dir(prev_mf), *legacy_state_dirs(prev_mf)):
                 _move_state_dir(src, d)
             _move_state_dir(downloads_dir(prev_mf), downloads_dir(new_mf))
-            _move_state_dir(trash_dir(prev_mf), trash_dir(new_mf))
+            # The bin's ROOT, not one scope's bin: trash_dir() is
+            # `<...>/trash/<user>` now, so moving it would carry the `default`
+            # scope and strand every named user's bin in the old folder —
+            # their Trash page would read an empty bin while the albums sat on
+            # disk one layout up.
+            _move_state_dir(trash_root(prev_mf), trash_root(new_mf))
             _write_stub(new_mf)
         path = active_config_file()
         directory = os.path.dirname(path) or "."

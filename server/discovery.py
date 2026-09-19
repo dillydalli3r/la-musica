@@ -1693,12 +1693,13 @@ def album_genres(artist, album, dz_id=None, cfg=None):
 
 
 def genre_lookup(artist, album, track_path=None, cfg=None):
-    """Genre names for one track/album — the hook script 8 fills GENRE with.
+    """Genre names for one track/album — the hook script 8 completes GENRE with.
 
     Delegates to ``integrations.genre_chain``, the ONE genre resolver (RYM →
-    community sources → streaming providers → MusicBrainz, merged, deduped,
-    Title-Cased, capped at `mb_genre_count`), so a library-wide Auto tagging
-    run and an import write genres the same way.
+    community sources → streaming providers → MusicBrainz, merged and deduped,
+    capped at `mb_genre_count`), so a library-wide Auto tagging run and an
+    import write genres the same way. The merged names keep the spelling the
+    sources used; the writer that stores them canonicalizes (mlo.genres).
 
     The answer is memoised per album for TTL_META: script 8 calls this hook
     once PER TRACK, and a chain that reaches the network must not run a dozen
@@ -1711,13 +1712,11 @@ def genre_lookup(artist, album, track_path=None, cfg=None):
             cfg = load_config()
         except Exception:
             cfg = {}
-    from mlo.config import DEFAULT_CONFIG
-    try:
-        # The shipped default has ONE home: a literal here drifts the moment
-        # `mb_genre_count` changes (it is Settings → Import's value).
-        limit = max(1, int(cfg.get("mb_genre_count") or DEFAULT_CONFIG["mb_genre_count"]))
-    except (TypeError, ValueError):
-        limit = DEFAULT_CONFIG["mb_genre_count"]
+    # The cap has ONE home (mlo.autotag.genre_count): a literal here drifts the
+    # moment `mb_genre_count` changes, and the value is clamped to its ceiling
+    # either way (it is Settings → Import's number).
+    from mlo.autotag import genre_count
+    limit = genre_count(cfg)
     key = (_norm(artist), _norm(album), limit)
     with _GENRE_MEMO_LOCK:
         hit = _GENRE_MEMO.get(key)

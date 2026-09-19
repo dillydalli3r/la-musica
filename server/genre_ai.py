@@ -3,11 +3,13 @@
 `server.integrations.genre_chain` asks MusicBrainz, RateYourMusic and the
 other configured sources first and hands their answers here; this module
 turns them — plus, when ``ai_genre_research`` is on, the model's own
-knowledge of the release — into the ``mb_genre_count`` genres in hierarchy
-order the app stores (parent / main / sub, see ``mlo.genres``).
+knowledge of the release — into at most ``mb_genre_count - 1`` SPECIFIC
+genres, most specific first. The family is NOT asked for and a family answer
+is dropped: the app derives it (`mlo.genre_vocab.parent_of`) and appends it
+last, see ``mlo.genres``.
 
 Optional end to end: no endpoint configured, a refusal, a timeout, an
-unparseable answer or a list too short to be a hierarchy all mean ``None``,
+unparseable answer or an answer with nothing usable in it all mean ``None``,
 and the caller keeps the source list exactly as it was. Nothing here ever
 raises — an import must never fail because the model had a bad day.
 
@@ -31,28 +33,32 @@ import os
 import re
 
 from server import ai as ai_client
-from mlo.genres import DEFAULT_GENRE_COUNT, normalize_genres
+from mlo.genres import (DEFAULT_GENRE_COUNT, GENRE_COUNT_MAX, canonical,
+                        is_parent)
 
 SYSTEM = (
     "You are a music taxonomist naming the genres a release is filed under. "
     "You answer ONLY with the JSON object asked for."
 )
 
-# The shape the answer must have, spelled out with one worked example: the
-# slots are the whole point of the feature (the grader checks them, see
-# mlo.genres.issues), and a model left to itself answers with a flat bag of
-# near-synonyms instead. Kept in the prompt rather than re-derived from the
-# reply, because ordering is a judgement no word list reproduces.
+# The shape the answer must have, spelled out in full: the model answers with
+# the SPECIFIC genres only, most specific first — the broad family is the
+# app's to derive (`mlo.genre_vocab.parent_of`) and append last, so asking for
+# it would be asking for a slot the caller has to throw away, and a model left
+# to itself answers with a flat bag of near-synonyms plus a family. Kept in
+# the prompt rather than re-derived from the reply, because "which genre is
+# more specific" is a judgement no word list reproduces.
 _SLOTS = (
-    "Answer with exactly {count} genres in hierarchy order — no numbering, "
-    "no explanation, JSON only:\n"
-    "  slot 1 the broad parent family (e.g. Rock, Hip Hop, Electronic),\n"
-    "  slot 2 the main genre that applies to this release "
-    "(e.g. Alternative Rock),\n"
-    "  slot 3 the most specific subgenre or style it actually falls under "
-    "(e.g. Post-Britpop).\n"
-    "All genres must be distinct (never the same word twice, not even with "
-    "different capitalisation) and every slot must be filled."
+    "Answer with AT MOST {count} SPECIFIC genre(s), most specific first — no "
+    "numbering, no explanation, JSON only:\n"
+    "  at most {count} genre(s) that describe this release, e.g. Post-Britpop, "
+    "Shoegaze, Melodic Death Metal.\n"
+    "Do NOT name a broad family (Rock, Pop, Electronic, Hip Hop, Jazz, "
+    "Classical, Folk, Metal…) in any slot: the app derives the family from the "
+    "specific genre and appends it itself, so a family here is discarded.\n"
+    "Every name must be a MusicBrainz genre, or one of the fetched genres "
+    "above; they must be distinct (never the same word twice, not even with "
+    "different capitalisation)."
 )
 
 _RESEARCH_ON = (
@@ -194,14 +200,53 @@ def _store(path, names):
         pass
 
 
+def _specifics(names, candidates, limit):
+    """The usable SPECIFIC genres of one answer, at most *limit* of them.
+
+    A name is kept when it is a MusicBrainz genre (`mlo.genres.canonical`) or
+    one of the fetched candidates (a source's own spelling is fine — the
+    writers canonicalize, and dropping what a source said would be worse),
+    resolved to MusicBrainz's spelling when it is one, de-duplicated
+    case-insensitively, and in the model's own order (which IS the ranking).
+
+    A name that IS a family is dropped rather than returned: the app derives
+    and appends the family itself (mlo.genres.normalize_genres), so a family
+    here would either duplicate the derived slot or take a specific genre's
+    place. Nothing else is filtered — junk the model invented that is neither
+    a genre nor a fetched candidate is what the vocabulary grade flags.
+    """
+    allowed = {str(c).strip().casefold() for c in (candidates or []) if str(c).strip()}
+    out, seen = [], set()
+    for raw in names:
+        text = " ".join(str(raw or "").split())
+        if not text:
+            continue
+        name = canonical(text) or text
+        key = name.casefold()
+        if key in seen or is_parent(name):
+            continue
+        if canonical(text) is None and key not in allowed:
+            continue
+        seen.add(key)
+        out.append(name)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def infer_genres(*, artist, album, title="", track_path="", candidates=None,
                  count=DEFAULT_GENRE_COUNT, extra=None):
-    """The release's genres in hierarchy order, or None to leave the sources'.
+    """The release's SPECIFIC genres, most specific first, or None.
 
     Never raises. None means "no opinion": AI is not configured, the call
-    failed, the answer could not be parsed, or it named fewer than two usable
-    genres — with one genre there is no hierarchy to rank, so the caller's own
-    list (which is at least ordered by source priority) is the better answer.
+    failed, the answer could not be parsed, or nothing usable was left after
+    canonicalization — the caller's own source list (which is at least ordered
+    by source priority) is the better answer then.
+
+    *count* is the track's total slot budget (`mb_genre_count`): at most
+    `count - 1` SPECIFIC genres are asked for, because the last slot belongs
+    to the derived family. A *count* of 1 has no room for a specific genre at
+    all, so there is nothing to ask and the answer is None.
 
     *candidates* are the genres the sources already answered with, best first
     (the chain's merged order); *extra* is any further context worth naming in
@@ -211,23 +256,24 @@ def infer_genres(*, artist, album, title="", track_path="", candidates=None,
         count = max(1, int(count))
     except (TypeError, ValueError):
         count = DEFAULT_GENRE_COUNT
+    # The family takes the last slot, so the model is asked for the ones in
+    # front of it — at most `count - 1`, and never more than the ceiling
+    # mlo.genres enforces (a hand-edited config file cannot widen the ask).
+    ask = min(GENRE_COUNT_MAX, count) - 1
+    if ask < 1:
+        return None
     cfg = _config()
     if not ai_client.ai_configured(cfg):
         return None
     try:
-        prompt = _prompt(artist, album, title, track_path, candidates, count,
+        prompt = _prompt(artist, album, title, track_path, candidates, ask,
                          extra, bool(cfg.get("ai_genre_research", True)))
     except Exception:
         return None
-    # The answer REPLACES the source list (see integrations._genre_ai_rank), so
-    # it has to satisfy the same contract the sources did: `mb_genre_count`
-    # genres, in order. A shorter answer used to be accepted (>= 2) and then
-    # applied, which stored two genres on a track the grader requires three on
-    # — a permanent failure, made permanent by the answer being disk-cached on
-    # this prompt. So: fill every slot, or keep what the sources found.
-    want = max(1, int(count or DEFAULT_GENRE_COUNT))
     path = _cache_file(prompt)
-    hit = _cached(path, want)
+    # Any non-empty cached answer satisfies the question as asked (the ask
+    # bounds the list, it does not require it to be full).
+    hit = _cached(path, 1)
     if hit is not None:
         return hit
     cfg = dict(cfg)
@@ -239,19 +285,10 @@ def infer_genres(*, artist, album, title="", track_path="", candidates=None,
         text = ai_client.ai_chat(cfg, SYSTEM, prompt)
     except Exception:
         return None
-    names = normalize_genres(_parse(text), count)
-    # The model has to have done the job it was asked to do: a single name (or
-    # prose that happened to look like one) is a refusal, not a ranking, and is
-    # rejected the way the pre-inference chain rejected an empty answer. Two
-    # slots of three IS a ranking — the model is right about the names it gave
-    # and the rest of the hierarchy is filled from the fetched candidates,
-    # because the stored list has to satisfy `mb_genre_count` or the grader
-    # fails a track for a reason the user cannot fix (the answer is cached).
-    if len(names) < min(2, want):
-        return None
-    if len(names) < want:
-        names = normalize_genres(list(names) + list(candidates or []), count)
-    if len(names) < want:
+    names = _specifics(_parse(text), candidates, ask)
+    if not names:
+        # Nothing usable: a refusal, prose, a family-only answer, or names the
+        # model invented. The sources' own list stays as it was.
         return None
     _store(path, names)
     return names
