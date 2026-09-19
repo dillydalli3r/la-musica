@@ -74,8 +74,14 @@ installed first.
 ## Mobile installs: what CI gives you
 
 - **Android** — CI builds a **debug** APK (`--apk --debug`), which is signed
-  with the SDK's debug keystore and therefore installs on any device that
-  allows apps from outside the store. That is a deliberate choice: a release
+  with the SDK's debug keystore
+  and therefore installs on any device that allows apps from outside the
+  store. It is a *universal* build — every ABI tauri's generated project lists
+  (arm64, armv7, x86_64, i686) — which is why the file is large (hundreds of
+  MB); build one ABI by trimming `abiFilters` in
+  `src-tauri/gen/android/app/build.gradle.kts` (or turn on Gradle's own ABI
+  splits), and a release (non-debug) build loses the debug symbols on top of
+  that. That is a deliberate choice: a release
   APK is only signed when `src-tauri/gen/android/keystore.properties` exists
   (a keystore generated locally, never committed), so a release build in CI
   would be an unsigned APK no phone accepts. To publish a signed release

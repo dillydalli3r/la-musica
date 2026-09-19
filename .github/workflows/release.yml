@@ -174,8 +174,18 @@ jobs:
         with:
           name: la musica ${{ github.ref_name }}
           generate_release_notes: true
+          # Installers only, by extension: the bundles' own trees carry
+          # internals (Info.plist, icon.icns, the bare mlo-desktop binary) and
+          # a release that lists those beside the installers reads as clutter
+          # and invites the wrong download.
           files: |
             la-musica-*-windows-x64.zip
-            clients/**
+            clients/**/*.msi
+            clients/**/*.exe
+            clients/**/*.dmg
+            clients/**/*.deb
+            clients/**/*.AppImage
+            clients/**/*.apk
+            clients/**/*.ipa
           draft: false
           prerelease: false
