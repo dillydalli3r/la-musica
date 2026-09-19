@@ -79,7 +79,12 @@ jobs:
             ran=$((ran + 1))
             echo "::group::$suite"
             code=0
-            python "$suite" || code=$?
+            # Every suite gets a hard ceiling. Several of them drive thread
+            # pools and stub servers, and a wedge there used to sit on the job
+            # until GitHub's own six-hour limit — which reads, from the
+            # outside, as "CI is slow" rather than "one suite hung". Five
+            # minutes is ~50x the slowest suite's local time.
+            timeout 300 python "$suite" || code=$?
             if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then
               # One retry, then the verdict stands. A handful of these suites
               # exercise thread pools, patched module identities and
@@ -91,11 +96,14 @@ jobs:
               # the only case that marks the shard red.
               echo "::warning file=$suite::$suite exited $code — retrying once"
               code=0
-              python "$suite" || code=$?
+              timeout 300 python "$suite" || code=$?
             fi
             echo "::endgroup::"
             if [ "$code" -eq 2 ]; then
               echo "SKIP: $suite (local toolchain not available)"
+            elif [ "$code" -eq 124 ]; then
+              echo "::error file=$suite::$suite hit the 300 s ceiling (hung)"
+              fail=1
             elif [ "$code" -ne 0 ]; then
               echo "::error file=$suite::$suite exited $code (twice)"
               fail=1
