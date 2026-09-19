@@ -17,6 +17,7 @@ import { auditFails } from "../lib/status";
 import { isVideoFile } from "../lib/fmt";
 import BulkTagsDialog from "../components/BulkTagsDialog";
 import Modal from "../components/Modal";
+import MoreLikeThis from "../components/MoreLikeThis";
 import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
 import TagActionsMenu from "../components/TagActionsMenu";
@@ -627,7 +628,7 @@ export default function AlbumPage() {
                 {issueEntries.length > 0 && (
                   <div>
                     <button
-                      className="inline-flex items-center gap-1.5 text-xs text-red-400/80 hover:text-red-300"
+                      className="tap inline-flex items-center gap-1.5 text-xs text-red-400/80 hover:text-red-300"
                       onClick={() => setIssuesOpen(!issuesOpen)}
                     >
                       <CircleAlert className="h-3.5 w-3.5" />
@@ -1292,6 +1293,9 @@ export default function AlbumPage() {
           }}
         />
       )}
+
+      {/* Records the local scorer ranks closest to this one. */}
+      <MoreLikeThis kind="album" id={decoded} />
       </div>
 
     </>

@@ -40,12 +40,15 @@ export default function FavoritesPage() {
           // Four tabs do not fit beside the title at 390 px: they wrap, and
           // the width cap (viewport-relative — the header's actions box is
           // sized by its content, so `max-w-full` cannot bound it) keeps the
-          // box inside the phone. min-h-[2rem] keeps each tab a 32 px tap target.
+          // box inside the phone. The tab height is NOT forced here: the
+          // buttons' own `.tap` sets the phone floor (44px) and would lose to
+          // a `[&>button]:min-h-…` utility on this wrapper, which is more
+          // specific than the class.
           <Segmented
             value={kind}
             onChange={(k) => navigate(`/favorites/${k}`)}
             options={TABS.map((t) => ({ id: t.id, label: t.label, icon: t.icon }))}
-            className="max-w-[calc(100vw-9rem)] flex-wrap justify-end [&>button]:min-h-[2rem]"
+            className="max-w-[calc(100vw-9rem)] flex-wrap justify-end"
           />
         }
       />

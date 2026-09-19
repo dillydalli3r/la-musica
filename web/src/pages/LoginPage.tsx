@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { KeyRound, Loader2, Lock, Server, ShieldCheck } from "lucide-react";
-import { api, setServerUrl, setToken, serverUrl, IN_MOBILE_SHELL, IN_TAURI } from "../api";
+import { api, normalizeServerUrl, setServerUrl, setToken, serverUrl, IN_MOBILE_SHELL, IN_TAURI } from "../api";
 import { toast } from "../store";
 import { useI18n } from "../lib/i18n";
 
@@ -61,7 +61,7 @@ export default function LoginPage({ onSignedIn }: { onSignedIn: () => void }) {
     try {
       const session = needsSetup
         ? await api.authSetup(password, confirm, username)
-        : await api.authLogin(password);
+        : await api.authLogin(password, username.trim() || undefined);
       setToken(session.token);
       setPassword("");
       setConfirm("");
@@ -77,14 +77,16 @@ export default function LoginPage({ onSignedIn }: { onSignedIn: () => void }) {
   };
 
   const applyAddress = () => {
-    setServerUrl(address);
+    const next = normalizeServerUrl(address);
+    setAddress(next); // what was typed, as it will be saved (`example.com:8000` → `http://example.com:8000`)
+    setServerUrl(next);
     setError("");
     status.refetch();
   };
 
   return (
-    <div className="min-h-dvh bg-bg text-zinc-100 flex items-center justify-center p-6">
-      <div className="w-full max-w-md">
+    <div className="safe-shell min-h-dvh bg-bg text-zinc-100 flex items-center justify-center">
+      <div className="w-full max-w-md p-6">
         <div className="flex items-center gap-3 mb-6">
           <div className="h-11 w-11 rounded-xl bg-accent/15 border border-accent/30 flex items-center justify-center">
             {needsSetup ? (
@@ -122,6 +124,11 @@ export default function LoginPage({ onSignedIn }: { onSignedIn: () => void }) {
                   {t("auth.use_address")}
                 </button>
               </div>
+              {normalizeServerUrl(address) && normalizeServerUrl(address) !== address.trim() && (
+                <span className="text-[11px] text-zinc-500 font-mono block mt-1">
+                  → {normalizeServerUrl(address)}
+                </span>
+              )}
               <span className="text-[11px] text-zinc-600 block mt-1">
                 {t("auth.server_address_help")}
               </span>
@@ -137,18 +144,22 @@ export default function LoginPage({ onSignedIn }: { onSignedIn: () => void }) {
           {needsSetup && (
             <p className="text-[11px] text-zinc-500 leading-relaxed">{t("auth.setup_hint")}</p>
           )}
-          {needsSetup && (
-            <label className="block">
-              <span className="text-xs text-zinc-400 mb-1.5 block">{t("auth.name_optional")}</span>
-              <input
-                className="input text-sm"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                placeholder={t("auth.name_placeholder")}
-                autoComplete="username"
-              />
-            </label>
-          )}
+          {/* Asked in both situations: claiming the server names the user, and
+              signing in needs the name to pick between users when a server has
+              more than one. It is prefilled from `/api/auth/status`, and left
+              empty the server answers with the only user it has. */}
+          <label className="block">
+            <span className="text-xs text-zinc-400 mb-1.5 block">
+              {t(needsSetup ? "auth.name_optional" : "auth.username")}
+            </span>
+            <input
+              className="input text-sm"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              placeholder={t("auth.name_placeholder")}
+              autoComplete="username"
+            />
+          </label>
 
           <label className="block">
             <span className="text-xs text-zinc-400 flex items-center gap-1.5 mb-1.5">

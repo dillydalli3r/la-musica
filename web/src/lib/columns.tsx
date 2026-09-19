@@ -247,12 +247,12 @@ export function ColumnsMenu({
       <button
         className={
           iconOnly
-            ? `p-1.5 rounded-lg border transition-colors min-h-8 min-w-8 md:min-h-0 md:min-w-0 ${
+            ? `p-1.5 rounded-lg border transition-colors tap min-w-11 md:min-w-0 ${
                 open
                   ? "text-accent border-accent/50 bg-raise"
                   : "border-border bg-panel/60 text-zinc-500 hover:text-white hover:bg-raise"
               }`
-            : `btn-ghost !py-1.5 text-xs min-h-8 md:min-h-0 ${open ? "!text-white !bg-raise" : ""}`
+            : `btn-ghost !py-1.5 text-xs tap ${open ? "!text-white !bg-raise" : ""}`
         }
         onClick={() => setOpen(!open)}
         title="Columns"
@@ -267,7 +267,7 @@ export function ColumnsMenu({
           <div className={`absolute right-0 top-full mt-1 z-50 bg-card border border-border rounded-lg p-2 ${onAddCustom ? "w-56" : "w-48"} shadow-2xl`}>
             <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2 pt-1 pb-1.5">{title}</div>
             {cols.map((c) => (
-              <div key={c.id} className="flex items-center gap-2 px-2 py-1.5 text-xs hover:bg-panel rounded">
+              <div key={c.id} className="flex items-center gap-2 px-2 py-1.5 text-xs hover:bg-panel rounded tap">
                 <label className="flex items-center gap-2 cursor-pointer min-w-0 flex-1">
                   <input type="checkbox" checked={visible.includes(c.id)} onChange={() => onToggle(c.id)} className="" />
                   <span className="truncate" title={c.tag ? `Tag: ${c.tag}` : undefined}>{c.label || "Cover"}</span>
@@ -290,7 +290,7 @@ export function ColumnsMenu({
                 <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2 pt-1 pb-1.5">Add tag column</div>
                 <div className="flex gap-1 px-2">
                   <input
-                    className="input !py-1 !px-2 text-xs min-w-0 flex-1"
+                    className="input !py-1 !px-2 text-xs min-w-0 flex-1 tap"
                     placeholder="TAG"
                     title="Tag name — e.g. MOOD, COMPOSER, CATALOGNUMBER"
                     value={tag}
@@ -298,7 +298,7 @@ export function ColumnsMenu({
                     onKeyDown={(e) => e.key === "Enter" && add()}
                   />
                   <input
-                    className="input !py-1 !px-2 text-xs min-w-0 flex-1"
+                    className="input !py-1 !px-2 text-xs min-w-0 flex-1 tap"
                     placeholder="Label"
                     title="Optional header label — the tag name is used when empty"
                     value={label}
@@ -306,7 +306,7 @@ export function ColumnsMenu({
                     onKeyDown={(e) => e.key === "Enter" && add()}
                   />
                 </div>
-                <button className="btn-ghost w-full !py-1 text-xs mt-1" onClick={add} disabled={!tag.trim()}>
+                <button className="btn-ghost w-full !py-1 text-xs mt-1 tap" onClick={add} disabled={!tag.trim()}>
                   Add column
                 </button>
               </>
@@ -316,7 +316,7 @@ export function ColumnsMenu({
                 <div className="border-t border-border my-1.5" />
                 <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2 pt-1 pb-1.5">{extraTitle}</div>
                 {extraCols.map((c) => (
-                  <div key={c.id} className="flex items-center gap-2 px-2 py-1.5 text-xs hover:bg-panel rounded">
+                  <div key={c.id} className="flex items-center gap-2 px-2 py-1.5 text-xs hover:bg-panel rounded tap">
                     <label className="flex items-center gap-2 cursor-pointer min-w-0 flex-1">
                       <input type="checkbox" checked={extraVisible.includes(c.id)} onChange={() => onExtraToggle(c.id)} className="" />
                       <span className="truncate" title={c.tag ? `Tag: ${c.tag}` : undefined}>{c.label || "Cover"}</span>

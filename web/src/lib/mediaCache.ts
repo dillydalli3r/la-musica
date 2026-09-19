@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import { isVideoFile } from "./fmt";
+import type { Library, Track } from "../types";
 
 /**
  * Offline media cache: "Download" in the app caches a track's audio into
@@ -10,7 +11,11 @@ import { isVideoFile } from "./fmt";
  * file to disk is Export's job, not Download's.
  *
  * The cache key is the exact URL the player element requests, so the
- * service worker's cache.match hits on ordinary playback.
+ * service worker's cache.match hits on ordinary playback. That URL is built
+ * from a file PATH, though, and organizing the library is what this app does
+ * — a moved file leaves its download at a key nothing asks for any more.
+ * Beside the bytes lives an identity index (below): MusicBrainz recording id
+ * → where its bytes actually sit, so a rename cannot orphan a download.
  */
 const CACHE_NAME = "mlo-media-v2";
 
@@ -18,6 +23,52 @@ const CACHE_NAME = "mlo-media-v2";
  *  they wrap: created once per key (a player that asks twice gets the same
  *  URL) and revoked the moment the bytes are removed. */
 const blobUrls = new Map<string, string>();
+
+/** Where the identity index lives: one JSON entry in the same Cache Storage
+ *  as the media, so "Clear all" evicts both together and the two can never
+ *  drift apart. */
+const INDEX_KEY = "/mlo-media-index.json";
+
+/** One indexed track: the URL its bytes are stored under, plus the library
+ *  path they were downloaded FROM. The identity is the index's own key and
+ *  what matching uses — the recorded path only feeds artwork/payload
+ *  bookkeeping, which is written from the same path at download time. */
+type IndexRow = { url: string; path: string };
+
+/** A cached track as the rest of the app sees it. */
+export type CachedTrack = {
+  /** The identity it is filed under: `mb:<uuid>`, or `path:<path>` for a file
+   *  with no MusicBrainz recording id. */
+  key: string;
+  /** Where the bytes sit — the stream URL the player requests. */
+  url: string;
+  /** The path they were downloaded from (stale once the file is moved). */
+  path: string;
+  /** The recording id behind `key`, when there is one. */
+  mbid: string | null;
+};
+
+/** The identity a track is cached under: its MusicBrainz recording id when it
+ *  has one, the path otherwise — a file with no MBID carries nothing that
+ *  would survive a move. */
+export function trackIdentity(path: string, mbid?: string | null): string {
+  const id = (mbid ?? "").trim().toLowerCase();
+  return id ? `mb:${id}` : `path:${path}`;
+}
+
+/** One track to look up or remove: its path, plus the MusicBrainz recording id
+ *  it is filed under when the caller has one. The id is what survives a move —
+ *  a path alone cannot name a file that was renamed or reorganized.
+ *
+ *  A single parameter on purpose: callers hand these straight to `Array.map`
+ *  with only paths in hand (`paths.map(uncacheTrack)`), and a second
+ *  positional slot would swallow the array index as if it were an id. */
+export type CacheTarget = string | { path: string; mbid?: string | null };
+
+function targetOf(target: CacheTarget): { path: string; mbid: string | null } {
+  if (typeof target === "string") return { path: target, mbid: null };
+  return { path: target.path, mbid: (target.mbid ?? "").trim().toLowerCase() || null };
+}
 
 function absolute(base: string): string {
   // api.ts prefixes an absolute origin inside Tauri; resolve to absolute
@@ -71,6 +122,77 @@ function entityUrls(trackPath: string): string[] {
 
 async function cache(): Promise<Cache> {
   return caches.open(CACHE_NAME);
+}
+
+/** The identity index, out of Cache Storage as a plain object (absent or
+ *  unreadable reads as empty: every caller falls back to path matching). */
+async function readIndex(c: Cache): Promise<Record<string, IndexRow>> {
+  try {
+    const hit = await c.match(absolute(INDEX_KEY));
+    if (!hit) return {};
+    const raw: unknown = await hit.json();
+    return raw && typeof raw === "object" ? (raw as Record<string, IndexRow>) : {};
+  } catch {
+    return {}; // absent, or written by a version that shaped it differently
+  }
+}
+
+/** Best-effort on purpose: the bytes are cached whether or not this lands, and
+ *  a lost row costs a moved track its mark — never the download itself. */
+async function writeIndex(c: Cache, index: Record<string, IndexRow>): Promise<void> {
+  try {
+    await c.put(
+      absolute(INDEX_KEY),
+      new Response(JSON.stringify(index), { headers: { "Content-Type": "application/json" } })
+    );
+  } catch {
+    /* quota, or Cache Storage unavailable (insecure context) */
+  }
+}
+
+/** The URL a track's bytes are actually filed at, when that is no longer the
+ *  path in hand: the index row written at download time. */
+async function indexedUrl(c: Cache, path: string, mbid: string): Promise<string | null> {
+  // The identity key holds the id alone, so `path` here is irrelevant to the
+  // lookup — which is exactly how a moved file still resolves.
+  const index = await readIndex(c);
+  return index[trackIdentity(path, mbid)]?.url ?? null;
+}
+
+/** A track's MusicBrainz recording id, read back out of the album payload the
+ *  download already warmed for offline use (the tag the library payload
+ *  carries as `MUSICBRAINZ_TRACKID`). Reaching for the library payload here
+ *  instead would cost a whole-library scan per download. */
+async function trackMbid(c: Cache, path: string): Promise<string | null> {
+  try {
+    const hit = await c.match(absolute(`/api/album?path=${encodeURIComponent(parentDir(path))}`));
+    if (!hit) return null;
+    const album = (await hit.json()) as { tracks?: Track[] };
+    const tag = (album.tracks ?? []).find((t) => t.path === path)?.tags?.MUSICBRAINZ_TRACKID;
+    return (tag ?? "").trim().toLowerCase() || null;
+  } catch {
+    return null; // payload missing or not JSON — the path key stands
+  }
+}
+
+/** A `blob:` URL for one stored response: created once per cache key, so a
+ *  player that asks twice gets the same URL instead of leaking another blob. */
+async function blobFor(key: string, resp: Response): Promise<string> {
+  const existing = blobUrls.get(key);
+  if (existing) return existing;
+  const blob = URL.createObjectURL(await resp.blob());
+  blobUrls.set(key, blob);
+  return blob;
+}
+
+/** Drop the `blob:` URL wrapping a cache key, if one was ever handed out — a
+ *  live blob keeps its bytes alive after the entry is gone. */
+function revoke(key: string): void {
+  const blob = blobUrls.get(key);
+  if (blob) {
+    URL.revokeObjectURL(blob);
+    blobUrls.delete(key);
+  }
 }
 
 /** Warm one URL into the cache, best-effort: a missing cover or artist image
@@ -137,23 +259,65 @@ export async function cacheTrack(path: string): Promise<void> {
   // offline playback is not left with a placeholder where the artwork should
   // be, and the album page still has its description.
   await Promise.allSettled([...artworkUrls(path), ...entityUrls(path)].map((u) => warm(c, u)));
+  // File the bytes under the track's identity too — the album payload is in
+  // the cache by now (warm() above), and its row is what keeps this download
+  // attached to the track when the organizer moves the file. A download made
+  // before this index existed keeps working off its path key and gains a row
+  // the next time it is cached.
+  const mbid = await trackMbid(c, path);
+  if (!mbid) return;
+  const key = trackIdentity(path, mbid);
+  const index = await readIndex(c);
+  const prev = index[key];
+  if (prev && prev.url !== url) {
+    // The same recording, downloaded earlier at a path it has since been
+    // moved off. These bytes just superseded those: drop them instead of
+    // leaving a second full-length copy nothing will ever ask for.
+    await c.delete(prev.url);
+    revoke(prev.url);
+  }
+  index[key] = { url, path };
+  await writeIndex(c, index);
 }
 
-export async function uncacheTrack(path: string): Promise<void> {
+export async function uncacheTrack(target: CacheTarget): Promise<void> {
+  const { path, mbid } = targetOf(target);
   const c = await cache();
-  const urls = cacheUrls(path);
-  await Promise.all(urls.map((u) => c.delete(u)));
+  // The index row first: for a track that has been MOVED since it was
+  // downloaded, it is the only thing naming the bytes behind the mark — the
+  // path the caller holds resolves to nothing.
+  const index = await readIndex(c);
+  const key = mbid ? trackIdentity(path, mbid) : null;
+  let row = key ? index[key] : undefined;
+  if (key && row) delete index[key];
+  if (!row) {
+    // No id in hand (or no row for it): a row that remembers this path is the
+    // same download seen from the other side.
+    const found = Object.entries(index).find(([, r]) => r?.path === path);
+    if (found) {
+      row = found[1];
+      delete index[found[0]];
+    }
+  }
+  // Last row gone: drop the index entry itself rather than leave an empty
+  // document sitting in the cache (it would count as stored bytes forever).
+  if (row) {
+    if (Object.keys(index).length) await writeIndex(c, index);
+    else await c.delete(absolute(INDEX_KEY));
+  }
+
+  const urls = new Set(cacheUrls(path));
+  if (row) {
+    urls.add(row.url);
+    // Its artwork was warmed from the path it was downloaded at.
+    for (const u of artworkUrls(row.path)) urls.add(u);
+  }
+  await Promise.all([...urls].map((u) => c.delete(u)));
   // A live blob: URL keeps its bytes alive after the cache entry is gone, and
   // would keep feeding an element a track the user just removed. The album
   // cover and artist image downloaded alongside it go the same way: their
   // blobs (offlineArtworkUrl) are keyed as artworkUrls() warms them.
-  for (const u of [...urls, ...artworkUrls(path)]) {
-    const blob = blobUrls.get(u);
-    if (blob) {
-      URL.revokeObjectURL(blob);
-      blobUrls.delete(u);
-    }
-  }
+  for (const u of [...urls, ...artworkUrls(path)]) revoke(u);
   await pruneEntityPayloads();
 }
 
@@ -183,17 +347,23 @@ export async function pruneEntityPayloads(): Promise<void> {
   }
 }
 
-export async function isTrackCached(path: string): Promise<boolean> {
+export async function isTrackCached(target: CacheTarget): Promise<boolean> {
+  const { path, mbid } = targetOf(target);
   try {
     const c = await cache();
     const hits = await Promise.all(cacheUrls(path).map((u) => c.match(u)));
-    return hits.some(Boolean);
+    if (hits.some(Boolean)) return true;
+    // Nothing at the path: the file may have been moved since it was
+    // downloaded, and its bytes then only answer to the identity.
+    const idUrl = mbid ? await indexedUrl(c, path, mbid) : null;
+    return !!idUrl && !!(await c.match(idUrl));
   } catch {
     return false; // Cache Storage unavailable (insecure context)
   }
 }
 
-/** Cached-track cache keys (absolute stream URLs), for debugging/UX. */
+/** Cached-track cache keys, for debugging/UX: the streams, the artwork and
+ *  the payloads this module warms, plus the identity index itself. */
 export async function cachedUrls(): Promise<string[]> {
   try {
     const c = await cache();
@@ -203,28 +373,58 @@ export async function cachedUrls(): Promise<string[]> {
   }
 }
 
-/** Library-relative paths behind those keys — the cache key IS the stream URL,
- *  so the path has to be read back out of its query string. Artwork keys carry
- *  `album=`/`artist=` instead and are skipped; a video cached under both its
- *  direct and its transcoded URL collapses to one path.
+/** Every cached track: an indexed download as one row keyed by its recording
+ *  id, and everything the index does not know — an entry cached before the
+ *  index existed, or a file with no MBID — read straight off its path key.
+ *  Rows whose bytes are gone are skipped, so a stale index can never claim a
+ *  download that was removed.
  *
- *  The album/artist PAYLOAD keys (see entityUrls) carry `path=` too, and they
- *  are JSON for a whole folder rather than a track — they are excluded by
- *  endpoint, or the downloads page counts each downloaded album twice. */
-export async function cachedPaths(): Promise<string[]> {
-  const paths = new Set<string>();
-  for (const u of await cachedUrls()) {
-    try {
-      const url = new URL(u);
-      if (url.pathname === "/api/album" || url.pathname === "/api/artist"
-          || url.pathname === "/api/credits") continue;
-      const p = url.searchParams.get("path");
-      if (p) paths.add(p);
-    } catch {
-      /* not a URL this module wrote */
+ *  Artwork keys carry `album=`/`artist=` instead of `path=` and are skipped;
+ *  the album/artist PAYLOAD keys (see entityUrls) carry `path=` too but are
+ *  JSON for a whole folder rather than a track, and are excluded by endpoint
+ *  or the downloads page would count each downloaded album twice. A video
+ *  cached under both its direct and its transcoded URL collapses to one row. */
+export async function cachedTracks(): Promise<CachedTrack[]> {
+  try {
+    const c = await cache();
+    const keys = (await c.keys()).map((r) => r.url);
+    const stored = new Set(keys);
+    const index = await readIndex(c);
+    const out: CachedTrack[] = [];
+    const seen = new Set<string>();
+    const indexKey = absolute(INDEX_KEY);
+    for (const [key, row] of Object.entries(index)) {
+      if (!row || !stored.has(row.url)) continue;
+      seen.add(row.url);
+      seen.add(row.path);
+      out.push({ key, url: row.url, path: row.path, mbid: key.startsWith("mb:") ? key.slice(3) : null });
     }
+    for (const url of keys) {
+      if (url === indexKey || seen.has(url)) continue;
+      let parsed: URL;
+      try {
+        parsed = new URL(url);
+      } catch {
+        continue; // not a URL this module wrote
+      }
+      if (parsed.pathname !== "/api/stream" && parsed.pathname !== "/api/videos/stream") continue;
+      const path = parsed.searchParams.get("path");
+      if (!path || seen.has(path)) continue;
+      seen.add(path);
+      seen.add(url);
+      out.push({ key: trackIdentity(path, null), url, path, mbid: null });
+    }
+    return out;
+  } catch {
+    return []; // Cache Storage unavailable (insecure context)
   }
-  return [...paths];
+}
+
+/** Library-relative paths behind those tracks, for the byte/count readouts
+ *  and the artwork payload sweep. Artwork keys carry `album=`/`artist=`
+ *  instead and are skipped. */
+export async function cachedPaths(): Promise<string[]> {
+  return [...new Set((await cachedTracks()).map((t) => t.path))];
 }
 
 /** Total cached bytes (Content-Length sums), for a storage readout. */
@@ -259,21 +459,24 @@ export async function clearMediaCache(): Promise<void> {
  *  server is away — the bytes are in Cache Storage, but nothing hands them to
  *  an <audio>/<video> element. This is that hand-off: look the path up under
  *  the same keys `cacheUrls()` uses and turn the stored body into a URL the
- *  element can play. Created once per cache key — a second call returns the
- *  same URL instead of leaking another blob — and revoked on removal. */
-export async function offlineMediaUrl(path: string): Promise<string | null> {
+ *  element can play. Created once per cache key and revoked on removal.
+ *
+ *  Pass the track's MusicBrainz recording id (a CacheTarget) when it has one:
+ *  the file may have been moved since it was downloaded, and its bytes then
+ *  sit at the URL the index remembers rather than at this path's. */
+export async function offlineMediaUrl(target: CacheTarget): Promise<string | null> {
+  const { path, mbid } = targetOf(target);
   try {
     const c = await cache();
     for (const url of cacheUrls(path)) {
       const hit = await c.match(url);
-      if (!hit) continue;
-      const existing = blobUrls.get(url);
-      if (existing) return existing;
-      const blob = URL.createObjectURL(await hit.blob());
-      blobUrls.set(url, blob);
-      return blob;
+      if (hit) return await blobFor(url, hit);
     }
-    return null;
+    // Moved since it was downloaded: the bytes are still there, filed under
+    // the identity, at whatever URL they were fetched from.
+    const idUrl = mbid ? await indexedUrl(c, path, mbid) : null;
+    const hit = idUrl ? await c.match(idUrl) : null;
+    return hit && idUrl ? await blobFor(idUrl, hit) : null;
   } catch {
     return null; // Cache Storage unavailable (insecure context), or no entry
   }
@@ -307,12 +510,7 @@ export async function offlineArtworkUrl(url: string): Promise<string | null> {
     const c = await cache();
     for (const k of keys) {
       const hit = await c.match(k);
-      if (!hit) continue;
-      const existing = blobUrls.get(k);
-      if (existing) return existing;
-      const blob = URL.createObjectURL(await hit.blob());
-      blobUrls.set(k, blob);
-      return blob;
+      if (hit) return await blobFor(k, hit);
     }
     return null;
   } catch {
@@ -320,14 +518,46 @@ export async function offlineArtworkUrl(url: string): Promise<string | null> {
   }
 }
 
-/** The query key for the cached-path snapshot. One key, so CachedTracksView,
+/** The query key for the cached-track snapshot. One key, so CachedTracksView,
  *  the download controls and every downloaded mark on a title read the SAME
- *  list — a download anywhere shows up everywhere on the next invalidation. */
+ *  list — a download anywhere shows up everywhere on the next invalidation.
+ *  (The stored value is `cachedTracks()`, identity rows included.) */
 export const CACHED_PATHS_KEY = ["cachedPaths"] as const;
 
-/** The downloaded paths as a set. Each row mounts its own observer, but the
- *  shared key dedupes them into one Cache Storage scan. */
+/** Paths of cached tracks, resolved against where the library keeps them NOW.
+ *
+ *  Each cached track contributes the path it was downloaded from plus, when it
+ *  was filed under a MusicBrainz recording id, whichever path the library
+ *  reports for that recording today. That second path is the whole point: the
+ *  organizer is free to move a file, and the Mark on its title (and every
+ *  download control reading this set) still finds it cached.
+ *
+ *  The library is only read from the query cache, never fetched from here —
+ *  a title mark must not trigger a whole-library scan on a page that was
+ *  happy with its album payload. */
 export function useCachedPaths(): Set<string> {
-  const { data } = useQuery({ queryKey: CACHED_PATHS_KEY, queryFn: cachedPaths });
-  return useMemo(() => new Set(data ?? []), [data]);
+  const { data: tracks } = useQuery({ queryKey: CACHED_PATHS_KEY, queryFn: cachedTracks });
+  const { data: lib } = useQuery<Library>({
+    queryKey: ["library"],
+    queryFn: api.library,
+    enabled: false,
+  });
+  return useMemo(() => {
+    const set = new Set((tracks ?? []).map((t) => t.path));
+    if (!lib || !tracks?.some((t) => t.mbid)) return set;
+    const nowAt = new Map<string, string>();
+    for (const a of lib.artists ?? []) {
+      for (const al of a.albums ?? []) {
+        for (const t of al.tracks ?? []) {
+          const key = trackIdentity(t.path, t.tags.MUSICBRAINZ_TRACKID);
+          if (key.startsWith("mb:")) nowAt.set(key, t.path);
+        }
+      }
+    }
+    for (const t of tracks ?? []) {
+      const now = t.mbid ? nowAt.get(t.key) : undefined;
+      if (now) set.add(now);
+    }
+    return set;
+  }, [tracks, lib]);
 }

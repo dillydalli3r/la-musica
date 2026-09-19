@@ -1,4 +1,4 @@
-import { IN_TAURI } from "../api";
+import { HOST_DEVICE_URL, IN_TAURI, normalizeServerUrl, serverUrl } from "../api";
 import { t, type MessageKey } from "./i18n";
 
 /** Where this client records that its own setup wizard has been through.
@@ -32,6 +32,27 @@ function writeStore(key: string, value: string | null) {
  *  Docker are served BY their backend and never need this wizard. */
 export function isClientShell(): boolean {
   return IN_TAURI;
+}
+
+/** The address "Host on this device" means for THIS client.
+ *
+ *  In a shell that is the backend the shell serves itself — on the desktop the
+ *  Tauri shell spawns it (desktop/src-tauri/src/lib.rs), never the origin,
+ *  because `tauri://localhost` is not a backend. On the web app it is the
+ *  origin that served the page, which is exactly what the empty base already
+ *  means to the API module.
+ *
+ *  A phone is the awkward case: it bundles no CPython, so nothing answers
+ *  unless an on-device Python (a-Shell, iSH, Termux) runs the backend — which
+ *  is why the wizard probes this address and says so plainly when nothing
+ *  does, instead of saving it and leaving every page failing to load. */
+export function hostOnDeviceUrl(): string {
+  return isClientShell() ? HOST_DEVICE_URL : "";
+}
+
+/** True while this client already points at the backend on this device. */
+export function isHostingOnThisDevice(): boolean {
+  return normalizeServerUrl(serverUrl()) === normalizeServerUrl(hostOnDeviceUrl());
 }
 
 export function isClientSetupDone(): boolean {

@@ -111,7 +111,7 @@ export default function Modal({
             </div>
             {headerExtra}
             <button
-              className="p-1.5 rounded-lg hover:bg-raise text-zinc-400 hover:text-white shrink-0"
+              className="p-1.5 rounded-lg hover:bg-raise text-zinc-400 hover:text-white shrink-0 tap-hit"
               onClick={onClose}
               title="Close (Esc)"
               aria-label="Close"

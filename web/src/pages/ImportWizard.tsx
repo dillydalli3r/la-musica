@@ -22,6 +22,7 @@ import type {
 } from "../types";
 import { SCRIPTS, DEFAULT_RUN_ALL, SCRIPT_LABEL, isScriptId } from "../lib/scripts";
 import { fmtCounts, fmtSteps } from "../lib/fmt";
+import { GENRE_COUNT_MAX, GENRE_FAMILIES, familyOf, splitGenres } from "../lib/genres";
 
 const STEPS = ["Select & separate", "Links", "Match", "Covers", "Genres", "Lyrics", "Advisory", "Finish"];
 
@@ -251,10 +252,15 @@ export default function ImportWizard() {
   const [release, setRelease] = useState<MBRelease | null>(null);
   const [releaseId, setReleaseId] = useState("");
   const [suggestions, setSuggestions] = useState<MatchSuggestion[]>([]);
-  const [genres, setGenres] = useState<Record<string, string>>({});
+  // Per-track genre LIST (specific genres first, the derived family last) —
+  // a track's GENRE tag is repeated fields, so a joined string here would
+  // collapse three genres into one tag on save.
+  const [genres, setGenres] = useState<Record<string, string[]>>({});
   const [discGenres, setDiscGenres] = useState<Record<number, string>>({});
   const [genreAddValues, setGenreAddValues] = useState<Record<string, string>>({});
-  const [genreLimit, setGenreLimit] = useState<number | null>(null); // null = all
+  /** Per-run import cap: which `limit` the next source run passes. Never
+   *  above `mb_genre_count` — the server's own cap is what gets written. */
+  const [genreLimit, setGenreLimit] = useState<number | null>(null); // null = the configured cap
   /** What the last per-source genre import answered: how many tracks that
    *  source updated, the names it wrote, and its own note when it stayed
    *  silent (a blocked RateYourMusic says so here). */
@@ -1097,7 +1103,7 @@ export default function ImportWizard() {
       if (albumPath && stepTracks.length) {
         try {
           const rows = await rescanTracks();
-          const onDisk = new Map(rows.map((r) => [r.path, r.tags?.GENRE ?? ""]));
+          const onDisk = new Map(rows.map((r) => [r.path, splitGenres(r.tags?.GENRE)]));
           setGenres((g) => {
             const next = { ...g };
             for (const t of stepTracks) if (onDisk.has(t.path)) next[t.path] = onDisk.get(t.path)!;
@@ -1562,6 +1568,36 @@ export default function ImportWizard() {
   };
 
   // ---------------- Step 4: genres ----------------
+  // The library's own genres, for the step's autocomplete: the same cache
+  // entry the genres page reads. Only asked for once the step is reached —
+  // it costs a library scan server-side, which a wizard that never gets to
+  // this step should not pay.
+  const { data: genreFacets } = useQuery({
+    queryKey: ["genreFacets"],
+    queryFn: api.genresFacets,
+    enabled: step === 4,
+  });
+
+  // `mb_genre_count` (Settings → Import) is the app's genre contract and the
+  // server's own cap. The per-run control may LOWER it for one import, never
+  // raise it: the select used to offer 4, 5 and 10, and the server trimmed
+  // every one of them back to this number on the way to the file.
+  const genreCap = Math.max(1, Math.min(GENRE_COUNT_MAX, Number(cfg?.mb_genre_count) || 2));
+  const genreLimitValue = Math.min(genreLimit ?? genreCap, genreCap);
+
+  /** The names the editor offers while typing, lowercase key -> the spelling
+   *  to write. The library's own canonical MusicBrainz names come first (they
+   *  are what the tagger writes), then the bundled families. Names no library
+   *  has ever used are missing on purpose: the full MusicBrainz vocabulary is
+   *  2202 entries, and a name it does not know is kept verbatim anyway (the
+   *  grader flags it) rather than dropped. */
+  const genreSuggestions = useMemo(() => {
+    const byName = new Map<string, string>();
+    const names = [...Object.keys(GENRE_FAMILIES), ...(genreFacets?.genres ?? []).map((g) => g.name)];
+    for (const n of names) if (!byName.has(n.toLowerCase())) byName.set(n.toLowerCase(), n);
+    return byName;
+  }, [genreFacets]);
+
   // When the Genres step opens, prefill untouched tracks with their existing
   // GENRE tags so they are visible and editable right away.
   useEffect(() => {
@@ -1571,7 +1607,7 @@ export default function ImportWizard() {
       const next = { ...g };
       for (const t of stepTracks) {
         if (next[t.path] === undefined && t.tags?.GENRE) {
-          next[t.path] = t.tags.GENRE;
+          next[t.path] = splitGenres(t.tags.GENRE);
           changed = true;
         }
       }
@@ -1580,8 +1616,7 @@ export default function ImportWizard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, stepTracks]);
 
-  const genreList = (path: string): string[] =>
-    (genres[path] ?? "").split(";").map((g) => g.trim()).filter(Boolean);
+  const genreList = (path: string): string[] => genres[path] ?? [];
 
   /** Every genre currently on ANY track, with how many tracks carry it, most
    *  common first — the album-wide cleanup control renders one chip per entry. */
@@ -1595,13 +1630,26 @@ export default function ImportWizard() {
   }, [stepTracks, genres]);
 
   const setGenreList = (path: string, list: string[]) =>
-    setGenres((g) => ({ ...g, [path]: list.join("; ") }));
+    setGenres((g) => ({ ...g, [path]: list }));
 
   const addGenre = (path: string, value: string) => {
-    const v = value.trim();
-    if (!v) return;
+    const typed = value.trim();
+    if (!typed) return;
+    // A name the vocabulary knows is written the way MusicBrainz spells it, so
+    // a hand-typed genre lands identical to an imported one.
+    const v = genreSuggestions.get(typed.toLowerCase()) ?? typed;
     const list = genreList(path);
-    if (!list.includes(v)) setGenreList(path, [...list, v]);
+    if (list.some((g) => g.toLowerCase() === v.toLowerCase())) return;
+    if (list.length >= genreCap) {
+      toast(`Genres per track is ${genreCap} — raise it in Settings → Import to add more`);
+      return;
+    }
+    // A list that already ends in its family keeps that slot: appending would
+    // make the family look like one more specific genre (the chip's own
+    // `familyOf` reads the LAST element), while the server reorders on write.
+    // Inserting in front of it is what the saved file will look like.
+    const family = familyOf(list);
+    setGenreList(path, family ? [...list.slice(0, -1), v, family] : [...list, v]);
   };
 
   const removeGenre = (path: string, genre: string) =>
@@ -1612,7 +1660,7 @@ export default function ImportWizard() {
     if (!paths.length) return;
     setGenres((g) => {
       const next = { ...g };
-      for (const p of paths) next[p] = value;
+      for (const p of paths) next[p] = splitGenres(value).slice(0, genreCap);
       return next;
     });
     setDiscGenres((m) => ({ ...m, [disc]: "" }));
@@ -1623,8 +1671,8 @@ export default function ImportWizard() {
     setGenres((g) => {
       const next = { ...g };
       for (const t of stepTracks) {
-        const list = (next[t.path] ?? "").split(";").map((x) => x.trim()).filter(Boolean);
-        if (list.includes(genre)) next[t.path] = list.filter((x) => x !== genre).join("; ");
+        const list = next[t.path] ?? [];
+        if (list.includes(genre)) next[t.path] = list.filter((x) => x !== genre);
       }
       return next;
     });
@@ -1633,7 +1681,7 @@ export default function ImportWizard() {
   const removeAllGenres = () =>
     setGenres((g) => {
       const next = { ...g };
-      for (const t of stepTracks) next[t.path] = "";
+      for (const t of stepTracks) next[t.path] = [];
       return next;
     });
 
@@ -1641,8 +1689,12 @@ export default function ImportWizard() {
     setBusy(true);
     setAct({ label: `Saving genres for ${Object.keys(genres).length} track(s)…` });
     try {
-      const writes: Record<string, Record<string, string | null>> = {};
-      for (const [p, g] of Object.entries(genres)) writes[p] = { GENRE: g || null };
+      // GENRE goes as a LIST, so the server writes one field per name. Sent as
+      // the joined string it used to be, every genre list became ONE tag
+      // literally named "shoegaze; rock". The family is not sent: the server
+      // derives it (mlo.genres.normalize_genres) when it writes.
+      const writes: Record<string, Record<string, string | string[] | null>> = {};
+      for (const [p, list] of Object.entries(genres)) writes[p] = { GENRE: list.length ? list : null };
       await api.mbAssign(writes, staged);
       toast("Genres saved");
       setStep(5);
@@ -2140,7 +2192,7 @@ const finish = async () => {
   })();
 
   return (
-    <div className="p-6 max-w-6xl mx-auto space-y-5">
+    <div className="p-6 space-y-5 mx-auto max-w-6xl">
       <PageHeader
         icon={UploadCloud}
         title="Import"
@@ -2148,7 +2200,7 @@ const finish = async () => {
           uploaded.length > 1 || albumPath ? (
             <>
               {uploaded.length > 1 && (
-                <select className="input !w-auto text-sm min-h-8 sm:min-h-0" value={albumIndex} onChange={(e) => switchAlbum(Number(e.target.value))}>
+                <select className="input !w-auto text-sm tap" value={albumIndex} onChange={(e) => switchAlbum(Number(e.target.value))}>
                   {uploaded.map((a, i) => (
                     <option key={a.path} value={i}>{a.name}</option>
                   ))}
@@ -2172,7 +2224,7 @@ const finish = async () => {
           <div key={s} className="flex items-center gap-1.5 shrink-0">
             <button
               onClick={() => i < step && setStep(i)}
-              className={`flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs min-h-8 sm:min-h-0 transition-colors ${
+              className={`flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs tap transition-colors ${
                 i === step
                   ? "bg-accent on-accent"
                   : i < step
@@ -2349,18 +2401,18 @@ const finish = async () => {
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
-            <button className="btn-ghost min-h-8 sm:min-h-0" onClick={pickFolderNative}>
+            <button className="btn-ghost tap" onClick={pickFolderNative}>
               <FolderOpen className="h-4 w-4" /> Choose folder
             </button>
             <input
-              className="input max-w-xs min-h-8 sm:min-h-0"
+              className="input max-w-xs tap"
               placeholder="Default album name"
               value={albumName}
               onChange={(e) => setAlbumName(e.target.value)}
             />
             <label className="flex items-center gap-1.5 text-xs text-zinc-400">
               Media type:
-              <select className="input !w-auto !py-1 text-xs min-h-8 sm:min-h-0" value={mediaType} onChange={(e) => setMediaType(e.target.value)}>
+              <select className="input !w-auto !py-1 text-xs tap" value={mediaType} onChange={(e) => setMediaType(e.target.value)}>
                 <option value="">Not sure</option>
                 <option value="CD">CD rip</option>
                 <option value="Digital Media">Digital Media</option>
@@ -2387,7 +2439,7 @@ const finish = async () => {
                 <span className="text-xs text-zinc-500">
                   {totalFiles} file(s) → {albums.length} album(s) — rename, or move files between albums with the dropdown
                 </span>
-                <button className="btn-ghost !py-1 text-xs ml-auto min-h-8 sm:min-h-0" onClick={addAlbum}>
+                <button className="btn-ghost !py-1 text-xs ml-auto tap" onClick={addAlbum}>
                   <Plus className="h-3.5 w-3.5" /> Add album
                 </button>
               </div>
@@ -2396,7 +2448,7 @@ const finish = async () => {
                   <div className="flex flex-wrap items-center gap-2 mb-2">
                     <Disc3 className="h-4 w-4 text-zinc-500 shrink-0" />
                     <input
-                      className="input !w-auto min-w-[200px] font-medium min-h-8 sm:min-h-0"
+                      className="input w-full min-w-0 font-medium sm:!w-auto tap"
                       value={g.name}
                       placeholder="Album name"
                       onChange={(e) => renameGroup(gi, e.target.value)}
@@ -2407,7 +2459,7 @@ const finish = async () => {
                         <span className="text-amber-300/90"> — partial album</span>
                       )}
                     </span>
-                    <button className="btn-danger !px-2 !py-1 ml-auto min-h-8 sm:min-h-0" onClick={() => removeAlbum(gi)} disabled={albums.length <= 1} title="Remove (files move to first album)">
+                    <button className="btn-danger !px-2 !py-1 ml-auto tap" onClick={() => removeAlbum(gi)} disabled={albums.length <= 1} title="Remove (files move to first album)">
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
                   </div>
@@ -2446,7 +2498,7 @@ const finish = async () => {
                 </div>
               ))}
               <button
-                className="btn-primary min-h-10 sm:min-h-0"
+                className="btn-primary tap"
                 onClick={doImport}
                 disabled={uploading || !albums.some((g) => g.name.trim() && g.files.length)}
               >
@@ -2479,7 +2531,7 @@ const finish = async () => {
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <input
-                className={`input flex-1 ${releaseId ? "!border-emerald-700" : ""} min-h-8 sm:min-h-0`}
+                className={`input flex-1 ${releaseId ? "!border-emerald-700" : ""} tap`}
                 placeholder="MusicBrainz release URL or ID (e.g. https://musicbrainz.org/release/…)"
                 value={mbLink}
                 onChange={(e) => setMbLink(e.target.value)}
@@ -2514,7 +2566,7 @@ const finish = async () => {
             <div className="flex gap-2">
               <div className="flex flex-wrap gap-2">
                 <select
-                  className="input !w-auto text-xs shrink-0 min-h-8 sm:min-h-0"
+                  className="input !w-auto text-xs shrink-0 tap"
                   value={searchMode}
                   onChange={(e) => setSearchMode(e.target.value as any)}
                   title="Search MusicBrainz by"
@@ -2524,20 +2576,20 @@ const finish = async () => {
                   <option value="catno">Catalog number</option>
                   <option value="barcode">Barcode</option>
                 </select>
-                <input className="input min-h-8 sm:min-h-0" placeholder="Search MusicBrainz…" value={mbSearch} onChange={(e) => setMbSearch(e.target.value)} onKeyDown={(e) => e.key === "Enter" && doSearch()} />
-                <button className="btn-ghost shrink-0 min-h-8 sm:min-h-0" onClick={() => doSearch()} disabled={busy}>Search</button>
+                <input className="input tap" placeholder="Search MusicBrainz…" value={mbSearch} onChange={(e) => setMbSearch(e.target.value)} onKeyDown={(e) => e.key === "Enter" && doSearch()} />
+                <button className="btn-ghost shrink-0 tap" onClick={() => doSearch()} disabled={busy}>Search</button>
               </div>
             </div>
             <div className="text-xs text-zinc-600">or find an artist:</div>
             <div className="flex gap-2">
               <input
-                className="input min-h-8 sm:min-h-0"
+                className="input tap"
                 placeholder="Artist name…"
                 value={artistQuery}
                 onChange={(e) => setArtistQuery(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && doArtistSearch()}
               />
-              <button className="btn-ghost shrink-0 min-h-8 sm:min-h-0" onClick={doArtistSearch} disabled={busy}>Find artist</button>
+              <button className="btn-ghost shrink-0 tap" onClick={doArtistSearch} disabled={busy}>Find artist</button>
             </div>
             {artistHits.length > 0 && (
               <div className="max-h-40 overflow-auto space-y-1">
@@ -2578,7 +2630,7 @@ const finish = async () => {
             <div className="text-sm font-semibold text-zinc-300 pt-2">RateYourMusic links (optional)</div>
             <div className="flex flex-wrap items-center gap-2">
               <input
-                className={`input flex-1 ${rymValid === true ? "!border-emerald-700" : rymValid === false ? "!border-red-800" : ""} min-h-8 sm:min-h-0`}
+                className={`input flex-1 ${rymValid === true ? "!border-emerald-700" : rymValid === false ? "!border-red-800" : ""} tap`}
                 placeholder="Album: https://rateyourmusic.com/release/…"
                 value={rymLink}
                 onChange={(e) => {
@@ -2588,7 +2640,7 @@ const finish = async () => {
               />
               <LinkValidChip state={rymValid} kind={rymKind} />
               <button
-                className="btn-ghost shrink-0 min-h-8 sm:min-h-0"
+                className="btn-ghost shrink-0 tap"
                 onClick={findRymLinks}
                 disabled={findingLinks || busy}
                 title="Ask RateYourMusic for this album's and this artist's pages and fill both fields for review"
@@ -2600,7 +2652,7 @@ const finish = async () => {
             {rymNote && <div className="text-[10px] text-amber-300/80">{rymNote}</div>}
             <div className="flex flex-wrap items-center gap-2">
               <input
-                className={`input flex-1 ${rymArtistValid === true ? "!border-emerald-700" : rymArtistValid === false ? "!border-red-800" : ""} min-h-8 sm:min-h-0`}
+                className={`input flex-1 ${rymArtistValid === true ? "!border-emerald-700" : rymArtistValid === false ? "!border-red-800" : ""} tap`}
                 placeholder="Artist: https://rateyourmusic.com/artist/…"
                 value={rymArtistLink}
                 onChange={(e) => {
@@ -2616,10 +2668,10 @@ const finish = async () => {
             {rymArtistNote && <div className="text-[10px] text-amber-300/80">{rymArtistNote}</div>}
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <button className="btn-primary min-h-10 sm:min-h-0" onClick={handleFetch} disabled={busy}>
+            <button className="btn-primary tap" onClick={handleFetch} disabled={busy}>
               <Wand2 className="h-4 w-4" /> Fetch release & auto-match
             </button>
-            <button className="btn-ghost min-h-8 sm:min-h-0" onClick={detectFromTags} disabled={busy || !albumPath}>
+            <button className="btn-ghost tap" onClick={detectFromTags} disabled={busy || !albumPath}>
               Detect from tags
             </button>
             {busy && fetchStatus && (
@@ -2655,7 +2707,7 @@ const finish = async () => {
                       {s.matched ? `${s.release_track!.disc}.${s.release_track!.position} ${s.release_track!.title}` : "no match"}
                     </span>
                     <select
-                      className="input !w-auto text-xs max-w-full min-h-8 sm:min-h-0"
+                      className="input !w-auto text-xs max-w-full tap"
                       value={s.release_track ? `${s.release_track.disc}-${s.release_track.position}` : ""}
                       onChange={(e) => {
                         const [d, p] = e.target.value.split("-").map(Number);
@@ -2675,7 +2727,7 @@ const finish = async () => {
             </DiscSection>
           ))}
           <div className="flex justify-end">
-            <button className="btn-primary min-h-10 sm:min-h-0" onClick={confirmMatch} disabled={busy}>
+            <button className="btn-primary tap" onClick={confirmMatch} disabled={busy}>
               Save matching
             </button>
           </div>
@@ -2703,12 +2755,12 @@ const finish = async () => {
                 {artistArt?.path ? <span className="font-mono"> · {artistArt.path}</span> : null}
               </span>
               {metaReply && (
-                <button className="btn-ghost !py-0.5 !px-1.5 text-[11px] ml-auto min-h-8 sm:min-h-0" onClick={() => setMetaReply(null)}>
+                <button className="btn-ghost !py-0.5 !px-1.5 text-[11px] ml-auto tap" onClick={() => setMetaReply(null)}>
                   Clear result
                 </button>
               )}
               <button
-                className={`btn-ghost !py-1 text-xs min-h-8 sm:min-h-0 ${metaReply ? "" : "ml-auto"}`}
+                className={`btn-ghost !py-1 text-xs tap ${metaReply ? "" : "ml-auto"}`}
                 onClick={fetchArtistMeta}
                 disabled={busy || !albumPath}
                 title="Ask the configured sources for the missing artist image, artist description and album description; what is already present is left alone"
@@ -2773,10 +2825,10 @@ const finish = async () => {
                   : "No album cover on disk yet."}
               </div>
               <div className="flex items-center gap-2 flex-wrap">
-                <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={() => albumCoverInput.current?.click()} disabled={busy}>
+                <button className="btn-ghost !py-1 text-xs tap" onClick={() => albumCoverInput.current?.click()} disabled={busy}>
                   <UploadCloud className="h-3.5 w-3.5" /> Upload image
                 </button>
-                <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={() => setCoverSearch({})} disabled={busy}>
+                <button className="btn-ghost !py-1 text-xs tap" onClick={() => setCoverSearch({})} disabled={busy}>
                   Search covers
                 </button>
               </div>
@@ -2784,7 +2836,7 @@ const finish = async () => {
                   user's — same one-click affordance as the album page. */}
               {!coverInfo?.file && !!stagedCoverRows?.length && (
                 <button
-                  className="btn-primary !py-1.5 text-xs min-h-10 sm:min-h-0"
+                  className="btn-primary !py-1.5 text-xs tap"
                   onClick={() =>
                     setCoverSearch({ results: stagedCoverRows, provider: stagedCovers.data?.provider ?? null })
                   }
@@ -2814,7 +2866,7 @@ const finish = async () => {
               )}
               <div className="flex items-center gap-2 flex-wrap">
                 <button
-                  className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
+                  className="btn-ghost !py-1 text-xs tap"
                   onClick={() => mbCoverUrl && applyCoverUrl(mbCoverUrl)}
                   disabled={busy || !mbCoverUrl}
                 >
@@ -2850,13 +2902,13 @@ const finish = async () => {
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-xs font-semibold text-zinc-400">Album cover from URL</span>
               <input
-                className="input flex-1 min-w-[240px] !py-1 text-xs min-h-8 sm:min-h-0"
+                className="input flex-1 min-w-0 !py-1 text-xs tap"
                 placeholder="https://…/cover.jpg"
                 value={coverUrl}
                 onChange={(e) => setCoverUrl(e.target.value)}
               />
               <button
-                className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
+                className="btn-ghost !py-1 text-xs tap"
                 onClick={() => applyCoverUrl(coverUrl)}
                 disabled={busy || !coverUrl.trim()}
               >
@@ -2873,7 +2925,7 @@ const finish = async () => {
                 tracks 7 and 8 get the same art).
               </span>
               <button
-                className="btn-ghost !py-1 text-xs ml-auto min-h-8 sm:min-h-0"
+                className="btn-ghost !py-1 text-xs ml-auto tap"
                 onClick={() =>
                   setCoverSel(
                     coverSel.size && coverSel.size === stepTracks.length
@@ -2887,33 +2939,33 @@ const finish = async () => {
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               <button
-                className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
+                className="btn-ghost !py-1 text-xs tap"
                 onClick={() => trackCoverInput.current?.click()}
                 disabled={busy || !coverSel.size}
               >
                 <UploadCloud className="h-3.5 w-3.5" /> Upload to selected
               </button>
               <input
-                className="input !w-64 !py-1 text-xs min-h-8 sm:min-h-0"
+                className="input !w-64 !py-1 text-xs tap"
                 placeholder="Cover image URL for the selection…"
                 value={trackCoverUrl}
                 onChange={(e) => setTrackCoverUrl(e.target.value)}
               />
               <button
-                className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
+                className="btn-ghost !py-1 text-xs tap"
                 onClick={() => applyCoverUrl(trackCoverUrl, selectedCoverFiles())}
                 disabled={busy || !coverSel.size || !trackCoverUrl.trim()}
               >
                 <ExternalLink className="h-3.5 w-3.5" /> Use URL
               </button>
               <button
-                className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
+                className="btn-ghost !py-1 text-xs tap"
                 onClick={() => mbCoverUrl && applyCoverUrl(mbCoverUrl, selectedCoverFiles())}
                 disabled={busy || !coverSel.size || !mbCoverUrl}
               >
                 <CloudDownloadIcon /> MusicBrainz cover
               </button>
-              <button className="btn-danger !py-1 text-xs min-h-8 sm:min-h-0" onClick={clearTrackCovers} disabled={busy || !coverSel.size}>
+              <button className="btn-danger !py-1 text-xs tap" onClick={clearTrackCovers} disabled={busy || !coverSel.size}>
                 <Trash2 className="h-3.5 w-3.5" /> Clear per-track cover
               </button>
             </div>
@@ -2930,13 +2982,13 @@ const finish = async () => {
                 extra={
                   <>
                     <button
-                      className="btn-ghost !py-0.5 !px-1.5 text-[11px] min-h-8 sm:min-h-0"
+                      className="btn-ghost !py-0.5 !px-1.5 text-[11px] tap"
                       onClick={() => setCoverSelFor(g.rows.map((t) => t.path), true)}
                     >
                       All
                     </button>
                     <button
-                      className="btn-ghost !py-0.5 !px-1.5 text-[11px] min-h-8 sm:min-h-0"
+                      className="btn-ghost !py-0.5 !px-1.5 text-[11px] tap"
                       onClick={() => setCoverSelFor(g.rows.map((t) => t.path), false)}
                     >
                       None
@@ -2976,7 +3028,7 @@ const finish = async () => {
 
           <div className="flex flex-wrap items-center gap-2 justify-end">
             <span className="text-xs text-zinc-500">Covers are written as you apply them — Continue just moves on.</span>
-            <button className="btn-primary min-h-10 sm:min-h-0" onClick={saveCovers}>Continue to genres</button>
+            <button className="btn-primary tap" onClick={saveCovers}>Continue to genres</button>
           </div>
 
           <input
@@ -3028,7 +3080,7 @@ const finish = async () => {
         <div className="space-y-3">
           <div className="flex items-center gap-2 flex-wrap">
             <button
-              className="btn-ghost min-h-8 sm:min-h-0"
+              className="btn-ghost tap"
               onClick={() => importGenresFrom("musicbrainz")}
               disabled={busy || !albumTargets().length}
               title="Ask MusicBrainz for this album's genres (recording → release → release group → artist) and write what it states"
@@ -3036,27 +3088,30 @@ const finish = async () => {
               <CloudDownloadIcon /> Genres from MusicBrainz
             </button>
             <button
-              className="btn-ghost min-h-8 sm:min-h-0"
+              className="btn-ghost tap"
               onClick={() => importGenresFrom("rateyourmusic")}
               disabled={busy || !albumTargets().length}
               title="Ask RateYourMusic for this album's genres and write what its page states — a blocked RYM says so instead of writing a guess"
             >
               <CloudDownloadIcon /> Genres from RateYourMusic
             </button>
+            {/* The per-run limit can only LOWER the app's own cap: the server
+                writes and trims every genre list to `mb_genre_count`, so an
+                option above it would be a promise nothing keeps. */}
             <label className="flex items-center gap-1.5 text-xs text-zinc-400 ml-auto">
               Max genres / track
               <select
-                className="input !w-auto !py-1 text-xs min-h-8 sm:min-h-0"
-                value={genreLimit ?? 0}
-                onChange={(e) => setGenreLimit(e.target.value === "0" ? null : Number(e.target.value))}
+                className="input !w-auto !py-1 text-xs tap"
+                value={genreLimitValue}
+                onChange={(e) => setGenreLimit(Number(e.target.value))}
+                title={`The app writes at most ${genreCap} genre value(s) per track (mb_genre_count, Settings → Import)`}
               >
-                <option value={0}>All</option>
-                <option value={1}>1 (primary)</option>
-                <option value={2}>2</option>
-                <option value={3}>3</option>
-                <option value={4}>4</option>
-                <option value={5}>5</option>
-                <option value={10}>10</option>
+                {Array.from({ length: genreCap }, (_, i) => i + 1).map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                    {n === genreCap ? " (app cap — Settings → Import)" : ""}
+                  </option>
+                ))}
               </select>
             </label>
           </div>
@@ -3107,7 +3162,18 @@ const finish = async () => {
           )}
           <span className="text-xs text-zinc-500 -mt-1 block">
             Genres are not fetched automatically — set the per-track limit, then ask MusicBrainz, RateYourMusic, or both.
+            The app writes the specific genres first and derives the family (rock, electronic…) into the last slot:
+            at most {genreCap} genre value{genreCap === 1 ? "" : "s"} per track (Settings → Import).
           </span>
+          {/* One datalist for every add input in the step: the browser's own
+              autocomplete, so a name is offered the way MusicBrainz spells it
+              without a keystroke of React work — and the options stay one DOM
+              copy however many tracks the album has. */}
+          <datalist id="wizard-genres">
+            {[...genreSuggestions.values()].map((n) => (
+              <option key={n} value={n} />
+            ))}
+          </datalist>
           {stepTracks.length === 0 && <div className="text-xs text-zinc-500">No tracks — go back and fetch the release.</div>}
           {/* Album-wide cleanup: every genre currently on any track, one click
               to strip it from ALL of them, plus a clear-everything button.
@@ -3120,9 +3186,15 @@ const finish = async () => {
               {allGenres.map(([gen, n]) => (
                 <button
                   key={gen}
-                  className="chip bg-raise border border-border text-zinc-300 hover:border-red-800 hover:text-red-200"
+                  className={`chip border ${GENRE_FAMILIES[gen.toLowerCase()]
+                    ? "bg-raise border-border text-zinc-500"
+                    : "bg-raise border-border text-zinc-300"} hover:border-red-800 hover:text-red-200`}
                   onClick={() => removeGenreEverywhere(gen)}
-                  title={`Remove “${gen}” from all ${n} track(s)`}
+                  title={GENRE_FAMILIES[gen.toLowerCase()]
+                    // A derived family comes back on the next write, so this
+                    // only helps while the step is open — say so.
+                    ? `Remove “${gen}” (a derived family) from all ${n} track(s) for this run`
+                    : `Remove “${gen}” from all ${n} track(s)`}
                 >
                   {gen}
                   <span className="text-[10px] text-zinc-500 tabular-nums">{n}</span>
@@ -3130,7 +3202,7 @@ const finish = async () => {
                 </button>
               ))}
               <button
-                className="btn-danger !py-1 text-xs ml-auto min-h-8 sm:min-h-0"
+                className="btn-danger !py-1 text-xs ml-auto tap"
                 onClick={removeAllGenres}
                 title="Clear the genre field on every track in this step"
               >
@@ -3150,7 +3222,8 @@ const finish = async () => {
                   ? [
                       <input
                         key="in"
-                        className="input !w-52 !py-1 text-xs min-h-8 sm:min-h-0"
+                        className="input !w-52 !py-1 text-xs tap"
+                        list="wizard-genres"
                         placeholder="Apply genre to whole disc…"
                         value={discGenres[g.disc!] ?? ""}
                         onChange={(e) => setDiscGenres((m) => ({ ...m, [g.disc!]: e.target.value }))}
@@ -3158,7 +3231,7 @@ const finish = async () => {
                       />,
                       <button
                         key="btn"
-                        className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
+                        className="btn-ghost !py-1 text-xs tap"
                         onClick={() => applyGenresToDisc(g.disc!, (discGenres[g.disc!] ?? "").trim())}
                       >
                         Apply to all
@@ -3167,42 +3240,85 @@ const finish = async () => {
                   : undefined
               }
             >
-              {g.rows.map((t) => (
-                <div key={t.path} className="flex items-center gap-3 panel px-3 py-2">
-                  <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
-                  <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
-                  <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                    {genreList(t.path).map((gen) => (
-                      <span key={gen} className="chip bg-accent/10 text-accent-soft border border-accent/25">
-                        {gen}
-                        <button
-                          className="hover:text-white transition-colors"
-                          onClick={() => removeGenre(t.path, gen)}
-                          title={`Remove ${gen}`}
+              {g.rows.map((t) => {
+                const list = genreList(t.path);
+                const family = familyOf(list);
+                const typed = genreAddValues[t.path] ?? "";
+                const unknown = !!typed.trim() && !genreSuggestions.has(typed.trim().toLowerCase());
+                return (
+                  <div key={t.path} className="flex items-center gap-3 panel px-3 py-2">
+                    <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
+                    <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
+                    <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                      {list.filter((x) => x !== family).map((gen) => (
+                        <span key={gen} className="chip bg-accent/10 text-accent-soft border border-accent/25">
+                          {gen}
+                          <button
+                            className="hover:text-white transition-colors"
+                            onClick={() => removeGenre(t.path, gen)}
+                            title={`Remove ${gen}`}
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </span>
+                      ))}
+                      {family ? (
+                        // The family's own slot: it is DERIVED from the
+                        // specific genre and written last, so it is labelled
+                        // rather than shown as one more name to edit.
+                        <span
+                          className="chip bg-raise border border-border text-zinc-400"
+                          title={`${family} is the family — the app derives it from the specific genre and writes it last`}
                         >
-                          <X className="h-3 w-3" />
-                        </button>
-                      </span>
-                    ))}
-                    <input
-                      className="input !w-36 !py-1 text-xs min-h-8 sm:min-h-0"
-                      placeholder={genreList(t.path).length ? "+ add genre…" : "Add genre…"}
-                      value={genreAddValues[t.path] ?? ""}
-                      onChange={(e) => setGenreAddValues((v) => ({ ...v, [t.path]: e.target.value }))}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          addGenre(t.path, genreAddValues[t.path] ?? "");
-                          setGenreAddValues((v) => ({ ...v, [t.path]: "" }));
+                          <span className="text-[9px] uppercase tracking-wider text-zinc-600">family</span>
+                          {family}
+                          <button
+                            className="hover:text-white transition-colors"
+                            onClick={() => removeGenre(t.path, family)}
+                            title={`Remove ${family} for this run — the app derives it again when it writes`}
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </span>
+                      ) : (
+                        list.length > 0 && (
+                          <span
+                            className="chip bg-raise border border-dashed border-border text-zinc-600"
+                            title={`The app derives the family of ${list[0]} when it writes — it is not typed in here`}
+                          >
+                            family derived on save
+                          </span>
+                        )
+                      )}
+                      <input
+                        className={`input !w-36 !py-1 text-xs tap${unknown ? " !border-amber-700" : ""}`}
+                        list="wizard-genres"
+                        placeholder={list.length ? "+ add genre…" : "Add genre…"}
+                        value={typed}
+                        disabled={list.length >= genreCap}
+                        title={
+                          list.length >= genreCap
+                            ? `Genres per track is ${genreCap} (Settings → Import) — remove one to add another`
+                            : unknown
+                              ? `“${typed.trim()}” is not a name the app's vocabulary knows — it is written as typed and the grade check flags it`
+                              : undefined
                         }
-                      }}
-                    />
+                        onChange={(e) => setGenreAddValues((v) => ({ ...v, [t.path]: e.target.value }))}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            addGenre(t.path, typed);
+                            setGenreAddValues((v) => ({ ...v, [t.path]: "" }));
+                          }
+                        }}
+                      />
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </DiscSection>
           ))}
           <div className="flex justify-end">
-            <button className="btn-primary min-h-10 sm:min-h-0" onClick={saveGenres} disabled={busy}>Save genres</button>
+            <button className="btn-primary tap" onClick={saveGenres} disabled={busy}>Save genres</button>
           </div>
         </div>
       )}
@@ -3216,7 +3332,7 @@ const finish = async () => {
             </div>
           )}
           <div className="flex flex-wrap items-center gap-2">
-            <button className="btn-primary text-xs min-h-8 sm:min-h-0" onClick={() => autoImportLyrics()} disabled={busy}>
+            <button className="btn-primary text-xs tap" onClick={() => autoImportLyrics()} disabled={busy}>
               <CloudDownloadIcon /> Auto-import lyrics
             </button>
             <span className="text-xs text-zinc-500">
@@ -3289,7 +3405,7 @@ const finish = async () => {
                     INSTRUMENTAL
                   </label>
                   <button
-                    className="btn-ghost !py-0.5 text-[11px] shrink-0 min-h-8 sm:min-h-0"
+                    className="btn-ghost !py-0.5 text-[11px] shrink-0 tap"
                     onClick={() => toggleLyricsRow(t.path)}
                     disabled={inst === "1"}
                     title={inst === "1" ? "Marked instrumental — uncheck INSTRUMENTAL to edit lyrics" : "Open the lyrics editor for this track"}
@@ -3300,7 +3416,7 @@ const finish = async () => {
                 {open && inst !== "1" && (
                   <div className="space-y-1.5">
                     <button
-                      className="btn-ghost !py-0.5 text-[11px] min-h-8 sm:min-h-0"
+                      className="btn-ghost !py-0.5 text-[11px] tap"
                       onClick={() => autoImportLyrics([t.path])}
                       disabled={busy}
                       title="Fetch this track's lyrics through the provider chain and write them to the file"
@@ -3323,7 +3439,7 @@ const finish = async () => {
             );
           })}
           <div className="flex justify-end">
-            <button className="btn-primary min-h-10 sm:min-h-0" onClick={saveLyricsStep} disabled={busy}>Save lyrics & instrumental</button>
+            <button className="btn-primary tap" onClick={saveLyricsStep} disabled={busy}>Save lyrics & instrumental</button>
           </div>
         </div>
       )}
@@ -3338,7 +3454,7 @@ const finish = async () => {
               <button
                 key={v}
                 onClick={() => applyAdvisoryToAll(v)}
-                className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
+                className="btn-ghost !py-1 text-xs tap"
                 title={`Set every track to ${v === "0" ? "clean" : v === "1" ? "explicit" : "safe"}`}
               >
                 {v === "0" ? "0 · clean" : v === "1" ? "1 · explicit" : "2 · safe"}
@@ -3352,7 +3468,7 @@ const finish = async () => {
           <div className="panel px-3 py-2 space-y-1.5">
             <div className="flex items-center gap-2 flex-wrap">
               <button
-                className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
+                className="btn-ghost !py-1 text-xs tap"
                 onClick={fetchAdvisoryAll}
                 disabled={busy || !stepTracks.length}
                 title="Ask the configured advisory sources (Deezer / Spotify by ISRC, Apple) for every track and write what they state"
@@ -3416,7 +3532,7 @@ const finish = async () => {
             </div>
           ))}
           <div className="flex justify-end">
-            <button className="btn-primary min-h-10 sm:min-h-0" onClick={saveAdvisory} disabled={busy}>Save advisory</button>
+            <button className="btn-primary tap" onClick={saveAdvisory} disabled={busy}>Save advisory</button>
           </div>
         </div>
       )}
@@ -3459,7 +3575,7 @@ const finish = async () => {
             </div>
             <div className="flex items-center gap-2 mt-3 flex-wrap">
               <button
-                className="btn-primary !py-1.5 text-xs min-h-10 sm:min-h-0"
+                className="btn-primary !py-1.5 text-xs tap"
                 onClick={runAllHere}
                 disabled={runningAll || scriptsRunning || (!albumPath && !uploaded.length)}
                 title="Run the scripts in the order set in Settings → Optimization, on this album only"
@@ -3468,7 +3584,7 @@ const finish = async () => {
                 {runningAll ? "Running…" : "Run all scripts"}
               </button>
               <button
-                className="btn-ghost !py-1.5 text-xs min-h-10 sm:min-h-0"
+                className="btn-ghost !py-1.5 text-xs tap"
                 onClick={runAllScripts}
                 disabled={scriptsRunning || runningAll || (!albumPath && !uploaded.length)}
                 title="Run the configured import chain — the same scripts a bulk or Soulseek import runs"
@@ -3528,13 +3644,13 @@ const finish = async () => {
                  works until the next reorganization. */
               <Link
                 to={releaseId ? `/album/mb:${encodeURIComponent(releaseId)}` : `/album/${encodeURIComponent(albumPath)}`}
-                className="btn-ghost min-h-8 sm:min-h-0"
+                className="btn-ghost tap"
                 onClick={finish}
               >
                 Open album
               </Link>
             )}
-            <button className="btn-primary min-h-10 sm:min-h-0" onClick={finish}>Done</button>
+            <button className="btn-primary tap" onClick={finish}>Done</button>
           </div>
         </div>
       )}
@@ -3542,13 +3658,13 @@ const finish = async () => {
       {/* nav buttons */}
       {step > 0 && step < 7 && (
         <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
-          <button className="btn-ghost min-h-8 sm:min-h-0" onClick={() => setStep(step - 1)}>
+          <button className="btn-ghost tap" onClick={() => setStep(step - 1)}>
             <ChevronLeft className="h-4 w-4" /> Back
           </button>
           <div className="flex flex-wrap items-center gap-2 ml-auto justify-end">
             {nextBlock && <span className="text-xs text-amber-300/90">{nextBlock}</span>}
             <button
-              className="btn-primary min-h-10 sm:min-h-0"
+              className="btn-primary tap"
               disabled={!canNext || busy}
               onClick={() =>
                 step === 1
@@ -3695,7 +3811,7 @@ function AcoustidBlock({
         </span>
         {queue && (
           <button
-            className="btn-primary !py-1 text-xs ml-auto min-h-8 sm:min-h-0"
+            className="btn-primary !py-1 text-xs ml-auto tap"
             onClick={onMatchAll}
             disabled={matchAllBusy || !canMatchAll}
             title="Match every queued album to the release chosen below and write its metadata"
@@ -3705,7 +3821,7 @@ function AcoustidBlock({
           </button>
         )}
         <button
-          className={`btn-ghost !py-1 text-xs min-h-8 sm:min-h-0 ${queue ? "" : "ml-auto"}`}
+          className={`btn-ghost !py-1 text-xs tap ${queue ? "" : "ml-auto"}`}
           onClick={onRun}
           disabled={busy}
         >
@@ -3745,7 +3861,7 @@ function AcoustidBlock({
                     <span className="text-zinc-600 font-mono">score {Math.round(row.score * 100)}%</span>
                   )}
                   <button
-                    className="btn-ghost !py-0.5 text-[11px] ml-auto min-h-8 sm:min-h-0"
+                    className="btn-ghost !py-0.5 text-[11px] ml-auto tap"
                     onClick={() => onUse(row)}
                     disabled={busy}
                     title="Fetch this release and auto-match the album's tracks"
@@ -3881,7 +3997,7 @@ function ImportFileRow({ f, gi, albums, groupFiles, selectable, excluded, onTogg
         {!excluded && coverFor && <span className="block text-[10px] text-accent-soft">→ {coverFor}</span>}
       </span>
       <select
-        className="input !w-auto !py-0.5 text-[11px] shrink-0 min-h-8 sm:min-h-0 max-w-[45%]"
+        className="input !w-auto !py-0.5 text-[11px] shrink-0 tap max-w-[45%]"
         value={gi}
         onChange={(e) => onMove(Number(e.target.value))}
       >

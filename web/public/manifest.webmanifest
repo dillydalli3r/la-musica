@@ -14,5 +14,22 @@
       "type": "image/png",
       "purpose": "any"
     }
+  ],
+  "shortcuts": [
+    {
+      "name": "Favorites",
+      "short_name": "Favorites",
+      "url": "/favorites"
+    },
+    {
+      "name": "Playlists",
+      "short_name": "Playlists",
+      "url": "/playlists"
+    },
+    {
+      "name": "Search",
+      "short_name": "Search",
+      "url": "/library"
+    }
   ]
 }

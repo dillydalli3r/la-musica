@@ -98,19 +98,19 @@ export default function DependenciesPage() {
         subtitle="External tools the scripts rely on. Missing ones are downloaded into the app's dependencies folder — nothing is installed system-wide."
         actions={
           <>
-            <button className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0" onClick={refreshNow} disabled={busy || isLoading}>
+            <button className="btn-ghost !py-1 text-xs tap" onClick={refreshNow} disabled={busy || isLoading}>
               <RotateCcw className="h-3 w-3" /> Refresh
             </button>
             {(missing.length > 0 || updates.length > 0) && (
               <button
-                className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0"
+                className="btn-ghost !py-1 text-xs tap"
                 onClick={() => install([...missing, ...updates].map((t) => t.key))}
                 disabled={busy}
               >
                 Install {missing.length + updates.length} ({missing.length} missing · {updates.length} updates)
               </button>
             )}
-            <button className="btn-primary !py-1 text-xs min-h-10 md:min-h-0" onClick={() => install()} disabled={busy}>
+            <button className="btn-primary !py-1 text-xs tap" onClick={() => install()} disabled={busy}>
               {busy ? "Installing…" : "Install / update all"}
             </button>
           </>
@@ -126,12 +126,14 @@ export default function DependenciesPage() {
         </span>
         {deps?.deps_dir && (
           <button
-            className="inline-flex items-center gap-1 min-w-0 min-h-8 md:min-h-0 hover:text-zinc-300 transition-colors font-mono truncate max-w-[24rem]"
+            className="inline-flex items-center gap-1 min-w-0 tap hover:text-zinc-300 transition-colors font-mono max-w-[24rem]"
             onClick={openDepsDir}
             title="Open the dependencies folder"
           >
             <FolderOpen className="h-3 w-3 shrink-0" />
-            {String(deps.deps_dir).replace(/\\/g, "/")}
+            {/* Ellipsis on the child: `truncate` on the flex row itself would
+                clip both ends of the path instead of adding an ellipsis. */}
+            <span className="truncate min-w-0">{String(deps.deps_dir).replace(/\\/g, "/")}</span>
           </button>
         )}
       </div>

@@ -24,7 +24,7 @@ export interface OverflowMenuSection {
 export default function OverflowMenu({
   sections,
   buttonTitle = "More actions",
-  buttonClass = "btn-ghost !px-2.5",
+  buttonClass = "btn-ghost !px-2.5 tap",
   align = "right",
   icon: Icon = Ellipsis,
   label,

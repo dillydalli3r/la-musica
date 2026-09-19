@@ -73,7 +73,7 @@ export default function ConfirmButton({
     return (
       <div ref={ref} className="inline-flex items-center gap-1">
         <button
-          className="btn-danger !py-1.5 text-xs"
+          className="btn-danger !py-1.5 text-xs tap"
           onClick={() => {
             setArmed(false);
             onConfirm();
@@ -82,7 +82,7 @@ export default function ConfirmButton({
         >
           <Check className="h-3.5 w-3.5" /> {confirmLabel}
         </button>
-        <button className="btn-ghost !py-1.5 text-xs" onClick={() => setArmed(false)} title="Cancel">
+        <button className="btn-ghost !py-1.5 text-xs tap" onClick={() => setArmed(false)} title="Cancel">
           <X className="h-3.5 w-3.5" />
         </button>
       </div>

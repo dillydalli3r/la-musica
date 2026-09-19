@@ -23,7 +23,7 @@ export default function Segmented<T extends string>({ value, onChange, options, 
           role="tab"
           aria-selected={value === o.id}
           onClick={() => onChange(o.id)}
-          className={`px-3 py-1.5 text-xs font-medium inline-flex items-center gap-1.5 transition-colors min-h-8 md:min-h-0 ${
+          className={`px-3 py-1.5 text-xs font-medium inline-flex items-center gap-1.5 transition-colors tap whitespace-nowrap ${
             value === o.id ? "bg-accent on-accent" : "bg-panel text-zinc-400 hover:text-white"
           }`}
         >

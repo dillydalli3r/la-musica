@@ -26,6 +26,22 @@ const ACCENT_OPTIONS: { id: string; name: string; color: string }[] = [
 
 const ENCODER_FORMATS = ["flac", "jpeg", "png", "jxl"] as const;
 const ENCODER_FIELDS = ["ENCODER_PROGRAM", "ENCODER_QUALITY", "ENCODER_VERSION"] as const;
+
+/** Interface zoom, as a percentage of the app's normal size.
+ *
+ *  Stored per browser (like the accent color and the player's own picks), and
+ *  APPLIED by the app shell: web/src/App.tsx reads this key and scales the
+ *  root, so this page only writes the value and tells it (the shell listens
+ *  for `mlo:zoom`). 80–150%: below that the player's own controls stop being
+ * tappable on a phone, above it a desktop window shows two albums and one
+ *  album's worth of scrolling. */
+const ZOOM_KEY = "mlo.zoom";
+const ZOOM_DEFAULT = 100;
+
+function readZoom(): number {
+  const saved = Number(localStorage.getItem(ZOOM_KEY));
+  return saved >= 80 && saved <= 150 ? saved : ZOOM_DEFAULT;
+}
 const AUDIO_TYPES = ["flac", "mp3", "mp4", "ogg", "opus", "aac"] as const;
 const TAG_FAMILIES = ["AUDIT", "LOG_GRADE", "REPLAYGAIN", "DYNAMIC_RANGE", "MEDIA_SOURCE", "INSTRUMENTAL", "ADVISORY", "LYRICS", "GENRE", "BPM", "INITIALKEY", "MOOD", "ENERGY"] as const;
 
@@ -33,8 +49,8 @@ const TAG_FAMILIES = ["AUDIT", "LOG_GRADE", "REPLAYGAIN", "DYNAMIC_RANGE", "MEDI
  *  this map so a fresh install shows the real default (the backend fills in
  *  the same values when it loads the file) instead of an empty field. */
 const CFG_DEFAULTS: Record<string, unknown> = {
-  mb_genre_count: 3,
-  genre_sources: ["rateyourmusic", "listenbrainz", "musicbrainz", "itunes", "wikidata", "lastfm", "discogs", "theaudiodb", "deezer"],
+  mb_genre_count: 2,
+  genre_sources: ["rateyourmusic", "musicbrainz"],
   advisory_auto_fetch: true,
   metadata_auto_fetch: true,
   metadata_review: false,
@@ -149,7 +165,7 @@ function ProviderOrder({
             <button
               key={o.id}
               type="button"
-              className="chip border border-white/15 bg-white/5 text-[10px] text-zinc-400 hover:text-white min-h-8 md:min-h-0"
+              className="chip border border-white/15 bg-white/5 text-[10px] text-zinc-400 hover:text-white tap"
               title={o.notes}
               onClick={() => onChange([...order, o.id])}
             >
@@ -161,7 +177,7 @@ function ProviderOrder({
       {order.length > 0 && (
         <button
           type="button"
-          className="text-[10px] text-zinc-500 hover:text-white underline min-h-8 md:min-h-0"
+          className="text-[10px] text-zinc-500 hover:text-white underline tap"
           onClick={() => onChange([])}
         >
           Reset to the built-in order
@@ -226,7 +242,7 @@ function CoverDefaults() {
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-[11px] font-semibold text-zinc-400">Region</span>
         <select
-          className="input !w-auto !py-1 text-xs min-h-8 md:min-h-0"
+          className="input !w-auto !py-1 text-xs tap"
           value={country}
           onChange={(e) => setCountry(e.target.value)}
         >
@@ -277,7 +293,7 @@ function CoverDefaults() {
         </button>
         {dirty && (
           <button
-            className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0"
+            className="btn-ghost !py-1 text-xs tap"
             disabled={busy}
             onClick={() => {
               setSrcSel(cat.default_sources);
@@ -296,6 +312,8 @@ function CoverDefaults() {
 export default function SettingsPage() {
   const navigate = useNavigate();
   const { data: config, isError: configError } = useQuery({ queryKey: ["config"], queryFn: api.config });
+  // Interface zoom — per browser, applied by the app shell (see ZOOM_KEY).
+  const [zoom, setZoom] = useState(readZoom);
   // open-source credits (vendored tools + packages), rendered at the bottom
   const { data: credits } = useQuery({
     queryKey: ["credits"],
@@ -365,9 +383,9 @@ export default function SettingsPage() {
   }
   const CFG_GROUPS: CfgGroup[] = [
     {
-      title: "AI lyric transforms (script 17)",
+      title: "AI — lyric transforms & genre ranking",
       blurb:
-        "The one optional model in the app. Script 17 romanizes non-Latin lyrics and translates them into the languages below, writing TRANSLITERATION-*/TRANSLATION-* tags (and .romaji.lrc / .<lang>.lrc sidecars for LRC/BOTH lyric formats). Any OpenAI-compatible /chat/completions endpoint works — OpenAI, OpenRouter, LM Studio, llama.cpp, or Google Gemini's OpenAI-compatible endpoint (paste the bare generativelanguage.googleapis.com host and it is routed). Nothing else in the app depends on it: with the URL or model empty, the script logs one line and skips. Reasoning effort is sent as `reasoning_effort` on every call — a provider that rejects the field gets one plain retry.",
+        "The app's only optional model, shared by script 17's lyric transforms and the genre ranking on the Import & tags tab. Script 17 romanizes non-Latin lyrics and translates them into the languages below, writing TRANSLITERATION-*/TRANSLATION-* tags (and .romaji.lrc / .<lang>.lrc sidecars for LRC/BOTH lyric formats). Any OpenAI-compatible /chat/completions endpoint works — OpenAI, OpenRouter, LM Studio, llama.cpp, or Google Gemini's OpenAI-compatible endpoint (paste the bare generativelanguage.googleapis.com host and it is routed). Nothing else in the app depends on it: with the URL or model empty, the lyric script logs one line and skips, and the genre ranking falls back to the source list. Reasoning effort is sent as `reasoning_effort` on every call — a provider that rejects the field gets one plain retry.",
       fields: [
         { k: "ai_base_url", label: "Base URL", type: "text", help: "e.g. https://api.openai.com/v1, http://localhost:1234/v1, or generativelanguage.googleapis.com" },
         { k: "ai_api_key", label: "API key", type: "password", help: "Sent as a Bearer token. Local servers (LM Studio, llama.cpp) usually ignore it — leave it empty there." },
@@ -790,11 +808,11 @@ export default function SettingsPage() {
     },
     {
       title: "Import & tag cleanup",
-      blurb: "Genre importing from MusicBrainz and tag hygiene applied while optimizing.",
+      blurb: "Genre importing from MusicBrainz and tag hygiene applied while optimizing. The genre inference below runs once per album during an import (with a model configured in the AI section), so its effort costs a slower import, never a slower app.",
       fields: [
         {
-          k: "mb_genre_count", label: "Genres per track (import, trimming and grading)", type: "number", min: 1, max: 10,
-          help: "One value, three consumers: an import writes this many genres onto a track (the best-voted source first), script 8 / the genre import / script 10 trim any excess off, and grading fails a track that carries fewer or more than this. Default 3 — a primary genre plus the two that say the most about it.",
+          k: "mb_genre_count", label: "Genres per track (import, trimming and grading)", type: "number", min: 1, max: 3,
+          help: "One value, three consumers: an import writes up to this many genres onto a track (specific genres first, the derived FAMILY last), script 8 / the genre import / script 10 trim any excess off, and grading fails a track carrying more than this. Fewer is fine — the family is derived from the specific genre, so one specific genre is a complete answer and nothing is topped up with filler. A per-run import limit may only lower this. Default 2.",
         },
         {
           k: "genre_sources", label: "Genre sources — every ticked source is asked; unticked ones are never used", type: "multi",
@@ -802,7 +820,19 @@ export default function SettingsPage() {
           // /api/sources/health = server/integrations.GENRE_SOURCES), and each
           // row says whether it can answer per track or only for the release.
           options: genreOptions,
-          help: "The genres the sources answer with are merged, deduped and capped at the count above, per track. MusicBrainz is the app's own identity anchor, so leave it on in most setups.",
+          help: "The genres the sources answer with are merged, deduped and capped at the count above, per track. MusicBrainz is the app's own identity anchor — it also supplies the family every list ends with — so leave it on in most setups.",
+        },
+        {
+          k: "ai_genre_inference", label: "Let a model rank the genres", type: "bool",
+          help: "The model is given what the sources above already answered and picks which of them describe the track, most specific first. Needs a base URL and model in the AI section; with none configured the source list is used as it stands.",
+        },
+        {
+          k: "ai_genre_effort", label: "Reasoning effort for that ranking", type: "select",
+          options: [["high", "High — reason, then research what the list misses (default)"], ["medium", "Medium"], ["low", "Low"], ["minimal", "Minimal — no thinking, fastest"]],
+        },
+        {
+          k: "ai_genre_research", label: "Let the model go beyond the fetched genres", type: "bool",
+          help: "On, the model may name a genre the sources did not answer with when it knows the artist better than they do — the name must still be a MusicBrainz genre to survive. Off, the answer is strictly a re-ranking of what was fetched.",
         },
         { k: "strip_unknown_tags", label: "Remove non-canonical tags on optimize (script 10)", type: "bool" },
       ],
@@ -875,7 +905,18 @@ export default function SettingsPage() {
     { k: "grade_check_mood", label: "Mood tag present", type: "bool" },
     { k: "grade_check_energy", label: "Energy tag present (0-100, with MOOD)", type: "bool" },
     { k: "grade_check_genre", label: "Genre tag present", type: "bool" },
-    { k: "grade_check_genre_count", label: "Genre count per track (mb_genre_count, both directions)", type: "bool" },
+    {
+      k: "grade_check_genre_count", label: "Genre count per track (at most mb_genre_count)", type: "bool",
+      help: "A track may hold at most the 'Genres per track' value — only an overflow fails (issue code GENRE_COUNT). There is no lower bound and no quota; keep the two in step.",
+    },
+    {
+      k: "grade_check_genre_order", label: "Genre order (the family, if present, is last)", type: "bool",
+      help: "The family must be the LAST genre, e.g. shoegaze / dream pop / rock (issue code GENRE_ORDER). A family in an earlier slot, or a genre repeated, fails. The names themselves are graded by the vocabulary check below.",
+    },
+    {
+      k: "grade_check_genre_vocab", label: "Genre vocabulary (MusicBrainz)", type: "bool",
+      help: "Every GENRE name must be one MusicBrainz publishes (shoegaze, dream pop, …); an unknown name fails with issue code GENRE_VOCAB and is named in the report. Grading never rewrites the tag — run Auto tagging (8) or Format all (10) to canonicalize.",
+    },
     { k: "grade_check_album_description", label: "Album description stored", type: "bool" },
     { k: "grade_check_artist_image", label: "Artist image stored", type: "bool" },
     { k: "grade_check_artist_description", label: "Artist description stored", type: "bool" },
@@ -1334,7 +1375,7 @@ export default function SettingsPage() {
             <div key={f.k} className="md:col-span-2 xl:col-span-3">
               <div className="text-[11px] text-zinc-400 mb-1">{f.label}</div>
               <input
-                className="input !py-1 text-xs w-full min-h-8 md:min-h-0"
+                className="input !py-1 text-xs w-full tap"
                 value={parts.join(", ")}
                 onChange={(e) => setCfg(f.k, e.target.value.split(",").map((s) => s.trim()))}
               />
@@ -1356,7 +1397,7 @@ export default function SettingsPage() {
             <div className="flex items-center gap-2 w-full">
               <span className="flex-1 min-w-0 truncate">{f.label}</span>
               <select
-                className="input !w-32 !py-0.5 text-[11px] shrink-0 min-h-8 md:min-h-0"
+                className="input !w-32 !py-0.5 text-[11px] shrink-0 tap"
                 value={String(scriptCfg[f.k] ?? "")}
                 onChange={(e) => setCfg(f.k, e.target.value)}
               >
@@ -1370,7 +1411,7 @@ export default function SettingsPage() {
               <div className="flex items-center gap-2 w-full">
                 <span className="flex-1 min-w-0 truncate">{f.label}</span>
                 <input
-                  className="input !w-32 !py-0.5 text-[11px] shrink-0 min-h-8 md:min-h-0"
+                  className="input !w-32 !py-0.5 text-[11px] shrink-0 tap"
                   value={
                     Array.isArray(scriptCfg[f.k])
                       ? (scriptCfg[f.k] as unknown[]).join("; ")
@@ -1387,7 +1428,7 @@ export default function SettingsPage() {
                 <span className="flex-1 min-w-0 truncate">{f.label}</span>
                 <div className="relative shrink-0">
                   <input
-                    className="input !w-32 !py-0.5 !pr-7 text-[11px] min-h-8 md:min-h-0"
+                    className="input !w-32 !py-0.5 !pr-7 text-[11px] tap"
                     type={showPasswords.has(f.k) ? "text" : "password"}
                     value={String(scriptCfg[f.k] ?? "")}
                     onChange={(e) => setCfg(f.k, e.target.value)}
@@ -1416,7 +1457,7 @@ export default function SettingsPage() {
               <div className="flex items-center gap-2 w-full">
                 <span className="flex-1 min-w-0 truncate">{f.label}</span>
                 <input
-                  className="input !w-20 !py-0.5 text-[11px] shrink-0 text-right min-h-8 md:min-h-0"
+                  className="input !w-20 !py-0.5 text-[11px] shrink-0 text-right tap"
                   type="number"
                   min={f.min}
                   max={f.max}
@@ -1452,7 +1493,7 @@ export default function SettingsPage() {
               {searchHits.map((h, i) => (
                 <button
                   key={i}
-                  className="w-full text-left px-2.5 py-1.5 rounded-md hover:bg-white/10 min-h-8 md:min-h-0"
+                  className="w-full text-left px-2.5 py-1.5 rounded-md hover:bg-white/10 tap"
                   onClick={() => {
                     if (h.tab) setTab(h.tab);
                     setQ("");
@@ -1481,7 +1522,7 @@ export default function SettingsPage() {
                 onClick={() => setTab(n.id)}
                 className={`w-full whitespace-nowrap text-left px-3 py-2 rounded-md text-xs transition-colors md:py-1.5 ${
                   tab === n.id ? "bg-accent on-accent font-medium" : "text-zinc-400 hover:text-white hover:bg-panel border border-transparent"
-                } min-h-8 md:min-h-0`}
+                } tap`}
               >
                 {n.label}
               </button>
@@ -1559,7 +1600,7 @@ export default function SettingsPage() {
                   reset by it: it only writes what you enter there.
                 </div>
                 <button
-                  className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0"
+                  className="btn-ghost !py-1 text-xs tap"
                   onClick={() => navigate("/setup")}
                 >
                   <Wand2 className="h-3 w-3" /> Run the setup wizard again
@@ -1605,6 +1646,38 @@ export default function SettingsPage() {
           {tab === "appearance" && (
             <div className="panel space-y-3">
               <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Appearance</div>
+              {/* Zoom comes first on purpose: index.html turns pinch-zoom OFF,
+                  so this is the only way to scale the app on a phone. */}
+              <label className="flex items-center justify-between gap-3 text-xs text-zinc-300 tap">
+                <span>
+                  Interface zoom <span className="text-zinc-600">(80–150%, default 100%)</span>
+                </span>
+                <span className="flex items-center gap-2">
+                  <input
+                    type="range"
+                    min={80}
+                    max={150}
+                    step={5}
+                    value={zoom}
+                    onChange={(e) => {
+                      const percent = Number(e.target.value);
+                      setZoom(percent);
+                      try {
+                        localStorage.setItem(ZOOM_KEY, String(percent));
+                      } catch {
+                        /* private mode: the zoom applies now and is gone on the next load */
+                      }
+                      // The root font size this scales is main.tsx's (the
+                      // shell's file), so tell it rather than setting a style
+                      // from here — a second source of truth would drift the
+                      // moment the shell reloads on its own.
+                      window.dispatchEvent(new CustomEvent<number>("mlo:zoom", { detail: percent }));
+                    }}
+                    className="w-40 accent-[var(--accent)]"
+                  />
+                  <span className="w-9 text-right tabular-nums">{zoom}%</span>
+                </span>
+              </label>
               <div>
                 <span className="text-xs text-zinc-500 uppercase">Accent color</span>
                 <div className="flex gap-2 mt-1.5">
@@ -1641,7 +1714,7 @@ export default function SettingsPage() {
                   <label className="flex items-center justify-between gap-3 text-xs text-zinc-300">
                     <span>Fullscreen lyrics size</span>
                     <select
-                      className="input !w-28 !py-1 min-h-8 md:min-h-0"
+                      className="input !w-28 !py-1 tap"
                       value={localStorage.getItem("mlo.np.size") ?? "md"}
                       onChange={(e) => localStorage.setItem("mlo.np.size", e.target.value)}
                     >
@@ -1669,7 +1742,7 @@ export default function SettingsPage() {
                   <label className="flex items-center justify-between gap-3 text-xs text-zinc-300">
                     <span>Default lyrics save target</span>
                     <select
-                      className="input !w-40 !py-1 min-h-8 md:min-h-0"
+                      className="input !w-40 !py-1 tap"
                       value={localStorage.getItem("mlo.lyricsSaveTarget") ?? "embedded"}
                       onChange={(e) => localStorage.setItem("mlo.lyricsSaveTarget", e.target.value)}
                     >
@@ -1704,7 +1777,7 @@ export default function SettingsPage() {
                   Shorter folder names (truncate MusicBrainz IDs to 8 chars)
                 </label>
                 <button
-                  className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0"
+                  className="btn-ghost !py-1 text-xs tap"
                   onClick={() =>
                     setNamingScript(
                       String((configDefaults as Record<string, unknown> | undefined)?.naming_script ?? "")
@@ -1713,7 +1786,7 @@ export default function SettingsPage() {
                 >
                   <RotateCcw className="h-3.5 w-3.5" /> Reset to default
                 </button>
-                <button className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0" onClick={runPreview} disabled={previewing}>
+                <button className="btn-ghost !py-1 text-xs tap" onClick={runPreview} disabled={previewing}>
                   Preview
                 </button>
               </div>
@@ -1747,11 +1820,11 @@ export default function SettingsPage() {
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <button className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0" onClick={() => refetchDeps()} disabled={depsBusy}>
+                  <button className="btn-ghost !py-1 text-xs tap" onClick={() => refetchDeps()} disabled={depsBusy}>
                     Refresh
                   </button>
                   <button
-                    className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0"
+                    className="btn-ghost !py-1 text-xs tap"
                     onClick={() => installDeps(deps?.tools.filter((t) => t.state === "missing").map((t) => t.key))}
                     disabled={depsBusy}
                   >
@@ -1978,7 +2051,7 @@ export default function SettingsPage() {
               <p className="text-[11px] text-zinc-600 leading-relaxed">{t("settings.notifications_help")}</p>
               <div className="flex flex-wrap items-center gap-2">
                 <button
-                  className="btn-ghost !py-1.5 text-xs min-h-8 md:min-h-0"
+                  className="btn-ghost !py-1.5 text-xs tap"
                   onClick={async () => {
                     const state = await requestNotifications();
                     setNotifyState(state);
@@ -2083,7 +2156,7 @@ export default function SettingsPage() {
               spellCheck={false}
             />
             <div className="flex items-center gap-2 mt-2">
-              <button className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0" onClick={applyRaw}>
+              <button className="btn-ghost !py-1 text-xs tap" onClick={applyRaw}>
                 Apply to form
               </button>
               <span className="text-[10px] text-zinc-600">

@@ -36,7 +36,7 @@ function StarLike({ a }: { a: HomeAlbum }) {
   if (!a.owned || !a.path) return null;
   return (
     <button
-      className={`absolute top-1.5 right-1.5 h-7 w-7 rounded-full border border-white/10 bg-black/60 backdrop-blur flex items-center justify-center transition-colors ${
+      className={`absolute top-1.5 right-1.5 h-7 w-7 rounded-full border border-white/10 bg-black/60 backdrop-blur flex items-center justify-center transition-colors tap-hit ${
         fav ? "text-accent" : "text-zinc-300 hover:text-white"
       }`}
       onClick={(e) => {
@@ -214,7 +214,7 @@ export default function HomePage() {
         />
         <div className="flex justify-center">
           <button
-            className="btn-ghost !py-1.5 text-xs min-h-[2rem] md:min-h-0"
+            className="btn-ghost !py-1.5 text-xs tap"
             onClick={() => refetch()}
             disabled={isFetching}
             title={t("home.refresh_title")}
@@ -257,7 +257,7 @@ export default function HomePage() {
             }
             actions={
               <button
-                className="btn-ghost !py-1.5 text-xs min-h-[2rem] md:min-h-0"
+                className="btn-ghost !py-1.5 text-xs tap"
                 onClick={() => refetch()}
                 disabled={isFetching}
                 title={t("home.refresh_title")}

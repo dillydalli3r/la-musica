@@ -1279,29 +1279,29 @@ export default function PlayerBar() {
             )}
           </div>
           <button
-            className={`p-2 rounded-lg hover:bg-raise shrink-0 ${liked ? "text-accent" : "text-zinc-500"} ${idle ? "opacity-40 pointer-events-none" : ""}`}
+            className={`tap-hit p-2 rounded-lg hover:bg-raise shrink-0 ${liked ? "text-accent" : "text-zinc-500"} ${idle ? "opacity-40 pointer-events-none" : ""}`}
             onClick={toggleLike}
             disabled={idle}
             title={liked ? "Unlike" : "Like this track"}
           >
             <Heart className={`h-4 w-4 ${liked ? "fill-current" : ""}`} />
           </button>
-          <button className="p-2 rounded-lg hover:bg-raise text-zinc-300 shrink-0" onClick={() => step(-1)} disabled={idle} title="Previous track">
+          <button className="tap-hit p-2 rounded-lg hover:bg-raise text-zinc-300 shrink-0" onClick={() => step(-1)} disabled={idle} title="Previous track">
             <SkipBack className="h-4 w-4" />
           </button>
           <button
-            className={`p-2.5 rounded-lg bg-accent on-accent shrink-0 ${idle ? "opacity-40 pointer-events-none" : ""}`}
+            className={`tap-hit p-2.5 rounded-lg bg-accent on-accent shrink-0 ${idle ? "opacity-40 pointer-events-none" : ""}`}
             onClick={togglePlay}
             disabled={idle}
             title={playing ? "Pause" : "Play"}
           >
             {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4 ml-0.5" />}
           </button>
-          <button className="p-2 rounded-lg hover:bg-raise text-zinc-300 shrink-0" onClick={() => step(1)} disabled={idle} title="Next track">
+          <button className="tap-hit p-2 rounded-lg hover:bg-raise text-zinc-300 shrink-0" onClick={() => step(1)} disabled={idle} title="Next track">
             <SkipForward className="h-4 w-4" />
           </button>
           <button
-            className={`p-2 rounded-lg hover:bg-raise text-zinc-400 shrink-0 ${idle ? "opacity-40 pointer-events-none" : ""}`}
+            className={`tap-hit p-2 rounded-lg hover:bg-raise text-zinc-400 shrink-0 ${idle ? "opacity-40 pointer-events-none" : ""}`}
             onClick={() => openFullscreen()}
             disabled={idle}
             title="Fullscreen player"

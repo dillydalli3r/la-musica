@@ -131,7 +131,7 @@ export default function OptimizationPage() {
       <div className="panel">
         <div className="flex items-center gap-2 flex-wrap">
           <button
-            className="btn-primary text-xs min-h-10 md:min-h-0"
+            className="btn-primary text-xs tap"
             disabled={busy}
             onClick={runAll}
             title="Runs every script in the best order for file optimization: remux first (bit-exact video pass), then tags/lyrics, analysis, audio work — grading always last"
@@ -140,7 +140,7 @@ export default function OptimizationPage() {
           </button>
           <div className="relative flex items-center">
             <button
-              className={`btn-ghost text-xs min-h-8 md:min-h-0 rounded-r-none border-r-0 ${forceRun ? "!text-accent border border-accent/50" : ""}`}
+              className={`btn-ghost text-xs tap rounded-r-none border-r-0 ${forceRun ? "!text-accent border border-accent/50" : ""}`}
               onClick={toggleForce}
               title="Force the selected scripts on the next runs — ignores their 'already done' skips (one-shot, saved Settings are untouched)"
             >
@@ -152,7 +152,7 @@ export default function OptimizationPage() {
               )}
             </button>
             <button
-              className={`btn-ghost text-xs min-h-8 min-w-8 md:min-h-0 md:min-w-0 rounded-l-none !px-1 ${forceRun ? "!text-accent" : ""}`}
+              className={`btn-ghost text-xs tap min-w-11 md:min-w-0 rounded-l-none !px-1 ${forceRun ? "!text-accent" : ""}`}
               onClick={() => setForceMenu(!forceMenu)}
               title="Choose which scripts are forced"
             >
@@ -174,13 +174,13 @@ export default function OptimizationPage() {
                   ))}
                   <div className="flex items-center gap-1.5 pt-1.5 mt-1 border-t border-border">
                     <button
-                      className="btn-ghost !py-1 text-[11px] min-h-8 md:min-h-0 flex-1 inline-flex items-center justify-center gap-1"
+                      className="btn-ghost !py-1 text-[11px] tap flex-1 inline-flex items-center justify-center gap-1"
                       onClick={() => setSel(Object.fromEntries(FORCE_SCRIPTS.map((f) => [f.key, true])))}
                     >
                       <Check className="h-3 w-3" /> All
                     </button>
                     <button
-                      className="btn-ghost !py-1 text-[11px] min-h-8 md:min-h-0 flex-1"
+                      className="btn-ghost !py-1 text-[11px] tap flex-1"
                       onClick={() => setSel(Object.fromEntries(FORCE_SCRIPTS.map((f) => [f.key, false])))}
                     >
                       None
@@ -193,7 +193,7 @@ export default function OptimizationPage() {
             </Popover>
           </div>
           <button
-            className="btn-ghost text-xs min-h-8 md:min-h-0"
+            className="btn-ghost text-xs tap"
             disabled={busy}
             onClick={() => qc.invalidateQueries({ queryKey: ["library"] })}
           >
@@ -214,13 +214,13 @@ export default function OptimizationPage() {
           {sel.length > 0 && (
             <>
               <span className="text-[11px] text-zinc-500">{sel.length} selected</span>
-              <button className="btn-ghost !py-1 text-[11px] min-h-8 md:min-h-0" disabled={busy} onClick={() => persistSel([])}>
+              <button className="btn-ghost !py-1 text-[11px] tap" disabled={busy} onClick={() => persistSel([])}>
                 Clear
               </button>
             </>
           )}
           <button
-            className="btn-primary !py-1 text-xs min-h-10 md:min-h-0"
+            className="btn-primary !py-1 text-xs tap"
             disabled={busy || !sel.length}
             onClick={runSelected}
             title={sel.length ? `Run in order: ${sel.map(selLabel).join(" → ")}` : "Tick scripts below to build a custom run"}
@@ -259,7 +259,7 @@ export default function OptimizationPage() {
                   </span>
                 )}
                 <button
-                  className="btn-ghost !p-1 min-h-8 min-w-8 md:min-h-0 md:min-w-0 shrink-0"
+                  className="btn-ghost !p-1 tap min-w-11 md:min-w-0 shrink-0"
                   disabled={busy}
                   onClick={() => runScripts(s.ids, s.label)}
                   title={`Run: ${s.label}`}
@@ -278,13 +278,13 @@ export default function OptimizationPage() {
                 <div key={id} className="flex items-center gap-2 text-xs text-zinc-300 bg-panel rounded-lg px-2 py-1">
                   <span className="font-mono text-[10px] text-zinc-500 w-4 text-right">{i + 1}</span>
                   <span className="flex-1 min-w-0 truncate">{selLabel(id)}</span>
-                  <button className="btn-ghost !px-1 !py-0.5 min-h-8 min-w-8 md:min-h-0 md:min-w-0" disabled={i === 0 || busy} onClick={() => move(i, -1)} title="Move up">
+                  <button className="btn-ghost !px-1 !py-0.5 tap min-w-11 md:min-w-0" disabled={i === 0 || busy} onClick={() => move(i, -1)} title="Move up">
                     <Up className="h-3 w-3" />
                   </button>
-                  <button className="btn-ghost !px-1 !py-0.5 min-h-8 min-w-8 md:min-h-0 md:min-w-0" disabled={i === sel.length - 1 || busy} onClick={() => move(i, 1)} title="Move down">
+                  <button className="btn-ghost !px-1 !py-0.5 tap min-w-11 md:min-w-0" disabled={i === sel.length - 1 || busy} onClick={() => move(i, 1)} title="Move down">
                     <Down className="h-3 w-3" />
                   </button>
-                  <button className="btn-ghost !px-1 !py-0.5 min-h-8 min-w-8 md:min-h-0 md:min-w-0" disabled={busy} onClick={() => toggleSel(id)} title="Remove from the custom run">
+                  <button className="btn-ghost !px-1 !py-0.5 tap min-w-11 md:min-w-0" disabled={busy} onClick={() => toggleSel(id)} title="Remove from the custom run">
                     <X className="h-3 w-3" />
                   </button>
                 </div>
@@ -377,7 +377,7 @@ function LayoutPanel() {
             {report.audio_files} audio file(s) · {report.albums} album folder(s) · {report.artists} artist(s)
           </span>
         )}
-        <button className="btn-primary !py-1 text-xs min-h-10 md:min-h-0" disabled={busy} onClick={scan}>
+        <button className="btn-primary !py-1 text-xs tap" disabled={busy} onClick={scan}>
           <RefreshCw className={`h-3.5 w-3.5 ${busy ? "animate-spin" : ""}`} />
           {busy ? "Scanning…" : report ? "Rescan" : "Scan library layout"}
         </button>
@@ -414,7 +414,7 @@ function LayoutPanel() {
             return (
               <div key={kind} className="border border-border rounded-lg overflow-hidden">
                 <button
-                  className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs bg-panel hover:bg-raise text-left min-h-8 md:min-h-0"
+                  className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs bg-panel hover:bg-raise text-left tap"
                   onClick={() => toggle(kind)}
                 >
                   {isOpen ? <Down className="h-3 w-3 shrink-0" /> : <Up className="h-3 w-3 shrink-0 rotate-90" />}
@@ -430,7 +430,7 @@ function LayoutPanel() {
                             {i.path}
                           </span>
                           <button
-                            className="btn-ghost !px-1.5 !py-0.5 text-[10px] min-h-8 md:min-h-0 shrink-0"
+                            className="btn-ghost !px-1.5 !py-0.5 text-[10px] tap shrink-0"
                             onClick={() => copyPath(i.abs)}
                             title={i.abs}
                           >

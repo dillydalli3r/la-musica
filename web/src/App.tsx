@@ -97,6 +97,28 @@ const NAV_GROUPS: { labelKey: MessageKey; items: { to: string; labelKey: Message
 
 const COLLAPSE_KEY = "mlo.sidebar.collapsed";
 
+/** The top bar's search answers from the library (the client-side filter over
+ *  the payload it already has) or from MusicBrainz (live). The pick is a
+ *  device preference, so it lives here rather than in the server config. */
+const SEARCH_SOURCE_KEY = "mlo.search.source";
+type SearchSource = "local" | "mb";
+
+/** The MusicBrainz page a search hit opens outside the app — the same
+ *  destination the import wizard's own MB search puts in its release link. */
+const mbUrl = (kind: "release" | "artist", id: string) => `https://musicbrainz.org/${kind}/${id}`;
+
+/** The value, `ms` after it stopped changing. MusicBrainz rate-limits a
+ *  client to about one request a second, and a query keyed on the raw input
+ *  fires one search per keystroke. */
+function useSettled<T>(value: T, ms = 400): T {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const id = setTimeout(() => setSettled(value), ms);
+    return () => clearTimeout(id);
+  }, [value, ms]);
+  return settled;
+}
+
 /** A `setTimeout`/`setInterval` handle in this build: a number in the browser
  *  typings, an object under Node's — naming it once keeps the shell's refs and
  *  locals readable and gives the pair one place to change. */
@@ -203,23 +225,33 @@ function PageLoading() {
 }
 
 /** One typed row in the top-bar search dropdown: a direct in-app link to the
- *  entity, with its kind on the right. */
-function SearchHit({ to, icon: Icon, label, hint, onGo }: {
+ *  entity, with its kind on the right. A MusicBrainz hit cannot be an in-app
+ *  route — the app has no page for a release it does not own — so `external`
+ *  renders it as a link out to the same page the import wizard's MB search
+ *  points at. */
+function SearchHit({ to, icon: Icon, label, hint, onGo, external }: {
   to: string;
   icon: LucideIcon;
   label: string;
   hint: string;
   onGo: () => void;
+  external?: boolean;
 }) {
-  return (
-    <Link
-      to={to}
-      onClick={onGo}
-      className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-zinc-200 hover:bg-raise transition-colors"
-    >
+  const body = (
+    <>
       <Icon className="h-4 w-4 text-accent-soft shrink-0" />
       <span className="flex-1 min-w-0 truncate">{label}</span>
       <span className="text-[10px] uppercase tracking-wider text-zinc-600 shrink-0">{hint}</span>
+    </>
+  );
+  const cls = "w-full flex items-center gap-2.5 px-3 py-2 text-xs text-zinc-200 hover:bg-raise transition-colors";
+  return external ? (
+    <a href={to} target="_blank" rel="noreferrer" className={cls} onClick={onGo}>
+      {body}
+    </a>
+  ) : (
+    <Link to={to} onClick={onGo} className={cls}>
+      {body}
     </Link>
   );
 }
@@ -432,8 +464,21 @@ export default function App() {
   // anywhere — typing on another page jumps to the library. The dropdown
   // below the input offers the typed local hits.
   const [searchOpen, setSearchOpen] = useState(false);
+  // Which of the two searches the box is running. Remembered per device: it is
+  // a way of working, not a server setting.
+  const [source, setSource] = useState<SearchSource>(() =>
+    localStorage.getItem(SEARCH_SOURCE_KEY) === "mb" ? "mb" : "local"
+  );
+  const pickSource = (next: SearchSource) => {
+    setSource(next);
+    localStorage.setItem(SEARCH_SOURCE_KEY, next);
+  };
   const onSearch = (q: string) => {
     setQuery(q);
+    // A MusicBrainz query is not a library filter: typing must not drag the
+    // user off the page they are on into a library narrowed by a query that
+    // does not describe it.
+    if (source === "mb") return;
     if (location.pathname !== "/library") navigate("/library");
   };
 
@@ -462,6 +507,32 @@ export default function App() {
         .slice(0, 5),
     };
   }, [lib, q]);
+
+  // MusicBrainz mode: the SAME two client calls the import wizard's search
+  // uses (releases + artists), so a hit here opens exactly the release the
+  // wizard would have matched. Live remote calls against a rate-limited
+  // service, so they run only while the dropdown is open, only on a settled
+  // query, and only from two characters on.
+  const mbQuery = useSettled(query.trim());
+  const mbOn = searchOpen && source === "mb" && mbQuery.length >= 2;
+  const { data: mbReleases = [] } = useQuery({
+    queryKey: ["mb-search", "releases", mbQuery],
+    queryFn: () => api.mbSearchReleases(mbQuery, "release"),
+    enabled: mbOn,
+    staleTime: 300000,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+  const { data: mbArtists = [] } = useQuery({
+    queryKey: ["mb-search", "artists", mbQuery],
+    queryFn: () => api.mbSearchArtists(mbQuery),
+    enabled: mbOn,
+    staleTime: 300000,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+  const mbRows = (Array.isArray(mbReleases) ? mbReleases : []).slice(0, 6);
+  const mbArtistRows = (Array.isArray(mbArtists) ? mbArtists : []).slice(0, 4);
 
   /** Enter opens the artist page when the query IS an artist (exact match, or
    *  the one artist the query narrows to) — otherwise it leaves the already
@@ -640,8 +711,10 @@ export default function App() {
   return (
     // The sidebar owns the entire left edge, top to bottom (brand header, nav,
     // footer); the top bar, content and player bar all live in the column to
-    // its right.
-    <div className="h-dvh overflow-hidden bg-bg text-zinc-100 flex">
+    // its right. `.safe-shell` carries the notch / home-indicator insets for
+    // everything inside it at once (index.html sets `viewport-fit=cover`, so
+    // without it the chrome paints under them).
+    <div className="safe-shell h-dvh overflow-hidden bg-bg text-zinc-100 flex">
       <aside
         className={`${collapsed ? "w-14" : "w-48"} hidden md:flex h-full shrink-0 border-r border-border bg-panel p-2 flex-col gap-1 overflow-y-auto transition-[width] duration-150 relative z-20`}
       >
@@ -747,14 +820,14 @@ export default function App() {
             role="dialog"
             aria-modal="true"
             aria-label={t("topbar.menu_open")}
-            className="anim-pop fixed left-0 top-0 bottom-0 z-50 w-52 bg-panel border-r border-border p-2 flex flex-col gap-1 overflow-y-auto overscroll-contain md:hidden shadow-2xl"
+            className="safe-drawer anim-pop fixed left-0 top-0 bottom-0 z-50 w-52 bg-panel border-r border-border p-2 flex flex-col gap-1 overflow-y-auto overscroll-contain md:hidden shadow-2xl"
           >
             <div className="flex items-center gap-2 border-b border-border pb-2 mb-1 px-1">
               <img src="/icon.png" alt="la musica" className="h-7 w-7 rounded-md object-cover ring-1 ring-border shadow-sm" />
               <span className="flex-1 overflow-hidden whitespace-nowrap font-bold tracking-tight text-sm">la musica</span>
               <button
                 ref={navCloseRef}
-                className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-raise transition-colors"
+                className="tap-hit p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-raise transition-colors"
                 onClick={() => setNavOpen(false)}
                 title={t("topbar.menu_close")}
                 aria-label={t("topbar.menu_close")}
@@ -774,7 +847,7 @@ export default function App() {
                     end={end}
                     onClick={() => setNavOpen(false)}
                     className={({ isActive }) =>
-                      `nav-link flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm border ${
+                      `nav-link flex items-center gap-2.5 rounded-lg px-3 py-3 text-sm border ${
                         isActive
                           ? "bg-accent on-accent font-semibold border-transparent shadow-sm"
                           : "text-zinc-400 hover:text-white hover:bg-raise border-transparent"
@@ -799,12 +872,17 @@ export default function App() {
 
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden relative z-10">
         {/* floating top bar: transparent overlay on the content — only the
-            controls themselves catch the pointer */}
-        <header className="absolute inset-x-0 top-0 h-12 z-30 flex items-center gap-3 px-4 pointer-events-none">
+            controls themselves catch the pointer. The spacing tightens on a
+            phone, where this bar shares its width with the drawer and the
+            search field: six controls at desktop spacing left the input about
+            100px of a 390px screen. The icon buttons keep their 36px box (a
+            44px box would not fit a 48px bar) and take `.tap-hit` instead,
+            which grows the touch area without moving anything. */}
+        <header className="absolute inset-x-0 top-0 h-12 z-30 flex items-center gap-1.5 sm:gap-3 px-2 sm:px-4 pointer-events-none">
           <div className="flex items-center gap-1.5 shrink-0 pointer-events-auto">
             <button
               ref={navTriggerRef}
-              className="h-9 w-9 rounded-full border border-border bg-panel/60 backdrop-blur flex md:hidden items-center justify-center text-zinc-300 hover:text-white hover:border-accent/50 transition-colors"
+              className="tap-hit h-9 w-9 rounded-full border border-border bg-panel/60 backdrop-blur flex md:hidden items-center justify-center text-zinc-300 hover:text-white hover:border-accent/50 transition-colors"
               onClick={() => setNavOpen(true)}
               title={t("topbar.menu")}
               aria-label={t("topbar.menu_open")}
@@ -813,7 +891,7 @@ export default function App() {
               <Menu className="h-4 w-4" />
             </button>
             <button
-              className="h-9 w-9 rounded-full border border-border bg-panel/60 backdrop-blur flex items-center justify-center text-zinc-300 hover:text-white hover:border-accent/50 disabled:opacity-30 disabled:pointer-events-none transition-colors"
+              className="tap-hit h-9 w-9 rounded-full border border-border bg-panel/60 backdrop-blur flex items-center justify-center text-zinc-300 hover:text-white hover:border-accent/50 disabled:opacity-30 disabled:pointer-events-none transition-colors"
               onClick={goBack}
               disabled={pos === 0}
               title={t("topbar.back")}
@@ -821,7 +899,7 @@ export default function App() {
               <ChevronLeft className="h-4 w-4" />
             </button>
             <button
-              className="h-9 w-9 rounded-full border border-border bg-panel/60 backdrop-blur hidden sm:flex items-center justify-center text-zinc-300 hover:text-white hover:border-accent/50 disabled:opacity-30 disabled:pointer-events-none transition-colors"
+              className="tap-hit h-9 w-9 rounded-full border border-border bg-panel/60 backdrop-blur hidden sm:flex items-center justify-center text-zinc-300 hover:text-white hover:border-accent/50 disabled:opacity-30 disabled:pointer-events-none transition-colors"
               onClick={goForward}
               disabled={pos >= stackRef.current.length - 1}
               title={t("topbar.forward")}
@@ -829,7 +907,7 @@ export default function App() {
               <ChevronRight className="h-4 w-4" />
             </button>
             <button
-              className="h-9 w-9 rounded-full border border-border bg-panel/60 backdrop-blur hidden sm:flex items-center justify-center text-zinc-300 hover:text-white hover:border-accent/50 transition-colors"
+              className="tap-hit h-9 w-9 rounded-full border border-border bg-panel/60 backdrop-blur hidden sm:flex items-center justify-center text-zinc-300 hover:text-white hover:border-accent/50 transition-colors"
               onClick={() => setShortcutsOpen(true)}
               title={t("topbar.shortcuts") + " (?)"}
               aria-label={t("topbar.shortcuts")}
@@ -854,61 +932,122 @@ export default function App() {
               </span>
             )}
           </div>
-          {/* the search input spans the rest of the bar */}
-          <div className="relative flex-1 pointer-events-auto">
+          {/* Which search the box runs. A native <select>: it is keyboard
+              reachable and screen-reader labelled for free, and it is the
+              control every platform already knows how to open. Kept narrow on
+              a phone (the bar has to hold the input too) — the placeholder and
+              the title both say which mode is active, so a clipped option
+              label is never the only clue. */}
+          <select
+            className="input tap-hit h-9 w-[5.5rem] sm:w-[7.5rem] shrink-0 !py-0 !px-2 text-[11px] sm:text-xs !bg-panel/60 backdrop-blur cursor-pointer pointer-events-auto"
+            aria-label={t("topbar.search_source")}
+            title={source === "mb" ? t("topbar.search_mb_hint") : t("topbar.search_local_hint")}
+            value={source}
+            onChange={(e) => pickSource(e.target.value as SearchSource)}
+          >
+            <option value="local">{t("topbar.search_local")}</option>
+            <option value="mb">{t("topbar.search_mb")}</option>
+          </select>
+          {/* the search input spans the rest of the bar. `.search-field` is a
+              query container: index.css drops the magnifier's inset when the
+              field itself gets too narrow to say anything (phone widths, and
+              any app zoom — see the rule). */}
+          <div className="search-field relative flex-1 pointer-events-auto">
             <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-500" />
             <input
               ref={searchRef}
               className="input !py-2 !pl-10 text-xs w-full !bg-panel/60 backdrop-blur"
-              placeholder={t("topbar.search")}
-              title="Tag-scoped search: composer:name · person:name (any credit) · genre:metal · tag:anything — quotes keep spaces · press / to jump here"
+              placeholder={source === "mb" ? t("topbar.search_mb_placeholder") : t("topbar.search")}
+              title={
+                source === "mb"
+                  ? t("topbar.search_mb_hint")
+                  : "Tag-scoped search: composer:name · person:name (any credit) · genre:metal · tag:anything — quotes keep spaces · press / to jump here"
+              }
               value={query}
               onChange={(e) => onSearch(e.target.value)}
               onFocus={() => setSearchOpen(true)}
               onBlur={() => setTimeout(() => setSearchOpen(false), 150)}
               onKeyDown={(e) => {
-                // Enter prefers the artist the query names (a direct open);
-                // otherwise it leaves the library filter that typing already
-                // applied.
                 if (e.key !== "Enter" || !query.trim()) return;
                 e.preventDefault();
                 setSearchOpen(false);
+                // MusicBrainz mode has no in-app page to land on: Enter takes
+                // the first release, which is the one the wizard's own search
+                // would have offered first. Local mode prefers the artist the
+                // query names; otherwise it leaves the library filter that
+                // typing already applied alone.
+                if (source === "mb") {
+                  if (mbRows[0]?.id) window.open(mbUrl("release", mbRows[0].id), "_blank", "noopener");
+                  return;
+                }
                 const artistTo = openOnEnter();
                 if (artistTo) navigate(artistTo);
               }}
             />
-            {searchOpen && query.trim() && (
+            {searchOpen && query.trim() && (source === "local" || mbRows.length > 0 || mbArtistRows.length > 0) && (
               <div className="anim-fade absolute left-0 right-0 top-full mt-1 z-40 rounded-lg border border-border bg-zinc-950/95 backdrop-blur shadow-xl overflow-hidden max-h-[70vh] overflow-y-auto">
-                {hits.artists.map((a) => (
-                  <SearchHit
-                    key={a.path}
-                    to={artistRef(a)}
-                    icon={User}
-                    label={a.display_name || a.name}
-                    hint={t("page.artist")}
-                    onGo={() => setSearchOpen(false)}
-                  />
-                ))}
-                {hits.albums.map((al) => (
-                  <SearchHit
-                    key={al.path}
-                    to={albumRef(al)}
-                    icon={Disc3}
-                    label={al.meta?.ALBUM ?? al.path}
-                    hint={t("page.album")}
-                    onGo={() => setSearchOpen(false)}
-                  />
-                ))}
-                {hits.tracks.map(({ al, t: tr }) => (
-                  <SearchHit
-                    key={tr.path}
-                    to={trackRef(tr)}
-                    icon={Music2}
-                    label={tr.tags?.TITLE ?? tr.file}
-                    hint={al.album_artist || t("page.track")}
-                    onGo={() => setSearchOpen(false)}
-                  />
-                ))}
+                {source === "local" ? (
+                  <>
+                    {hits.artists.map((a) => (
+                      <SearchHit
+                        key={a.path}
+                        to={artistRef(a)}
+                        icon={User}
+                        label={a.display_name || a.name}
+                        hint={t("page.artist")}
+                        onGo={() => setSearchOpen(false)}
+                      />
+                    ))}
+                    {hits.albums.map((al) => (
+                      <SearchHit
+                        key={al.path}
+                        to={albumRef(al)}
+                        icon={Disc3}
+                        label={al.meta?.ALBUM ?? al.path}
+                        hint={t("page.album")}
+                        onGo={() => setSearchOpen(false)}
+                      />
+                    ))}
+                    {hits.tracks.map(({ al, t: tr }) => (
+                      <SearchHit
+                        key={tr.path}
+                        to={trackRef(tr)}
+                        icon={Music2}
+                        label={tr.tags?.TITLE ?? tr.file}
+                        hint={al.album_artist || t("page.track")}
+                        onGo={() => setSearchOpen(false)}
+                      />
+                    ))}
+                  </>
+                ) : (
+                  <>
+                    {/* Artists first, then releases: a name is how a user
+                        finds the act, and both kinds open on musicbrainz.org
+                        (the app has no page for a release it does not own). */}
+                    {mbArtistRows.map((a: { id: string; name: string; type?: string }) => (
+                      <SearchHit
+                        key={`a-${a.id}`}
+                        to={mbUrl("artist", a.id)}
+                        icon={User}
+                        label={a.name}
+                        hint={a.type || t("page.artist")}
+                        onGo={() => setSearchOpen(false)}
+                        external
+                      />
+                    ))}
+                    {mbRows.map((h: { id: string; title: string; artist?: string; date?: string }) => (
+                      <SearchHit
+                        key={`r-${h.id}`}
+                        to={mbUrl("release", h.id)}
+                        icon={Disc3}
+                        label={h.title || h.id}
+                        hint={h.artist || h.date || ""}
+                        onGo={() => setSearchOpen(false)}
+                        external
+                      />
+                    ))}
+                  </>
+                )}
               </div>
             )}
           </div>

@@ -196,7 +196,7 @@ export default function SourcesPanel({ only }: { only?: SourceKind } = {}) {
             a source that cannot run here is skipped, never fatal.
           </div>
         </div>
-        <button className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0" onClick={testAll} disabled={busy !== null}>
+        <button className="btn-ghost !py-1 text-xs tap" onClick={testAll} disabled={busy !== null}>
           <RotateCcw className={`h-3 w-3 ${busy === "all" ? "animate-spin" : ""}`} />
           {busy === "all" ? "Testing…" : "Test all"}
         </button>
@@ -257,7 +257,7 @@ export default function SourcesPanel({ only }: { only?: SourceKind } = {}) {
                     {row.ms ? ` · ${row.ms} ms` : ""}
                   </span>
                   <button
-                    className="btn-ghost !py-0.5 !px-2 text-[11px] min-h-8 md:min-h-0"
+                    className="btn-ghost !py-0.5 !px-2 text-[11px] tap"
                     onClick={() => testOne(row)}
                     disabled={busy !== null}
                   >
@@ -294,7 +294,7 @@ export default function SourcesPanel({ only }: { only?: SourceKind } = {}) {
                             {KEY_INFO[k].label}
                           </span>
                           <input
-                            className="input !py-1 text-[11px] mt-0.5 min-h-8 md:min-h-0"
+                            className="input !py-1 text-[11px] mt-0.5 tap"
                             type={KEY_INFO[k].secret ? "password" : "text"}
                             value={draft[k] ?? ""}
                             placeholder={KEY_INFO[k].label}

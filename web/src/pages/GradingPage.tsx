@@ -39,8 +39,9 @@ const GROUPS: Group[] = [
       { k: "grade_check_mood", label: "Mood tag present", desc: "Every track needs a MOOD tag — script 8 fills it (script 16 re-runs just that classifier), so no track should ship without one (issue code MOOD_MISSING)." },
       { k: "grade_check_energy", label: "Energy tag present", desc: "Every track needs an ENERGY tag (0-100, written with MOOD by script 8 or 16; issue code ENERGY_MISSING)." },
       { k: "grade_check_genre", label: "Genre tag present", desc: "Every track needs a GENRE tag. Graded on its own, independent of the required-tags sweep (issue code GENRE_MISSING)." },
-      { k: "grade_check_genre_count", label: "Genre count per track", desc: "Every track must hold EXACTLY the number of genres set by 'Genres per track' in Settings → Import (mb_genre_count) — fewer or more fails (issue code GENRE_COUNT). Separate from the presence check above: a track with two genres passes that one and fails this one. The import and the trimming scripts cap a track at the same value, so a library this app tagged can never fail it." },
-      { k: "grade_check_genre_order", label: "Genre order (parent → sub)", desc: "The genres form a hierarchy: parent first, then the main genre, then the subgenre (Rock / Alternative Rock / Post-Britpop). A parent that sits in a later slot, or a slot repeated, fails (issue code GENRE_ORDER). A head this app's vocabulary does not know (Kwaito) is never a failure on its own. AI genre inference (Settings → AI) and the import's source chain are what produce the order." },
+      { k: "grade_check_genre_count", label: "Genre count per track", desc: "A track may hold AT MOST the number of genres set by 'Genres per track' in Settings → Import & tags (mb_genre_count) — only an overflow fails (issue code GENRE_COUNT). Fewer is fine: the family is derived from the specific genre, so one specific genre is a complete answer and nothing is topped up with filler." },
+      { k: "grade_check_genre_order", label: "Genre order (family last)", desc: "The family, if present, must be the LAST genre — shoegaze / dream pop / rock. A family in an earlier slot, or a genre repeated, fails (issue code GENRE_ORDER). The names themselves are graded by the vocabulary check below." },
+      { k: "grade_check_genre_vocab", label: "Genre vocabulary", desc: "Every GENRE name must be one MusicBrainz publishes (shoegaze, dream pop, …). A name it does not know fails with issue code GENRE_VOCAB and is named in the report — the writers keep what a source said, so grading is where it surfaces. Grading never rewrites the tag: run Auto tagging (8) or Format all (10) to canonicalize it." },
       { k: "grade_check_replaygain", label: "ReplayGain tags present", desc: "A file that carries any REPLAYGAIN_* tag must carry all four — REPLAYGAIN_TRACK_GAIN/_PEAK and _ALBUM_GAIN/_PEAK. A file with none is not graded (run the Loudness pass; the player can also analyse on demand)." },
       { k: "grade_check_encoder", label: "Encoder identity", desc: "The ENCODER_* markers switched on under Tagging → Encoder tags must be present (PROGRAM is off by default). Covers are graded by the same rule while image processing is on." },
       { k: "grade_check_naming", label: "Naming script match", desc: "File paths must match the configured naming script (full or shortened MusicBrainz IDs both accepted)." },
@@ -295,13 +296,14 @@ export default function GradingPage() {
               confirmLabel="Reset checks"
               disabled={!defaults || saving}
               title="Restore factory defaults for every grading check"
+              className="btn-ghost !py-1.5 text-xs tap"
             >
               <RotateCcw className="h-3.5 w-3.5" /> Reset to defaults
             </ConfirmButton>
-            <button className="btn-ghost !py-1.5 text-xs min-h-8 md:min-h-0" onClick={discard} disabled={!dirty || saving}>
+            <button className="btn-ghost !py-1.5 text-xs tap" onClick={discard} disabled={!dirty || saving}>
               <RotateCcw className="h-3.5 w-3.5" /> Discard
             </button>
-            <button className="btn-primary !py-1.5 text-xs min-h-10 md:min-h-0" onClick={save} disabled={!dirty || saving}>
+            <button className="btn-primary !py-1.5 text-xs tap" onClick={save} disabled={!dirty || saving}>
               <Save className="h-3.5 w-3.5" /> {saving ? "Saving…" : "Save"}
             </button>
           </>
@@ -310,22 +312,18 @@ export default function GradingPage() {
         {local && (
           <div className="flex items-center gap-2 flex-wrap">
             <input
-              className="input !py-1.5 text-xs w-full sm:max-w-xs min-h-8 md:min-h-0"
+              className="input !py-1.5 text-xs w-full sm:max-w-xs tap"
               placeholder="Filter checks… (tags, lyrics, cover…)"
               value={q}
               onChange={(e) => setQ(e.target.value)}
             />
             <Segmented
-              // The preset switcher's own options are px-3 py-1.5 (28 px); a
-              // min-height on the flex wrapper stretches them to a phone tap
-              // target without touching the shared Segmented component.
-              className="min-h-8 md:min-h-0"
               value={preset}
               onChange={applyPreset}
               options={PRESETS}
             />
-            <button className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0" onClick={() => setBulk(true)}>Enable all</button>
-            <button className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0" onClick={() => setBulk(false)}>Disable all</button>
+            <button className="btn-ghost !py-1 text-xs tap" onClick={() => setBulk(true)}>Enable all</button>
+            <button className="btn-ghost !py-1 text-xs tap" onClick={() => setBulk(false)}>Disable all</button>
             <span
               className="chip font-mono bg-white/5 border border-border text-zinc-400"
               title="Enabled grading checks — the file-category permissions are counted per group instead"
@@ -343,7 +341,7 @@ export default function GradingPage() {
               <div className="text-amber-300">
                 Could not load the grading settings — the server may be restarting.
               </div>
-              <button className="btn-ghost !py-1.5 text-xs min-h-8 md:min-h-0" onClick={() => refetchConfig()}>
+              <button className="btn-ghost !py-1.5 text-xs tap" onClick={() => refetchConfig()}>
                 <RefreshCw className="h-3.5 w-3.5" /> Retry
               </button>
             </>
@@ -418,7 +416,7 @@ export default function GradingPage() {
                         <span className="text-[11px] text-zinc-500 block leading-snug">{n.desc}</span>
                       </span>
                       <input
-                        className="input !w-20 !py-1 text-sm shrink-0 min-h-8 md:min-h-0"
+                        className="input !w-20 !py-1 text-sm shrink-0 tap"
                         type="number"
                         min={n.min}
                         max={n.max}

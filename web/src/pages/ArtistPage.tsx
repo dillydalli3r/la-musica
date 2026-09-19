@@ -14,6 +14,7 @@ import DownloadButton from "../components/DownloadButton";
 import FavHeart from "../components/FavHeart";
 import ArtistImageModal from "../components/ArtistImageModal";
 import MetadataReviewModal from "../components/MetadataReviewModal";
+import MoreLikeThis from "../components/MoreLikeThis";
 import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
 import TagActionsMenu from "../components/TagActionsMenu";
@@ -662,6 +663,10 @@ export default function ArtistPage() {
           })
         )}
       </section>
+
+      {/* Albums the local scorer ranks closest to this artist's catalogue —
+          from OTHER artists, since this page already lists its own. */}
+      <MoreLikeThis kind="artist" id={decoded} />
 
       {imageOpen && (
         <ArtistImageModal

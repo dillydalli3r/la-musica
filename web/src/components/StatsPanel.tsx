@@ -2,6 +2,7 @@ import { BarChart3 } from "lucide-react";
 import { useMemo, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { trackRef } from "../lib/refs";
+import { canonicalGenre, splitGenres } from "../lib/genres";
 import { useStore } from "../store";
 import type { TrackTags } from "../types";
 import Modal from "./Modal";
@@ -69,8 +70,14 @@ export default function StatsPanel({
       else advisory.none++;
       if (tags.INSTRUMENTAL === "1") instrumental++;
       if (t.lyrics_present) withLyrics++;
-      for (const g of String(tags.GENRE ?? "").split(";")) {
-        const gg = g.trim();
+      // A GENRE tag holds a LIST now (repeated fields, read back joined): one
+      // name, one chip — the shared splitter handles both the storage "; " and
+      // the rendered " / " separator, so "shoegaze / rock" is two genres.
+      for (const g of splitGenres(tags.GENRE)) {
+        // MusicBrainz's own spelling, the same fold `/api/genres/facets`
+        // applies, so this list and the Genres page cannot report the same
+        // tags under two different names ("Shoegaze" vs "shoegaze").
+        const gg = canonicalGenre(g);
         if (gg) genres.set(gg, (genres.get(gg) ?? 0) + 1);
       }
     }

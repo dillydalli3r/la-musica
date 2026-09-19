@@ -191,7 +191,7 @@ export default function TrackDetails({
         {/* jump to the track's own page for full tag editing */}
         <Link
           to={trackRef({ path: track.path, tags: { MUSICBRAINZ_TRACKID: track.tags?.MUSICBRAINZ_TRACKID } })}
-          className="btn-ghost !py-1.5 text-xs"
+          className="btn-ghost !py-1.5 text-xs tap"
           title="Open the track page"
         >
           <ExternalLink className="h-3.5 w-3.5" /> Track page

@@ -295,7 +295,11 @@ export default function ExportPage() {
 
       <div className="grid lg:grid-cols-2 gap-4">
         {/* ---- source -------------------------------------------------- */}
-        <div className="panel">
+        {/* `min-w-0`: as a grid item the panel's automatic minimum is its
+            content's min-content, which the tab strip below sets — and then
+            the strip grows the panel instead of scrolling inside its own box
+            on a phone. */}
+        <div className="panel min-w-0">
           <div className="text-xs font-bold text-zinc-300 mb-2">Source</div>
           {/* Five options are wider than a phone: the strip scrolls in its own
               box instead of pushing the page sideways. */}
@@ -305,7 +309,7 @@ export default function ExportPage() {
 
           {sourceKind === "playlist" && (
             <select
-              className="input !py-1 text-xs w-full min-h-8 sm:min-h-0"
+              className="input !py-1 text-xs w-full min-w-0 tap"
               value={playlistId ?? ""}
               onChange={(e) => setPlaylistId(e.target.value ? Number(e.target.value) : null)}
             >
@@ -333,7 +337,7 @@ export default function ExportPage() {
               <div className="relative mb-2">
                 <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-500" />
                 <input
-                  className="input !py-1 !pl-7 text-xs w-full min-h-8 sm:min-h-0"
+                  className="input !py-1 !pl-7 text-xs w-full min-w-0 tap"
                   placeholder={
                     sourceKind === "albums" ? "Filter albums / artists…"
                     : sourceKind === "artists" ? "Filter artists…"
@@ -344,10 +348,10 @@ export default function ExportPage() {
                 />
               </div>
               <div className="flex items-center gap-2 mb-2 text-[11px]">
-                <button className="btn !py-0.5 !px-2 text-[11px] min-h-8 sm:min-h-0" onClick={() => bulkSelect(true)}>
+                <button className="btn !py-0.5 !px-2 text-[11px] tap" onClick={() => bulkSelect(true)}>
                   Select all{filter ? " matching" : ""} ({listKeys.length})
                 </button>
-                <button className="btn !py-0.5 !px-2 text-[11px] min-h-8 sm:min-h-0" onClick={() => bulkSelect(false)}>
+                <button className="btn !py-0.5 !px-2 text-[11px] tap" onClick={() => bulkSelect(false)}>
                   Clear
                 </button>
               </div>
@@ -470,11 +474,11 @@ export default function ExportPage() {
         </div>
 
         {/* ---- destination + format ------------------------------------ */}
-        <div className="panel">
+        <div className="panel min-w-0">
           <div className="flex items-center justify-between mb-2">
             <div className="text-xs font-bold text-zinc-300">Destination</div>
             <button
-              className="btn !py-0.5 !px-2 text-[11px] min-h-8 sm:min-h-0"
+              className="btn !py-0.5 !px-2 text-[11px] tap"
               onClick={() => queryClient.invalidateQueries({ queryKey: ["exportDrives"] })}
               title="Rescan the drives (a device plugged in after the page opened)"
             >
@@ -483,7 +487,7 @@ export default function ExportPage() {
             </button>
           </div>
           <select
-            className="input !py-1 text-xs w-full min-h-8 sm:min-h-0"
+            className="input !py-1 text-xs w-full min-w-0 tap"
             value={f.dest}
             onChange={(e) => set("dest", e.target.value)}
           >
@@ -496,7 +500,7 @@ export default function ExportPage() {
           </select>
           <label className="flex items-center gap-2 mt-2 text-xs text-zinc-300">
             <span className="shrink-0">Subfolder</span>
-            <input className="input !py-1 text-xs flex-1 min-h-8 sm:min-h-0" value={f.subfolder} onChange={(e) => set("subfolder", e.target.value)} />
+            <input className="input !py-1 text-xs flex-1 min-w-0 tap" value={f.subfolder} onChange={(e) => set("subfolder", e.target.value)} />
           </label>
           {overCapacity && (
             <div className="flex items-start gap-2 mt-2 text-[11px] text-amber-300 border border-amber-500/30 bg-amber-500/10 rounded-md p-2">
@@ -513,7 +517,7 @@ export default function ExportPage() {
             <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
               Codec
               <select
-                className="input !py-1 text-xs min-h-8 sm:min-h-0"
+                className="input !py-1 text-xs min-w-0 tap"
                 value={f.codec}
                 onChange={(e) => {
                   set("codec", e.target.value);
@@ -528,7 +532,7 @@ export default function ExportPage() {
             <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
               Quality
               <select
-                className="input !py-1 text-xs min-h-8 sm:min-h-0"
+                className="input !py-1 text-xs min-w-0 tap"
                 value={quality || spec?.default || ""}
                 onChange={(e) => set("quality", e.target.value)}
                 disabled={!spec?.presets.length && !spec?.custom}
@@ -558,7 +562,7 @@ export default function ExportPage() {
                 ? `Custom q (${spec.custom.min}–${spec.custom.max})`
                 : `Custom bitrate (${spec.custom.min}–${spec.custom.max} kbps)`}
               <input
-                className="input !py-1 text-xs w-24 min-h-8 sm:min-h-0"
+                className="input !py-1 text-xs w-24 min-w-0 tap"
                 type="number"
                 min={spec.custom.min}
                 max={spec.custom.max}
@@ -571,7 +575,7 @@ export default function ExportPage() {
           <label className="text-[10px] text-zinc-500 flex flex-col gap-1 mt-2">
             Folder structure
             <select
-              className="input !py-1 text-xs w-full min-h-8 sm:min-h-0"
+              className="input !py-1 text-xs w-full min-w-0 tap"
               value={f.structure}
               onChange={(e) => set("structure", e.target.value)}
             >
@@ -608,7 +612,7 @@ export default function ExportPage() {
               <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
                 Max resolution (px, 0 = original)
                 <input
-                  className="input !py-1 text-xs min-h-8 sm:min-h-0"
+                  className="input !py-1 text-xs min-w-0 tap"
                   type="number"
                   min={0}
                   max={4000}
@@ -628,7 +632,7 @@ export default function ExportPage() {
             <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
               ID3 version (MP3)
               <select
-                className="input !py-1 text-xs min-h-8 sm:min-h-0"
+                className="input !py-1 text-xs min-w-0 tap"
                 value={f.id3v2}
                 onChange={(e) => set("id3v2", e.target.value)}
               >
@@ -670,7 +674,7 @@ export default function ExportPage() {
           <label className="flex flex-wrap items-center gap-2 mt-2 text-xs text-zinc-300">
             <span className="shrink-0">Parallel workers</span>
             <select
-              className="input !py-1 text-xs min-h-8 sm:min-h-0"
+              className="input !py-1 text-xs min-w-0 tap"
               value={f.workers}
               onChange={(e) => set("workers", Number(e.target.value))}
             >
@@ -689,15 +693,15 @@ export default function ExportPage() {
           />
 
           <div className="grid grid-cols-2 sm:grid-cols-[2fr_1fr_auto] gap-2 mt-4">
-            <button className="btn-primary text-xs col-span-2 sm:col-span-1 min-h-10 sm:min-h-0" disabled={busy || !paths.length} onClick={run}>
+            <button className="btn-primary text-xs col-span-2 sm:col-span-1 tap" disabled={busy || !paths.length} onClick={run}>
               <HardDriveDownload className="h-3.5 w-3.5" />
               {busy ? "Exporting…" : `Export ${paths.length || ""} track${paths.length === 1 ? "" : "s"}`}
             </button>
-            <button className="btn text-xs min-h-8 sm:min-h-0" disabled={busy} onClick={saveDefaults} title="Save these choices as the defaults for the next export">
+            <button className="btn text-xs tap" disabled={busy} onClick={saveDefaults} title="Save these choices as the defaults for the next export">
               <Save className="h-3.5 w-3.5" />
               Save as default
             </button>
-            <button className="btn text-xs !px-2 min-h-8 sm:min-h-0" disabled={busy} onClick={resetDefaults} title="Reload the saved defaults">
+            <button className="btn text-xs !px-2 tap" disabled={busy} onClick={resetDefaults} title="Reload the saved defaults">
               <RotateCcw className="h-3.5 w-3.5" />
             </button>
           </div>

@@ -109,7 +109,7 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
         </div>
         {actions ?? (
           <button
-            className="btn-primary absolute left-2 top-9 !rounded-lg !p-3 row-hover transition-opacity shadow-2xl"
+            className="tap-hit btn-primary absolute left-2 top-9 !rounded-lg !p-3 row-hover transition-opacity shadow-2xl"
             title="Play album"
             onClick={(e) => {
               e.stopPropagation();

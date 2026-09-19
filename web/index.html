@@ -17,14 +17,17 @@
          so a focus does not reflow the entire shell (library, player bar) —
          the keyboard moves the visual viewport instead, which the browser
          pans to reach the field being edited.
-         `viewport-fit=cover` is deliberately NOT set: nothing in index.css
-         reads env(safe-area-inset-*), so painting edge-to-edge would slide
-         the player bar under the home indicator with no padding to lift it
-         back. Add it together with that padding, not before.
-         Zoom is left at the default (no user-scalable/maximum-scale): the
-         library, lyrics and tag values are mostly text, and pinch-zoom is
-         the accessibility way to read them. -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-visual" />
+         `viewport-fit=cover` paints edge to edge; index.css's `.safe-shell`
+         and `.safe-drawer` carry the matching env(safe-area-inset-*) padding,
+         so the notched strip stays clear of the shell's own chrome.
+         Zoom: pinch-zoom is OFF (`maximum-scale=1, user-scalable=no`) and the
+         app offers an explicit scale instead — the `mlo.zoom` preference
+         (80–150%), applied as a root font size in main.tsx and set in
+         Settings. That scale is the substitute for pinch, not a replacement
+         for the BROWSER's own text scaling: nothing here sets
+         `text-size-adjust`, so a device's accessibility font size still
+         enlarges the text. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-visual" />
     <title>la musica</title>
   </head>
   <body>

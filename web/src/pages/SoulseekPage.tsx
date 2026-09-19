@@ -14,6 +14,7 @@ import { EmptyState, PageLoading } from "../components/Badges";
 import CachedTracksView from "../components/CachedTracksView";
 import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
+import Segmented from "../components/Segmented";
 import type { DownloadEntry, ImportBulkJob, Wish } from "../types";
 import { fmtCounts, fmtPercent } from "../lib/fmt";
 
@@ -249,10 +250,10 @@ function ReconnectingCard({ username, password, error, onDone }: {
         </span>
       )}
       <div className="ml-auto flex flex-wrap gap-1.5 justify-end">
-        <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={retry} disabled={busy}>
+        <button className="btn-ghost !py-1 text-xs tap" onClick={retry} disabled={busy}>
           {busy ? "Reconnecting…" : "Reconnect now"}
         </button>
-        <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={() => setShowForm(true)}>
+        <button className="btn-ghost !py-1 text-xs tap" onClick={() => setShowForm(true)}>
           Different account
         </button>
       </div>
@@ -288,7 +289,7 @@ function PortConflictCard({ message, otherUser }: {
         its slskd) and press Start again. This app never stops the other
         program's slskd for you.
       </p>
-      <a className="btn-ghost text-xs min-h-8 sm:min-h-0" href="/settings">
+      <a className="btn-ghost text-xs tap" href="/settings">
         <ExternalLink className="h-3.5 w-3.5" /> Open Settings
       </a>
     </div>
@@ -343,7 +344,7 @@ function LoginCard({ onDone, initialUsername, initialPassword, initialError }: {
       </p>
       <div className="flex gap-2 flex-wrap">
         <input
-          className="input w-full sm:w-52 min-h-8 sm:min-h-0"
+          className="input w-full sm:w-52 tap"
           placeholder="Soulseek username"
           value={username}
           autoComplete="username"
@@ -351,7 +352,7 @@ function LoginCard({ onDone, initialUsername, initialPassword, initialError }: {
         />
         <div className="relative">
           <input
-            className="input w-full sm:w-52 pr-9 min-h-8 sm:min-h-0"
+            className="input w-full sm:w-52 pr-9 tap"
             placeholder="Password"
             type={showPw ? "text" : "password"}
             value={password}
@@ -368,7 +369,7 @@ function LoginCard({ onDone, initialUsername, initialPassword, initialError }: {
             {showPw ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
           </button>
         </div>
-        <button className="btn-primary min-h-10 sm:min-h-0" onClick={login} disabled={busy}>
+        <button className="btn-primary tap" onClick={login} disabled={busy}>
           {busy ? "Connecting…" : "Log in / create account"}
         </button>
       </div>
@@ -597,7 +598,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
           <Zap className="h-3.5 w-3.5" /> Auto-import a MusicBrainz release
         </div>
         {running && (
-          <button className="btn-ghost !py-1 text-xs text-red-300 min-h-8 sm:min-h-0" onClick={cancel}>
+          <button className="btn-ghost !py-1 text-xs text-red-300 tap" onClick={cancel}>
             <Square className="h-3 w-3" /> Stop
           </button>
         )}
@@ -612,19 +613,19 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
       {!running && (
         <div className="flex gap-2 flex-wrap">
           <input
-            className="input flex-1 min-w-[240px] min-h-8 sm:min-h-0"
+            className="input flex-1 min-w-[240px] tap"
             placeholder="MusicBrainz release URL or MBID (e.g. https://musicbrainz.org/release/…)"
             value={mbid}
             onChange={(e) => setMbid(e.target.value)}
           />
           <input
-            className="input w-full sm:w-56 min-h-8 sm:min-h-0"
+            className="input w-full sm:w-56 tap"
             placeholder="Custom queries (; separated, optional)"
             value={queries}
             onChange={(e) => setQueries(e.target.value)}
             title="Override the search terms for this run. Fields: artist album year country catalognumber barcode label"
           />
-          <button className="btn-primary min-h-10 sm:min-h-0" onClick={start}>
+          <button className="btn-primary tap" onClick={start}>
             <Zap className="h-4 w-4" /> Auto-import
           </button>
         </div>
@@ -652,7 +653,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
                 {job.result?.error || "The job stopped before it finished — see the log below."}
               </div>
               <button
-                className="btn-ghost !py-1 text-xs mt-2 text-red-300 min-h-8 sm:min-h-0"
+                className="btn-ghost !py-1 text-xs mt-2 text-red-300 tap"
                 disabled={!releaseMbid(mbid)}
                 onClick={start}
                 title="Run the same release again with the values in the form above"
@@ -668,7 +669,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
                 Stopped during {job.stage || "the current step"} — nothing else was downloaded.
               </div>
               <button
-                className="btn-ghost !py-1 text-xs mt-2 min-h-8 sm:min-h-0"
+                className="btn-ghost !py-1 text-xs mt-2 tap"
                 disabled={!releaseMbid(mbid)}
                 onClick={start}
                 title="Run the same release again with the values in the form above"
@@ -700,10 +701,10 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
                 </div>
               )}
               <div className="flex flex-wrap items-center gap-2">
-                <button className="btn-primary !py-1 text-xs min-h-10 sm:min-h-0" onClick={() => answer(true)} disabled={answering}>
+                <button className="btn-primary !py-1 text-xs tap" onClick={() => answer(true)} disabled={answering}>
                   <Star className="h-3.5 w-3.5" /> Move to wishes
                 </button>
-                <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={() => answer(false)} disabled={answering}>
+                <button className="btn-ghost !py-1 text-xs tap" onClick={() => answer(false)} disabled={answering}>
                   No, stop
                 </button>
               </div>
@@ -729,10 +730,10 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
                 ))}
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <button className="btn-primary !py-1 text-xs min-h-10 sm:min-h-0" onClick={() => answer(true)} disabled={answering}>
+                <button className="btn-primary !py-1 text-xs tap" onClick={() => answer(true)} disabled={answering}>
                   <Download className="h-3.5 w-3.5" /> Download without logs
                 </button>
-                <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={() => answer(false)} disabled={answering}>
+                <button className="btn-ghost !py-1 text-xs tap" onClick={() => answer(false)} disabled={answering}>
                   No, wait for a CD rip
                 </button>
               </div>
@@ -754,10 +755,10 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
                 ))}
               </div>
               <div className="flex flex-wrap items-center gap-2">
-                <button className="btn-primary !py-1 text-xs min-h-10 sm:min-h-0" onClick={() => answer(true)} disabled={answering}>
+                <button className="btn-primary !py-1 text-xs tap" onClick={() => answer(true)} disabled={answering}>
                   <Download className="h-3.5 w-3.5" /> Download lossy anyway
                 </button>
-                <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={() => answer(false)} disabled={answering}>
+                <button className="btn-ghost !py-1 text-xs tap" onClick={() => answer(false)} disabled={answering}>
                   No, wait for lossless
                 </button>
               </div>
@@ -798,7 +799,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
           ) : (
             <div className="mt-2 flex items-center gap-2 flex-wrap">
               <button
-                className="btn-primary !py-1 text-xs min-h-10 sm:min-h-0"
+                className="btn-primary !py-1 text-xs tap"
                 disabled={!tagPath}
                 onClick={() => {
                   stopPreviews();
@@ -957,7 +958,7 @@ function BrowseModal({ username, onAuto, onClose }: {
       headerExtra={
         <>
           <button
-            className="btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0"
+            className="btn-ghost !py-1 text-xs shrink-0 tap"
             disabled={isFetching}
             onClick={() => refetch()}
             title="Re-read the share list from slskd"
@@ -965,7 +966,7 @@ function BrowseModal({ username, onAuto, onClose }: {
             <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} />
           </button>
           <button
-            className="btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0"
+            className="btn-ghost !py-1 text-xs shrink-0 tap"
             disabled={busy !== null || picked.size === 0}
             onClick={queuePicked}
             title="Queue every file in the ticked folders"
@@ -973,7 +974,7 @@ function BrowseModal({ username, onAuto, onClose }: {
             <Download className="h-3.5 w-3.5" /> Queue selected{picked.size > 0 ? ` (${picked.size})` : ""}
           </button>
           <button
-            className="btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0"
+            className="btn-ghost !py-1 text-xs shrink-0 tap"
             disabled={busy !== null}
             onClick={queueUser}
             title={`Queue everything ${username} shares — slskd scans their whole file list`}
@@ -984,7 +985,7 @@ function BrowseModal({ username, onAuto, onClose }: {
       }
     >
       <input
-        className="input w-full !py-1.5 text-xs min-h-8 sm:min-h-0"
+        className="input w-full !py-1.5 text-xs tap"
         placeholder="Filter folders (artist, album, path…)"
         value={text}
         onChange={(e) => setText(e.target.value)}
@@ -1031,7 +1032,7 @@ function BrowseModal({ username, onAuto, onClose }: {
                       </span>
                     </button>
                     <button
-                      className="btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0"
+                      className="btn-ghost !py-1 text-xs shrink-0 tap"
                       disabled={busy !== null || d.files.length === 0}
                       onClick={() => queue(d)}
                       title="Queue every file in this folder"
@@ -1039,7 +1040,7 @@ function BrowseModal({ username, onAuto, onClose }: {
                       <Download className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Download</span>
                     </button>
                     <button
-                      className="btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0"
+                      className="btn-ghost !py-1 text-xs shrink-0 tap"
                       disabled={busy !== null}
                       onClick={() => auto(d)}
                       title="Search the release this folder holds and import it fully tagged"
@@ -1054,7 +1055,7 @@ function BrowseModal({ username, onAuto, onClose }: {
                           <span className="flex-1 min-w-0 truncate text-zinc-300" title={f.filename}>{fileName(f.filename)}</span>
                           <span className="text-zinc-500 w-16 text-right shrink-0">{fmtSize(f.size)}</span>
                           <button
-                            className="btn-ghost !px-1.5 !py-0.5 shrink-0 min-h-8 sm:min-h-0"
+                            className="btn-ghost !px-1.5 !py-0.5 shrink-0 tap"
                             disabled={busy !== null}
                             onClick={() => queueFile(f)}
                             title="Queue this file on its own"
@@ -1070,7 +1071,7 @@ function BrowseModal({ username, onAuto, onClose }: {
             })}
           </div>
           {shown.length > limit && (
-            <button className="btn-secondary w-full py-2 text-xs min-h-8 sm:min-h-0" onClick={() => setLimit((n) => n + 200)}>
+            <button className="btn-secondary w-full py-2 text-xs tap" onClick={() => setLimit((n) => n + 200)}>
               Show more ({shown.length - limit} folders remaining)
             </button>
           )}
@@ -1231,21 +1232,21 @@ function ReviewRow({ f, onChanged }: { f: ReviewFile; onChanged: () => void }) {
           </div>
         </button>
         <button
-          className={`btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0 ${previewOpen ? "!text-accent" : ""}`}
+          className={`btn-ghost !py-1 text-xs shrink-0 tap ${previewOpen ? "!text-accent" : ""}`}
           onClick={() => setPreviewOpen(!previewOpen)}
           title={f.is_video ? "Watch (preview player)" : "Listen (preview player)"}
         >
           <Play className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Preview</span>
         </button>
         <button
-          className={`btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0 ${tagOpen ? "!text-accent" : ""}`}
+          className={`btn-ghost !py-1 text-xs shrink-0 tap ${tagOpen ? "!text-accent" : ""}`}
           onClick={() => setTagOpen(!tagOpen)}
           title="Check / edit the tags before import — video files are remuxed to MKV on save (stream copy, no quality loss)"
         >
           <Tag className="h-3.5 w-3.5" /> <span className="hidden sm:inline">Tag</span>
         </button>
         <button
-          className={`btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0 ${armDelete ? "!text-red-300 border border-red-800" : ""}`}
+          className={`btn-ghost !py-1 text-xs shrink-0 tap ${armDelete ? "!text-red-300 border border-red-800" : ""}`}
           disabled={busy}
           onClick={discard}
           title={armDelete ? "Click again to delete this download" : "Delete this download without importing"}
@@ -1283,7 +1284,7 @@ function ReviewRow({ f, onChanged }: { f: ReviewFile; onChanged: () => void }) {
               <label key={t.key} className="text-[10px] text-zinc-500 block">
                 {t.label}
                 <input
-                  className="input !py-1 !px-2 text-xs mt-0.5 w-full min-h-8 sm:min-h-0"
+                  className="input !py-1 !px-2 text-xs mt-0.5 w-full tap"
                   value={form[t.key] ?? ""}
                   placeholder={t.placeholder}
                   onChange={(e) => set(t.key, e.target.value)}
@@ -1293,7 +1294,7 @@ function ReviewRow({ f, onChanged }: { f: ReviewFile; onChanged: () => void }) {
             <label className="text-[10px] text-zinc-500 block">
               Advisory
               <select
-                className="input !py-1 !px-2 text-xs mt-0.5 w-full min-h-8 sm:min-h-0"
+                className="input !py-1 !px-2 text-xs mt-0.5 w-full tap"
                 value={form.ITUNESADVISORY ?? "0"}
                 onChange={(e) => set("ITUNESADVISORY", e.target.value)}
               >
@@ -1304,7 +1305,7 @@ function ReviewRow({ f, onChanged }: { f: ReviewFile; onChanged: () => void }) {
             </label>
           </div>
           <div className="flex items-center gap-2">
-            <button className="btn-primary !py-1 text-xs min-h-10 sm:min-h-0" disabled={busy} onClick={save}>
+            <button className="btn-primary !py-1 text-xs tap" disabled={busy} onClick={save}>
               <Save className="h-3.5 w-3.5" /> Save tags{f.is_video ? " (remux to MKV)" : ""}
             </button>
             <span className="text-[10px] text-zinc-600">
@@ -1415,7 +1416,7 @@ function ImportRunCard({ run }: { run: ImportRunStatus | undefined }) {
         )}
         {running && (
           <button
-            className="btn-ghost !py-1 text-xs ml-auto min-h-8 sm:min-h-0"
+            className="btn-ghost !py-1 text-xs ml-auto tap"
             onClick={cancel}
             title="Stop after the album being imported — never mid-album, a half-imported album is worse than a slow one"
           >
@@ -1496,7 +1497,7 @@ function ReadyImports() {
             : "nothing finished is waiting to be imported"}
         </span>
         <button
-          className="btn-ghost !py-0.5 !px-2 text-[11px] ml-auto min-h-8 sm:min-h-0"
+          className="btn-ghost !py-0.5 !px-2 text-[11px] ml-auto tap"
           onClick={() => refetch()}
           disabled={isFetching}
           title="Rescan the download folder"
@@ -1513,7 +1514,7 @@ function ReadyImports() {
           <span className="text-zinc-500 w-8 text-right shrink-0" title={`${a.files} file(s)`}>{a.files} f</span>
           <span className="text-zinc-500 w-16 text-right shrink-0">{fmtSize(a.bytes)}</span>
           <button
-            className="btn-primary !py-0.5 !px-2 text-[11px] shrink-0 min-h-10 sm:min-h-0"
+            className="btn-primary !py-0.5 !px-2 text-[11px] shrink-0 tap"
             disabled={runBusy || busyPath !== null}
             onClick={() => start(a)}
             title="Import this album all the way through — convert, tag, organize, then the import chain"
@@ -1597,10 +1598,10 @@ function ReviewPanel() {
           )}
         </div>
         <div className="flex gap-2">
-          <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={() => refetch()} title="Rescan the download folder">
+          <button className="btn-ghost !py-1 text-xs tap" onClick={() => refetch()} title="Rescan the download folder">
             <RefreshCw className="h-3.5 w-3.5" />
           </button>
-          <button className="btn-primary !py-1 text-xs min-h-10 sm:min-h-0" onClick={importAll} title="Ingest completed downloads into the library">
+          <button className="btn-primary !py-1 text-xs tap" onClick={importAll} title="Ingest completed downloads into the library">
             <Download className="h-3.5 w-3.5" /> Import completed
           </button>
         </div>
@@ -1617,7 +1618,7 @@ function ReviewPanel() {
           {albums.map(([dir, count]) => (
             <button
               key={dir}
-              className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
+              className="btn-ghost !py-1 text-xs tap"
               onClick={() => {
                 stopPreviews();
                 navigate(`/import?album=${encodeURIComponent(dir)}`);
@@ -1636,7 +1637,7 @@ function ReviewPanel() {
           {justImported.moved.map((dir) => (
             <button
               key={dir}
-              className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
+              className="btn-ghost !py-1 text-xs tap"
               onClick={() => {
                 stopPreviews();
                 navigate(`/import?album=${encodeURIComponent(dir)}`);
@@ -1770,7 +1771,7 @@ function SharingCard({ running }: { running: boolean }) {
             />
             Start with the app
           </label>
-          <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={rescan} disabled={busy || !running}>
+          <button className="btn-ghost !py-1 text-xs tap" onClick={rescan} disabled={busy || !running}>
             <RefreshCw className="h-3.5 w-3.5" /> Rescan
           </button>
         </div>
@@ -1792,7 +1793,7 @@ function SharingCard({ running }: { running: boolean }) {
           ))}
           <div className="flex items-center gap-2">
             <input
-              className="input !py-1 flex-1 font-mono text-[11px] min-h-8 sm:min-h-0"
+              className="input !py-1 flex-1 font-mono text-[11px] tap"
               placeholder="Add a folder to share (full path)"
               value={newDir}
               onChange={(e) => setNewDir(e.target.value)}
@@ -1804,7 +1805,7 @@ function SharingCard({ running }: { running: boolean }) {
               }}
             />
             <button
-              className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
+              className="btn-ghost !py-1 text-xs tap"
               disabled={!newDir.trim()}
               onClick={() => {
                 setDirs([...(dirs ?? []), newDir.trim()]);
@@ -1815,7 +1816,7 @@ function SharingCard({ running }: { running: boolean }) {
             </button>
           </div>
           {dirty && (
-            <button className="btn-primary !py-1 text-xs w-full min-h-10 sm:min-h-0" onClick={() => save()} disabled={busy}>
+            <button className="btn-primary !py-1 text-xs w-full tap" onClick={() => save()} disabled={busy}>
               {busy ? "Applying…" : "Save & apply (restarts slskd to rescan)"}
             </button>
           )}
@@ -1942,7 +1943,7 @@ function WishRow({ w, run, importing, pageBusy, onImport, onChanged }: {
         <div className="flex flex-wrap items-center gap-1 shrink-0 w-full justify-end sm:w-auto">
           {canImport && (
             <button
-              className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
+              className="btn-ghost !py-1 text-xs tap"
               onClick={onImport}
               disabled={importing || pageBusy || runBusy}
               title="Import the download this wish is waiting on — the album goes through the whole pipeline in the background"
@@ -1951,17 +1952,17 @@ function WishRow({ w, run, importing, pageBusy, onImport, onChanged }: {
             </button>
           )}
           {w.status !== "imported" && (
-            <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={search} disabled={busy} title="Search Soulseek now">
+            <button className="btn-ghost !py-1 text-xs tap" onClick={search} disabled={busy} title="Search Soulseek now">
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
             </button>
           )}
           {w.album_path && (
-            <a className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" href={`/album/${encodeURIComponent(w.album_path)}`} title="Open the imported album">
+            <a className="btn-ghost !py-1 text-xs tap" href={`/album/${encodeURIComponent(w.album_path)}`} title="Open the imported album">
               <PackageOpen className="h-3.5 w-3.5" />
             </a>
           )}
           <a
-            className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
+            className="btn-ghost !py-1 text-xs tap"
             href={`https://musicbrainz.org/release/${w.release_mbid}`}
             target="_blank"
             rel="noreferrer"
@@ -1969,10 +1970,10 @@ function WishRow({ w, run, importing, pageBusy, onImport, onChanged }: {
           >
             <ExternalLink className="h-3.5 w-3.5" />
           </a>
-          <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={() => setOpen(!open)} title="Notes">
+          <button className="btn-ghost !py-1 text-xs tap" onClick={() => setOpen(!open)} title="Notes">
             {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
           </button>
-          <button className="btn-ghost !py-1 text-xs text-red-300 min-h-8 sm:min-h-0" onClick={remove} title="Remove wish">
+          <button className="btn-ghost !py-1 text-xs text-red-300 tap" onClick={remove} title="Remove wish">
             <Trash2 className="h-3.5 w-3.5" />
           </button>
         </div>
@@ -1980,12 +1981,12 @@ function WishRow({ w, run, importing, pageBusy, onImport, onChanged }: {
       {open && (
         <div className="border-t border-border/60 p-2.5 flex items-center gap-2 anim-fade">
           <input
-            className="input !py-1 text-xs flex-1 min-h-8 sm:min-h-0"
+            className="input !py-1 text-xs flex-1 tap"
             placeholder="Note — pressings to prefer, source hints…"
             value={note}
             onChange={(e) => setNote(e.target.value)}
           />
-          <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={saveNote} disabled={note === w.note}>
+          <button className="btn-ghost !py-1 text-xs tap" onClick={saveNote} disabled={note === w.note}>
             <Save className="h-3.5 w-3.5" /> Save
           </button>
         </div>
@@ -2130,17 +2131,17 @@ function WishesPanel() {
           </span>
           <div className="ml-auto flex flex-wrap items-center gap-2 justify-end">
             <button
-              className="btn-primary !py-1 text-xs min-h-10 sm:min-h-0"
+              className="btn-primary !py-1 text-xs tap"
               onClick={importAll}
               disabled={busy || runBusy}
               title="Import every finished download into the library, one album at a time"
             >
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />} Import all completed
             </button>
-            <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={reconcile} disabled={busy} title="Flip wishes already present in the library">
+            <button className="btn-ghost !py-1 text-xs tap" onClick={reconcile} disabled={busy} title="Flip wishes already present in the library">
               <CheckCircle2 className="h-3.5 w-3.5" /> Sync library
             </button>
-            <button className="btn-primary !py-1 text-xs min-h-10 sm:min-h-0" onClick={searchAll} disabled={busy}>
+            <button className="btn-primary !py-1 text-xs tap" onClick={searchAll} disabled={busy}>
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />} Search all now
             </button>
           </div>
@@ -2165,13 +2166,13 @@ function WishesPanel() {
         <div className="flex gap-2">
           <Link2 className="h-4 w-4 text-zinc-600 self-center shrink-0" />
           <input
-            className="input flex-1 min-h-8 sm:min-h-0"
+            className="input flex-1 tap"
             placeholder="Paste a MusicBrainz release ID or URL to wish for it"
             value={mbid}
             onChange={(e) => setMbid(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && !busy && add()}
           />
-          <button className="btn-primary min-h-10 sm:min-h-0" onClick={add} disabled={busy || !mbid.trim()}>
+          <button className="btn-primary tap" onClick={add} disabled={busy || !mbid.trim()}>
             <Plus className="h-4 w-4" /> Add wish
           </button>
         </div>
@@ -2352,6 +2353,17 @@ export default function SoulseekPage() {
     (u.directories ?? []).flatMap((d: any) =>
       (d.files ?? []).map((f: any) => ({ ...f, username: u.username, dir: d.directory }))));
   const dlActive = dlFiles.filter((f: any) => f.state === "InProgress" || f.state === "Queued").length;
+  // The shared Segmented renders plain labels, so the live counts ride in the
+  // label string; every tab still reads as the same control as the rest of the
+  // app's switchers.
+  const TAB_OPTIONS = TAB_LIST.map((t) => ({
+    id: t.id,
+    label:
+      t.id === "downloads" && dlActive > 0 ? `${t.label} · ${dlActive}`
+      : t.id === "messages" && msgUnread > 0 ? `${t.label} · ${msgUnread}`
+      : t.id === "search" && results.length > 0 ? `${t.label} · ${results.length}`
+      : t.label,
+  }));
 
   /** Pre-download quality check: fetch only the .log file(s), grade them,
    * clean up — shows the Logchecker score inline on the folder row. */
@@ -2588,37 +2600,22 @@ export default function SoulseekPage() {
         actions={
           <>
             {running ? (
-              <button className="btn-ghost min-h-8 sm:min-h-0" onClick={stop} disabled={pending !== null}>
+              <button className="btn-ghost tap" onClick={stop} disabled={pending !== null}>
                 {pending === "stop" ? "Stopping…" : <><Power className="h-4 w-4" /> Stop</>}
               </button>
             ) : (
-              <button className="btn-primary min-h-10 sm:min-h-0" onClick={start} disabled={pending !== null}>
+              <button className="btn-primary tap" onClick={start} disabled={pending !== null}>
                 {pending === "start" ? "Starting…" : <><Play className="h-4 w-4" /> Start slskd</>}
               </button>
             )}
-            <button className="btn-ghost min-h-8 sm:min-h-0" onClick={() => { refetchStatus(); refetchDownloads(); }} title="Reload status and the transfer list">
+            <button className="btn-ghost tap" onClick={() => { refetchStatus(); refetchDownloads(); }} title="Reload status and the transfer list">
               <RefreshCw className="h-4 w-4" />
             </button>
           </>
         }
       >
         {/* Tabs live in the header's extra row — they belong to the title. */}
-        <div className="flex rounded-md border border-border overflow-x-auto max-w-full w-fit">
-          {TAB_LIST.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
-              className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                tab === t.id ? "bg-accent on-accent" : "bg-panel text-zinc-400 hover:text-white"
-              }`}
-            >
-              {t.label}
-              {t.id === "downloads" && dlActive > 0 ? ` · ${dlActive}` : ""}
-              {t.id === "messages" && msgUnread > 0 ? ` · ${msgUnread}` : ""}
-              {t.id === "search" && results.length > 0 ? ` · ${results.length}` : ""}
-            </button>
-          ))}
-        </div>
+        <Segmented className="max-w-full flex-wrap" value={tab} onChange={setTab} options={TAB_OPTIONS} />
       </PageHeader>
 
       {tab === "settings" && status && (
@@ -2627,7 +2624,7 @@ export default function SoulseekPage() {
           <label className="flex items-center gap-1.5 text-zinc-500">
             Listen (Soulseek)
             <input
-              className="input w-28 !py-1 !px-2 font-mono min-h-8 sm:min-h-0"
+              className="input w-28 !py-1 !px-2 font-mono tap"
               inputMode="numeric"
               value={listenPort}
               onChange={(e) => setListenPort(e.target.value.replace(/\D/g, ""))}
@@ -2637,14 +2634,14 @@ export default function SoulseekPage() {
           <label className="flex items-center gap-1.5 text-zinc-500">
             Web UI
             <input
-              className="input w-28 !py-1 !px-2 font-mono min-h-8 sm:min-h-0"
+              className="input w-28 !py-1 !px-2 font-mono tap"
               inputMode="numeric"
               value={webPort}
               onChange={(e) => setWebPort(e.target.value.replace(/\D/g, ""))}
               title="Local slskd API/web port"
             />
           </label>
-          <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" disabled={!portsChanged || portsBusy} onClick={savePorts}>
+          <button className="btn-ghost !py-1 text-xs tap" disabled={!portsChanged || portsBusy} onClick={savePorts}>
             <Save className="h-3.5 w-3.5" /> {portsBusy ? "Saving…" : "Save"}
           </button>
           <span className="text-[10px] text-zinc-600">
@@ -2696,17 +2693,17 @@ export default function SoulseekPage() {
       <div className="panel-hero">
         <div className="flex flex-wrap gap-2">
           <input
-            className="input flex-1 min-h-8 sm:min-h-0"
+            className="input flex-1 tap"
             placeholder="Search Soulseek manually (artist — album, title, catalog #…)"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && !searching && runSearch()}
           />
-          <button className="btn-primary min-h-10 sm:min-h-0" onClick={() => runSearch()} disabled={searching || !running}>
+          <button className="btn-primary tap" onClick={() => runSearch()} disabled={searching || !running}>
             <Search className="h-4 w-4" /> {searching ? "Searching…" : "Search"}
           </button>
           {searching && (
-            <button className="btn-ghost min-h-8 sm:min-h-0" onClick={cancelSearch} title="Stop this search — slskd drops it and the results stop polling">
+            <button className="btn-ghost tap" onClick={cancelSearch} title="Stop this search — slskd drops it and the results stop polling">
               <Square className="h-4 w-4" /> Cancel search
             </button>
           )}
@@ -2717,16 +2714,18 @@ export default function SoulseekPage() {
             {recent.map((q) => (
               <button
                 key={q}
-                className="chip px-2 py-0.5 border bg-raise border-border text-zinc-400 hover:text-white max-w-[280px] truncate"
+                className="chip px-2 py-0.5 border bg-raise border-border text-zinc-400 hover:text-white max-w-[280px]"
                 disabled={searching || !running}
                 onClick={() => runSearch(q)}
                 title={q}
               >
-                {q}
+                {/* The chip is inline-flex, so the ellipsis belongs on this
+                    child — a `truncate` on the chip clips both ends. */}
+                <span className="truncate min-w-0">{q}</span>
               </button>
             ))}
             <button
-              className="btn-ghost !px-1.5 !py-0 text-[11px] text-zinc-500 min-h-8 sm:min-h-0"
+              className="btn-ghost !px-1.5 !py-0 text-[11px] text-zinc-500 tap"
               onClick={() => {
                 setRecent([]);
                 try {
@@ -2766,7 +2765,7 @@ export default function SoulseekPage() {
                 {/* codec filter, built from what the peers actually offer */}
                 {codecs.length > 1 && (
                   <select
-                    className="input !py-1 !w-auto text-[11px] min-h-8 sm:min-h-0"
+                    className="input !py-1 !w-auto text-[11px] tap"
                     value={codec}
                     onChange={(e) => setCodec(e.target.value)}
                     title="Show only folders holding this codec"
@@ -2777,9 +2776,9 @@ export default function SoulseekPage() {
                 )}
               </div>
               <div className="flex items-center gap-1.5 text-xs text-zinc-500">
-                <button className="btn-ghost !py-0.5 !px-2 text-[11px] min-h-8 sm:min-h-0" onClick={expandAll}>Expand all</button>
+                <button className="btn-ghost !py-0.5 !px-2 text-[11px] tap" onClick={expandAll}>Expand all</button>
                 <span>·</span>
-                <button className="btn-ghost !py-0.5 !px-2 text-[11px] min-h-8 sm:min-h-0" onClick={collapseAll}>Collapse all</button>
+                <button className="btn-ghost !py-0.5 !px-2 text-[11px] tap" onClick={collapseAll}>Collapse all</button>
               </div>
             </div>
 
@@ -2819,7 +2818,7 @@ export default function SoulseekPage() {
                       })()}
                       {g.hasLog && (
                         <button
-                          className="btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0"
+                          className="btn-ghost !py-1 text-xs shrink-0 tap"
                           disabled={logTest[g.key] === "busy"}
                           onClick={() => testLogs(g)}
                           title="Download only the .log file(s) and grade them before committing to the album"
@@ -2828,14 +2827,14 @@ export default function SoulseekPage() {
                         </button>
                       )}
                       <button
-                        className="btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0"
+                        className="btn-ghost !py-1 text-xs shrink-0 tap"
                         onClick={() => setBrowseUser(g.username)}
                         title={`Browse everything ${g.username} shares`}
                       >
                         <FolderOpen className="h-3.5 w-3.5" /> Browse
                       </button>
                       <button
-                        className="btn-ghost !py-1 text-xs shrink-0 min-h-8 sm:min-h-0"
+                        className="btn-ghost !py-1 text-xs shrink-0 tap"
                         disabled={busyUser === g.username || !g.files.length}
                         onClick={() => downloadFile(g.files[0], true)}
                         title="Download this whole folder"
@@ -2858,7 +2857,7 @@ export default function SoulseekPage() {
                             </span>
                             <span className="text-zinc-500 w-10 text-right shrink-0">{fmtDur(f.duration)}</span>
                             <button
-                              className="btn-ghost !px-1.5 !py-0.5 shrink-0 min-h-8 sm:min-h-0"
+                              className="btn-ghost !px-1.5 !py-0.5 shrink-0 tap"
                               disabled={busyUser === g.username}
                               onClick={() => downloadFile(f, false)}
                               title="Download this file"
@@ -2880,7 +2879,7 @@ export default function SoulseekPage() {
               )}
               {visible.length > visibleLimit && (
                 <button
-                  className="btn-secondary w-full py-2 text-xs mt-2 min-h-8 sm:min-h-0"
+                  className="btn-secondary w-full py-2 text-xs mt-2 tap"
                   onClick={() => setVisibleLimit((n) => n + 60)}
                 >
                   Show more ({visible.length - visibleLimit} remaining)
@@ -2905,7 +2904,7 @@ export default function SoulseekPage() {
             ) : (
               <span>Broadcasting query to Soulseek network…</span>
             )}
-            <button className="btn-ghost !py-0.5 !px-2 text-[11px] min-h-8 sm:min-h-0" onClick={cancelSearch} title="Stop this search">
+            <button className="btn-ghost !py-0.5 !px-2 text-[11px] tap" onClick={cancelSearch} title="Stop this search">
               Cancel search
             </button>
           </div>
@@ -3056,7 +3055,7 @@ function MessagesPanel({ running }: { running: boolean }) {
         </div>
         <div className="flex-1" />
         <input
-          className="input !py-1 !px-2 text-xs w-full sm:w-56 min-h-8 sm:min-h-0"
+          className="input !py-1 !px-2 text-xs w-full sm:w-56 tap"
           placeholder="New message — peer username"
           value={newUser}
           onChange={(e) => setNewUser(e.target.value)}
@@ -3069,7 +3068,7 @@ function MessagesPanel({ running }: { running: boolean }) {
           title="Open (or start) a thread with this Soulseek user — sending creates it"
         />
         <button
-          className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
+          className="btn-ghost !py-1 text-xs tap"
           onClick={() => { refetch(); if (open) thread.refetch(); }}
           title="Reload the conversation list and the open thread"
         >
@@ -3107,7 +3106,7 @@ function MessagesPanel({ running }: { running: boolean }) {
                     </span>
                   )}
                   <button
-                    className="btn-ghost !px-1.5 !py-0.5 text-[10px] min-h-8 sm:min-h-0"
+                    className="btn-ghost !px-1.5 !py-0.5 text-[10px] tap"
                     onClick={() => closeConversation(c.username)}
                     disabled={closing === c.username}
                     title="Close this conversation (drops it from slskd)"
@@ -3175,7 +3174,7 @@ function MessagesPanel({ running }: { running: boolean }) {
                     disabled={sending}
                   />
                   <button
-                    className="btn-primary !py-1 text-xs self-end min-h-10 sm:min-h-0"
+                    className="btn-primary !py-1 text-xs self-end tap"
                     onClick={send}
                     disabled={sending || !draft.trim()}
                   >
@@ -3329,7 +3328,7 @@ function DownloadsPanel({ downloads, status }: {
           ))}
           {finished > 0 && (
             <button
-              className="btn-ghost !py-0.5 !px-2 text-[11px] ml-1 min-h-8 sm:min-h-0"
+              className="btn-ghost !py-0.5 !px-2 text-[11px] ml-1 tap"
               disabled={busy !== null}
               onClick={() => clear("finished")}
               title="Remove finished / failed transfers from this list (in-progress and queued transfers are kept)"
@@ -3339,7 +3338,7 @@ function DownloadsPanel({ downloads, status }: {
           )}
           {active.length + queued.length > 0 && (
             <button
-              className="btn-ghost !py-0.5 !px-2 text-[11px] min-h-8 sm:min-h-0"
+              className="btn-ghost !py-0.5 !px-2 text-[11px] tap"
               disabled={busy !== null}
               onClick={() => clear(
                 "incomplete",
@@ -3352,7 +3351,7 @@ function DownloadsPanel({ downloads, status }: {
           )}
           {failed.length > 0 && (
             <button
-              className="btn-ghost !py-0.5 !px-2 text-[11px] min-h-8 sm:min-h-0"
+              className="btn-ghost !py-0.5 !px-2 text-[11px] tap"
               disabled={busy !== null}
               onClick={() => clear("failed")}
               title="Remove only the failed transfers from this list (completed ones stay, nothing on disk is touched)"
@@ -3362,7 +3361,7 @@ function DownloadsPanel({ downloads, status }: {
           )}
           {active.length + queued.length > 0 && (
             <button
-              className="btn-ghost !py-0.5 !px-2 text-[11px] min-h-8 sm:min-h-0"
+              className="btn-ghost !py-0.5 !px-2 text-[11px] tap"
               disabled={busy !== null}
               onClick={() => cancel([...active, ...queued])}
               title="Drop every running and queued transfer from slskd's queue"
@@ -3372,7 +3371,7 @@ function DownloadsPanel({ downloads, status }: {
           )}
           {failed.length > 0 && (
             <button
-              className="btn-ghost !py-0.5 !px-2 text-[11px] min-h-8 sm:min-h-0"
+              className="btn-ghost !py-0.5 !px-2 text-[11px] tap"
               disabled={busy !== null}
               onClick={() => retry(failed)}
               title="Queue every failed transfer's file again"
@@ -3403,19 +3402,15 @@ function DownloadsPanel({ downloads, status }: {
         )
       ) : (
         <>
-          <div className="flex rounded-md border border-border overflow-hidden w-fit mb-2">
-            {(["active", "completed"] as const).map((v) => (
-              <button
-                key={v}
-                onClick={() => setView(v)}
-                className={`px-2.5 py-1 text-[11px] font-medium transition-colors ${
-                  view === v ? "bg-accent on-accent" : "bg-panel text-zinc-400 hover:text-white"
-                }`}
-              >
-                {v === "active" ? `Active (${active.length + queued.length})` : `History (${completed.length + failed.length})`}
-              </button>
-            ))}
-          </div>
+          <Segmented
+            className="mb-2"
+            value={view}
+            onChange={setView}
+            options={[
+              { id: "active", label: `Active (${active.length + queued.length})` },
+              { id: "completed", label: `History (${completed.length + failed.length})` },
+            ]}
+          />
           <div className="space-y-1 max-h-[360px] overflow-auto stagger">
             {shown.map((f) => (
               <div key={f.id || `${f.username}\u0000${f.filename}`} className="flex items-center gap-3 px-2 py-1.5 rounded hover:bg-white/[0.04] text-xs">
@@ -3437,7 +3432,7 @@ function DownloadsPanel({ downloads, status }: {
                 <span className="w-14 sm:w-16 text-right shrink-0">{bucket(f)}</span>
                 {view === "active" ? (
                   <button
-                    className="btn-ghost !px-1.5 !py-0.5 text-[11px] shrink-0 w-16 justify-center min-h-8 sm:min-h-0"
+                    className="btn-ghost !px-1.5 !py-0.5 text-[11px] shrink-0 w-16 justify-center tap"
                     disabled={busy !== null}
                     onClick={() => cancel([f])}
                     title="Drop this transfer from slskd's queue"
@@ -3446,7 +3441,7 @@ function DownloadsPanel({ downloads, status }: {
                   </button>
                 ) : failed.includes(f) ? (
                   <button
-                    className="btn-ghost !px-1.5 !py-0.5 text-[11px] shrink-0 w-16 justify-center min-h-8 sm:min-h-0"
+                    className="btn-ghost !px-1.5 !py-0.5 text-[11px] shrink-0 w-16 justify-center tap"
                     disabled={busy !== null}
                     onClick={() => retry([f])}
                     title="Queue this file again"
@@ -3517,7 +3512,7 @@ function StagingCard({ id, root, busy, onDelete, onClear }: {
         <div className="flex items-center gap-1 shrink-0">
           {root.count > 0 && (
             <button
-              className="btn-ghost !py-0.5 !px-2 text-[11px] min-h-8 sm:min-h-0"
+              className="btn-ghost !py-0.5 !px-2 text-[11px] tap"
               disabled={busy}
               onClick={onClear}
               title={`Delete every entry in ${root.folder} — the folder itself stays`}
@@ -3541,7 +3536,7 @@ function StagingCard({ id, root, busy, onDelete, onClear }: {
               <span className="hidden sm:block text-zinc-500 w-8 text-right shrink-0" title={`${e.files} file(s)`}>{e.files} f</span>
               <span className="text-zinc-500 w-14 sm:w-16 text-right shrink-0">{fmtSize(e.bytes)}</span>
               <button
-                className="btn-ghost !px-2 sm:!px-1.5 !py-0.5 text-[11px] shrink-0 min-h-8 sm:min-h-0"
+                className="btn-ghost !px-2 sm:!px-1.5 !py-0.5 text-[11px] shrink-0 tap"
                 disabled={busy}
                 onClick={() => onDelete(e)}
                 title={`Delete ${e.name} from ${root.folder}`}
@@ -3636,7 +3631,7 @@ function StagingPanel() {
         <div className="text-xs text-amber-300">
           Could not read the staging folders — the server may be restarting (the walk can also take a
           while on a large queue).{" "}
-          <button className="btn-ghost !py-0.5 text-xs min-h-8 sm:min-h-0" onClick={() => refetch()}>
+          <button className="btn-ghost !py-0.5 text-xs tap" onClick={() => refetch()}>
             Retry
           </button>
         </div>
@@ -3839,7 +3834,7 @@ function StagingImportPanel() {
           </span>
         </div>
         <button
-          className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
+          className="btn-ghost !py-1 text-xs tap"
           onClick={() => refetch()}
           disabled={isFetching}
           title="Re-read the downloads folder"
@@ -3909,7 +3904,7 @@ function StagingImportPanel() {
         {entries.length > 0 && (
           <div className="flex items-center gap-2 flex-wrap">
             <button
-              className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0"
+              className="btn-ghost !py-1 text-xs tap"
               onClick={() => setSel(allSelected ? new Set() : new Set(entries.map((e) => e.name)))}
             >
               {allSelected ? "Select none" : "Select all"}
@@ -3919,7 +3914,7 @@ function StagingImportPanel() {
             )}
             <div className="flex flex-wrap items-center gap-2 ml-auto justify-end">
               <button
-                className="btn-primary !py-1 text-xs min-h-10 sm:min-h-0"
+                className="btn-primary !py-1 text-xs tap"
                 onClick={doImport}
                 disabled={busy || !liveSelection.length}
                 title={
@@ -3934,16 +3929,16 @@ function StagingImportPanel() {
               {confirmDelete ? (
                 <>
                   <span className="text-xs text-amber-300">Delete permanently?</span>
-                  <button className="btn-danger !py-1 text-xs min-h-8 sm:min-h-0" onClick={doDelete} disabled={busy}>
+                  <button className="btn-danger !py-1 text-xs tap" onClick={doDelete} disabled={busy}>
                     <Trash2 className="h-3.5 w-3.5" /> Yes, delete
                   </button>
-                  <button className="btn-ghost !py-1 text-xs min-h-8 sm:min-h-0" onClick={() => setConfirmDelete(false)} disabled={busy}>
+                  <button className="btn-ghost !py-1 text-xs tap" onClick={() => setConfirmDelete(false)} disabled={busy}>
                     <X className="h-3.5 w-3.5" /> Cancel
                   </button>
                 </>
               ) : (
                 <button
-                  className="btn-danger !py-1 text-xs min-h-8 sm:min-h-0"
+                  className="btn-danger !py-1 text-xs tap"
                   onClick={() => setConfirmDelete(true)}
                   disabled={busy || !liveSelection.length}
                   title="Delete the selected entries from disk — this cannot be undone"

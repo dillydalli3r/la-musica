@@ -64,6 +64,13 @@ const VIEW_TABS: { id: View; label: string }[] = [
   { id: "tracks", label: "Tracks" },
 ];
 
+/** Cover size in the grid view — the same segmented control as the view tabs. */
+const GRID_SIZES = [
+  { id: "s", label: "S" },
+  { id: "m", label: "M" },
+  { id: "l", label: "L" },
+] as const;
+
 const ALBUM_SORTS = [
   { key: "meta.ALBUM", label: "Album name" },
   { key: "artist", label: "Artist" },
@@ -697,7 +704,7 @@ export default function LibraryPage() {
   const allTracksSelected = sortedTracks.length > 0 && sortedTracks.every((t) => selection.tracks.includes(t.path));
 
   return (
-    <div className="p-6 space-y-5">
+    <div className="p-6 space-y-5 mx-auto max-w-6xl">
       {/* toolbar rides in the header: controls left, stats/select/counts right */}
       <PageHeader icon={Library} title="Library">
       {/* toolbar — every control on ONE line (wrapped as a unit when the
@@ -706,14 +713,15 @@ export default function LibraryPage() {
       <div className="flex items-center gap-2 flex-wrap">
         {/* Five view tabs are wider than a phone: they wrap inside their own
             box. `max-w-full` resolves against the toolbar (a block-level flex
-            container, so it does bound them); min-h-[2rem] keeps a 32 px target. */}
+            container, so it does bound them); the tabs' own `.tap` carries the
+            phone target height. */}
         <Segmented value={view} onChange={setView} options={VIEW_TABS}
-          className="max-w-full flex-wrap [&>button]:min-h-[2rem]" />
+          className="max-w-full flex-wrap" />
 
         {(view === "albums" || view === "compact" || view === "grid") && (
           <div className="relative">
             <button
-              className={`btn-ghost !py-1.5 text-xs min-h-[2rem] md:min-h-0 ${sortOpen ? "!text-white !bg-raise" : ""}`}
+              className={`btn-ghost !py-1.5 text-xs tap ${sortOpen ? "!text-white !bg-raise" : ""}`}
               onClick={() => setSortOpen(!sortOpen)}
               title="Sort albums"
             >
@@ -746,24 +754,14 @@ export default function LibraryPage() {
         )}
 
         {view === "grid" && (
-          <div className="flex rounded-md border border-border overflow-hidden" title="Cover size">
-            {(["s", "m", "l"] as const).map((s) => (
-              <button
-                key={s}
-                onClick={() => pickGridSize(s)}
-                className={`px-2.5 py-1.5 text-xs font-medium uppercase transition-colors ${
-                  gridSize === s ? "bg-accent on-accent" : "bg-panel text-zinc-400 hover:text-white"
-                }`}
-              >
-                {s}
-              </button>
-            ))}
-          </div>
+          <span title="Cover size">
+            <Segmented value={gridSize} onChange={pickGridSize} options={GRID_SIZES} />
+          </span>
         )}
 
         {(view === "albums" || view === "grid") && (
           <button
-            className={`btn-ghost !py-1.5 text-xs min-h-[2rem] md:min-h-0 ${groupByArtist ? "!text-accent !border-accent/50" : ""}`}
+            className={`btn-ghost !py-1.5 text-xs tap ${groupByArtist ? "!text-accent !border-accent/50" : ""}`}
             onClick={() => setGroupByArtist(!groupByArtist)}
             title="Group albums under artist headers"
           >
@@ -795,7 +793,7 @@ export default function LibraryPage() {
         {/* quick filter lives on the same line as the view options */}
         <div className="relative">
           <button
-            className={`btn-ghost !py-1.5 text-xs min-h-[2rem] md:min-h-0 ${filterOpen ? "!text-white !bg-raise" : ""}`}
+            className={`btn-ghost !py-1.5 text-xs tap ${filterOpen ? "!text-white !bg-raise" : ""}`}
             onClick={() => setFilterOpen(!filterOpen)}
             title="Filter the library"
           >
@@ -827,16 +825,18 @@ export default function LibraryPage() {
           )}
         </div>
 
-        <div className="ml-auto flex items-center gap-2">
+        {/* min-w-0 + wrap: the counts grow with the library, so on a phone this
+            group takes its own line instead of pushing the row past the edge. */}
+        <div className="ml-auto flex items-center gap-2 flex-wrap min-w-0">
           <button
-            className="btn-ghost !py-1.5 text-xs min-h-[2rem] md:min-h-0"
+            className="btn-ghost !py-1.5 text-xs tap"
             onClick={() => setStatsOpen(true)}
             title={selectionCount ? "Statistics for the current selection" : "Library-wide statistics"}
           >
             <BarChart3 className="h-3.5 w-3.5" /> Stats
           </button>
           <button
-            className={`btn-ghost !py-1.5 text-xs min-h-[2rem] md:min-h-0 ${selectMode ? "!text-accent !border-accent/50" : ""}`}
+            className={`btn-ghost !py-1.5 text-xs tap ${selectMode ? "!text-accent !border-accent/50" : ""}`}
             onClick={toggleSelectMode}
             title="Select mode — show checkboxes for batch actions"
           >
@@ -857,15 +857,15 @@ export default function LibraryPage() {
             {selection.albums.length} album{selection.albums.length === 1 ? "" : "s"} · {selection.artists.length} artist{selection.artists.length === 1 ? "" : "s"} · {selection.tracks.length} track{selection.tracks.length === 1 ? "" : "s"} · {selTracks.size} total tracks
           </span>
           <div className="ml-auto flex gap-1.5 flex-wrap">
-            <button className="btn-primary !py-1 text-xs min-h-[2rem] md:min-h-0" onClick={playSelection}>
+            <button className="btn-primary !py-1 text-xs tap" onClick={playSelection}>
               <Play className="h-3.5 w-3.5" /> Play
             </button>
-            <button className="btn-ghost !py-1 text-xs min-h-[2rem] md:min-h-0" onClick={() => addToPlaylist([...selTracks])}>
+            <button className="btn-ghost !py-1 text-xs tap" onClick={() => addToPlaylist([...selTracks])}>
               <ListPlus className="h-3.5 w-3.5" /> Playlist
             </button>
             {(selection.albums.length > 0 || selection.artists.length > 0) && (
               <button
-                className="btn-danger !py-1 text-xs min-h-[2rem] md:min-h-0"
+                className="btn-danger !py-1 text-xs tap"
                 onClick={() => removeAlbums(selectionAlbumDirs)}
                 disabled={busy || removing === "batch" || !selectionAlbumDirs.length}
                 title="Move selected albums to trash"
@@ -875,7 +875,7 @@ export default function LibraryPage() {
             )}
             <ScriptsDropdown onRun={runScriptsOnSelection} runAllIds={runAllIds} />
             <button
-              className="btn-ghost !py-1 text-xs min-h-[2rem] md:min-h-0"
+              className="btn-ghost !py-1 text-xs tap"
               onClick={downloadLyricsSelection}
               disabled={lyricsBusy}
               title="Auto-import missing lyrics for the selection through the provider chain (skips instrumentals)"
@@ -883,7 +883,7 @@ export default function LibraryPage() {
               <CloudDownload className="h-3.5 w-3.5" /> {lyricsBusy ? "Fetching…" : "Lyrics"}
             </button>
             <button
-              className="btn-ghost !py-1 text-xs min-h-[2rem] md:min-h-0"
+              className="btn-ghost !py-1 text-xs tap"
               onClick={() => setBulkTagsOpen(true)}
               disabled={!selTracks.size}
               title="Bulk remove or set tags on the selected tracks"
@@ -891,14 +891,14 @@ export default function LibraryPage() {
               <Tag className="h-3.5 w-3.5" /> Tags
             </button>
             <button
-              className="btn-ghost !py-1 text-xs min-h-[2rem] md:min-h-0"
+              className="btn-ghost !py-1 text-xs tap"
               onClick={organizeSelection}
               disabled={busy || removing === "batch" || !selectionAlbumDirs.length}
               title="Apply the naming script from Settings"
             >
               <FolderSync className="h-3.5 w-3.5" /> {busy ? "Organizing…" : "Organize"}
             </button>
-            <button className="btn-ghost !py-1 text-xs min-h-[2rem] md:min-h-0" onClick={clearSelection}>
+            <button className="btn-ghost !py-1 text-xs tap" onClick={clearSelection}>
               Clear
             </button>
           </div>
@@ -1041,7 +1041,7 @@ export default function LibraryPage() {
                   <span className="text-[10px] text-zinc-600 shrink-0 w-8 text-right">{al.track_count}t</span>
                   <div className="opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 flex gap-1 shrink-0 transition-opacity" onClick={(e) => e.stopPropagation()}>
                     <button
-                      className="btn-ghost !px-1.5 !py-0.5 min-h-[2rem] md:min-h-0"
+                      className="btn-ghost !px-1.5 !py-0.5 tap"
                       title={isExp ? "Collapse" : "Show tracks"}
                       onClick={() => toggleExpand(al.path)}
                     >
@@ -1677,7 +1677,7 @@ function ScriptsDropdown({ onRun, runAllIds }: { onRun: (ids: number[], force?: 
   ];
   return (
     <div className="relative">
-      <button className="btn-ghost !py-1 text-xs min-h-[2rem] md:min-h-0" onClick={() => setOpen(!open)}>
+      <button className="btn-ghost !py-1 text-xs tap" onClick={() => setOpen(!open)}>
         <Wand2 className="h-3.5 w-3.5" /> Scripts
       </button>
       {open && (

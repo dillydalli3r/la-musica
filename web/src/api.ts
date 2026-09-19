@@ -72,10 +72,42 @@ function writeStore(key: string, value: string | null) {
   }
 }
 
+/** The address the desktop shell's own backend listens on (see
+ *  desktop/src-tauri/src/lib.rs: the shell spawns `server` and expects it
+ *  here). A phone has no bundled Python — this is the address an on-device
+ *  one (a-Shell, iSH, Termux) would use, and often nothing answers it. */
+export const HOST_DEVICE_URL = "http://127.0.0.1:8000";
+
+/** Normalise a server address the user typed (login screen, the client
+ *  wizard's first step, Settings → Security).
+ *
+ *  A typed address is almost never a URL: people write `example.com:8000` or
+ *  paste one with a trailing slash. Scheme-less input gets `http://` — every
+ *  LAN server and the shell's own backend speak plain HTTP — except when the
+ *  address names port 443, where HTTPS is the only thing that can be
+ *  listening. The host is lower-cased and any path or trailing slash is
+ *  dropped, because the request base is built by appending `/api`; every
+ *  caller shows the result back before saving it. "" stays "" — on the web
+ *  app and in Docker that means "the origin that served this page". */
+export function normalizeServerUrl(raw: string): string {
+  const typed = (raw || "").trim();
+  if (!typed) return "";
+  const scheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(typed) ? "" : /:443(\/|$)/.test(typed) ? "https://" : "http://";
+  try {
+    const u = new URL(`${scheme}${typed}`);
+    return u.host ? `${u.protocol}//${u.host}` : typed;
+  } catch {
+    // Not parseable as an address at all — hand back what was typed (minus the
+    // trailing slashes the request base would double up) and let the probe
+    // report the failure.
+    return `${scheme}${typed}`.replace(/\/+$/, "");
+  }
+}
+
 function resolveBase(): string {
-  const saved = readStore(SERVER_KEY).replace(/\/+$/, "");
+  const saved = normalizeServerUrl(readStore(SERVER_KEY));
   if (saved) return saved;
-  return IN_TAURI ? "http://127.0.0.1:8000" : "";
+  return IN_TAURI ? HOST_DEVICE_URL : "";
 }
 
 /** The server address this client talks to. "" means "the origin that served
@@ -83,11 +115,15 @@ function resolveBase(): string {
 let BASE = resolveBase();
 let API = `${BASE}/api`;
 
-/** Point this client at another server (the login screen's server field). */
+/** Point this client at another server — the login screen's address field and
+ *  the setup wizard's first step both land here, as does Settings → Security,
+ *  which is the only one the web app offers (its address is otherwise fixed to
+ *  the origin that served it). "Host on this device" arrives as the shell's
+ *  own address, so there is exactly one way a client is pointed anywhere. */
 export function setServerUrl(url: string | null) {
-  const clean = (url || "").trim().replace(/\/+$/, "");
+  const clean = normalizeServerUrl(url || "");
   writeStore(SERVER_KEY, clean || null);
-  const next = clean || (IN_TAURI ? "http://127.0.0.1:8000" : "");
+  const next = clean || (IN_TAURI ? HOST_DEVICE_URL : "");
   // The offline copy is keyed by endpoint, not by server: left in place, a
   // client pointed at a second server would answer from the first one's
   // library the moment the network is gone.
@@ -788,6 +824,30 @@ export interface AuthSession {
   username: string;
 }
 
+/** `/api/auth/users` — every user on this server, and which one is asking.
+ *  The unnamed default scope is not a user row and is never listed: it is
+ *  where an unclaimed install's data lives. */
+export interface AuthUsers {
+  users: string[];
+  you: string;
+}
+
+/** `/api/version` — the running server's version and whether upstream has a
+ *  newer one. `latest` is the newest release tag ("" while the check has not
+ *  succeeded), `update_available` is the server's own verdict, `release_url`
+ *  a link to that release ("" when there is nothing to link), and `source` is
+ *  `"github"` or `"unavailable"` — the GitHub check is cached and never fatal,
+ *  so a client shows the version either way and only mentions `latest` when
+ *  the server says it is behind. */
+export interface ServerVersion {
+  version: string;
+  latest: string;
+  update_available: boolean;
+  release_url: string;
+  checked_at: number;
+  source: "github" | "unavailable";
+}
+
 /** One completed download waiting to be imported. */
 export interface ReadyAlbum {
   path: string;
@@ -825,15 +885,23 @@ export interface ImportRunStatus {
 
 export const api = {
   health: () => json<{ status: string; version: string }>(`${API}/health`),
+  /** The running server's version, checked against the latest GitHub release
+   *  (cached on the server 6 h). `source: "unavailable"` still carries the
+   *  version — the update check is never allowed to fail the request. */
+  version: () => json<ServerVersion>(`${API}/version`, undefined, 8000),
 
   // ── session ────────────────────────────────────────────────────────────
   /** Does this server want a login, has anyone claimed it, and are we in? */
   authStatus: () => json<AuthStatus>(`${API}/auth/status`),
-  authLogin: (password: string) =>
+  /** Sign in. `username` names which user to sign in as and is only sent when
+   *  the caller has one to offer (the screen prefills it from
+   *  `/api/auth/status`); omitted, the server answers with the only user the
+   *  server has — every install that was never asked for a second one. */
+  authLogin: (password: string, username?: string) =>
     json<AuthSession>(`${API}/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password }),
+      body: JSON.stringify(username ? { password, username } : { password }),
     }, 30000),
   authSetup: (password: string, confirm: string, username?: string) =>
     json<AuthSession>(`${API}/auth/setup`, {
@@ -849,6 +917,26 @@ export const api = {
       body: JSON.stringify({ current, password, confirm }),
     }, 60000),
   authRevokeAll: () => json<{ ok: boolean; revoked: number }>(`${API}/auth/revoke-all`, { method: "POST" }),
+  /** The server's users, and which of them is asking. */
+  authUsers: () => json<AuthUsers>(`${API}/auth/users`),
+  /** Add a user, or set an existing one's password. Unlike a password change
+   *  this signs nobody out — adding a second person must not disconnect the
+   *  first. The server's own words come back as an Error (`username is
+   *  required`, `password must be at least 8 characters`, `the passwords do
+   *  not match`), and are shown verbatim. */
+  authAddUser: (username: string, password: string, confirm: string) =>
+    json<{ ok: boolean; username: string; users: string[] }>(`${API}/auth/users`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password, confirm }),
+    }, 30000),
+  /** Remove a user and every session they hold. The last user is refused by
+   *  the server (a 400 with a readable detail) — removing it would change
+   *  which password opens the library instead of closing it. */
+  authRemoveUser: (username: string) =>
+    json<{ ok: boolean; users: string[] }>(`${API}/auth/users/${encodeURIComponent(username)}`, {
+      method: "DELETE",
+    }, 30000),
   config: () => json<Record<string, unknown>>(`${API}/config`),
   configDefaults: () => json<Record<string, unknown>>(`${API}/config/defaults`),
   saveConfig: (cfg: Record<string, unknown>) =>
@@ -1066,7 +1154,11 @@ export const api = {
         body: JSON.stringify({ album_path: albumPath, release_id: releaseId, staged }),
       }
     ),
-  mbAssign: (tracks: Record<string, Record<string, string | null>>, staged = false) =>
+  /** Write tags onto tracks. A value is a string, or a LIST for a
+   *  multi-valued field (GENRE): the server splits a string on the separator
+   *  but writes an array one field per name, which is the only way a track
+   *  keeps "Rock" and "Shoegaze" apart. */
+  mbAssign: (tracks: Record<string, Record<string, string | string[] | null>>, staged = false) =>
     json<{ ok: boolean; changed: number } & ContainerSwap>(`${API}/mb/assign`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

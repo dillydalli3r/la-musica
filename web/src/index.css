@@ -185,6 +185,114 @@ body {
   height: 100%;
 }
 
+/* Phone chrome. The viewport is `viewport-fit=cover` (index.html), so the app
+   paints under the notch and the home indicator unless the shell pads itself
+   by the device's own insets — which are 0 on every device without them.
+   `.safe-shell` is the app shell: one padding on its root covers the sidebar,
+   the top bar, the content column and the player bar together, because they
+   are all inside it. The nav drawer is `fixed`, so it does NOT inherit that
+   padding and repeats the insets it needs. */
+.safe-shell {
+  padding-top: env(safe-area-inset-top);
+  padding-right: env(safe-area-inset-right);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+}
+.safe-drawer {
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+}
+
+/* Nothing may scroll sideways: a wide table, an unbreakable file path or a
+   fixed `min-w-` inside a panel must not shift the shell off-screen. Sideways
+   scrolling stays deliberate and local, inside a `.table-scroll` wrapper. */
+body {
+  overflow-x: hidden;
+}
+
+/* Touch targets: iOS asks for 44px, and a 32px control is a coin toss with a
+   thumb. Two opt-in pieces, because one shape cannot serve both cases —
+   `.tap` gives a control that is sized by its content (a row's button, an
+   input) the 44px BOX, while `.tap-hit` grows only the HIT area of a
+   fixed-size icon button (the 36px ones inside the 48px top bar) through a
+   transparent ::after, so a min-height there cannot reflow the bar it sits in.
+   Gated on a narrow viewport OR a coarse pointer: the pointer query is the
+   honest one for a real phone, but tools/check_responsive.cjs renders 390px
+   without `hasTouch`, so a coarse-only rule would never run in the check that
+   exists to catch this class of bug. */
+@media (max-width: 767px), (pointer: coarse) {
+  .tap {
+    min-height: 2.75rem;
+  }
+  /* The app's own button classes are the most-tapped things on a phone — a
+     page header's Play / Download / Links / Tag actions row, the Settings
+     section nav, a wizard step — and their 3.0.0 geometry is 30-34px, under
+     the 44px guideline. Growing the LABEL buttons here rather than at each
+     call site is what keeps them consistent; `.btn-icon` is deliberately not
+     in this list, because it is a square whose hit area is grown instead
+     (`.tap-hit`) and a min-height there would make it taller than it is wide. */
+  .btn,
+  .btn-ghost,
+  .btn-primary,
+  .btn-danger {
+    min-height: 2.75rem;
+  }
+  .tap-hit {
+    position: relative;
+  }
+  /* Every icon button is a 36px square by design; growing the HIT area is the
+     only way to reach 44px without making it taller than it is wide. */
+  .btn-icon,
+  .btn-icon-primary,
+  .btn-icon-danger {
+    position: relative;
+  }
+  .btn-icon::after,
+  .btn-icon-primary::after,
+  .btn-icon-danger::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: max(100%, 44px);
+    height: max(100%, 44px);
+    transform: translate(-50%, -50%);
+  }
+  .tap-hit::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: max(100%, 44px);
+    height: max(100%, 44px);
+    transform: translate(-50%, -50%);
+  }
+}
+
+/* A search field this narrow is a field whose placeholder is being eaten by
+   the magnifier's own inset: on a phone, and again at any app zoom (main.tsx
+   scales the root font size, which shrinks the field in px while the inset
+   scales up with it), 2.5rem of a ~100px field is padding. The query asks the
+   field's REAL width, so it fires for both causes — a media query could not:
+   `rem` inside a media query resolves against the browser's initial root font
+   size, not the zoomed one, so `@media (max-width: 22rem)` stays 352px at every
+   zoom level. Dropping the icon returns its room to the text, and the mode is
+   still named by the search-source selector beside the field.
+   `!important` plus the descendant selector beat the input's own `!pl-10`,
+   which still applies at every width above the threshold. */
+.search-field {
+  container-type: inline-size;
+}
+@container (max-width: 192px) {
+  .search-field > svg {
+    display: none;
+  }
+  .search-field > input {
+    padding-left: 0.875rem !important;
+  }
+}
+
 @layer components {
   /* Smoothed-rectangle controls (Monochrome-style): soft corners, never
      full pills — buttons, chips and inputs share one rect language. */

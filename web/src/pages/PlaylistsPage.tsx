@@ -109,13 +109,13 @@ export default function PlaylistsPage() {
         actions={
           <>
             <input
-              className="input max-w-xs"
+              className="input max-w-xs tap"
               placeholder="New playlist name…"
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && create.mutate()}
             />
-            <button className="btn-primary" onClick={() => create.mutate()} disabled={!newName.trim()}>
+            <button className="btn-primary tap" onClick={() => create.mutate()} disabled={!newName.trim()}>
               <Plus className="h-4 w-4" /> Create
             </button>
             <input
@@ -125,7 +125,7 @@ export default function PlaylistsPage() {
               className="hidden"
               onChange={(e) => e.target.files?.[0] && importM3u8(e.target.files[0])}
             />
-            <button className="btn-ghost" onClick={() => fileRef.current?.click()}>
+            <button className="btn-ghost tap" onClick={() => fileRef.current?.click()}>
               <Upload className="h-4 w-4" /> Import .m3u8
             </button>
           </>
@@ -208,10 +208,10 @@ function PlaylistGridCard({ playlist, trackMeta, onPlay }: {
         </div>
         </Link>
         <div className="absolute top-1.5 right-1.5 row-hover transition-opacity">
-          <FavHeart kind="playlist" id={String(playlist.id)} className="!p-1.5 bg-black/60" iconClass="h-4 w-4" />
+          <FavHeart kind="playlist" id={String(playlist.id)} className="!p-1.5 bg-black/60 tap-hit" iconClass="h-4 w-4" />
         </div>
         <button
-          className="btn-primary absolute left-2 top-9 !rounded-lg !p-3 row-hover transition-opacity shadow-2xl"
+          className="btn-primary absolute left-2 top-9 !rounded-lg !p-3 row-hover transition-opacity shadow-2xl tap-hit"
           title="Play playlist"
           onClick={(e) => {
             e.stopPropagation();

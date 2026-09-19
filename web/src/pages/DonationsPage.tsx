@@ -67,7 +67,7 @@ export default function DonationsPage() {
         subtitle={t("donations.subtitle")}
         actions={
           <button
-            className="btn-ghost !py-1 text-xs min-h-8 md:min-h-0"
+            className="btn-ghost !py-1 text-xs tap"
             onClick={() =>
               copy(
                 COINS.map((c) => c.address).join("\n"),
@@ -102,7 +102,7 @@ export default function DonationsPage() {
                   <div className="text-[11px] text-zinc-500">{t(coin.note)}</div>
                 </div>
                 <button
-                  className="btn-primary !py-1 text-xs min-h-10 md:min-h-0"
+                  className="btn-primary !py-1 text-xs tap"
                   onClick={() => copy(coin.address, t(coin.name), codeRefs.current[coin.id] ?? null)}
                 >
                   <Copy className="h-3 w-3" /> {t("donations.copy")}

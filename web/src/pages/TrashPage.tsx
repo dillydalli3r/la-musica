@@ -349,7 +349,7 @@ export default function TrashPage() {
   const rowActions = (e: Entry) => (
     <>
       <button
-        className="btn-ghost !py-2 !px-2 text-xs md:!py-1"
+        className="btn-ghost !py-2 !px-2 text-xs md:!py-1 tap"
         onClick={() => restoreOne(e)}
         disabled={busy}
         aria-label={e.origin ? "Restore" : "Restore to…"}
@@ -363,7 +363,7 @@ export default function TrashPage() {
         <span className="hidden md:inline">{e.origin ? "Restore" : "Restore to…"}</span>
       </button>
       <button
-        className="btn-danger !py-2 !px-2 text-xs md:!py-1"
+        className="btn-danger !py-2 !px-2 text-xs md:!py-1 tap"
         onClick={() => removeOne(e)}
         disabled={busy}
         aria-label="Delete permanently"
@@ -379,7 +379,7 @@ export default function TrashPage() {
   const cardActions = (e: Entry) => (
     <div className="absolute left-2 top-9 flex gap-1 row-hover transition-opacity">
       <button
-        className="btn-primary !rounded-lg !p-2.5"
+        className="btn-primary !rounded-lg !p-2.5 tap-hit"
         onClick={(ev) => {
           ev.stopPropagation();
           restoreOne(e);
@@ -390,7 +390,7 @@ export default function TrashPage() {
         <Undo2 className="h-4 w-4" />
       </button>
       <button
-        className="btn-danger !rounded-lg !p-2.5"
+        className="btn-danger !rounded-lg !p-2.5 tap-hit"
         onClick={(ev) => {
           ev.stopPropagation();
           removeOne(e);
@@ -430,18 +430,17 @@ export default function TrashPage() {
   };
 
   return (
-    <div className="p-6 space-y-5">
+    <div className="p-6 space-y-5 mx-auto max-w-6xl">
       <PageHeader icon={Trash2} title="Trash">
       {/* toolbar — the library's line-up: view tabs, sort, columns, filter —
           then Empty trash, the trash folder, select mode and the counts on
           the right, all on ONE line. */}
       <div className="flex items-center gap-2 flex-wrap">
-        <Segmented value={view} onChange={setView} options={VIEW_TABS}
-          className="[&>button]:min-h-[2rem]" />
+        <Segmented value={view} onChange={setView} options={VIEW_TABS} />
 
         <div className="relative">
           <button
-            className={`btn-ghost !py-1.5 text-xs min-h-[2rem] md:min-h-0 ${sortOpen ? "!text-white !bg-raise" : ""}`}
+            className={`btn-ghost !py-1.5 text-xs tap ${sortOpen ? "!text-white !bg-raise" : ""}`}
             onClick={() => setSortOpen(!sortOpen)}
             title="Sort the trash"
           >
@@ -480,7 +479,7 @@ export default function TrashPage() {
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-600" />
           <input
-            className="input !py-1.5 !pl-8 text-xs !w-52 min-h-[2rem] md:min-h-0"
+            className="input !py-1.5 !pl-8 text-xs !w-52 tap"
             placeholder="Filter the trash"
             title="Filter by album name or by the raw folder name"
             value={filter}
@@ -488,25 +487,31 @@ export default function TrashPage() {
           />
         </div>
 
-        <div className="ml-auto flex items-center gap-2">
+        {/* min-w-0 + wrap: on a phone this group is wider than the row, so it
+            takes its own line and the folder path truncates instead of pushing
+            the row past the viewport. */}
+        <div className="ml-auto flex items-center gap-2 flex-wrap min-w-0">
           {entries.length > 0 && (
-            <button className="btn-danger !py-1.5 text-xs min-h-[2rem] md:min-h-0" onClick={emptyAll} disabled={busy}>
+            <button className="btn-danger !py-1.5 text-xs tap" onClick={emptyAll} disabled={busy}>
               {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
               Empty trash
             </button>
           )}
           {folder && (
             <button
-              className="btn-ghost !py-1.5 text-xs font-mono max-w-full sm:max-w-[24rem] truncate min-h-[2rem] md:min-h-0"
+              className="btn-ghost !py-1.5 text-xs font-mono max-w-full sm:max-w-[24rem] tap min-w-0"
               onClick={copyFolder}
               title="Copy the trash folder path"
             >
               <FolderOpen className="h-3.5 w-3.5 shrink-0" />
-              {folder}
+              {/* The ellipsis has to live on a child: text overflow does not
+                  apply to a flex container, so a `truncate` on the button
+                  itself clips both ends of the path with no ellipsis. */}
+              <span className="truncate min-w-0">{folder}</span>
             </button>
           )}
           <button
-            className={`btn-ghost !py-1.5 text-xs min-h-[2rem] md:min-h-0 ${selectMode ? "!text-accent !border-accent/50" : ""}`}
+            className={`btn-ghost !py-1.5 text-xs tap ${selectMode ? "!text-accent !border-accent/50" : ""}`}
             onClick={toggleSelectMode}
             title="Select mode — show checkboxes for batch actions"
           >
@@ -529,7 +534,7 @@ export default function TrashPage() {
           </span>
           <div className="ml-auto flex gap-1.5 flex-wrap">
             <button
-              className="btn-primary !py-1 text-xs min-h-[2rem] md:min-h-0"
+              className="btn-primary !py-1 text-xs tap"
               onClick={restoreSelected}
               disabled={busy}
               title="Put the selected items back into the library"
@@ -542,14 +547,14 @@ export default function TrashPage() {
               Restore
             </button>
             <button
-              className="btn-danger !py-1 text-xs min-h-[2rem] md:min-h-0"
+              className="btn-danger !py-1 text-xs tap"
               onClick={removeSelected}
               disabled={busy}
               title="Erase the selected items from disk — cannot be undone"
             >
               <Trash2 className="h-3.5 w-3.5" /> Delete permanently
             </button>
-            <button className="btn-ghost !py-1 text-xs min-h-[2rem] md:min-h-0" onClick={() => setSelected([])}>
+            <button className="btn-ghost !py-1 text-xs tap" onClick={() => setSelected([])}>
               Clear
             </button>
           </div>

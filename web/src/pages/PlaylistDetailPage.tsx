@@ -9,6 +9,7 @@ import { toast, useStore } from "../store";
 import { EmptyState, PageLoading } from "../components/Badges";
 import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
+import MoreLikeThis from "../components/MoreLikeThis";
 import { TrackCover } from "../components/CoverImg";
 import DownloadButton from "../components/DownloadButton";
 import FavHeart from "../components/FavHeart";
@@ -441,6 +442,10 @@ export default function PlaylistDetailPage() {
         ) : (
           <EmptyState title="Empty playlist" hint="Add tracks from any album or track page." />
         )}
+
+        {/* Library tracks the local scorer ranks closest to what this playlist
+            already holds — the playlist's own tracks are excluded. */}
+        <MoreLikeThis kind="playlist" id={String(pid)} />
       </div>
 
       {filterOpen && (

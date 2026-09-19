@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, Play, RefreshCw, Trash2 } from "lucide-react";
 import { api } from "../api";
 import { toast, useStore, type QueueTrack } from "../store";
-import { CACHED_PATHS_KEY, cachedBytes, cachedPaths, clearMediaCache, uncacheTrack } from "../lib/mediaCache";
+import { CACHED_PATHS_KEY, cachedBytes, cachedTracks, clearMediaCache, trackIdentity, uncacheTrack, useCachedPaths } from "../lib/mediaCache";
 import { sortRows, SortHeader, toggleSort, type SortState } from "../lib/sort";
 import { ColumnResizer, ColumnsMenu, useColumnPrefs, useColumnWidths, type Col } from "../lib/columns";
 import { fmtDuration, fmtTech, originalYear } from "../lib/fmt";
@@ -244,18 +244,26 @@ export default function CachedTracksView() {
   const [trackW, setTrackW, resetTrackW] = useColumnWidths("cached-tracks");
 
   const { data: lib } = useQuery({ queryKey: ["library"], queryFn: api.library });
-  const { data: paths, isFetching, refetch } = useQuery({ queryKey: CACHED_PATHS_KEY, queryFn: cachedPaths });
+  const { data: tracks, isFetching, refetch } = useQuery({ queryKey: CACHED_PATHS_KEY, queryFn: cachedTracks });
   const { data: total } = useQuery({ queryKey: ["cachedBytes"], queryFn: cachedBytes });
 
-  const cached = useMemo(() => new Set(paths ?? []), [paths]);
+  // A cached track is matched to the library by IDENTITY (its MusicBrainz
+  // recording id, else the path): this set holds every cached track's path plus
+  // where the library keeps that recording today, so a download is not lost
+  // when the organizer moves the file.
+  const cached = useCachedPaths();
 
   const rows = useMemo(() => {
-    const known = new Set<string>();
+    const knownIds = new Set<string>();
+    const knownPaths = new Set<string>();
     const out: CachedAlbum[] = [];
     for (const a of lib?.artists ?? []) {
       for (const al of a.albums ?? []) {
         const tracks = (al.tracks ?? []).filter((t) => cached.has(t.path));
-        for (const t of al.tracks ?? []) known.add(t.path);
+        for (const t of al.tracks ?? []) {
+          knownPaths.add(t.path);
+          knownIds.add(trackIdentity(t.path, t.tags.MUSICBRAINZ_TRACKID));
+        }
         if (!tracks.length) continue;
         out.push({
           path: al.path,
@@ -267,11 +275,14 @@ export default function CachedTracksView() {
         });
       }
     }
-    // Paths the library no longer lists (a track removed or renamed since it
-    // was downloaded) have no row to live on — they are counted, not hidden.
-    const orphans = (paths ?? []).filter((p) => !known.has(p)).length;
+    // Cached tracks no library row claims any more — deleted, or moved to a
+    // folder the library does not list: nothing to show them on, so they are
+    // counted, not hidden. Identity is what decides, not the stored path: a
+    // cached file the library still holds under its recording id is not an
+    // orphan just because its path changed.
+    const orphans = (tracks ?? []).filter((t) => !knownIds.has(t.key) && !knownPaths.has(t.path)).length;
     return { list: sortRows(out, sort), orphans };
-  }, [lib, cached, paths, sort]);
+  }, [lib, cached, tracks, sort]);
 
   const after = () => {
     qc.invalidateQueries({ queryKey: CACHED_PATHS_KEY });
@@ -287,7 +298,11 @@ export default function CachedTracksView() {
     // A rejected Cache Storage call used to be an unhandled rejection: the row
     // stayed on screen with no explanation. Say what happened instead.
     try {
-      await Promise.all(tracks.map((t) => uncacheTrack(t.path)));
+      // The recording id goes along: after a move the stored path no longer
+      // names the bytes, and the identity is what does.
+      await Promise.all(
+        tracks.map((t) => uncacheTrack({ path: t.path, mbid: t.tags.MUSICBRAINZ_TRACKID }))
+      );
       toast(`Removed ${tracks.length} track(s) from the offline cache`);
     } catch (e) {
       toast.error(`Could not remove from the offline cache: ${e instanceof Error ? e.message : e}`);
@@ -305,7 +320,7 @@ export default function CachedTracksView() {
     after();
   };
 
-  const count = paths?.length ?? 0;
+  const count = tracks?.length ?? 0;
   const toggleRow = (path: string) =>
     setOpen((s) => {
       const next = new Set(s);
@@ -418,13 +433,13 @@ export default function CachedTracksView() {
           </div>
           {rows.list.length === 0 && (
             <EmptyState
-              title="Only files the library does not list"
-              hint="What is cached here was moved or renamed since it was downloaded — Clear all evicts it."
+              title="Only tracks the library does not list"
+              hint="What is cached here matches no track in the library any more — deleted, or moved outside the music folder. Clear all evicts it."
             />
           )}
           {rows.orphans > 0 && (
             <div className="text-[10px] text-zinc-600 mt-2">
-              {rows.orphans} cached file(s) are no longer part of the library — Clear all evicts them too.
+              {rows.orphans} cached track(s) match no track in the library any more — Clear all evicts them too.
             </div>
           )}
         </>

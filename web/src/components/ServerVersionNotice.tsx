@@ -1,0 +1,71 @@
+import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { X } from "lucide-react";
+import { api } from "../api";
+import { useI18n } from "../lib/i18n";
+
+/** The version the connected server is running, plus the one-line update
+ *  notice when upstream has a newer release.
+ *
+ *  Shown by Settings → Security and by the setup wizard's last step, so a
+ *  fresh client is told what it just connected to. The server does the GitHub
+ *  check (cached 6 h, never fatal), so this never waits on the network itself:
+ *  without an answer the line simply does not render.
+ *
+ *  Dismissal is per client and per version — dismissing 3.1.0 must not hide
+ *  3.2.0 — and localStorage-only, like the other per-device display picks. */
+const DISMISS_KEY = "mlo.updateDismissed";
+
+export default function ServerVersionNotice() {
+  const { t } = useI18n();
+  const [dismissed, setDismissed] = useState(() => localStorage.getItem(DISMISS_KEY) || "");
+  const { data } = useQuery({
+    queryKey: ["version"],
+    queryFn: api.version,
+    staleTime: 3600_000,
+    retry: 0, // an older server has no such route; the version line is enough
+  });
+
+  if (!data?.version) return null;
+  const offer = data.update_available && !!data.latest && data.latest !== dismissed;
+
+  return (
+    <div className="space-y-1">
+      <div className="font-mono text-[11px] text-zinc-400 break-all">
+        {t("settings.server_version", { version: data.version })}
+      </div>
+      {offer && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-900/60 bg-amber-950/30 px-2.5 py-1.5">
+          <span className="flex-1 text-[11px] text-amber-200/90 leading-relaxed">
+            {t("settings.update_available", { version: data.version, latest: data.latest })}
+          </span>
+          {data.release_url && (
+            <a
+              className="text-[11px] text-amber-200 underline shrink-0"
+              href={data.release_url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {t("settings.update_link")}
+            </a>
+          )}
+          <button
+            type="button"
+            aria-label={t("settings.update_dismiss")}
+            className="tap-hit text-amber-200/80 hover:text-amber-100 shrink-0"
+            onClick={() => {
+              try {
+                localStorage.setItem(DISMISS_KEY, data.latest);
+              } catch {
+                /* private mode: the notice simply returns next launch */
+              }
+              setDismissed(data.latest);
+            }}
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}

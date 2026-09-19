@@ -52,7 +52,10 @@ export default function PageHeader({
               {title}
             </span>
           </h1>
-          {subtitle && <div className="mt-1 text-xs text-zinc-500">{subtitle}</div>}
+          {/* `break-words`: a subtitle carrying a file path (Soulseek's download
+              dir, Dependencies' folder) has no space to wrap at, and an
+              unbreakable run of text scrolls the whole page sideways. */}
+          {subtitle && <div className="mt-1 text-xs text-zinc-500 break-words">{subtitle}</div>}
           {chips && chips.length > 0 && (
             <div className="flex flex-wrap gap-1.5 mt-2">
               {chips.map((c) => (

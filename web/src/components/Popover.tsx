@@ -79,7 +79,7 @@ export function MenuItem({
       disabled={disabled}
       title={title}
       onClick={onClick}
-      className={`w-full text-left text-xs px-2.5 py-1.5 rounded-lg flex items-center gap-2.5 transition-colors disabled:opacity-40 ${
+      className={`w-full text-left text-xs px-2.5 py-1.5 rounded-lg flex items-center gap-2.5 transition-colors disabled:opacity-40 tap ${
         danger ? "text-red-300 hover:bg-red-950/50" : "text-zinc-300 hover:bg-white/10"
       } ${active ? "bg-white/10" : ""}`}
     >

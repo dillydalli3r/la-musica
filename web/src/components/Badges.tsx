@@ -213,9 +213,9 @@ export function EmptyState({ title, hint, action }: {
     <div className="flex flex-col items-center justify-center gap-2 py-24 text-zinc-500">
       <Disc3 className="h-9 w-9 opacity-30" />
       <div className="text-sm font-medium text-zinc-400">{title}</div>
-      {hint && <div className="text-xs text-zinc-600 max-w-sm text-center">{hint}</div>}
+      {hint && <div className="text-xs text-zinc-600 max-w-sm text-center break-words">{hint}</div>}
       {action && (
-        <Link to={action.to} className="btn-ghost !py-1.5 text-xs mt-2">
+        <Link to={action.to} className="btn-ghost !py-1.5 text-xs mt-2 tap">
           {action.label}
         </Link>
       )}

@@ -390,7 +390,7 @@ export function LinkEditorButton({
                   </label>
                   <div className="flex items-center gap-1.5 mt-0.5">
                     <input
-                      className={`input !py-1 !px-2 text-xs flex-1 ${
+                      className={`input !py-1 !px-2 text-xs flex-1 tap ${
                         checks[f.key]?.valid === true
                           ? "!border-emerald-700"
                           : checks[f.key]?.valid === false
@@ -416,10 +416,10 @@ export function LinkEditorButton({
               );
             })}
             <div className="flex justify-end gap-1.5 pt-1">
-              <button className="btn-ghost !py-1 text-xs" onClick={() => setOpen(false)}>
+              <button className="btn-ghost !py-1 text-xs tap" onClick={() => setOpen(false)}>
                 Cancel
               </button>
-              <button className="btn-primary !py-1 text-xs" onClick={save} disabled={busy}>
+              <button className="btn-primary !py-1 text-xs tap" onClick={save} disabled={busy}>
                 {busy && <Loader2 className="h-3 w-3 animate-spin" />} Write to {paths.length} file(s)
               </button>
             </div>

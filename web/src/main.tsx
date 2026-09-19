@@ -14,6 +14,43 @@ import { applyConfigLocale } from "./lib/i18n";
 // page) call applyConfigLocale(cfg) so the server's `ui_locale` applies too.
 applyConfigLocale();
 
+// ---- device zoom ---------------------------------------------------------
+// Pinch-zoom is OFF (index.html), so the app offers an explicit scale instead:
+// Settings writes `mlo.zoom` (a percent, 80..150) and dispatches `mlo:zoom`
+// with the new number, so a change lands without a reload. Applied before the
+// first render, so nothing flashes at 100% first — including the login and
+// first-run screens, which never mount the shell.
+//
+// It is the ROOT FONT SIZE, not CSS `zoom`: the whole UI is sized in rem, so
+// every control and every glyph scales, while the chrome that positions itself
+// against the viewport (`top-0`, `inset-x-0`, the absolute top bar and the
+// fixed nav drawer) keeps its own coordinates. `zoom` would re-scale those
+// coordinates underneath the chrome instead, which is how a zoomed app ends up
+// with its bars floating away from the edges.
+// ponytail: rem scale — the few px-sized hairlines (scrollbars, the fat seek
+// slider's 5px track) stay put; give them rem if they ever need to grow too.
+const ZOOM_KEY = "mlo.zoom";
+
+function zoomPct(value: unknown): number {
+  const n = typeof value === "number" ? value : Number(String(value ?? "").trim());
+  // blank, garbage and 0 all mean "no preference" — they must not clamp to the
+  // 80% floor, which would silently shrink the app for anyone whose stored
+  // value went missing.
+  if (!Number.isFinite(n) || n <= 0) return 100;
+  return Math.min(150, Math.max(80, Math.round(n)));
+}
+
+function applyZoom(pct: number) {
+  document.documentElement.style.fontSize = `${(16 * pct) / 100}px`;
+}
+
+try {
+  applyZoom(zoomPct(localStorage.getItem(ZOOM_KEY)));
+} catch {
+  /* storage disabled (private mode): 100% is the right answer anyway */
+}
+window.addEventListener("mlo:zoom", (e) => applyZoom(zoomPct((e as CustomEvent).detail)));
+
 /** A render-time throw anywhere in the app (a lazy page chunk included)
  * would otherwise unmount the whole tree to a blank screen. */
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {

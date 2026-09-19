@@ -18,6 +18,7 @@ import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
 import TagActionsMenu from "../components/TagActionsMenu";
 import Modal from "../components/Modal";
+import MoreLikeThis from "../components/MoreLikeThis";
 import { CreditsPanel, creditTagsFrom } from "../components/TrackDetails";
 
 export default function TrackPage() {
@@ -462,6 +463,10 @@ export default function TrackPage() {
           />
         </div>
       </div>
+
+      {/* Tracks the local scorer ranks closest to this one, from elsewhere in
+          the library — its own album is excluded. */}
+      <MoreLikeThis kind="track" id={decoded} />
 
       {managerOpen && (
         <LyricsManagerModal

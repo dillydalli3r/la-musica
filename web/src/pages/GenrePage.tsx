@@ -5,10 +5,14 @@ import { Tags } from "lucide-react";
 import { api } from "../api";
 import PageHeader from "../components/PageHeader";
 import { EmptyState, PageLoading } from "../components/Badges";
+import { GENRE_FAMILIES } from "../lib/genres";
 import { useStore } from "../store";
 
 /** Genre browsing: the genre facet of the library as category cards, every
- *  genre a chip that opens the library filtered to it. The chip writes the
+ *  genre a chip that opens the library filtered to it. The cards are filter
+ *  buckets, not a genre tree — a track's genre LIST is a specific genre and
+ *  the family the app derives from it (mlo.genres), so a family is marked as
+ *  one rather than drawn as a subgenre of a card. The chip writes the
  *  tag-scoped `genre:` query, which is the same filter the library search box
  *  understands (`genre:"progressive rock"`), so this page and the search box
  *  stay one mechanism. */
@@ -41,24 +45,35 @@ export default function GenrePage() {
     navigate("/library");
   };
 
-  const chip = (name: string, count?: number) => (
-    <button
-      key={name}
-      className="chip bg-raise border border-border text-zinc-300 hover:text-white hover:border-accent transition-colors"
-      onClick={() => open(name)}
-      title={`Open the library filtered to ${name}`}
-    >
-      {name}
-      {count != null && <span className="text-zinc-600 font-mono text-[10px]">{count}</span>}
-    </button>
-  );
+  const chip = (name: string, count?: number) => {
+    // A family is the DERIVED last slot of a track's genre list
+    // (mlo.genre_vocab.parent_of). The library holds it as a genre of its own,
+    // so it is labelled here instead of left looking like one more specific
+    // genre sitting under this card's head — the hierarchy the old
+    // parent/main/sub model implied is gone.
+    const family = GENRE_FAMILIES[name.toLowerCase()];
+    return (
+      <button
+        key={name}
+        className={`chip border ${family ? "bg-panel border-dashed border-border text-zinc-400" : "bg-raise border-border text-zinc-300"} hover:text-white hover:border-accent transition-colors`}
+        onClick={() => open(name)}
+        title={family
+          ? `${name} is a family — the app derives it from a track's specific genre and writes it last. Open the library filtered to ${name}`
+          : `Open the library filtered to ${name}`}
+      >
+        {family && <span className="text-[9px] uppercase tracking-wider text-zinc-600">family</span>}
+        {name}
+        {count != null && <span className="text-zinc-600 font-mono text-[10px]">{count}</span>}
+      </button>
+    );
+  };
 
   return (
     <div className="p-6 space-y-5 mx-auto max-w-6xl">
       <PageHeader
         icon={Tags}
         title="Genres"
-        subtitle="Every genre in the library, grouped by category — a chip opens the library filtered to it."
+        subtitle="Every genre in the library, in the app's filter buckets — one chip per name, a family marked as the derived head it is, and a click opens the library filtered to it."
         actions={
           <input
             className="input !py-1.5 w-56"
