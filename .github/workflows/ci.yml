@@ -80,11 +80,24 @@ jobs:
             echo "::group::$suite"
             code=0
             python "$suite" || code=$?
+            if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then
+              # One retry, then the verdict stands. A handful of these suites
+              # exercise thread pools, patched module identities and
+              # timing-dependent waits, and on a loaded runner they have been
+              # seen to fail once and pass on the next process (the same
+              # command passes locally and in most runs) — a flake that has
+              # twice taken a whole release run down with it. A real
+              # regression is deterministic and fails both attempts, which is
+              # the only case that marks the shard red.
+              echo "::warning file=$suite::$suite exited $code — retrying once"
+              code=0
+              python "$suite" || code=$?
+            fi
             echo "::endgroup::"
             if [ "$code" -eq 2 ]; then
               echo "SKIP: $suite (local toolchain not available)"
             elif [ "$code" -ne 0 ]; then
-              echo "::error file=$suite::$suite exited $code"
+              echo "::error file=$suite::$suite exited $code (twice)"
               fail=1
             fi
           done

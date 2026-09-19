@@ -407,8 +407,12 @@ assert rows[0]["title"] == "OK Computer" and rows[0]["artist"] == "Radiohead"
 assert rows[0]["url"] == f"{intg.CAA_BASE}/release-group/{CAA_RG}", rows[0]
 assert (rows[0]["width"], rows[0]["height"]) == (1500, 1500), rows[0]
 assert [c[0] for c in calls] == [f"{intg.CAA_BASE}/release-group/{CAA_RG}"], calls
-assert probes == [CAA_IMAGE,
-                  "https://coverartarchive.org/release/abc/back.png"], probes
+# Sorted, not ordered: the dimensions of several rows are probed in a pool,
+# so which probe lands in the recorder first is a scheduling detail. What
+# matters — and what the rows above assert — is that each row got ITS OWN
+# size back.
+assert sorted(probes) == sorted([CAA_IMAGE,
+                                 "https://coverartarchive.org/release/abc/back.png"]), probes
 
 # (c) no MBID → Deezer, and the real album's cover sorts ahead of a karaoke one
 clear_caches()
@@ -457,8 +461,8 @@ assert rows[0]["title"] == "OK Computer" and rows[0]["tracks"] == 12, rows[0]
 assert (rows[0]["width"], rows[0]["height"]) == (3000, 3000), rows[0]
 assert [c[0] for c in calls] == [f"{intg.DEEZER_API}/search/album",
                                  "https://itunes.apple.com/search"], calls
-assert probes == [BIG3000,
-                  "https://is1-ssl.mzstatic.com/image/thumb/Music/x/3000x3000bb.jpg"], probes
+assert sorted(probes) == sorted([BIG3000,
+                                 "https://is1-ssl.mzstatic.com/image/thumb/Music/x/3000x3000bb.jpg"]), probes
 
 # (e) a dead meta-search is a fallback case, not an error
 clear_caches()
