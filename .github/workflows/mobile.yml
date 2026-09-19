@@ -97,12 +97,13 @@ jobs:
         run: |
           mkdir -p desktop/src-tauri/target/mobile-wheels/android
           if gh release download mobile-deps \
-               --pattern "android-*.whl" --dir desktop/src-tauri/target/mobile-wheels/android --clobber 2>/dev/null \
+               --pattern "*android_24_arm64_v8a.whl" --dir desktop/src-tauri/target/mobile-wheels/android --clobber 2>/dev/null \
              && ls desktop/src-tauri/target/mobile-wheels/android/*.whl >/dev/null 2>&1; then
             echo "hit=1" >> "$GITHUB_OUTPUT"
             echo "reusing the published Android wheel(s)"
           else
             echo "hit=0" >> "$GITHUB_OUTPUT"
+            echo "no published Android wheel yet — building it (this also publishes it)"
           fi
 
       - name: Cache the cibuildwheel environment
@@ -172,12 +173,13 @@ jobs:
         run: |
           mkdir -p desktop/src-tauri/target/mobile-wheels/ios
           if gh release download mobile-deps \
-               --pattern "ios-*.whl" --dir desktop/src-tauri/target/mobile-wheels/ios --clobber 2>/dev/null \
+               --pattern "*ios_13_0_arm64_iphoneos.whl" --dir desktop/src-tauri/target/mobile-wheels/ios --clobber 2>/dev/null \
              && ls desktop/src-tauri/target/mobile-wheels/ios/*.whl >/dev/null 2>&1; then
             echo "hit=1" >> "$GITHUB_OUTPUT"
             echo "reusing the published iOS wheel(s)"
           else
             echo "hit=0" >> "$GITHUB_OUTPUT"
+            echo "no published iOS wheel yet — building it (this also publishes it)"
           fi
 
       - name: Cache the cibuildwheel environment
