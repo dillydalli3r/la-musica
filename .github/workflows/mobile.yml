@@ -8,6 +8,17 @@ name: Mobile bundles
 # projects need.
 #
 # Reusable (`release.yml` can call it) and manually dispatchable.
+#
+# SPEED. The two things these jobs need — the mobile wheels (pydantic-core has
+# no iOS/Android wheel on PyPI, so it is cross-built) and the Android CLI tools
+# (ffmpeg/flac, cross-compiled for arm64) — are INPUTS, not per-run outputs:
+# they change only when the pinned versions change. So they are published once
+# as assets of a `mobile-deps` release and downloaded from there on every later
+# run. `actions/cache` alone was not enough: it is evicted and key-scoped, and a
+# cold run paid ~25 minutes rebuilding wheels plus ~10 minutes rebuilding
+# ffmpeg before the app build even started. The build path stays as the seed —
+# a version bump rebuilds once, republishes, and every run after that is a
+# download. A run that finds the assets is minutes instead of tens of minutes.
 
 on:
   workflow_dispatch:
@@ -71,11 +82,27 @@ jobs:
         # target has to exist before it starts.
         run: rustup target add aarch64-linux-android
 
-      - name: Cache the built wheels
+      - name: Reuse the Android wheels if this repo has published them
+        id: prebuilt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p desktop/src-tauri/target/mobile-wheels/android
+          if gh release download mobile-deps \
+               --pattern "android-*.whl" --dir desktop/src-tauri/target/mobile-wheels/android --clobber 2>/dev/null \
+             && ls desktop/src-tauri/target/mobile-wheels/android/*.whl >/dev/null 2>&1; then
+            echo "hit=1" >> "$GITHUB_OUTPUT"
+            echo "reusing the published Android wheel(s)"
+          else
+            echo "hit=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Cache the cibuildwheel environment
+        if: steps.prebuilt.outputs.hit != '1'
         uses: actions/cache@v4
         with:
-          path: desktop/src-tauri/target/mobile-wheels/android
-          key: mobile-wheels-android-${{ hashFiles('tools/mobile/requirements-android.txt') }}
+          path: ~/.cache/cibuildwheel
+          key: cibw-env-android-${{ hashFiles('tools/mobile/requirements-android.txt') }}
 
       - name: cibuildwheel
         run: python3 -m pip install cibuildwheel
@@ -85,9 +112,28 @@ jobs:
         # must match the runtime the APK ships (Android stages Python 3.14), and
         # a CI file that says so cannot drift from the build the way a default
         # computed from the runner's own interpreter did.
+        if: steps.prebuilt.outputs.hit != '1'
         env:
           CIBW_BUILD: cp314-*
         run: python3 tools/mobile/bundle.py wheels android
+
+      - name: Publish the wheels for the next run
+        # Only from the default branch, and only when they were just built: two
+        # jobs racing to write the same release asset is how a cache gets
+        # corrupted, and the upload is what makes every later run fast.
+        if: steps.prebuilt.outputs.hit != '1' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          for w in desktop/src-tauri/target/mobile-wheels/android/*/*.whl; do
+            [ -f "$w" ] || continue
+            cp "$w" "desktop/src-tauri/target/mobile-wheels/android/$(basename "$w")"
+          done
+          gh release view mobile-deps >/dev/null 2>&1 || \
+            gh release create mobile-deps --title "mobile build dependencies" \
+              --notes "Wheels and CLI tools the mobile builds bundle. Built once when the pinned versions change; downloaded by every later run."
+          gh release upload mobile-deps desktop/src-tauri/target/mobile-wheels/android/*.whl --clobber
 
       - name: Upload the wheels
         uses: actions/upload-artifact@v4
@@ -111,11 +157,27 @@ jobs:
         # cibuildwheel hands the build to cargo.
         run: rustup target add aarch64-apple-ios
 
-      - name: Cache the built wheels
+      - name: Reuse the iOS wheels if this repo has published them
+        id: prebuilt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p desktop/src-tauri/target/mobile-wheels/ios
+          if gh release download mobile-deps \
+               --pattern "ios-*.whl" --dir desktop/src-tauri/target/mobile-wheels/ios --clobber 2>/dev/null \
+             && ls desktop/src-tauri/target/mobile-wheels/ios/*.whl >/dev/null 2>&1; then
+            echo "hit=1" >> "$GITHUB_OUTPUT"
+            echo "reusing the published iOS wheel(s)"
+          else
+            echo "hit=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Cache the cibuildwheel environment
+        if: steps.prebuilt.outputs.hit != '1'
         uses: actions/cache@v4
         with:
-          path: desktop/src-tauri/target/mobile-wheels/ios
-          key: mobile-wheels-ios-${{ hashFiles('tools/mobile/requirements-ios.txt') }}
+          path: ~/.cache/cibuildwheel
+          key: cibw-env-ios-${{ hashFiles('tools/mobile/requirements-ios.txt') }}
 
       - name: cibuildwheel
         run: python3 -m pip install --user cibuildwheel
@@ -125,9 +187,25 @@ jobs:
         # environment's PATH excludes everything it is not told about. The
         # target is the runtime the IPA ships (iOS stages Python 3.13, the last
         # version Pillow publishes an iOS wheel for).
+        if: steps.prebuilt.outputs.hit != '1'
         env:
           CIBW_BUILD: cp313-*
         run: python3 tools/mobile/bundle.py wheels ios
+
+      - name: Publish the wheels for the next run
+        if: steps.prebuilt.outputs.hit != '1' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          for w in desktop/src-tauri/target/mobile-wheels/ios/*/*.whl; do
+            [ -f "$w" ] || continue
+            cp "$w" "desktop/src-tauri/target/mobile-wheels/ios/$(basename "$w")"
+          done
+          gh release view mobile-deps >/dev/null 2>&1 || \
+            gh release create mobile-deps --title "mobile build dependencies" \
+              --notes "Wheels and CLI tools the mobile builds bundle. Built once when the pinned versions change; downloaded by every later run."
+          gh release upload mobile-deps desktop/src-tauri/target/mobile-wheels/ios/*.whl --clobber
 
       - name: Upload the wheels
         uses: actions/upload-artifact@v4
@@ -208,17 +286,41 @@ jobs:
           name: mobile-wheels-android
           path: desktop/src-tauri/target/mobile-wheels/android
 
-      - name: Cache the bundled CLI tools
-        uses: actions/cache@v4
-        with:
-          path: desktop/src-tauri/target/mobile-tools
-          key: mobile-tools-${{ hashFiles('tools/mobile/build_android_tools.sh') }}
+      - name: Reuse the bundled CLI tools if this repo has published them
+        id: prebuilt-tools
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p desktop/src-tauri/target/mobile-tools
+          if gh release download mobile-deps --pattern "android-tools.tar.gz" \
+               --dir desktop/src-tauri/target --clobber 2>/dev/null; then
+            tar -xzf desktop/src-tauri/target/android-tools.tar.gz \
+              -C desktop/src-tauri/target/mobile-tools
+            echo "hit=1" >> "$GITHUB_OUTPUT"
+            echo "reusing the published CLI tools"
+          else
+            echo "hit=0" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build the bundled CLI tools (ffmpeg, flac)
+        if: steps.prebuilt-tools.outputs.hit != '1'
         # Android may execute a binary it ships, which is the one thing the
         # platform can do that iOS cannot — so the tools it needs are built for
         # arm64 and shipped inside the APK.
         run: bash tools/mobile/build_android_tools.sh "$GITHUB_WORKSPACE/desktop/src-tauri/target/mobile-tools"
+
+      - name: Publish the CLI tools for the next run
+        if: steps.prebuilt-tools.outputs.hit != '1' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          tar -czf desktop/src-tauri/target/android-tools.tar.gz \
+            -C desktop/src-tauri/target/mobile-tools .
+          gh release view mobile-deps >/dev/null 2>&1 || \
+            gh release create mobile-deps --title "mobile build dependencies" \
+              --notes "Wheels and CLI tools the mobile builds bundle. Built once when the pinned versions change; downloaded by every later run."
+          gh release upload mobile-deps desktop/src-tauri/target/android-tools.tar.gz --clobber
 
       - name: Stage the bundled Python runtime
         # BEFORE `android init`: the runtime is staged as a single
