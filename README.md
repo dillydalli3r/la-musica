@@ -1,9 +1,15 @@
 # la musica
 
-**v3.0.0** — the release that put the library on more than one machine: a
-login gate for a server that is no longer loopback-only, five client targets
-(Windows, macOS, Linux, Android and iOS), OS notifications, an AI genre
-hierarchy, lyric-transform grading, six UI languages and a donations page.
+**v3.1.0** — the release that made the library answer questions about itself.
+Genres are two slots now — the specific genre, then its family — spelled the way
+MusicBrainz spells them, with the family derived instead of asked for. Paths
+carry the release-group id as well, so a file names its album even out of its
+folder. Playlists, likes and favourites are **per user**, and the trash bin
+follows. The top search bar searches MusicBrainz as well as the library, every
+artist, album, track and playlist page has a local-only *More like this* shelf,
+and every client — the container included — says when it is behind. On a phone:
+44 px touch targets, no pinch-zoom, a real zoom setting, and a SideStore/AltStore
+source so the iOS build installs with its own name, icon and version attached.
 
 **la musica** (formerly Music Library Optimizer) — a modern, self-hosted app
 that *manages, optimizes, audits, grades and plays* your music library, from
@@ -38,10 +44,11 @@ machines.
   and imports still need the server. See *Offline*.
 - **A login gate, because the server is no longer loopback-only** (new in
   3.0.0) — one password, PBKDF2-HMAC-SHA256, sessions whose SHA-256 alone
-  touches the disk (`<music>/.mlo/data/auth.db`), and an `auth_mode: auto`
-  default that turns the gate ON the moment `server_host` is not a loopback
-  address. `off` on a non-loopback bind is treated as `required`: a
-  misconfiguration never publishes an open library. See *Security & accounts*.
+  touches the disk (`<music>/.mlo/data/auth.db`), and an
+  `auth_mode: auto` default that turns the gate ON the moment `server_host` is
+  not a loopback address. `off` on a non-loopback bind is treated as
+  `required`: a misconfiguration never publishes an open library. See *Security
+  & accounts*.
 - **Notifications that reach you while the app is behind other windows** (new
   in 3.0.0) — the backend announces a found wish, a download that finished and
   was imported, and one that is sitting ready to import on `/ws/events`; each
@@ -49,12 +56,24 @@ machines.
   on desktop and mobile, the Web Notification API in the browser) with an
   in-app toast when permission is refused. Not remote push — see
   *Notifications* for what that honestly costs.
-- **Genres are a hierarchy now** (new in 3.0.0) — three slots, **parent / main
-  / sub**, stored as repeated `GENRE` fields in that order and displayed as
-  e.g. `Rock / Alternative Rock / Post-Britpop`. The configured AI endpoint can
-  pick the three (`ai_genre_inference`, `ai_genre_effort`, `ai_genre_research`);
-  with no endpoint the fetched source list is used unchanged. Grading checks the
-  *arrangement*, not just the count (`GENRE_ORDER`).
+- **Genres are two slots, and they are MusicBrainz's own names** (rewritten in
+  3.1.0) — the **specific** genre first, its **family** last (`shoegaze / rock`),
+  stored as repeated `GENRE` fields. The family is *derived* from a curated
+  table, never asked of the model and never invented, and every name is
+  canonicalised against MusicBrainz's 2 202-genre list (`mlo/genre_vocab.py`)
+  so spellings stop drifting. `mb_genre_count` (default 2, max 3) is a ceiling,
+  not a quota — nothing is padded. The AI endpoint picks at most
+  `mb_genre_count - 1` specific genres (`ai_genre_inference`,
+  `ai_genre_effort`, `ai_genre_research`, `genre_sources`); with no endpoint the
+  fetched source list is used unchanged. Grading checks the *arrangement*
+  (`GENRE_ORDER`: the family last) and the vocabulary (`GENRE_VOCAB`).
+- **Playlists, likes and favourites belong to a user** (new in 3.1.0) —
+  `auth.db` has a `users` table, a session carries the name it was opened for,
+  and every playlist, like and favourite row is scoped by it, as is the trash
+  bin (`<music>/.mlo/trash/<user>/`). Login takes an optional username; omit it
+  and the server uses the only user there is. Settings → Security adds and
+  removes users, and a claim made without a name keeps working after a second
+  one is added. See *Security & accounts*.
 - **Lyric transforms are graded on whether they were needed** (new in 3.0.0) —
   one shared decision function (`mlo/lyrics_xlit.py:xlit_needs`) drives both
   script 17 and the grader, so a stored transliteration for Latin-script lyrics
@@ -75,11 +94,11 @@ machines.
 - **A donations page** (new in 3.0.0) — Litecoin and Bitcoin addresses with
   copy-to-clipboard (and a select-the-text fallback), and cats. Nothing is
   gated behind it: every feature is already on the machine you installed it on.
-- **Genres per track is 3 by default, and the app can now REACH that number** (new in 2.8.2) — the
-  count is one value (`mb_genre_count`) for the import, the trimming scripts and the *Genre count*
-  grade, and the default is 3: a primary genre plus the two that say the most about it (which source
-  ranked them first decides which three). Since 3.0.0 those three slots are a
-  parent / main / sub hierarchy rather than a flat list — see the entry above.
+- **Genres per track is one number** (new in 2.8.2, retuned in 3.1.0) — the count is one value
+  (`mb_genre_count`) for the import, the trimming scripts and the *Genre count*
+  grade. The default is **2** today: the specific genre and its family (see the
+  entry above), and it is a ceiling rather than a quota — the app never pads a
+  track to reach it.
   Auto tagging (and the genre chain it calls) now **tops a
   track UP to the count** instead of only filling an empty GENRE — the track's own genres stay first
   because they are deliberate, the provider answers are appended (case-insensitively de-duplicated)
@@ -138,6 +157,27 @@ machines.
 
 - **Polish, robustness and hardening pass** (new in 2.7.0) — sidebar hover nudge plus shared motion tokens for consistent animation; lyrics robustness with millisecond precision, `[offset:]` clamping, translation/transliteration alignment, mixed synced+plain files, and a stale-track seek guard; performance via debounced library search, O(1) cover lookup, 60 s library cache, optimistic offline cache, and no background-tab polling; backend hardening with symlink-safe path guards, capped caches, and partial-success bulk tagging; Soulseek with bounded wish waits, no silent-drop handoffs, and daemon errors surfaced in the UI; plus keyboard/screen-reader and small-phone/tablet fixes.
 
+- **The top search bar searches the library or MusicBrainz** — one selector
+  next to the field, and the choice sticks (`localStorage: mlo.search.source`).
+  **Library** is the behaviour that was always there: a debounced client-side
+  filter over the cached library payload, with the `composer:`, `person:`,
+  `genre:` and `tag:` prefixes, and Enter opening an exactly-matching artist.
+  **MusicBrainz** asks the network instead — the same release/artist search the
+  import wizard's *Match* step uses (`/api/mb/search/releases` with
+  `mode=release|track|catno|barcode`, and `/api/mb/search/artists`) — and the
+  dropdown rows link straight to musicbrainz.org, so a search that finds
+  nothing in your library ends by showing you what you are missing. Queries are
+  cached per query, so typing then re-typing a phrase costs one request: a cold
+  search answered in 0.79 s, the same one again in 0.00 s.
+- **"More like this" on artist, album, track and playlist pages** — the one
+  recommendation surface that is entirely local. It scores the library's own
+  tags (genre *and* family, mood, energy, era, artist), weights a shared
+  specific genre above a shared family, drops any term neither side has data
+  for instead of counting it as a difference, and reports the reasons on every
+  row (`same genre: shoegaze`, `energy 62 near 68`). No provider, no model, no
+  network: the payload the library page already reads, indexed once per call —
+  measured at 0.16 ms per recommendation over a 300-track library and 2.6 ms
+  warm for an album shelf on 5 000 tracks.
 - **Home** — a sidebar landing page of library highlights: recently added,
   best-graded, rediscover, top-artist, favourite, wanted and
   needs-attention shelves with a skeleton loading state, plus the library's
@@ -642,17 +682,22 @@ The app now enforces canonical file naming in all three ways:
 #### The default naming script (current)
 
 ```
-%albumartist% [%musicbrainz_albumartistid%]/$if(%releasetype%,[%releasetype%] ,)$if(%originaldate%,%originaldate% - ,)$if(%date%,%date% - ,)%album% {$if(%releasecountry%,%releasecountry%)$if(%media%,$if(%releasecountry%, - ,)%media%)$if(%catalognumber%,$if(%media%, - ,$if(%releasecountry%, - ,))%catalognumber%)}$if(%label%, [%label%])$if(%musicbrainz_albumid%, [%musicbrainz_albumid%])/%discnumber%-$num(%tracknumber%,2) %title%$if(%musicbrainz_trackid%, [%musicbrainz_trackid%])
+%albumartist% [%musicbrainz_albumartistid%]/$if(%releasetype%,[%releasetype%] ,)$if(%originaldate%,%originaldate% - ,)$if(%date%,%date% - ,)%album% {$if(%releasecountry%,%releasecountry%)$if(%media%,$if(%releasecountry%, - ,)%media%)$if(%catalognumber%,$if(%media%, - ,$if(%releasecountry%, - ,))%catalognumber%)}$if(%label%, [%label%])$if(%musicbrainz_albumid%, [%musicbrainz_albumid%])$if(%musicbrainz_releasegroupid%, [%musicbrainz_releasegroupid%])/%discnumber%-$num(%tracknumber%,2) %title%$if(%musicbrainz_trackid%, [%musicbrainz_trackid%])$if(%musicbrainz_releasegroupid%, [%musicbrainz_releasegroupid%])
 ```
 
 Every level is identifiable without reading tags, and the segments are all
 `$if`-guarded — no dangling `[]` or ` - `:
 
 ```
-System of a Down [cc0b7089-…]/[Album] 2001-08-27 - 2001-09-04 - Toxicity {US - CD - CK 62240} [American Recordings] [f8a44d0f-…]/1-04 Psycho [4f0e7e10-…].flac
+System of a Down [cc0b7089-…]/[Album] 2001-08-27 - 2001-09-04 - Toxicity {US - CD - CK 62240} [American Recordings] [f8a44d0f-…] [9b0dd5e7-…]/1-04 Psycho [4f0e7e10-…] [9b0dd5e7-…].flac
 ```
 
-- the album folder: name + release id, the artist folder: name + artist id
+- the artist folder ends with the **artist id**, the album folder with the
+  **release id** *and* the **release group id**, and the file name with the
+  **recording id** *and* the release group id — so a file pulled out of its
+  folder still names the album it came from. `short_folder_names` trims the
+  full uuid in every one of them to 8 characters for a library that needs the
+  path length back
 - `[Release type]` uses the tag's own spelling; **both dates are written in
   full** — the original (release-group) date first, then the release's own.
   The tags are kept full, not merely read: *Auto tagging* fills DATE and
@@ -672,8 +717,11 @@ System of a Down [cc0b7089-…]/[Album] 2001-08-27 - 2001-09-04 - Toxicity {US -
 - the brace group is `country - media - catalog number`, each segment joined
   only when the one before it is present (a rip with no catalog number keeps
   its `CD`, and one with nothing to say keeps no braces at all)
-- the optional ` [label]` / ` [release id]` groups follow the braces, and the
-  file name ends with the recording id (`%musicbrainz_trackid%`)
+- the optional ` [label]` / ` [release id]` / ` [release group id]` groups follow
+  the braces, and the file name ends with the recording id
+  (`%musicbrainz_trackid%`) and the release group id. The release id is **not**
+  repeated in the file name: the folder above already names it, and a second
+  copy of a 36-character uuid is exactly the path length this app fights
 - with nothing but album/title the same script degrades to
   `Artist/Album/1-01 Song.flac`
 
@@ -889,19 +937,34 @@ requires them:
   the pair on one row (**MOOD · ENERGY**, the label and the number it was
   scored from), and both ride in the library payload so `tag:MOOD` /
   `tag:ENERGY` columns work.
-- **GENRE — three slots, parent / main / sub.** Genres are a *hierarchy*, not a
-  bag. The file carries repeated `GENRE` fields in that order — `GENRE=Rock`,
-  `GENRE=Alternative Rock`, `GENRE=Post-Britpop` — and the app displays them
-  joined (`Rock / Alternative Rock / Post-Britpop`). `mb_genre_count`
-  (**genres per track**, default **3**, 1-10) is the one number behind all of
-  it: an import writes at most that many; script 8 (Auto tagging) tops a track
-  UP to it (the track's own genres stay first because they are deliberate, the
-  provider's answers are appended case-insensitively de-duplicated); and script
-  8, the genre import buttons and script 10 **trim any excess off** an existing
-  track. A track that carries fewer or more than the count fails grading
-  (`grade_check_genre_count`, the *Genre count* check), and an import that
-  trimmed anything says so — naming the configured value — as one of the
-  album's warnings. Set it in Settings → Import.
+- **GENRE — two slots: the specific genre, then its family.** Genres are a
+  *hierarchy with two rungs*, not a bag and not a three-deep ladder. The file
+  carries repeated `GENRE` fields in that order — `GENRE=Shoegaze`,
+  `GENRE=Rock` — and the app displays them joined (`shoegaze / rock`).
+  The **specific** genre is what a source or the model answers with; the
+  **family** (the broad head: `rock`, `electronic`, `hip hop`) is *derived*
+  from it, never asked for and never invented, so the two slots cannot
+  contradict each other. `mb_genre_count` (**genres per track**, default **2**,
+  1-3) is the one number behind all of it, and it is a **ceiling, not a
+  quota**: an import writes at most that many, script 8 (Auto tagging) trims a
+  track back to it, and script 10 and every genre import button trim too.
+  Nothing is ever padded — filler genres were the old model's worst habit, and
+  a track with one honest genre is in shape.
+  - **Names are MusicBrainz's own.** Every genre the app writes is looked up in
+    MusicBrainz's genre list (bundled, 2202 names, `mlo/genre_vocab.py`), so
+    casing, hyphens and spellings stop drifting: `Hip-Hop`, `hip hop` and
+    `Hip Hop` all land as `hip hop`, `IDM` stops being Title-Cased into `Idm`,
+    and an alias table catches the spellings the sources themselves emit
+    (`rnb` → `r&b`, `synthpop` → `synth-pop`, `OST` → nothing, because
+    MusicBrainz has no such genre). A name MusicBrainz does not publish is
+    still stored — dropping what a source said would be worse — but it is
+    flagged by the *Genre vocabulary* grade check.
+  - **The family table is curated and small.** 28 families, each a real
+    MusicBrainz genre, and a specific-to-family table covering the genres the
+    app's sources actually emit (`shoegaze` → `rock`, `post-punk` → `punk`,
+    `trip hop` → `electronic`, `jazz rap` → `hip hop`), with keyword rules for
+    the long tail. A genre whose family is unknown gets **no** family slot
+    rather than a wrong one.
 - **Where the genres come from.** `genre_sources` is walked in order, and the
   shipped default is **RateYourMusic → MusicBrainz** — the two the library
   actually agrees with. The other nine providers stay in the registry
@@ -949,28 +1012,34 @@ requires them:
     `ai_genre_inference` (default on **when an endpoint exists**) sends the
     artist, album, track, the year and country and the fetched genre list to
     the configured OpenAI-compatible endpoint in one `/chat/completions` call
-    (`server/genre_ai.py`) and asks for exactly `mb_genre_count` genres in
-    hierarchy order — distinct, every slot filled. `ai_genre_effort`
+    (`server/genre_ai.py`) and asks for at most `mb_genre_count - 1`
+    **specific** genres, most specific first, each one either from the fetched
+    list or a MusicBrainz genre — it is explicitly told never to answer with a
+    family, because the app derives that itself and appends it as the last
+    slot. `ai_genre_effort`
     (`minimal` / `low` / `medium` / `high`, default **high**) is the thinking
     budget spent on the ranking, and `ai_genre_research` (default on) lets the
     model go past the fetched list with its own knowledge of the artist rather
     than only re-ranking what it was handed. Answers are disk-cached
-    (`genre-<hash>.json` under `.mlo/data/lyrics_ai_cache`), an answer with
-    fewer than two usable names is rejected, and a successful ranking adds `ai`
+    (`genre-<hash>.json` under `.mlo/data/lyrics_ai_cache`), anything the
+    vocabulary does not recognise is dropped rather than written, and a
+    successful ranking adds `ai`
     to the track's contributors so the provenance still says who answered.
     **With no endpoint configured the source list is used unchanged** — no `ai`
     in the provenance, no error, no extra call.
 - **Graded.** *Mood tag present*, *Energy tag present*, *Genre tag count*
-  (exactly `mb_genre_count` per track — too few and too many both fail,
+  (at most `mb_genre_count` per track — the cap, not a quota,
   `grade_check_genre_count`) and *Genre tag
   present* are per-track checks (on by default, `MOOD_MISSING` /
   `ENERGY_MISSING` / `GENRE_MISSING`), so a library that never ran script 8
   fails them until it does — which is the point: no track ships without a
-  mood. **Genre order is its own check** (new in 3.0.0,
-  `grade_check_genre_order`, issue code `GENRE_ORDER`): the three slots are
-  parent → main → sub, so a parent genre sitting anywhere but the first slot,
-  or the same slot twice, fails, while an unknown head ("Kwaito", say) does
-  not — the check vouches for the order, never for a fixed vocabulary.
+  mood. **Genre order is its own check**
+  (`grade_check_genre_order`, issue code `GENRE_ORDER`): the family is the
+  **last** slot, so `shoegaze / rock` passes and `rock / shoegaze` fails.
+  **Genre vocabulary** (`grade_check_genre_vocab`, new, issue code
+  `GENRE_VOCAB`) reports any name MusicBrainz does not publish — the check
+  that makes "consistent tagging" something you can see rather than hope for.
+  Both can be turned off in Settings → Grading.
 
 ## Import (new in 2.4.0)
 
@@ -1167,13 +1236,15 @@ enable-all / disable-all bulk actions.
   `ENERGY` and `GENRE` (`MOOD_MISSING` / `ENERGY_MISSING` / `GENRE_MISSING`,
   each with its own toggle); script 8 writes all three, so the fix for a
   failure is one click on the Optimization page.
-- **Genre order** (new in 3.0.0) — `grade_check_genre_order` grades the
-  *arrangement* of the three slots, not their number: the hierarchy is
-  parent → main → sub, so a parent genre in any position but the first fails
-  (a repeated slot fails too). Issue code `GENRE_ORDER`, from the same
-  `mlo/genres.py` policy the writer uses — an unknown head such as `Kwaito` is
-  not a failure, because the check vouches for the order and never for a fixed
-  vocabulary. Off-setting `grade_check_genre_count` does not disable it.
+- **Genre order** — `grade_check_genre_order` grades the *arrangement*, not the
+  number: the family belongs LAST, so `shoegaze / rock` passes and
+  `rock / shoegaze` fails (a repeated slot fails too). Issue code `GENRE_ORDER`,
+  from the same `mlo/genres.py` policy the writer uses. Off-setting
+  `grade_check_genre_count` does not disable it.
+- **Genre vocabulary** (new in 3.1.0) — `grade_check_genre_vocab` reports any
+  name MusicBrainz does not publish (`GENRE_VOCAB`), which is what makes
+  "consistent tagging" visible rather than hoped for. Both checks can be turned
+  off in Settings → Grading.
 - **Lyric transforms** (new in 3.0.0) — `grade_check_xlit_transliteration`
   and `grade_check_xlit_translation` fail a stored transform the lyrics do not
   need (`XLIT_UNNEEDED`: a transliteration for Latin-script lyrics, a
@@ -1856,21 +1927,39 @@ manage.
   `web/src/pages/ClientSetup.tsx` walks **Server → Account → Notifications →
   Done**, before every other gate in `App.tsx`, and nothing below it runs until
   *Finish*.
-  - **Server** — the address the backend answers on (`http://musicbox.lan:8000`,
-    a Tailscale name, whatever `server_host:server_port` names; empty means
-    "this page's own origin", which only the web app can use). *Test* probes
-    `${address}/api/health` with a 3 s deadline (`probeServer`), and **Next**
+  - **Where the backend is** — the step asks the question the client actually
+    has: **Connect to a server** or **Host on this device**. Hosting means the
+    shell runs (or already has) the backend itself — the desktop app starts its
+    own on `127.0.0.1:8000`, and the web app and the Docker image are served by
+    one already. On a phone "host on this device" is a real but narrow case:
+    iOS and Android bundle no Python, so the device needs a backend started
+    there (a-Shell, iSH, Termux); the wizard probes the device's own address
+    and, when nothing answers, says exactly that instead of pretending.
+    Connecting asks for the address (`http://musicbox.lan:8000`, a Tailscale
+    name, whatever `server_host:server_port` names; empty means "this page's
+    own origin", which only the web app can use). A scheme-less address is
+    given `http://` (`https://` for port 443) and shown back normalised before
+    it is saved, so `musicbox.lan:8000` and `http://musicbox.lan:8000` cannot
+    become two different servers. *Test* probes `${address}/api/health` with a
+    3 s deadline (`probeServer`), and **Next**
     stays disabled until an address really answered with a la musica
     `version` — a captive portal's 200 is not a server. The address is saved
     through the API module (`localStorage: mlo.server`, `setServerUrl`), so
-    every later call, the event socket and the media URLs follow it.
-  - **Account** — sign in with the server's password; when the probe reported
+    every later call, the event socket and the media URLs follow it. The same
+    choice, with the same Test-before-Save, is in Settings → Security for
+    **every** client — the browser build included, which previously had no way
+    to change servers at all.
+  - **Account** — sign in with the server's password, and with the username
+    when there is one (the field is prefilled from `/api/auth/status` and is
+    optional: a server with a single user needs no name, a server with several
+    does). When the probe reported
     `has_password: false` the step instead *claims* that server (name,
     password, repeat), exactly like the web's first-run screen.
   - **Notifications** — asks this client for notification permission from a
     real click (browsers reject a request made from a timer; see
     *Notifications*), and is skippable.
-  - **Done** — repeats the server address and the account back, and *Finish*
+  - **Done** — repeats the server address, the account and the server's own
+    **version** back, and *Finish*
     records `localStorage: mlo.clientSetup` and reloads (the API base and the
     token changed under the running module state). That flag is **per device
     and re-runnable**: Settings → Security carries *Run setup again*
@@ -1878,6 +1967,22 @@ manage.
     and the address can be corrected from the wizard at any time.
   The web app and the Docker image are served BY their backend and never see
   this page — `isClientShell()` is exactly "inside Tauri".
+- **A client notices when it is behind.** `GET /api/version` reports this
+  build's version, the newest GitHub release and whether this copy is stale;
+  Settings → Security shows the running server's version, and a dismissible
+  banner (`localStorage: mlo.updateDismissed`, per version, so dismissing
+  3.1.0 does not hide 3.2.0) names the newer release and links to it. The
+  check is a background, 6-hourly, disk-cached request that can fail without
+  consequence: no GitHub, no banner, no error — and the app never blocks on it.
+  A Docker container answers with the version its **image** was built from
+  (`MLO_VERSION`, a build arg the release workflow passes), so a container that
+  is behind the code says so instead of reporting the code's version.
+- **Zoom, on every device.** Pinch-zoom is off (see *Responsive*), so the app
+  offers its own scale: Settings → Appearance sets **80–150 %**
+  (`localStorage: mlo.zoom`) and the whole UI is sized in `rem` from a scaled
+  root font size, which keeps the fixed chrome — top bar, player bar, nav
+  drawer — on the viewport edges at every level instead of scaling its
+  coordinates out from under it.
 - **A shell whose server does not answer lands on the sign-in screen, with the
   address field.** The gate reads the auth status as a *value*: a network
   failure resolves to `null` ("no server") while a real 401/428 still throws
@@ -1919,6 +2024,27 @@ no Apple certificate, provisioning profile or team id**; installing it on a
 device means signing it yourself (Xcode with your own team id, or a sideloading
 tool) on a device whose UDID that certificate covers. Neither is a store build,
 and nothing in the repo pretends otherwise.
+
+**Adding the IPA to SideStore or AltStore shows the right thing, because the
+release publishes a source.** A sideloading tool needs a name, a version, a
+bundle id, an icon and a download URL for every app it lists; without a source
+file the user hunts for the right `.ipa` by hand and the tool guesses the rest.
+`tools/make_sidestore_source.py` reads those values from **the IPA being
+released** (`CFBundleShortVersionString` from `tauri.conf.json`, the file's own
+size, the tag's asset URL), and the release workflow attaches the result as
+`source.json`. Add this URL to SideStore once:
+
+```
+https://github.com/dillydalli3r/la-musica/releases/latest/download/source.json
+```
+
+`releases/latest/download/…` is a **stable** URL that always resolves to the
+newest release, so the source keeps working across versions and the tool can
+tell you an update exists. The app's identity in that file is
+`com.musiclibraryoptimizer.lamusica` — the bundle identifier, which is also
+what a build from before this release used as `…optimizer.app`; an upgrade
+therefore installs **beside** the old app rather than over it, and the old one
+keeps its own settings until you delete it.
 
 **Icons** are generated, not drawn by hand: `tauri icon` is the only writer of
 an app icon anywhere in this repo, and `tools/make_tauri_icons.py` is now a thin
@@ -1963,9 +2089,13 @@ one-liner for a release build done outside CI.
 **Responsive — every route measured at three widths.** Every page was measured
 at **390×780** (a phone in portrait, the narrowest thing the app is installed
 on), **834×1112** and **1440×900**: no route scrolls sideways, and at phone
-width every control in the main content is at least **32 px** tall
-(`min-h-8 md:min-h-0` — the floor applies below `md`, and `md:` restores the
-compact desktop geometry unchanged, so this is a phone fix and nothing else).
+width every control is a **44 px** touch target — the `.tap` / `.tap-hit`
+classes in `web/src/index.css`, width-gated below `md` so the compact desktop
+geometry is unchanged and the check can see it. Pinch-zoom is disabled
+(`maximum-scale=1, user-scalable=no`) because the app now has a real zoom
+setting of its own, with `viewport-fit=cover` and `env(safe-area-inset-*)`
+padding so a notched phone does not clip the shell; browser text scaling is
+still available for accessibility.
 Tables fold their low-value columns below `md` and keep their own horizontal
 scroll box, so a wide table never drags the document with it; `PageHeader`
 stacks its actions under the title; the settings section nav becomes a
@@ -1985,10 +2115,10 @@ port. That is what the gate covers; it is not a UI lock.
 | `auth_mode` | `auto` | `auto` = gate ON when `server_host` is not loopback; `required` = gate ON always; `off` = gate off for loopback only |
 | `server_host` | `127.0.0.1` | where the server binds — and the address the gate reads |
 | `server_port` | `8000` | the port |
-| `auth_username` | `""` | an optional label shown on the login screen; the password is the credential |
+| `auth_username` | `""` | the name shown on the login screen; `POST /api/auth/login` accepts it as an optional `username` (it is also the display source for an install claimed before the `users` table existed) |
 | `auth_password_hash` | `""` | PBKDF2-HMAC-SHA256, written as `pbkdf2$<rounds>$<salt-hex>$<hash-hex>` |
 | `auth_session_days` | `30` | how long a session stays valid |
-| `server_public_url` | `""` | the address clients should dial when it is not the page's own origin |
+| `server_public_url` | `""` | the address clients should dial when it is not the page's own origin; a scheme-less host is normalised server-side (`https://` for port 443, `http://` otherwise) |
 
 `auto` follows the bind: `127.0.0.1`, `::1` and `localhost` are loopback and
 keep a single-user desktop install password-free; anything else (`0.0.0.0`, a
@@ -2003,6 +2133,22 @@ open library.
   in `auth_password_hash` — never the password itself, and the comparison is
   constant-time. Minimum length 8. Setting or changing one revokes every
   session.
+- **Users.** `auth.db` also holds a `users` table (`username`, `hash`,
+  `created`); a session carries the username it was opened for and every
+  playlist, like and favorite row is scoped by it, as is the trash folder
+  (`<music>/.mlo/trash/<user>/`; downloads stay one shared queue, because
+  slskd is).
+  `""` is the default/admin scope: what an unclaimed install uses, and where
+  everything written before users existed still lives (the migration adds the
+  columns in place and moves nothing). **Settings → Security manages them**: the list,
+  *Add user* (a name and its password), and removal — refused for the last
+  user, because with none left the server falls back to its config claim, which
+  would change *which* password opens the library instead of closing it.
+  Nothing is shared except the library itself, the downloads queue (slskd is
+  one queue) and the caches. `POST /api/auth/login` takes an
+  optional `username` — omit it and the server uses the only user there is,
+  which is what a single-user install wants; a server with several users
+  needs the name. The config's `auth_username` stays the display name.
 - **Sessions** are random 32-byte tokens. Only their SHA-256 is stored, in
   `<music>/.mlo/data/auth.db` (SQLite, beside `playlists.db`), so reading that
   file does not hand anyone a working login. Sessions expire after
@@ -2106,6 +2252,14 @@ so `docker compose pull` and watchtower have something to compare against.
   base has no curl. 30 s interval, 5 s timeout, 30 s start period, 3 retries;
   compose declares the same check so `docker compose ps` and watchtower see
   readiness.
+- **The image knows its own version.** The release workflow passes the tag as
+  `--build-arg MLO_VERSION=…`, the image records it as
+  `ARG`/`ENV`/`LABEL org.opencontainers.image.version`, and a running container
+  reports it on `/api/version` next to the newest GitHub release — so
+  "am I behind?" is answerable from inside the container, without pulling
+  anything. A plain `docker build` (no build-arg) keeps the default stamped in
+  the Dockerfile, which `tools/check_versions.py` holds in step with
+  `mlo/__init__.py`.
 - **Binding and the login gate.** The image sets `MLO_SERVER_HOST=0.0.0.0`
   (docker-compose repeats it) and that seeds the config's `server_host` — the
   same key the gate reads — so the container both binds the published port and
@@ -2193,7 +2347,7 @@ mlo/         core engine (imports mutagen for every tag operation — the CLI
              grader, audit, flac, images, lyrics (deterministic
              word-sync + the multi-provider lyrics chain), lyrics_xlit
              (the transform decision script 17 and the grader share),
-             genres (the three-slot hierarchy policy), moods (incl.
+             genres (the two-slot hierarchy policy), moods (incl.
              ENERGY), artistdata, acoustid, cue, accurip,
              loudness (batch rsgain + on-demand EBU R128), autotag, remux
              (chapters + text-subtitle filtering), fetchdeps (external
@@ -2215,7 +2369,8 @@ Where the app stores what it fetches:
 | `<music>/.mlo/data/metadata_review.json` | artist/album metadata candidates staged by `metadata_review` until you apply one |
 | `<music>/.mlo/data/rym_cache/` | RateYourMusic genre pages, cached for 30 days (1 request/second) |
 | `<music>/.mlo/data/wishes.db` | the wishlist |
-| `<music>/.mlo/data/auth.db` | live sessions of the login gate — the SHA-256 of each token, never the token (the password hash itself lives in `config.json`) |
+| `<music>/.mlo/data/auth.db` | live sessions and the user rows of the login gate — the SHA-256 of each token, never the token (the password hash itself lives in `config.json`) |
+| `<music>/.mlo/data/update_check.json` | the last GitHub release check (`latest`, `release_url`, `checked_at`), reused for 6 h |
 | `<music>/.mlo/data/lyrics_ai_cache/` | AI answers, keyed by a hash of the prompt: lyric transforms and genre rankings (`genre-<hash>.json`) |
 | `Artists/<Artist>/artist.jpg` | the artist image (normalized to the configured cover aspect + JPEG quality) |
 | `Artists/<Artist>/description.txt` | the artist description |
@@ -2226,10 +2381,15 @@ Where the app stores what it fetches:
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/library` | tag-rich library tree (grades, audits, tags, tech info; gzipped) |
+| `GET /api/health` | liveness (`status`, `version`) plus the update fields below; what the launchers probe to recognize their own backend — it never waits on the network |
+| `GET /api/version` | `{version, latest, update_available, release_url, checked_at, source}` — `mlo.__version__` against the newest GitHub release, cached on disk for 6 h, and `latest: null` / `source: "unavailable"` when GitHub cannot be reached |
 | `GET /api/auth/status` | the login gate's state — `required`, `has_password`, `username`, `host`, `public_url`, `session_days` — and nothing secret; the only route a client needs before it has a token |
-| `POST /api/auth/setup` `…/login` `…/logout` `…/password` `…/revoke-all` `GET …/sessions` | first-run password, sign in (mints a session + sets the `mlo_session` cookie), sign out, change the password (current one required), sign every client out everywhere, live session count |
+| `POST /api/auth/setup` `…/login` `…/logout` `…/password` `…/revoke-all` `GET …/sessions` | first-run password, sign in (optional `username` in the body — omitted means the only user; mints a session + sets the `mlo_session` cookie), sign out, change the password (current one required), sign every client out everywhere, live session count |
+| `GET/POST /api/auth/users` `DELETE /api/auth/users/{name}` | the users on this server, add one (or reset a password) **without signing anyone out**, remove one with their sessions. The last user is refused, and a username cannot carry a path separator — it names that user's trash folder |
 | `GET /api/library/layout` | read-only layout scan: misplaced audio, unexpected folders, empty albums, stray files, hidden folders, `wrong_case` |
 | `GET /api/home` | Home page: stats plus the library-only shelves (recent, top-rated, favorites, discover, top artists, wanted, needs attention) |
+| `GET /api/version` | this build's version, the newest GitHub release, and whether this copy is behind — `{version, latest, update_available, release_url, checked_at, source}`. GitHub is asked at most once every 6 h, the answer is cached on disk, and an unreachable GitHub is `source: "unavailable"` with `latest: null`, never an error. A Docker container reports the version its image was built from (`MLO_VERSION`), so it can be behind the code and say so |
+| `GET /api/recommend?kind=artist\|album\|track\|playlist&id=…&limit=` | "More like this", scored from the library's OWN tags only — genre (+family), mood, energy, era and artist affinity — with a `reasons` list per row (`same genre: shoegaze`, `energy 62 near 68`). No provider, no model, no network: the same payload the library page reads, indexed once per call |
 | `GET/POST/PATCH/DELETE /api/wishes` | release wishlist CRUD; `POST …/{id}/search`, `…/search-all`, `…/reconcile` |
 | `GET /api/album` `GET /api/artist` | entity details |
 | `GET /api/stream` `GET /api/videos/stream` | audio/video streaming (Range; `?transcode=1` pipes fragmented MP4) |
@@ -2307,8 +2467,11 @@ convention as the other `check_*.cjs` tools, so a missing browser is never
 mistaken for a layout defect.
 
 The other `tools/test_*.py` suites cover the login gate and its routes
-(`test_auth.py`), the genre hierarchy — the three-slot policy, `trim_genres`,
-the AI ranking with the chat client stubbed (`test_genre_format.py`), the
+(`test_auth.py`), the genre vocabulary and the two-slot policy
+(`test_genre_vocab.py`: every curated name and alias is a real MusicBrainz
+genre, the family is derived and goes last, an unrecognised name is kept but
+reported), the genre pipeline — `trim_genres`, the AI ranking with the chat
+client stubbed (`test_genre_format.py`), the
 lyric-transform checks and `xlit_needs` (`test_xlit_grading.py`), config
 migration, CUE disc renaming,
 grading paths (mood/energy/genre, the identity-tag sweep, the Picard-safe
@@ -2326,6 +2489,19 @@ client and the layout scanner's capitalization reporting
 (`test_layout_case.py`). Most of them run offline by design — network
 providers are stubbed, and the tests that need a toolchain (ffmpeg, fpcalc)
 skip that section when it is not installed.
+`tools/test_user_scoping.py` drives every playlist/like/favourite call for two
+named users *and* the default scope, because the way this breaks is silent: one
+read that forgets its `user` argument still returns a plausible list — someone
+else's. It also pins the trash folder's per-user segments and the username rules
+(a name becomes a folder, so a separator or a `..` is refused).
+
+`python tools/check_versions.py` is the release gate that costs nothing: it
+compares all seven version strings (the app's own, `tauri.conf.json`,
+`Cargo.toml`, both `package.json`s, the Dockerfile's `MLO_VERSION` and this
+README's header) and fails on any drift, so a release cannot ship an installer
+that disagrees with itself. CI runs it on every push; the release workflow runs
+it against the tag too.
+
 Run them all before a release. The frontend gate is `cd web && npx tsc -b &&
 npx oxlint && npm run build`, plus `node tools/test_i18n.cjs` for the locale
 bundles (key parity both ways, placeholders aligned). CI (`.github/workflows/ci.yml`) runs the Python
