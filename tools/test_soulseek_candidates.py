@@ -1047,13 +1047,15 @@ def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSls
                 # case; run.prompt stays the FIRST payload the job published.
                 for ans in (answer if isinstance(answer, (list, tuple)) else [answer]):
                     parked = None
-                    # The job sleeps on its own search waits between prompts
-                    # (soulseek_auto_search_wait, 5 s in JOB_CFG, once per
-                    # attempt) and a loaded CI runner runs three jobs at once,
-                    # so a flat 10 s window made this suite fail on timing
-                    # alone. Budget the job's own waits plus slack.
+                    # Poll until the job parks, the worker dies, or the CAP
+                    # expires. The cap is generous on purpose: the loop exits
+                    # the moment a prompt appears (a passing case costs
+                    # milliseconds), and a loaded CI runner — three workflows
+                    # share the machine — made a tight window the reason this
+                    # suite failed, which is not something the assertion can
+                    # tell apart from a real regression.
                     _wait = (cfg or JOB_CFG).get("soulseek_auto_search_wait", 5)
-                    deadline = real_time.time() + max(30, 4 * float(_wait) + 15)
+                    deadline = real_time.time() + max(120, 8 * float(_wait))
                     while real_time.time() < deadline:
                         st = soulseek_auto.job_state()
                         if st["state"] == "confirm":
@@ -1062,7 +1064,15 @@ def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSls
                         if not worker.is_alive():
                             break
                         real_time.sleep(0.01)
-                    assert parked is not None, "the job never parked on its prompt"
+                    if parked is None:
+                        state = soulseek_auto.job_state().get("state")
+                        if worker.is_alive():
+                            raise AssertionError(
+                                "the job never parked on its prompt within "
+                                f"{max(120, 8 * float(_wait)):.0f}s (state {state!r})")
+                        raise AssertionError(
+                            f"the job finished (state {state!r}) without parking "
+                            "on its prompt")
                     prompts.append(parked)
                     if ans == "cancel":
                         assert soulseek_auto.cancel() is True, "the parked job took no cancel"
