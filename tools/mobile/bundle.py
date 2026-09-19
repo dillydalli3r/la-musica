@@ -442,7 +442,15 @@ def build_missing_wheels(platform: str, wheel_dir: Path, spec: dict) -> None:
     here rather than hand-rolled so the wheel a CI cache holds and the wheel a
     Mac builds locally come from the same code path.
     """
-    os.environ.setdefault("CIBW_BUILD", f"cp{sys.version_info.major}{sys.version_info.minor}-*")
+    # The TARGET interpreter, taken from the platform's own spec — never the
+    # host's. This ran as `sys.version_info` once, and on a cp312 runner that
+    # silently pinned CIBW_BUILD to `cp312-*` before the platform branch could
+    # set anything: cibuildwheel then reported "0 builds selected" and exited 3,
+    # so the mobile jobs were skipped and the release could not proceed. The
+    # wheel must match the runtime the app ships (3.13 for iOS, 3.14 for
+    # Android), which has nothing to do with the machine building it.
+    target = f"cp{spec['python'].replace('.', '')}-*"
+    os.environ.setdefault("CIBW_BUILD", target)
     if platform == "ios":
         if sys.platform != "darwin":
             die("cibuildwheel iOS builds need macOS with Xcode — this host is "
@@ -459,7 +467,6 @@ def build_missing_wheels(platform: str, wheel_dir: Path, spec: dict) -> None:
                 "Android SDK (the script installs what it needs from there).")
         env_arch = ["--platform", "android", "--archs", "arm64_v8a"]
         os.environ.setdefault("ANDROID_API_LEVEL", "24")
-        os.environ.setdefault("CIBW_BUILD", f"cp{spec['python'].replace('.', '')}-*")
     src = CACHE / "wheel-src"
     src.mkdir(parents=True, exist_ok=True)
     target_dir = wheel_dir

@@ -47,6 +47,25 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      - name: Export the Android SDK
+        # bundle.py refuses to start without ANDROID_HOME, and cibuildwheel
+        # discovers the SDK through it. The runner image already carries the
+        # SDK, so this only exports it (same idea as the build job's setup, less
+        # the Gradle packages the app project itself needs).
+        run: |
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          test -n "$SDK" || { echo "::error::no Android SDK on this runner"; exit 1; }
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+
+      - name: Set up the Android NDK
+        # cibuildwheel needs an NDK to compile the extension for arm64; pinned
+        # rather than "latest" so an NDK release cannot change the wheel.
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27
+          add-to-path: false
+
       - name: Rust for the Android wheel
         # pydantic-core is a Rust extension: cibuildwheel drives cargo, and the
         # target has to exist before it starts.
@@ -62,7 +81,12 @@ jobs:
         run: python3 -m pip install cibuildwheel
 
       - name: Build the wheels Android needs
-        # cibuildwheel fetches the NDK it needs through the runner's sdkmanager.
+        # The target is stated here as well as derived in bundle.py: the wheel
+        # must match the runtime the APK ships (Android stages Python 3.14), and
+        # a CI file that says so cannot drift from the build the way a default
+        # computed from the runner's own interpreter did.
+        env:
+          CIBW_BUILD: cp314-*
         run: python3 tools/mobile/bundle.py wheels android
 
       - name: Upload the wheels
@@ -98,7 +122,11 @@ jobs:
 
       - name: Build the wheels iOS needs
         # bundle.py supplies CIBW_XBUILD_TOOLS="cargo rustc" — the iOS build
-        # environment's PATH excludes everything it is not told about.
+        # environment's PATH excludes everything it is not told about. The
+        # target is the runtime the IPA ships (iOS stages Python 3.13, the last
+        # version Pillow publishes an iOS wheel for).
+        env:
+          CIBW_BUILD: cp313-*
         run: python3 tools/mobile/bundle.py wheels ios
 
       - name: Upload the wheels
