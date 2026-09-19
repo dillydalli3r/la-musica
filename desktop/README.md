@@ -59,7 +59,7 @@ a backend running somewhere else:
   gives Android/iOS the core commands and notifications but no dialog
   permission, since there is no folder to pick.
 - **Bundle config**: `bundle.iOS.minimumSystemVersion` 14.0,
-  `bundle.iOS.bundleVersion` 3.1.2, `bundle.iOS.infoPlist` and
+  `bundle.iOS.bundleVersion` 3.1.3, `bundle.iOS.infoPlist` and
   `bundle.android.minSdkVersion` 24 in `tauri.conf.json`. The Android package
   name and the iOS bundle id both come from the top-level `identifier`
   (`com.musiclibraryoptimizer.lamusica` — the old

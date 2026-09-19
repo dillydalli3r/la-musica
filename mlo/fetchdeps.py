@@ -1146,7 +1146,21 @@ def install_dependency(key, log=print, progress=None):
             for fname in os.listdir(src):
                 s = os.path.join(src, fname)
                 if os.path.isfile(s):
-                    shutil.copy2(s, os.path.join(dest_dir, fname))
+                    try:
+                        shutil.copy2(s, os.path.join(dest_dir, fname))
+                    except OSError as e:
+                        # Windows refuses to replace a file another process is
+                        # EXECUTING (WinError 32), and slskd is the one tool
+                        # this app runs — so "install all" used to end with a
+                        # bare "used by another process" and nothing explaining
+                        # it. The server stops the managed daemon around the
+                        # install (see server.main.dependencies_install); this
+                        # is the honest message for anything else holding a
+                        # file open.
+                        raise RuntimeError(
+                            f"{display} is running — {fname} is in use by another "
+                            f"process, so it cannot be replaced. Stop it and "
+                            f"install again ({type(e).__name__}: {e})") from e
             _copy_licence_files(workdir, dest_dir, log)
 
         names = {f.lower() for f in os.listdir(dest_dir)}

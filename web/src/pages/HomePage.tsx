@@ -37,6 +37,7 @@ function StarLike({ a }: { a: HomeAlbum }) {
   if (!a.owned || !a.path) return null;
   return (
     <button
+      type="button"
       className={`absolute top-1.5 right-1.5 h-7 w-7 rounded-full border border-white/10 bg-black/60 backdrop-blur flex items-center justify-center transition-colors tap-hit ${
         fav ? "text-accent" : "text-zinc-300 hover:text-white"
       }`}
@@ -76,19 +77,23 @@ function HomeCard({ a }: { a: HomeAlbum }) {
 
   return (
     <div className="group flex h-full flex-col rounded-xl p-2 transition-all duration-200 hover:bg-panel/70 hover:-translate-y-0.5">
-      {to ? (
-        <Link to={to} className="block" title="Open album page">
-          <div className="relative">
+      {/* The star is a SIBLING of the link, not a child of it. A <button>
+          inside an <a> is interactive content inside interactive content —
+          invalid HTML, and WebKit (every iOS build) hit-tests it differently
+          from Chromium: a tap on the star could navigate to the album instead
+          of toggling the favourite, which is the "the star does not work on
+          iOS" report. Absent from the anchor it is simply a button, and the
+          absolute position keeps the layout identical. */}
+      <div className="relative">
+        {to ? (
+          <Link to={to} className="block" title="Open album page">
             {art}
-            <StarLike a={a} />
-          </div>
-        </Link>
-      ) : (
-        <div className="relative" title={a.artist ? `${a.artist} — ${a.album}` : a.album}>
-          {art}
-          <StarLike a={a} />
-        </div>
-      )}
+          </Link>
+        ) : (
+          <div title={a.artist ? `${a.artist} — ${a.album}` : a.album}>{art}</div>
+        )}
+        <StarLike a={a} />
+      </div>
       <div className="mt-2 px-0.5 flex flex-1 flex-col gap-1">
         {to ? (
           <Link

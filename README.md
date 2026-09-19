@@ -1,6 +1,6 @@
 # la musica
 
-**v3.1.2** — the release that made the library answer questions about itself.
+**v3.1.3** — the release that made the library answer questions about itself.
 Genres are two slots now — the specific genre, then its family — spelled the way
 MusicBrainz spells them, with the family derived instead of asked for. Paths
 carry the release-group id as well, so a file names its album even out of its
@@ -10,6 +10,8 @@ artist, album, track and playlist page has a local-only *More like this* shelf,
 and every client — the container included — says when it is behind. On a phone:
 44 px touch targets, no pinch-zoom, a real zoom setting, and a SideStore/AltStore
 source so the iOS build installs with its own name, icon and version attached.
+
+Two fixes from a real machine: the iOS favourite star is a real button outside its album link now (a `<button>` inside an `<a>` is invalid and WebKit hit-tests it differently, so a tap could navigate instead of toggling), and dependency installs work — slskd, the one tool the app runs, is stopped and restarted around its own update, which is the "used by another process" failure that made Install all look broken.
 
 Lyrics can be manually submitted to LRCLIB even when the database already holds the recording: the refusal now offers a labelled **Submit anyway**, which resubmits with the override.
 
@@ -1873,7 +1875,11 @@ upstream version), `missing`, `error` (that tool's check failed). Rows with no
 upstream at all fall back to the pinned pair.
 
 Updates are one click (*Install / update all*, or per tool) and land in
-`<app>/.dependencies`. In Docker that is the `lamusica-dependencies` volume,
+`<app>/.dependencies`. **Installing slskd stops the managed daemon first and
+starts it again afterwards** — Windows refuses to replace a file another process
+is executing, so without that an update to the one tool this app *runs* could
+never succeed, and `Install / update all` ended in a bare "used by another
+process". In Docker that is the `lamusica-dependencies` volume,
 so updates survive a container rebuild; pip-based tools (beets, librosa)
 install into the same folder at runtime, and distro-provided tools (ffmpeg,
 flac, libjxl, …) are reported ready from the image's own packages. Only the

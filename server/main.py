@@ -834,16 +834,48 @@ class DepsInstallRequest(BaseModel):
 def dependencies_install(req: DepsInstallRequest):
     """Install/update external tools from their pinned GitHub releases."""
     from mlo import fetchdeps
+    from server import soulseek as slsk
+
     wanted = set(req.keys or [])
-    results = []
-    for key, name in fetchdeps.DISPLAY_NAMES.items():
-        if wanted and key not in wanted:
-            continue
+    keys = [k for k in fetchdeps.DISPLAY_NAMES if not wanted or k in wanted]
+
+    # slskd is the one dependency this app RUNS. Windows refuses to replace a
+    # file another process is executing, so installing it while the managed
+    # daemon is up failed with a bare "used by another process" — which is what
+    # "dependency installs are broken" turned out to be: 15 of 16 tools install
+    # fine, and that one always failed. Stop it around the install and put it
+    # back the way it was, so an update is a single press again.
+    slskd_was_running = False
+    if "slskd" in keys:
         try:
-            fetchdeps.install_dependency(key, log=lambda m: None)
-            results.append({"key": key, "name": name, "ok": True})
-        except Exception as e:
-            results.append({"key": key, "name": name, "ok": False, "error": str(e)})
+            slskd_was_running = bool(slsk.is_running())
+            if slskd_was_running:
+                slsk.stop()
+        except Exception:
+            slskd_was_running = False
+
+    results = []
+    try:
+        for key in keys:
+            name = fetchdeps.DISPLAY_NAMES[key]
+            try:
+                fetchdeps.install_dependency(key, log=lambda m: None)
+                results.append({"key": key, "name": name, "ok": True})
+            except Exception as e:
+                results.append({"key": key, "name": name, "ok": False, "error": str(e)})
+    finally:
+        restarted = False
+        if slskd_was_running:
+            try:
+                slsk.start()
+                restarted = True
+            except Exception:
+                restarted = False
+        if restarted:
+            for row in results:
+                if row["key"] == "slskd":
+                    row["restarted"] = True
+
     try:
         fetchdeps.refresh_tool_cache()
     except Exception:

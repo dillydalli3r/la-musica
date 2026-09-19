@@ -21,7 +21,10 @@ export default function FavHeart({
 }) {
   const { fav, toggle } = useFav(kind, id, mbid);
   return (
+    // `type="button"` explicitly: a favourite toggle must never inherit a
+    // form's submit behaviour, wherever a future caller drops it.
     <button
+      type="button"
       className={`tap-hit p-1.5 rounded-md hover:bg-raise shrink-0 transition-colors ${
         fav ? "text-accent" : "text-zinc-500 hover:text-zinc-200"
       } ${className}`}
