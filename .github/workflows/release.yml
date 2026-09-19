@@ -52,11 +52,14 @@ jobs:
       - name: Tag must match the app's own version
         # The shipped app reports mlo.__version__ on /api/health, so a tag that
         # disagrees with the source would publish a release whose own version
-        # string is a different release. Fail here instead.
+        # string is a different release. Fail here instead. (grep, not an inline
+        # python -c: nesting quotes inside a YAML block scalar is how this step
+        # first shipped — and died on a shell syntax error.)
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          APP_VERSION="$(python -c 'import re,pathlib; print(re.search(r'__version__ = "([^"]+)"', pathlib.Path("mlo/__init__.py").read_text(encoding="utf-8")).group(1))')"
+          APP_VERSION="$(grep -m1 -oP '__version__ = "[^"]+"' mlo/__init__.py | cut -d'"' -f2)"
           echo "tag=$VERSION app=$APP_VERSION"
+          test -n "$APP_VERSION" || { echo "::error::no __version__ found in mlo/__init__.py"; exit 1; }
           test "$VERSION" = "$APP_VERSION" || {
             echo "::error::tag $GITHUB_REF_NAME does not match mlo/__init__.py ($APP_VERSION)"
             exit 1
