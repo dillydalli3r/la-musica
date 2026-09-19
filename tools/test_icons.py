@@ -32,8 +32,8 @@ SOURCE = os.path.join(ROOT, "desktop", "icon-source.png")
 WEB_ICON = os.path.join(ROOT, "web", "public", "icon.png")
 
 SIDE = 64
-# The 20x20 iOS rasters, upscaled to 64x64, lose ~25 on the triangle's edges
-# alone; a file drawn from other artwork lands 60-100 away in either metric.
+# The 20x20 iOS rasters upscaled to 64x64 are the blurriest comparison in the
+# set; a file drawn from different artwork lands 60-100 away in either metric.
 CANVAS_TOL = 30.0
 TILE_TOL = 20.0
 
@@ -116,6 +116,12 @@ if FAILS:
 SRC = Image.open(SOURCE).convert("RGBA")
 
 raster(os.path.join(ICONS, "*.png"), canvas_mad, CANVAS_TOL)
+# Not artwork the app renders itself, but the picture the Windows installer and
+# the macOS bundle show in a taskbar, a dock and a file manager — and the two
+# files Pillow's own ICO/ICNS readers make it easy to leave behind, since no
+# `*.png` glob above would ever name them.
+raster(os.path.join(ICONS, "icon.ico"), canvas_mad, CANVAS_TOL)
+raster(os.path.join(ICONS, "icon.icns"), canvas_mad, CANVAS_TOL)
 raster(os.path.join(ICONS, "ios", "*.png"), canvas_mad, CANVAS_TOL)
 raster(os.path.join(ANDROID, "mipmap-*", "ic_launcher_foreground.png"), canvas_mad, CANVAS_TOL)
 raster(WEB_ICON, canvas_mad, CANVAS_TOL)

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Regenerate the app icons from the one source of truth.
 
-``desktop/icon-source.png`` (1024x1024) is that source. What this script
-writes from it:
+``desktop/icon-source.png`` (1024x1024) is that source, cropped square from
+``gato.jpg`` — the photograph at the repo root is the original artwork, kept
+here so the source of the source is not a mystery. What this script writes
+from it:
 
 - ``web/public/icon.png`` (512x512, square centre-crop + LANCZOS). It is the
   browser favicon (``web/index.html``), the sidebar brand and the copy
