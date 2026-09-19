@@ -67,6 +67,17 @@ USER mlo
 # be written to "/" and fail.
 ENV HOME=/home/mlo
 
+# The version of the code this image was built from. The release workflow
+# passes the tag (`--build-arg MLO_VERSION=3.1.0`); a plain `docker build`
+# leaves it empty, and the server then reports its own code version instead of
+# claiming to be a release it is not. `tools/check_versions.py` keeps the
+# ARG default in step with mlo/__init__.py.
+ARG MLO_VERSION=3.1.0
+ENV MLO_VERSION=${MLO_VERSION}
+LABEL org.opencontainers.image.version="${MLO_VERSION}" \
+      org.opencontainers.image.title="la musica" \
+      org.opencontainers.image.source="https://github.com/dillydalli3r/la-musica"
+
 # /music: the library (+ all app state under /music/.mlo).
 # /app/.dependencies: runtime-fetched tools - a volume so a new image does not
 # throw them away.

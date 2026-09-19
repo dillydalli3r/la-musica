@@ -19,14 +19,63 @@
 	  here because the host is chosen by the user at runtime, not by us.
 
 	  Tauri merges this file into the generated plist for both iOS
-	  (`tauri ios build`, which also accepts the same path via
-	  bundle.iOS.infoPlist) and the macOS .app bundle, so one file covers both
-	  Apple platforms. Android is unaffected and documented in desktop/README.md.
+	  (`tauri ios build`, which is told about it explicitly through
+	  `bundle.iOS.infoPlist` in tauri.conf.json) and the macOS .app bundle,
+	  so one file covers both Apple platforms. Android is unaffected and
+	  documented in desktop/README.md.
 	-->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoadsInWebContent</key>
 		<true/>
 	</dict>
+
+	<!--
+	  The name under the home-screen icon. Without it the generated plist has
+	  only CFBundleName, and iOS falls back to that - which today happens to be
+	  "la musica" because the CLI maps PRODUCT_NAME from productName by
+	  template. Both keys are named here so the sideloaded IPA shows the
+	  product's own name rather than whatever the template does with it.
+	-->
+	<key>CFBundleDisplayName</key>
+	<string>la musica</string>
+	<key>CFBundleName</key>
+	<string>la musica</string>
+
+	<!--
+	  Export-compliance declaration for the App Store question every upload
+	  asks. `false` is the honest answer for this app: it implements no
+	  cryptography of its own - HTTPS, the keychain and the TLS stack are the
+	  system's, and a self-hosted server is reached over plain http. Apple
+	  accepts this key in place of answering the question per build, which
+	  matters for the sideload flow (an ad-hoc re-sign of our unsigned IPA)
+	  because a re-signed bundle cannot be edited to add it afterwards without
+	  breaking the signature.
+	-->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+
+	<!--
+	  Orientation, iPhone and iPad separately because iOS reads the `~ipad`
+	  suffix. iPhone omits upside-down, the usual choice: nothing in the UI is
+	  drawn for it (the shell rotates fine, the player bar and library just
+	  ride along) and iOS only rotates to upside-down when an app asks. iPad
+	  gets all four - the library and the tag editors have the room for either
+	  landscape. Declared here instead of left to tauri-cli's project.yml
+	  template so a reader of this repo knows what the app ships with.
+	-->
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
 </dict>
 </plist>

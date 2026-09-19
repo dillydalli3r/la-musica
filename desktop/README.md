@@ -58,11 +58,28 @@ a backend running somewhere else:
   desktop-only (folder picker + notifications), `capabilities/mobile.json`
   gives Android/iOS the core commands and notifications but no dialog
   permission, since there is no folder to pick.
-- **Bundle config**: `bundle.iOS.minimumSystemVersion` 14.0 and
+- **Bundle config**: `bundle.iOS.minimumSystemVersion` 14.0,
+  `bundle.iOS.bundleVersion` 3.1.0, `bundle.iOS.infoPlist` and
   `bundle.android.minSdkVersion` 24 in `tauri.conf.json`. The Android package
-  name and the iOS bundle id both come from the top-level `identifier`; the
+  name and the iOS bundle id both come from the top-level `identifier`
+  (`com.musiclibraryoptimizer.lamusica` — the old
+  `com.musiclibraryoptimizer.app` is the shape tauri-cli warns about on every
+  build, because an identifier ending in `.app` reads as the bundle extension;
+  nothing rejects it, it is just the default-shaped mistake). The
   Android permissions are declared by the generated project (`gen/android`),
   not in this config — Tauri v2 exposes no config key for them.
+
+  The iOS `Info.plist` is `src-tauri/Info.plist`, named by
+  `bundle.iOS.infoPlist` so the merge is a repo decision rather than the CLI's
+  auto-detection. Tauri merges it into the macOS `.app` too (the same file
+  also carries the App Transport Security exemption described below). What it
+  states about the app: `CFBundleDisplayName`/`CFBundleName` "la musica",
+  `ITSAppUsesNonExemptEncryption` false, and the orientation sets — iPhone
+  portrait + both landscapes, iPad all four. `CFBundleVersion` is
+  `bundle.iOS.bundleVersion`, deliberately stated: `CFBundleShortVersionString`
+  is the marketing version (`tauri.conf.json` `version`, which must match
+  `mlo/__init__.py`), and the build number is what changes when the *same*
+  version is rebuilt for a re-upload or a re-sideload.
 
 Mobile builds need the native projects, which are **generated, never
 committed**: `npx tauri android init` (Android SDK, NDK, JDK 17) and
@@ -70,6 +87,35 @@ committed**: `npx tauri android init` (Android SDK, NDK, JDK 17) and
 does exactly that, so `.github/workflows/mobile.yml` is the reference for the
 toolchain each target needs; a local build needs the same SDK/NDK or Xcode
 installed first.
+
+## Home-screen installs
+
+The React UI is installable from any browser on the served address — the
+desktop shell's own webview, a phone pointed at a server, and the plain web
+build are the same files. `web/public/manifest.webmanifest` carries what a
+home screen needs and `web/index.html` links it, plus the `apple-touch-icon`
+iOS Safari reads instead (it ignores the manifest's `icons`):
+
+- name/short name "la musica", `start_url`/`scope` `/`, `display` standalone.
+- `theme_color` and `background_color` `#0a0a0c` — the `bg` token in
+  `web/tailwind.config.js` and the `<meta name="theme-color">` in
+  `web/index.html`, so the status bar and splash match the app.
+- one icon, `/icon.png` at 512×512 (`web/public/icon.png`, drawn by
+  `tools/make_icons.py`). Declared `purpose: "any"`, not `maskable`: the
+  artwork is full-bleed, and a maskable declaration promises Android it can
+  crop to a circle without eating the picture.
+- three `shortcuts` — Favorites `/favorites`, Playlists `/playlists`, Search
+  `/library` (all real routes in `web/src/App.tsx`).
+
+**Only Android honours `shortcuts`.** Chrome/Android shows them on a
+long-press of the installed icon. iOS Safari does not implement the manifest's
+`shortcuts` at all, and the native equivalent — `UIApplicationShortcutItems`
+in `Info.plist` for static items, or `UIApplication.shared.shortcutItems` from
+Swift for dynamic ones, both surfaced by the same long-press — needs an app
+delegate of our own in the generated Xcode project. This repo has none
+(`tauri ios init` generates one and we never touch `src-tauri/gen/`), so an
+iOS home-screen install gets the icon and no jump list, and `tauri.conf.json`
+deliberately carries no shortcut config that would only ever apply to Android.
 
 ## Plain-http servers: what is shipped, and what you have to do
 
@@ -81,10 +127,11 @@ server:
 
 - **iOS and macOS** — `src-tauri/Info.plist` sets
   `NSAppTransportSecurity > NSAllowsArbitraryLoadsInWebContent`. Tauri merges
-  that file into the generated iOS `Info.plist` at `tauri ios build` time (the
-  `bundle.iOS.infoPlist` config key is the explicit form of the same thing),
-  and into the macOS `.app`; without it App Transport Security blocks every
-  `http://` and `ws://` request the webview makes — fetch, WebSocket, audio and
+  that file into the generated iOS `Info.plist` at `tauri ios build` time —
+  `bundle.iOS.infoPlist` names it, and it is the last plist merged, so what it
+  says wins — and into the macOS `.app`; without it App Transport Security
+  blocks every `http://` and `ws://` request the webview makes — fetch,
+  WebSocket, audio and
   video playback alike. The exemption covers web content only, so the shell's
   own native calls would still be held to full ATS (there are none: `lib.rs`
   carries no HTTP client).
@@ -136,6 +183,25 @@ permitted, it does not require plain http.
   certificate, a provisioning profile and a team id (`APPLE_DEVELOPMENT_TEAM`
   or `bundle.iOS.developmentTeam`), none of which this repository carries —
   that step is a human's, with their own Apple account.
+
+  What the installed IPA shows comes from this repo, not from the CLI's
+  templates: `CFBundleDisplayName`/`CFBundleName` "la musica",
+  `CFBundleShortVersionString` from `tauri.conf.json` `version`,
+  `CFBundleVersion` from `bundle.iOS.bundleVersion`, iPad/iPhone orientation,
+  and `ITSAppUsesNonExemptEncryption` false — the last one matters here
+  because a sideload tool re-signs the bundle, and an edit to a signed
+  `Info.plist` is exactly what invalidates that signature, so the answer to
+  the export-compliance question has to be inside the file we build.
+
+The identifier changed this release (`com.musiclibraryoptimizer.lamusica`, a
+build from before it used `…optimizer.app`), and both platforms key an update
+on that one string — Android's package id is the identifier too. So an older
+APK or IPA is left installed *beside* the new build, keeps its own icon, and
+keeps whatever it stored locally (the service worker's caches, the saved
+server address); the new install starts empty and asks for the server address
+again. Nothing on the server is affected — the library, playlists and likes
+live there, not in the app — so the cost is one manual uninstall of the old
+icon.
 
 ## Development
 

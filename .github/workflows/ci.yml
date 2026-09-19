@@ -45,6 +45,13 @@ jobs:
           cache: pip
           cache-dependency-path: server/requirements.txt
 
+      - name: Every version copy agrees
+        # mlo/__init__.py is what the app reports, but six other files name a
+        # version too, and a release where one was missed ships a build that
+        # disagrees with itself. This is the cheap check that catches it on
+        # every push instead of at tag time.
+        run: python tools/check_versions.py
+
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip

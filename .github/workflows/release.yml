@@ -80,21 +80,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Tag must match the app's own version
-        # The shipped app reports mlo.__version__ on /api/health, so a tag that
-        # disagrees with the source would publish a release whose own version
-        # string is a different release. Fail here instead. (grep, not an inline
-        # python -c: nesting quotes inside a YAML block scalar is how this step
-        # first shipped — and died on a shell syntax error.)
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          APP_VERSION="$(grep -m1 -oP '__version__ = "[^"]+"' mlo/__init__.py | cut -d'"' -f2)"
-          echo "tag=$VERSION app=$APP_VERSION"
-          test -n "$APP_VERSION" || { echo "::error::no __version__ found in mlo/__init__.py"; exit 1; }
-          test "$VERSION" = "$APP_VERSION" || {
-            echo "::error::tag $GITHUB_REF_NAME does not match mlo/__init__.py ($APP_VERSION)"
-            exit 1
-          }
+      - name: Tag must match every version copy
+        # The app reports mlo.__version__ on /api/health, the installers and
+        # the iOS IPA take theirs from tauri.conf.json, the container from
+        # this workflow's build-arg, and the README header from hand. A tag
+        # that disagrees with ANY of them publishes a release that disagrees
+        # with itself, so the shared checker (also run on every push in CI)
+        # is the gate rather than the single grep this step used to do.
+        run: python tools/check_versions.py "${GITHUB_REF_NAME}"
 
       - name: Package application zip
         run: |
@@ -141,6 +134,10 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # The running container reports this on /api/version, so a user can
+          # be told the image is behind the code without pulling it first.
+          build-args: |
+            MLO_VERSION=${GITHUB_REF_NAME#v}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -188,6 +185,21 @@ jobs:
           check iOS '*.ipa'
           exit "$missing"
 
+      - name: SideStore / AltStore source for the iOS build
+        # The sideloading tools show a name, version, bundle id, icon and size
+        # for each app they offer; without a source file the user hunts for the
+        # right .ipa by hand and the tool guesses the rest. The generated file
+        # is published as a release asset, and
+        # https://github.com/<owner>/<repo>/releases/latest/download/source.json
+        # is a STABLE url, so the source is added to SideStore once and always
+        # points at the newest build.
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          IPA="$(find clients -type f -name '*.ipa' -print -quit)"
+          test -n "$IPA" || { echo "::error::no IPA to build a source from"; exit 1; }
+          python tools/make_sidestore_source.py "$IPA" "$VERSION" "${GITHUB_REF_NAME}" source.json
+          python -c "import json;d=json.load(open('source.json'));print(d['apps'][0]['bundleIdentifier'], d['apps'][0]['versions'][0]['downloadURL'])"
+
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
@@ -206,5 +218,6 @@ jobs:
             clients/**/*.AppImage
             clients/**/*.apk
             clients/**/*.ipa
+            source.json
           draft: false
           prerelease: false
