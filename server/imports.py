@@ -28,7 +28,7 @@ import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from mlo.config import load_config
+from mlo.config import DEFAULT_CONFIG, load_config
 from mlo.paths import library_root, move_path
 
 from server import script_runners
@@ -914,6 +914,7 @@ def _stamp_release(album_dir, release, cfg):
     Returns the number of files written; a tag failure never fails an import.
     """
     from mlo.audio import AudioFile
+    from mlo.autotag import trim_genres
     from server import integrations as intg
     from server import soulseek_auto
 
@@ -944,6 +945,10 @@ def _stamp_release(album_dir, release, cfg):
             traceback.print_exc()
 
     failed = 0
+    # The same per-track cap the other writers keep — read from the one config
+    # key, with the shipped default as the fallback so an import can never
+    # leave a file the app's own grader would fail.
+    cap = cfg.get("mb_genre_count") or DEFAULT_CONFIG["mb_genre_count"]
     for path in files:
         try:
             af = AudioFile(path)
@@ -954,11 +959,21 @@ def _stamp_release(album_dir, release, cfg):
             disc, pos = soulseek_auto._parse_trackno(path)
             names = genres.get((disc, pos)) or []
             if names and not str(af.get_tag("GENRE") or "").strip():
-                tags["GENRE"] = "; ".join(names)
+                # The LIST goes in as a list: set_tag writes repeated GENRE
+                # fields, so the grader counts every genre this step wrote
+                # instead of reading one value literally named "A; B".
+                tags["GENRE"] = list(names)
             for key, value in tags.items():
                 af.set_tag(key, value)
             if tags:
                 written += 1
+            try:
+                # Cap on EVERY track, not just the ones written above: an
+                # album that arrived carrying three genres comes down to
+                # `mb_genre_count` here (the trimmer script 8/10 also use).
+                trim_genres(af, cap)
+            except Exception:
+                pass
         except Exception:
             failed += 1
             continue

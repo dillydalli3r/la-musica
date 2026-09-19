@@ -359,9 +359,19 @@ def apply_mood_tags(audio, path, cfg, genre=None):
             # A video container is rewritten whole on every tag write (see
             # mlo.audio), so both tags go in ONE ffmpeg pass.
             return bool(audio.set_video_tags(pending))
+        # Both tags go to disk in ONE container rewrite: without the
+        # deferral each set_tag() re-saved the file for itself, and a handle
+        # that cannot defer (a test double) is written per tag as before.
+        defer = hasattr(audio, "defer_save")
+        if defer:
+            audio.defer_save(True)
         wrote = False
         for name, value in pending.items():
             wrote = bool(audio.set_tag(name, value)) or wrote
+        if defer:
+            # A failed flush means nothing landed; never report a write.
+            wrote = bool(audio.flush()) and wrote
+            audio.defer_save(False)
         return wrote
     except Exception:
         return False

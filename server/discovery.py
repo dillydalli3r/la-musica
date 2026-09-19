@@ -1711,10 +1711,13 @@ def genre_lookup(artist, album, track_path=None, cfg=None):
             cfg = load_config()
         except Exception:
             cfg = {}
+    from mlo.config import DEFAULT_CONFIG
     try:
-        limit = max(1, int(cfg.get("mb_genre_count") or 3))
+        # The shipped default has ONE home: a literal here drifts the moment
+        # `mb_genre_count` changes (it is Settings → Import's value).
+        limit = max(1, int(cfg.get("mb_genre_count") or DEFAULT_CONFIG["mb_genre_count"]))
     except (TypeError, ValueError):
-        limit = 3
+        limit = DEFAULT_CONFIG["mb_genre_count"]
     key = (_norm(artist), _norm(album), limit)
     with _GENRE_MEMO_LOCK:
         hit = _GENRE_MEMO.get(key)

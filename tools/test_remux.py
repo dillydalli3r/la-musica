@@ -178,9 +178,12 @@ def main():
 
     print("\n== output verification ==")
     v, a, s, d = streams(outs["vob"])
-    # MKV accepts MPEG-2 natively — video is stream-copied, audio -> FLAC.
+    # MKV accepts MPEG-2 natively — video is stream-copied. Audio: a LOSSY
+    # source stream is copied as it is (re-encoding AC-3 to FLAC cannot bring
+    # a sample back and only inflates the file), which is the shipped default
+    # of video_lossy_audio_copy.
     check("vob -> mpeg2 video copied", v == "mpeg2video", v)
-    check("vob -> flac audio", a == ["flac"], a)
+    check("vob -> ac3 audio copied", a == ["ac3"], a)
     check("vob duration sane", 1.5 < d < 3.0, d)
     ok, err = decodable(outs["vob"])
     check("vob output decodes", ok, err)
@@ -193,11 +196,11 @@ def main():
 
     v, a, s, d = streams(outs["avi"])
     check("avi -> mpeg4 copied", v == "mpeg4", v)
-    check("avi -> flac audio", a == ["flac"], a)
+    check("avi -> mp3 audio copied", a == ["mp3"], a)
 
     v, a, s, d = streams(outs["webm"])
     check("webm -> vp9 copied", v == "vp9", v)
-    check("webm -> flac audio", a == ["flac"], a)
+    check("webm -> opus audio copied", a == ["opus"], a)
 
     check("source files kept", all(os.path.isfile(p) for p in fix.values()))
     check("no temp files left", not any(f.startswith(".remux_") for f in os.listdir(outdir)))
@@ -220,8 +223,42 @@ def main():
     check("bytes accounted", stats3["total_bytes_removed"] > 0)
     v, a, s, d = streams(os.path.join(outdir, "sample_aac.mkv"))
     check("mp4 -> h264 video", v == "h264", v)
-    check("mp4 -> flac audio", a == ["flac"], a)
+    check("mp4 -> aac audio copied", a == ["aac"], a)
     check("stray mp4 gone", not os.path.isfile(os.path.join(outdir, "sample_aac.mp4")))
+
+    print("\n== video_lossy_audio_copy off forces FLAC for every stream ==")
+    pcm_dir = os.path.join(base, "pcm_in")
+    os.makedirs(pcm_dir, exist_ok=True)
+    pcm_src = os.path.join(pcm_dir, "sample_pcm.avi")
+    r = subprocess.run([FF, "-y", "-v", "error",
+                        "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=15:duration=1",
+                        "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                        "-c:v", "libx264", "-preset", "ultrafast",
+                        "-c:a", "pcm_s16le", pcm_src],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError("pcm fixture gen failed: " + r.stderr[-300:])
+    forced = dict(cfg, music_folder=pcm_dir, video_lossy_audio_copy=False)
+    remux.run_remux_videos(forced)
+    v, a, s, d = streams(os.path.join(pcm_dir, "sample_pcm.mkv"))  # remuxed output
+    check("pcm source -> flac audio", a == ["flac"], a)
+
+    # …and a lossy stream with the option off is re-encoded, not copied.
+    lossy_dir = os.path.join(base, "lossy_in")
+    os.makedirs(lossy_dir, exist_ok=True)
+    lossy_src = os.path.join(lossy_dir, "sample_ac3.avi")
+    r = subprocess.run([FF, "-y", "-v", "error",
+                        "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=15:duration=1",
+                        "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                        "-c:v", "libx264", "-preset", "ultrafast",
+                        "-c:a", "ac3", "-b:a", "96k", lossy_src],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError("ac3 fixture gen failed: " + r.stderr[-300:])
+    forced2 = dict(cfg, music_folder=lossy_dir, video_lossy_audio_copy=False)
+    remux.run_remux_videos(forced2)
+    v, a, s, d = streams(os.path.join(lossy_dir, "sample_ac3.mkv"))
+    check("ac3 source -> flac when the option is off", a == ["flac"], a)
 
     print("\n== chapters survive the remux ==")
     chap = gen_chapter_fixture(base)

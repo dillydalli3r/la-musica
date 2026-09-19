@@ -37,7 +37,9 @@ To ship a fully standalone `.exe` without requiring Python:
 
 1. Build the backend as a single file:
    `pyinstaller --onefile server/main.py --name mlo-server`
-2. Place `mlo-server.exe` next to the built app binary (or into
-   `src-tauri/resources/` with the Tauri sidecar mechanism).
+2. Place `mlo-server.exe` **next to the built app binary** (step 1 of the
+   resolution order above). `tauri.conf.json` declares no bundle resources or
+   external binaries, so a copy dropped into `src-tauri/resources/` is not
+   packaged and will not be found.
 
 Icons regenerate with `python tools/make_tauri_icons.py`.

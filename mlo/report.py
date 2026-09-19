@@ -184,8 +184,12 @@ def print_combined_results(per_script, title="COMBINED RESULTS"):
     ]
     rows = []
 
-    tot_processed = tot_modified = tot_passed = 0
+    tot_modified = tot_passed = 0
     tot_skipped = tot_failed = tot_errors = 0
+    # The "Processed" column counts two different units: a grader's stats are
+    # per file (audit) and per album (DR/AccurateRip), so one total summing
+    # both said nothing at all. They are totalled apart and printed apart.
+    tot_files = tot_albums = 0
     net_total = 0
     grader_runs = []
 
@@ -195,15 +199,18 @@ def print_combined_results(per_script, title="COMBINED RESULTS"):
             passed = gd.get("PASS", 0)
             failed = gd.get("FAIL", 0)
             grader_runs.append((name, s))
-            tot_processed += s.get("total_scanned", 0)
+            is_files = s.get("audit_status_counts") is not None
+            if is_files:
+                tot_files += s.get("total_scanned", 0)
+            else:
+                tot_albums += s.get("total_scanned", 0)
             tot_passed += passed
             tot_failed += failed
             tot_errors += s.get("error_count", 0)
             rows.append([
                 name,
                 f"{s.get('total_scanned', 0)} "
-                + ("files" if s.get("audit_status_counts") is not None
-                   else "albums"),
+                + ("files" if is_files else "albums"),
                 "—",
                 c(str(passed), Color.GREEN),
                 "—",
@@ -214,7 +221,6 @@ def print_combined_results(per_script, title="COMBINED RESULTS"):
         else:
             net = s.get("total_bytes_removed", 0) - s.get("total_bytes_added", 0)
             net_total += net
-            tot_processed += s.get("total_scanned", 0)
             tot_modified += s.get("modified_count", 0)
             tot_skipped += s.get("skipped_count", 0)
             tot_errors += s.get("error_count", 0)
@@ -231,9 +237,16 @@ def print_combined_results(per_script, title="COMBINED RESULTS"):
             ])
 
     net_color = Color.GREEN if net_total >= 0 else Color.RED
+    # Only the units actually present are named: "N files + M albums" when the
+    # run mixed both, a plain number when every script counted the same thing.
+    total_parts = []
+    if tot_files:
+        total_parts.append(f"{tot_files} files")
+    if tot_albums:
+        total_parts.append(f"{tot_albums} albums")
     rows.append([
         c("TOTAL", Color.BOLD),
-        c(str(tot_processed), Color.BOLD),
+        c(" + ".join(total_parts) or "0", Color.BOLD),
         c(str(tot_modified), Color.BOLD),
         c(str(tot_passed), Color.BOLD),
         c(str(tot_skipped), Color.BOLD),

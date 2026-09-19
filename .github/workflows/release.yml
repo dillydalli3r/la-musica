@@ -3,7 +3,9 @@ name: Release
 # Creating a v* tag runs CI first and only then builds the web frontend,
 # publishes a GitHub release with the packaged source zip
 # (la-musica-<version>-windows-x64.zip: mlo/, server/, tools/, web/dist,
-# start_app.py, tray.py), and pushes a Docker image to GHCR.
+# start_app.py, tray.py), and pushes a Docker image to GHCR. The tag is checked
+# against mlo/__init__.py first: the app reports that version, so a mistagged
+# release would ship two different answers to "which version is this?".
 # There is no in-app updater (desktop/src-tauri/tauri.conf.json configures no
 # updater plugin/endpoints/pubkey), so a release is consumed by downloading
 # the zip or pulling the image; the draft/prerelease flags below are just the
@@ -47,6 +49,19 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Tag must match the app's own version
+        # The shipped app reports mlo.__version__ on /api/health, so a tag that
+        # disagrees with the source would publish a release whose own version
+        # string is a different release. Fail here instead.
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          APP_VERSION="$(python -c 'import re,pathlib; print(re.search(r'__version__ = "([^"]+)"', pathlib.Path("mlo/__init__.py").read_text(encoding="utf-8")).group(1))')"
+          echo "tag=$VERSION app=$APP_VERSION"
+          test "$VERSION" = "$APP_VERSION" || {
+            echo "::error::tag $GITHUB_REF_NAME does not match mlo/__init__.py ($APP_VERSION)"
+            exit 1
+          }
+
       - name: Package application zip
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
@@ -62,7 +77,6 @@ jobs:
             exit 1
           }
           cp "Start la musica.bat" "${STAGE}/"
-          echo "${VERSION}" > "${STAGE}/.version"
           zip -qr "la-musica-${VERSION}-windows-x64.zip" "${STAGE}"
           rm -rf "${STAGE}"
 

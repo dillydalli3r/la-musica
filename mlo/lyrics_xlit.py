@@ -400,12 +400,15 @@ def run_lyrics_xlit(config):
                         xlit, ok = _apply(config, text, "transliterate")
                         if ok:
                             if embed_tags:
-                                af.set_tag(
-                                    f"TRANSLITERATION-{xlit_tag_suffix(config, text, af)}".upper(),
-                                    xlit)
-                                # the bare legacy name is superseded
-                                if str(af.get_tag("TRANSLITERATION") or "").strip():
-                                    af.delete_tag("TRANSLITERATION")
+                                if af.set_tag(
+                                        f"TRANSLITERATION-{xlit_tag_suffix(config, text, af)}".upper(),
+                                        xlit):
+                                    # The bare legacy name is superseded — but
+                                    # only once the suffixed tag actually
+                                    # landed: deleting it after a refused
+                                    # write lost the transform outright.
+                                    if str(af.get_tag("TRANSLITERATION") or "").strip():
+                                        af.delete_tag("TRANSLITERATION")
                             if sidecars:
                                 _atomic_write_text(
                                     os.path.splitext(path)[0] + XLIT_SIDECAR, xlit)
@@ -430,9 +433,12 @@ def run_lyrics_xlit(config):
                             if embed_tags:
                                 # one tag per configured language:
                                 # TRANSLATION-EN, TRANSLATION-DE, …
-                                af.set_tag(f"TRANSLATION-{lang}".upper(), trans)
-                                if str(af.get_tag("TRANSLATION") or "").strip():
-                                    af.delete_tag("TRANSLATION")
+                                if af.set_tag(f"TRANSLATION-{lang}".upper(), trans):
+                                    # Only delete the legacy bare name once
+                                    # the per-language tag is really on the
+                                    # file (see the transliteration pass).
+                                    if str(af.get_tag("TRANSLATION") or "").strip():
+                                        af.delete_tag("TRANSLATION")
                             if sidecars:
                                 _atomic_write_text(
                                     os.path.splitext(path)[0] + f".{lang}.lrc", trans)

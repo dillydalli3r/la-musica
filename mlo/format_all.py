@@ -21,53 +21,68 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .accurip import _canonical_accurip_text
 from .audio import AudioFile
-from .config import should_write_audio_tag
+from .autotag import trim_genres
+from .config import DEFAULT_CONFIG, should_write_audio_tag
 from .cue import canonical_cue_text
 from .deps import HAS_PIL, Image
 from .images import _exif_transposed
 from .lyrics import _canonical_lyrics, format_lyrics_text
-from .paths import AUDIO_EXTS
+from .paths import AUDIO_EXTS, IMAGE_EXTS
 from .stats import _collect_targets, _walk_files, new_stats, _make_pbar, worker_count
 from .ui import print_header, log, c, Color
 
-# Canonical on-disk cover names (mirrors the grader's COVER_NAMES).
+# Canonical on-disk cover names (the grader's COVER_NAMES) plus the
+# front/folder aliases script 2 treats as the album cover (mlo.images):
+# with rename_to_cover off the art is called "folder.jpg", and the embed
+# pass found nothing while the album was graded with a cover.
 _COVER_NAMES = {"cover.jpg", "cover.jpeg", "cover.png", "cover.jxl"}
+_COVER_STEMS = ("cover", "front", "folder")
 
 
 def _find_cover_file(album_dir):
+    """Path of the album's cover image, canonical cover.* first."""
     try:
-        for f in os.listdir(album_dir):
-            if f.lower() in _COVER_NAMES:
-                return os.path.join(album_dir, f)
-    except OSError:
-        pass
-    return None
-
-
-def _prepare_embedded_cover(album_dir, cfg):
-    """(data, mime) of the album cover, prepared for embedding.
-
-    JPEG embeds are re-encoded at embed_cover_jpeg_quality (only JPEG
-    honors a quality setting — PNG/lossless embeds are lossless by
-    definition). When embed_cover_resolution is set, art larger than the
-    cap is downscaled, aspect ratio preserved. Returns None when the
-    album has no on-disk cover to embed.
-    """
-    cover_path = _find_cover_file(album_dir)
-    if not cover_path:
-        return None
-    try:
-        with open(cover_path, "rb") as f:
-            data = f.read()
+        names = os.listdir(album_dir)
     except OSError:
         return None
+    alias = None
+    for f in names:
+        low = f.lower()
+        if low in _COVER_NAMES:
+            return os.path.join(album_dir, f)
+        if alias is None:
+            stem, ext = os.path.splitext(low)
+            if stem in _COVER_STEMS and ext in IMAGE_EXTS:
+                alias = os.path.join(album_dir, f)
+    return alias
 
-    ext = os.path.splitext(cover_path)[1].lower()
+
+def cover_mime(ext):
+    """Embedded-art MIME type for a cover file extension."""
+    ext = (ext or "").lower()
     if ext == ".jxl":
-        return (data, "image/jxl")
-    mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
+        return "image/jxl"
+    return "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
 
-    if not HAS_PIL:
+
+def prepare_cover_bytes(data, mime, cfg):
+    """(data, mime) of cover bytes prepared for embedding.
+
+    The cover policy the on-disk cover is held to (mlo.images.
+    ``_resize_and_crop_image``, driven by cover_crop_enabled /
+    cover_crop_threshold / cover_force_exact_size + cover_target_size)
+    applies to EMBEDDED art too, so a track does not carry the raw
+    non-square original the grader fails on disk. It runs FIRST, then the
+    embed resolution cap: JPEG embeds are re-encoded at
+    embed_cover_jpeg_quality (only JPEG honors a quality setting — PNG/
+    lossless embeds are lossless by definition) and anything larger than
+    embed_cover_resolution is downscaled, aspect ratio preserved.
+    Shared by the optimizer and the exporter, so both apply identical
+    rules to on-disk covers *and* to art taken out of a source file's own
+    tags; a cfg without the policy keys (the exporter's own options) keeps
+    them off, so its documented quality/resolution behaviour is unchanged.
+    """
+    if not HAS_PIL or mime == "image/jxl":
         return (data, mime)
     quality = int(cfg.get("embed_cover_jpeg_quality") or 90)
     resolution = int(cfg.get("embed_cover_resolution") or 0)
@@ -75,6 +90,36 @@ def _prepare_embedded_cover(album_dir, cfg):
         img = Image.open(io.BytesIO(data))
         img = _exif_transposed(img)
         resized = False
+        try:
+            threshold = max(0.0, min(0.5, float(cfg.get("cover_crop_threshold") or 0.0)))
+        except (TypeError, ValueError):
+            threshold = 0.0
+        force_exact = bool(cfg.get("cover_force_exact_size"))
+        try:
+            target = int(cfg.get("cover_target_size") or 0) if force_exact else 0
+        except (TypeError, ValueError):
+            target = 0
+        width, height = img.size
+        if (height and abs(width / height - 1.0) > threshold
+                and (cfg.get("cover_crop_enabled") or (force_exact and target > 0))):
+            # Center-crop the longer side just inside the threshold — the
+            # same geometry images._resize_and_crop_image uses, so the
+            # embedded art and the file on disk are the same square.
+            if width > height:
+                side = max(height, min(int(height * (1.0 + threshold)), width))
+                left = (width - side) // 2
+                img = img.crop((left, 0, left + side, height))
+            else:
+                side = max(width, min(int(width * (1.0 + threshold)), height))
+                top = (height - side) // 2
+                img = img.crop((0, top, width, top + side))
+            resized = True
+            width, height = img.size
+        if target > 0 and max(width, height) > target:
+            # force_exact wants exactly target x target; never upscale.
+            img = img.convert("RGB") if mime == "image/jpeg" else img
+            img = img.resize((target, target), Image.LANCZOS)
+            resized = True
         if resolution > 0 and max(img.size) > resolution:
             # thumbnail() never upscales and keeps the aspect ratio
             img = img.convert("RGB") if mime == "image/jpeg" else img
@@ -96,16 +141,36 @@ def _prepare_embedded_cover(album_dir, cfg):
         return (data, mime)
 
 
-def _format_embedded_covers(path, cfg, cover_cache):
+def _prepare_embedded_cover(album_dir, cfg):
+    """(data, mime) of the album's on-disk cover, prepared for embedding.
+
+    Returns None when the album has no cover.* file to embed.
+    """
+    cover_path = _find_cover_file(album_dir)
+    if not cover_path:
+        return None
+    try:
+        with open(cover_path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return None
+    return prepare_cover_bytes(data, cover_mime(os.path.splitext(cover_path)[1]), cfg)
+
+
+def _format_embedded_covers(path, cfg, cover_cache, af=None):
     """Embedded-art pass driven by the embed_covers setting.
 
     OFF (default): audio files carry no embedded art — any pictures are
     removed. ON: the album's on-disk cover is embedded into every track
     (replacing whatever art is already there). Both directions only
     rewrite files that actually change.
+
+    *af* is an already-open handle — the fused pass opens each file once
+    (see _format_audio_file); art writes go through _save_container(), so
+    unlike the tag pass this one writes the container itself.
     """
     try:
-        af = AudioFile(path)
+        af = af or AudioFile(path)
         if af.audio is None or af.kind in ("video", "aac"):
             return (path, False, None)
         pics = af.embedded_pictures()
@@ -297,11 +362,24 @@ def _format_lrc_file(path, cfg, force=False):
         return (path, False, str(e))
 
 
-def _format_audio_tags(path, cfg, force=False):
+def _trim_tag_lines(raw):
+    """One tag value with each line trimmed and every blank line removed."""
+    lines = [ln.strip(" \t") for ln in str(raw).split("\n")]
+    return "\n".join(ln for ln in lines if ln != "")
+
+
+def _format_audio_tags(path, cfg, force=False, af=None):
+    """Trim every tag's lines and drop blank ones — and cap GENRE at
+    `mb_genre_count`. Returns (path, ok, err, genres_trimmed).
+
+    *af* is an already-open handle (the fused pass opens the file once);
+    the caller then owns nothing about it — this pass still flushes its own
+    deferred write.
+    """
     try:
-        af = AudioFile(path)
+        af = af or AudioFile(path)
         if af.audio is None:
-            return (path, False, None)
+            return (path, False, None, 0)
         changed = False
         af.defer_save(True)
         for key, val in list(af.all_tags().items()):
@@ -324,23 +402,38 @@ def _format_audio_tags(path, cfg, force=False):
                             changed = True
                         else:
                             af.defer_save(False)
-                            return (path, False, af.error or "set_tag failed")
+                            return (path, False, af.error or "set_tag failed", 0)
                     continue
                 except Exception:
                     pass
-            # For all other tags, trim each line and remove ALL blank lines
-            stripped_lines = [ln.strip(" \t") for ln in raw.split("\n")]
-            fixed_lines = [ln for ln in stripped_lines if ln != ""]
-            if not fixed_lines and raw.strip() == "":
-                fixed = ""
-            else:
-                fixed = "\n".join(fixed_lines)
-            if force or fixed != raw:
-                if af.set_tag(key, fixed):
+            # For all other tags, trim each line and remove ALL blank lines.
+            # A repeated tag (three GENREs, say) is rewritten as the WHOLE
+            # list it holds: all_tags() shows the repeats "; "-joined, and
+            # feeding that one string back to set_tag wrote a single value
+            # literally named "Rock; Pop" — the other two genres were gone
+            # from the file. tag_values() gives the pieces back.
+            values = af.tag_values(key) or [raw]
+            fixed = [_trim_tag_lines(v) for v in values]
+            if force or fixed != values:
+                if af.set_tag(key, fixed if len(fixed) > 1 else fixed[0]):
                     changed = True
                 else:
                     af.defer_save(False)
-                    return (path, False, af.error or "set_tag failed")
+                    return (path, False, af.error or "set_tag failed", 0)
+        # The per-track genre cap (`mb_genre_count`) is swept here too, over
+        # the whole library, so an existing album that carries "Rock;
+        # Alternative Rock; Indie" is fixed by running this one script — the
+        # same value the import and Auto tagging keep, from one config key.
+        # GENRE goes through the write gate the loop above applies to it.
+        trimmed = 0
+        if should_write_audio_tag(cfg, "GENRE", filepath=path):
+            try:
+                trimmed = trim_genres(
+                    af, cfg.get("mb_genre_count") or DEFAULT_CONFIG["mb_genre_count"])
+            except Exception:
+                trimmed = 0
+            if trimmed:
+                changed = True
         # Optimization leaves only tags this app (and its graders) understand:
         # anything outside the shared vocabulary — TAG_MAP, the encoder
         # identity tags, beets/Picard's own spellings and the app's
@@ -359,12 +452,34 @@ def _format_audio_tags(path, cfg, force=False):
                         changed = True
                 except Exception:
                     pass
-        af.defer_save(False)
+        # The one container write of this pass: a failed flush (a read-only
+        # file, a full disk) must NOT be reported as "formatted" — the tags
+        # never reached disk and grading would keep failing on them.
+        if af.defer_save(False) is False:
+            return (path, False, af.error or "tag write failed", 0)
         if changed:
-            return (path, True, None)
-        return (path, False, None)
+            return (path, True, None, trimmed)
+        return (path, False, None, trimmed)
     except Exception as e:
-        return (path, False, str(e))
+        return (path, False, str(e), 0)
+
+
+def _format_audio_file(path, cfg, force, cover_cache):
+    """Tag pass + embedded-art pass over ONE open handle.
+
+    The two passes used to run as separate futures, so every file was
+    opened and its container parsed twice per Format All run. Runs the
+    cover pass first (its art write is immediate either way), then the tag
+    pass, which owns the deferred write of this file.
+    Returns ((tag_ok, err), (cover_ok, err), genres_trimmed).
+    """
+    try:
+        af = AudioFile(path)
+    except Exception as e:
+        return (path, (False, str(e)), (False, str(e)), 0)
+    covers = _format_embedded_covers(path, cfg, cover_cache, af=af)
+    tags = _format_audio_tags(path, cfg, force, af=af)
+    return (path, (tags[1], tags[2]), (covers[1], covers[2]), tags[3])
 
 
 def run_format_all(config):
@@ -376,6 +491,9 @@ def run_format_all(config):
     """
     folder = config["music_folder"]
     stats = new_stats()
+    # Extra GENRE values this run dropped to reach `mb_genre_count`; always
+    # present so a caller reads a count, not a missing key.
+    stats["genres_trimmed"] = 0
     print_header("Format All (Final Pass)")
     log(f"music folder: {folder} · detects incorrect formatting and fixes only what needs it")
 
@@ -409,11 +527,20 @@ def run_format_all(config):
         # Also collect audio files themselves for tag formatting
         audio_to_check = audio_files
     else:
-        # Full library walk
-        accurip_files = sorted(_walk_files(folder, (".accurip",)))
-        cue_files = sorted(_walk_files(folder, (".cue",)))
-        lrc_files = sorted(_walk_files(folder, (".lrc",)))
-        audio_to_check = sorted(_walk_files(folder, AUDIO_EXTS))
+        # ONE walk of the library, bucketed by extension: the four
+        # _walk_files passes below walked every directory four times for the
+        # same answers. The bucket lists stay sorted exactly as before.
+        buckets = {".accurip": [], ".cue": [], ".lrc": []}
+        audio_to_check = []
+        for f in sorted(_walk_files(folder, AUDIO_EXTS + (".accurip", ".cue", ".lrc"))):
+            low = os.path.splitext(f)[1].lower()
+            if low in AUDIO_EXTS:
+                audio_to_check.append(f)
+            else:
+                buckets[low].append(f)
+        accurip_files = buckets[".accurip"]
+        cue_files = buckets[".cue"]
+        lrc_files = buckets[".lrc"]
 
     # Script 1 gates .lrc cleaning on optimize_lrc (mlo/lyrics.py:475) and
     # Format All runs last, so the same key is honoured here — otherwise a
@@ -421,7 +548,7 @@ def run_format_all(config):
     if not (config.get("force_lyrics", False) or config.get("optimize_lrc", True)):
         lrc_files = []
 
-    total_tasks = len(accurip_files) + len(cue_files) + len(lrc_files) + 2 * len(audio_to_check)
+    total_tasks = len(accurip_files) + len(cue_files) + len(lrc_files) + len(audio_to_check)
     if total_tasks == 0:
         log("No files found to format.")
         return stats
@@ -515,50 +642,40 @@ def run_format_all(config):
                 if pbar:
                     try: pbar.update(1)
                     except: pass
-        # audio tags
+        # audio tags + embedded art: ONE open per file (see _format_audio_file)
+        cover_cache = {}
         futures = {}
         for f in audio_to_check:
-            fut = ex.submit(_format_audio_tags, f, config, force["tags"])
+            fut = ex.submit(_format_audio_file, f, config, force["tags"], cover_cache)
             futures[fut] = f
         for fut in as_completed(futures):
-            fn, ok, err = fut.result()
-            # Only log when actually changed to avoid noise; tagged files are many
+            fn, tag_res, cover_res, genres_trimmed = fut.result()
+            # Tags: only log when actually changed to avoid noise; tagged
+            # files are many, and unreadable ones must not spam.
+            ok, err = tag_res
             if err:
-                # Don't spam for unreadable files
                 counts["fail"] += 1
-                if pbar:
-                    try: pbar.update(1)
-                    except: pass
-                continue
-            if ok:
+            elif ok:
                 stats["modified_count"] += 1
                 stats["total_scanned"] += 1
-                log(f"  ✓ {os.path.relpath(fn, folder) if os.path.commonpath([folder, fn])==folder else fn} → tags trimmed")
+                extra = f" ({genres_trimmed} extra genre value(s) dropped)" if genres_trimmed else ""
+                log(f"  ✓ {os.path.relpath(fn, folder) if os.path.commonpath([folder, fn])==folder else fn} → tags trimmed{extra}")
                 counts["ok"] += 1
             else:
                 stats["skipped_count"] += 1
                 counts["skip"] += 1
-            if pbar:
-                try: pbar.update(1)
-                except: pass
-        # embedded cover art — remove (default) or embed the album cover
-        cover_cache = {}
-        futures = {}
-        for f in audio_to_check:
-            fut = ex.submit(_format_embedded_covers, f, config, cover_cache)
-            futures[fut] = f
-        for fut in as_completed(futures):
-            fn, ok, err = fut.result()
+            if genres_trimmed:
+                # The canonical sweep's own count: what the per-track genre
+                # cap actually removed from the library in this run.
+                stats["genres_trimmed"] += genres_trimmed
+            # Embedded art — removed (default) or the album cover embedded.
+            ok, err = cover_res
             if err:
                 counts["fail"] += 1
                 stats["error_count"] += 1
                 stats["errors"].append((fn, err))
                 log(c(f"  ✕ {os.path.basename(fn)}: {err}", Color.RED))
-                if pbar:
-                    try: pbar.update(1)
-                    except: pass
-                continue
-            if ok:
+            elif ok:
                 stats["modified_count"] += 1
                 stats["total_scanned"] += 1
                 action = "cover embedded" if config.get("embed_covers") else "embedded art removed"
@@ -576,4 +693,10 @@ def run_format_all(config):
         except: pass
 
     log(f"Format All: {counts['ok']} formatted, {counts['skip']} already correct, {counts['fail']} errors")
+    trimmed_total = stats.get("genres_trimmed", 0)
+    if trimmed_total:
+        # What the canonical genre sweep removed, against the one knob
+        # (Settings → Import) that defines it.
+        cap = config.get("mb_genre_count") or DEFAULT_CONFIG["mb_genre_count"]
+        log(f"  GENRE: {trimmed_total} extra genre value(s) trimmed — genres per track is {cap} (Settings → Import)")
     return stats

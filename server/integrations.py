@@ -3043,7 +3043,8 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
 
     Every source that answers contributes; the merged list is deduped
     case-insensitively, Title-Cased and capped at `limit` (default
-    `mb_genre_count`, now 3) **per track**.
+    `mb_genre_count` from Settings → Import, whose shipped value lives in
+    `mlo.config.DEFAULT_CONFIG`) **per track**.
 
     Each track's own answer is merged first, then the release-wide one, so a
     track that states its own genre keeps it ahead of the album's fallback.
@@ -3078,10 +3079,14 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
                        else (cfg.get("genre_sources") or GENRE_SOURCES))
              if str(s).strip()]
     if limit is None:
+        from mlo.config import DEFAULT_CONFIG
         try:
-            limit = max(1, int(cfg.get("mb_genre_count") or 3))
+            # The shipped default has ONE home: a literal here drifts the
+            # moment `mb_genre_count` changes (it is Settings → Import's value).
+            limit = max(1, int(cfg.get("mb_genre_count")
+                               or DEFAULT_CONFIG["mb_genre_count"]))
         except (TypeError, ValueError):
-            limit = 3
+            limit = DEFAULT_CONFIG["mb_genre_count"]
     artist = str(artist or "").strip()
     album = str(album or "").strip()
     tracks = list((release or {}).get("media") or [])

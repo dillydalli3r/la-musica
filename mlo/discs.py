@@ -102,10 +102,16 @@ def album_discs(album_dir):
 
     Only folders where every audio file carries the D-TT convention are
     returned; anything else has no reliable disc structure ({}).
+
+    Only the CD-audio extensions count (paths.AUDIO_EXTS, the set the audit
+    and the AccurateRip generator walk): mlo.stats.is_audio_file also accepts
+    music-video containers, and one stray .mkv without the D-TT prefix used to
+    void the disc mapping of the whole album — every per-disc gate then fell
+    back to guessing.
     """
     discs = {}
     for f in sorted(os.listdir(album_dir)):
-        if not is_audio_file(f):
+        if not f.lower().endswith(AUDIO_EXTS):
             continue
         d = disc_of_filename(f)
         if d is None or d < 1:
@@ -1095,6 +1101,26 @@ def _fix_cue_filenames_locked(album_dir, log_fn, config):
 # ----------------------------------------------------------------------
 # Per-disc rip-log scoring — now via OPSnet Logchecker (PHP) instead of AudioAuditor
 # ----------------------------------------------------------------------
+def logchecker_available():
+    """Whether a rip-log scorer (Logchecker phar + PHP) is installed.
+
+    A missing scorer and an unscorable log are different things: with no
+    scorer nothing judged the logs, so callers must not read "no score" as
+    "every log of this library is broken" (the audit used to write
+    AUDIT=FAKE for every CD track of a library when PHP was absent).
+    """
+    try:
+        from .tools import detect_all_tools
+        tools = detect_all_tools()
+        lc = tools.get("logchecker") or {}
+        php = tools.get("php") or {}
+        phar = lc.get("phar_path")
+        php_exe = lc.get("php_exe") or php.get("php_exe") or shutil.which("php")
+        return bool(phar) and os.path.isfile(phar) and bool(php_exe) and os.path.isfile(php_exe)
+    except Exception:
+        return False
+
+
 def score_disc_log(cli_exe, log_path=None, disc_files=None, timeout=30):
     """Score one disc's log with OPSnet Logchecker via PHP. Returns 0-100 or None.
 
@@ -1155,14 +1181,24 @@ def score_disc_log(cli_exe, log_path=None, disc_files=None, timeout=30):
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                         text=True, encoding="utf-8", errors="replace",
                         timeout=timeout, env=env)
-        # Logchecker prints Score even when checksum not validated (still valid)
-        if proc.stdout:
-            m = re.search(r"Score\s*:\s*(\d+)", proc.stdout)
-            if m:
-                try:
-                    return int(m.group(1))
-                except:
-                    pass
+        # The score is the rip grade only when Logchecker actually finished
+        # AND its own checksum validation did not FAIL: the number it prints
+        # for a log whose SHA256 does not match grades the log's text (and a
+        # crashed run can print a partial one). A log Logchecker never
+        # validated (XLD logs, no checksum concept) is still scored — the
+        # audit's own checksum gate owns that verdict.
+        if proc.returncode != 0:
+            return None
+        out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        m_chk = re.search(r"Checksum\s*:\s*(\w+)", out, re.IGNORECASE)
+        if m_chk and m_chk.group(1).lower() in ("checksum_invalid", "checksum_error"):
+            return None
+        m = re.search(r"Score\s*:\s*(\d+)", out)
+        if m:
+            try:
+                return int(m.group(1))
+            except ValueError:
+                pass
         return None
     except Exception:
         return None
@@ -1262,9 +1298,15 @@ def grade_album_logs(cli_exe, album_dir, force=False, log_fn=None,
     write LOG_GRADE (0-100) to every track of MEDIA=CD albums, one score
     per disc.
 
-    Returns ({disc: score}, notes list).
+    Returns ({disc: score}, notes list, unscorable list). *unscorable* holds
+    the disc numbers whose .log could not be scored (missing or unreadable) as
+    DATA: the audit fails exactly those discs, and used to recover the numbers
+    by regexing this function's free-text notes. Callers that act on it should
+    check discs.logchecker_available() first — with no scorer installed
+    nothing was judged, so an empty-score run says nothing about the logs.
     """
     notes = []
+    unscorable = []
     discs = album_discs(album_dir)
     if not discs:
         # Single-disc fallback for scoring: if enabled and single album with one log/cue,
@@ -1277,11 +1319,11 @@ def grade_album_logs(cli_exe, album_dir, force=False, log_fn=None,
                 if aud and (len(logs_tmp) == 1 or len(cues_tmp) == 1):
                     discs = {1: [os.path.join(album_dir, f) for f in aud]}
                 else:
-                    return {}, notes
+                    return {}, notes, unscorable
             except OSError:
-                return {}, notes
+                return {}, notes, unscorable
         else:
-            return {}, notes
+            return {}, notes, unscorable
 
     # MEDIA=CD only - check all discs first file, not arbitrary order
     first = None
@@ -1290,13 +1332,13 @@ def grade_album_logs(cli_exe, album_dir, force=False, log_fn=None,
             first = discs[d][0]
             break
     if first is None:
-        return {}, notes
+        return {}, notes, unscorable
     af = AudioFile(first)
     if af.audio is None:
-        return {}, notes
+        return {}, notes, unscorable
     media = str(af.get_tag("MEDIA") or "").strip()
     if media != "CD":
-        return {}, notes
+        return {}, notes, unscorable
 
     # Fix FILE entries first (conservative) so the subsequent
     # FILE->disc mapping for renaming has correct references; .log
@@ -1315,6 +1357,7 @@ def grade_album_logs(cli_exe, album_dir, force=False, log_fn=None,
         log_path = os.path.join(album_dir, log_name)
         if not os.path.isfile(log_path):
             notes.append(f"disc {d}: no {_disc_expected_name(pattern, d, '.log')}")
+            unscorable.append(d)
             continue
         if not force:
             have = []
@@ -1327,6 +1370,7 @@ def grade_album_logs(cli_exe, album_dir, force=False, log_fn=None,
         score = score_disc_log(log_path)
         if score is None:
             notes.append(f"disc {d}: could not score {_disc_expected_name(pattern, d, '.log')} (Logchecker failed)")
+            unscorable.append(d)
             continue
         scores[d] = score
         for p in paths:
@@ -1359,4 +1403,4 @@ def grade_album_logs(cli_exe, album_dir, force=False, log_fn=None,
             notes.append(f"{logf}: not mapped to a disc - not graded")
     except OSError:
         pass
-    return scores, notes
+    return scores, notes, sorted(unscorable)

@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from .config import DEFAULT_CONFIG
 from .containers import (
     _read_jxl_tags, _write_jxl_tags, _read_jpeg_xmp_tags, _insert_jpeg_xmp,
-    _read_png_text, _strip_png_metadata, _inject_png_text, _encoder_dict,
+    _read_png_text, _strip_png_encoder_tags, _inject_png_text, _encoder_dict,
     _identity_missing, _quality_meets,
 )
 from .deps import HAS_PIL, Image
@@ -139,6 +139,30 @@ def _flatten_png_alpha(src_path, dst_path):
         return False
 
 
+def _upright_png(src_path):
+    """*src_path*'s pixels with its EXIF orientation applied, as a PNG path.
+
+    Returns None when there is nothing to do (no orientation tag, no Pillow,
+    an unreadable image). Used before cjxl on JPEG sources: the metadata strip
+    that feeds cjxl removes the APP1 segment holding the orientation, so a
+    cover whose tag says "rotate" would be encoded — and, with the source
+    deleted right after, permanently stored — on its side. PNG keeps the
+    decoded pixels exact, so this path adds no generation loss.
+    """
+    if not HAS_PIL:
+        return None
+    try:
+        with Image.open(src_path) as img:
+            if not img.getexif().get(0x0112):
+                return None
+            img.load()
+            out = src_path + ".upright.png"
+            _exif_transposed(img).convert("RGB").save(out, format="PNG")
+            return out
+    except Exception:
+        return None
+
+
 def _unique_target_path(src_path, out_path, target_ext):
     """Destination for *out_path* that will not clobber an unrelated file.
 
@@ -160,28 +184,26 @@ def _unique_target_path(src_path, out_path, target_ext):
     return None
 
 
-def _convert_to_jpeg(src_path, dst_path, quality, config=None):
-    """Convert any image to JPEG (lossy) with given quality, handling cover crop/resize."""
-    if not HAS_PIL:
-        return False
-    try:
-        # Use streamlined helper to handle alpha, crop, resize in one pass, then save as JPEG
-        # We create a temp PNG first via _prepare_image_streamlined, then save as JPEG
-        # Actually _prepare_image_streamlined already handles JPEG saving with quality, so we can use it
-        # If cover handling is needed, it will be done there
-        return _prepare_image_streamlined(src_path, dst_path, config, remove_alpha=True)
-    except Exception:
-        return False
+def _jpeg_write_quality(src_path, dst_path, config, did_cover=False):
+    """The JPEG quality this module writes *dst_path* with.
 
-
-def _convert_to_png(src_path, dst_path, config=None):
-    """Convert any image to PNG (lossless), handling cover crop/resize."""
-    if not HAS_PIL:
-        return False
+    Shared by the writer and by the ENCODER_QUALITY marker so the tag records
+    the quality the pixels actually got: cover art (a cover-named file, or one
+    the cover pass cropped/resized) uses `cover_jpeg_quality`, anything else
+    `images_jpeg_quality`.
+    """
     try:
-        return _prepare_image_streamlined(src_path, dst_path, config, remove_alpha=False)
+        dst_base = os.path.splitext(os.path.basename(dst_path).lower())[0]
+        src_base = os.path.splitext(os.path.basename(src_path).lower())[0]
+        is_cover_file = (dst_base in ("cover", "front", "folder")
+                         or src_base in ("cover", "front", "folder"))
+        if (did_cover or is_cover_file) and config and "cover_jpeg_quality" in config:
+            q = int(config.get("cover_jpeg_quality", DEFAULT_CONFIG["cover_jpeg_quality"]))
+        else:
+            q = int(config.get("images_jpeg_quality", DEFAULT_CONFIG["images_jpeg_quality"])) if config else 95
+        return max(70, min(100, q))
     except Exception:
-        return False
+        return 95
 
 
 def _prepare_image_streamlined(src_path, dst_path, config, remove_alpha=False):
@@ -321,24 +343,8 @@ def _prepare_image_streamlined(src_path, dst_path, config, remove_alpha=False):
                 elif img.mode != "RGB":
                     img = img.convert("RGB")
                 save_kwargs["format"] = "JPEG"
-                try:
-                    # Use cover_jpeg_quality for covers (cropped/resized or cover-named), else images_jpeg_quality for re-encoded
-                    is_cover_file = False
-                    try:
-                        dst_base = os.path.splitext(os.path.basename(dst_path).lower())[0]
-                        src_base = os.path.splitext(os.path.basename(src_path).lower())[0]
-                        if dst_base in ("cover", "front", "folder") or src_base in ("cover", "front", "folder"):
-                            is_cover_file = True
-                    except Exception:
-                        pass
-                    if (did_cover or is_cover_file) and config and "cover_jpeg_quality" in config:
-                        q = int(config.get("cover_jpeg_quality", DEFAULT_CONFIG["cover_jpeg_quality"]))
-                    else:
-                        q = int(config.get("images_jpeg_quality", DEFAULT_CONFIG["images_jpeg_quality"])) if config else 95
-                    q = max(70, min(100, q))
-                except Exception:
-                    q = 95
-                save_kwargs["quality"] = q
+                save_kwargs["quality"] = _jpeg_write_quality(
+                    src_path, dst_path, config, did_cover)
                 save_kwargs["optimize"] = True
             elif ext_dst == ".png":
                 save_kwargs["format"] = "PNG"
@@ -382,30 +388,6 @@ def _get_cover_target_size(ext, config):
     if per_size > 0:
         return max(0, min(4000, per_size))
     return global_size
-
-
-def _should_resize_cover(src_path, config):
-    """Whether cover resize should be attempted for *src_path*.
-
-    Checks global cover_resize_enabled, per-format enabled and
-    target_size >0. Requires Pillow.
-    """
-    if not config or not config.get("cover_resize_enabled"):
-        return False
-    if not HAS_PIL:
-        return False
-    ext = os.path.splitext(src_path)[1].lower() if src_path else ""
-    if ext in (".jpg", ".jpeg"):
-        if not config.get("cover_jpeg_enabled", True):
-            return False
-    elif ext == ".png":
-        if not config.get("cover_png_enabled", True):
-            return False
-    elif ext == ".jxl":
-        if not config.get("cover_jxl_enabled", True):
-            return False
-    target = _get_cover_target_size(ext, config)
-    return target > 0
 
 
 def _resize_and_crop_image(src_path, dst_path, target_size, crop_enabled, crop_threshold, config=None):
@@ -742,8 +724,6 @@ def _process_image_to_jxl(args):
                     pass
             if not _cover_needs:
                 q, v, p = _read_jxl_tags(src_path)
-                # Debug log for JXL early skip decision
-                log(f"[jxl check] {os.path.basename(src_path)} q={q} v={v} p={p} effort={effort} jxl_version={jxl_version} enabled={enabled} cover_needs={_cover_needs}")
                 if not _identity_missing(enabled, q, v, p):
                     try:
                         if _quality_meets(enabled, q, effort) and not _version_is_older(v, jxl_version):
@@ -768,6 +748,7 @@ def _process_image_to_jxl(args):
         input_for_cjxl = src_path
         use_strip_all = True
         force_no_reconstruction = False
+        jpeg_stripped = None
 
         if ext in (".jpg", ".jpeg"):
             stripped_jpeg = src_path + ".no_meta.jpg"
@@ -776,6 +757,7 @@ def _process_image_to_jxl(args):
             if _strip_jpeg_metadata(src_path, stripped_jpeg):
                 input_for_cjxl = stripped_jpeg
                 use_strip_all = False
+                jpeg_stripped = stripped_jpeg
             else:
                 _safe_remove(stripped_jpeg)
                 temp_files.remove(stripped_jpeg)
@@ -934,8 +916,12 @@ def _process_image_to_jxl(args):
                         if alt_target > 0:
                             target_for_cover = alt_target
                     if (resize_enabled_cfg and target_for_cover > 0) or crop_enabled_cfg:
-                        # Use a dedicated temp to avoid clobbering input_for_cjxl
-                        resized_cover_tmp = input_for_cjxl + ".cover_resized.tmp" + ext_for_cover
+                        # A lossless intermediate: cjxl is about to encode the
+                        # pixels, so a JPEG temp here would insert a whole lossy
+                        # generation into a cover whose source is deleted right
+                        # after — while the decoded pixels are still in hand.
+                        tmp_ext = ".png" if ext_for_cover in (".jpg", ".jpeg") else ext_for_cover
+                        resized_cover_tmp = input_for_cjxl + ".cover_resized.tmp" + tmp_ext
                         _safe_remove(resized_cover_tmp)
                         did_resize = _resize_and_crop_image(
                             input_for_cjxl, resized_cover_tmp,
@@ -950,6 +936,19 @@ def _process_image_to_jxl(args):
                             _safe_remove(resized_cover_tmp)
             except Exception as e:
                 log(f"[cover warn] {src_path}: {e}")
+
+        # The strip above dropped APP1 along with every other metadata segment,
+        # and the cover pass only applies an EXIF rotation when it actually
+        # re-writes the image. A JPEG cover whose tag says "rotate" would
+        # otherwise reach cjxl on its side and then lose its original — so the
+        # rotation is applied to the pixels here, read from the ORIGINAL (the
+        # stripped copy has no tags left to read it from; its pixels are
+        # identical).
+        if jpeg_stripped is not None and input_for_cjxl == jpeg_stripped:
+            upright = _upright_png(src_path)
+            if upright:
+                temp_files.append(upright)
+                input_for_cjxl = upright
 
         cmd = [
             cjxl_path,
@@ -1240,6 +1239,12 @@ def _process_png_in_place(args):
         cover_path = os.path.join(os.path.dirname(filepath), "cover.png")
         existing_dest_size = _existing_size(cover_path, filepath)
 
+    # Alpha is not part of the ENCODER identity the skip check reads, so a
+    # tagged PNG would keep its transparency forever: the flatten pass below
+    # only runs when the file is processed. Probe once, here, and reuse the
+    # answer for that pass.
+    has_alpha = _png_has_alpha(filepath) if (remove_alpha and HAS_PIL) else False
+
     # Cover-aware skip check
     _cover_needs = False
     if not force and config is not None and HAS_PIL:
@@ -1273,7 +1278,7 @@ def _process_png_in_place(args):
                         pass
         except Exception:
             pass
-    if not force and not _cover_needs:
+    if not force and not _cover_needs and not has_alpha:
         tags = _read_png_text(filepath)
         q = tags.get("ENCODER_QUALITY")
         v = tags.get("ENCODER_VERSION")
@@ -1293,23 +1298,21 @@ def _process_png_in_place(args):
 
     _safe_remove(temp_path)
 
-    if remove_alpha and HAS_PIL:
-        has_alpha = _png_has_alpha(filepath)
-        if has_alpha:
-            flat_path = filepath + ".no_alpha.png"
-            _safe_remove(flat_path)
+    if has_alpha:
+        flat_path = filepath + ".no_alpha.png"
+        _safe_remove(flat_path)
 
-            try:
-                # Feed the flattened copy to oxipng; the original is only
-                # replaced by the existing success path below, so a later
-                # failure leaves the source (and its transparency) intact.
-                if _flatten_png_alpha(filepath, flat_path) and os.path.getsize(flat_path) > 0:
-                    _flat_alpha_tmp = flat_path
-                    _input_for_oxipng = flat_path
-                else:
-                    _safe_remove(flat_path)
-            except Exception:
+        try:
+            # Feed the flattened copy to oxipng; the original is only
+            # replaced by the existing success path below, so a later
+            # failure leaves the source (and its transparency) intact.
+            if _flatten_png_alpha(filepath, flat_path) and os.path.getsize(flat_path) > 0:
+                _flat_alpha_tmp = flat_path
+                _input_for_oxipng = flat_path
+            else:
                 _safe_remove(flat_path)
+        except Exception:
+            _safe_remove(flat_path)
 
     # Cover resize / crop before oxipng (temp copy)
     if config is not None and HAS_PIL:
@@ -1390,7 +1393,7 @@ def _process_png_in_place(args):
         temp_path = None
 
         try:
-            _strip_png_metadata(filepath)
+            _strip_png_encoder_tags(filepath)
         except Exception as e:
             log(f"[png strip warn] {filepath}: {e}")
 
@@ -1693,6 +1696,45 @@ def _process_jxl_in_place(args):
         _safe_remove(temp_out_path)
 
 
+def _cover_rank(path):
+    """Rank one album-cover candidate: cover-named first, then the biggest scan.
+
+    ONE rule for both places that decide which image is a folder's cover — the
+    map that tells the in-place workers which file to rename to cover.* and the
+    end-of-run rename pass — because two rankings could pick different files
+    for the same folder and the two passes then fought over the name.
+    """
+    base = os.path.splitext(os.path.basename(path).lower())[0]
+    if base in ("cover", "front", "folder"):
+        score = 3
+    elif "cover" in base or "front" in base:
+        score = 2
+    elif base.startswith(("01", "1", "scan")):
+        score = 1
+    else:
+        score = 0
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        size = 0  # vanished/locked file: rank it last, don't abort
+    return (score, size, os.path.basename(path).lower())
+
+
+def _twin_present(src_path, out_path):
+    """Whether *out_path* already exists as the same-stem twin of *src_path*.
+
+    The JXL -> original pass deletes its source once it has written the
+    same-stem file, so finding that file already there means the reverse
+    conversion has already happened (or an unrelated file of the same name is
+    in the way). _unique_target_path would mint "cover_1.jpg" — a redundant
+    second copy of the same art — so the callers treat this as a done-state
+    and leave both files alone.
+    """
+    return (os.path.normcase(os.path.normpath(out_path))
+            != os.path.normcase(os.path.normpath(src_path))
+            and os.path.exists(out_path))
+
+
 def _process_jxl_back_to_original(args):
     if isinstance(args, (list, tuple)) and len(args) == 14:
         (
@@ -1759,6 +1801,9 @@ def _process_jxl_back_to_original(args):
                 if rename_to_cover
                 else os.path.splitext(src_path)[0] + ".jpg"
             )
+            if not force and _twin_present(src_path, out_path):
+                return (src_path, "skipped", 0, 0,
+                        f"skipped ({os.path.basename(out_path)} already present)")
             alt_out = _unique_target_path(src_path, out_path, ".jpg")
             if alt_out is None:
                 return (src_path, "failed", 0, 0,
@@ -1904,6 +1949,9 @@ def _process_jxl_back_to_original(args):
             if rename_to_cover
             else os.path.splitext(src_path)[0] + ".png"
         )
+        if not force and _twin_present(src_path, out_path):
+            return (src_path, "skipped", 0, 0,
+                    f"skipped ({os.path.basename(out_path)} already present)")
         alt_out = _unique_target_path(src_path, out_path, ".png")
         if alt_out is None:
             return (src_path, "failed", 0, 0,
@@ -1996,7 +2044,7 @@ def _process_jxl_back_to_original(args):
             log(f"[cleanup warn] could not remove {src_path}: {e}")
 
         try:
-            _strip_png_metadata(out_path)
+            _strip_png_encoder_tags(out_path)
         except Exception:
             pass
 
@@ -2119,11 +2167,11 @@ def _process_convert_image(args):
         from .containers import _encoder_dict
         enc = config.get("encoder_tags") or {} if config else {}
         if target_ext == ".jpg":
-            try:
-                q = int(config.get("images_jpeg_quality", DEFAULT_CONFIG["images_jpeg_quality"])) if config else 95
-                q = max(70, min(100, q))
-            except Exception:
-                q = 95
+            # The marker records the quality the pixels were written with (the
+            # same rule the writer just applied), not the global one: tagging a
+            # cover written at cover_jpeg_quality as images_jpeg_quality made
+            # the skip check compare the wrong number.
+            q = _jpeg_write_quality(src_path, temp_out, config)
             # _prepare_image_streamlined already wrote with quality, just add tag
             try:
                 from .containers import _insert_jpeg_xmp
@@ -2209,8 +2257,12 @@ def run_process_images(config):
     stats = new_stats()
 
     if not reencode_images:
-        print_header("Image Processing (skipped - reencode_images is False)")
-        return stats
+        # NOT an abort: the cover-rename pass at the end of this function moves
+        # a file, it does not encode one, and gating it on reencode_images left
+        # folders without a cover.* (and per-track sidecars unrenamed) whenever
+        # the user turned re-encoding off. No tasks are built below.
+        log(c("Image re-encoding is off — running the cover rename pass only.",
+              Color.YELLOW))
 
     tools = detect_all_tools()
     jxl_tool = tools.get("libjxl")
@@ -2244,7 +2296,9 @@ def run_process_images(config):
 
     print_header("Image Processing")
 
-    if convert_jxl_back and reencode_to_jxl:
+    if not reencode_images:
+        mode = "cover rename only (re-encoding is off)"
+    elif convert_jxl_back and reencode_to_jxl:
         mode = "JXL -> original (reverse only; other files untouched)"
     elif convert_jxl_back:
         mode = "JXL -> original + in-place lossless JPEG/PNG optimization"
@@ -2309,13 +2363,7 @@ def run_process_images(config):
         for f in files:
             groups.setdefault(os.path.dirname(f), []).append(f)
         for folder, group in groups.items():
-            def _cover_key(f):
-                base = os.path.splitext(os.path.basename(f).lower())[0]
-                priority = 3 if base in ("cover", "front", "folder") else (
-                    2 if ("front" in base or "cover" in base) else (
-                        1 if base.startswith(("01", "1", "scan")) else 0))
-                return (-priority, os.path.basename(f).lower(), f)
-            cover_map[folder] = sorted(group, key=_cover_key)[0]
+            cover_map[folder] = max(group, key=_cover_rank)
 
     def _renames(f):
         return rename_to_cover and f == cover_map.get(os.path.dirname(f))
@@ -2325,7 +2373,7 @@ def run_process_images(config):
     # (e.g., cover.bmp + cover.tiff both → cover.png) would overwrite each other
     reserved_targets = set(os.path.normcase(p) for p in files)
 
-    for f in files:
+    for f in (files if reencode_images else []):
         ext = os.path.splitext(f)[1].lower()
 
         if convert_jxl_back and ext == ".jxl":
@@ -2624,22 +2672,7 @@ def run_process_images(config):
             if not group:
                 continue
 
-            def _pick(f):
-                base = os.path.splitext(os.path.basename(f).lower())[0]
-                score = 0
-                if base in ("cover", "front", "folder"):
-                    score = 3
-                elif "cover" in base or "front" in base:
-                    score = 2
-                elif base.startswith(("01", "1", "scan")):
-                    score = 1
-                try:
-                    size = -os.path.getsize(f)
-                except OSError:
-                    size = 0  # vanished/locked file: rank it last, don't abort
-                return (score, size, os.path.basename(f).lower())
-
-            candidate = max(group, key=_pick)
+            candidate = max(group, key=_cover_rank)
             cand_ext = os.path.splitext(candidate)[1]
             target = os.path.join(folder, "cover" + cand_ext)
             if os.path.normcase(os.path.normpath(candidate)) == os.path.normcase(os.path.normpath(target)):

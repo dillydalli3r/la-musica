@@ -263,6 +263,10 @@ export default function ImportWizard() {
     genres: string[];
     per_source: Record<string, string[]>;
     notes: Record<string, string>;
+    /** Genres per track (`mb_genre_count`) the run applied, and how many
+     *  tracks it trimmed to reach it. */
+    genre_count: number;
+    trimmed: number;
   } | null>(null);
   // Last MusicBrainz genre import failure — the 400 that names the missing
   // MBID, kept in the step instead of only in a toast.
@@ -3061,6 +3065,14 @@ const finish = async () => {
                 {genreJobResult.genres.length
                   ? ` — ${genreJobResult.genres.join(", ")}`
                   : " — no genres returned"}
+              </div>
+              {/* The cap these genres were written and trimmed to, so the
+                  value is visible where the genres are, not only in Settings
+                  → Import (`mb_genre_count`). */}
+              <div className="text-[11px] text-zinc-500">
+                Genres per track: {genreJobResult.genre_count} (Settings → Import)
+                {genreJobResult.trimmed > 0 &&
+                  ` — ${genreJobResult.trimmed} track(s) trimmed to ${genreJobResult.genre_count}`}
               </div>
               {Object.entries(genreJobResult.per_source).filter(([, names]) => names.length).length > 0 && (
                 <div className="flex flex-wrap gap-1.5">

@@ -59,7 +59,35 @@ def _detect_tool(prefix, deps_dir):
 
 
 _TOOLS_CACHE = None
+# The .dependencies folder as it looked when _TOOLS_CACHE was built. Installing
+# a tool adds a folder there, so the cache below re-detects instead of serving
+# a stale "not installed" for the rest of the process — a session that installs
+# a tool through any path (Dependencies UI, CLI, auto-update) sees it at the
+# next detect_all_tools() call, not at the next restart.
+_TOOLS_CACHE_SIG = None
 _CACHE_LOCK = __import__("threading").Lock()
+
+
+def deps_dir_signature():
+    """Signature of the dependencies folder: changes when a tool is installed.
+
+    detect_all_tools() keys its cache on this (and the per-module ffmpeg /
+    ffprobe latches can do the same) so a mid-session install becomes visible
+    without a manual refresh_tool_cache() call.
+    """
+    try:
+        return os.stat(DEPS_DIR).st_mtime_ns
+    except OSError:
+        return None
+
+
+def _store_tools_cache(tools, sig):
+    """Publish *tools* as the process-wide detection result."""
+    global _TOOLS_CACHE, _TOOLS_CACHE_SIG
+    with _CACHE_LOCK:
+        _TOOLS_CACHE = tools
+        _TOOLS_CACHE_SIG = sig
+    return tools
 
 
 def _which_pair(exe_name):
@@ -166,27 +194,21 @@ def _detect_system_tools():
 
 
 def detect_all_tools():
-    global _TOOLS_CACHE
+    sig = deps_dir_signature()
     with _CACHE_LOCK:
-        if _TOOLS_CACHE is not None:
+        if _TOOLS_CACHE is not None and _TOOLS_CACHE_SIG == sig:
             return _TOOLS_CACHE
 
     # .dependencies only ever holds Windows binaries (fetchdeps refuses to
     # install anything else off-Windows), so on Linux/macOS the distro
     # packages on PATH ARE the tools - never select an unrunnable .exe folder.
     if os.name != "nt":
-        tools = _detect_system_tools()
-        with _CACHE_LOCK:
-            _TOOLS_CACHE = tools
-        return tools
+        return _store_tools_cache(_detect_system_tools(), sig)
 
     tools = {}
 
     if not os.path.isdir(DEPS_DIR):
-        tools = _detect_system_tools()
-        with _CACHE_LOCK:
-            _TOOLS_CACHE = tools
-        return tools
+        return _store_tools_cache(_detect_system_tools(), sig)
 
     fv, ff = _detect_tool("flac", DEPS_DIR)
     if ff:
@@ -340,9 +362,7 @@ def detect_all_tools():
         if key not in tools and key in system:
             tools[key] = system[key]
 
-    with _CACHE_LOCK:
-        _TOOLS_CACHE = tools
-    return tools
+    return _store_tools_cache(tools, sig)
 
 
 SIMPLE_DR_METER_DIRNAME = "simple-dr-meter"

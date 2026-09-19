@@ -7,6 +7,7 @@ import re
 import tempfile
 import zlib
 
+from .config import should_write_audio_tag
 from .deps import FLAC
 
 
@@ -139,7 +140,11 @@ def _clean_flac_tags(filepath, config=None, enabled=None):
     The app previously removed *any* tag not in KEEP_VORBIS_KEYS, which broke
     Picard recognition (MusicBrainz IDs etc. were deleted). New behavior:
     * Never remove tags except for the two lyric variants.
-    * ``UNSYNCEDLYRICS`` is always removed (legacy, never written by this app).
+    * ``UNSYNCEDLYRICS`` is legacy (this app writes LYRICS), but
+      ``AudioFile.get_lyrics`` still reads it and the grader grades what that
+      returns — stripping it from a file whose only lyrics live there failed
+      the album's lyrics grade. It follows the LYRICS family gate and the
+      lyrics_format rule below instead of being removed unconditionally.
     * ``LYRICS`` is removed only when ``lyrics_format`` is ``LRC`` (embedded
       lyrics are not wanted) — otherwise it is kept.
     * ``ENCODER_PROGRAM`` is removed when it is disabled per-format via
@@ -152,20 +157,23 @@ def _clean_flac_tags(filepath, config=None, enabled=None):
         if audio.tags is None:
             return False
         to_remove = []
-        # Always remove UNSYNCEDLYRICS (legacy, not used)
-        for k in list(audio.tags.keys()):
-            if str(k).lower() == "unsyncedlyrics":
-                to_remove.append(k)
-        # Remove LYRICS only when the user wants LRC sidecars only
+        # Embedded lyrics are dropped only where this file may not carry
+        # them: the LRC-sidecar-only setting, or the LYRICS family turned off
+        # for this filetype. A container whose lyrics the grader expects must
+        # keep BOTH spellings (a partial cfg with no lyrics_format keeps
+        # them, like the app does when the setting is at its default).
+        want_embedded = True
         if config is not None:
             try:
                 fmt = str(config.get("lyrics_format", "EMBEDDED")).upper()
             except Exception:
                 fmt = "EMBEDDED"
-            if fmt == "LRC":
-                for k in list(audio.tags.keys()):
-                    if str(k).lower() == "lyrics" and k not in to_remove:
-                        to_remove.append(k)
+            want_embedded = (fmt != "LRC" and should_write_audio_tag(
+                config, "LYRICS", filepath=filepath))
+        if not want_embedded:
+            for k in list(audio.tags.keys()):
+                if str(k).lower() in ("lyrics", "unsyncedlyrics"):
+                    to_remove.append(k)
         # Remove ENCODER_PROGRAM when disabled per-format
         if enabled is not None and not _enabled(enabled, "ENCODER_PROGRAM"):
             for k in list(audio.tags.keys()):
@@ -490,9 +498,32 @@ def _read_png_text(png_path):
     return result
 
 
-def _strip_png_metadata(png_path):
-    strip = {b"tEXt", b"iTXt", b"zTXt", b"eXIf", b"tIME"}
+# The PNG text keys THIS app writes itself (see _inject_png_text and
+# _encoder_dict). Only these are stripped before fresh markers are injected —
+# the old pass removed every tEXt/iTXt/zTXt/eXIf/tIME chunk, which wiped a
+# caption, a colour-managed EXIF block and a timestamp some other tool wrote,
+# on every optimization run, and no setting asked for that.
+_PNG_OWN_TEXT_KEYS = {"ENCODER", "ENCODER_PROGRAM", "ENCODER_QUALITY",
+                      "ENCODER_VERSION"}
 
+
+def _png_text_keyword(ctype, payload):
+    """The keyword of a PNG text chunk (uppercased), or None for any other
+    chunk. tEXt/zTXt carry "keyword\0…"; iTXt carries
+    "keyword\0compression flag\0method\0language\0translated\0text"."""
+    if ctype not in (b"tEXt", b"zTXt", b"iTXt"):
+        return None
+    null = payload.find(b"\x00")
+    if null <= 0:
+        return None
+    try:
+        return payload[:null].decode("latin-1").upper()
+    except Exception:
+        return None
+
+
+def _strip_png_encoder_tags(png_path):
+    """Drop the encoder markers this app wrote, keep everyone else's chunks."""
     with open(png_path, "rb") as f:
         data = f.read()
 
@@ -500,9 +531,11 @@ def _strip_png_metadata(png_path):
         return False
 
     out = bytearray(PNG_SIG)
+    removed = False
 
     for ctype, payload, _, _ in _iter_png_chunks(data):
-        if ctype in strip:
+        if _png_text_keyword(ctype, payload) in _PNG_OWN_TEXT_KEYS:
+            removed = True
             continue
 
         out.extend(len(payload).to_bytes(4, "big"))
@@ -511,6 +544,9 @@ def _strip_png_metadata(png_path):
 
         crc = zlib.crc32(ctype + payload) & 0xFFFFFFFF
         out.extend(crc.to_bytes(4, "big"))
+
+    if not removed:
+        return False  # nothing of ours in there: do not rewrite the file
 
     _atomic_write(png_path, bytes(out))
 

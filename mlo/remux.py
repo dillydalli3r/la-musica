@@ -5,13 +5,15 @@ the tracks (VOB rips, MKV/AVI/WMV downloads, TS captures...). Matroska can
 hold virtually every stream codec in common circulation, so this script
 normalizes every video file while keeping quality fully intact:
 
-* Pass 1 — video is copied **bit-exact**; every audio stream is re-encoded
-  to FLAC (lossless from the decoded source, compression level from
-  ``video_flac_level``) so the audio matches the library's FLAC standard.
+* Pass 1 — video is copied **bit-exact**; audio that is already lossless is
+  re-encoded to FLAC (compression level from ``video_flac_level``) so it
+  matches the library's FLAC standard, while lossy audio (AC3/DTS/AAC…) is
+  copied byte-for-byte under ``video_lossy_audio_copy`` — re-encoding it
+  cannot restore a sample and only inflates the file.
 * Pass 2 (caption rescue) — text captions the MKV muxer refuses verbatim
   are converted to SubRip so they are kept, never dropped.
 * Pass 3 (last resort, ``video_reencode_incompatible``) — a video codec the
-  muxer still refuses is re-encoded to H.264; audio stays FLAC.
+  muxer still refuses is re-encoded to H.264; audio keeps the same rule.
 * Captions are NEVER removed: every subtitle stream is mapped in every
   pass, and the output is verified to carry the same subtitle stream count
   as the source (a remux that would drop captions fails instead).
@@ -31,8 +33,8 @@ normalizes every video file while keeping quality fully intact:
   set /api/videos/scan lists) — including .mp4/.m4v, which are only rewritten
   when ``video_process_mp4`` is on because they already play and tag natively.
 
-Config keys: video_reencode_incompatible, video_crf, video_preset,
-video_flac_level, video_remove_original, video_process_mp4.
+Config keys: video_reencode_incompatible, video_lossy_audio_copy, video_crf,
+video_preset, video_flac_level, video_remove_original, video_process_mp4.
 """
 
 import json
@@ -80,6 +82,20 @@ X264_PRESETS = (
     "ultrafast", "superfast", "veryfast", "faster", "fast",
     "medium", "slow", "slower", "veryslow",
 )
+
+# Audio codecs that lose nothing when re-encoded as FLAC, plus every raw PCM
+# variant. `dts` is deliberately NOT here: ffprobe reports DTS-HD MA (lossless)
+# and plain DTS core (lossy) as the same codec name, and re-encoding a lossy
+# core is exactly what video_lossy_audio_copy exists to stop.
+LOSSLESS_AUDIO_CODECS = frozenset({
+    "flac", "alac", "truehd", "mlp", "wavpack", "tta", "ape", "tak", "als",
+})
+
+
+def _is_lossless_audio(codec):
+    """Whether an ffprobe codec name is a lossless one."""
+    name = str(codec or "").lower()
+    return name.startswith("pcm_") or name in LOSSLESS_AUDIO_CODECS
 
 
 def _ffprobe_json(ffprobe_exe, path, timeout=60):
@@ -180,12 +196,18 @@ def _unique_dest(src, out_ext=".mkv"):
 _DEST_LOCK = threading.Lock()
 
 
-def _ffmpeg_args(mode, cfg):
+def _ffmpeg_args(mode, cfg, acodecs=None):
     """Encoder arguments for a remux pass. Mode "2" = copied video + FLAC
     audio + copied captions; "2s" = copied video + FLAC audio + captions
     converted to SRT (rescue for text caption codecs the MKV muxer refuses);
     "3" = h264 video + FLAC audio. Captions are NEVER dropped: every pass
-    maps all subtitle streams."""
+    maps all subtitle streams.
+
+    *acodecs* is the source's audio codec list, in stream order. Lossless
+    ones become FLAC; a lossy one (AC3/DTS/AAC…) is copied byte-for-byte
+    when ``video_lossy_audio_copy`` is on, because re-encoding lossy audio
+    cannot restore a sample and only inflates the file.
+    """
     try:
         crf = max(0, min(51, int(cfg.get("video_crf", 18))))
     except (TypeError, ValueError):
@@ -204,7 +226,14 @@ def _ffmpeg_args(mode, cfg):
         cmd += ["-preset", preset, "-crf", str(crf), "-pix_fmt", "yuv420p"]
     # FLAC keeps every decoded audio stream bit-perfect (any channel
     # layout / bit depth) — lossless, at the configured compression level.
+    # This is the DEFAULT for every audio stream; the per-stream -c:a:N
+    # arguments below override it for the lossy sources that must not be
+    # decoded and re-encoded.
     cmd += ["-c:a", "flac", "-strict", "-2", "-compression_level", str(flac_level)]
+    if cfg.get("video_lossy_audio_copy", True):
+        for i, codec in enumerate(acodecs or ()):
+            if not _is_lossless_audio(codec):
+                cmd += [f"-c:a:{i}", "copy"]
     # Captions: copied verbatim; the "2s" rescue pass re-encodes text
     # captions to SubRip (content preserved) when the container refuses
     # the source codec. Bitmap captions (DVD/PGS/DVB) can only be copied.
@@ -217,10 +246,13 @@ def remux_video(src, dest, ffmpeg_exe, ffprobe_exe, cfg):
 
     ``dest`` must not exist (callers pass a temp path); on success the
     caller os.replace()s it into place after verification. Video is copied
-    bit-exact and every audio stream is re-encoded to FLAC (lossless);
-    when the muxer refuses the video codec a config-gated H.264 pass
-    follows. Subtitle streams are always mapped and copied — the output is
-    verified to carry the same caption streams as the source.
+    bit-exact; audio streams that are lossless already are re-encoded to
+    FLAC, and lossy ones (AC3/DTS/AAC…) are copied as they are while
+    ``video_lossy_audio_copy`` is on — re-encoding lossy audio cannot
+    restore a sample and only inflates the file. When the muxer refuses the
+    video codec a config-gated H.264 pass follows. Subtitle streams are
+    always mapped and copied — the output is verified to carry the same
+    caption streams as the source.
     """
     # Forward slashes: with backslash paths ffmpeg's VOB/VOB-VR demuxer can
     # expose phantom audio substreams (unknown codec parameters) that kill
@@ -239,6 +271,14 @@ def remux_video(src, dest, ffmpeg_exe, ffprobe_exe, cfg):
     # H.264 fallback only ever runs when the user kept the safety valve on.
     allow_reencode = bool(cfg.get("video_reencode_incompatible", True))
 
+    # What the pass did with the audio, spelled out in the result message so a
+    # scan of the log shows whether a lossy source was copied or re-encoded.
+    lossy_copied = sorted({str(c) for c in acodecs
+                           if cfg.get("video_lossy_audio_copy", True)
+                           and not _is_lossless_audio(c)})
+    audio_label = (f"audio -> FLAC, {'/'.join(lossy_copied)} copied"
+                   if lossy_copied else "audio -> FLAC")
+
     # Regenerate input PTS — DVD-VR VOBs often carry pcm_dvd packets with
     # unknown timestamps that abort the mux otherwise. Input flags must
     # precede -i. Only video/audio/subtitle streams are mapped — data
@@ -252,7 +292,7 @@ def remux_video(src, dest, ffmpeg_exe, ffprobe_exe, cfg):
     for mode in ("2", "2s", "3") if allow_reencode else ("2", "2s"):
         cmd = ([ffmpeg_exe, "-y", "-v", "error", "-nostdin"]
                + input_flags + ["-i", src] + stream_maps)
-        cmd += _ffmpeg_args(mode, cfg)
+        cmd += _ffmpeg_args(mode, cfg, acodecs)
         # Chapters are copied from the source explicitly (ffmpeg's default,
         # spelled out so a future option change can't silently drop them).
         cmd += ["-map_chapters", "0", "-f", "matroska", dest]
@@ -295,11 +335,11 @@ def remux_video(src, dest, ffmpeg_exe, ffprobe_exe, cfg):
             last_err = f"duration changed ({duration:.2f}s -> {odur:.2f}s)"
             continue
         if mode == "2":
-            return True, f"video copied, audio -> FLAC ({' + '.join(acodecs) if acodecs else '?'})"
+            return True, f"video copied, {audio_label} ({' + '.join(acodecs) if acodecs else '?'})"
         if mode == "2s":
-            return True, "video copied, audio -> FLAC, captions -> SRT"
+            return True, f"video copied, {audio_label}, captions -> SRT"
         return True, (f"{vcodec} video re-encoded to h264 "
-                      f"(crf {cfg.get('video_crf', 18)}), audio -> FLAC")
+                      f"(crf {cfg.get('video_crf', 18)}), {audio_label}")
     return False, last_err or "remux failed"
 
 
@@ -336,9 +376,11 @@ def run_remux_videos(config):
     print_header("Video Remux (MKV)")
     reenc = bool(config.get("video_reencode_incompatible", True))
     remove_original = bool(config.get("video_remove_original", True))
+    copy_lossy = bool(config.get("video_lossy_audio_copy", True))
     log(
         f"ffmpeg: {ffmpeg}\n"
-        f"streams: video copied · audio -> FLAC (lossless, level {config.get('video_flac_level', 8)}) · "
+        f"streams: video copied · audio -> FLAC (lossless, level {config.get('video_flac_level', 8)})"
+        f"{' · lossy sources (AC3/DTS/AAC…) copied as they are' if copy_lossy else ' · every stream re-encoded'} · "
         f"captions always kept · chapters kept · h264 fallback {'on' if reenc else 'off'} · "
         f"originals: {'removed after verified remux' if remove_original else 'kept'}"
     )

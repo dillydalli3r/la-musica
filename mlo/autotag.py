@@ -41,7 +41,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .audio import AudioFile
-from .config import should_write_audio_tag
+from .config import DEFAULT_CONFIG, should_write_audio_tag
 # the app's RELEASETYPE spelling ("album+live" -> "Album; Live"), shared with
 # the organizer and the grader so one release_type reads the same everywhere;
 # fuller_date is the same shared rule for the two DATE tags the album folder
@@ -107,6 +107,46 @@ def set_genre_lookup(fn):
     _genre_lookup = fn
 
 
+def trim_genres(af, count):
+    """Keep the first `count` genre values, drop the rest. Returns how many
+    values were removed (0 = nothing changed, no container write).
+
+    EVERY writer of the tag routes through this one helper (script 8, the
+    genre import, script 10), so `mb_genre_count` means the same thing to all
+    of them. Values are stored in source-priority order (highest-voted source
+    first), so "keep the first N" IS "keep the N best".
+    """
+    try:
+        count = max(0, int(count))
+    except (TypeError, ValueError):
+        return 0
+    values = af.tag_values("GENRE")
+    if not values:
+        raw = af.get_tag("GENRE")
+        if raw is None:
+            return 0
+        values = [raw]
+    if len(values) == 1 and ";" in str(values[0]):
+        # ONE stored value that is really a "; "-joined list — the spelling
+        # another tagger leaves behind, which tag_values() hands back whole
+        # (repeated fields are the app's own spelling). Split it, or the file
+        # would read as a single genre called "Rock; Alternative Rock; Indie".
+        values = str(values[0]).split(";")
+    # Blank repeats are dropped rather than kept: a file carrying ["", "Rock"]
+    # must not end up with the empty string as its first genre.
+    values = [v for v in (str(v).strip() for v in values) if v]
+    if len(values) <= count:
+        return 0  # already at or under the cap: never rewrite a container for nothing
+    kept = values[:count]
+    if kept:
+        # A list writes repeated GENRE fields; one value stays a plain string.
+        af.set_tag("GENRE", kept if len(kept) > 1 else kept[0])
+    else:
+        # Nothing survives the cap — an empty GENRE is worse than no GENRE.
+        af.delete_tag("GENRE")
+    return len(values) - len(kept)
+
+
 # ----------------------------------------------------------------------
 # Album-level MusicBrainz release identity (LABEL / CATALOGNUMBER / …)
 # ----------------------------------------------------------------------
@@ -140,6 +180,17 @@ _RELEASE_TAGS = (
 # The two date slots above: the only tags this stage may SHARPEN (year ->
 # full date) rather than merely fill when empty.
 _DATE_TAGS = ("DATE", "ORIGINALDATE")
+
+# Album facts filled WHENEVER the release is fetched — but deliberately NOT
+# part of the prescan completeness test below: putting a slot there would make
+# every otherwise-complete album cost one more MusicBrainz request (and get
+# rewritten) just to gain a status, and the prescan's contract — an album that
+# already carries everything this stage could write is never asked — is what
+# the album-date suite pins. They ride along on a request made for another
+# reason, exactly like the per-track ids in the loop.
+_EXTRA_RELEASE_TAGS = (
+    ("RELEASESTATUS", "status"),
+)
 
 # Per-track slots this stage matches against the release (or the manifest):
 # the recording id of the track's own position, and the artist it credits.
@@ -203,6 +254,12 @@ def _cached_release(mbid):
             tracks[(disc, int(pos))] = {
                 "recording_mbid": str(rec.get("id") or ""),
                 "artist_mbid": str(artists[0] if artists else ""),
+                # The id of this POSITION (distinct from the recording) and
+                # the ISRCs MusicBrainz knows for it: `inc` above already
+                # fetched both, and they were parsed away — the naming script
+                # reads the first, the ISRC tag the second.
+                "release_track_mbid": str(trk.get("id") or ""),
+                "isrcs": [str(x) for x in (trk.get("isrcs") or [])],
             }
     album_artists = [ac["artist"]["id"] for ac in data.get("artist-credit") or []
                      if ac.get("artist")]
@@ -215,6 +272,9 @@ def _cached_release(mbid):
         "label": label,
         "catalog_number": catalogs[0] if catalogs else "",
         "country": str(data.get("country") or ""),
+        # the release's own status ("Official", "Bootleg", …) — the same
+        # field the importer's stamper writes as RELEASESTATUS
+        "status": str(data.get("status") or ""),
         # the spelling the app's writers use ("album+live" -> "Album; Live")
         "release_type": mb_style_release_type("+".join(t for t in types if t)),
         # the RELEASE's own date (full when MusicBrainz has the day) — the
@@ -307,7 +367,7 @@ def _fill_release_tags(info, config, album_dir):
         return 0, "release tags: MusicBrainz had no answer"
 
     values = [(tag, str(release.get(key) or "").strip())
-              for tag, key in _RELEASE_TAGS]
+              for tag, key in _RELEASE_TAGS + _EXTRA_RELEASE_TAGS]
     values = [(tag, value) for tag, value in values if value]
 
     # recording id per (disc, position): the manifest wins — its release_id is
@@ -331,6 +391,12 @@ def _fill_release_tags(info, config, album_dir):
             ("MUSICBRAINZ_TRACKID", track_mbid),
             ("MUSICBRAINZ_ARTISTID",
              slot.get("artist_mbid") or release["album_artist_mbid"]),
+            # The id of this track's POSITION on this release (the recording
+            # id above is a different id) and the ISRC of the track: both
+            # arrived with the same payload and are filled only where empty,
+            # gate included, through the same loop below.
+            ("MUSICBRAINZ_RELEASETRACKID", slot.get("release_track_mbid") or ""),
+            ("ISRC", (slot.get("isrcs") or [""])[0]),
         ]
         for tag, value in values + per_track:
             try:
@@ -344,6 +410,12 @@ def _fill_release_tags(info, config, album_dir):
                     value = fuller_date(have, value)
                     if not value:
                         continue
+                if not str(value or "").strip():
+                    # An empty answer is not a value. Writing it produced a
+                    # blank tag AND counted as "written" on every run — an
+                    # unmatched track, or a release that simply has no
+                    # artist/ISRC/status for this file, looked tagged.
+                    continue
                 if not should_write_audio_tag(config, tag, filepath=af.path):
                     continue          # the same gate every write here honours
                 if af.set_tag(tag, value):
@@ -398,6 +470,10 @@ def run_auto_tagging(config):
     do_instrumental = config.get("auto_instrumental", True)
     do_mood = config.get("mood_enabled", True)
     do_genre = config.get("genre_autofill", True) and _genre_lookup is not None
+    # The per-track cap this app's writers keep (`mb_genre_count`, one value,
+    # default read from DEFAULT_CONFIG so it cannot drift from the shipped
+    # default); grading requires exactly this many genres per track.
+    genre_count = int(config.get("mb_genre_count") or DEFAULT_CONFIG["mb_genre_count"])
     if do_mood:
         from . import moods  # local: keeps librosa discovery out of import time
     # Advisory zero-fill is OFF by default: a missing ITUNESADVISORY means
@@ -595,6 +671,7 @@ def run_auto_tagging(config):
 
         mood_modified = 0
         genre_modified = 0
+        genre_trimmed = 0
         for d in info:
             af = d["af"]
             path = af.path
@@ -605,13 +682,25 @@ def run_auto_tagging(config):
                     names = _genre_lookup(artist, album_tag, path) or []
                 except Exception:
                     names = []
-                if names and should_write_audio_tag(config, "GENRE", filepath=path):
+                if names:
                     # The list goes in as a list: set_tag writes repeated
                     # GENRE fields, so players see several genres instead of
                     # one called "Dance-Punk; Electronic; Funk Rock".
+                    # (No should_write_audio_tag() here: GENRE belongs to no
+                    # family, so that gate could only ever return True —
+                    # genre_autofill, checked above, is the real switch.)
                     if af.set_tag("GENRE", names):
                         genre_modified += 1
                         af = d["af"] = AudioFile(path)  # refresh for the mood prior
+            if do_genre:
+                # The cap is enforced on EVERY track, not only on the ones
+                # filled above: a library that already carries three genres is
+                # brought down to `mb_genre_count` by re-running Auto tagging.
+                try:
+                    if trim_genres(af, genre_count):
+                        genre_trimmed += 1
+                except Exception:
+                    pass
             if do_mood:
                 try:
                     # The decode is the expensive part (librosa, seconds per
@@ -632,11 +721,13 @@ def run_auto_tagging(config):
                 except Exception:
                     continue
 
-        modified = (modified or 0) + mood_modified + genre_modified
+        modified = (modified or 0) + mood_modified + genre_modified + genre_trimmed
         if mood_modified:
             notes.append("mood")
         if genre_modified:
             notes.append("genre")
+        if genre_trimmed:
+            notes.append(f"genre trimmed to {genre_count}")
         return album, modified, notes, advisory_value, info
 
     counts = {"ok": 0, "skip": 0, "fail": 0}

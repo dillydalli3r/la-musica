@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from .config import DEFAULT_CONFIG
 from .containers import (
     _read_flac_tags, _write_flac_tags, _identity_missing, _enabled,
 )
@@ -153,21 +154,6 @@ def _set_semantic_tag(af, name, value):
     return af.set_any_tag(key, value)
 
 
-def _ffprobe_tags(ffprobe_exe, path):
-    """Metadata dict from ffprobe (keys as the source stores them) or {}."""
-    try:
-        proc = run_tool(
-            [ffprobe_exe, "-v", "error", "-print_format", "json",
-             "-show_format", path],
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=30,
-        )
-        data = json.loads(proc.stdout or "{}")
-        return (data.get("format") or {}).get("tags") or {}
-    except Exception:
-        return {}
-
-
 def _convert_lossless_source(args):
     """Convert one lossless source file to the configured target codec.
 
@@ -193,6 +179,8 @@ def _convert_lossless_source(args):
     if os.path.exists(dest):
         return (filename, False, f"skipped (same-stem {out_ext} exists)", 0, 0)
 
+    src_dur = 0.0
+    raw_tags = {}
     try:
         src_probe = run_tool(
             [ffprobe_exe, "-v", "error", "-print_format", "json",
@@ -200,8 +188,13 @@ def _convert_lossless_source(args):
             capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=30,
         )
-        src_dur = float((json.loads(src_probe.stdout or "{}")
-                         .get("format") or {}).get("duration") or 0)
+        src_format = json.loads(src_probe.stdout or "{}").get("format") or {}
+        src_dur = float(src_format.get("duration") or 0)
+        # -show_format carries the tags too, so this one probe feeds both the
+        # duration check below and the tag copy further down: asking ffprobe
+        # for the same JSON a second time was one extra process spawn per
+        # converted file.
+        raw_tags = src_format.get("tags") or {}
     except Exception:
         src_dur = 0.0
 
@@ -212,7 +205,16 @@ def _convert_lossless_source(args):
         if codec == "flac":
             enc_args = enc_args + ["-compression_level", str(flac_level)]
         cmd = [ffmpeg_exe, "-y", "-v", "error", "-nostdin", "-i", filepath,
-               "-map", "0:a:0"] + enc_args + [tmp]
+               "-map", "0:a:0"]
+        # Embedded art is an attached_pic VIDEO stream, so mapping audio alone
+        # dropped it before the original — the only copy of that artwork — was
+        # deleted. Copied only when the library is set to keep covers: the "?"
+        # keeps an audio-only source working, and copy keeps the picture
+        # bit-exact.
+        if (bool(config.get("embed_covers", False))
+                or bool(config.get("flac_preserve_picture", False))):
+            cmd += ["-map", "0:v?", "-c:v", "copy"]
+        cmd += enc_args + [tmp]
         try:
             proc = run_tool(cmd, capture_output=True, text=True,
                             encoding="utf-8", errors="replace", timeout=60 * 60)
@@ -243,7 +245,6 @@ def _convert_lossless_source(args):
         try:
             from .audio import AudioFile
             out_af = AudioFile(tmp)
-            raw_tags = _ffprobe_tags(ffprobe_exe, filepath)
             seen = set()
             out_af.defer_save(True)
             for k, v in raw_tags.items():
@@ -318,15 +319,6 @@ def _convert_lossless_source(args):
             except OSError:
                 pass
         b_add = out_size
-        # The audio just changed name (extension) under a cue sheet that
-        # names the file it was ripped from — repoint it here, where the
-        # rename happens, instead of hoping a later CUE script runs (a
-        # standalone "Optimize FLACs" used to leave the sheet dead).
-        try:
-            from .discs import fix_cue_filenames
-            fix_cue_filenames(os.path.dirname(dest) or ".", config=config)
-        except Exception:
-            pass
         src_label = os.path.splitext(filepath)[1].lstrip(".").upper()
         dst_label = out_ext.lstrip(".").upper()
         return (filename, True,
@@ -374,6 +366,22 @@ def _should_reencode_flac(filepath, target_quality, target_version, force,
     return False, f"already at quality={q}, version={v}", ours
 
 
+def _flac_has_seektable(filepath):
+    """Whether *filepath* carries a SEEKTABLE block.
+
+    mutagen reads only the metadata blocks, so this replaces a metaflac
+    --list process spawn per file (one exe launch per foreign file on every
+    run of the script). A file mutagen cannot parse reports True, which
+    keeps the caller's old "assume the block is there" behaviour instead of
+    silently doing nothing.
+    """
+    try:
+        from mutagen.flac import FLAC, SeekTable
+        return any(isinstance(b, SeekTable) for b in FLAC(filepath).metadata_blocks)
+    except Exception:
+        return True
+
+
 def _optimize_flac(args):
     # Backwards compatible: older callers pass 8 args, new pass 9 with config
     if len(args) == 9:
@@ -404,7 +412,7 @@ def _optimize_flac(args):
     filename = os.path.basename(filepath)
     temp_path = filepath + ".opttmp.flac"
 
-    should_reencode, reason, ours = _should_reencode_flac(
+    should_reencode, reason, _ours = _should_reencode_flac(
         filepath,
         flac_level,
         target_version,
@@ -416,41 +424,32 @@ def _optimize_flac(args):
     # needs tag cleanup; otherwise don't mutate a file we will skip.
     # _clean_flac_tags is applied to the temp output after the flac re-encode.
     if not should_reencode:
-        # Even when skipping re-encode, actively remove seektables if
-        # required - but only for files this pipeline did not write
-        # itself: our own output is encoded --no-seektable and already
-        # stripped, so the metaflac pass would be pure process-spawn
-        # overhead (one exe launch per file on every re-run).
+        # Even when skipping the re-encode the seektable state has to be
+        # applied: `add_seektables` is NOT part of the skip decision (the
+        # ENCODER tags say nothing about it), so a foreign FLAC that already
+        # carries our tags would otherwise never get the seektable the current
+        # setting asks for — and one of ours encoded under the other setting
+        # would keep the wrong state forever. The block list is the only
+        # truth, and it is read from mutagen, so the pass costs no process
+        # spawn when the state already matches.
         try:
             original_size = os.path.getsize(filepath)
         except OSError as e:
             return (filename, False, f"cannot stat file: {e}", 0, 0)
 
-        if not add_seektables and metaflac_exe and not ours:
-            # Quick pre-check: avoid launching metaflac --remove when no SEEKTABLE exists.
-            # Use --list to inspect; if no SEEKTABLE block, skip entirely (no rewrite, no mtime touch).
+        if metaflac_exe and _flac_has_seektable(filepath) != bool(add_seektables):
+            # "--add-seekpoint=10s", not "--add-seektable": metaflac has no
+            # such option (flac 1.5 rejects it) — adding seekpoints IS how a
+            # SEEKTABLE is created. 10 s is flac.exe's own default spacing, so
+            # the file ends up with the table a fresh encode would have
+            # written.
+            cmd = ([metaflac_exe, "--add-seekpoint=10s", filepath]
+                   if add_seektables
+                   else [metaflac_exe, "--remove", "--block-type=SEEKTABLE",
+                         filepath])
             try:
-                has_seek = True  # default to attempting removal if check fails
-                try:
-                    lr = run_tool(
-                        [metaflac_exe, "--list", filepath],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                    )
-                    out = (lr.stdout or "") + (lr.stderr or "")
-                    has_seek = "SEEKTABLE" in out.upper()
-                except Exception:
-                    has_seek = True
-                if not has_seek:
-                    return (filename, False, f"skipped ({reason})", 0, 0)
                 result = run_tool(
-                    [
-                        metaflac_exe,
-                        "--remove",
-                        "--block-type=SEEKTABLE",
-                        filepath,
-                    ],
+                    cmd,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -461,17 +460,23 @@ def _optimize_flac(args):
                     log(c(f"[strip warn] {filename}: metaflac failed: {err}",
                           Color.YELLOW))
                 else:
-                    final_size = os.path.getsize(filepath)
-
-                    if final_size != original_size:
-                        b_rem, b_add = _diff_bytes(original_size, final_size)
-                        return (
-                            filename,
-                            True,
-                            "removed seektable (skipped re-encode)",
-                            b_rem,
-                            b_add,
-                        )
+                    # The BLOCK STATE, not the byte delta, says whether the
+                    # pass changed anything: adding a seekpoint block can
+                    # consume the padding block and leave the file exactly the
+                    # size it was.
+                    if _flac_has_seektable(filepath) != bool(add_seektables):
+                        return (filename, False, f"skipped ({reason})", 0, 0)
+                    b_rem, b_add = _diff_bytes(original_size,
+                                               os.path.getsize(filepath))
+                    return (
+                        filename,
+                        True,
+                        "added seektable (skipped re-encode)"
+                        if add_seektables
+                        else "removed seektable (skipped re-encode)",
+                        b_rem,
+                        b_add,
+                    )
             except Exception:
                 pass
 
@@ -483,9 +488,16 @@ def _optimize_flac(args):
         return (filename, False, f"cannot stat file: {e}", 0, 0)
 
     flac_no_pad = bool(config.get("flac_no_padding", True)) if config else True
-    flac_args = [f"-{flac_level}", "-f"]
-    if flac_no_pad:
-        flac_args.append("--no-padding")
+    # -V makes flac.exe decode its own output and compare it with the source,
+    # so a bad encode fails here (returncode != 0) and the verified original is
+    # never replaced by a broken file.
+    flac_args = [f"-{flac_level}", "-f", "-V"]
+    # --padding is a CAP on the padding block flac.exe writes. flac_no_padding
+    # (the default) asks for none: the file is as small as it can be, at the
+    # price of a whole-file rewrite for every later tag pass (scripts 8/7/12/
+    # 16/10 all write tags). Keeping padding (the flag off) asks for 8192
+    # bytes — flac.exe's own default — which those passes swap in place.
+    flac_args.append("--padding=0" if flac_no_pad else "--padding=8192")
 
     if not add_seektables:
         flac_args.append("--no-seektable")
@@ -525,13 +537,18 @@ def _optimize_flac(args):
                 bool(config.get("embed_covers", False))
                 or bool(config.get("flac_preserve_picture", False))
             ) if config else False
-            no_pad = bool(config.get("flac_no_padding", True)) if config else True
             parts = []
             if not preserve_pic:
                 parts.append("PICTURE")
-            if no_pad:
-                parts.append("PADDING")
             parts.extend(["CUESHEET", "APPLICATION"])
+            if flac_no_pad:
+                # --padding=0 already wrote none, and this removes any the
+                # source carried, so the optimizer's own output is as small as
+                # the codec allows. Note a later TAG write (the ENCODER marker
+                # just above, script 10) makes mutagen add its own small
+                # padding block back — that is the swap-in-place headroom the
+                # following passes need, not something this setting controls.
+                parts.append("PADDING")
             if not add_seektables:
                 # SEEKTABLE already handled via flac --no-seektable, but also strip existing
                 if "SEEKTABLE" not in parts:
@@ -583,7 +600,7 @@ def _optimize_flac(args):
                 pass
 
 
-def _lossless_conversion_sources(target, targets, out_ext):
+def _lossless_conversion_sources(target, targets, out_ext, files=None):
     """Files whose lossless audio should be re-containerized into the target.
 
     LOSSLESS_SOURCE_EXTS (uncompressed or externally compressed lossless)
@@ -592,10 +609,15 @@ def _lossless_conversion_sources(target, targets, out_ext):
     FLACs qualify when the target is another codec (the setting means the
     library ends up in that codec). Files already in the target are left
     alone.
+
+    *files* is a candidate list the caller already walked (the FLAC pass
+    scans the same tree for its own extensions, so a FLAC-target run hands
+    its union list over instead of walking the library a second time).
     """
-    exts = LOSSLESS_SOURCE_EXTS + ((".m4a", ".mp4") if out_ext == ".flac" else (".flac",))
-    files = (sorted(_walk_files(target, exts)) if targets is None
-             else sorted(_collect_targets(targets, exts)))
+    if files is None:
+        exts = LOSSLESS_SOURCE_EXTS + ((".m4a", ".mp4") if out_ext == ".flac" else (".flac",))
+        files = (sorted(_walk_files(target, exts)) if targets is None
+                 else sorted(_collect_targets(targets, exts)))
     out = []
     for p in files:
         low = str(p).lower()
@@ -621,8 +643,10 @@ def convert_album_lossless(album_dir, cfg):
 
 
 def run_optimize_flacs(config):
-    flac_level = config["flac_level"]
-    add_seektables = config["add_seektables"]
+    # `.get` with the shipped default, like the rest of this module: a partial
+    # cfg (a test, the album-scoped conversion helper) must not KeyError here.
+    flac_level = config.get("flac_level", DEFAULT_CONFIG["flac_level"])
+    add_seektables = config.get("add_seektables", DEFAULT_CONFIG["add_seektables"])
     force = config.get("force_reencode_flac", False)
     stats = new_stats()
 
@@ -647,13 +671,18 @@ def run_optimize_flacs(config):
     print_header("FLAC Optimizer")
     log(f"lossless target codec: {out_ext.lstrip('.').upper()}")
     if codec == "flac":
-        strip_msg = "PICTURE, PADDING, CUESHEET, APPLICATION"
+        strip_msg = ("PICTURE, " if not (config or {}).get("embed_covers", False)
+                     and not (config or {}).get("flac_preserve_picture", False) else "")
+        strip_msg += "CUESHEET, APPLICATION"
+        if config.get("flac_no_padding", True):
+            strip_msg += ", PADDING"
         if not add_seektables:
             strip_msg += ", SEEKTABLE"
         log(
             f"level=-{flac_level} · seektables={'on' if add_seektables else 'off'} · "
             f"encoder={target_version} · force={'on' if force else 'off'} · "
-            f"padding=removed · strip={strip_msg}"
+            f"padding={'none' if config.get('flac_no_padding', True) else '8 KB'} · "
+            f"strip={strip_msg}"
         )
 
     target = os.path.abspath(config["music_folder"] or os.getcwd())
@@ -667,16 +696,22 @@ def run_optimize_flacs(config):
 
     targets = config.get("targets")
     flac_files = []
+    conv_scan = None
     if codec == "flac":
-        flac_files = _collect_targets(targets, (".flac",))
-        if targets is None:
-            flac_files = sorted(
-                [
-                    f
-                    for f in _walk_files(target, (".flac",))
-                    if not f.endswith(".opttmp.flac")
-                ]
-            )
+        # One walk for both passes: the conversion step below needs
+        # LOSSLESS_SOURCE_EXTS (+ ALAC-in-MP4) and used to walk the whole
+        # library again for them after this one had finished. The union is
+        # collected here and split, which is the same file set with one
+        # directory scan.
+        walk_exts = (".flac",) + LOSSLESS_SOURCE_EXTS + (".m4a", ".mp4")
+        walked = (sorted(_walk_files(target, walk_exts)) if targets is None
+                  else sorted(_collect_targets(targets, walk_exts)))
+        flac_files = sorted(
+            f for f in walked
+            if f.lower().endswith(".flac")
+            and not f.lower().endswith(".opttmp.flac")
+        )
+        conv_scan = walked
 
         # Deduplicate (Select All checks album + tracks -> duplicates) + normcase for Windows
         if len(flac_files) != len(set(os.path.normcase(p) for p in flac_files)):
@@ -751,7 +786,8 @@ def run_optimize_flacs(config):
 
     # ---- Lossless source conversion -> configured target codec ----
     if config.get("optimize_convert_lossless", True):
-        conv_files = _lossless_conversion_sources(target, targets, out_ext)
+        conv_files = _lossless_conversion_sources(target, targets, out_ext,
+                                                  conv_scan)
         seen_conv = {}
         for p in conv_files:
             seen_conv.setdefault(os.path.normcase(p), p)
@@ -804,6 +840,19 @@ def run_optimize_flacs(config):
                             _pbar_skip(pbar2, conv_counts)
                     if pbar2:
                         pbar2.close()
+
+                    # Repoint each album's cue sheets ONCE, after the batch:
+                    # the conversion renamed the files a rip produced, and a
+                    # per-file call re-read every sheet in the folder once per
+                    # track — and could still run before the folder's other
+                    # tracks had been converted, leaving their entries stale.
+                    for folder in sorted({os.path.dirname(p) or "."
+                                          for p in conv_files}):
+                        try:
+                            from .discs import fix_cue_filenames
+                            fix_cue_filenames(folder, config=config)
+                        except Exception:
+                            pass
 
     return stats
 

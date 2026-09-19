@@ -144,13 +144,15 @@ ok([i["code"] for i in res["issues"]] == ["ARTIST_DESCRIPTION_MISSING"]
    and res["pct"] == 0.0,
    f"the other toggle still grades its own artefact ({res})")
 
-# both off: nothing graded is nothing failed
+# both off: nothing graded is nothing failed — and nothing graded is 100%, not
+# 0%: the album rule (format_grade_report) reads the same state as a full
+# score, so a passing artist folder must not display an empty one.
 res = grade_artist(ART, {"grade_check_artist_image": False,
                          "grade_check_artist_description": False})
 ok((res["checks"], res["pass_count"], res["failed_checks"], res["pct"],
     res["pass"], res["issues"])
-   == (0, 0, 0, 0.0, True, []),
-   f"both checks disabled → checks=0, pct=0, pass=True ({res})")
+   == (0, 0, 0, 100.0, True, []),
+   f"both checks disabled → checks=0, pct=100, pass=True ({res})")
 
 # a folder that is not there must not raise
 missing = os.path.join(MF, "Artists", "Nobody")

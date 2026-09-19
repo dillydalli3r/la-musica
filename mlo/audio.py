@@ -291,6 +291,18 @@ TAG_MAP = {
         "mp3": ("TXXX", "AUDIOAUDITOR_OVERRIDE"),
         "mp4": ("freeform", "com.apple.iTunes", "AUDIOAUDITOR_OVERRIDE"),
     },
+    # Compilation flag (1 on a various-artists release). Picard, beets and
+    # iTunes all write it, the grader's vocabulary allows it — but with no
+    # entry here get_tag() read nothing and set_tag() fell through to
+    # set_any_tag(), which refuses "COMPILATION" on MP3/MP4 (not an ID3
+    # frame ID, not a 4-character atom): the tag was visible to every other
+    # tagger and unwritable to this one. ID3 keeps it in the iTunes TCMP
+    # frame, MP4 in the boolean cpil atom.
+    "COMPILATION": {
+        "flac": "COMPILATION",
+        "mp3": ("TCMP", None),
+        "mp4": "cpil",
+    },
     # Rip-log score (0-100) from AudioAuditor's cambia grading, written
     # to the tracks of MEDIA=CD releases only.
     "LOG_GRADE": {
@@ -394,6 +406,23 @@ TAG_MAP = {
 # a leading ID3v2 chunk — what Picard and foobar2000 write for .aac, and what
 # ffmpeg/ffprobe skip past when decoding the stream.
 _ID3_KINDS = ("mp3", "aac")
+
+# Lyrics transforms carry the language in the tag NAME (TRANSLATION-EN,
+# TRANSLITERATION-JA-LATN) — the same prefixes mlo.config keys the LYRICS
+# family on — so they cannot be fixed TAG_MAP entries. See set_tag.
+_LYRICS_TRANSFORM_PREFIXES = ("TRANSLATION-", "TRANSLITERATION-")
+
+
+def _is_id3_frame_id(key):
+    """True for a well-formed ID3v2 frame ID: four ASCII A-Z/0-9 bytes.
+
+    Guards set_any_tag: mutagen happily accepts a frame whose ID is not a
+    legal frame ID (an MP4 atom name like "©too" is four characters too) and
+    then writes a header no parser can walk, which loses every tag on the
+    file. Anything that is not a frame ID goes through TXXX:<name> instead."""
+    key = str(key)
+    return (len(key) == 4 and key.isascii() and key.isalnum()
+            and key.isupper())
 
 
 def _mp3_specs(spec):
@@ -501,11 +530,11 @@ class AacHandle:
         self.info = info
         self.tags = tag
 
-    def save(self):
+    def save(self, v2_version=4, v1=1):
         # Nothing loaded and nothing added: never prepend an empty chunk.
         if not self.tags and not self.tags.size:
             return
-        self.tags.save(self.path)
+        self.tags.save(self.path, v2_version=v2_version, v1=v1)
 
 
 def _load_aac(path):
@@ -562,18 +591,65 @@ class AudioFile:
         # Tag writers save on every call by default. Bulk callers flip this
         # on so a 30-tag edit rewrites the container once, not 30 times.
         self._defer_save = False
+        # ID3 write options (MP3 and raw .aac only): mutagen writes v2.4 and
+        # no ID3v1 chunk by default, but older players — and most car
+        # stereos — read v2.3, and a few very old ones read only ID3v1.
+        # Callers that care (the exporter's compatibility options) set these
+        # before the write; nothing else changes behaviour.
+        self.id3_version = 4
+        self.id3v1 = False
         self._dirty = False
         self._load()
+        # Write ID3 back in the version the file ARRIVED in. mutagen's save()
+        # defaults to v2.4 and its up-conversion drops frames v2.4 has no
+        # spelling for, so an untouched v2.3 file (the version most car
+        # stereos read) silently "upgraded" on the first tag write and lost
+        # whatever the converter could not carry over. A file with no ID3
+        # chunk yet keeps the 2.4 default; the exporter sets this explicitly.
+        if self.kind in _ID3_KINDS and self.audio is not None:
+            version = getattr(getattr(self.audio, "tags", None), "version", None)
+            # Only the two versions mutagen can write (a v2.2 file keeps the
+            # 2.4 default rather than asking for a version save() rejects).
+            if isinstance(version, tuple) and len(version) > 1 and version[1] in (3, 4):
+                self.id3_version = int(version[1])
+
+    def _save_container(self):
+        """Write the container through its own format writer.
+
+        ID3 containers honour ``id3_version`` / ``id3v1``: the v2.3
+        conversion runs here, once, over the frames this file actually holds
+        (mutagen's default is v2.4). Every other format saves unchanged.
+        """
+        if self.kind in _ID3_KINDS and (self.id3_version != 4 or self.id3v1):
+            if self.id3_version != 4:
+                tags = getattr(self.audio, "tags", None)
+                if tags is not None:
+                    try:
+                        tags.update_to_v23()
+                    except Exception:
+                        pass  # an unconvertible exotic frame: write it as-is
+            self.audio.save(v2_version=self.id3_version,
+                            v1=2 if self.id3v1 else 0)
+            self._invalidate_cache()
+            return True
+        self.audio.save()
+        return True
 
     def _invalidate_cache(self):
         """Drop the vorbis tag-read cache after any tag write."""
         self._tag_cache = None
 
     def defer_save(self, on=True):
-        """Defer container writes until flush() (or defer_save(False))."""
+        """Defer container writes until flush() (or defer_save(False)).
+
+        Turning deferral OFF writes the pending change and returns flush()'s
+        result, so a bulk caller can tell whether the one write it saved up
+        actually landed (a full disk or a read-only file used to look like a
+        success to every caller that ignores the return)."""
         self._defer_save = bool(on)
         if not on:
-            self.flush()
+            return self.flush()
+        return True
 
     def flush(self):
         """Write pending tag changes to disk (no-op when nothing changed)."""
@@ -582,7 +658,7 @@ class AudioFile:
         if self.audio is None:
             return False  # nothing loaded: a pending write could never land
         try:
-            self.audio.save()
+            self._save_container()
             self._dirty = False
             return True
         except Exception as e:
@@ -595,7 +671,7 @@ class AudioFile:
         self._dirty = True
         if self._defer_save:
             return True
-        self.audio.save()
+        self._save_container()
         self._dirty = False
         return True
 
@@ -931,14 +1007,19 @@ class AudioFile:
         return None
 
     def _mp4_read(self, atom):
-        """Value of one MP4 atom spelling (None when the atom is absent)."""
+        """Value of one MP4 atom spelling (None when the atom is absent).
+
+        A freeform atom can hold several values (the repeated fields
+        set_tag writes for a list); they read back "; "-joined, exactly like
+        the Vorbis and ID3 branches, instead of only the first one."""
         if isinstance(atom, tuple) and atom[0] == "freeform":
             _, mean, name = atom
+            vals = []
             for k in self._mp4_freeform_keys(mean, name):
-                vals = self.audio.tags.get(k) if self.audio.tags else None
-                if vals:
-                    return _decode_mp4_value(vals[0])
-            return None
+                vals.extend(_decode_mp4_value(v)
+                            for v in (self.audio.tags.get(k) or []))
+            vals = [v for v in vals if v not in (None, "")]
+            return "; ".join(vals) if vals else None
         return self._mp4_text(self.audio.get(atom))
 
     def _mp4_delete(self, atom):
@@ -993,12 +1074,27 @@ class AudioFile:
 
     @staticmethod
     def _mp4_text(value):
-        # Only lists are unwrapped: a bare tuple is a trkn/disk pair and
-        # must render as "n/total" (all_tags passes it unwrapped).
-        if isinstance(value, list) and value:
-            value = value[0]
+        # Repeated values ("two genres") read as the "; "-joined string the
+        # other container branches return: taking value[0] alone hid every
+        # repeat from get_tag and all_tags.
+        if isinstance(value, list):
+            if len(value) > 1:
+                return "; ".join(AudioFile._mp4_text(v) for v in value)
+            if value:
+                value = value[0]
+        # A bare tuple is a trkn/disk pair and must render as "n/total"
+        # (all_tags passes it unwrapped). A total of 0 is how MP4 spells
+        # "no total" — writing "3" stored (3, 0), which read back as "3/0"
+        # and so never round-tripped; a pair that HAS a total keeps it.
         if isinstance(value, tuple) and len(value) >= 2:
+            if not value[1]:
+                return str(value[0])
             return f"{value[0]}/{value[1]}"
+        if isinstance(value, bool):
+            # Boolean atoms (cpil, pgap, …) come back from mutagen as bools;
+            # the app's spelling of a flag is "1"/"0" — str(True) is neither
+            # what set_tag() wrote nor what any grader compares against.
+            return "1" if value else "0"
         if isinstance(value, bytes):
             return value.decode("utf-8", "replace")
         return str(value) if value is not None else None
@@ -1153,7 +1249,14 @@ class AudioFile:
 
             if self.kind in ("flac", "ogg", "opus"):
                 for k, v in self.audio.tags.items():
-                    val = v[0] if isinstance(v, list) and v else v
+                    # Repeated values (several GENREs, two ARTISTs) read as
+                    # the "; "-joined string get_tag returns. Keeping only
+                    # the first one hid every repeat from all_tags consumers
+                    # — the tag editor, the excess-tag check, Format All —
+                    # and a writer that fed the single value back through
+                    # set_tag dropped the rest of the list off the file.
+                    val = ("; ".join(str(x) for x in v)
+                           if isinstance(v, list) else v)
                     if isinstance(val, bytes):
                         continue
                     raw = str(k)
@@ -1203,11 +1306,17 @@ class AudioFile:
                 for k, v in self.audio.tags.items():
                     if k == "covr":
                         continue
-                    val = v[0] if isinstance(v, list) and v else v
-                    if isinstance(val, MP4FreeForm):
-                        val = _decode_mp4_value(val)
-                    if isinstance(val, bytes):
+                    vals = v if isinstance(v, list) else [v]
+                    # Freeform atoms carry their text inside MP4FreeForm;
+                    # binary values (covr, or an atom a tool wrote as bytes)
+                    # stay out of the tag list.
+                    if vals and isinstance(vals[0], MP4FreeForm):
+                        vals = [_decode_mp4_value(x) for x in vals]
+                    if any(isinstance(x, bytes) for x in vals):
                         continue
+                    # The whole list goes in: _mp4_text joins repeats with
+                    # "; " (and renders a trkn/disk pair as "n/total")
+                    # instead of dropping every value but the first.
                     raw = str(k)
                     canonical = raw
                     if raw.startswith("----:com.apple.iTunes:"):
@@ -1225,10 +1334,79 @@ class AudioFile:
                              if any(not isinstance(a, tuple) and a == raw
                                     for a in _mp4_specs(spec))), raw
                         )
-                    out[canonical] = self._mp4_text(val) or ""
+                    out[canonical] = self._mp4_text(vals) or ""
         except Exception:
             return {}
         return out
+
+    def tag_values(self, name):
+        """EVERY stored value of one tag, in file order ([] when absent).
+
+        get_tag()/all_tags() join repeated values with "; " so a reader sees
+        them all in one string; a WRITER needs the pieces back, because the
+        containers hold repeats natively (three GENREs, two ARTISTs) and
+        set_tag() given the joined string would store ONE value literally
+        named "Rock; Pop". *name* is a semantic TAG_MAP name or, for a
+        custom tag, the raw key all_tags() emits ("TXXX:FOO",
+        "----:com.apple.iTunes:FOO").
+        """
+        if self.audio is None:
+            return []
+        name = str(name)
+        try:
+            if self.kind in ("flac", "ogg", "opus"):
+                spec = TAG_MAP.get(name.upper())
+                want = str(spec["flac"] if spec else name).lower()
+                for k, v in (self.audio.tags or {}).items():
+                    if str(k).lower() != want:
+                        continue
+                    vals = v if isinstance(v, list) else [v]
+                    return [str(x) for x in vals if not isinstance(x, bytes)]
+                return []
+
+            if self.kind in _ID3_KINDS:
+                spec = TAG_MAP.get(name.upper())
+                specs = _mp3_specs(spec) if spec else ()
+                if not specs:
+                    specs = ((("TXXX", name[5:]) if name.upper().startswith("TXXX:")
+                              else (name, None)),)
+                out = []
+                for frame_type, desc in specs:
+                    if frame_type in ("USLT", "UFID"):
+                        value = self._id3_read(frame_type, desc)
+                        return [value] if value else []
+                    for frame in self.audio.tags.getall(frame_type):
+                        if frame_type == "TXXX" and (
+                                str(frame.desc).upper() != str(desc or "").upper()):
+                            continue
+                        # Another language's comment is not this tag's value.
+                        if frame_type == "COMM" and getattr(frame, "lang", "eng") != "eng":
+                            continue
+                        text = getattr(frame, "text", None)
+                        out.extend(str(x) for x in (text if isinstance(text, list)
+                                                    else [text] if text is not None else []))
+                    if out:
+                        return out
+                return []
+
+            if self.kind == "mp4":
+                spec = TAG_MAP.get(name.upper())
+                atoms = _mp4_specs(spec) if spec else (name,)
+                out = []
+                for atom in atoms:
+                    if isinstance(atom, tuple) and atom[0] == "freeform":
+                        for k in self._mp4_freeform_keys(atom[1], atom[2]):
+                            for v in self.audio.tags.get(k) or []:
+                                out.append(_decode_mp4_value(v))
+                    else:
+                        for v in self.audio.get(atom) or []:
+                            out.append(self._mp4_text(v))
+                    if out:
+                        return [str(x) for x in out if x is not None]
+                return []
+        except Exception:
+            return []
+        return []
 
     def set_any_tag(self, key, value):
         """Write an arbitrary tag key (raw container key).
@@ -1275,13 +1453,17 @@ class AudioFile:
                     self.audio.tags.add(
                         TXXX(encoding=Encoding.UTF8, desc=desc, text=[value])
                     )
-                elif len(str(key)) != 4:
-                    # An ID3 frame ID is exactly four characters. Writing a
-                    # longer key produced a malformed frame that no reader
-                    # (this app included) can find, so the value was lost
-                    # silently — refuse it and name the working spelling.
+                elif not _is_id3_frame_id(str(key)):
+                    # An ID3 frame ID is exactly four A-Z/0-9 bytes. A longer
+                    # key produced a malformed frame that no reader (this app
+                    # included) can find, and a key that merely has four
+                    # CHARACTERS — an MP4 atom name like "©too" — is worse:
+                    # mutagen writes it as a frame header anyway and the whole
+                    # tag block stops parsing, which silently wiped every tag
+                    # on the file. Refuse both and name the working spelling.
                     self.error = (f"set_any_tag: {key!r} is not an ID3 frame "
-                                  f"ID — custom tags use TXXX:{key}")
+                                  f"ID (A-Z, 0-9, four of them) — custom tags "
+                                  f"use TXXX:{key}")
                     return False
                 else:
                     self.audio.tags.delall(str(key))
@@ -1431,6 +1613,18 @@ class AudioFile:
             # values (non-0/1/2) as failure; we don't silently coerce.
             pass
         spec = TAG_MAP.get(name)
+        if spec is None and name.startswith(_LYRICS_TRANSFORM_PREFIXES):
+            # TRANSLATION-EN / TRANSLITERATION-JA-LATN: the language lives in
+            # the tag NAME, so there is no fixed TAG_MAP entry for them (the
+            # set is open-ended). Without this they fell through to the
+            # arbitrary-key writer, which refuses a name that is neither an
+            # ID3 frame ID nor a 4-character MP4 atom — the transform was
+            # silently lost on MP3/AAC/MP4 while the caller's return value
+            # went unchecked. They use the same freeform spellings as the
+            # bare TRANSLATION/TRANSLITERATION entries (TXXX: / iTunes atom),
+            # which is where the readers look for them.
+            spec = {"flac": name, "mp3": ("TXXX", name),
+                    "mp4": ("freeform", "com.apple.iTunes", name)}
         if spec is None:
             # raw / unknown key: fall back to the arbitrary-key writer so
             # custom tags (TXXX:..., freeform atoms, vorbis comments) work
@@ -1532,17 +1726,24 @@ class AudioFile:
 
                     fmt = getattr(MP4FreeForm, "FORMAT_UTF8", 1)
 
+                    # One atom PER value, like the Vorbis/ID3 branches: the
+                    # list is repeated fields, not one atom holding "A; B".
                     try:
                         self.audio[key] = [
-                            MP4FreeForm(
-                                value.encode("utf-8"),
-                                dataformat=fmt,
-                            )
+                            MP4FreeForm(v.encode("utf-8"), dataformat=fmt)
+                            for v in (values or [value])
                         ]
                     except TypeError:
                         self.audio[key] = [
-                            MP4FreeForm(value.encode("utf-8"))
+                            MP4FreeForm(v.encode("utf-8"))
+                            for v in (values or [value])
                         ]
+                elif atom == "cpil":
+                    # The compilation flag is a BOOLEAN atom: mutagen renders
+                    # it as an int and refuses a str on save.
+                    self.audio[atom] = [
+                        1 if str(value).strip().lower() in ("1", "true", "yes") else 0
+                    ]
                 elif atom in ("trkn", "disk"):
                     pair = self._mp4_pair(value)
                     if pair is None:
@@ -1758,9 +1959,23 @@ class AudioFile:
                 return True
 
             elif self.kind in _ID3_KINDS:
-                self.audio.tags.delall("USLT")
+                # USLT carries ONE frame per language, so only the
+                # undescribed frame this app writes is replaced: a described
+                # one (a tagger's named translation) is left alone, exactly
+                # like the COMM rule in set_tag. The replacement keeps the
+                # language that frame declared, so rewriting a Japanese
+                # lyric does not relabel it "eng".
+                lang = "eng"
+                for frame in list(self.audio.tags.getall("USLT")):
+                    if frame.desc:
+                        continue
+                    lang = str(getattr(frame, "lang", "") or "eng")
+                    try:
+                        del self.audio.tags[frame.HashKey]
+                    except Exception:
+                        pass
                 self.audio.tags.add(
-                    USLT(encoding=Encoding.UTF8, lang="eng", desc="", text=text)
+                    USLT(encoding=Encoding.UTF8, lang=lang, desc="", text=text)
                 )
                 self._save()
                 return True
@@ -1801,7 +2016,17 @@ class AudioFile:
                 return True
 
             elif self.kind in _ID3_KINDS:
-                self.audio.tags.delall("USLT")
+                # Only the undescribed frames are this app's own lyrics: a
+                # USLT another tagger wrote under a description (a named
+                # translation) belongs to them and stays, like set_tag does
+                # for COMM.
+                for frame in list(self.audio.tags.getall("USLT")):
+                    if frame.desc:
+                        continue
+                    try:
+                        del self.audio.tags[frame.HashKey]
+                    except Exception:
+                        pass
                 self._save()
                 return True
 
@@ -1871,21 +2096,21 @@ class AudioFile:
                 if not self.audio.pictures:
                     return False
                 self.audio.clear_pictures()
-                self.audio.save()
+                self._save_container()
                 return True
 
             if self.kind in _ID3_KINDS and self.audio is not None and self.audio.tags:
                 if not self.audio.tags.getall("APIC"):
                     return False
                 self.audio.tags.delall("APIC")
-                self.audio.save()
+                self._save_container()
                 return True
 
             if self.kind == "mp4" and self.audio is not None and self.audio.tags:
                 if "covr" not in self.audio.tags:
                     return False
                 del self.audio.tags["covr"]
-                self.audio.save()
+                self._save_container()
                 return True
 
             if self.kind in ("ogg", "opus") and self.audio is not None and self.audio.tags:
@@ -1895,7 +2120,7 @@ class AudioFile:
                     return False
                 for k in keys:
                     del self.audio.tags[k]
-                self.audio.save()
+                self._save_container()
                 return True
             return False
         except Exception as e:
@@ -1912,7 +2137,7 @@ class AudioFile:
                 pic.mime = mime
                 pic.data = data
                 self.audio.add_picture(pic)
-                self.audio.save()
+                self._save_container()
                 return True
 
             if self.kind in _ID3_KINDS and self.audio is not None:
@@ -1920,13 +2145,13 @@ class AudioFile:
                     self.audio.add_tags()
                 self.audio.tags.delall("APIC")
                 self.audio.tags.add(APIC(encoding=3, mime=mime, type=3, data=data))
-                self.audio.save()
+                self._save_container()
                 return True
 
             if self.kind == "mp4" and self.audio is not None:
                 fmt = MP4Cover.FORMAT_PNG if mime == "image/png" else MP4Cover.FORMAT_JPEG
                 self.audio.tags["covr"] = [MP4Cover(data, imageformat=fmt)]
-                self.audio.save()
+                self._save_container()
                 return True
 
             if self.kind in ("ogg", "opus") and self.audio is not None:
@@ -1936,7 +2161,7 @@ class AudioFile:
                 pic.mime = mime
                 pic.data = data
                 self.audio.tags["METADATA_BLOCK_PICTURE"] = base64.b64encode(pic.write()).decode("ascii")
-                self.audio.save()
+                self._save_container()
                 return True
             return False
         except Exception as e:

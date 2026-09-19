@@ -280,24 +280,30 @@ def _track_paths(config):
 
 
 def _needs_analysis(path, force, overwrite):
-    """True when at least one of BPM/INITIALKEY is missing (or forced)."""
+    """(needed, af) — whether a tag is missing (or forced), and the handle it
+    was decided from.
+
+    The open handle is handed back so the write pass below reuses it: opening
+    the file here and again in _write_tags parsed every analysed container
+    twice for the same answers."""
     if force:
-        return True
+        return True, None
     try:
         af = AudioFile(path)
         has_bpm = bool(str(af.get_tag("BPM") or "").strip())
         has_key = bool(str(af.get_tag("INITIALKEY") or "").strip())
     except Exception:
-        return True
-    return overwrite or not (has_bpm and has_key)
+        return True, None
+    return (overwrite or not (has_bpm and has_key)), af
 
 
-def _write_tags(path, bpm, key_str, config):
+def _write_tags(path, bpm, key_str, config, af=None):
     """Write BPM/INITIALKEY respecting per-filetype gates. Returns True when
-    the file changed."""
+    the file changed. *af* is the already-open handle from _needs_analysis,
+    when there is one."""
     changed = False
     try:
-        af = AudioFile(path)
+        af = af or AudioFile(path)
         if bpm is not None and should_write_audio_tag(config, "BPM", filepath=path):
             if str(af.get_tag("BPM") or "").strip() != str(bpm):
                 if af.set_tag("BPM", str(bpm)):
@@ -338,12 +344,17 @@ def run_analyze_audiometa(config):
     overwrite = config.get("audiometa_overwrite", False)
     min_seconds = int(config.get("audiometa_min_seconds", 10) or 10)
 
-    paths = [p for p in _track_paths(config) if _needs_analysis(p, force, overwrite)]
-    if not paths:
+    pending = {}
+    for p in _track_paths(config):
+        needed, af = _needs_analysis(p, force, overwrite)
+        if needed:
+            pending[p] = af
+    if not pending:
         log("Nothing to analyze (all tracks already tagged).")
         return stats
 
     notation = config.get("audiometa_key_notation", "musical")
+    paths = sorted(pending)
     workers = worker_count(config, default=4, maximum=8, items=len(paths))
     counts = {"ok": 0, "skip": 0, "fail": 0}
     pbar = _make_pbar(len(paths), "Key & BPM", unit="file")
@@ -370,7 +381,7 @@ def run_analyze_audiometa(config):
         if key:
             tonic, minor = key
             key_str = _key_notation(tonic, minor, notation)
-        if _write_tags(path, bpm, key_str, config):
+        if _write_tags(path, bpm, key_str, config, af=pending.get(path)):
             stats["total_scanned"] += 1
             stats["modified_count"] += 1
             _pbar_update(pbar, counts, kind="ok")

@@ -10,7 +10,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 
 from mlo.stats import _find_albums, worker_count
-from mlo.grader import _grade_album
+from mlo.grader import _empty_folder_result, _find_empty_folders, _grade_album
 from mlo.audio import AudioFile
 from mlo.paths import LIB_VIDEO_EXTS, get_track_cover, load_expected_tracks
 from server import tagcache
@@ -223,8 +223,31 @@ def build_album(album_dir, cfg, light=False):
     res["artwork"] = _album_artwork(album_dir, light=light)
     tc = res.get("total_checks", 0)
     res["grade_pct"] = round(100.0 * res.get("pass_count", 0) / tc, 1) if tc else None
-    res["pass"] = res.get("pass_count", 0) == tc and tc > 0
+    # Same rule as the grader's own PASS — failed == 0 (run_grade_library) — so
+    # an album whose checks are all switched off is a PASS here too instead of
+    # disagreeing with the Grade script. grade_pct stays null for it: there is
+    # nothing to show a percentage of.
+    res["pass"] = res.get("pass_count", 0) == tc
     return res
+
+
+def _empty_album_row(folder, root):
+    """Library row for a folder with no audio track anywhere beneath it.
+
+    The Grade script's EMPTY_FOLDER row (mlo.grader._empty_folder_result) in
+    the shape this payload uses. The album tree is built from audio files, so
+    without it such a folder — and the failure it reports — would only ever be
+    visible in the run's output.
+    """
+    row = _empty_folder_result(folder, root)
+    row["path"] = row["path"].replace("\\", "/")
+    # grade_pct / pass exactly as build_album derives them (nothing passed out
+    # of one failed check), and a null audit: the artist rollup folds album
+    # audits together, and "" would read as a verdict of its own.
+    row["grade_pct"] = 0.0
+    row["pass"] = False
+    row["audit_summary"] = None
+    return row
 
 
 def _add_expected_tracks(res, album_dir):
@@ -318,17 +341,33 @@ def build_library(cfg, progress=None):
     cfg_key = library_cache_key(cfg)
 
     def _build():
-        albums = _find_albums(folder)
+        # One walk feeds the album list and the empty-folder sweep below (the
+        # same directory scan mlo.grader's run fills).
+        dir_scan = {}
+        albums = _find_albums(folder, dir_scan)
         artists = {}
         for alb in albums:
             artists.setdefault(os.path.dirname(alb), []).append(alb)
+        # A folder with no audio track anywhere beneath it never becomes an
+        # album, so the tree would never show the EMPTY_FOLDER failures the
+        # Grade script reports for it. The run's own row is added under the
+        # folder it sits in, so the library and the run name the same problems.
+        empty_rows = {}
+        if cfg.get("grade_check_empty_folders", True):
+            for d in _find_empty_folders(folder, dir_scan):
+                artists.setdefault(os.path.dirname(d), [])
+                empty_rows.setdefault(os.path.dirname(d), []).append(d)
 
         result = []
         total = len(artists)
         for i, (artist_dir, alb_list) in enumerate(sorted(artists.items())):
             if progress:
                 progress(i + 1, total, "Scanning library")
-            albums_data = build_albums_parallel(sorted(alb_list), cfg, light=True)
+            albums_data = (build_albums_parallel(sorted(alb_list), cfg, light=True)
+                           if alb_list else [])
+            albums_data.extend(_empty_album_row(d, folder)
+                               for d in empty_rows.get(artist_dir, []))
+            albums_data.sort(key=lambda a: str(a.get("path", "")).lower())
             agg = _aggregate_albums(albums_data)
             result.append({
                 "path": artist_dir.replace("\\", "/"),

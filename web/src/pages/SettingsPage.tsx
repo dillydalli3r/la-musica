@@ -24,13 +24,13 @@ const ACCENT_OPTIONS: { id: string; name: string; color: string }[] = [
 const ENCODER_FORMATS = ["flac", "jpeg", "png", "jxl"] as const;
 const ENCODER_FIELDS = ["ENCODER_PROGRAM", "ENCODER_QUALITY", "ENCODER_VERSION"] as const;
 const AUDIO_TYPES = ["flac", "mp3", "mp4", "ogg", "opus", "aac"] as const;
-const TAG_FAMILIES = ["AUDIT", "LOG_GRADE", "REPLAYGAIN", "DYNAMIC_RANGE", "MEDIA_SOURCE", "INSTRUMENTAL", "ADVISORY", "LYRICS", "BPM", "INITIALKEY", "ENERGY"] as const;
+const TAG_FAMILIES = ["AUDIT", "LOG_GRADE", "REPLAYGAIN", "DYNAMIC_RANGE", "MEDIA_SOURCE", "INSTRUMENTAL", "ADVISORY", "LYRICS", "GENRE", "BPM", "INITIALKEY", "MOOD", "ENERGY"] as const;
 
 /** Wave-2 keys an older config file predates. The form reads them through
  *  this map so a fresh install shows the real default (the backend fills in
  *  the same values when it loads the file) instead of an empty field. */
 const CFG_DEFAULTS: Record<string, unknown> = {
-  mb_genre_count: 3,
+  mb_genre_count: 2,
   genre_sources: ["rateyourmusic", "listenbrainz", "musicbrainz", "itunes", "wikidata", "lastfm", "discogs", "theaudiodb", "deezer"],
   advisory_auto_fetch: true,
   metadata_auto_fetch: true,
@@ -624,11 +624,12 @@ export default function SettingsPage() {
     },
     {
       title: "Videos (script 11)",
-      blurb: "Lossless remux: any video container → MKV with the video copied bit-exact and every audio stream re-encoded to FLAC (lossless, level below). Captions/subtitles are always kept and verified — never removed. If the muxer refuses the video codec, H.264 is a last-resort fallback. The original (e.g. the .VOB) is removed after a verified remux.",
+      blurb: "Lossless remux: any video container → MKV with the video copied bit-exact and lossless audio converted to FLAC (level below); lossy audio (AC3/DTS/AAC) is copied rather than inflated into FLAC unless that is turned off. Captions/subtitles are always kept and verified — never removed. If the muxer refuses the video codec, H.264 is a last-resort fallback (off by default: it re-encodes the only copy). The original (e.g. the .VOB) is removed after a verified remux.",
       fields: [
         { k: "youtube_enabled", label: "Fetch missing music videos from YouTube", type: "bool" },
         { k: "youtube_max_height", label: "Maximum video height (px, 0 = best available)", type: "number", min: 0, max: 4320 },
-        { k: "video_reencode_incompatible", label: "Allow H.264 video fallback (last resort)", type: "bool" },
+        { k: "video_reencode_incompatible", label: "Allow H.264 video fallback (lossy re-encode, last resort)", type: "bool" },
+        { k: "video_lossy_audio_copy", label: "Copy lossy audio streams instead of re-encoding to FLAC", type: "bool" },
         { k: "video_crf", label: "H.264 CRF (lower = better)", type: "number", min: 0, max: 51 },
         { k: "video_preset", label: "H.264 preset", type: "select", options: [["ultrafast","ultrafast"],["superfast","superfast"],["veryfast","veryfast"],["faster","faster"],["fast","fast"],["medium","medium"],["slow","slow"],["slower","slower"],["veryslow","veryslow"]] },
         { k: "video_flac_level", label: "FLAC compression (0-8)", type: "number", min: 0, max: 8 },
@@ -784,7 +785,10 @@ export default function SettingsPage() {
       title: "Import & tag cleanup",
       blurb: "Genre importing from MusicBrainz and tag hygiene applied while optimizing.",
       fields: [
-        { k: "mb_genre_count", label: "Genres imported per release (MusicBrainz)", type: "number", min: 1, max: 10 },
+        {
+          k: "mb_genre_count", label: "Genres per track (import, trimming and grading)", type: "number", min: 1, max: 10,
+          help: "One value, three consumers: an import writes this many genres onto a track (the best-voted source first), script 8 / the genre import / script 10 trim any excess off, and grading fails a track that carries fewer or more than this. Default 2 — a primary genre plus its most useful sub-genre.",
+        },
         {
           k: "genre_sources", label: "Genre sources — every ticked source is asked; unticked ones are never used", type: "multi",
           // The list IS the backend chain (the genre rows of
@@ -849,9 +853,12 @@ export default function SettingsPage() {
     { k: "grade_check_cd_format", label: "CD format", type: "bool" },
     { k: "grade_check_cover", label: "Cover present", type: "bool" },
     { k: "grade_check_cue_format", label: "CUE format", type: "bool" },
+    { k: "grade_check_cue_files", label: "Per-track CUE sheets (a CUE beside the tracks)", type: "bool" },
+    { k: "grade_check_accurip_format", label: ".accurip format", type: "bool" },
+    { k: "grade_check_expected_tracks", label: "Release tracklist manifest (albums carrying a MusicBrainz release id)", type: "bool" },
     { k: "grade_check_disallowed", label: "Disallowed files", type: "bool" },
     { k: "grade_check_extra_images", label: "Extra artwork (images not tied to a track)", type: "bool" },
-    { k: "grade_check_empty_folders", label: "Empty folders (nothing anywhere beneath them)", type: "bool" },
+    { k: "grade_check_empty_folders", label: "Empty folders (no files anywhere beneath them)", type: "bool" },
     { k: "grade_check_naming", label: "Naming script paths", type: "bool" },
     { k: "grade_check_filename_case", label: "Filename capitalization (exact case)", type: "bool" },
     { k: "grade_check_ext_case", label: "Lowercase file extensions", type: "bool" },
@@ -861,6 +868,7 @@ export default function SettingsPage() {
     { k: "grade_check_mood", label: "Mood tag present", type: "bool" },
     { k: "grade_check_energy", label: "Energy tag present (0-100, with MOOD)", type: "bool" },
     { k: "grade_check_genre", label: "Genre tag present", type: "bool" },
+    { k: "grade_check_genre_count", label: "Genre count per track (mb_genre_count, both directions)", type: "bool" },
     { k: "grade_check_album_description", label: "Album description stored", type: "bool" },
     { k: "grade_check_artist_image", label: "Artist image stored", type: "bool" },
     { k: "grade_check_artist_description", label: "Artist description stored", type: "bool" },

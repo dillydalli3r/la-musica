@@ -9,6 +9,14 @@ from .paths import LIB_AUDIO_EXTS, SKIP_DIRS, AUDIO_EXTS
 # rebuild this set at every level.
 _SKIP_DIRS_LOWER = {d.lower() for d in SKIP_DIRS}
 
+# What _walk_files records for a directory in its optional *dirs_out* scan:
+# whether the walk found no file, files of another kind, or a matching one. The
+# grader's empty-folder sweep needs both halves — a folder with no file at all
+# under it and a folder whose audio is gone while its sidecars are not.
+WALK_EMPTY = 0
+WALK_FILES = 1
+WALK_MATCHED = 2
+
 BAR_OPTS = dict(
     dynamic_ncols=True,
     ascii=False,
@@ -153,14 +161,21 @@ def _pbar_tick(pbar, counts):
         pass
 
 
-def _walk_files(root_dir, extensions):
-    """Fast recursive file walker using os.scandir()."""
+def _walk_files(root_dir, extensions, dirs_out=None):
+    """Fast recursive file walker using os.scandir().
+
+    *dirs_out*, when given, is filled with every directory the walk enters
+    (SKIP_DIRS pruned) mapped to what it holds directly — WALK_EMPTY,
+    WALK_FILES or WALK_MATCHED (see the constants above). One walk then answers
+    both "which albums are there" and "which folders hold no audio at all"
+    (mlo.grader's empty-folder sweep) instead of walking the library twice.
+    """
     if not os.path.isdir(root_dir):
         return
-    yield from _walk_dir(root_dir, extensions)
+    yield from _walk_dir(root_dir, extensions, dirs_out)
 
 
-def _walk_dir(root_dir, extensions):
+def _walk_dir(root_dir, extensions, dirs_out=None, _links=None):
     """The recursion half of :func:`_walk_files`.
 
     *root_dir* is known to be a directory here — its parent's scandir said so —
@@ -170,17 +185,77 @@ def _walk_dir(root_dir, extensions):
     unreadable between the scan and the descent still reports nothing: scandir
     raises OSError, which the guard below already swallows exactly as the
     old isdir check did.
+
+    Linked directories are FOLLOWED: an artist or album folder that is a
+    symlink (a mapped drive, a second library kept elsewhere) is a real folder
+    in this library, and the walker yielded nothing at all for it while it did
+    not — those albums were never graded. Only a linked entry pays for the
+    resolve (see :func:`_link_loops`); a link that points back up its own
+    chain, or at a target another link already brought in, is skipped so the
+    recursion cannot run away.
     """
+    if dirs_out is not None:
+        dirs_out[root_dir] = WALK_EMPTY
+    if _links is None:
+        _links = set()
     try:
         for entry in os.scandir(root_dir):
-            if entry.is_dir(follow_symlinks=False):
-                if entry.name.lower() not in _SKIP_DIRS_LOWER:
-                    yield from _walk_dir(entry.path, extensions)
-            elif entry.is_file(follow_symlinks=False):
-                if os.path.splitext(entry.name)[1].lower() in extensions:
+            if entry.is_dir(follow_symlinks=True):
+                if entry.name.lower() in _SKIP_DIRS_LOWER:
+                    continue
+                if _linked_dir(entry) and _link_loops(entry.path, root_dir, _links):
+                    continue
+                yield from _walk_dir(entry.path, extensions, dirs_out, _links)
+            elif entry.is_file(follow_symlinks=True):
+                matched = os.path.splitext(entry.name)[1].lower() in extensions
+                if dirs_out is not None:
+                    # Only ever climbs: a directory that already matched stays
+                    # matched whatever else it holds.
+                    if dirs_out.get(root_dir, WALK_EMPTY) < WALK_FILES:
+                        dirs_out[root_dir] = WALK_FILES
+                    if matched:
+                        dirs_out[root_dir] = WALK_MATCHED
+                if matched:
                     yield entry.path
     except OSError:
         pass
+
+
+def _linked_dir(entry):
+    """Whether a scanned directory entry is a link of any kind.
+
+    A Windows junction (``mklink /J``, a folder mounted into the library) is a
+    directory that ``DirEntry.is_symlink`` reports as False, so a walk that
+    only tested for symlinks would follow one — and one pointing back up its
+    own chain would recurse until the path outgrew the filesystem. Python < 3.12
+    has no ``is_junction``, where junctions simply stay the plain directories
+    they always were here.
+    """
+    if entry.is_symlink():
+        return True
+    try:
+        return entry.is_junction()
+    except AttributeError:
+        return False
+
+
+def _link_loops(path, parent, links):
+    """Whether following the linked directory *path* would revisit a folder.
+
+    Remembers each link's resolved target in *links*, so two links to the same
+    folder are walked once, and refuses a target that *parent* already sits
+    inside — that link points back up its own chain and would otherwise
+    recurse until the path outgrew the filesystem.
+    """
+    try:
+        target = os.path.realpath(path)
+        here = os.path.realpath(parent)
+    except OSError:
+        return False
+    if target in links or here == target or here.startswith(target + os.sep):
+        return True
+    links.add(target)
+    return False
 
 
 def is_audio_file(path):
@@ -222,14 +297,18 @@ def _decode_mp4_value(v):
         return str(v)
 
 
-def _find_albums(root_dir):
+def _find_albums(root_dir, dirs_out=None):
     albums = set()
     # The walker yields a directory's files one after another, so the parent
     # is the same string for the whole album: normalizing it once per album
     # instead of once per track saves a normpath call per file (a 20-track
     # album cost 20, the same path 20 times).
+    #
+    # *dirs_out* receives the walker's own directory scan (see _walk_files):
+    # the grader's empty-folder sweep reads it instead of walking the library
+    # a second time.
     last_raw = last_album = None
-    for file_path in _walk_files(root_dir, LIB_AUDIO_EXTS):
+    for file_path in _walk_files(root_dir, LIB_AUDIO_EXTS, dirs_out):
         raw = os.path.dirname(file_path)
         if raw != last_raw:
             # Normalize so F:/Music/Artists + \System\... mixed separators don't

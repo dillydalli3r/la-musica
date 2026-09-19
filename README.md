@@ -16,6 +16,27 @@ trash (`.mlo/trash`) beside it — one folder to back up or carry between
 machines.
 
 ## Highlights
+- **Export that fits the player, and an audit that stops guessing** (new in 2.8.0) — the Export page
+  grew the options a real device needs and every one of them is saved as a default: **cover art is
+  embedded** at a JPEG quality (60-100, default 90) and a longest-side cap (default 1200 px) you set,
+  MP3 exports are written as **ID3v2.3** (mutagen's v2.4 default is what older players and car stereos
+  choke on) with an optional ID3v1 chunk, **ReplayGain** track *and* album tags are measured with the
+  same EBU R128 meter script 7 writes tags from (the measurement rides along inside the transcode, so
+  it costs no extra decode), **`.m3u8` playlists**, covers, `.lrc`, `.cue`, `.log`, descriptions and the
+  artist image travel with the tracks, every written file is re-opened and proven to parse with the
+  source's duration, and the run uses **parallel workers** (auto by default). Codecs now include **AAC,
+  AIFF, ALAC, WavPack and WMA** beside MP3/Opus/Vorbis/WAV/FLAC/copy; multi-disc albums get the
+  library's own `1-01 Title` file name instead of colliding on `01 Title`; a re-run skips what is
+  already there (transcodes included, compared on duration + track identity, not file size); "sync
+  mode" removes audio the export did not write, and exporting *into* the music folder is refused
+  outright. The quality presets the page offers now come from the server's own table, so a new codec
+  needs no UI change. On the audit side, a **missing tool, a timeout or an undecodable file no longer
+  becomes a permanent FAKE** AUDIT verdict that every later run trusts and skips: a verdict is only
+  written where evidence exists, the `.accurip`/log-checksum verdicts are bound to the disc they came
+  from (multi-disc albums used to be graded by their neighbour's log), and ENERGY now follows the same
+  switch as MOOD — so a file this app optimized cannot fail this app's grader. Re-encoding an
+  incompatible video lossily is now **opt-in** (`video_reencode_incompatible`), because it used to
+  replace the only copy by default.
 - **Path-changing scripts run first, cues follow the audio, credits everywhere, and a full audit pass** (new in 2.7.5) — Run All and the import chain now order **11 videos → 3 FLACs → 14 beets** (its generated config sets `move: yes`) ahead of every reader, then the sidecar namers (15 tracklist → 2 CUEs → 1 lyrics format), then content, with 10 Format all and 4 Grade last; the old order formatted cues *before* the converters and moved the album with beets *after* images/audit/DR had been computed for the old paths. A cue's `FILE` line now follows a conversion: `fix_cue_filenames` used to skip a referenced name that still existed, which is exactly the case left by `lossless_remove_original` off (a `.wav` kept beside its `.flac`), the converter and the exporter both repoint their sheets, and the sheet's references are now a **graded check** (`grade_check_cue_files`). Multi-value tags are written as **repeated fields** (`GENRE`, so players stop showing one genre called "Dance-Punk; Electronic; Funk Rock") while `get_tag` still reads them back joined. **Credits** gained a menu on the track page (its album sibling already had one, and both now show the file-tag fallback). An **audit pass** over both halves of the app found and fixed 18 live bugs — five that silently did nothing (a Soulseek "Import & organize" that organized the album and then ran the whole script chain against the pre-rename path, so *no* script ran; a tag cache keyed without its read mode, which blanked MOOD/ReplayGain/AUDIO_MD5 on the track page once the library loaded; two settings fields whose values no code read, one of which was a transfer speed limit that never applied), four that reported success on failure (a folder where one disc's log was never graded answering `ok:true`, a per-track DR check that skipped albums whose *album* tag was missing and could never be repaired, a bulk-tag dialog counting refused writes as nothing to do, a `..` album name escaping the containment guard into the music-folder root), one permanent retry loop (a Soulseek queue item that kept its head slot after being refused as "already in your library"), one place the wrong file was returned (the track's own `.lrc` served as its *translation*), and two stale-cache/latch bugs (a failed RYM warm-up disabling it for that cookie until restart; the ffprobe/ffmpeg detection latch surviving a Dependencies install). Also corrected the CD-audit comments: the `.log` CRC is the authoritative verdict — AudioAuditor does not veto it.
 
 - **Offline app, honest downloads, live share index** (new in 2.7.4) — the app itself now opens with the server down: the service worker precaches the built shell (every lazy route chunk, listed by the build as `precache.json`) and caches the library/config/album/artist payloads, so a downloaded album plays, renders its description and browses its artist offline. Downloads warm those payloads and drop them with the last track of the album. Download failures carry a reason ("the server has no file at that path", "the download was cut short (2 MB of 41 MB)") instead of a bare count, a stalled stream now has a 120 s deadline and one retry, and a truncated body is rejected rather than cached. Two dead routes were found and fixed on the way: `/api/track/download` had lost its decorator and `/api/track/export` referenced `detect_all_tools` it never imported — every export answered 500. Soulseek's share refresh was dead code (a worker defined and never started): tags, scripts, optimizations, organizes and imports now schedule a debounced share rescan, so the daemon stops serving its boot-time file list.
@@ -148,9 +169,16 @@ machines.
   filters. Playlist pages look and behave exactly like album pages, with a
   2×2 mosaic cover built from the first four tracks.
 - **Export** — export tracks, albums, artists, playlists or the whole
-  library to MP3 (VBR/CBR presets + custom bitrates), Opus, Vorbis, WAV or
-  bit-exact FLAC copies, with a size estimate and drive-fit warning.
-  Cover art and identity tags travel with the files.
+  library to MP3 (VBR/CBR presets + custom bitrates), AAC, Opus, Vorbis,
+  WAV, AIFF, ALAC, WavPack, WMA or a bit-exact copy, into
+  Artist/Album, Album, flat or library-mirror layouts, with a size estimate
+  and a drive-fit warning. Cover art is embedded at a JPEG quality and
+  resolution you choose, MP3 exports write **ID3v2.3** (plus optional
+  ID3v1) for old players and car stereos, ReplayGain track+album tags are
+  measured with the same EBU R128 meter script 7 uses, `.m3u8` playlists,
+  covers, lyrics, cues, logs and descriptions travel with the files, every
+  written file is re-opened and verified, and the whole run uses parallel
+  workers. Every choice is saved to `config.json` as its default.
 - **Favorites** — liked tracks / albums / artists / playlists, consistent
   with the library views (ctrl-click a track title anywhere to open its
   track page for editing; the player bar title opens it too).
@@ -403,11 +431,13 @@ machines.
 - **Desktop + Web** — served by FastAPI (browser or Docker); a Tauri v2
   desktop shell lives in `desktop/`.
 
-## Optimization: the 17 scripts
+## Optimization: the 18 scripts
 
-Run All executes a configurable order (default shown in parentheses where
-it differs). Every script can run individually, on selected albums, or be
-forced to redo work.
+Run All executes a configurable order (Settings → Run All; the shipped order
+is 11 → 3 → 14 → 15 → 2 → 1 → 13 → 18 → 17 → 8 → 5 → 6 → 7 → 9 → 12 → 16 → 10
+→ 4, i.e. everything that moves a file first, everything that reads it last).
+Every script can run individually, on selected albums, or be forced to redo
+work.
 
 | # | Script | What it does |
 | --- | --- | --- |
@@ -425,7 +455,7 @@ forced to redo work.
 | 12 | Key & BPM | librosa-backed INITIALKEY + BPM (musical/camelot/openkey notation) |
 | 13 | Fetch lyrics | The configurable synced lyrics chain (default LRCLIB → NetEase → QQ Music → Kuwo → Kugou → YouTube captions) into the configured format (embedded / .lrc / both) |
 | 14 | Beets tagging | Managed beets (Picard parity) with the naming script, genre import, work/movement tags. Its output is streamed to the progress bar (one tick per item, so the longest step of a run is no longer a static label) and the plugin skips the locale-alias lookups a Latin-script library cannot use — measured on one 8-track CD album: 42 s → 14 s |
-| 15 | Release tracklist | Records the MusicBrainz release's own tracklist as `.mlo_expected.json` in the album folder (release id + disc/position/title/recording MBID per track) — the only way a PARTIAL import can name what never arrived. Grading requires it (`grade_check_expected_tracks`), the album page greys out the missing tracks from it, and `finish_album` runs it on every import path (after tagging, since it needs the release id the match wrote). An album with no MusicBrainz id is reported and skipped, never given a fabricated manifest |
+| 15 | Release tracklist | Records the MusicBrainz release's own tracklist as `.mlo_expected.json` in the album folder (release id + disc/position/title/recording MBID per track) — the only way a PARTIAL import can name what never arrived. Grading requires it (`grade_check_expected_tracks`) for albums whose tracks carry a MusicBrainz release id — an album with no id is never failed for a manifest it could not have, and never given a fabricated one — the album page greys out the missing tracks from it, and `finish_album` runs it on every import path (after tagging, since it needs the release id the match wrote) |
 | 16 | Mood & Energy | The mood classifier on its own: decodes each track's audio (librosa; videos through ffmpeg) and writes **MOOD** plus **ENERGY** — the 0-100 arousal the verdict was scored from. Script 8 runs the same stage as part of its pass; this is the one to run when only the mood work is wanted (a genre rewritten since, `mood_source` changed, ENERGY backfilled onto a library tagged before it existed). Already-tagged tracks are skipped unless the script is forced (`force_mood`), and `mood_enabled` off skips it entirely |
 | 17 | Lyrics transliterate (AI) | The one optional model in the app: romanizes non-Latin lyrics and translates them into every language in `lyrics_translation_langs`, writing `TRANSLITERATION-JA-LATN` / `TRANSLATION-EN` tags (and `.romaji.lrc` / `.<lang>.lrc` sidecars for LRC/BOTH lyric formats). Line structure and timings are preserved and re-synced at `lrc_sync_level`, so the transforms stay karaoke-aligned with the original; blank lines pass through, already-Latin lyrics are skipped (romanizing them is a no-op) and a "translation" that mirrors its source is not stored. Any OpenAI-compatible endpoint works (Settings → AI, or the setup wizard); answers are disk-cached per track so re-runs only pay for changed lyrics, and with no AI configured the script logs one line and does nothing |
 | 18 | Publish lyrics (LRCLIB) | Gives back: for every track that carries lyrics (embedded `LYRICS` or an `.lrc` sidecar) it asks LRCLIB whether it already knows that recording — artist, title, album and duration, the same exact-then-search lookup the fetch chain uses — and, when it does not, submits this library's own text (`POST /api/publish`). A synced text goes with its plain form beside it, because LRCLIB wants both. LRCLIB is the app's first lyrics provider, so a hand-tagged library is exactly what the database is missing. Default ON (`lrclib_auto_publish`; off skips the script everywhere), and a per-track rule the script can never override: a track LRCLIB already answers for is never touched (`force_publish` re-submits anyway). Skips are counted apart — `already on LRCLIB`, `no lyrics`, `instrumental`, `no duration` — and a 409 duplicate is a skip, not a failure. The manual *Publish to LRCLIB* button on the lyrics editor is unchanged and shares the same client. |
@@ -771,7 +801,14 @@ requires them:
 - **GENRE** — filled only when the tags carry none, from `genre_sources`,
   merged per track: the source order, then each source's names, then a
   case-insensitive de-duplication, Title Case, and a cap of
-  `mb_genre_count` (default 3) **per track**. The default is **MusicBrainz →
+  `mb_genre_count` (**genres per track**, default **2**) **per track**. That
+  one number is the whole policy: an import writes at most this many genres
+  onto a track (the best-voted source's names first, so what survives is what
+  that source ranked highest), script 8, the genre import buttons and script 10
+  **trim any excess off** an existing track, and grading fails a track that
+  carries fewer or more than this (`grade_check_genre_count`, the *Genre count*
+  check). An import that trimmed anything says so — naming the configured
+  value — as one of the album's warnings. Set it in Settings → Import. The default is **MusicBrainz →
   RateYourMusic** — the two the library actually agrees with; the other nine
   providers stay in the registry and can be added back in Settings →
   Discovery (a saved list is used exactly as saved, so an old eleven-source
@@ -811,7 +848,9 @@ requires them:
   - `soulseek` is not in the default list (peers advertise folders and file
     names, not genres); a saved source list naming it stays a documented no-op
     so older configs keep working.
-- **Graded.** *Mood tag present*, *Energy tag present* and *Genre tag
+- **Graded.** *Mood tag present*, *Energy tag present*, *Genre tag count*
+  (exactly `mb_genre_count` per track — too few and too many both fail,
+  `grade_check_genre_count`) and *Genre tag
   present* are per-track checks (on by default, `MOOD_MISSING` /
   `ENERGY_MISSING` / `GENRE_MISSING`), so a library that never ran script 8
   fails them until it does — which is the point: no track ships without a
@@ -827,12 +866,12 @@ The import paths share one pipeline now (`server/imports.py`):
   shows a progress bar: a real count where the work counts steps (the
   metadata fetch `1/3…3/3`), the websocket relay's own `done/total` for the
   long script runs — during *Run All* the label reads
-  `#step/total · script name` (e.g. `#4/18 · Format lyrics`), the bar carries
+  `#step/total · script name` (e.g. `#6/18 · Format lyrics`), the bar carries
   that step's own fraction, the readout beside it prints the WHOLE step count
   (`4/18`, never a spliced `3.9/18`: the fraction belongs to the bar, the
   number to the scripts finished), and a step that reports what it is doing
   adds it
-  behind a dash (`#2/18 · Beets tagging — looking up on MusicBrainz`), so a
+  behind a dash (`#3/18 · Beets tagging — looking up on MusicBrainz`), so a
   long silent phase still says where the run is — and an
   indeterminate bar plus a ticking clock for anything that cannot count.
   Every HTTP error — including "no MusicBrainz album/release-group ID on the
@@ -1092,6 +1131,30 @@ album and track pages show the verdict derived from the rip's own evidence, so
 a provably intact disc never renders red off a stale tag written by an older
 run.
 
+**A verdict needs evidence, and it is bound to the file it describes** (new in
+2.8.0). A stored `AUDIT` tag used to be trusted forever, and everything that
+was not a clean pass — a decoder that timed out, a file nobody could classify,
+a tool that is not installed — was written as `REAL`/`FAKE` and skipped on
+every later run. Now:
+
+- script 6 writes a verdict only where something actually verified it. A
+  missing `flac`/`ffmpeg`, an AudioAuditor timeout or an `info`-only answer
+  leaves the tag **untouched** (the run reports the file as *not verified*
+  instead of "all passed"), so a later run with the tool installed can still
+  decide.
+- a CD disc is only failed when the evidence to check it existed: CRC
+  verification, an `.accurip`, or CUETools. A missed log-checker in a
+  container is reported as unavailable, never as a bad rip.
+- the verdict is stamped with the file's size and mtime in
+  `<music>/.mlo/data/audit_evidence.json`, and a file whose stamp no longer
+  matches is re-audited — a replaced or re-encoded track cannot keep a verdict
+  about its predecessor.
+- `.accurip` files are judged per disc (`CD-1.accurip`, `CD-2.accurip`) and
+  regenerated when a track is newer than the log, so a re-ripped disc cannot
+  inherit its neighbour's verdict (or its own stale one).
+- the rip log's own score is accepted only when the log-checker exited cleanly
+  on a log whose EAC checksum it could validate.
+
 ### The rip's checksums are graded, not merely present (new in 2.6.9)
 
 Two checks make a rip's own numbers cost it the grade — independently of
@@ -1127,13 +1190,16 @@ old `.mlo_data` layout.
 The scan never moves, renames or deletes anything; acting on the report is
 what **Organize** and the scripts are for.
 
-- **A completely empty folder is a grading failure, not a footnote.** A folder
-  with no files anywhere beneath it can never become an album (albums are
-  derived from audio paths), so grading used to *skip* it silently; the
-  `grade_check_empty_folders` check (on by default) now walks the library and
-  reports every such folder as an `Empty folder` problem of its own, so an
-  empty artist/disc folder shows up in the counts instead of hiding. Toggle it
-  on the Grading page with the other checks.
+- **A folder with nothing to grade is a grading failure, not a footnote.** A
+  folder with no files anywhere beneath it can never become an album (albums
+  are derived from audio paths), so grading used to *skip* it silently; the
+  `grade_check_empty_folders` check (on by default) reports every such folder
+  as an `Empty folder` problem of its own, so an empty artist/disc folder shows
+  up in the counts instead of hiding. Folders that hold only album markers
+  (a `cover.*`, a `.cue`/`.log`, an `.accurip`, an `.lrc`) are reported the same
+  way — an album folder with a cover and no music is a problem, not a footnote.
+  Toggle it on the Grading page with the other checks, and the library view
+  shows the same rows (`EMPTY_FOLDER`).
 - **The scripts clean up after themselves.** At the end of every chain run
   (`/api/run`, an import, the bulk queue, the Soulseek importer) the folders a
   step may have emptied are pruned bottom-up: a disc folder or album folder
@@ -1167,6 +1233,49 @@ from those choices. `GET /api/cover/search` runs the search against the
 catalogue, `GET /api/cover/sources` lists the selectable sources, the regions
 and the saved defaults, and `POST /api/cover/fromurl` saves a chosen result to
 disk.
+
+## Export to a device (rewritten in 2.8.0)
+
+The Export page writes a selection — a playlist, albums, artists, single tracks
+or the whole library — onto a drive, and every choice on it is saved into
+`config.json` as its default ("Save as default"; the form loads those values
+when it opens, `export_*` keys).
+
+**Format.** `copy` keeps the original bytes (and the container), `flac` is a
+bit-exact copy for FLAC sources and a lossless re-encode for anything else, and
+MP3 (V0-V5 VBR or 128-320 CBR, or a custom bitrate), AAC/M4A, Opus, Ogg Vorbis
+(q0-q10 or custom), WAV, AIFF, ALAC, WavPack and WMA are re-encoded with
+ffmpeg. The quality list, its labels and the estimates come from the server's
+own codec table, so the two can never drift. WAV and AIFF carry no tag set
+this app can write, so those two exports keep the audio only (the page says so
+before you start).
+
+**Layout.** `artist_album` (default), `album`, `flat`, or `mirror` (the
+library's own tree, re-extensioned). A multi-disc album gets the library's
+`1-01 Title` file name, so its discs cannot collide on `01 Title`.
+
+**Compatibility options** (each one is both a per-run switch and a saved
+default):
+
+| Option | What it does |
+| --- | --- |
+| Embed covers | Embeds the album's `cover.*` (or, failing that, the file's own art) into every export, re-encoded to a JPEG quality (60-100, default 90) and downscaled to a longest-side cap (default 1200 px). The same preparation script 10 uses for the library, so embedded art matches the on-disk cover |
+| ID3v2.3 / ID3v1 | MP3 exports are written as ID3v2.3 by default (older players and car stereos do not read v2.4) with an optional ID3v1 chunk. A plain copy stays byte-exact |
+| ReplayGain | Measures each track with ffmpeg's EBU R128 meter — the same meter script 7 writes tags from — and stores `REPLAYGAIN_TRACK_GAIN/PEAK` plus one album gain/peak per album. On a transcode the measurement rides inside the same ffmpeg run (`ebur128` passes its input through), so it costs no extra decode |
+| Clean tags | Transcodes keep only the canonical tag set instead of the source's leftover frames |
+| Playlists | A `.m3u8` per exported album (UTF-8, relative paths, `#EXTINF` with the duration) plus an `all.m3u8` for the whole export |
+| Sidecars | Covers, `description.txt`, `.lrc`/`.cue`/`.log` and the artist image travel with the tracks, and a `.cue` that names the library's `.flac` files is repointed at what was actually exported |
+| Verify | Every written file is re-opened and proven to parse with the source's duration before the export reports success |
+| Sync mode | Removes audio under the export folder that this run did not write (a destination that mirrors the selection). Off by default — an export otherwise never deletes anything |
+| Parallel workers | Transcodes and copies run in parallel (auto = half the cores, capped at 8). Progress reports through the same header bar as the library scripts |
+
+**Safety.** Exporting *into* the music folder is refused (that is how a library
+gets overwritten); the subfolder is a single folder name under the drive root,
+never a path; a destination file that is not provably this source's export is
+reported as a failure instead of silently overwritten; the run checks the
+estimate against the drive's free space before it starts; and re-running an
+export is idempotent — an existing export is recognised by duration and track
+identity, transcodes included, so a second run only adds what is missing.
 
 ## Downloads — the sidebar page, and Soulseek's own tabs (new in 2.7.1)
 
@@ -1263,10 +1372,13 @@ import wizard's own "pick the folder to import" dialog is a different thing).
 Everything else (playlists, favourites, the beets library, the Soulseek
 config) lives in the same `.mlo` folder.
 
-Install the external toolchain from Settings → Dependencies (ffmpeg, flac,
-libjxl, oxipng, rsgain, AudioAuditor, Logchecker, CUETools, librosa, beets,
-slskd, yt-dlp — and optionally chromaprint/`fpcalc` for AcoustID matching).
-The UI walks you through the first-run setup.
+Install the external toolchain from Settings → Dependencies. The installer
+knows sixteen of them — ffmpeg, flac, libjxl, libjpeg-turbo (`jpegtran`),
+oxipng, rsgain, simple-dr-meter, AudioAuditor, Logchecker, php (Logchecker
+needs it), CUETools, chromaprint (`fpcalc`, optional — AcoustID matching),
+librosa, beets, slskd and yt-dlp — and shows the installed, pinned
+and upstream-available version of each. The UI walks you through the
+first-run setup.
 
 ### Sources & setup
 
@@ -1399,7 +1511,7 @@ is re-read on every pass, so switching it off stops the next one.
 python -m mlo
 ```
 
-That is the classic console menu (scripts 1–17, Run All, config editor), and
+That is the classic console menu (scripts 1–18, Run All, config editor), and
 it is **not** stdlib-only: `mlo` imports `mutagen` for every tag operation, so
 run it from the same environment that has `server/requirements.txt` installed
 (script 14 additionally needs `server/beetscfg` plus a vendored beets, and
@@ -1436,8 +1548,11 @@ so `docker compose pull` and watchtower have something to compare against.
   compose declares the same check so `docker compose ps` and watchtower see
   readiness.
 - **Toolchain in the image.** `ffmpeg`, `flac`, `libjxl`, `jpegtran`
-  (`libjpeg-progs`) and `libchromaprint-tools` (`fpcalc`) are installed from
-  apt and a failure there fails the build — these are the Linux counterparts
+  (`libjpeg-turbo-progs`) and `libchromaprint-tools` (`fpcalc`) are installed
+  from apt, together with `libsndfile1` and `libgomp1` — the shared libraries
+  the pip-installed librosa/numba stack links against, without which script 12
+  and 16 fail at import — and a failure there fails the build: these are the
+  Linux counterparts
   of `mlo/fetchdeps.py`'s Windows downloads, which the in-app installer refuses
   to fetch on Linux and points at the distro package instead. `oxipng` and
   `rsgain` are best-effort: Debian bookworm does not ship them, the image
@@ -1488,6 +1603,7 @@ Where the app stores what it fetches:
 | `<music>/.mlo/data/config.json` | all settings |
 | `<music>/.mlo/data/artwork.json` | provenance for artist images and album/artist descriptions (provider, source URL, fetch time) |
 | `<music>/.mlo/data/replaygain.json` | on-demand ReplayGain measurements (invalidated on size/mtime change) |
+| `<music>/.mlo/data/audit_evidence.json` | what each stored `AUDIT` verdict was proved on (source + the file's size/mtime, so a changed file is re-audited) |
 | `<music>/.mlo/data/metadata_review.json` | artist/album metadata candidates staged by `metadata_review` until you apply one |
 | `<music>/.mlo/data/rym_cache/` | RateYourMusic genre pages, cached for 30 days (1 request/second) |
 | `<music>/.mlo/data/wishes.db` | the wishlist |
@@ -1509,9 +1625,11 @@ Where the app stores what it fetches:
 | `GET /api/tags` | per-track tag/lyrics/cover read view |
 | `POST /api/tags/bulk` `POST /api/videos/tag` | bulk tag surgery; music-video tag writes |
 | `POST /api/lyrics/embed` `POST /api/lyrics/write` | embedded LYRICS / .lrc sidecar writes |
-| `POST /api/run` | run any of scripts 1–17 on targets |
+| `POST /api/run` | run any of scripts 1–18 on targets |
 | `POST /api/organize` | apply the naming script (dry-run supported) |
-| `POST /api/export` | multi-format export with codec/bitrate config |
+| `POST /api/export` | multi-format export: `paths`, `dest`, `subfolder`, `codec`, `quality`, `structure` plus the compatibility options (`embed_covers`, `embed_cover_jpeg_quality`, `embed_cover_resolution`, `id3v2`, `id3v1`, `replaygain`, `clean_tags`, `playlists`, `sidecars`, `verify`, `prune`, `workers`) — returns counts for exported/skipped/failed, bytes, sidecars, playlists, verified and pruned files, the drive-fit estimate and any warnings |
+| `GET /api/export/codecs` | every codec with the quality presets, the custom-value range and the kbps hint the size estimate uses (the server's table IS the UI's dropdown) |
+| `GET /api/export/drives` `GET /api/export/defaults` | candidate drives with free space and bus type; the saved `export_*` form values |
 | `GET/POST /api/playlists…` | manual + smart playlists, .m3u8 |
 | `GET /api/mb/release?mbid=…` `GET /api/mb/release-genres?mbid=…` | MusicBrainz release + genre cascade |
 | `POST /api/mb/match` `POST /api/mb/assign` | track/disc matching, MB/RYM/genre/advisory writes (ITUNESADVISORY is accepted only as 0/1/2 or empty) |

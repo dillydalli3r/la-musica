@@ -116,6 +116,39 @@ export interface Credits {
   release_mbid?: string;
 }
 
+/** One codec's spec as the server reports it (server/exporter.CODECS): the
+ * quality presets the dropdown shows and the custom range behind the
+ * "Custom…" entry. kbps is null when the output size cannot be predicted. */
+export interface ExportCodecSpec {
+  label: string;
+  ext: string | null;
+  presets: { v: string; label: string; kbps: number | null }[];
+  custom: { mode: "kbps" | "q"; min: number; max: number; default: number } | null;
+  default: string;
+}
+
+/** The Export page's form — the request body, and (key for key, under
+ * `export_<field>`) the saved defaults it loads on open. */
+export interface ExportForm {
+  dest: string;
+  subfolder: string;
+  codec: string;
+  quality: string;
+  structure: string;
+  embed_covers: boolean;
+  embed_cover_jpeg_quality: number;
+  embed_cover_resolution: number;
+  id3v2: string;
+  id3v1: boolean;
+  replaygain: boolean;
+  clean_tags: boolean;
+  playlists: boolean;
+  sidecars: boolean;
+  verify: boolean;
+  prune: boolean;
+  workers: number;
+}
+
 /** One item in <music folder>/.mlo/trash. `cover` is false when the cover
  *  endpoint would 404 for this directory — render a placeholder then. */
 export interface TrashEntry {
@@ -1165,13 +1198,31 @@ export const api = {
     }),
   // export to device
   exportDrives: () => json<{ drives: { letter: string; root: string; type: string; free: number | null; total: number | null }[] }>(`${API}/export/drives`),
-  exportCodecs: () => json<{ codecs: Record<string, string> }>(`${API}/export/codecs`),
-  exportRun: (body: { paths: string[]; dest: string; subfolder: string; codec: string; quality: string; structure: string }, timeoutMs = 1800000) =>
-    json<{ ok: boolean; total: number; exported: number; skipped: number; failed: number; bytes: number; errors: string[] }>(`${API}/export`, {
+  /** Codec specs come from the server (quality presets, custom ranges and
+   * the kbps hints the drive-fit estimate uses) so the page never mirrors a
+   * table the backend owns. */
+  exportCodecs: () => json<{ codecs: Record<string, ExportCodecSpec> }>(`${API}/export/codecs`),
+  exportDefaults: () => json<ExportForm>(`${API}/export/defaults`),
+  exportRun: (body: ExportForm & { paths: string[] }, timeoutMs = 1800000) =>
+    json<{
+      ok: boolean; total: number; exported: number; skipped: number; failed: number;
+      bytes: number; sidecars: number; playlists: number; verified: number;
+      pruned: number; pruned_files: string[]; warnings: string[];
+      error_count: number; errors: string[]; estimated_bytes: number | null;
+    }>(`${API}/export`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }, timeoutMs),
+  /** Write the Export page's form back into config.json (its saved defaults).
+   * Every field maps onto the `export_<field>` config key the server reads. */
+  exportSaveDefaults: (form: ExportForm) =>
+    json<Record<string, unknown>>(`${API}/config`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.fromEntries(
+        Object.entries(form).map(([k, v]) => [`export_${k}`, v]))),
+    }),
 
   soulseekUser: (username: string) =>
     json<any>(`${API}/soulseek/user/${encodeURIComponent(username)}`, undefined, 30000),
@@ -1404,6 +1455,10 @@ export const api = {
       per_track: boolean;
       sources: Record<string, string[]>;
       levels: Record<string, string | null>;
+      /** The configured genres-per-track cap (`mb_genre_count`) this run
+       *  applied, and how many tracks had extra values trimmed to reach it. */
+      genre_count: number;
+      trimmed: number;
     }>(`${API}/genres/import`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

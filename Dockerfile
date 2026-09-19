@@ -31,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         flac \
         libjxl-tools \
-        libjpeg-progs \
+        libjpeg-turbo-progs \
         libchromaprint-tools \
         libsndfile1 \
         libgomp1 \
@@ -42,12 +42,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# The dependency layer comes first and copies ONLY the requirements file: a
+# source edit must not invalidate it and re-download every wheel.
+COPY server/requirements.txt /app/server/requirements.txt
+RUN pip install --no-cache-dir -r /app/server/requirements.txt
+
 COPY --from=web-build /app/web/dist /app/web/dist
 COPY server/ /app/server/
 COPY mlo/ /app/mlo/
 COPY tools/ /app/tools/
-
-RUN pip install --no-cache-dir -r /app/server/requirements.txt
 
 # Run unprivileged. uid/gid 1000 is the usual first desktop user, which is what
 # a bind-mounted ./music is normally owned by (docker-compose.yml documents the

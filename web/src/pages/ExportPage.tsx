@@ -1,90 +1,47 @@
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, HardDriveDownload, Library, Search } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { AlertTriangle, HardDriveDownload, Library, RotateCcw, Save, Search } from "lucide-react";
 import { api } from "../api";
+import type { ExportCodecSpec, ExportForm } from "../api";
 import { toast } from "../store";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import { fmtDuration } from "../lib/fmt";
 import Segmented from "../components/Segmented";
 import PageHeader from "../components/PageHeader";
 
-/** Quality presets per codec — mirrors server/exporter.py CODECS tables.
- * Every transcode codec additionally offers "custom" (raw kbps / Vorbis q),
- * which the backend accepts as a plain number. */
-const QUALITY: Record<string, { v: string; label: string }[]> = {
-  copy: [],
-  flac: Array.from({ length: 9 }, (_, i) => 8 - i).map((lv) => ({
-    v: String(lv),
-    label: `level ${lv}${lv === 8 ? " (smallest, slowest)" : lv === 5 ? " (balanced)" : lv === 0 ? " (fastest)" : ""}`,
-  })),
-  mp3: [
-    { v: "V0", label: "V0 (~245 kbps VBR, best)" },
-    { v: "V1", label: "V1 (~225 kbps VBR)" },
-    { v: "V2", label: "V2 (~175 kbps VBR)" },
-    { v: "V3", label: "V3 (~155 kbps VBR)" },
-    { v: "V4", label: "V4 (~135 kbps VBR)" },
-    { v: "V5", label: "V5 (~115 kbps VBR)" },
-    { v: "320", label: "320 kbps CBR" },
-    { v: "256", label: "256 kbps CBR" },
-    { v: "192", label: "192 kbps CBR" },
-    { v: "128", label: "128 kbps CBR" },
-    { v: "custom", label: "Custom bitrate…" },
-  ],
-  aac: [
-    { v: "320", label: "320 kbps" },
-    { v: "256", label: "256 kbps" },
-    { v: "192", label: "192 kbps" },
-    { v: "128", label: "128 kbps" },
-    { v: "custom", label: "Custom bitrate…" },
-  ],
-  opus: [
-    { v: "320", label: "320 kbps" },
-    { v: "256", label: "256 kbps" },
-    { v: "224", label: "224 kbps" },
-    { v: "192", label: "192 kbps" },
-    { v: "160", label: "160 kbps" },
-    { v: "128", label: "128 kbps" },
-    { v: "112", label: "112 kbps" },
-    { v: "96", label: "96 kbps" },
-    { v: "80", label: "80 kbps" },
-    { v: "64", label: "64 kbps" },
-    { v: "custom", label: "Custom bitrate…" },
-  ],
-  vorbis: [
-    { v: "q10", label: "q10 (~320 kbps, best)" },
-    { v: "q9", label: "q9 (~280 kbps)" },
-    { v: "q8", label: "q8 (~256 kbps)" },
-    { v: "q7", label: "q7 (~224 kbps)" },
-    { v: "q6", label: "q6 (~192 kbps)" },
-    { v: "q5", label: "q5 (~160 kbps)" },
-    { v: "q4", label: "q4 (~128 kbps)" },
-    { v: "q3", label: "q3 (~112 kbps)" },
-    { v: "q2", label: "q2 (~96 kbps)" },
-    { v: "q1", label: "q1 (~80 kbps)" },
-    { v: "q0", label: "q0 (~64 kbps, smallest)" },
-    { v: "custom", label: "Custom q…" },
-  ],
-  wav: [
-    { v: "24", label: "24-bit" },
-    { v: "16", label: "16-bit (CD)" },
-  ],
-};
-
-const FALLBACK_CODEC_LABELS: Record<string, string> = {
-  copy: "Copy (original codec)",
-  flac: "FLAC (lossless)",
-  mp3: "MP3",
-  aac: "AAC / M4A",
-  opus: "Opus",
-  vorbis: "Ogg Vorbis",
-  wav: "WAV (PCM, uncompressed)",
-};
+/** The dropdown's synthetic entry for a codec's "custom value" field; the
+ * backend takes the plain number the field holds (kbps, or 0-10 for Vorbis),
+ * so nothing but the form needs to know the word. */
+const CUSTOM = "custom";
 
 const STRUCTURES = [
   { v: "artist_album", label: "Artist / Album / 01 - Title" },
+  { v: "album", label: "Album / 01 - Title" },
   { v: "flat", label: "Flat — one folder" },
   { v: "mirror", label: "Mirror library layout" },
 ];
+
+/** Rendered while the saved defaults are still loading; the same shape and the
+ * same first-run values the backend ships. */
+const BLANK_FORM: ExportForm = {
+  dest: "",
+  subfolder: "Music",
+  codec: "copy",
+  quality: "",
+  structure: "artist_album",
+  embed_covers: true,
+  embed_cover_jpeg_quality: 90,
+  embed_cover_resolution: 1200,
+  id3v2: "2.3",
+  id3v1: false,
+  replaygain: false,
+  clean_tags: true,
+  playlists: true,
+  sidecars: true,
+  verify: true,
+  prune: false,
+  workers: 0,
+};
 
 const SOURCE_KINDS = [
   { id: "playlist", label: "Playlist" },
@@ -99,19 +56,45 @@ function fmtGB(n: number | null): string {
   return n === null ? "—" : `${(n / 1024 ** 3).toFixed(1)} GB`;
 }
 
-/** Rough constant-bitrate output size for the drive-fit estimate; null =
- * size unknown (copy / FLAC, whose compressed size can't be predicted). */
-function estimateKbps(codec: string, quality: string, custom: string): number | null {
-  if (codec === "copy" || codec === "flac") return null;
-  if (codec === "wav") return quality === "24" ? 2117 : 1411;
-  const q = quality === "custom" ? custom : quality;
-  const n = parseInt(q.replace(/^[Vq]/i, ""), 10);
-  if (codec === "mp3") {
-    if (/^V/i.test(quality === "custom" ? "" : quality)) return { 0: 245, 1: 225, 2: 175, 3: 155, 4: 135, 5: 115 }[n] ?? 175;
-    return n || 190;
+/** Effective kbps for the drive-fit estimate, from the server's own preset
+ * hints (server/exporter.py CODECS). null = unpredictable: a bit-exact copy,
+ * a lossless re-encode, or a custom Vorbis q. */
+function effectiveKbps(spec: ExportCodecSpec | undefined, quality: string, custom: string): number | null {
+  if (!spec) return null;
+  const preset = spec.presets.find((p) => p.v === quality);
+  if (preset) return preset.kbps;
+  if (spec.custom && spec.custom.mode === "kbps") {
+    const n = parseInt(quality === CUSTOM ? custom : quality, 10);
+    if (!Number.isFinite(n)) return null;
+    return Math.min(spec.custom.max, Math.max(spec.custom.min, n));
   }
-  if (codec === "vorbis") return { 10: 320, 9: 280, 8: 256, 7: 224, 6: 192, 5: 160, 4: 128, 3: 112, 2: 96 }[n] ?? 160;
-  return n || 220; // aac / opus
+  return null;
+}
+
+/** One option row: the checkbox plus its one-line explanation. The
+ * compatibility switches are numerous enough that bare checkbox rows would
+ * not say what they do. */
+function Opt({ checked, onChange, label, hint, danger }: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  label: string;
+  hint: string;
+  danger?: boolean;
+}) {
+  return (
+    <label className="flex items-start gap-2 mt-2 text-xs text-zinc-300 cursor-pointer">
+      <input
+        type="checkbox"
+        className="mt-0.5"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span className="min-w-0">
+        <span className={"block " + (danger ? "text-amber-300" : "")}>{label}</span>
+        <span className="block text-[10px] text-zinc-600">{hint}</span>
+      </span>
+    </label>
+  );
 }
 
 /** Export any slice of the library — playlists, albums, artists, single
@@ -122,7 +105,9 @@ export default function ExportPage() {
   const { data: lib } = useQuery({ queryKey: ["library"], queryFn: api.library });
   const { data: playlists } = useQuery({ queryKey: ["playlists"], queryFn: api.playlists });
   const { data: drivesData } = useQuery({ queryKey: ["exportDrives"], queryFn: api.exportDrives });
-  const { data: codecLabels } = useQuery({ queryKey: ["exportCodecs"], queryFn: api.exportCodecs });
+  const { data: specs } = useQuery({ queryKey: ["exportCodecs"], queryFn: api.exportCodecs });
+  const { data: savedDefaults } = useQuery({ queryKey: ["exportDefaults"], queryFn: api.exportDefaults });
+  const queryClient = useQueryClient();
 
   const [sourceKind, setSourceKind] = useState<SourceKind>("playlist");
   const [playlistId, setPlaylistId] = useState<number | null>(null);
@@ -130,13 +115,17 @@ export default function ExportPage() {
   const [artistPaths, setArtistPaths] = useState<Set<string>>(new Set());
   const [trackPaths, setTrackPaths] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState("");
-  const [drive, setDrive] = useState("");
-  const [subfolder, setSubfolder] = useState("Music");
-  const [codec, setCodec] = useState("copy");
-  const [quality, setQuality] = useState("");
-  const [customKbps, setCustomKbps] = useState("192");
-  const [structure, setStructure] = useState("artist_album");
+  const [form, setForm] = useState<ExportForm | null>(null);
+  const [customValue, setCustomValue] = useState("192");
   const [busy, setBusy] = useState(false);
+
+  // What the form shows (and what a run sends): the user's edits, else the
+  // saved `export_*` config values, else the shipped defaults. An export uses
+  // exactly what is displayed; nothing is written back to config until "Save
+  // as default" is pressed.
+  const f = form ?? savedDefaults ?? BLANK_FORM;
+  const set = <K extends keyof ExportForm>(key: K, value: ExportForm[K]) =>
+    setForm({ ...f, [key]: value });
 
   const artists = useMemo(() => lib?.artists ?? [], [lib]);
   const albums = useMemo(() => artists.flatMap((a: any) => a.albums ?? []), [artists]);
@@ -186,6 +175,28 @@ export default function ExportPage() {
     );
   }, [trackRows, filter]);
 
+  // Bulk selection over the FILTERED list: "All" means "everything the filter
+  // shows", the only reading that cannot surprise after a search.
+  const listKeys = useMemo(() => {
+    if (sourceKind === "albums") return filteredAlbums.map((a: any) => a.path);
+    if (sourceKind === "artists") return filteredArtists.map((a: any) => a.path);
+    if (sourceKind === "tracks") return filteredTracks.map((t) => t.path);
+    return [];
+  }, [sourceKind, filteredAlbums, filteredArtists, filteredTracks]);
+
+  const bulkSelect = (on: boolean) => {
+    const apply = sourceKind === "albums" ? setAlbumPaths
+      : sourceKind === "artists" ? setArtistPaths : setTrackPaths;
+    apply((prev) => {
+      const next = new Set(prev);
+      for (const key of listKeys) {
+        if (on) next.add(key);
+        else next.delete(key);
+      }
+      return next;
+    });
+  };
+
   const { data: playlistDetail } = useQuery({
     queryKey: ["playlist", playlistId],
     queryFn: () => api.playlist(playlistId!),
@@ -213,9 +224,11 @@ export default function ExportPage() {
     () => paths.reduce((sum, p) => sum + (trackByPath.get(p)?.dur ?? 0), 0),
     [paths, trackByPath]
   );
-  const kbps = estimateKbps(codec, quality || QUALITY[codec]?.[0]?.v || "", customKbps);
+  const spec = specs?.codecs?.[f.codec];
+  const quality = f.quality;
+  const kbps = effectiveKbps(spec, quality, customValue);
   const estBytes = kbps !== null ? (totalSeconds * kbps * 1000) / 8 : null;
-  const selectedDrive = drivesData?.drives.find((d) => d.root === drive) ?? null;
+  const selectedDrive = drivesData?.drives.find((d) => d.root === f.dest) ?? null;
   const overCapacity = estBytes !== null && selectedDrive?.free != null && estBytes > selectedDrive.free;
 
   const toggle = (set: Set<string>, path: string, apply: (s: Set<string>) => void) => {
@@ -227,19 +240,27 @@ export default function ExportPage() {
 
   const run = async () => {
     if (!paths.length) return toast("Select something to export first");
-    const destRoot = drivesData?.drives.find((d) => d.root === drive)?.root;
+    const destRoot = drivesData?.drives.find((d) => d.root === f.dest)?.root;
     if (!destRoot) return toast("Choose a destination drive");
     setBusy(true);
     toast(`Exporting ${paths.length} track(s)…`);
     try {
       const r = await api.exportRun({
-        paths, dest: destRoot, subfolder, codec,
-        quality: quality === "custom" ? customKbps : quality || QUALITY[codec]?.[0]?.v || "",
-        structure,
+        ...f,
+        dest: destRoot,
+        quality: quality === CUSTOM ? customValue : quality || spec?.default || "",
+        paths,
       });
       const gb = (r.bytes / 1024 ** 3).toFixed(2);
+      const extras = [
+        r.skipped ? `${r.skipped} already there` : "",
+        r.playlists ? `${r.playlists} playlist(s)` : "",
+        r.sidecars ? `${r.sidecars} sidecar file(s)` : "",
+        r.pruned ? `${r.pruned} removed from the device` : "",
+      ].filter(Boolean).join(" · ");
       if (r.failed) toast.error(`Export finished with ${r.failed} failure(s): ${r.errors[0] ?? ""}`);
-      else toast.success(`Exported ${r.exported} track(s)${r.skipped ? ` (${r.skipped} already there)` : ""} · ${gb} GB`);
+      else toast.success(`Exported ${r.exported} track(s)${extras ? ` (${extras})` : ""} · ${gb} GB`);
+      if (r.warnings?.length) toast(r.warnings[0]);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -247,7 +268,21 @@ export default function ExportPage() {
     }
   };
 
-  const codecLabel = codecLabels?.codecs?.[codec] ?? FALLBACK_CODEC_LABELS[codec] ?? codec;
+  const saveDefaults = async () => {
+    try {
+      await api.exportSaveDefaults(f);
+      queryClient.invalidateQueries({ queryKey: ["exportDefaults"] });
+      queryClient.invalidateQueries({ queryKey: ["config"] });
+      toast.success("Export defaults saved");
+    } catch (e) {
+      toast.error(String(e));
+    }
+  };
+
+  const resetDefaults = () => {
+    if (savedDefaults) setForm(savedDefaults);
+    toast("Form reset to the saved defaults");
+  };
 
   return (
     <div className="p-6 space-y-5 mx-auto max-w-6xl">
@@ -302,6 +337,14 @@ export default function ExportPage() {
                   value={filter}
                   onChange={(e) => setFilter(e.target.value)}
                 />
+              </div>
+              <div className="flex items-center gap-2 mb-2 text-[11px]">
+                <button className="btn !py-0.5 !px-2 text-[11px]" onClick={() => bulkSelect(true)}>
+                  Select all{filter ? " matching" : ""} ({listKeys.length})
+                </button>
+                <button className="btn !py-0.5 !px-2 text-[11px]" onClick={() => bulkSelect(false)}>
+                  Clear
+                </button>
               </div>
               <div className="stagger max-h-64 overflow-y-auto border border-border rounded-md divide-y divide-border/60">
                 {sourceKind === "albums" && filteredAlbums.map((a: any) => (
@@ -414,11 +457,21 @@ export default function ExportPage() {
 
         {/* ---- destination + format ------------------------------------ */}
         <div className="panel">
-          <div className="text-xs font-bold text-zinc-300 mb-2">Destination</div>
+          <div className="flex items-center justify-between mb-2">
+            <div className="text-xs font-bold text-zinc-300">Destination</div>
+            <button
+              className="btn !py-0.5 !px-2 text-[11px]"
+              onClick={() => queryClient.invalidateQueries({ queryKey: ["exportDrives"] })}
+              title="Rescan the drives (a device plugged in after the page opened)"
+            >
+              <RotateCcw className="h-3 w-3" />
+              Rescan
+            </button>
+          </div>
           <select
             className="input !py-1 text-xs w-full"
-            value={drive}
-            onChange={(e) => setDrive(e.target.value)}
+            value={f.dest}
+            onChange={(e) => set("dest", e.target.value)}
           >
             <option value="">Choose a drive…</option>
             {(drivesData?.drives ?? []).map((d) => (
@@ -429,7 +482,7 @@ export default function ExportPage() {
           </select>
           <label className="flex items-center gap-2 mt-2 text-xs text-zinc-300">
             <span className="shrink-0">Subfolder</span>
-            <input className="input !py-1 text-xs flex-1" value={subfolder} onChange={(e) => setSubfolder(e.target.value)} />
+            <input className="input !py-1 text-xs flex-1" value={f.subfolder} onChange={(e) => set("subfolder", e.target.value)} />
           </label>
           {overCapacity && (
             <div className="flex items-start gap-2 mt-2 text-[11px] text-amber-300 border border-amber-500/30 bg-amber-500/10 rounded-md p-2">
@@ -447,14 +500,14 @@ export default function ExportPage() {
               Codec
               <select
                 className="input !py-1 text-xs"
-                value={codec}
+                value={f.codec}
                 onChange={(e) => {
-                  setCodec(e.target.value);
-                  setQuality("");
+                  set("codec", e.target.value);
+                  set("quality", "");
                 }}
               >
-                {Object.entries(codecLabels?.codecs ?? FALLBACK_CODEC_LABELS).map(([v, l]) => (
-                  <option key={v} value={v}>{l}</option>
+                {Object.entries(specs?.codecs ?? {}).map(([v, cs]) => (
+                  <option key={v} value={v}>{cs.label}</option>
                 ))}
               </select>
             </label>
@@ -462,32 +515,41 @@ export default function ExportPage() {
               Quality
               <select
                 className="input !py-1 text-xs"
-                value={quality || QUALITY[codec]?.[0]?.v || ""}
-                onChange={(e) => setQuality(e.target.value)}
-                disabled={codec === "copy"}
+                value={quality || spec?.default || ""}
+                onChange={(e) => set("quality", e.target.value)}
+                disabled={!spec?.presets.length && !spec?.custom}
               >
                 {/* copy has no knobs — a disabled placeholder keeps the box legible */}
-                {(QUALITY[codec] ?? []).length === 0 ? (
+                {!spec?.presets.length && !spec?.custom ? (
                   <option value="">—</option>
                 ) : (
-                  (QUALITY[codec] ?? []).map((q) => (
-                    <option key={q.v} value={q.v}>{q.label}</option>
-                  ))
+                  <>
+                    {spec.presets.map((q) => (
+                      <option key={q.v} value={q.v}>{q.label}</option>
+                    ))}
+                    {spec.custom && (
+                      <option value={CUSTOM}>
+                        {spec.custom.mode === "q" ? "Custom q…" : "Custom bitrate…"}
+                      </option>
+                    )}
+                  </>
                 )}
               </select>
             </label>
           </div>
-          {/* custom bitrate / q — per-codec ranges clamp server-side too */}
-          {(QUALITY[codec] ?? []).some((q) => q.v === "custom") && quality === "custom" && (
+          {/* custom bitrate / q — the server clamps to the same range again */}
+          {spec?.custom && quality === CUSTOM && (
             <label className="flex items-center gap-2 mt-2 text-[10px] text-zinc-500">
-              {codec === "vorbis" ? "Custom q (0–10)" : "Custom bitrate (kbps)"}
+              {spec.custom.mode === "q"
+                ? `Custom q (${spec.custom.min}–${spec.custom.max})`
+                : `Custom bitrate (${spec.custom.min}–${spec.custom.max} kbps)`}
               <input
                 className="input !py-1 text-xs w-24"
                 type="number"
-                min={codec === "vorbis" ? 0 : 32}
-                max={codec === "mp3" ? 320 : codec === "vorbis" ? 10 : 510}
-                value={customKbps}
-                onChange={(e) => setCustomKbps(e.target.value)}
+                min={spec.custom.min}
+                max={spec.custom.max}
+                value={customValue}
+                onChange={(e) => setCustomValue(e.target.value)}
               />
               {kbps !== null && <span className="text-zinc-600">~{kbps} kbps effective</span>}
             </label>
@@ -496,25 +558,143 @@ export default function ExportPage() {
             Folder structure
             <select
               className="input !py-1 text-xs w-full"
-              value={structure}
-              onChange={(e) => setStructure(e.target.value)}
+              value={f.structure}
+              onChange={(e) => set("structure", e.target.value)}
             >
-              {STRUCTURES.map((s) => (
-                <option key={s.v} value={s.v}>{s.label}</option>
+              {STRUCTURES.map((st) => (
+                <option key={st.v} value={st.v}>{st.label}</option>
               ))}
             </select>
           </label>
+          <div className="text-[10px] text-zinc-600 mt-1">
+            A multi-disc album gets a &quot;1-01 - Title&quot; file name, so the two discs
+            cannot collide.
+          </div>
 
-          <button className="btn-primary w-full mt-4 text-xs" disabled={busy || !paths.length} onClick={run}>
-            <HardDriveDownload className="h-3.5 w-3.5" />
-            {busy ? "Exporting…" : `Export ${paths.length || ""} track${paths.length === 1 ? "" : "s"}`}
-          </button>
+          {/* ---- artwork, tags, extras -------------------------------- */}
+          <div className="text-xs font-bold text-zinc-300 mt-4 mb-2">Artwork &amp; tags</div>
+          <Opt
+            checked={f.embed_covers}
+            onChange={(v) => set("embed_covers", v)}
+            label="Embed cover art into the exported files"
+            hint="The album's cover.* (or the file's own art when the folder has none) is embedded, re-encoded at the quality below. Off leaves art exactly as the source had it."
+          />
+          {f.embed_covers && (
+            <div className="grid grid-cols-2 gap-2 mt-1 pl-6">
+              <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
+                Embedded JPEG quality — {f.embed_cover_jpeg_quality}
+                <input
+                  type="range"
+                  min={60}
+                  max={100}
+                  value={f.embed_cover_jpeg_quality}
+                  onChange={(e) => set("embed_cover_jpeg_quality", Number(e.target.value))}
+                />
+              </label>
+              <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
+                Max resolution (px, 0 = original)
+                <input
+                  className="input !py-1 text-xs"
+                  type="number"
+                  min={0}
+                  max={4000}
+                  value={f.embed_cover_resolution}
+                  onChange={(e) => set("embed_cover_resolution", Number(e.target.value))}
+                />
+              </label>
+            </div>
+          )}
+          <Opt
+            checked={f.clean_tags}
+            onChange={(v) => set("clean_tags", v)}
+            label="Write only the canonical tag set"
+            hint="Transcodes drop the source's leftover frames instead of carrying them along beside the tags this app writes."
+          />
+          <div className="grid grid-cols-2 gap-2 mt-2 items-end">
+            <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
+              ID3 version (MP3)
+              <select
+                className="input !py-1 text-xs"
+                value={f.id3v2}
+                onChange={(e) => set("id3v2", e.target.value)}
+              >
+                <option value="2.3">2.3 — older players, car stereos</option>
+                <option value="2.4">2.4 — newest frames</option>
+              </select>
+            </label>
+            <Opt
+              checked={f.id3v1}
+              onChange={(v) => set("id3v1", v)}
+              label="Also write ID3v1"
+              hint="For players that read nothing else (short, latin-1 fields)."
+            />
+          </div>
+          <Opt
+            checked={f.replaygain}
+            onChange={(v) => set("replaygain", v)}
+            label="Write ReplayGain tags"
+            hint="Measures each track (ffmpeg EBU R128, one pass that rides along with the transcode) and stores track + album gain/peak, so the player matches your library's loudness."
+          />
+          <Opt
+            checked={f.playlists}
+            onChange={(v) => set("playlists", v)}
+            label="Write .m3u8 playlists"
+            hint="One per exported album, plus all.m3u8 for the whole export — UTF-8 with relative paths and durations."
+          />
+          <Opt
+            checked={f.sidecars}
+            onChange={(v) => set("sidecars", v)}
+            label="Copy covers, lyrics, cue, log and descriptions"
+            hint="cover.*, description.txt, .lrc, .cue, .log and the artist image travel with the tracks."
+          />
+          <Opt
+            checked={f.verify}
+            onChange={(v) => set("verify", v)}
+            label="Verify every written file"
+            hint="Re-opens each export and proves it parses with the source's duration before reporting success."
+          />
+          <label className="flex items-center gap-2 mt-2 text-xs text-zinc-300">
+            <span className="shrink-0">Parallel workers</span>
+            <select
+              className="input !py-1 text-xs"
+              value={f.workers}
+              onChange={(e) => set("workers", Number(e.target.value))}
+            >
+              <option value={0}>Auto (half the cores, max 8)</option>
+              {[1, 2, 3, 4, 6, 8, 12, 16].map((n) => (
+                <option key={n} value={n}>{n}</option>
+              ))}
+            </select>
+          </label>
+          <Opt
+            checked={f.prune}
+            onChange={(v) => set("prune", v)}
+            danger
+            label="Sync mode — remove audio the export does not write"
+            hint="Deletes audio files under the export folder that this run did not produce. Meant for mirroring a player: leave it off unless you want the destination to match this selection exactly."
+          />
+
+          <div className="grid grid-cols-[2fr_1fr_auto] gap-2 mt-4">
+            <button className="btn-primary text-xs" disabled={busy || !paths.length} onClick={run}>
+              <HardDriveDownload className="h-3.5 w-3.5" />
+              {busy ? "Exporting…" : `Export ${paths.length || ""} track${paths.length === 1 ? "" : "s"}`}
+            </button>
+            <button className="btn text-xs" disabled={busy} onClick={saveDefaults} title="Save these choices as the defaults for the next export">
+              <Save className="h-3.5 w-3.5" />
+              Save as default
+            </button>
+            <button className="btn text-xs !px-2" disabled={busy} onClick={resetDefaults} title="Reload the saved defaults">
+              <RotateCcw className="h-3.5 w-3.5" />
+            </button>
+          </div>
           <div className="text-[10px] text-zinc-600 mt-2">
-            {codec === "copy"
-              ? "Copy keeps the original files bit-exact."
-              : codec === "flac"
+            {f.codec === "copy"
+              ? "Copy keeps the original files bit-exact (an embed-cover pass still rewrites tags when art must change)."
+              : f.codec === "flac"
                 ? "FLAC → FLAC exports are bit-copies; anything else is re-encoded with ffmpeg and fully re-tagged."
-                : `Exporting as ${codecLabel} — files are re-encoded with ffmpeg and fully re-tagged.`}
+                : f.codec === "wav" || f.codec === "aiff"
+                  ? `${spec?.label ?? f.codec} carries no tag set this app can write — the export keeps the audio only.`
+                  : `Exporting as ${spec?.label ?? f.codec} — files are re-encoded with ffmpeg and fully re-tagged.`}
           </div>
         </div>
       </div>

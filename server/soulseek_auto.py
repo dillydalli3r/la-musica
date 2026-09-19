@@ -2604,7 +2604,10 @@ def _stamp_media(album_dir, media, cfg):
                 if not str(af.get_tag("MEDIA") or "").strip():
                     af.set_tag("MEDIA", media)
                 if media == "CD" and str(af.get_tag("SOURCE") or "").strip():
-                    af.set_tag("SOURCE", "")
+                    # DELETE it: set_tag("SOURCE", "") wrote an empty tag that
+                    # stays on the file forever (nothing re-clears a blank
+                    # one) and reads as a cleared tag only to this app.
+                    af.delete_tag("SOURCE")
                 n += 1
             except Exception as e:
                 problems.append(f"{f}: MEDIA tag not written ({str(e)[:80]})")

@@ -18,3 +18,8 @@ desktop/src-tauri/target
 .DS_Store
 Thumbs.db
 music/
+desktop/
+.pi/
+local/
+.zcode/
+wwwroot/

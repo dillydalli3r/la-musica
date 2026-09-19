@@ -2134,7 +2134,14 @@ def tags_bulk(req: BulkTagsRequest):
                     # which reads as "nothing to do" instead of "it failed".
                     failed += 1
                     errors.append(f"{os.path.basename(rp)}: {name} was not written")
-            af.defer_save(False)
+            # One write for the whole track: a failed flush (read-only file,
+            # full disk) means nothing landed, so it is a failed track — the
+            # dialog used to report ok=true with counts that never reached
+            # the tags.
+            if af.defer_save(False) is False:
+                failed += 1
+                errors.append(f"{os.path.basename(rp)}: {af.error or 'tag write failed'}")
+                continue
             tagcache.invalidate_path(p)
         except Exception as e:
             failed += 1
@@ -2219,9 +2226,42 @@ class ExportRequest(BaseModel):
     paths: List[str] = []              # absolute audio file paths to export
     dest: str                          # destination drive root (e.g. "E:\\")
     subfolder: str = "Music"           # created under the drive root
-    codec: str = "copy"                # copy | flac | mp3 | aac | opus | vorbis
-    quality: str = ""                  # codec-specific (V0/320/256/q8/…)
-    structure: str = "artist_album"    # artist_album | flat | mirror
+    codec: str = "copy"                # any key of exporter.CODECS
+    quality: str = ""                  # a preset key (V0/320/256/q8/…) or a number
+    structure: str = "artist_album"    # artist_album | album | flat | mirror
+    # Compatibility options. None = use the saved `export_*` config value, so a
+    # client that omits a field keeps the user's defaults instead of forcing
+    # the built-in one (server.exporter.EXPORT_DEFAULTS holds both).
+    embed_covers: Optional[bool] = None
+    embed_cover_jpeg_quality: Optional[int] = None
+    embed_cover_resolution: Optional[int] = None
+    id3v2: Optional[str] = None
+    id3v1: Optional[bool] = None
+    replaygain: Optional[bool] = None
+    clean_tags: Optional[bool] = None
+    playlists: Optional[bool] = None
+    sidecars: Optional[bool] = None
+    verify: Optional[bool] = None
+    prune: Optional[bool] = None
+    workers: Optional[int] = None
+
+
+# Fields of ExportRequest that are not run options (they are positional parts
+# of the call, not keys of exporter.EXPORT_DEFAULTS).
+_EXPORT_FORM_FIELDS = ("paths", "dest", "subfolder", "codec", "quality", "structure")
+
+
+@app.get("/api/export/defaults")
+def export_defaults():
+    """The saved export form values — what the Export page loads when it opens
+    and what its "Save as default" writes back."""
+    cfg = load_config()
+    out = {}
+    for name in ("dest", "subfolder", "codec", "quality", "structure"):
+        out[name] = cfg.get("export_" + name, DEFAULT_CONFIG.get("export_" + name, ""))
+    for name, default in exporter.EXPORT_DEFAULTS.items():
+        out[name] = cfg.get("export_" + name, default)
+    return out
 
 
 @app.get("/api/export/drives")
@@ -2235,8 +2275,10 @@ def export_drives():
 
 @app.get("/api/export/codecs")
 def export_codecs():
-    """Available export codecs + their quality choices (drives the UI)."""
-    return {"codecs": {k: v.get("label", k) for k, v in exporter.CODECS.items()}}
+    """Export codecs with the quality presets and custom-value ranges the
+    Export page offers — the server's tables are the single source of truth,
+    so adding a codec needs no UI change."""
+    return {"codecs": exporter.codec_specs()}
 
 
 @app.post("/api/export")
@@ -2255,11 +2297,16 @@ def export_run(req: ExportRequest):
     if req.codec not in exporter.CODECS:
         raise HTTPException(400, f"unknown codec: {req.codec}")
     cfg = load_config()
-    res = exporter.export_tracks(
-        cfg, [os.path.normpath(p) for p in req.paths], dest_root,
-        subfolder=req.subfolder, codec=req.codec, quality=req.quality,
-        structure=req.structure,
-    )
+    opts = {k: v for k, v in req.model_dump().items()
+            if k not in _EXPORT_FORM_FIELDS and v is not None}
+    try:
+        res = exporter.export_tracks(
+            cfg, [os.path.normpath(p) for p in req.paths], dest_root,
+            subfolder=req.subfolder, codec=req.codec, quality=req.quality,
+            structure=req.structure, **opts,
+        )
+    except ValueError as e:      # an unusable destination (inside the library…)
+        raise HTTPException(400, str(e))
     return {"ok": res["failed"] == 0, **res}
 
 
@@ -4089,9 +4136,17 @@ def _detect_rip_media(album_dir):
 
 def _tag_media_for_albums(album_dirs):
     """Write MEDIA (and SOURCE for digital rips) on every audio file of the
-    freshly imported albums so grading and the library filters work."""
-    from mlo.audio import AudioFile
+    freshly imported albums so grading and the library filters work.
 
+    Both writes honour the same gate every other writer uses
+    (should_write_audio_tag): normalize_media_source turns the whole
+    MEDIA/SOURCE family off, and audio_tag_writes can disable it per
+    filetype — an import used to stamp MEDIA/SOURCE regardless, so a user
+    who turned the family off got it back on the next download."""
+    from mlo.audio import AudioFile
+    from mlo.config import should_write_audio_tag
+
+    cfg = load_config()
     tagged = 0
     for d in album_dirs:
         media = _detect_rip_media(d)
@@ -4101,13 +4156,17 @@ def _tag_media_for_albums(album_dirs):
             for f in sorted(files):
                 if not is_audio_file(f):
                     continue
+                path = os.path.join(root, f)
                 try:
-                    af = AudioFile(os.path.join(root, f))
+                    af = AudioFile(path)
                     if af.audio is None:
                         continue
-                    if not str(af.get_tag("MEDIA") or "").strip():
+                    if (not str(af.get_tag("MEDIA") or "").strip()
+                            and should_write_audio_tag(cfg, "MEDIA", filepath=path)):
                         af.set_tag("MEDIA", media)
-                    if media == "Digital Media" and not str(af.get_tag("SOURCE") or "").strip():
+                    if (media == "Digital Media"
+                            and not str(af.get_tag("SOURCE") or "").strip()
+                            and should_write_audio_tag(cfg, "SOURCE", filepath=path)):
                         af.set_tag("SOURCE", "Soulseek")
                     tagged += 1
                 except Exception:
@@ -4973,12 +5032,14 @@ def mb_genres_import(req: GenreImportRequest):
     The release (MUSICBRAINZ_ALBUMID) or release group (RELEASEGROUPID) on the
     first track identifies the entity; per-track recording genres win over the
     release's list, and the count follows Settings → Import (`mb_genre_count`,
-    default 3). Other sources are deliberately not consulted here — use
+    shipped default `DEFAULT_CONFIG["mb_genre_count"]`). Other sources are
+    deliberately not consulted here — use
     /api/genres/import for the full chain."""
     from mlo.audio import AudioFile
 
     cfg = load_config()
-    n = max(1, min(10, int(req.count or cfg.get("mb_genre_count", 3) or 3)))
+    n = max(1, min(10, int(req.count or cfg.get("mb_genre_count")
+                           or DEFAULT_CONFIG["mb_genre_count"])))
     _tag_paths_guard(req.paths)
     files = _genre_files(req.paths)
 
@@ -5031,7 +5092,9 @@ def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=Fals
     The chain runs in the order of `genre_sources` (RateYourMusic → Soulseek
     signals → Discogs/Last.fm/TheAudioDB → Deezer/iTunes → MusicBrainz),
     merges what each source answers, dedupes case-insensitively, Title-Cases
-    the names and caps them at `limit`/`mb_genre_count` (default 3). Sources
+    the names and caps them at `limit`/`mb_genre_count` (the shipped default
+    lives in `DEFAULT_CONFIG["mb_genre_count"]`, read here — never repeated as
+    a literal). Sources
     that cannot answer are reported in `notes` (a blocked RYM, a Discogs or
     Last.fm source without its token/key) — nothing is filled in from a guess.
     MusicBrainz recording genres refine each track when the album names a
@@ -5074,12 +5137,41 @@ def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=Fals
     # ONE writer, is what applies the cap to the file.
     per_track = chain.get("per_track") or {}
 
-    cap = limit or int(cfg.get("mb_genre_count") or 3)
+    cap = limit or int(cfg.get("mb_genre_count") or DEFAULT_CONFIG["mb_genre_count"])
     updated = _write_album_genres(files, names, per_track, limit=cap)
+    # The cap is a per-track contract the import has to LEAVE BEHIND, not just
+    # apply to what it writes: a track that already carried three genres comes
+    # down to `mb_genre_count` here, through the one trimmer script 8 and
+    # script 10 also use. Counts are extra values / tracks touched, so the
+    # caller can say what the cap actually did.
+    from mlo.autotag import trim_genres
+    trimmed = extra = 0
+    for p in files:
+        try:
+            af = AudioFile(p)
+            if af.audio is None:
+                continue
+            removed = trim_genres(af, cap)
+        except Exception:
+            continue
+        if removed:
+            trimmed += 1
+            extra += removed
+    if trimmed:
+        tagcache.invalidate_all()
+        mbresolve.invalidate()
+    notes = dict(chain.get("notes") or {})
+    if trimmed:
+        # Reuses the chain's own notes channel (the wizard renders it under the
+        # genre step), so the trim is visible where genres are reported.
+        notes["genres per track"] = (f"{extra} extra genre(s) trimmed — genres per "
+                                     f"track is {cap} (Settings → Import)")
     return {"updated": updated, "genres": names,
             "per_source": chain.get("per_source") or {},
-            "notes": chain.get("notes") or {},
+            "notes": notes,
             "per_track": bool(per_track),
+            "genre_count": cap,
+            "trimmed": trimmed,
             # Where each file's genres came from, in the order that
             # contributed, plus the tier that answered (track/album/artist).
             "sources": chain.get("sources") or {},

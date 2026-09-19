@@ -25,6 +25,7 @@ every level is identifiable without reading tags:
 """
 import os
 import re
+from functools import lru_cache
 
 # Gradeable sentinel: the release type is UNKNOWN (no RELEASETYPE tag and no
 # warm MusicBrainz value). The grader substitutes it so the rest of the path
@@ -108,7 +109,7 @@ def _split_args(argtext):
 
 
 def _func(name, args, variables):
-    a = [_eval(x, variables) for x in args]
+    a = [_run(tokens, variables) for tokens in args]
     if name == "if":
         if len(a) >= 2:
             cond = a[0].strip()
@@ -162,9 +163,24 @@ def _func(name, args, variables):
     return ""
 
 
-def _eval(script, variables):
-    """Raw evaluation (no sanitization — applied once at the top level)."""
-    out = []
+@lru_cache(maxsize=32)
+def _compile(script):
+    """Token list for *script*: literal text, ("var", name), ("func", …, args).
+
+    The script is a constant for a run — every track of a library is named by
+    the same one — so it is scanned ONCE per distinct script instead of once
+    per character per track (_eval used to re-find every %variable% and every
+    balanced paren for each file). Cached by script text; argument bodies are
+    compiled too, so a nested $if(...) is not re-scanned either.
+    """
+    tokens = []
+    buf = []
+
+    def flush():
+        if buf:
+            tokens.append(("lit", "".join(buf)))
+            del buf[:]
+
     i = 0
     n = len(script)
     while i < n:
@@ -172,11 +188,40 @@ def _eval(script, variables):
         if ch == "%":
             j = script.find("%", i + 1)
             if j == -1:
-                out.append(ch)
+                buf.append(ch)
                 i += 1
                 continue
-            name = script[i + 1:j]
-            value = str(variables.get(name, "") or "")
+            flush()
+            tokens.append(("var", script[i + 1:j]))
+            i = j + 1
+        elif ch == "$":
+            m = re.match(r"\$(\w+)\(", script[i:])
+            if not m:
+                buf.append(ch)
+                i += 1
+                continue
+            name = m.group(1)
+            body, end = _find_balanced(script, i + 1 + len(name))
+            flush()
+            tokens.append(("func", name,
+                           tuple(_compile(a) for a in _split_args(body))))
+            i = end
+        else:
+            buf.append(ch)
+            i += 1
+    flush()
+    return tokens
+
+
+def _run(tokens, variables):
+    """Evaluate a compiled token list against *variables*."""
+    out = []
+    for token in tokens:
+        kind = token[0]
+        if kind == "lit":
+            out.append(token[1])
+        elif kind == "var":
+            value = str(variables.get(token[1], "") or "")
             # Tag values must never inject path separators or other illegal
             # characters (a title like "Aerials / Arto" would otherwise split
             # the filename into an unintended subfolder). Illegals become "_"
@@ -184,23 +229,15 @@ def _eval(script, variables):
             # grader's expected-path check and the beets mlo_dir field all
             # compute identical paths. The script's OWN "/" separators
             # (between %variables%) are untouched.
-            value = re.sub(r'[<>:"/\\|?*]', "_", value)
-            out.append(value)
-            i = j + 1
-        elif ch == "$":
-            m = re.match(r"\$(\w+)\(", script[i:])
-            if m:
-                name = m.group(1)
-                body, end = _find_balanced(script, i + 1 + len(name))
-                out.append(_func(name, _split_args(body), variables))
-                i = end
-            else:
-                out.append(ch)
-                i += 1
+            out.append(re.sub(r'[<>:"/\\|?*]', "_", value))
         else:
-            out.append(ch)
-            i += 1
+            out.append(_func(token[1], token[2], variables))
     return "".join(out)
+
+
+def _eval(script, variables):
+    """Raw evaluation (no sanitization — applied once at the top level)."""
+    return _run(_compile(script), variables)
 
 
 def eval_script(script, variables, shorter_ids=False):

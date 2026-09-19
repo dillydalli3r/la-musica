@@ -3,7 +3,8 @@ name: CI
 # Runs on every push and pull request. Three jobs, no third-party actions:
 #   python  — installs server/requirements.txt and runs the non-networked
 #             tools/test_*.py suites (each exits non-zero on failure, 2 to
-#             skip). The browser suites (check_menus.cjs, shot.cjs) and
+#             skip). The browser checks (check_menus.cjs, check_lyrscroll.cjs,
+#             check_player_state.cjs, check_sidebar.cjs, check_trash.cjs) and
 #             smoke_api.py need a live backend and are not run here.
 #   web     — type-checks, lints and builds the React app.
 #   desktop — compiles the Tauri shell (cargo check) and installs its npm
@@ -42,10 +43,13 @@ jobs:
         # Several suites look for the bundled encoder at
         # .dependencies/flac*/flac.exe — that folder is version-stamped and
         # gitignored, so on a runner it never exists. Point it at the distro
-        # flac instead of letting those suites fail for a missing binary.
+        # flac instead of letting those suites fail for a missing binary. The
+        # folder name comes from fetchdeps' own pin, so bumping the pinned
+        # flac version cannot silently break CI with a "missing binary" error.
         run: |
-          mkdir -p ".dependencies/flac v1.5.0"
-          ln -s "$(command -v flac)" ".dependencies/flac v1.5.0/flac.exe"
+          FLAC_VERSION="$(python -c 'from mlo.fetchdeps import PINNED; print(PINNED["flac"]["version"])')"
+          mkdir -p ".dependencies/flac v${FLAC_VERSION}"
+          ln -s "$(command -v flac)" ".dependencies/flac v${FLAC_VERSION}/flac.exe"
 
       - name: Run the test suites
         run: |

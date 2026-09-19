@@ -72,6 +72,13 @@ LEGACY_DEFAULT_GENRE_SOURCES = (
 LEGACY_DEFAULT_CD_QUERIES = (
     ["catalognumber", "artist album catalognumber", "artist album"],
 )
+
+# Genres-per-track defaults this app shipped BEFORE the current one (2). A
+# config still holding one of these was never a decision — Settings carried the
+# shipped default — so it follows the new value, the same rule the naming
+# script, the genre-source order and the query templates above already use. A
+# number the user actually chose is any other value and is kept.
+LEGACY_DEFAULT_GENRE_COUNTS = (3,)
 LEGACY_DEFAULT_DIGITAL_QUERIES = (
     ["artist album year", "artist album"],
 )
@@ -110,6 +117,8 @@ AUDIO_TAG_FAMILIES = [
     "LYRICS",         # embedded LYRICS tag (and .lrc sidecar)
     "BPM",            # BPM (Key & BPM analysis)
     "INITIALKEY",     # INITIALKEY (Key & BPM analysis)
+    "GENRE",          # GENRE (import / auto tagging, one per configured count)
+    "MOOD",           # MOOD (audio/provider classification, script 8/16)
     "ENERGY",         # ENERGY (0-100, audio analysis, written with MOOD)
 ]
 AUDIO_TAG_TYPES = ["flac", "mp3", "mp4", "ogg", "opus", "aac"]
@@ -133,6 +142,7 @@ _TAG_TO_FAMILY = {
     "UNSYNCEDLYRICS": "LYRICS",
     "BPM": "BPM",
     "INITIALKEY": "INITIALKEY",
+    "GENRE": "GENRE",
     "MOOD": "MOOD",
     "ENERGY": "ENERGY",
     # integrity tags follow AUDIT family (written alongside audit when present)
@@ -141,8 +151,17 @@ _TAG_TO_FAMILY = {
     "LOG_CRC": "LOG_GRADE",
 }
 
+# Lyrics transforms carry their language in the tag name
+# (TRANSLATION-DE, TRANSLITERATION-JA), so they are matched by prefix: every
+# one of them is a lyrics tag and follows the LYRICS family.
+_LYRICS_PREFIXES = ("TRANSLATION-", "TRANSLITERATION-")
+
+
 def _audio_tag_family(tag_name):
-    return _TAG_TO_FAMILY.get(str(tag_name).upper())
+    name = str(tag_name).upper()
+    if name.startswith(_LYRICS_PREFIXES):
+        return "LYRICS"
+    return _TAG_TO_FAMILY.get(name)
 
 def _ext_to_audio_type(ext):
     ext = (ext or "").lower().lstrip(".")
@@ -181,7 +200,11 @@ def should_write_audio_tag(config, tag_name, filepath=None, filetype=None):
         "MEDIA_SOURCE": "normalize_media_source",
         "INSTRUMENTAL": None,  # gated by two keys; handle below
         "ADVISORY": "auto_advisory",
+        "GENRE": "genre_autofill",
         "MOOD": "mood_enabled",
+        # ENERGY is written by the same analysis pass as MOOD, so it answers
+        # to the same switch; the grader requires it when it is on.
+        "ENERGY": "mood_enabled",
         "LYRICS": None,  # lyrics_format gates this separately
     }
     gkey = family_global.get(family)
@@ -428,6 +451,9 @@ DEFAULT_CONFIG = {
     # ...and that the sheet's FILE lines name files the album actually has
     # (a converted or renamed album used to keep "….wav" forever).
     "grade_check_cue_files": True,
+    # .accurip canonical FORMAT (line/blank-line shape). Every other graded
+    # check can be switched off; this one ran whenever the file existed.
+    "grade_check_accurip_format": True,
     "grade_check_disallowed": True,
     # A library folder with nothing at all beneath it (no file anywhere in
     # its subtree) counts against grading as an EMPTY_FOLDER failure. Albums
@@ -477,6 +503,10 @@ DEFAULT_CONFIG = {
     "grade_check_mood": True,
     "grade_check_energy": True,   # ENERGY (0-100), written next to MOOD by script 8
     "grade_check_genre": True,
+    # Genre COUNT per track: fewer or more than mb_genre_count fails. The
+    # same value the import writes and the scripts trim to, so a library this
+    # app tagged can never fail this check.
+    "grade_check_genre_count": True,
     # ReplayGain tags: opt-in like AcoustID — graded only when the file
     # already carries at least one of the four REPLAYGAIN_* tags, and then
     # the whole set is required. A library that never ran script 7 is never
@@ -578,10 +608,17 @@ DEFAULT_CONFIG = {
     # from the decoded source, compression level video_flac_level). Caption /
     # subtitle streams are always copied and verified — never removed. When
     # the muxer refuses the video codec, the video falls back to H.264
-    # (gated by video_reencode_incompatible). The original (e.g. the VOB) is
+    # (gated by video_reencode_incompatible). The fallback re-encodes the only
+    # copy lossily, so it is OFF by default: an incompatible video is reported
+    # instead of quietly losing a generation. The original (e.g. the VOB) is
     # deleted after a verified remux; a stray original whose same-stem MKV
     # already exists is duration-verified and then removed as well.
-    "video_reencode_incompatible": True,
+    "video_reencode_incompatible": False,
+    # Lossy source audio (AC3/DTS/AAC…) is copied into the MKV instead of
+    # being re-encoded to FLAC: re-encoding lossy audio cannot restore a
+    # sample and inflates the file. Lossless source audio (PCM/FLAC/TrueHD)
+    # is still converted to FLAC. Turn off to force FLAC for every stream.
+    "video_lossy_audio_copy": True,
     "video_crf": 18,
     "video_preset": "medium",
     "video_flac_level": 8,
@@ -819,7 +856,15 @@ DEFAULT_CONFIG = {
     # absent (peers advertise folders, not genres). An install that never
     # touched the Settings list follows this change: the previous two-source
     # default is in `LEGACY_DEFAULT_GENRE_SOURCES` (see normalize_config).
-    "mb_genre_count": 3,
+    # GENRES PER TRACK — one knob for three places, so they can never
+    # disagree: how many genres an import writes onto a track (highest-voted
+    # source first), how many a track may KEEP (script 8's auto tagging, the
+    # genre import and script 10's canonical pass all trim the rest off), and
+    # what grading requires (`grade_check_genre_count`: a track with fewer or
+    # more than this fails). Default 2: a primary genre plus its most useful
+    # sub-genre is the most a player shows, and a merged
+    # "Rock; Alternative Rock; Indie; Shoegaze" list helps no one.
+    "mb_genre_count": 2,
     # Genre sources, in priority order. Two by default — RateYourMusic (what
     # the release page itself says, the user's own first preference) and
     # MusicBrainz (open data, keyless) — because they are the two the library
@@ -887,6 +932,54 @@ DEFAULT_CONFIG = {
     "worker_limit": 0,
     "run_all_order": list(DEFAULT_RUN_ALL_ORDER),
 
+    # Export to device (Export page). Each key is the SAVED DEFAULT behind one
+    # control on that page: the page loads them when it opens and its "Save as
+    # default" writes them back, so a DAP's own settings survive a restart.
+    # Every one is still overridable per export — the request carries the
+    # values the form showed. Which codecs/structures exist is
+    # server.exporter's tables, not a list here: an unknown value falls back
+    # to the default instead of being reset by the config loader.
+    "export_dest": "",
+    "export_subfolder": "Music",
+    "export_codec": "copy",
+    "export_quality": "",
+    "export_structure": "artist_album",
+    # Embed the album cover into every exported file. Separate keys from the
+    # library's embed_covers / embed_cover_* on purpose: exporting to a player
+    # must never decide what the library's own files keep. Quality applies to
+    # JPEG embeds, resolution caps the longest side (0 = the cover's own size).
+    "export_embed_covers": True,
+    "export_embed_cover_jpeg_quality": 90,
+    "export_embed_cover_resolution": 1200,
+    # ID3 write options for MP3 exports: "2.3" is what older players and car
+    # stereos read (mutagen writes 2.4 by default), and an ID3v1 chunk is for
+    # players that read nothing else. Only applies where the export writes
+    # tags — a plain byte-for-byte copy stays byte-for-byte.
+    "export_id3v2": "2.3",
+    "export_id3v1": False,
+    # Measure each exported track with ffmpeg's EBU R128 meter (the same meter
+    # script 7 writes tags from) and store ReplayGain 2.0 track + album tags,
+    # so a player that honours them plays the export at the library's loudness.
+    "export_replaygain": False,
+    # Write only the canonical tag set on transcodes instead of letting the
+    # source's leftover frames ride along beside it.
+    "export_clean_tags": True,
+    # .m3u8 playlists next to the exported albums (and one for the whole
+    # export) — what a DAP needs to show album order.
+    "export_playlists": True,
+    # Mirror cover.*/description.txt/artist image/.lrc/.cue/.log next to the
+    # exported audio.
+    "export_sidecars": True,
+    # Re-open every written file and prove it parses (and has the source's
+    # duration) before the export reports success.
+    "export_verify": True,
+    # Sync mode: delete audio files under the export root this run did not
+    # write. OFF by default — an export never deletes anything unless the user
+    # explicitly asked for a mirror of the selection.
+    "export_prune": False,
+    # Parallel transcode/copy workers; 0 = automatic (half the cores, max 8).
+    "export_workers": 0,
+
     # First run / updates
     "first_run_done": False,
     # Install tools that are missing or behind their upstream release without
@@ -945,6 +1038,9 @@ _INT_RANGES = {
     "discovery_timeout_s": (3, 30),
     "import_bulk_concurrency": (1, 8),
     "mb_genre_count": (1, 10),
+    "export_embed_cover_jpeg_quality": (1, 100),
+    "export_embed_cover_resolution": (0, 8000),
+    "export_workers": (0, 64),
 }
 _CHOICES = {
     "lyrics_format": {"EMBEDDED", "LRC", "BOTH"},
@@ -1106,6 +1202,11 @@ def normalize_config(user=None) -> dict:
     if saved in LEGACY_DEFAULT_GENRE_SOURCES:
         saved = []
     cfg["genre_sources"] = saved or list(DEFAULT_CONFIG["genre_sources"])
+
+    # An untouched install holds the old shipped genres-per-track count (see
+    # LEGACY_DEFAULT_GENRE_COUNTS) and follows the new one.
+    if cfg.get("mb_genre_count") in LEGACY_DEFAULT_GENRE_COUNTS:
+        cfg["mb_genre_count"] = DEFAULT_CONFIG["mb_genre_count"]
 
     # Auto-import query templates: the old shipped defaults narrow to the
     # catalog-number-only (CD) / artist-album-year (digital) wording.

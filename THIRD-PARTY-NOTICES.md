@@ -148,9 +148,8 @@ The Tauri shell in `desktop/src-tauri` compiles a locked crate graph
 
 | Crate | License |
 | --- | --- |
-| tauri, tauri-build, tauri-codegen, tauri-plugin-dialog, tauri-plugin-autostart | MIT OR Apache-2.0 |
-| serde, serde_json, dirs | MIT OR Apache-2.0 |
-| auto-launch | MIT |
+| tauri, tauri-build, tauri-plugin-dialog, tauri-plugin-autostart | MIT OR Apache-2.0 |
+| serde, serde_json | MIT OR Apache-2.0 |
 
 The rest of the graph was read from the licence each crate declares in its
 registry manifest. The 305 locked crates present in this checkout's cargo cache
@@ -221,9 +220,8 @@ locally):
   project is not affiliated with it or with slskd.
 - **NetEase Cloud Music** (<https://music.163.com>), **QQ Music**
   (<https://y.qq.com>), **Kugou** (<https://www.kugou.com>), **Kuwo**
-  (<https://www.kuwo.cn>), **lyrics.ovh** (<https://lyrics.ovh>) — additional
-  lyrics sources in the provider chain; lyrics remain the property of their
-  respective rights holders.
+  (<https://www.kuwo.cn>) — additional lyrics sources in the provider chain;
+  lyrics remain the property of their respective rights holders.
 
 These same credits, with each entry's licence, are rendered inside the app
 (`web/public/credits.json` — the bottom-left corner of the window and Settings

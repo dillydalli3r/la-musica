@@ -130,9 +130,24 @@ def _file_missing_rgain(path):
 # ----------------------------------------------------------------------
 # Dynamic Range via simple-dr-meter
 # ----------------------------------------------------------------------
-def _run_dr_meter(script_path, ffmpeg_dir, album, workdir):
+def _dr_python_usable(python):
+    """(ok, reason) — whether *python* can import numpy, tested once a run."""
+    try:
+        proc = run_tool([python, "-c", "import numpy"],
+                        capture_output=True, text=True, encoding="utf-8",
+                        errors="replace", timeout=120)
+        if proc.returncode == 0:
+            return True, ""
+        tail = (proc.stderr or "").strip().splitlines()
+        return False, (tail[-1] if tail else f"rc={proc.returncode}")
+    except Exception as e:
+        return False, str(e)
+
+
+def _run_dr_meter(script_path, ffmpeg_dir, album, workdir, python=None):
     """Run simple-dr-meter on an album; returns path to dr.txt or None."""
-    python = _find_python()
+    if python is None:
+        python = _find_python()
     if not python:
         return None
     env = dict(os.environ)
@@ -163,9 +178,17 @@ def _run_dr_meter(script_path, ffmpeg_dir, album, workdir):
 
 
 def _parse_dr_file(dr_path):
-    """Parse dr.txt -> ({row_position: dr}, {title_lower: dr}, album_dr)."""
+    """Parse dr.txt -> ({row_position: dr}, {title_lower: dr}, album_dr).
+
+    A title is only kept for matching when it appears ONCE in the file: two
+    rows sharing a title (the same song on two discs, "Untitled", a bonus
+    track) would otherwise both resolve to whichever row was read last, and
+    one of the files got the other disc's DR. A duplicated title falls back
+    to the row's ordinal position, which is unique within the folder.
+    """
     per_position = {}
     per_title = {}
+    title_count = {}
     album_dr = None
     try:
         # Try chardet if available for cp1252/latin1 titles, fallback to utf-8
@@ -191,12 +214,16 @@ def _parse_dr_file(dr_path):
                     title = m.group(3).strip().lower()
                     if title:
                         per_title[title] = dr
+                        title_count[title] = title_count.get(title, 0) + 1
                     continue
                 m2 = OFFICIAL_DR_RE.search(line)
                 if m2:
                     album_dr = int(m2.group(1))
     except OSError:
         pass
+    for title, count in title_count.items():
+        if count > 1:
+            per_title.pop(title, None)
     return per_position, per_title, album_dr
 
 
@@ -211,14 +238,73 @@ def _raw_tag(af, name):
     return ""
 
 
-def _write_dr_tags(album, per_position, per_title, album_dr, write_tags=True, config=None):
+def _open_album_files(album):
+    """{path: AudioFile | None} for the album's audio files, opened once.
+
+    The DR pass asks two questions about the same file — does it still miss a
+    DR tag, and then write them — and used to open the container for each, on
+    top of the two full decodes (rsgain + dr-meter) the album already pays
+    for. One handle answers both; a file that will not open keeps a None
+    handle, so the album is still measured and the write pass skips it.
+    """
+    opened = {}
+    try:
+        names = sorted(os.listdir(album))
+    except OSError:
+        return opened
+    for f in names:
+        if not is_audio_file(f):
+            continue
+        path = os.path.join(album, f)
+        try:
+            opened[path] = AudioFile(path)
+        except Exception:
+            opened[path] = None
+    return opened
+
+
+def _dr_missing_on(af):
+    """True when the handle does not hold BOTH DR tags.
+
+    The ALBUM tag is written by the same pass and the grader requires it
+    (ALBUM_TAGS → "Missing album tag ALBUM DYNAMIC RANGE" fails the album), so
+    requiring only the per-track tag let script 7 skip a whole album that
+    could never pass grading — and the skip is by design, so re-running the
+    script could not repair it without Force."""
+    if af is None:
+        return True
+    try:
+        return not (str(af.get_tag("DYNAMIC RANGE") or "").strip()
+                    and str(af.get_tag("ALBUM DYNAMIC RANGE") or "").strip())
+    except Exception:
+        return True
+
+
+def _album_needs_dr(opened):
+    """Paths in *opened* that still miss a DR tag."""
+    return [p for p, af in opened.items() if _dr_missing_on(af)]
+
+
+def _write_dr_tags(album, per_position, per_title, album_dr, write_tags=True,
+                   config=None, opened=None):
     """Write DYNAMIC RANGE + ALBUM DYNAMIC RANGE to the album's files.
 
     dr.txt keys rows by the file's TITLE tag and by its ordinal position in
     the folder listing; files are matched on the title first, position only
-    as a fallback.
+    as a fallback. *opened* is the album's {path: AudioFile} map from
+    _open_album_files — the caller's already-open handles — and is what keeps
+    this pass from re-opening every container it just asked about.
     """
     modified = 0
+    if not per_position and not per_title:
+        # A format change in simple-dr-meter's dr.txt would otherwise write
+        # nothing, forever, with no line in the log saying why.
+        log(c(f"      dr.txt of {os.path.basename(album)} holds no parsable "
+              f"DR rows (simple-dr-meter format changed?) - no DYNAMIC RANGE "
+              f"tags written", Color.YELLOW))
+    elif album_dr is None:
+        log(c(f"      dr.txt of {os.path.basename(album)} has no 'Official DR "
+              f"value' line - ALBUM DYNAMIC RANGE not written", Color.YELLOW))
     names = os.listdir(album)
     # Ordinal position of each file in the listing simple-dr-meter walks
     # (natural-sorted, audio extensions only) — that is what dr.txt numbers.
@@ -232,7 +318,12 @@ def _write_dr_tags(album, per_position, per_title, album_dr, write_tags=True, co
             continue
         path = os.path.join(album, f)
         try:
-            af = AudioFile(path)
+            if opened is not None:
+                af = opened.get(path)
+                if af is None:
+                    continue
+            else:
+                af = AudioFile(path)
             raw_title = _raw_tag(af, "TITLE").lower()
         except Exception:
             continue
@@ -303,8 +394,30 @@ def run_calc_dr_replaygain(config):
     if rsgain:
         log(f"replaygain: rsgain v{rsgain['version']} · skip-existing="
             f"{'on' if skip_existing else 'off'}")
-    if (dr_script and ffmpeg
-            and config.get("write_dynamic_range_tags", True)):
+
+    # The DR pass needs a Python interpreter that can import numpy. Resolving
+    # it ONCE — and saying so when there is none (a frozen build with no
+    # python/py on PATH, or an interpreter without numpy) — replaces the
+    # silent fall-through where every album came back "skipped", no dr.txt was
+    # ever written and the run looked like a success.
+    dr_python = None
+    if dr_script and ffmpeg and config.get("write_dynamic_range_tags", True):
+        dr_python = _find_python()
+        why = None
+        if not dr_python:
+            why = ("no Python interpreter found for simple-dr-meter "
+                   "(a frozen build needs python/py on PATH)")
+        else:
+            ok, why = _dr_python_usable(dr_python)
+            if not ok:
+                why = f"{dr_python} cannot run simple-dr-meter: {why}"
+                dr_python = None
+        if why:
+            log(c(f"ERROR: dynamic range unavailable: {why}", Color.RED))
+            stats["error_count"] += 1
+            stats["errors"].append(("simple-dr-meter", why))
+
+    if dr_python:
         log(f"dynamic range: simple-dr-meter + ffmpeg v{ffmpeg['version']}")
     else:
         log(c("dynamic range: unavailable (need simple-dr-meter + ffmpeg "
@@ -391,19 +504,18 @@ def run_calc_dr_replaygain(config):
                             # Force re-ran but file still missing (e.g., write disabled per-type) -> count as modified attempt
                             if should_write_audio_tag(config, "REPLAYGAIN_TRACK_GAIN", filepath=path):
                                 album_modified += 1
-                if dr_script and ffmpeg and album_failed is None:
-                    audio_files = [f for f in os.listdir(album) if is_audio_file(f)]
-                    if audio_files and (force or any(_file_missing_dr(
-                            os.path.join(album, f)) for f in audio_files)):
+                if dr_python and album_failed is None:
+                    opened = _open_album_files(album)
+                    if opened and (force or _album_needs_dr(opened)):
                         dr_path = _run_dr_meter(
                             dr_script, os.path.dirname(ffmpeg["ffmpeg_exe"]),
-                            album, workdir)
+                            album, workdir, python=dr_python)
                         if dr_path:
                             per_position, per_title, album_dr = _parse_dr_file(dr_path)
                             album_modified += _write_dr_tags(
                                 album, per_position, per_title, album_dr,
                                 write_tags=config.get("write_dynamic_range_tags", True),
-                                config=config,
+                                config=config, opened=opened,
                             )
                             try:
                                 os.remove(dr_path)
@@ -447,16 +559,13 @@ def run_calc_dr_replaygain(config):
                                         af.delete_tag(tk)
                             except Exception:
                                 pass
-            if dr_script and ffmpeg and afail is None:
-                try:
-                    audio_files = [f for f in os.listdir(album_path) if is_audio_file(f)]
-                except OSError:
-                    audio_files = []
-                if audio_files and (force or any(_file_missing_dr(os.path.join(album_path, f)) for f in audio_files)):
-                    dr_path = _run_dr_meter(dr_script, os.path.dirname(ffmpeg["ffmpeg_exe"]), album_path, workdir)
+            if dr_python and afail is None:
+                opened = _open_album_files(album_path)
+                if opened and (force or _album_needs_dr(opened)):
+                    dr_path = _run_dr_meter(dr_script, os.path.dirname(ffmpeg["ffmpeg_exe"]), album_path, workdir, python=dr_python)
                     if dr_path:
                         per_position, per_title, album_dr = _parse_dr_file(dr_path)
-                        amod += _write_dr_tags(album_path, per_position, per_title, album_dr, write_tags=config.get("write_dynamic_range_tags", True), config=config)
+                        amod += _write_dr_tags(album_path, per_position, per_title, album_dr, write_tags=config.get("write_dynamic_range_tags", True), config=config, opened=opened)
                         try:
                             os.remove(dr_path)
                         except OSError:
@@ -488,22 +597,6 @@ def run_calc_dr_replaygain(config):
 
     stats["is_grader"] = False
     return stats
-
-
-def _file_missing_dr(path):
-    """True when either DR tag is missing.
-
-    The ALBUM tag is written by the same pass and the grader requires it
-    (ALBUM_TAGS → "Missing album tag ALBUM DYNAMIC RANGE" fails the album), so
-    requiring only the per-track tag let script 7 skip a whole album that
-    could never pass grading — and the skip is by design, so re-running the
-    script could not repair it without Force."""
-    try:
-        af = AudioFile(path)
-        return not (str(af.get_tag("DYNAMIC RANGE") or "").strip()
-                    and str(af.get_tag("ALBUM DYNAMIC RANGE") or "").strip())
-    except Exception:
-        return True
 
 
 # ======================================================================

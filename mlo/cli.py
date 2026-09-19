@@ -29,7 +29,7 @@ from .ui import (
     c, Color, clear_screen, print_header, print_separator,
     pause_for_input, log, fmt_size,
 )
-from .config import load_config, save_config, DEFAULT_RUN_ALL_ORDER
+from .config import load_config, save_config, DEFAULT_CONFIG, DEFAULT_RUN_ALL_ORDER
 
 # Enable ANSI escape sequences on Windows 10+ consoles.
 if os.name == "nt":
@@ -176,8 +176,8 @@ def show_config_menu(config):
         print(f"  4. Force Re-encode FLACs    : {config.get('force_reencode_flac', False)}")
         print(f"  5. JPEG XL Effort           : {config['jpegxl_effort']} (1-10)")
         print(f"  6. Re-encode Images         : {config.get('reencode_images', True)}")
-        print(f"  7. Re-encode to JXL         : {config.get('reencode_to_jxl', True)}")
-        print(f"  8. Convert JXL Back         : {config.get('convert_jxl_back', False)}")
+        print(f"  7. Re-encode to JXL         : {config.get('reencode_to_jxl', DEFAULT_CONFIG['reencode_to_jxl'])}")
+        print(f"  8. Convert JXL Back         : {config.get('convert_jxl_back', DEFAULT_CONFIG['convert_jxl_back'])}")
         print(f"  9. Rename to Cover          : {config.get('rename_to_cover', True)}")
         print(f" 10. Remove Alpha             : {config.get('remove_alpha', True)}")
         print(f" 11. Force Re-encode Images   : {config.get('force_reencode_images', False)}")
@@ -194,7 +194,7 @@ def show_config_menu(config):
         )
         print(f" 20. Grade Verbose            : {config.get('grade_verbose', True)}")
         print(f" 21. Edit Run All Order       : {config.get('run_all_order', DEFAULT_RUN_ALL_ORDER)}")
-        print(f" 22. Thorough Audit           : {config.get('audit_thorough', False)}")
+        print(f" 22. Thorough Audit           : {config.get('audit_thorough', DEFAULT_CONFIG['audit_thorough'])}")
         print(f" 23. Force Audit              : {config.get('force_audit', False)}")
         print(f" 24. Audit Cutoff Allowance   : {config.get('audit_cutoff_allow', 0)} Hz (0=default)")
         print(f" 25. Audit Clipping           : {config.get('audit_clipping', True)}")

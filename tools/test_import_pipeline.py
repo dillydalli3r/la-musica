@@ -536,7 +536,10 @@ try:
         assert tags["GENRE"], tags
     assert _written["01 - track.wav"]["MUSICBRAINZ_TRACKID"] == "rec-1", _written["01 - track.wav"]
     assert _written["02 - track.wav"]["MUSICBRAINZ_TRACKID"] == "rec-2", _written["02 - track.wav"]
-    assert _written["01 - track.wav"]["GENRE"] == "Shoegaze; Noise Pop", _written["01 - track.wav"]
+    # The list goes in as REPEATED GENRE fields, not one "; "-joined value:
+    # the grader counts the values a file carries, so a joined string would
+    # read as one genre and fail the per-track count check.
+    assert _written["01 - track.wav"]["GENRE"] == ["Shoegaze", "Noise Pop"], _written["01 - track.wav"]
 
     # A stated rating IS written, for every track — and the provider that
     # stated it is reported back per track.

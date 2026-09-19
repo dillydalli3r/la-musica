@@ -38,9 +38,9 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .audio import AudioFile
-from .discs import album_discs, _disc_pattern_for, _disc_expected_name, disc_of_filename, CUE_FILE_RE
+from .discs import album_discs, _disc_pattern_for, _disc_expected_name, CUE_FILE_RE
 from .paths import AUDIO_EXTS
-from .stats import (is_audio_file, _collect_targets, _walk_files, new_stats,
+from .stats import (is_audio_file, _collect_targets, new_stats,
                     _make_pbar, _pbar_skip, _pbar_update, worker_count)
 from .subproc import run_tool
 from .ui import log, c, Color, print_header
@@ -108,9 +108,55 @@ def _patched_cue_for_temp(original_text, discs_wav_map):
 # ----------------------------------------------------------------------
 # WAV conversion via ffmpeg (lossless transport only – not a CRC tool)
 # ----------------------------------------------------------------------
+def _transport_codec(src):
+    """The pcm codec for one track's WAV transport, or (None, reason).
+
+    The transported WAV is what ArCueDotNet CRCs, so it must be the source
+    audio itself: a fixed pcm_s16le changed every sample of a 24-bit rip, so
+    the whole disc came back "No match" from AccurateRip — a false verdict on
+    perfectly good audio (and audit_require_accuraterip then wrote FAKE for
+    it). Only a depth PCM cannot carry is refused, and the caller reports
+    that disc as unverifiable rather than as not-in-database.
+    """
+    bits = 0
+    try:
+        info = getattr(getattr(AudioFile(src), "audio", None), "info", None)
+        bits = int(getattr(info, "bits_per_sample", 0) or 0)
+    except Exception:
+        bits = 0
+    if bits <= 16:
+        # Unknown depth (0) stays 16-bit: a CD-DA rip is 16/44.1, which is
+        # also the only depth AccurateRip has entries for.
+        return "pcm_s16le", None
+    if bits <= 24:
+        return "pcm_s24le", None
+    if bits <= 32:
+        return "pcm_s32le", None
+    return None, f"{bits}-bit audio"
+
+
+def _wav_transport_timeout(src):
+    """Timeout for one track's lossless WAV transport, scaled by duration.
+
+    A fixed 120 s fails a long or high-resolution track spuriously — the
+    decode is I/O bound (~4x realtime at worst) and the disc is then thrown
+    away for a slow disk, not for bad audio.
+    """
+    timeout = 120
+    try:
+        info = getattr(getattr(AudioFile(src), "audio", None), "info", None)
+        seconds = float(getattr(info, "length", 0) or 0)
+        if seconds > 0:
+            timeout = int(max(120.0, seconds * 4.0 + 60.0))
+    except Exception:
+        pass
+    return timeout
+
+
 def _convert_to_wavs(ffmpeg_exe, track_paths, tmp_dir, config):
-    """Decode each track to WAV in tmp_dir, keeping its own channel layout
-    and sample rate (no upmix/resample — the WAV must be the source audio).
+    """Decode each track to WAV in tmp_dir, keeping its own channel layout,
+    sample rate and bit depth (no upmix/resample/truncation — the WAV must be
+    the source audio).
 
     Returns {original basename lower -> wav basename} on success.
     Parallelised; on any failure raises.
@@ -136,10 +182,14 @@ def _convert_to_wavs(ffmpeg_exe, track_paths, tmp_dir, config):
 
     def _one(pair):
         src, dst = pair
+        codec, reason = _transport_codec(src)
+        if codec is None:
+            return (src, f"cannot transport to WAV without changing the "
+                         f"samples ({reason})")
         proc = run_tool(
-            [ffmpeg_exe, "-v", "error", "-i", src, "-f", "wav", "-acodec", "pcm_s16le", dst],
+            [ffmpeg_exe, "-v", "error", "-i", src, "-f", "wav", "-acodec", codec, dst],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
-            timeout=120,
+            timeout=_wav_transport_timeout(src),
         )
         if proc.returncode != 0 or not os.path.isfile(dst):
             return (src, proc.stderr or f"ffmpeg rc={proc.returncode}")
@@ -297,8 +347,6 @@ def parse_accurip_status(text):
             return ("NONE", "AccurateRip disk/track not present in database")
         if "not found" in low and "accuraterip" in low:
             return ("NONE", "AccurateRip ID not found")
-        if "accuraterip" not in low:
-            return ("NONE", "no AccurateRip ID")
         return ("NONE", "no AccurateRip ID")
     start = m_id.end()
     # Per spec the header is ``Track   [  CRC   |   V2   ] Status`` (2.1.4+) or ``Track   [ CRC    ] Status`` (single CRC offsetted)
@@ -461,6 +509,40 @@ def _canonical_accurip_text(content, keep_empty_lines=False, keep_other_lines=Fa
     return result
 
 
+def resolve_arcue_exe(tools=None):
+    """The ArCueDotNet / CUETools.ARCUE executable, or None when absent.
+
+    Shared with the audit: a missing generator is the one honest reason an
+    album has no .accurip, and the audit must not read "no tool could make
+    one" as "the rip did not match the database".
+    """
+    if tools is None:
+        from .tools import detect_all_tools
+        tools = detect_all_tools()
+    cuetools = tools.get("cuetools") or {}
+    exe = cuetools.get("arcue_exe")
+    if exe and os.path.isfile(exe):
+        return exe
+    # Direct exe paths for both 2.1.6 (ArCueDotNet) and 2.2.6 (CUETools.ARCUE).
+    d = cuetools.get("dir") or ""
+    for cand_name in ("CUETools.ARCUE.exe", "ArCueDotNet.exe"):
+        cand = os.path.join(d, cand_name) if d else ""
+        if cand and os.path.isfile(cand):
+            return cand
+    # Last resort: any *arcue*.exe in the tool folder.
+    try:
+        if d and os.path.isdir(d):
+            for entry in sorted(os.listdir(d)):
+                low = entry.lower()
+                if "arcue" in low and low.endswith(".exe"):
+                    cand = os.path.join(d, entry)
+                    if os.path.isfile(cand):
+                        return cand
+    except OSError:
+        pass
+    return None
+
+
 def run_generate_accurip(config):
     """Generate CD-{n}.accurip via CUETools CLI for every MEDIA=CD disc.
 
@@ -489,29 +571,8 @@ def run_generate_accurip(config):
         return stats
 
     cuetools = tools.get("cuetools") or {}
-    arcue_exe = cuetools.get("arcue_exe")
-    # Fallback: try direct exe paths for both 2.1.6 (ArCueDotNet) and 2.2.6 (CUETools.ARCUE)
-    if not arcue_exe or not os.path.isfile(arcue_exe):
-        for cand_name in ("CUETools.ARCUE.exe", "ArCueDotNet.exe"):
-            cand = os.path.join(cuetools.get("dir", ""), cand_name)
-            if os.path.isfile(cand):
-                arcue_exe = cand
-                break
-    if not arcue_exe or not os.path.isfile(arcue_exe):
-        # Last resort scan
-        try:
-            d = cuetools.get("dir", "")
-            if d and os.path.isdir(d):
-                for entry in os.listdir(d):
-                    low = entry.lower()
-                    if "arcue" in low and low.endswith(".exe"):
-                        cand = os.path.join(d, entry)
-                        if os.path.isfile(cand):
-                            arcue_exe = cand
-                            break
-        except Exception:
-            pass
-    if not arcue_exe or not os.path.isfile(arcue_exe):
+    arcue_exe = resolve_arcue_exe(tools)
+    if not arcue_exe:
         log(c("ERROR: CUETools ARCUE (ArCueDotNet/CUETools.ARCUE) not found — needed for AccurateRip verification", Color.RED))
         log(c("Install via Dependencies → CUETools or place CUETools.ARCUE.exe in .dependencies/CUETools v*/", Color.YELLOW))
         return stats
@@ -614,18 +675,29 @@ def run_generate_accurip(config):
                             needs_regen = True
                         elif is_old_version:
                             needs_regen = True
+                        # The .accurip describes the bytes it was generated
+                        # from: a re-rip (or a re-encode) of any track makes
+                        # the stored verdict stale, and its text markers still
+                        # look perfectly current. Newer track file than the
+                        # .accurip therefore means regenerate.
+                        newest_track = 0.0
+                        for tp in track_paths:
+                            try:
+                                newest_track = max(newest_track, os.path.getmtime(tp))
+                            except OSError:
+                                pass
+                        try:
+                            if newest_track > os.path.getmtime(accurip_path) + 1.0:
+                                needs_regen = True
+                        except OSError:
+                            pass
                         if not needs_regen:
                             stats["skipped_count"] += 1
                             continue
-                    if existing and existing.strip():
-                        # legacy synthetic verified file – regenerate via CUETools for correct format
-                        pass
-                    else:
-                        # empty – regenerate
-                        pass
                 except OSError:
                     pass
-                # if not a correctly formatted CUETools log, we will regenerate
+                # Empty, or not a correctly formatted CUETools log we can
+                # trust: regenerate it through CUETools.
 
             if not write_files:
                 stats["skipped_count"] += 1

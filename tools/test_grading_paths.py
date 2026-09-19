@@ -73,6 +73,15 @@ def del_tags(path, keys):
     f.save()
 
 
+def set_multi(path, key, values):
+    """set_tags() writes ONE value per tag; this writes REPEATED fields
+    (two GENREs), which is how the app stores a multi-value tag."""
+    from mutagen.flac import FLAC
+    f = FLAC(path)
+    f[key] = list(values)
+    f.save()
+
+
 BASE_TAGS = {
     "TITLE": "Song",
     "ARTIST": "Artist",
@@ -135,6 +144,10 @@ ISO_CFG = {
     # the dedicated cases below.
     "grade_check_mood": False,
     "grade_check_energy": False,
+    # The Genre COUNT check compares a track against mb_genre_count, whose
+    # shipped default is 2 while every fixture here carries one genre: off
+    # for these cases and switched on in its own block below.
+    "grade_check_genre_count": False,
     "grade_check_replaygain": False,
     "grade_check_acoustid": False,
     "grade_check_album_description": False,
@@ -409,6 +422,58 @@ ok("GENRE_MISSING" in res["tracks"][0]["issues"]
 set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
 
 # ----------------------------------------------------------------------
+# Genre count (grade_check_genre_count) — EXACTLY mb_genre_count values
+# ----------------------------------------------------------------------
+print("== genre count ==")
+# The fixture carries one genre, so these cases pin the configured number to
+# 1 — the check reads it from the config in every case below (the value has
+# one home, and the tests must not accidentally pin today's shipped default).
+cnt_cfg = dict(mood_cfg, grade_check_genre_count=True, mb_genre_count=1)
+res = _grade_album(album, "EMBEDDED", cnt_cfg)
+ok("GENRE_COUNT" not in res["tracks"][0]["issues"]
+   and res["pass_count"] == res["total_checks"],
+   f"one genre passes the count check ({res['pass_count']}/{res['total_checks']})")
+# ... and it is COUNTED while on: switching it off drops one check from the
+# denominator (a check that never counts is the bug this key class had).
+res_off = _grade_album(album, "EMBEDDED",
+                       dict(cnt_cfg, grade_check_genre_count=False))
+ok(res_off["total_checks"] == res["total_checks"] - 1
+   and res_off["pass_count"] == res_off["total_checks"],
+   f"the check counts while on and disappears with the toggle off "
+   f"({res['total_checks']} vs {res_off['total_checks']})")
+
+set_multi(flac, "GENRE", ["Rock", "Alternative Rock"])
+res = _grade_album(album, "EMBEDDED", cnt_cfg)
+ok(res["tracks"][0]["issues"] == ["GENRE_COUNT"],
+   f"two genres pass the presence check and fail only the count "
+   f"(got {res['tracks'][0]['issues']})")
+ok(any("2 genres, 1 expected" in i for i in res["issues"]),
+   f"the issue names both numbers (got {res['issues']})")
+ok(res["total_checks"] - res["pass_count"] == 1,
+   f"and costs exactly one grade point ({res['pass_count']}/{res['total_checks']})")
+# Raising the configured value clears it — the check reads the config, it does
+# not compare against a literal of its own.
+res = _grade_album(album, "EMBEDDED", dict(cnt_cfg, mb_genre_count=2))
+ok(res["pass_count"] == res["total_checks"],
+   f"two genres pass when 2 are configured ({res['pass_count']}/{res['total_checks']})")
+# ... and a single genre then fails naming the OTHER number too.
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
+res = _grade_album(album, "EMBEDDED", dict(cnt_cfg, mb_genre_count=2))
+ok(any("1 genre, 2 expected" in i for i in res["issues"]),
+   f"a lone genre fails when 2 are configured (got {res['issues']})")
+
+# No genre at all is graded by the count check too — independently of the
+# presence toggle, with its own wording (never a second 'Missing GENRE').
+del_tags(flac, ["GENRE"])
+res = _grade_album(album, "EMBEDDED", dict(cnt_cfg, grade_check_genre=False))
+ok(res["tracks"][0]["issues"] == ["GENRE_COUNT"],
+   f"an absent genre fails the count check on its own "
+   f"(got {res['tracks'][0]['issues']})")
+ok(any("no genre, 1 expected" in i for i in res["issues"]),
+   f"and says 'no genre' (got {res['issues']})")
+set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
+
+# ----------------------------------------------------------------------
 # ReplayGain family (grade_check_replaygain) — opt-in like AcoustID
 # ----------------------------------------------------------------------
 print("== replaygain presence ==")
@@ -458,13 +523,19 @@ ok(res["total_checks"] == rg_base["total_checks"]
    f"grade_check_replaygain=False does not grade them "
    f"({res['pass_count']}/{res['total_checks']})")
 # both toggles on: exactly one penalty per missing RG tag (the generic sweep
-# still owns DYNAMIC RANGE, which this fixture does not carry either)
+# still owns DYNAMIC RANGE, which this fixture does not carry either). The
+# baseline for the count is the same album with the family toggle OFF but the
+# sweep ON — the generic sweep answers to its own key, so it adds its checks to
+# the denominator as soon as it is switched on, and the family must add only
+# its own four on top.
+_rg_both_base = _grade_album(album, "EMBEDDED",
+                             dict(cfg, grade_check_missing_tags=True))
 res = _grade_album(album, "EMBEDDED",
                    dict(cfg, grade_check_replaygain=True,
                         grade_check_missing_tags=True))
 _rg_issues = [i for i in res["tracks"][0]["issues"]
               if i.startswith("REPLAYGAIN")]
-ok(res["total_checks"] == rg_base["total_checks"] + 4
+ok(res["total_checks"] == _rg_both_base["total_checks"] + 4
    and _rg_issues == ["REPLAYGAIN_TRACK_PEAK", "REPLAYGAIN_ALBUM_GAIN",
                       "REPLAYGAIN_ALBUM_PEAK"]
    and res["tracks"][0]["issues"].count("DYNAMIC RANGE") == 1,
@@ -1046,7 +1117,11 @@ ok(stats_only["issue_counts"].get(EMPTY_FOLDER) == 1
 # off" case here; MAN_CFG turns it on over its own album tree.
 print("== grade_check_expected_tracks ==")
 mn_music = os.path.join(tmp, "Manifest", "Music")
-mn_tags = dict(BASE_TAGS)
+# The album states a MusicBrainz release id: the manifest is only required
+# where script 15 could have written one (it refuses to fabricate a tracklist
+# for a release it cannot name), and that is what makes the missing manifest a
+# failure below — and a pass once the manifest exists.
+mn_tags = dict(BASE_TAGS, MUSICBRAINZ_ALBUMID=_MBID)
 mn_flac = album_path(mn_music, mn_tags)
 os.makedirs(os.path.dirname(mn_flac), exist_ok=True)
 make_flac(mn_flac)
@@ -1092,6 +1167,21 @@ ok(EXPECTED_TRACKS_MISSING not in stats_man_off["issue_counts"],
 ok(row_line(lines_man_off, mn_rel) is not None
    and "PASS" in row_line(lines_man_off, mn_rel),
    "the album grades without the manifest while the check is off")
+
+# No release id on the album: script 15 writes NO manifest for it (one line
+# says so), so the check is not graded there at all — the album is reported on
+# what it can be fixed on, never on a file nothing can produce.
+nm_music = os.path.join(tmp, "NoId", "Music")
+nm_flac = album_path(nm_music, dict(BASE_TAGS))
+os.makedirs(os.path.dirname(nm_flac), exist_ok=True)
+make_flac(nm_flac)
+set_tags(nm_flac, dict(BASE_TAGS))
+stats_nom, _lines_nom = graded(dict(MAN_CFG, music_folder=nm_music))
+ok(EXPECTED_TRACKS_MISSING not in stats_nom["issue_counts"],
+   f"an album with no MusicBrainz release id is not failed for a manifest it "
+   f"can never have ({stats_nom['issue_counts']})")
+ok(stats_nom["grade_dist"] == {"PASS": 1, "FAIL": 0},
+   f"and it grades PASS ({stats_nom['grade_dist']})")
 
 print(f"\nAll {passed} checks passed.")
 shutil.rmtree(tmp, ignore_errors=True)
