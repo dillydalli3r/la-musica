@@ -19,6 +19,11 @@ on:
   push:
     tags:
       - "v*"
+  # Re-running a release without re-tagging (a tag whose build failed on one
+  # platform, a GHCR push that hit a registry hiccup). The version check below
+  # still binds the run to the tag it is on, so this cannot publish a release
+  # for a version the source does not claim.
+  workflow_dispatch:
 
 permissions:
   contents: write
