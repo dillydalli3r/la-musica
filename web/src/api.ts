@@ -1341,6 +1341,16 @@ export const api = {
       body: JSON.stringify({ path }),
     }),
 
+  /** What THIS build can do (`GET /api/capabilities`).
+   *
+   *  Answered from the server's cached tool detection plus one spawn probe —
+   *  no network, no GitHub check — so a page can ask it on load. A phone
+   *  running the backend inside the app answers the same shape as a desktop
+   *  server and differs only in the per-feature rows: that difference is what
+   *  the Dependencies page and both wizards read instead of guessing from the
+   *  platform. */
+  capabilities: () => json<Capabilities>(`${API}/capabilities`),
+
   dependencies: (refresh = false) =>
     json<{
       deps_dir: string;
@@ -2032,3 +2042,81 @@ export const api = {
       body: JSON.stringify({ album_path: albumPath, assignments }),
     }, 600000).then(noteContainerSwap),
 };
+/** One row of `GET /api/capabilities`: what one feature can do HERE. */
+export interface Capability {
+  label: string;
+  available: boolean;
+  /** Why not — either the tool is missing, or this device can never run it
+   *  (a sandbox that refuses to start a program). Null when it works. */
+  reason: string | null;
+  /** What would provide it; null when it already works or never can. */
+  how: string | null;
+  /** The Dependencies-table keys this feature needs, so those rows can be
+   *  marked rather than each caller re-deriving the tool list. */
+  tools: string[];
+}
+
+/** The features the report covers. The names are the server's own keys. */
+export type CapabilityKey =
+  | "core"
+  | "lyrics"
+  | "transcode"
+  | "video"
+  | "loudness"
+  | "accuraterip"
+  | "audit"
+  | "logchecker"
+  | "beets"
+  | "acoustid"
+  | "images"
+  | "soulseek"
+  | "keybpm"
+  | "can_spawn";
+
+export type Capabilities = Record<CapabilityKey, Capability> & {
+  /** `sys.platform` of the backend that answered ("win32", "linux", "darwin", "ios"). */
+  platform: string;
+  /** How that backend was started: inside the app ("embedded"), as a
+   *  launcher's child process ("child"), or one reached over the network. */
+  backend: string;
+  python: string;
+  /** Whether the Dependencies installer can help at all on this platform. */
+  installable: boolean;
+};
+
+/** Why every external tool is unavailable on this device, or null when the
+ *  server can start one at all.
+ *
+ *  One measurement covers the whole Dependencies table: if the backend cannot
+ *  start a program, no row of it can ever work here, and the reason is the
+ *  platform's own (a sandbox that refuses to exec anything). When it CAN start
+ *  one, a missing tool really is missing and the Install button is honest —
+ *  which is why nothing here guesses per tool. */
+export function deviceUnavailable(caps: Capabilities | undefined): string | null {
+  if (!caps || caps.can_spawn.available) return null;
+  return caps.can_spawn.reason || "unavailable on this device";
+}
+
+/** The features this device cannot run, in CAPABILITY_KEYS order. */
+export function unavailableFeatures(caps: Capabilities | undefined): Capability[] {
+  if (!caps) return [];
+  return CAPABILITY_KEYS.filter((k) => !caps[k].available).map((k) => caps[k]);
+}
+
+/** Iteration order for the report — a fixed list, so both the summary line
+ *  and the Dependencies table read the same features in the same order. */
+export const CAPABILITY_KEYS: CapabilityKey[] = [
+  "core",
+  "lyrics",
+  "transcode",
+  "video",
+  "loudness",
+  "accuraterip",
+  "audit",
+  "logchecker",
+  "beets",
+  "acoustid",
+  "images",
+  "soulseek",
+  "keybpm",
+];

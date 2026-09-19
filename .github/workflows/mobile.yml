@@ -19,7 +19,87 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ---------------------------------------------------------------------- #
+  # The mobile wheels nobody publishes.
+  #
+  # The backend runs on the device, and FastAPI needs pydantic v2, which needs
+  # pydantic-core — a Rust extension with NO iOS or Android wheel on PyPI
+  # (checked: 137 files, none for either platform). BeeWare's own mobile-wheels
+  # index says the way to get one is cibuildwheel, which builds for both mobile
+  # platforms from a POSIX host. So each platform gets a wheel job, and the
+  # build jobs below refuse to run without it: an app that cannot import its own
+  # API would install, open, and fail on first use.
+  #
+  # Cached on the requirements hash, because the first build pays for itself and
+  # every release after that should not.
+  # ---------------------------------------------------------------------- #
+  wheels-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache the built wheels
+        uses: actions/cache@v4
+        with:
+          path: desktop/src-tauri/target/mobile-wheels/android
+          key: mobile-wheels-android-${{ hashFiles('tools/mobile/requirements-android.txt') }}
+
+      - name: cibuildwheel
+        run: python3 -m pip install cibuildwheel
+
+      - name: Build the wheels Android needs
+        # cibuildwheel fetches the NDK it needs through the runner's sdkmanager.
+        run: python3 tools/mobile/bundle.py wheels android
+
+      - name: Upload the wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-wheels-android
+          if-no-files-found: error
+          path: desktop/src-tauri/target/mobile-wheels/android/**/*.whl
+
+  wheels-ios:
+    # iOS wheels are built with Apple's SDK, so this job has to be a Mac.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache the built wheels
+        uses: actions/cache@v4
+        with:
+          path: desktop/src-tauri/target/mobile-wheels/ios
+          key: mobile-wheels-ios-${{ hashFiles('tools/mobile/requirements-ios.txt') }}
+
+      - name: cibuildwheel
+        run: python3 -m pip install --user cibuildwheel
+
+      - name: Build the wheels iOS needs
+        # bundle.py supplies CIBW_XBUILD_TOOLS="cargo rustc" — the iOS build
+        # environment's PATH excludes everything it is not told about.
+        run: python3 tools/mobile/bundle.py wheels ios
+
+      - name: Upload the wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-wheels-ios
+          if-no-files-found: error
+          path: desktop/src-tauri/target/mobile-wheels/ios/**/*.whl
+
   android:
+    needs: [wheels-android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -84,6 +164,34 @@ jobs:
         working-directory: desktop
         run: npm ci
 
+      - name: Get the wheel the Android app needs
+        uses: actions/download-artifact@v4
+        with:
+          name: mobile-wheels-android
+          path: desktop/src-tauri/target/mobile-wheels/android
+
+      - name: Cache the bundled CLI tools
+        uses: actions/cache@v4
+        with:
+          path: desktop/src-tauri/target/mobile-tools
+          key: mobile-tools-${{ hashFiles('tools/mobile/build_android_tools.sh') }}
+
+      - name: Build the bundled CLI tools (ffmpeg, flac)
+        # Android may execute a binary it ships, which is the one thing the
+        # platform can do that iOS cannot — so the tools it needs are built for
+        # arm64 and shipped inside the APK.
+        run: bash tools/mobile/build_android_tools.sh desktop/src-tauri/target/mobile-tools
+
+      - name: Stage the bundled Python runtime
+        # BEFORE `android init`: the runtime is staged as a single
+        # `libmlopy.so` payload (an APK gives assets no filesystem path, and
+        # only lib*.so survives packaging), and the injector below copies it
+        # into the project that init just generated.
+        run: |
+          python3 tools/mobile/bundle.py android \
+            --wheels desktop/src-tauri/target/mobile-wheels/android \
+            --tools desktop/src-tauri/target/mobile-tools
+
       - name: Regenerate the committed icon sets
         # `tauri icon` is the only thing that writes app icons anywhere in this
         # repo. With no generated project in the tree yet it writes the
@@ -116,6 +224,18 @@ jobs:
           cmp -s src-tauri/gen/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher_foreground.png \
                  src-tauri/icons/android/mipmap-xxxhdpi/ic_launcher_foreground.png \
             || { echo "::error::the generated Android project does not carry the la musica icons"; exit 1; }
+
+      - name: Wire the runtime into the generated Android project
+        # `gen/android` is generated in CI and never committed, so the payload
+        # and the foreground service are injected the same way the
+        # cleartext-traffic edit above is. inject.py is idempotent and fails
+        # loudly when tauri's template changes shape, so a silent no-op here is
+        # not possible.
+        working-directory: desktop
+        run: |
+          python3 ../tools/mobile/android/inject.py \
+            --project src-tauri/gen/android \
+            --jni-libs src-tauri/resources/mobile/android/jniLibs/arm64-v8a
 
       - name: Allow plain-http servers in the release build type
         # Tauri v2 has no config key for Android's cleartext policy, and the
@@ -174,6 +294,17 @@ jobs:
           echo "inspecting $APK"
           python3 ../tools/bundle_icons.py --apk "$APK"
 
+      - name: Verify the runtime inside the built APK
+        # The assertion that makes "the app can host its own backend" a fact
+        # rather than a claim: the packaged APK must carry the interpreter, the
+        # site-packages and the CLI tools. Without this, a build that lost the
+        # payload would ship and only fail on someone's phone.
+        working-directory: desktop
+        run: |
+          APK="$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -1)"
+          test -n "$APK" || { echo "::error::the build produced no .apk to inspect"; exit 1; }
+          python3 ../tools/mobile/bundle.py verify --require-tools "$APK"
+
       - name: Upload the APK
         uses: actions/upload-artifact@v4
         with:
@@ -182,6 +313,7 @@ jobs:
           path: desktop/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
 
   ios:
+    needs: [wheels-ios]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -210,6 +342,20 @@ jobs:
       - name: npm ci (desktop)
         working-directory: desktop
         run: npm ci
+
+      - name: Get the wheel the iOS app needs
+        uses: actions/download-artifact@v4
+        with:
+          name: mobile-wheels-ios
+          path: desktop/src-tauri/target/mobile-wheels/ios
+
+      - name: Stage the bundled Python runtime
+        # BEFORE `ios init`: `bundle.iOS.frameworks` names the staged
+        # Python.xcframework, and init is what turns that into an embedded
+        # framework in the generated Xcode project.
+        run: |
+          python3 tools/mobile/bundle.py ios \
+            --wheels desktop/src-tauri/target/mobile-wheels/ios
 
       - name: Regenerate the committed icon sets
         # See the Android job: with no generated project in the tree,
@@ -314,6 +460,15 @@ jobs:
             rm -rf Payload
           fi
           ls -l "$OUT"
+
+      - name: Verify the runtime inside the built IPA
+        # Same assertion as the APK above: the framework, the stdlib, the
+        # site-packages and the backend's own sources must be in the bundle.
+        working-directory: desktop
+        run: |
+          IPA="$(ls la-musica_*_ios-unsigned.ipa | head -1)"
+          test -n "$IPA" || { echo "::error::no .ipa was packaged"; exit 1; }
+          python3 ../tools/mobile/bundle.py verify "$IPA"
 
       - name: Upload the unsigned IPA
         uses: actions/upload-artifact@v4

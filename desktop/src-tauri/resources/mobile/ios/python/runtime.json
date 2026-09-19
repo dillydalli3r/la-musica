@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "platform": "ios",
+  "python": "3.13",
+  "runtime": "Python-Apple-support 3.13-b15",
+  "platform_tag": "ios_13_0_arm64_iphoneos",
+  "site_packages": [
+    "aiofiles",
+    "anyio",
+    "bin",
+    "certifi",
+    "click",
+    "h11",
+    "httpcore",
+    "httpx",
+    "idna",
+    "multipart",
+    "mutagen",
+    "PIL",
+    "python_multipart",
+    "share",
+    "typing_extensions",
+    "uvicorn",
+    "websockets"
+  ],
+  "missing_required": [
+    "fastapi",
+    "starlette",
+    "pydantic",
+    "pydantic_core",
+    "sniffio",
+    "annotated_types"
+  ],
+  "missing_optional": [],
+  "backend_importable": false,
+  "app_sha256": "eb8573ec4c78c92a5bac904de898071545ed78a83a502703058066f862d2396a",
+  "content_sha256": "6d621eb0057ac108ff20bd2bdcef594774ec6f70662890a1e32482cc2fd9e68b",
+  "tools": [],
+  "reason": "this build's Python cannot import the backend: missing fastapi, starlette, pydantic, pydantic_core, sniffio, annotated_types",
+  "staged": "2026-09-19T22:25:17Z"
+}

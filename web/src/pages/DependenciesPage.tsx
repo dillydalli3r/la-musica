@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { FolderOpen, RotateCcw, Wrench } from "lucide-react";
-import { api } from "../api";
+import { api, deviceUnavailable, unavailableFeatures } from "../api";
 import { toast } from "../store";
 import PageHeader from "../components/PageHeader";
 import { EmptyState } from "../components/Badges";
@@ -40,6 +40,17 @@ export default function DependenciesPage() {
     // table (and fought the user's scroll) for as long as the check ran.
     refetchInterval: (query) => (query.state.data?.checking ? 5000 : false),
   });
+  // What this build can do (GET /api/capabilities). It is the only thing that
+  // can tell a tool nobody installed yet from one this device can never run,
+  // and the page must not offer the second kind an Install button.
+  const { data: caps } = useQuery({
+    queryKey: ["capabilities"],
+    queryFn: () => api.capabilities(),
+    retry: false,
+    staleTime: 5 * 60 * 1000,
+  });
+  const deviceReason = deviceUnavailable(caps);
+  const unavailable = unavailableFeatures(caps);
   const refreshNow = () => {
     forceRef.current = true;
     refetch().finally(() => {
@@ -105,17 +116,36 @@ export default function DependenciesPage() {
               <button
                 className="btn-ghost !py-1 text-xs tap"
                 onClick={() => install([...missing, ...updates].map((t) => t.key))}
-                disabled={busy}
+                disabled={busy || !!deviceReason}
+                title={deviceReason ?? undefined}
               >
                 Install {missing.length + updates.length} ({missing.length} missing · {updates.length} updates)
               </button>
             )}
-            <button className="btn-primary !py-1 text-xs tap" onClick={() => install()} disabled={busy}>
+            <button
+              className="btn-primary !py-1 text-xs tap"
+              onClick={() => install()}
+              disabled={busy || !!deviceReason}
+              title={deviceReason ?? undefined}
+            >
               {busy ? "Installing…" : "Install / update all"}
             </button>
           </>
         }
       />
+
+      {/* One honest line about what THIS build can do, from the backend's own
+          capability report. A tool that is missing on a device that can start
+          one is a download; a device that cannot start a program at all is
+          never fixed by one, and the table below says which of the two it is
+          looking at. */}
+      {caps && deviceReason && (
+        <div className="rounded-md border border-border bg-panel/40 px-3 py-2 text-[11px] text-zinc-400 leading-relaxed">
+          <span className="text-amber-400">Unavailable on this device</span> — {deviceReason}. Browsing, tagging,
+          playing, playlists and lyrics work here; the {unavailable.length} other feature
+          {unavailable.length === 1 ? "" : "s"} need a tool this device can start.
+        </div>
+      )}
 
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-zinc-500">
         <span>
@@ -189,7 +219,14 @@ export default function DependenciesPage() {
                     </span>
                   )}
                   {t.state === "missing" && (
-                    <span className="chip bg-red-900/50 text-red-300 border border-red-900">Missing</span>
+                    <span
+                      className={`chip border ${deviceReason
+                        ? "bg-zinc-800 text-zinc-400 border-zinc-700"
+                        : "bg-red-900/50 text-red-300 border-red-900"}`}
+                      title={deviceReason ?? undefined}
+                    >
+                      {deviceReason ? "Unavailable here" : "Missing"}
+                    </span>
                   )}
                   {t.state === "error" && (
                     <span className="chip bg-zinc-800 text-zinc-400 border border-zinc-700" title={t.note ?? undefined}>

@@ -6,13 +6,19 @@
 //! checkout otherwise. The React UI (web/dist) is served by the Tauri webview
 //! and talks to the backend over HTTP.
 //!
-//! On mobile (Android/iOS) there is no Python interpreter to spawn, no tray
-//! icon, no autostart registry and no window to hide, so every backend/tray
-//! path below is compiled out behind `#[cfg(desktop)]` (`cfg(desktop)` comes
-//! from tauri-build, which sets it for every non-mobile target). The mobile
-//! shell hosts the same React UI and nothing else: the user types the address
-//! of their server into the login screen, so a mobile install is a client of
-//! a backend running somewhere else.
+//! On mobile (Android/iOS) that Python is *embedded* instead of spawned: the
+//! build carries a CPython runtime, its standard library, the backend's own
+//! sources and a site-packages tree (staged by `tools/mobile/bundle.py`), and
+//! `mobile_backend.rs` starts `server.main:app` inside this process — on iOS
+//! because an app cannot execute a second program at all, on Android because
+//! there is no `python` executable to execute. The same port probe, the same
+//! `/api/health` ownership check and the same shutdown route are used, so the
+//! lifecycle guarantees do not fork with the target. What stays desktop-only is
+//! the child-process machinery (a phone has no child to kill), the tray icon,
+//! the autostart registry and the folder picker; and a mobile build whose bundle
+//! cannot host a backend (no runtime staged, or a package missing from it) still
+//! installs and still opens as the pure client it also is — the setup wizard is
+//! told which of the two it has.
 
 #[cfg(desktop)]
 use std::path::PathBuf;
@@ -20,7 +26,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 #[cfg(desktop)]
 use std::sync::Mutex;
-#[cfg(desktop)]
+#[cfg(any(desktop, mobile))]
 use std::time::Duration;
 
 #[cfg(desktop)]
@@ -30,9 +36,10 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 #[cfg(desktop)]
 use tauri::{Manager, RunEvent};
 // The mobile path needs `Manager` too, for the one thing it does at startup:
-// look up the window from the config and show it.
+// look up the window from the config and show it — and `RunEvent`, because the
+// embedded backend is asked to exit through it.
 #[cfg(mobile)]
-use tauri::Manager;
+use tauri::{Manager, RunEvent};
 #[cfg(desktop)]
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as AutostartManagerExt};
 #[cfg(desktop)]
@@ -41,13 +48,18 @@ use tauri_plugin_dialog::DialogExt;
 #[cfg(desktop)]
 struct BackendState(Mutex<Option<Child>>);
 
+/// The embedded local backend, and the only Tauri command a mobile build
+/// registers: what the UI must ask before it offers "Host on this device".
+#[cfg(mobile)]
+mod mobile_backend;
+
 /// The tray's "Start on Login" checkbox, kept in managed state so the
 /// click handler can re-sync its visual with the registry after toggling.
 #[cfg(desktop)]
 struct AutostartItem(Mutex<Option<CheckMenuItem<tauri::Wry>>>);
 
-#[cfg(desktop)]
-const PORT: &str = "8000";
+#[cfg(any(desktop, mobile))]
+pub(crate) const PORT: &str = "8000";
 
 /// Try to locate the backend entry point.
 ///
@@ -114,8 +126,8 @@ fn project_root() -> PathBuf {
     dir
 }
 
-#[cfg(desktop)]
-fn backend_port_open() -> bool {
+#[cfg(any(desktop, mobile))]
+pub(crate) fn backend_port_open() -> bool {
     std::net::TcpStream::connect(("127.0.0.1", 8000)).is_ok()
 }
 
@@ -126,8 +138,8 @@ fn backend_port_open() -> bool {
 /// requires the API's own `/api/health` reply, JSON `{"status":"ok"}`, which
 /// is exactly the check `start_app.py` and `tray.py` make before they adopt,
 /// shut down or kill a backend. A foreign listener is left completely alone.
-#[cfg(desktop)]
-fn backend_is_ours() -> bool {
+#[cfg(any(desktop, mobile))]
+pub(crate) fn backend_is_ours() -> bool {
     use std::io::{Read, Write};
     let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", 8000)) else {
         return false;
@@ -156,8 +168,8 @@ fn backend_is_ours() -> bool {
 ///
 /// Only ever called after `backend_is_ours()` said the listener is ours — a
 /// foreign app on the port never receives this POST.
-#[cfg(desktop)]
-fn request_backend_shutdown() {
+#[cfg(any(desktop, mobile))]
+pub(crate) fn request_backend_shutdown() {
     use std::io::{Read, Write};
     if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", 8000)) {
         let req = "POST /api/shutdown HTTP/1.1\r\nHost: 127.0.0.1:8000\r\n\
@@ -451,13 +463,26 @@ pub fn run() {
     // screen exists to collect. Nothing on the mobile path may create, recreate,
     // hide or reload this window — a webview torn down and rebuilt is exactly
     // the "the app keeps refreshing" a user sees as the app restarting.
+    //
+    // The same hook starts the embedded backend. It is deliberately *after* the
+    // window is shown: the interpreter's initialisation is millisecond-scale and
+    // the API's first import is not, so the login/setup screen must be able to
+    // paint while the server is still coming up, and `backend_info` answers
+    // `starting` until it does.
     #[cfg(mobile)]
-    let builder = builder.setup(|app| {
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.show();
-        }
-        Ok(())
-    });
+    let builder = builder
+        .manage(mobile_backend::State::default())
+        .invoke_handler(tauri::generate_handler![
+            mobile_backend::backend_info,
+            mobile_backend::set_backend_keepalive
+        ])
+        .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+            }
+            mobile_backend::start(app.handle().clone());
+            Ok(())
+        });
 
     builder
         .on_window_event(|_window, _event| {
@@ -476,13 +501,18 @@ pub fn run() {
         .run(|_app, _event| {
             // Desktop stays alive in the tray when the last window goes away;
             // only an explicit exit (Quit menu / process kill) ends the app —
-            // and that exit is where the spawned backend gets stopped. A
-            // mobile exit is the OS's decision, so there is nothing to hook.
+            // and that exit is where the spawned backend gets stopped. Mobile
+            // has no child process to stop, but the embedded backend still gets
+            // asked to exit cleanly on the way out.
             #[cfg(desktop)]
             match _event {
                 RunEvent::ExitRequested { code: None, api, .. } => api.prevent_exit(),
                 RunEvent::Exit => stop_backend(_app),
                 _ => {}
+            }
+            #[cfg(mobile)]
+            if let RunEvent::Exit = _event {
+                mobile_backend::stop(_app);
             }
         });
 }

@@ -1,16 +1,20 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { HardDrive, KeyRound, Loader2, LogOut, Server, ShieldCheck, Trash2, UserPlus, Wand2 } from "lucide-react";
 import { api, IN_TAURI, normalizeServerUrl, serverUrl, setServerUrl, setToken } from "../api";
 import ConfirmButton from "./ConfirmButton";
+import BackgroundHostingToggle from "./BackgroundHostingToggle";
 import ServerVersionNotice from "./ServerVersionNotice";
 import { useI18n } from "../lib/i18n";
 import {
   hostOnDeviceUrl,
   isClientShell,
   isHostingOnThisDevice,
+  localBackendSummary,
+  probeLocalBackend,
   probeServer,
   resetClientSetup,
+  type LocalBackend,
   type ProbeResult,
 } from "../lib/clientSetup";
 import { toast } from "../store";
@@ -35,6 +39,22 @@ export default function SecurityPanel() {
   const [address, setAddress] = useState(serverUrl());
   const [probe, setProbe] = useState<ProbeResult | null>(null);
   const [testing, setTesting] = useState(false);
+  // What this device's own address answers, when the client is a shell. The
+  // browser build never asks: for it "this device" IS the origin that served
+  // the page, which is alive by definition.
+  const [local, setLocal] = useState<LocalBackend | null>(null);
+  useEffect(() => {
+    let live = true;
+    probeLocalBackend().then((r) => {
+      if (live) setLocal(r);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+  const hostPossible = !isClientShell() || local?.possible === true;
+  const activeMode = hostPossible ? mode : "server";
+  const hostNote = localBackendSummary(local?.capabilities ?? null);
   const status = useQuery({
     queryKey: ["auth", "status"],
     queryFn: api.authStatus,
@@ -92,8 +112,8 @@ export default function SecurityPanel() {
    *  wizard applies, and the reason a wrong address here cannot leave a
    *  client pointed at nothing. */
   const test = async () => {
-    const target = mode === "host" ? hostOnDeviceUrl() : normalizeServerUrl(address);
-    if (mode === "server") setAddress(target);
+    const target = activeMode === "host" ? hostOnDeviceUrl() : normalizeServerUrl(address);
+    if (activeMode === "server") setAddress(target);
     setTesting(true);
     setProbe(null);
     const r = await probeServer(target);
@@ -102,7 +122,7 @@ export default function SecurityPanel() {
   };
 
   const save = () => {
-    setServerUrl(mode === "host" ? hostOnDeviceUrl() : normalizeServerUrl(address));
+    setServerUrl(activeMode === "host" ? hostOnDeviceUrl() : normalizeServerUrl(address));
     // Reload rather than re-point by hand: the API base, every cached query and
     // the event socket are fixed when the module loads, and the session token
     // belongs to the server we just left.
@@ -160,22 +180,31 @@ export default function SecurityPanel() {
         </div>
         <div className="rounded-md border border-border bg-zinc-950/40 px-3 py-2 space-y-2">
           <div className="flex items-center justify-between gap-3 text-xs text-zinc-300">
-            {mode === "host" ? <HardDrive className="h-3.5 w-3.5" /> : <Server className="h-3.5 w-3.5" />}
+            {activeMode === "host" ? <HardDrive className="h-3.5 w-3.5" /> : <Server className="h-3.5 w-3.5" />}
             <select
               className="input tap !w-auto !py-1 tap"
               aria-label={t("settings.connection")}
-              value={mode}
+              value={activeMode}
               onChange={(e) => {
                 setMode(e.target.value as "server" | "host");
                 setProbe(null); // the other mode's answer says nothing about this one
               }}
             >
               <option value="server">{t("client.mode_connect")}</option>
-              <option value="host">{t("client.mode_host")}</option>
+              {/* Offered only when a backend of this device's own answers
+                  (see probeLocalBackend) — the browser build keeps it, where
+                  "this device" is the origin that served the page. */}
+              {hostPossible && <option value="host">{t("client.mode_host")}</option>}
             </select>
           </div>
 
-          {mode === "server" ? (
+          {local && !hostPossible && (
+            <p className="text-[11px] text-zinc-500 leading-relaxed">
+              {t("client.host_impossible", { reason: local.error || "" })}
+            </p>
+          )}
+
+          {activeMode === "server" ? (
             <div className="space-y-1">
               <div className="flex gap-2">
                 <input
@@ -209,7 +238,8 @@ export default function SecurityPanel() {
               <div className="font-mono text-[11px] text-zinc-400 break-all">
                 {hostOnDeviceUrl() || window.location.origin}
               </div>
-              <p className="text-[11px] text-zinc-600 leading-relaxed">{t("client.host_help")}</p>
+              <p className="text-[11px] text-zinc-600 leading-relaxed">{hostNote ?? t("client.host_help")}</p>
+              <BackgroundHostingToggle caps={local?.capabilities ?? null} />
               <button
                 type="button"
                 className="btn-ghost tap !py-1.5 text-xs"
@@ -227,9 +257,7 @@ export default function SecurityPanel() {
               <p className="text-xs text-emerald-300">{t("client.test_ok", { version: probe.version || "" })}</p>
             ) : (
               <p className="text-xs text-amber-300 break-words">
-                {mode === "host" && !isClientShell()
-                  ? t("client.host_no_python")
-                  : t("client.test_fail", { error: probe.error || "" })}
+                {t("client.test_fail", { error: probe.error || "" })}
               </p>
             ))}
 

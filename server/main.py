@@ -750,6 +750,43 @@ def _check_source_kind(kind):
                                  f"(one of {', '.join(health_mod.KINDS)})")
 
 
+def _backend_kind():
+    """How this backend was started, for the client's own report.
+
+    `embedded`: it runs inside the app's own process (a mobile build that
+    bundles Python sets MLO_EMBEDDED). `child`: a launcher spawned it — the
+    desktop shell, tray.py and start_app.py all pass MLO_ALLOW_SHUTDOWN, which
+    is that launcher's own way of saying so. `remote`: anything else (Docker,
+    a server, a manually started backend), which is how a client pointed at
+    this address sees it.
+    """
+    if os.environ.get("MLO_EMBEDDED") == "1":
+        return "embedded"
+    if os.environ.get("MLO_ALLOW_SHUTDOWN") == "1":
+        return "child"
+    return "remote"
+
+
+@app.get("/api/capabilities")
+def capabilities_report():
+    """What THIS build can do, so the UI can say so before it is asked to.
+
+    Cheap and offline: the answer comes from the cached tool detection and a
+    one-time spawn probe (mlo.deps), never from the network. `platform`,
+    `backend` and `python` say which build answered — a phone running the
+    backend inside the app, a desktop shell's child process and a server in
+    Docker all execute the same code and differ only here and in the
+    per-feature rows, which is exactly what a client has to know before it
+    offers "host on this device" or an Install button.
+    """
+    from mlo.deps import capabilities
+
+    return {"platform": sys.platform,
+            "backend": _backend_kind(),
+            "python": sys.version.split()[0],
+            **capabilities()}
+
+
 @app.get("/api/sources/health")
 def sources_health(kind: str = Query(None), probe: int = Query(0)):
     """Which external sources work right now — the wizard's and Settings' one

@@ -1,4 +1,6 @@
-import { HOST_DEVICE_URL, IN_TAURI, normalizeServerUrl, serverUrl } from "../api";
+import { invoke } from "@tauri-apps/api/core";
+import { CAPABILITY_KEYS, HOST_DEVICE_URL, IN_TAURI, normalizeServerUrl, serverUrl } from "../api";
+import type { Capabilities } from "../api";
 import { t, type MessageKey } from "./i18n";
 
 /** Where this client records that its own setup wizard has been through.
@@ -153,6 +155,155 @@ export async function probeServer(url: string): Promise<ProbeResult> {
     requiresLogin: typeof s?.required === "boolean" ? s.required : undefined,
     hasPassword: typeof s?.has_password === "boolean" ? s.has_password : undefined,
   };
+}
+
+/** What this device's own address answers, and what it says it can do. */
+export interface LocalBackend {
+  /** True when a la musica backend answers on this device RIGHT NOW. */
+  possible: boolean;
+  /** That backend's capability report, or null when it did not answer the
+   *  capability call — an older build without the route, or a gated server
+   *  that wants a session first. `possible` is true in both cases. */
+  capabilities: Capabilities | null;
+  /** Why nothing answered, when nothing did. */
+  error?: string;
+}
+
+/** The mobile shell's own answer to the same question
+ *  (`desktop/src-tauri/src/mobile_backend.rs`, the `backend_info` command):
+ *  whether it hosts a backend, where, and — when it does not — why not, in its
+ *  own words. Only the fields this file reads are declared. */
+interface BackendInfo {
+  /** hosting | starting | unavailable | busy */
+  state: string;
+  url: string;
+  reason: string;
+}
+
+/** Ask this device's own address what it is. Never throws.
+ *
+ *  The client wizard cannot decide whether offering "Host on this device" is
+ *  honest by looking at the platform: the desktop shell starts a backend
+ *  before its window shows, a phone build may run one inside the app, and a
+ *  build that ships no local backend answers nothing at all — three different
+ *  situations with one question, so this asks it. The capability call is a
+ *  second, optional question about what such a backend could do; it is read
+ *  directly only when the answer comes from THIS device (a gated server
+ *  replies 401 and is left to the Dependencies page, which has a session). */
+export async function probeLocalBackend(): Promise<LocalBackend> {
+  if (!isClientShell()) return { possible: false, capabilities: null, error: "" };
+
+  // The shell knows this better than a fetch can: it started (or is starting,
+  // or failed to start) the backend itself and holds the reason why
+  // (desktop/src-tauri/src/mobile_backend.rs). A build whose capability list
+  // does not permit the command rejects, and the HTTP probe below answers
+  // instead — the same questions, asked of whoever can answer them.
+  try {
+    const info = await invoke<BackendInfo>("backend_info");
+    if (info?.state === "starting") {
+      // Coming up: the honest answer is "yes, not yet", never "impossible".
+      return { possible: true, capabilities: null };
+    }
+    if (info?.state !== "hosting" || !info.url) {
+      return { possible: false, capabilities: null, error: info?.reason || "" };
+    }
+    return { possible: true, capabilities: await fetchCapabilities(info.url) };
+  } catch {
+    /* no such command in this build — the HTTP probe below is the fallback */
+  }
+
+  const health = await getJson(HOST_DEVICE_URL, "/api/health");
+  const version = health.body?.version;
+  if (!health.ok || typeof version !== "string") {
+    return { possible: false, capabilities: null, error: health.error || "" };
+  }
+  return { possible: true, capabilities: await fetchCapabilities(HOST_DEVICE_URL) };
+}
+
+/** A backend's capability report, or null when it did not answer the call —
+ *  an older build without the route, or a gated server that wants a session
+ *  first. Never throws. */
+async function fetchCapabilities(base: string): Promise<Capabilities | null> {
+  const caps = await getJson(base, "/api/capabilities");
+  const body = caps.ok ? caps.body : null;
+  return body && typeof body.platform === "string" ? (body as unknown as Capabilities) : null;
+}
+
+/** One honest line about a backend that runs ON THIS DEVICE: what works and
+ *  what does not, read from its own capability report rather than assumed
+ *  from the platform. Null while the report is unavailable, so a caller shows
+ *  nothing instead of a claim it cannot back. */
+export function localBackendSummary(caps: Capabilities | null): string | null {
+  if (!caps) return null;
+  const total = CAPABILITY_KEYS.length;
+  const missing = CAPABILITY_KEYS.filter((k) => !caps[k].available).length;
+  if (!missing) return t("client.host_local_all");
+  return t("client.host_local_partial", { missing, total });
+}
+
+/** Device preference: keep the local backend hosting while the app is not in
+ *  the foreground — the "Soulseek sharing with the phone locked" case.
+ *
+ *  Stored per device (localStorage, like this client's server address) because
+ *  it is a property of THIS phone's shell and never of a server: a client
+ *  pointed at a LAN server has no backend of its own to keep alive.
+ *
+ *  The stored key is this UI's own memory of the switch — the shell keeps its
+ *  own copy, because it has to act on the choice at launch and across a
+ *  resume, with no webview in sight (it persists what set_backend_keepalive
+ *  tells it). One writer, so the two cannot disagree. */
+export const BACKGROUND_HOSTING_KEY = "mlo.hostBackground";
+
+export function isBackgroundHosting(): boolean {
+  return readStore(BACKGROUND_HOSTING_KEY) === "1";
+}
+
+/** Record the choice and tell the shell about it.
+ *
+ *  The shell is what keeps the process alive while the screen is off, so this
+ *  is not a switch that only paints itself: it hands the decision over
+ *  (mobile shell only — a build without the command, or the desktop app,
+ *  rejects and the stored choice simply stands). Never throws. */
+export async function setBackgroundHosting(on: boolean): Promise<void> {
+  writeStore(BACKGROUND_HOSTING_KEY, on ? "1" : null);
+  try {
+    await invoke("set_backend_keepalive", { keep: on });
+  } catch {
+    /* no such command in this build: the choice is recorded and nothing here
+       depends on the shell acknowledging it */
+  }
+}
+
+/** How this device can keep a backend hosted in the background. */
+export interface BackgroundHosting {
+  /** True when the switch is offered; false carries the reason instead. */
+  available: boolean;
+  /** Which platform's cost this is — it picks the wording. */
+  kind: "ios" | "android" | "desktop";
+  /** One line: what staying up costs here, or why there is nothing to switch. */
+  help: string;
+}
+
+/** The background-hosting answer for this device, or null when the question
+ *  does not apply (the browser build, or no capability report yet).
+ *
+ *  The platform comes from the backend's own report rather than the user
+ *  agent: it is the process that will be kept alive, so it is the one that
+ *  knows what keeping it alive means. iOS and Android pay for it in different
+ *  currency and a desktop shell pays nothing, which is why this is not one
+ *  switch with one explanation. */
+export function backgroundHosting(caps: Capabilities | null): BackgroundHosting | null {
+  if (!caps || !isClientShell()) return null;
+  if (caps.platform === "ios") {
+    return { available: true, kind: "ios", help: t("client.bg_ios") };
+  }
+  if (caps.platform === "android") {
+    return { available: true, kind: "android", help: t("client.bg_android") };
+  }
+  // A desktop shell supervises its own backend for as long as it runs: the
+  // problem being solved here (the OS suspending the app that hosts it) does
+  // not exist there, so this says so instead of offering a switch.
+  return { available: false, kind: "desktop", help: t("client.bg_desktop") };
 }
 
 /** Point this client at a server that just answered (the wizard's "Next"

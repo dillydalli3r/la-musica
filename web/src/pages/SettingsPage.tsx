@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bell, Save, RotateCcw, LayoutGrid, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, Wand2, X } from "lucide-react";
-import { api } from "../api";
+import { api, deviceUnavailable, unavailableFeatures } from "../api";
 import ConfirmButton from "../components/ConfirmButton";
 import SourcesPanel from "../components/SourcesPanel";
 import SecurityPanel from "../components/SecurityPanel";
@@ -1280,7 +1280,20 @@ export default function SettingsPage() {
     queryFn: () => api.dependencies(),
     retry: false,
   });
+  // What this build can do — asked once per page visit and reused by the
+  // dependency table below: it is the only thing that can tell a tool this
+  // device cannot run from a tool nobody installed yet.
+  const { data: caps } = useQuery({
+    queryKey: ["capabilities"],
+    queryFn: () => api.capabilities(),
+    retry: false,
+    staleTime: 5 * 60 * 1000,
+  });
   const [depsBusy, setDepsBusy] = useState(false);
+  // Why no external tool can run here, or null when the backend can start
+  // one. One measurement for the whole table (see api.deviceUnavailable).
+  const deviceReason = deviceUnavailable(caps);
+  const unavailable = unavailableFeatures(caps);
 
   const installDeps = async (keys?: string[]) => {
     setDepsBusy(true);
@@ -1826,15 +1839,33 @@ export default function SettingsPage() {
                   <button
                     className="btn-ghost !py-1 text-xs tap"
                     onClick={() => installDeps(deps?.tools.filter((t) => t.state === "missing").map((t) => t.key))}
-                    disabled={depsBusy}
+                    disabled={depsBusy || !!deviceReason}
+                    title={deviceReason ?? undefined}
                   >
                     Install missing
                   </button>
-                  <button className="btn-primary !py-1 text-xs min-h-10 md:min-h-0" onClick={() => installDeps()} disabled={depsBusy}>
+                  <button
+                    className="btn-primary !py-1 text-xs min-h-10 md:min-h-0"
+                    onClick={() => installDeps()}
+                    disabled={depsBusy || !!deviceReason}
+                    title={deviceReason ?? undefined}
+                  >
                     {depsBusy ? "Installing…" : "Install / update all"}
                   </button>
                 </div>
               </div>
+              {/* One honest line about what THIS build can do, from the
+                  backend's own capability report. A tool that is missing on a
+                  device that can run one is a download; a device that cannot
+                  start a program at all is never fixed by one, and the table
+                  below says which of the two it is looking at. */}
+              {caps && deviceReason && (
+                <div className="rounded-md border border-border bg-bg/60 px-3 py-2 text-[11px] text-zinc-400 leading-relaxed">
+                  <span className="text-amber-400">Unavailable on this device</span> — {deviceReason}. Browsing,
+                  tagging, playing, playlists and lyrics work here; the {unavailable.length} other feature
+                  {unavailable.length === 1 ? "" : "s"} need a tool this device can start.
+                </div>
+              )}
               {/* `table-scroll` alone: the utility `overflow-hidden` used to sit
                   beside it and, living in the utilities layer, won — the table
                   was clipped instead of scrolled at a phone width. */}
@@ -1866,7 +1897,16 @@ export default function SettingsPage() {
                               Update
                             </span>
                           )}
-                          {t.state === "missing" && <span className="chip bg-red-900/50 text-red-300 border border-red-900">Missing</span>}
+                          {t.state === "missing" && (
+                            <span
+                              className={`chip border ${deviceReason
+                                ? "bg-zinc-800 text-zinc-400 border-zinc-700"
+                                : "bg-red-900/50 text-red-300 border-red-900"}`}
+                              title={deviceReason ?? undefined}
+                            >
+                              {deviceReason ? "Unavailable here" : "Missing"}
+                            </span>
+                          )}
                           {t.state === "error" && (
                             <span className="chip bg-zinc-800 text-zinc-400 border border-zinc-700" title={t.note ?? undefined}>
                               Check failed

@@ -1,6 +1,6 @@
 # la musica
 
-**v3.1.3** — the release that made the library answer questions about itself.
+**v3.1.4** — the release that made the library answer questions about itself.
 Genres are two slots now — the specific genre, then its family — spelled the way
 MusicBrainz spells them, with the family derived instead of asked for. Paths
 carry the release-group id as well, so a file names its album even out of its
@@ -10,6 +10,11 @@ artist, album, track and playlist page has a local-only *More like this* shelf,
 and every client — the container included — says when it is behind. On a phone:
 44 px touch targets, no pinch-zoom, a real zoom setting, and a SideStore/AltStore
 source so the iOS build installs with its own name, icon and version attached.
+
+The mobile builds carry their own backend: a pinned CPython runtime, the
+backend's sources and (on Android) the CLI tools go inside the app, so a
+phone hosts its own library with no external software. What each platform
+cannot do is reported in the UI instead of failing on first use.
 
 Two fixes from a real machine: the iOS favourite star is a real button outside its album link now (a `<button>` inside an `<a>` is invalid and WebKit hit-tests it differently, so a tap could navigate instead of toggling), and dependency installs work — slskd, the one tool the app runs, is stopped and restarted around its own update, which is the "used by another process" failure that made Install all look broken.
 
@@ -1917,8 +1922,8 @@ The same React build runs in five places. The `desktop/` Tauri v2 shell wraps
 | Windows | `npx tauri build` | `.msi`, NSIS `.exe` | spawns and owns the backend |
 | macOS | `npx tauri build` | `.app`, `.dmg` | spawns and owns the backend |
 | Linux | `npx tauri build` | `.deb`, `.AppImage` | spawns and owns the backend |
-| Android | `npx tauri android build --apk --debug` | debug-signed APK | a client of a server you run |
-| iOS | `npx tauri ios build … --no-sign` | unsigned IPA | a client of a server you run |
+| Android | `npx tauri android build --apk --debug` | debug-signed APK | **hosts its own backend** (bundled CPython + ffmpeg/flac), or connects to one |
+| iOS | `npx tauri ios build … --no-sign` | unsigned IPA | **hosts its own backend** (bundled CPython; no external tools are possible), or connects to one |
 
 Both the frontend and the shell are built locally before bundling:
 
@@ -1935,12 +1940,17 @@ iOS app, and packages the `.app` into `Payload/` and zips it into an IPA.
 `.github/workflows/release.yml` runs on a `v*` tag, calls both, and attaches
 the client builds to the release beside the Windows zip and the GHCR image.
 
-**Desktop owns a backend; mobile talks to one.** The shell's Rust is split by
-configuration: everything that spawns, watches, kills and possibly *is* the
-server is behind `#[cfg(desktop)]`, and the mobile build is only a webview
-(`#[cfg_attr(mobile, tauri::mobile_entry_point)]`) with the dialog and
-notification plugins registered — no tray, no folder picker, no process to
-manage.
+**Every build can host a backend — including the phones.** Desktop starts a
+Python it finds on the machine; the mobile builds carry their own, so a phone
+with no server anywhere else still has a working library (see *A backend on the
+phone* below). What differs is only *which* features a platform's backend can
+offer, and the app reports that split instead of failing on first use.
+
+The desktop shell is what runs a separate process, and that part is behind
+`#[cfg(desktop)]`; on mobile the interpreter is embedded in the app itself
+(Android has no `python` executable either — embedding is the only way Python
+runs there), so there is still no tray, no folder picker and no process for the
+user to manage.
 
 - The desktop shell first looks for a packed `mlo-server.exe`/`mlo-server` in
   its resource dir and otherwise for a repo checkout, then runs
@@ -2040,6 +2050,45 @@ Wi-Fi used to open 20 sockets a minute, each one a 4401 close); both
 peer cannot read the library's layout and live activity off the progress relay.
 `SoulseekPage`'s once-a-second status poll is gone, and dragging the volume
 slider no longer writes `localStorage` once per pointermove.
+
+### A backend on the phone
+
+The mobile builds **ship their own backend**: a pinned CPython runtime, the
+stdlib, the API's dependencies and the app's own sources are staged into the app
+at build time (`tools/mobile/bundle.py`), and the shell starts `server.main` on
+loopback at launch — the same adopt/probe/shutdown contract the desktop path
+has. Android additionally carries the CLI tools it is allowed to run (ffmpeg,
+flac) inside the APK, which is the one capability iOS cannot have.
+
+Two facts decide what each platform can do, and both were measured rather than
+assumed:
+
+- **iOS cannot start another program at all.** No `fork`/`exec` in the sandbox,
+  so every subprocess-backed feature is unavailable there — transcoding, video,
+  audit and AccurateRip, loudness measurement, beets, AcoustID, image
+  conversion, Soulseek. Everything in-process works: tag read/write, scanning,
+  the API, streaming, playlists, favourites, search, grading, recommendations
+  and cover art (Pillow ships an iOS wheel).
+- **One dependency has no mobile wheel**: `pydantic-core` (a Rust extension, 137
+  files on PyPI, none for iOS or Android). CI builds it with cibuildwheel —
+  which needs a **macOS** runner for iOS — and caches it. That is why the mobile
+  jobs depend on a wheel job, and why the built APK/IPA is asserted to contain
+  the runtime: an app that cannot import its own API would install, open and
+  fail on first use.
+
+`GET /api/capabilities` is the single report of what this build can do
+(derived, not a platform table: it asks whether a process can be started and
+whether each tool is actually present), and the Dependencies page, both setup
+wizards and the client-setup step read it — a feature that cannot work here says
+so, with the reason, instead of offering an Install button that cannot succeed.
+
+**Background hosting.** A phone suspends apps, so the backend needs an explicit
+keep-alive to keep serving (Soulseek sharing while locked, for instance):
+Android runs a foreground service with an ongoing notification, and iOS uses the
+audio background mode — legitimate while music plays, and a *sideload-only*
+affordance when nothing is playing (holding a silent audio session is exactly
+what Apple's review guidance calls abuse; it will not pass App Store review).
+The setting appears only where the platform can honour it.
 
 **Both mobile artifacts are sideload builds, and neither is signed by us.**
 The Android APK comes out of the workflow as a **debug** APK (`tauri android

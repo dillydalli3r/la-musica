@@ -24,6 +24,24 @@
 	  so one file covers both Apple platforms. Android is unaffected and
 	  documented in desktop/README.md.
 	-->
+	<!--
+	  Background execution, which an app is otherwise denied the moment the user
+	  switches away or locks the phone — and a suspended app serves nothing: the
+	  embedded backend stops answering until the app is resumed.
+
+	  `audio` is the mode this app can claim honestly, because it IS a music
+	  player: while audio plays, the process keeps running, which is what keeps
+	  the local backend (and Soulseek sharing, and an in-flight import) alive.
+	  The shell's "keep hosting in the background" setting activates a playback
+	  audio session even with nothing playing — the silent-audio trick, marked in
+	  desktop/src-tauri/src/mobile_backend.rs as a sideload-only affordance,
+	  off by default, and not something an App Store build may ship turned on.
+	-->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
+
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoadsInWebContent</key>

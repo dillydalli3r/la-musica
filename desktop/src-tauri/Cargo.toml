@@ -1,6 +1,6 @@
 [package]
 name = "mlo-desktop"
-version = "3.1.3"
+version = "3.1.4"
 description = "la musica desktop shell (Tauri v2)"
 authors = ["dillydalli3r"]
 edition = "2021"
@@ -22,6 +22,26 @@ tauri-plugin-autostart = "2"
 tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# A parking_lot Mutex for the mobile backend's state: it is locked on every
+# `backend_info` call and never needs the poisoning dance.
+parking_lot = "0.12"
+
+# Android only: the bundled Python tree ships as one gzipped tar inside the APK's
+# native-lib directory (APK assets have no filesystem path, and CPython needs a
+# real path to import from), so the shell unpacks it into the app's own storage
+# on first launch. iOS reads its runtime straight out of the bundle as files and
+# needs neither crate.
+[target.'cfg(target_os = "android")'.dependencies]
+flate2 = "1"
+tar = "0.4"
+
+# iOS only: the keep-alive. When music is playing the app is kept alive by its
+# audio session (that is what UIBackgroundModes: audio declares in Info.plist),
+# and the user can additionally ask the shell to hold a silent session so the
+# backend keeps serving with nothing playing — see `keepalive` in
+# mobile_backend.rs for what that is and is not.
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2-avf-audio = { version = "0.3", features = ["AVAudioSession", "AVAudioSessionTypes"] }
 
 [profile.release]
 codegen-units = 1

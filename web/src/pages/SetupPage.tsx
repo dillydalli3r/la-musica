@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ArrowRight, ArrowLeft, RotateCcw, Users, Sparkles, Music2 } from "lucide-react";
-import { api } from "../api";
+import { api, deviceUnavailable, unavailableFeatures } from "../api";
 import SourcesPanel from "../components/SourcesPanel";
 import AiTestButton from "../components/AiTestButton";
 import { toast } from "../store";
@@ -32,6 +32,17 @@ export default function SetupPage() {
     retry: false,
     enabled: step >= 2,
   });
+
+  // What THIS build can do, so the wizard never offers to install a tool the
+  // device could not run even if the download succeeded (see api.deviceUnavailable).
+  const { data: caps } = useQuery({
+    queryKey: ["capabilities"],
+    queryFn: () => api.capabilities(),
+    retry: false,
+    enabled: step >= 2,
+    staleTime: 5 * 60 * 1000,
+  });
+  const deviceReason = deviceUnavailable(caps);
 
   useEffect(() => {
     if (!config) return;
@@ -219,15 +230,31 @@ export default function SetupPage() {
                 <button
                   className="btn-ghost !py-1 text-xs"
                   onClick={() => installDeps(deps?.tools.filter((t) => t.state === "missing").map((t) => t.key))}
-                  disabled={busy}
+                  disabled={busy || !!deviceReason}
+                  title={deviceReason ?? undefined}
                 >
                   Install missing
                 </button>
-                <button className="btn-primary !py-1 text-xs" onClick={() => installDeps()} disabled={busy}>
+                <button
+                  className="btn-primary !py-1 text-xs"
+                  onClick={() => installDeps()}
+                  disabled={busy || !!deviceReason}
+                  title={deviceReason ?? undefined}
+                >
                   {busy ? "Installing…" : "Install all"}
                 </button>
               </div>
             </div>
+            {/* One honest line per surface: what this build can and cannot do,
+                before anything is asked of it. The reasons per tool are on
+                the Dependencies page. */}
+            {caps && deviceReason && (
+              <div className="rounded-md border border-border bg-bg/60 px-3 py-2 text-[11px] text-zinc-400 leading-relaxed">
+                <span className="text-amber-400">Unavailable on this device</span> — {deviceReason}. The app still
+                browses, tags, plays and keeps playlists; the {unavailableFeatures(caps).length} features that start
+                another program need a server instead.
+              </div>
+            )}
             <div className="rounded-md border border-border overflow-hidden">
               <table className="w-full text-sm">
                 <thead className="bg-panel/60">
@@ -254,7 +281,16 @@ export default function SetupPage() {
                             Update
                           </span>
                         )}
-                        {t.state === "missing" && <span className="chip bg-red-900/50 text-red-300 border border-red-900">Missing</span>}
+                        {t.state === "missing" && (
+                          <span
+                            className={`chip border ${deviceReason
+                              ? "bg-zinc-800 text-zinc-400 border-zinc-700"
+                              : "bg-red-900/50 text-red-300 border-red-900"}`}
+                            title={deviceReason ?? undefined}
+                          >
+                            {deviceReason ? "Unavailable here" : "Missing"}
+                          </span>
+                        )}
                         {t.state === "error" && (
                           <span className="chip bg-zinc-800 text-zinc-400 border border-zinc-700" title={t.note ?? undefined}>
                             Check failed
