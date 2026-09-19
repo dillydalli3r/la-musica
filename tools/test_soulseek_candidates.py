@@ -1405,6 +1405,14 @@ NO_RESULT_MSG = ("No candidate folder contained every track (and cue/log per "
                  "disc for CD). Try the manual entry or different search terms.")
 try:
     with Patch(wishes_store, db_path=lambda: os.path.join(_wish_dir, "wishes.db")):
+        # The store creates its schema on FIRST USE, and "first use" is a
+        # process-wide flag: whatever initialized it earlier in this process
+        # (another block of this suite, a route) leaves it set, so the fresh DB
+        # patched in here would be opened WITHOUT its tables and every wish
+        # write would fail ("no such table: wishes"). The job then ended in
+        # `error` instead of parking on its offer — the reason this suite flaked
+        # on CI while passing on a developer machine.
+        wishes_store._initialized = False
         run = run_job(JOB_RELEASE, [], confirm_lossy=True, answer=True)
         assert run.prompt, "the interactive job never offered the wishes list"
         assert run.prompt["reason"] == "no_results", run.prompt
@@ -1535,6 +1543,14 @@ _saved_wish_init_none = wishes_store._initialized
 _sj_calls = []
 try:
     with Patch(wishes_store, db_path=lambda: os.path.join(_wish_none_dir, "wishes.db")):
+        # The store creates its schema on FIRST USE, and "first use" is a
+        # process-wide flag: whatever initialized it earlier in this process
+        # (another block of this suite, a route) leaves it set, so the fresh DB
+        # patched in here would be opened WITHOUT its tables and every wish
+        # write would fail ("no such table: wishes"). The job then ended in
+        # `error` instead of parking on its offer — the reason this suite flaked
+        # on CI while passing on a developer machine.
+        wishes_store._initialized = False
         _w_empty = wishes_store.add_wish(JOB_RELEASE["id"], title="Job Album",
                                          artist="Job Artist", year="1996")
         assert _w_empty["queries"] == [], _w_empty          # nothing stored
@@ -2088,6 +2104,14 @@ _nologs_wish_dir = tempfile.mkdtemp(prefix="mlo-nologs-wish-")
 _saved_wish_init = wishes_store._initialized
 try:
     with Patch(wishes_store, db_path=lambda: os.path.join(_nologs_wish_dir, "wishes.db")):
+        # The store creates its schema on FIRST USE, and "first use" is a
+        # process-wide flag: whatever initialized it earlier in this process
+        # (another block of this suite, a route) leaves it set, so the fresh DB
+        # patched in here would be opened WITHOUT its tables and every wish
+        # write would fail ("no such table: wishes"). The job then ended in
+        # `error` instead of parking on its offer — the reason this suite flaked
+        # on CI while passing on a developer machine.
+        wishes_store._initialized = False
         run = run_job(JOB_RELEASE, DECLINE_ROWS, stub_cls=per_query([[], DECLINE_ROWS]),
                       confirm_lossy=True, answer=[False, True])
         assert [p["reason"] for p in run.prompts] == ["no_logs", "no_results"], run.prompts
@@ -2314,6 +2338,14 @@ _orph_wish_dir = tempfile.mkdtemp(prefix="mlo-rejected-wish-")
 _saved_wish_init = wishes_store._initialized
 try:
     with Patch(wishes_store, db_path=lambda: os.path.join(_orph_wish_dir, "wishes.db")):
+        # The store creates its schema on FIRST USE, and "first use" is a
+        # process-wide flag: whatever initialized it earlier in this process
+        # (another block of this suite, a route) leaves it set, so the fresh DB
+        # patched in here would be opened WITHOUT its tables and every wish
+        # write would fail ("no such table: wishes"). The job then ended in
+        # `error` instead of parking on its offer — the reason this suite flaked
+        # on CI while passing on a developer machine.
+        wishes_store._initialized = False
         # (a) accepted: one wish carrying the release id and the job's own
         #     queries, and a finished "done" job that downloaded nothing.
         run = run_job(JOB_RELEASE, GATE_ROWS, stub_cls=QueueRefused,
