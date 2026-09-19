@@ -9,8 +9,8 @@ Tauri v2 (Rust) wrapper around the React UI and Python backend.
 | Windows 10/11 (x64) | `npm run build` on Windows | `.msi`, NSIS `.exe` |
 | macOS 11+ (Intel/ARM) | `npm run build` on macOS | `.app`, `.dmg` |
 | Linux (x64) | `npm run build` on Linux | `.deb`, `.AppImage` |
-| Android 7.0+ (API 24) | `npx tauri android build --apk` | `.apk` (unsigned, see below) |
-| iOS 14+ | `npx tauri ios build` | unsigned `.app` → `.ipa` |
+| Android 7.0+ (API 24) | `npx tauri android build --apk --debug` | `.apk` (debug-signed, installable) |
+| iOS 14+ | `npx tauri ios build --target aarch64 --no-sign` | unsigned `.app` → `.ipa` |
 
 All five share one crate. Everything that only makes sense with a Python
 process and a desktop shell — backend spawn, tray icon, autostart registry,
@@ -71,17 +71,16 @@ does exactly that, so `.github/workflows/mobile.yml` is the reference for the
 toolchain each target needs; a local build needs the same SDK/NDK or Xcode
 installed first.
 
-## Mobile installs are unsigned
+## Mobile installs: what CI gives you
 
-Neither mobile artifact can be published as-is:
-
-- **Android**: a release APK is only signed when
-  `src-tauri/gen/android/keystore.properties` exists (a keystore generated
-  locally, never committed), so CI produces
-  `app-universal-release-unsigned.apk`. An unsigned APK will not install;
-  sign it with `apksigner` and your keystore, or build with
-  `npx tauri android build --apk --debug` to get a debug-key-signed build you
-  can `adb install` for testing.
+- **Android** — CI builds a **debug** APK (`--apk --debug`), which is signed
+  with the SDK's debug keystore and therefore installs on any device that
+  allows apps from outside the store. That is a deliberate choice: a release
+  APK is only signed when `src-tauri/gen/android/keystore.properties` exists
+  (a keystore generated locally, never committed), so a release build in CI
+  would be an unsigned APK no phone accepts. To publish a signed release
+  build, add that file as a CI secret, build with `--apk`, and `apksigner`
+  with your own keystore.
 - **iOS**: the IPA is an unsigned `.app` zipped into `Payload/`, which is what
   an `.ipa` is. Installing it needs an ad-hoc sideload tool (AltStore,
   Sideloadly, `ios-deploy`) that re-signs with a personal or team
@@ -106,7 +105,7 @@ switches API calls to `http://127.0.0.1:8000` automatically.
 
 - `.github/workflows/desktop.yml` — Windows/macOS/Linux bundles, uploaded per
   platform.
-- `.github/workflows/mobile.yml` — Android APK and unsigned iOS IPA.
+- `.github/workflows/mobile.yml` — Android debug APK and unsigned iOS IPA.
 - `ci.yml` runs `cargo check` for this crate on every push, so the crate graph
   cannot rot unnoticed.
 
