@@ -24,6 +24,14 @@ on:
   workflow_dispatch:
   workflow_call:
 
+# The wheel/tools jobs publish what they build as assets of the `mobile-deps`
+# release, so every later run downloads instead of cross-compiling. That needs a
+# token that may write to the repository: without this block the default token
+# is read-only and `gh release create` is denied — which is exactly how the
+# first attempt at seeding the cache failed, after the wheel had already built.
+permissions:
+  contents: write
+
 # See desktop.yml: the same ref must not build twice in parallel.
 concurrency:
   group: mobile-${{ github.ref }}
