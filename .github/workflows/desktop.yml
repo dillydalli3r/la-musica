@@ -120,11 +120,19 @@ jobs:
         run: |
           set -e
           # `python3` is not on the Windows runner's PATH, `python` is not on
-          # the macOS/Linux ones; the exe is named after the product or the
-          # crate depending on Tauri's mood, so it is found, not assumed.
+          # the macOS/Linux ones, so the interpreter is resolved rather than
+          # assumed. GitHub runs this script with `-e -o pipefail`, and `find`
+          # on a bundle directory this platform did not produce exits non-zero
+          # — so every lookup is guarded by an existence test instead of a
+          # redirect, which pipefail would otherwise turn into a failed step.
           PY="$(command -v python3 || command -v python)"
           B=desktop/src-tauri/target/release/bundle
-          APP="$(find "$B" -maxdepth 3 -name '*.app' -type d 2>/dev/null | head -1)"
+          # `find` recurses, so the app exe's lookup is bounded to depth 1 —
+          # otherwise it matches the NSIS installer under bundle/nsis and the
+          # app exe itself is never looked at.
+          first() { if [ -d "$1" ]; then find "$1" -maxdepth "${3:-9}" -name "$2" 2>/dev/null | head -1; fi; }
+
+          APP="$(first "$B" '*.app')"
           if [ -n "$APP" ]; then
             test -f "$APP/Contents/Resources/icon.icns" \
               || { echo "::error::$APP carries no Contents/Resources/icon.icns"; exit 1; }
@@ -133,13 +141,13 @@ jobs:
             echo "ok: $APP carries the committed icon.icns"
           fi
 
-          EXE="$(find desktop/src-tauri/target/release -maxdepth 1 -name '*.exe' -type f 2>/dev/null | head -1)"
+          EXE="$(first desktop/src-tauri/target/release '*.exe' 1)"
           if [ -n "$EXE" ]; then "$PY" tools/bundle_icons.py --exe "$EXE"; fi
 
-          NSIS="$(find "$B/nsis" -name '*.exe' 2>/dev/null | head -1)"
+          NSIS="$(first "$B/nsis" '*.exe')"
           if [ -n "$NSIS" ]; then "$PY" tools/bundle_icons.py --exe "$NSIS"; fi
 
-          DEB="$(find "$B/deb" -name '*.deb' 2>/dev/null | head -1)"
+          DEB="$(first "$B/deb" '*.deb')"
           if [ -n "$DEB" ]; then
             rm -rf /tmp/debicons && mkdir -p /tmp/debicons
             dpkg-deb -x "$DEB" /tmp/debicons
