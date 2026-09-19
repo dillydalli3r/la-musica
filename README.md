@@ -1,6 +1,6 @@
 # la musica
 
-**v3.1.0** — the release that made the library answer questions about itself.
+**v3.1.1** — the release that made the library answer questions about itself.
 Genres are two slots now — the specific genre, then its family — spelled the way
 MusicBrainz spells them, with the family derived instead of asked for. Paths
 carry the release-group id as well, so a file names its album even out of its
@@ -10,6 +10,8 @@ artist, album, track and playlist page has a local-only *More like this* shelf,
 and every client — the container included — says when it is behind. On a phone:
 44 px touch targets, no pinch-zoom, a real zoom setting, and a SideStore/AltStore
 source so the iOS build installs with its own name, icon and version attached.
+
+The patch that fixed what 3.1.0 got wrong on a phone: the setup wizard's buttons ran off the screen, a wide table crushed its text one character per line instead of scrolling, the fullscreen player put its controls under the notch, and the Home card's Refresh button re-asked a cached answer. It also brings back the in-app MusicBrainz browser (sidebar + top bar), reworks genre importing, and fixes RateYourMusic release pages never resolving.
 
 **la musica** (formerly Music Library Optimizer) — a modern, self-hosted app
 that *manages, optimizes, audits, grades and plays* your music library, from
@@ -164,11 +166,26 @@ machines.
   `genre:` and `tag:` prefixes, and Enter opening an exactly-matching artist.
   **MusicBrainz** asks the network instead — the same release/artist search the
   import wizard's *Match* step uses (`/api/mb/search/releases` with
-  `mode=release|track|catno|barcode`, and `/api/mb/search/artists`) — and the
-  dropdown rows link straight to musicbrainz.org, so a search that finds
-  nothing in your library ends by showing you what you are missing. Queries are
-  cached per query, so typing then re-typing a phrase costs one request: a cold
-  search answered in 0.79 s, the same one again in 0.00 s.
+  `mode=release|track|catno|barcode`, and `/api/mb/search/artists`) — and its
+  rows open the app's OWN MusicBrainz browser (`/mb/artist/…`, `/mb/release/…`),
+  where the release can be read and queued in one place: a small icon on the row
+  is the escape hatch to the same page on musicbrainz.org, Enter searches
+  `/mb/search?q=…`, and a pasted musicbrainz.org link opens that entity
+  directly. Queries are cached per query, so typing then re-typing a phrase
+  costs one request: a cold search answered in 0.79 s, the same one again in
+  0.00 s.
+- **The in-app MusicBrainz browser** (`/mb/search`, the sidebar's *MusicBrainz*
+  entry) searches the four browsable kinds — artists, release groups, releases
+  and recordings — with MusicBrainz's own primary/secondary release-type
+  filters and catno/barcode modes, pages 100 rows at a time, and shows each kind
+  as the library's own column table. The entity pages drill from an artist to a
+  release group to a release to a recording and back (each release page links
+  the recording of every track); a pasted MBID is type-probed server-side so the
+  user never picks a kind; and every header carries *Auto-import* (`mode=best`
+  queues the edition the policy prefers, `all` every eligible one) plus a
+  wishlist action, reporting what the server actually queued
+  (`{queued, items, skipped}` — an album the library already holds is `skipped`
+  with that reason, and its page shows *In library* linking the local album).
 - **"More like this" on artist, album, track and playlist pages** — the one
   recommendation surface that is entirely local. It scores the library's own
   tags (genre *and* family, mood, energy, era, artist), weights a shared
@@ -2405,6 +2422,7 @@ Where the app stores what it fetches:
 | `GET /api/export/drives` `GET /api/export/defaults` | candidate drives with free space and bus type; the saved `export_*` form values |
 | `GET/POST /api/playlists…` | manual + smart playlists, .m3u8 |
 | `GET /api/mb/release?mbid=…` `GET /api/mb/release-genres?mbid=…` | MusicBrainz release + genre cascade |
+| `GET /api/mb/search?type=…&q=…&mode=free\|catno\|barcode&offset=&primary_type=&secondary_type=` | the in-app browser's search over `artist \| release-group \| release \| recording`, returning `{rows, total}` (100 rows a page); `GET /api/mb/artist/{mbid}` `GET /api/mb/release-group/{mbid}` `GET /api/mb/recording/{mbid}` are its entity pages, and `GET /api/mb/detect/{mbid}` names the kind a bare pasted MBID belongs to |
 | `POST /api/mb/match` `POST /api/mb/assign` | track/disc matching, MB/RYM/genre/advisory writes (ITUNESADVISORY is accepted only as 0/1/2 or empty) |
 | `POST /api/mb/auto-import` | enqueue a release / release group / artist for download: `mode=best` (one edition per group) or `all` (every eligible edition). Returns in about a second — `{queued, items: [{mbid, title, status}], skipped: [{mbid, reason}]}` — with `status` `queued` (waiting behind a running job), `running` (started at once) or `queued (resolving)` when MusicBrainz did not answer inside the inline budget and the job resolves the ID itself; nothing to queue is `queued: 0` plus a `skipped` reason, never a 404 |
 | `POST /api/mb/advisory/fetch` | resolve `ITUNESADVISORY` for tracks (or a release): every applicable source is asked on every track (Deezer and Spotify by ISRC, Apple's explicit-edition album route, Apple's song search, Discogs' parental-advisory format when a token is set, yt-dlp's `age_limit` for a track with a YouTube id) and merged — explicit anywhere is 1, else clean is 0, else 0 — returning `sources` (who stated each path's value) and `answers` (what every source said, `{path: {source: 0\|1}}`) |
