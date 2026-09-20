@@ -209,7 +209,11 @@ def _which_pair(exe_name):
 
 
 def _detect_system_tools():
-    """Non-Windows fallback: detect distro tools on PATH (Docker/Linux/macOS)."""
+    """Non-Windows detection: .dependencies installs, then distro tools on PATH.
+
+    Docker/Linux/macOS: the app's own installs (native binaries, pip packages)
+    come first, and anything else is whatever the system provides.
+    """
     import shutil
 
     tools = {}
@@ -273,6 +277,36 @@ def _detect_system_tools():
         if ytdlp:
             tools["yt-dlp"] = {"version": None, "ytdlp_exe": ytdlp}
 
+    # A native install under .dependencies LAST, so it wins over a copy on
+    # PATH: it is the versioned one the Dependencies page reports and updates,
+    # and without this the app could install oxipng or slskd and still call
+    # them missing.
+    tools.update(_detect_deps_native())
+
+    return tools
+
+
+def _detect_deps_native():
+    """Tools installed as native binaries under .dependencies (POSIX only).
+
+    fetchdeps installs native Linux builds there (oxipng, slskd - see
+    fetchdeps.LINUX_BINARIES) and the .exe scan above cannot see them. A
+    Windows host sharing this folder must never pick one up: an .exe-less
+    folder is a file it cannot execute.
+    """
+    from .fetchdeps import INSTALL_PREFIX, LINUX_BINARIES
+
+    tools = {}
+    if os.name == "nt":
+        return tools
+    for key, spec in LINUX_BINARIES.items():
+        version, folder = _detect_tool(INSTALL_PREFIX.get(key, key), DEPS_DIR)
+        if not folder:
+            continue
+        d = os.path.join(DEPS_DIR, folder)
+        if all(os.path.isfile(os.path.join(d, m)) for m in spec["markers"]):
+            tools[key] = {"version": version,
+                          f"{key}_exe": os.path.join(d, spec["markers"][0])}
     return tools
 
 
@@ -282,9 +316,11 @@ def detect_all_tools():
         if _TOOLS_CACHE is not None and _TOOLS_CACHE_SIG == sig:
             return _TOOLS_CACHE
 
-    # .dependencies only ever holds Windows binaries (fetchdeps refuses to
-    # install anything else off-Windows), so on Linux/macOS the distro
-    # packages on PATH ARE the tools - never select an unrunnable .exe folder.
+    # Off-Windows the tools are the app's own installs under .dependencies
+    # (native binaries and pip packages - fetchdeps installs those there, see
+    # _detect_deps_native) plus the distro/Homebrew ones on PATH. The .exe
+    # scan below is Windows-only: a folder of Windows binaries must never be
+    # selected as an install on a host that cannot run them.
     if os.name != "nt":
         return _store_tools_cache(_with_bundled(_detect_system_tools()), sig)
 

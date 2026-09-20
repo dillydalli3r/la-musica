@@ -1838,7 +1838,7 @@ export default function SettingsPage() {
                   </button>
                   <button
                     className="btn-ghost !py-1 text-xs tap"
-                    onClick={() => installDeps(deps?.tools.filter((t) => t.state === "missing").map((t) => t.key))}
+                    onClick={() => installDeps(deps?.tools.filter((t) => t.state === "missing" && t.installable !== false).map((t) => t.key))}
                     disabled={depsBusy || !!deviceReason}
                     title={deviceReason ?? undefined}
                   >
@@ -1899,12 +1899,16 @@ export default function SettingsPage() {
                           )}
                           {t.state === "missing" && (
                             <span
-                              className={`chip border ${deviceReason
+                              className={`chip border ${deviceReason || t.installable === false
                                 ? "bg-zinc-800 text-zinc-400 border-zinc-700"
                                 : "bg-red-900/50 text-red-300 border-red-900"}`}
-                              title={deviceReason ?? undefined}
+                              title={deviceReason ?? t.install_note ?? undefined}
                             >
-                              {deviceReason ? "Unavailable here" : "Missing"}
+                              {deviceReason
+                                ? "Unavailable here"
+                                : t.installable === false
+                                  ? t.install_kind === "system" ? "System package" : "No build here"
+                                  : "Missing"}
                             </span>
                           )}
                           {t.state === "error" && (

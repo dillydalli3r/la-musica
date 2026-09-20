@@ -878,8 +878,16 @@ def dependencies_install(req: DepsInstallRequest):
     # missing) and must install nothing. `req.keys or []` collapsed the two,
     # so one press of a button that had nothing to install started a full
     # reinstall of all sixteen tools.
+    #
+    # "Every tool" means every tool this PLATFORM can install: a Windows-only
+    # tool on Linux, or one the host provides as a distro package (flac, ffmpeg
+    # — the Docker image ships them), has no download to perform, and counted
+    # as failures they turned one press of Install all into twelve of sixteen
+    # tools reported broken. The rows carry the same flag (fetchdeps.
+    # installable), so the page's per-tool buttons exclude them too; an
+    # explicitly requested tool still gets its honest refusal below.
     if req.keys is None:
-        keys = list(fetchdeps.DISPLAY_NAMES)
+        keys = fetchdeps.installable_keys()
     else:
         wanted = set(req.keys)
         keys = [k for k in fetchdeps.DISPLAY_NAMES if k in wanted]

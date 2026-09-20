@@ -667,7 +667,8 @@ def show_main_menu(config):
 
 def manage_dependencies():
     from .fetchdeps import (
-        DISPLAY_NAMES, dependency_rows, install_dependency, refresh_tool_cache,
+        DISPLAY_NAMES, dependency_rows, install_dependency, installable_keys,
+        refresh_tool_cache,
     )
 
     clear_screen()
@@ -706,11 +707,20 @@ def manage_dependencies():
 
     choice = input("Install/update all tools now? (y/n): ").strip().lower()
     if choice in ("y", "yes"):
-        for key in DISPLAY_NAMES:
+        # Only what THIS platform can install: a distro-provided tool or a
+        # Windows-only one has no download to perform, and attempting them
+        # printed a wall of FAILED lines that read as a broken installer (same
+        # reason server.main's Install all takes this list).
+        keys = installable_keys()
+        for key in keys:
             try:
                 install_dependency(key, log=log)
             except Exception as e:
                 log(c(f"FAILED {DISPLAY_NAMES[key]}: {e}", Color.RED))
+        skipped = [k for k in DISPLAY_NAMES if k not in keys]
+        if skipped:
+            log(c("Not installable on this platform: "
+                  + ", ".join(DISPLAY_NAMES[k] for k in skipped), Color.YELLOW))
         tools = refresh_tool_cache()
         log(
             c(

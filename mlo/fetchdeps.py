@@ -1,20 +1,22 @@
 """Automatic dependency fetcher.
 
-Downloads the latest official Windows builds of the external encoder
-toolchain from GitHub releases and installs them into .dependencies/
-using exactly the layout the auto-detection in tools.py expects:
+Downloads the official builds of the external encoder toolchain from GitHub
+releases and installs them into .dependencies/ using exactly the layout the
+auto-detection in tools.py expects:
 
     .dependencies/
-        flac v1.5.0/           flac.exe, metaflac.exe
-        libjxl v0.12.0/        cjxl.exe, djxl.exe
-        libjpeg-turbo v3.2.0/  jpegtran.exe
-        oxipng v10.2.0/        oxipng.exe
+        flac v1.5.0/           flac.exe, metaflac.exe      (Windows)
+        oxipng v10.2.0/        oxipng.exe | oxipng        (Windows | Linux)
+        slskd v0.26.0/         slskd.exe | slskd + wwwroot
 
 Asset sources:
     flac            xiph/flac          flac-<v>-win.zip
     libjxl          libjxl/libjxl      jxl-x64-windows-static.zip
     libjpeg-turbo   libjpeg-turbo/...  libjpeg-turbo-<v>-vc-x64.exe (NSIS)
     oxipng          oxipng/oxipng      oxipng-<v>-x86_64-pc-windows-msvc.zip
+                                       oxipng-<v>-x86_64-unknown-linux-musl.tar.gz
+    slskd           slskd/slskd        slskd-<v>-win-x64.zip
+                                       slskd-<v>-linux-musl-x64.zip
     AudioAuditor    Angel2mp3/...      AudioAuditorCLI-win-x64.exe (bare exe)
 
 The libjpeg-turbo release only ships NSIS installers for Windows; those are
@@ -22,12 +24,18 @@ unpacked with 7-Zip when available, otherwise installed silently into a
 temporary folder (which needs a space-free path, hence GetShortPathName) and
 the required binaries are copied out.
 
-Only the vendored pip packages (librosa, beets) and simple-dr-meter are
-platform-independent: every other tool above is a Windows binary, so on
-Linux/macOS install_dependency() refuses with the distro package that already
-provides it (LINUX_PACKAGES) rather than downloading something that cannot run.
-Each archive's LICENSE/COPYING/README is copied next to the installed binaries
-(_copy_licence_files).
+Platforms: install_kind() is the single answer to how a tool installs here.
+Every tool has a Windows build; the ones upstream also ships a Linux build for
+(LINUX_BINARIES - oxipng, slskd) install natively there too; the rest are distro
+packages (LINUX_PACKAGES: flac, ffmpeg, …) or have no build this app can use
+(AudioAuditor, CUETools, Logchecker + php). An install the platform cannot
+perform is refused with that reason instead of downloading something that cannot
+run, and the Dependencies rows carry the same answer so the UI never shows an
+Install button for a tool that cannot be installed here.
+
+The vendored pip packages (librosa, beets, yt-dlp) and simple-dr-meter are
+platform-independent. Each archive's LICENSE/COPYING/README is copied next to
+the installed binaries (_copy_licence_files).
 
 Standard-library only - no requests.
 """
@@ -39,6 +47,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -122,22 +131,63 @@ INSTALL_PREFIX = {
     "yt-dlp": "yt-dlp",
 }
 
-# Tools whose upstream releases only ship Windows builds, mapped to the Linux
-# package providing the same tool (None = no packaged equivalent). Every asset
-# below is a .exe/win-zip, and MARKER_EXES can only check that files with the
-# right NAMES landed - so on Linux a download would "succeed" with a folder of
-# unrunnable .exe files. install_dependency()/pick_asset() refuse via
-# _require_windows() instead, naming the distro package to use (the Docker
-# image installs them; see Dockerfile).
+# Tools whose upstream releases ship a NATIVE Linux build, mapped to the asset
+# name that build carries per architecture and the files the installer must
+# find inside it. The release tag and the version label are the shared PINNED
+# ones: both platforms install from the same GitHub release.
+#
+# This table is what makes these installable at all in a container. Debian
+# bookworm has no oxipng package, so the Docker image cannot apt-install it and
+# its row sat "missing" for ever behind an Install button that refused - and
+# slskd, the one dependency this app RUNS, ships Linux binaries that make
+# Soulseek work in the Docker image.
+#
+# Each pattern key picks the build for one machine+libc: "x64"/"arm64" is the
+# host's libc as named there, "<arch>-musl" the musl one. A tool published for a
+# single libc (oxipng's static musl tarball) may cover both — see _linux_pattern.
+LINUX_BINARIES = {
+    "oxipng": {
+        # Static musl build: one file that runs on glibc and musl alike
+        # (verified in the Debian-based image).
+        "patterns": {
+            "x64": r"^oxipng-[\d.]+-x86_64-unknown-linux-musl\.tar\.gz$",
+            "arm64": r"^oxipng-[\d.]+-aarch64-unknown-linux-musl\.tar\.gz$",
+        },
+        "markers": ("oxipng",),
+    },
+    "slskd": {
+        # .NET apphost, and dynamically linked: the musl zip names
+        # /lib/ld-musl-x86_64.so.1 as its loader, which a glibc system does not
+        # have, so it exits "not found" instead of running. Both libcs exist
+        # upstream and the host's decides (see _linux_pattern).
+        "patterns": {
+            "x64": r"^slskd-[\d.]+-linux-x64\.zip$",
+            "arm64": r"^slskd-[\d.]+-linux-arm64\.zip$",
+            "x64-musl": r"^slskd-[\d.]+-linux-musl-x64\.zip$",
+            "arm64-musl": r"^slskd-[\d.]+-linux-musl-arm64\.zip$",
+        },
+        "markers": ("slskd",),
+    },
+}
+
+# Tools whose install is the same download on every platform this app supports
+# (a pip package, a source archive), so no platform table decides anything
+# about them.
+PLATFORM_INDEPENDENT = {"simpledrmeter", "librosa", "beets", "yt-dlp"}
+
+# Tools with no native build this app can use, mapped to the distro package
+# providing the same tool (None = no packaged equivalent). MARKER_EXES can only
+# check that files with the right NAMES landed, so on Linux a Windows download
+# would "succeed" with a folder of unrunnable .exe files. install_dependency()/
+# pick_asset() refuse via _require_installable() instead, naming the distro
+# package to use (the Docker image installs them; see Dockerfile).
 LINUX_PACKAGES = {
     "flac": "flac",
     "libjxl": "libjxl-tools",
     "libjpeg_turbo": "libjpeg-progs",
-    "oxipng": "oxipng",
     "ffmpeg": "ffmpeg",
     "rsgain": "rsgain",
     "chromaprint": "libchromaprint-tools",
-    "slskd": None,
     "audioauditor": None,
     "logchecker": None,
     "php": None,
@@ -156,9 +206,180 @@ PIP_PACKAGES = {
 # Tools of which only the Windows build is vendored as a binary: on Linux the
 # same program is installed as the pip package above (yt-dlp has no Linux
 # release asset at all, and its pip package is the upstream-supported install).
-# They are deliberately NOT in LINUX_PACKAGES - _require_windows() would refuse
-# the download instead of using pip.
+# They are deliberately NOT in LINUX_PACKAGES - _require_installable() would
+# refuse the download instead of using pip.
 PIP_ON_LINUX = {"yt-dlp"}
+
+
+# --------------------------------------------------------------------------- #
+# How a tool installs here
+# --------------------------------------------------------------------------- #
+# One answer for the whole installer - which asset table applies, which marker
+# files a finished install must carry, and whether there is anything to fetch
+# at all - so the refusal message, the `latest_version` column and the row's
+# Install button can never disagree about a tool.
+def host_platform():
+    """`windows` | `linux` | `other` for this host.
+
+    Linux is the only non-Windows platform with downloads of its own
+    (LINUX_BINARIES); everywhere else a tool is a pip package or one the user
+    installs with the system package manager.
+
+    Android reports itself as Linux (sys.platform is "linux" there too) but is
+    NOT one for this installer: `sys.getandroidapilevel` exists only on Android,
+    the platform refuses to exec a file in app storage, and the mobile builds
+    bundle their own tools instead (see tools/mobile). Without this, a phone
+    would be offered a musl desktop binary that lands "installed" and cannot run.
+    """
+    if os.name == "nt":
+        return "windows"
+    if sys.platform.startswith("linux"):
+        if hasattr(sys, "getandroidapilevel"):
+            return "other"
+        return "linux"
+    return "other"
+
+
+def _platform_of(platform=None):
+    """*platform* when the caller names one (tests), else the host's."""
+    return platform or host_platform()
+
+
+def _machine():
+    """This host's CPU architecture name, the direct way.
+
+    `os.uname()` on POSIX, and the environment on Windows, which has no
+    `os.uname`. Deliberately NOT platform.machine(): that goes through a cached
+    platform.uname() keyed on sys.platform, so it answers for the wrong system
+    the moment the platform is simulated — and returns "" rather than raising,
+    which would silently turn every native build into "unsupported".
+    """
+    uname = getattr(os, "uname", None)
+    if uname is not None:
+        try:
+            return uname().machine
+        except OSError:
+            pass
+    return os.environ.get("PROCESSOR_ARCHITECTURE", "")
+
+
+def linux_arch(machine=None):
+    """`x64` | `arm64` for a machine name, else None when upstream ships no
+    Linux build for it (a 32-bit ARM or x86 container)."""
+    text = str(machine if machine is not None else _machine()).lower()
+    if text in ("x86_64", "amd64"):
+        return "x64"
+    if text in ("aarch64", "arm64"):
+        return "arm64"
+    return None
+
+
+def musl_libc():
+    """True on a musl system (Alpine and friends).
+
+    Release assets come in both libcs and they are not interchangeable: the
+    musl build names /lib/ld-musl-<arch>.so.1 as its ELF loader, and a glibc
+    host has no such file — the install then "succeeds" and every run dies with
+    "not found" (exit 127), which is exactly how slskd's musl zip behaved in the
+    Debian-based image.
+    """
+    if os.path.exists("/etc/alpine-release"):
+        return True
+    return any(os.path.exists(p) for p in (
+        "/lib/ld-musl-x86_64.so.1", "/lib/ld-musl-aarch64.so.1",
+        "/lib/ld-musl-arm.so.1", "/lib/ld-musl-i386.so.1"))
+
+
+def _linux_pattern(key, machine=None):
+    """Asset pattern of *key*'s native Linux build on this machine, or None when
+    upstream ships none for it.
+
+    A tool published for one libc only (oxipng's static musl tarball, which runs
+    on both) has a single pattern per architecture; where both variants exist the
+    host's libc is tried first and the other one is the fallback, so a platform
+    that cannot be identified still gets a build rather than a refusal.
+    """
+    spec = LINUX_BINARIES.get(key)
+    if not spec:
+        return None
+    arch = linux_arch(machine)
+    if not arch:
+        return None
+    names = ([f"{arch}-musl", arch] if musl_libc() else [arch, f"{arch}-musl"])
+    for name in names:
+        pattern = spec["patterns"].get(name)
+        if pattern:
+            return pattern
+    return None
+
+
+def install_kind(key, platform=None, machine=None):
+    """How *key* installs on *platform*: `deps` | `system` | `unsupported`.
+
+    `deps`        the installer fetches it into .dependencies (a pinned
+                  Windows binary, a native Linux build, a pip package or a
+                  source archive)
+    `system`      the platform provides it as a distro package
+    `unsupported` nothing to fetch: upstream ships no build for this platform
+    """
+    plat = _platform_of(platform)
+    if plat == "windows":
+        return "deps"
+    if key in PLATFORM_INDEPENDENT or key in PIP_PACKAGES:
+        return "deps"
+    if plat == "linux" and key in LINUX_BINARIES:
+        return "deps" if _linux_pattern(key, machine) else "unsupported"
+    if plat == "linux" and key in LINUX_PACKAGES:
+        return "system" if LINUX_PACKAGES[key] else "unsupported"
+    return "unsupported"
+
+
+def installable(key, platform=None, machine=None):
+    """Whether this platform can install *key* into .dependencies."""
+    return install_kind(key, platform=platform, machine=machine) == "deps"
+
+
+def installable_keys(platform=None, machine=None):
+    """Every tool the installer can fetch here, in DISPLAY_NAMES order."""
+    return [key for key in DISPLAY_NAMES
+            if installable(key, platform=platform, machine=machine)]
+
+
+def install_problem(key, platform=None, machine=None):
+    """Why this platform cannot install *key*, or None when it can.
+
+    The Dependencies row shows this next to a missing tool that has no Install
+    button, and install_dependency() raises it when one is asked for anyway -
+    the same sentence from one place.
+    """
+    kind = install_kind(key, platform=platform, machine=machine)
+    if kind == "deps":
+        return None
+    display = DISPLAY_NAMES.get(key, key)
+    plat = _platform_of(platform)
+    pkg = LINUX_PACKAGES.get(key)
+    if kind == "system" and pkg:
+        return (f"{display} is a system package on this platform - install it "
+                f"with your package manager (Debian/Ubuntu: apt-get install "
+                f"{pkg}); the Docker image already ships it.")
+    if plat == "linux" and key in LINUX_BINARIES:
+        return (f"{display} publishes no Linux build for this machine's "
+                f"architecture - install it with your package manager.")
+    if plat == "linux" and key in LINUX_PACKAGES:
+        return (f"{display} is a Windows binary only and has no Linux build - "
+                f"it is unsupported on this platform.")
+    return (f"{display} has no build this app can install on this platform - "
+            f"install it with your system package manager.")
+
+
+def markers(key, platform=None):
+    """The files a finished install of *key* must carry here."""
+    if _platform_of(platform) != "windows":
+        spec = LINUX_BINARIES.get(key)
+        if spec:
+            return spec["markers"]
+    return MARKER_EXES[key]
+
 
 TOOL_DIRS = INSTALL_PREFIX  # backward compat for app.py (use installed_path() for versioned folder)
 
@@ -382,18 +603,22 @@ def latest_versions():
     Keyed by DISPLAY_NAMES - the exact set `server.main` /api/dependencies
     serves - so every row the UI can show has an entry. No network needed.
 
-    Off Windows the pinned Windows builds are not what a user runs and not
-    fetchable either (`_require_windows` refuses them): the install path is
-    LINUX_PACKAGES (distro package) or PIP_PACKAGES, so the target reported is
-    the distro package, and a tool with no Linux build at all reports None
-    (the UI shows "unknown" rather than a version nobody can install).
+    Windows: the pinned release of every tool. Linux: the pinned release for
+    what the installer fetches there (the native builds in LINUX_BINARIES, the
+    pip packages), the distro package for the rest (LINUX_PACKAGES), and None
+    for a tool with no build at all - the UI shows "unknown" rather than a
+    version nobody can install. install_kind() decides which of those applies,
+    so this column agrees with what pressing Install would actually do.
     """
     out = {}
     for key in DISPLAY_NAMES:
-        out[key] = PINNED.get(key, {}).get("version")
-        if os.name != "nt" and key in LINUX_PACKAGES:
-            pkg = LINUX_PACKAGES[key]
-            out[key] = f"apt: {pkg}" if pkg else None
+        kind = install_kind(key)
+        if kind == "deps":
+            out[key] = PINNED.get(key, {}).get("version")
+        elif kind == "system":
+            out[key] = f"apt: {LINUX_PACKAGES[key]}"
+        else:
+            out[key] = None
     return out
 
 
@@ -657,6 +882,14 @@ def dependency_rows(refresh=False, block=False):
             "upstream_checked_at": _iso(entry.get("checked_at")),
             "update_available": update_available,
             "note": note,
+            # Whether an Install press can do anything HERE, and the reason
+            # when it cannot (see install_kind/install_problem). The page shows
+            # that reason instead of counting the row as a missing tool, which
+            # is what made a Windows-only tool on Linux - or a distro package
+            # the image already ships - read as a broken Install button.
+            "installable": installable(key),
+            "install_note": install_problem(key),
+            "install_kind": install_kind(key),
         })
     return out
 
@@ -687,16 +920,6 @@ def installed_versions():
     for key in PIP_PACKAGES:
         if pip_package_path(key):
             out[key] = PINNED[key]["version"]
-    # slskd has an exe but detect_all_tools doesn't scan for it; check the
-    # marker directly so the Dependencies UI shows it correctly.
-    d = installed_path("slskd")
-    if d and os.path.isfile(os.path.join(d, "slskd.exe")):
-        out["slskd"] = PINNED["slskd"]["version"]
-    # Same for chromaprint's fpcalc - detect_all_tools doesn't scan for it.
-    d = installed_path("chromaprint")
-    if d and any(os.path.isfile(os.path.join(d, n))
-                 for n in MARKER_EXES["chromaprint"]):
-        out["chromaprint"] = PINNED["chromaprint"]["version"]
     return out
 
 
@@ -711,27 +934,31 @@ def tools_mod_simple_dr_meter():
     return simple_dr_meter_path() is not None
 
 
-def _require_windows(key):
-    """Refuse Windows-only downloads on a non-Windows host.
+def _require_installable(key):
+    """Refuse an install this platform cannot perform.
 
-    Nothing else in the install path knows the platform: the archive unpacks
-    fine and the marker check passes, so a Linux install used to report
-    success for tools it can never run.
+    Nothing else in the install path knows the platform: a Windows archive
+    unpacks fine on Linux and passes the marker check, so a download used to
+    "succeed" into a folder of unrunnable .exe files, and a tool this host can
+    never install (its distro package, or a Windows-only one) read as a broken
+    button. install_problem() supplies the one sentence every caller shows.
     """
-    if os.name == "nt" or key not in LINUX_PACKAGES:
-        return
-    display = DISPLAY_NAMES.get(key, key)
-    pkg = LINUX_PACKAGES[key]
-    if pkg:
-        raise RuntimeError(
-            f"{display} is distributed as a Windows binary only - install the "
-            f"system package instead (Debian/Ubuntu: apt-get install {pkg}; "
-            f"the Docker image already ships it)."
-        )
-    raise RuntimeError(
-        f"{display} is a Windows binary only and has no Linux build - it is "
-        f"unsupported on this platform."
-    )
+    problem = install_problem(key)
+    if problem:
+        raise RuntimeError(problem)
+
+
+def _asset_patterns(key, platform=None, machine=None):
+    """Asset-name patterns to try for *key* on this platform, best first.
+
+    Windows names come from ASSET_PATTERNS; a native Linux tool names the one
+    asset its architecture is published as. A key with no platform table entry
+    (a pip package) matches nothing - it never reaches the download path.
+    """
+    if _platform_of(platform) == "windows":
+        return ASSET_PATTERNS.get(key, [])
+    pattern = _linux_pattern(key, machine)
+    return [pattern] if pattern else []
 
 
 def pick_asset(key, upstream=False):
@@ -739,11 +966,12 @@ def pick_asset(key, upstream=False):
 
     `upstream=True` picks from the newest release instead, so the asset and the
     version it is installed as come from the same release (see
-    get_latest_release).
+    get_latest_release). The pin itself is a Windows asset name, so it is only
+    consulted there; on Linux the pattern decides, from the same release.
     """
-    _require_windows(key)
+    _require_installable(key)
     pin = PINNED.get(key) or {}
-    if pin.get("asset"):
+    if pin.get("asset") and _platform_of() == "windows":
         rel = _release(key, upstream)
         if pin["asset"] in rel["assets"]:
             return pin["asset"]
@@ -751,9 +979,9 @@ def pick_asset(key, upstream=False):
 
 
 def _pattern_asset(key, assets=None, upstream=False):
-    """First release asset matching ASSET_PATTERNS for a tool."""
+    """First release asset matching the platform patterns for a tool."""
     names = assets if assets is not None else _release(key, upstream)["assets"]
-    for pattern in ASSET_PATTERNS.get(key, []):
+    for pattern in _asset_patterns(key):
         rx = re.compile(pattern, re.IGNORECASE)
         for name in names:
             if rx.match(name):
@@ -828,9 +1056,38 @@ def _extract_with_7z(sevenz, archive_path, dest_dir):
         raise RuntimeError(f"7-Zip extraction failed (rc={result.returncode})")
 
 
+def _archive_suffix(asset):
+    """The archive extension of a release asset, compression chain included.
+
+    `os.path.splitext` alone cuts "….tar.gz" down to ".gz", and a temp file
+    named "*.gz" is not recognisable as a tarball to _extract_archive — it fell
+    through to the "run it as an installer" branch and died with rc=126 on the
+    first Linux tarball this installer ever fetched.
+    """
+    lower = asset.lower()
+    for suffix in (".tar.gz", ".tar.xz", ".tar.bz2", ".tgz", ".tar",
+                   ".zip", ".7z", ".exe", ".phar"):
+        if lower.endswith(suffix):
+            return suffix
+    return os.path.splitext(asset)[1]
+
+
 def _extract_archive(archive_path, dest_dir, log):
-    """Extract zip / 7z / NSIS installer into dest_dir."""
+    """Extract zip / tar / 7z / NSIS installer into dest_dir."""
     lower = archive_path.lower()
+
+    if lower.endswith((".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".tar")):
+        # Linux release assets are tarballs (oxipng) as often as zips. tarfile
+        # restores each entry's mode, which is what makes the unpacked binary
+        # executable; `filter="data"` (3.12+) keeps that while refusing entries
+        # that would escape dest_dir or carry device nodes, the same guarantee
+        # zipfile gives.
+        with tarfile.open(archive_path) as tf:
+            try:
+                tf.extractall(dest_dir, filter="data")
+            except TypeError:      # Python < 3.12: no extraction filters
+                tf.extractall(dest_dir)
+        return
 
     if lower.endswith(".zip"):
         try:
@@ -886,12 +1143,17 @@ def _extract_archive(archive_path, dest_dir, log):
 
 
 def _locate_binaries(root, key):
-    """Find the directory containing the tool's marker exes."""
-    markers = MARKER_EXES[key]
+    """Find the directory containing the tool's marker files here.
+
+    The markers are the platform's (see markers()): a Linux install looks for
+    the bare binary names, which is also what keeps a folder of unrunnable
+    .exe files from being mistaken for an install.
+    """
+    wanted = markers(key)
     candidates = []
     for dirpath, _dirnames, filenames in os.walk(root):
         names = {f.lower() for f in filenames}
-        if all(m.lower() in names for m in markers):
+        if all(m.lower() in names for m in wanted):
             candidates.append(dirpath)
 
     if not candidates:
@@ -933,6 +1195,24 @@ def _copy_licence_files(root, dest_dir, log=print):
     if copied:
         log(f"  licence files: {', '.join(sorted(copied))}")
     return copied
+
+
+def _make_executable(dest_dir, marker_names):
+    """Give the installed binaries the exec bit (POSIX).
+
+    zipfile does not restore file modes, so a Linux binary unpacked from a
+    .zip would land without it and every spawn - slskd is the one tool this
+    app RUNS - would fail with EACCES. A no-op on Windows, where the bit does
+    not exist; a tarball already carries its own.
+    """
+    if os.name == "nt":
+        return
+    for name in marker_names:
+        path = os.path.join(dest_dir, name)
+        try:
+            os.chmod(path, os.stat(path).st_mode | 0o111)
+        except OSError:
+            pass
 
 
 def _existing_install(prefix, markers):
@@ -1176,7 +1456,7 @@ def install_dependency(key, log=print, progress=None):
 
     Returns the installed version string. Raises on any failure.
     """
-    _require_windows(key)
+    _require_installable(key)
     if key == "simpledrmeter":
         version = _install_simple_dr_meter(log=log, progress=progress)
         _patch_simple_dr_meter(os.path.join(DEPS_DIR, "simple-dr-meter"))
@@ -1185,7 +1465,8 @@ def install_dependency(key, log=print, progress=None):
         return _install_php(log=log, progress=progress)
     # Vendored pip packages — plus the tools whose Linux install IS the pip
     # package (PIP_ON_LINUX): on Windows those take the pinned .exe below.
-    if key in PIP_PACKAGES and (key not in PIP_ON_LINUX or os.name != "nt"):
+    if key in PIP_PACKAGES and (key not in PIP_ON_LINUX
+                                or host_platform() != "windows"):
         return _install_pip_package(key, log=log, progress=progress)
 
     # An installed copy takes the NEWEST release; only a tool that is not there
@@ -1200,7 +1481,8 @@ def install_dependency(key, log=print, progress=None):
     # release whose assets do not match our patterns all still install
     # something known-good rather than failing.
     prefix = INSTALL_PREFIX[key]
-    upstream = bool(_existing_install(prefix, MARKER_EXES[key]))
+    wanted = markers(key)
+    upstream = bool(_existing_install(prefix, wanted))
     rel = _release(key, upstream)
     version = rel["version"]
     asset = pick_asset(key, upstream)
@@ -1214,14 +1496,15 @@ def install_dependency(key, log=print, progress=None):
         asset = pick_asset(key)
 
     if not asset:
-        raise RuntimeError(f"No suitable Windows asset in latest {key} release")
+        raise RuntimeError(
+            f"No suitable {host_platform()} asset in the latest {key} release")
 
     display = DISPLAY_NAMES[key]
-    existing = _existing_install(prefix, MARKER_EXES[key])
+    existing = _existing_install(prefix, wanted)
     dest_dir = os.path.join(DEPS_DIR, existing or f"{prefix} v{version}")
 
     tmp_archived_fd, tmp_archived = tempfile.mkstemp(
-        suffix=os.path.splitext(asset)[1])
+        suffix=_archive_suffix(asset))
     os.close(tmp_archived_fd)
     workdir = tempfile.mkdtemp(prefix="mlo_dep_")
 
@@ -1239,8 +1522,8 @@ def install_dependency(key, log=print, progress=None):
             if not fallbacks:
                 raise
             asset = fallbacks[0]
-            suffix = os.path.splitext(asset)[1]
-            if suffix != os.path.splitext(tmp_archived)[1]:
+            suffix = _archive_suffix(asset)
+            if suffix != _archive_suffix(os.path.basename(tmp_archived)):
                 os.remove(tmp_archived)
                 fd, tmp_archived = tempfile.mkstemp(suffix=suffix)
                 os.close(fd)
@@ -1250,8 +1533,7 @@ def install_dependency(key, log=print, progress=None):
         if key in SINGLE_EXE_TOOLS:
             # The release asset is the tool itself - no extraction step.
             os.makedirs(dest_dir, exist_ok=True)
-            shutil.copy2(tmp_archived,
-                         os.path.join(dest_dir, MARKER_EXES[key][0]))
+            shutil.copy2(tmp_archived, os.path.join(dest_dir, wanted[0]))
         else:
             log(f"Extracting {asset} …")
             _extract_archive(tmp_archived, workdir, log)
@@ -1259,34 +1541,41 @@ def install_dependency(key, log=print, progress=None):
             src = _locate_binaries(workdir, key)
             if src is None:
                 raise RuntimeError(
-                    f"Could not find {' + '.join(MARKER_EXES[key])} inside the archive"
+                    f"Could not find {' + '.join(wanted)} inside the archive"
                 )
 
             os.makedirs(dest_dir, exist_ok=True)
             for fname in os.listdir(src):
                 s = os.path.join(src, fname)
-                if os.path.isfile(s):
-                    try:
-                        shutil.copy2(s, os.path.join(dest_dir, fname))
-                    except OSError as e:
-                        # Windows refuses to replace a file another process is
-                        # EXECUTING (WinError 32), and slskd is the one tool
-                        # this app runs — so "install all" used to end with a
-                        # bare "used by another process" and nothing explaining
-                        # it. The server stops the managed daemon around the
-                        # install (see server.main.dependencies_install); this
-                        # is the honest message for anything else holding a
-                        # file open.
-                        raise RuntimeError(
-                            f"{display} is running — {fname} is in use by another "
-                            f"process, so it cannot be replaced. Stop it and "
-                            f"install again ({type(e).__name__}: {e})") from e
+                if os.path.isdir(s):
+                    # A native Linux build carries a runtime tree beside its
+                    # binary (slskd ships wwwroot/ and etc/ and refuses to boot
+                    # without them), so the whole layout has to come along.
+                    shutil.copytree(s, os.path.join(dest_dir, fname),
+                                    dirs_exist_ok=True)
+                    continue
+                try:
+                    shutil.copy2(s, os.path.join(dest_dir, fname))
+                except OSError as e:
+                    # Windows refuses to replace a file another process is
+                    # EXECUTING (WinError 32), and slskd is the one tool
+                    # this app runs — so "install all" used to end with a
+                    # bare "used by another process" and nothing explaining
+                    # it. The server stops the managed daemon around the
+                    # install (see server.main.dependencies_install); this
+                    # is the honest message for anything else holding a
+                    # file open.
+                    raise RuntimeError(
+                        f"{display} is running — {fname} is in use by another "
+                        f"process, so it cannot be replaced. Stop it and "
+                        f"install again ({type(e).__name__}: {e})") from e
             _copy_licence_files(workdir, dest_dir, log)
 
         names = {f.lower() for f in os.listdir(dest_dir)}
-        missing = [m for m in MARKER_EXES[key] if m.lower() not in names]
+        missing = [m for m in wanted if m.lower() not in names]
         if missing:
             raise RuntimeError(f"Installed folder is missing: {', '.join(missing)}")
+        _make_executable(dest_dir, wanted)
 
         # Before the pruner runs, and before anything reports a version: the
         # folder has to carry the version that is now in it.
@@ -1371,6 +1660,11 @@ def auto_update_pass(log=print):
     changed = 0
     for row in rows:
         if row["state"] not in ("missing", "update"):
+            continue
+        # A tool this platform cannot install is not a failure to retry every
+        # pass: its row says why (Windows-only, or a distro package), and the
+        # old loop logged the same refusal every six hours.
+        if not row.get("installable", True):
             continue
         # No "installed == pin, so skip" guard here any more: it existed
         # because install_dependency fetched the pin regardless, so a tool whose

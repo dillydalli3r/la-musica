@@ -212,7 +212,7 @@ relaunch — asks the platform to keep the process alive anyway:
 
 ### Bundle config
 
-`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 3.1.6,
+`bundle.iOS.minimumSystemVersion` 14.0, `bundle.iOS.bundleVersion` 3.1.7,
 `bundle.iOS.infoPlist`, `bundle.iOS.frameworks` (the staged
 `Python.xcframework`) and `bundle.android.minSdkVersion` 24 in
 `tauri.conf.json`. The Android package name and the iOS bundle id both come from

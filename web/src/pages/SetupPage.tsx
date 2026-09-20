@@ -52,8 +52,11 @@ export default function SetupPage() {
   });
   const deviceReason = deviceUnavailable(caps);
   // What the "Install N missing" button would install, so the wizard only
-  // offers it when there is something to install.
-  const missing = (deps?.tools ?? []).filter((t) => t.state === "missing");
+  // offers it when there is something to install — and only what this host can
+  // actually fetch: a Windows-only tool on Linux, or one the image already
+  // provides as a distro package, has nothing to download (the row's
+  // `installable`), so counting it would offer a button that can only fail.
+  const missing = (deps?.tools ?? []).filter((t) => t.state === "missing" && t.installable !== false);
 
   useEffect(() => {
     if (!config) return;
@@ -301,12 +304,16 @@ export default function SetupPage() {
                         )}
                         {t.state === "missing" && (
                           <span
-                            className={`chip border ${deviceReason
+                            className={`chip border ${deviceReason || t.installable === false
                               ? "bg-zinc-800 text-zinc-400 border-zinc-700"
                               : "bg-red-900/50 text-red-300 border-red-900"}`}
-                            title={deviceReason ?? undefined}
+                            title={deviceReason ?? t.install_note ?? undefined}
                           >
-                            {deviceReason ? "Unavailable here" : "Missing"}
+                            {deviceReason
+                              ? "Unavailable here"
+                              : t.installable === false
+                                ? t.install_kind === "system" ? "System package" : "No build here"
+                                : "Missing"}
                           </span>
                         )}
                         {t.state === "error" && (

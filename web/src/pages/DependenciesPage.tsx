@@ -18,6 +18,12 @@ type DepTool = {
   upstream_checked_at?: string | null;
   update_available?: boolean;
   note?: string | null;
+  /** False when this host has nothing to fetch for the tool (a Windows-only
+   *  one on Linux, or a distro package the image already provides). */
+  installable?: boolean;
+  /** The sentence explaining that, shown on the row. */
+  install_note?: string | null;
+  install_kind?: "deps" | "system" | "unsupported";
 };
 
 /** Sidebar "Dependencies" — the external binaries the scripts shell out to
@@ -59,8 +65,14 @@ export default function DependenciesPage() {
   };
 
   const tools: DepTool[] = deps?.tools ?? [];
-  const missing = tools.filter((t) => t.state === "missing");
-  const updates = tools.filter((t) => t.state === "update");
+  // Only what this host can FETCH counts as missing/update for the buttons:
+  // `installable` is the backend's own answer (a Windows-only tool on Linux,
+  // or one the image already provides as a distro package, has nothing to
+  // download — pressing Install on those is what made a working server look
+  // broken). They stay in the table below, labelled with the reason.
+  const missing = tools.filter((t) => t.state === "missing" && t.installable !== false);
+  const updates = tools.filter((t) => t.state === "update" && t.installable !== false);
+  const blocked = tools.filter((t) => t.state === "missing" && t.installable === false);
   const ready = tools.filter((t) => t.state === "ok").length;
   // The tool list is empty only when the payload could not be read at all —
   // that case is the page's empty state, not a one-row table.
@@ -129,7 +141,9 @@ export default function DependenciesPage() {
               className="btn-primary !py-1 text-xs tap"
               onClick={() => install()}
               disabled={busy || !!deviceReason}
-              title={deviceReason ?? undefined}
+              title={deviceReason ?? (blocked.length
+                ? `Installs every tool this host can fetch — skips the ${blocked.length} it cannot`
+                : undefined)}
             >
               {busy ? "Installing…" : "Install / update all"}
             </button>
@@ -155,6 +169,14 @@ export default function DependenciesPage() {
           {isLoading ? "Checking tools…" : `${ready}/${tools.length} ready`}
           {updates.length > 0 && <span className="text-amber-400"> · {updates.length} update(s) available</span>}
           {missing.length > 0 && <span className="text-red-400"> · {missing.length} missing</span>}
+          {/* Not "missing": there is nothing this host could install, so the
+              count must not read as work waiting to be done. The row carries
+              the reason. */}
+          {blocked.length > 0 && (
+            <span className="text-zinc-400" title={blocked.map((t) => `${t.name}: ${t.install_note}`).join("\n")}>
+              {" "}· {blocked.length} not installable here
+            </span>
+          )}
           {deps?.checking && <span className="text-zinc-400"> · checking upstream…</span>}
         </span>
         {deps?.deps_dir && (
@@ -223,12 +245,16 @@ export default function DependenciesPage() {
                   )}
                   {t.state === "missing" && (
                     <span
-                      className={`chip border ${deviceReason
+                      className={`chip border ${deviceReason || t.installable === false
                         ? "bg-zinc-800 text-zinc-400 border-zinc-700"
                         : "bg-red-900/50 text-red-300 border-red-900"}`}
-                      title={deviceReason ?? undefined}
+                      title={deviceReason ?? t.install_note ?? undefined}
                     >
-                      {deviceReason ? "Unavailable here" : "Missing"}
+                      {deviceReason
+                        ? "Unavailable here"
+                        : t.installable === false
+                          ? t.install_kind === "system" ? "System package" : "No build here"
+                          : "Missing"}
                     </span>
                   )}
                   {t.state === "error" && (

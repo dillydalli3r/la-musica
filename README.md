@@ -1,5 +1,24 @@
 # la musica
 
+**v3.1.7** — the release where the dependency installer stops lying about what
+this platform can install. On Docker (and any Linux host) *Install / update all*
+attempted all sixteen tools and failed on twelve of them — the distro-provided
+ones (flac, ffmpeg, …) and the Windows-only ones — while **oxipng** and **slskd**,
+which upstream ships Linux builds for, were refused for ever and sat "Missing"
+behind a button that could not work. What an install can do is now one answer per
+platform (`fetchdeps.install_kind`): *deps* (the installer fetches it — the pinned
+Windows build, a native Linux build, a pip package), *system* (a distro package:
+the row shows `apt: flac`, has no Install button, and Install all skips it) or
+*unsupported* (no build for this platform — the row says so with the reason). Two
+things follow that were impossible before: a container installs **oxipng**'s
+static Linux build (no Debian release the image is built on packages it, so PNG
+optimization was permanently degraded there) and **slskd**, which makes the
+managed Soulseek daemon work in Docker — verified end to end: install, boot,
+REST API, shares, stop. The image also gained the two libraries a runtime-installed
+tool needs to actually start (`libicu76` for slskd's .NET runtime, whose absence
+no `ldd` shows), and its Debian release is pinned (`python:3.12-slim-trixie`)
+because `python:3.12-slim` had floated from bookworm to trixie on its own.
+
 **v3.1.6** — the release that made the phone's own backend start. Until now the
 iOS build could not host a library at all: `bundle.resources` mapped the staged
 Python tree with a **glob**, and Tauri copies glob matches by *file name*, so
@@ -1915,11 +1934,25 @@ starts it again afterwards** — Windows refuses to replace a file another proce
 is executing, so without that an update to the one tool this app *runs* could
 never succeed, and `Install / update all` ended in a bare "used by another
 process". In Docker that is the `lamusica-dependencies` volume,
-so updates survive a container rebuild; pip-based tools (beets, librosa)
+so updates survive a container rebuild; pip-based tools (beets, librosa, yt-dlp)
 install into the same folder at runtime, and distro-provided tools (ffmpeg,
-flac, libjxl, …) are reported ready from the image's own packages. Only the
-Windows-only tools (AudioAuditor, CUETools, Logchecker+php, slskd) cannot be
-fetched on Linux — their rows say so instead of failing an install.
+flac, libjxl, …) are reported ready from the image's own packages.
+
+**What an install can do is per platform, and every row says which.** `install_kind`
+is the single answer: `deps` (the installer fetches it — the pinned Windows
+build, a native Linux build, a pip package or a source archive), `system` (a
+distro package: the row shows `apt: flac`, carries no Install button, and
+`Install / update all` skips it instead of failing on it) or `unsupported`
+(AudioAuditor, CUETools, Logchecker + php — Windows-only, so their rows read
+"No build here" with the reason instead of offering a button that cannot work).
+Two tools upstream publishes Linux builds for install natively there:
+**oxipng** (its static musl tarball — no Debian release the image is built on has
+an oxipng package, so before this the Docker image could never have it) and
+**slskd** (the `linux-x64`/`arm64` zip, or the `-musl` pair on Alpine — the two
+are not interchangeable, so the host's libc decides), which is what makes the
+managed Soulseek daemon work in a container. A native install lands in
+`.dependencies` and is detected from there — ahead of a copy on PATH, since that
+is the versioned one these rows report and update.
 
 **An install takes the newest release for a tool that is already installed, and
 the reviewed pin for one that is not.** The Update chip is a promise: with the
@@ -2387,25 +2420,31 @@ so `docker compose pull` and watchtower have something to compare against.
   the library is behind a password from the first request.
   `MLO_SERVER_PORT` seeds the port the same way.
 - **Toolchain in the image.** `ffmpeg`, `flac`, `libjxl`, `jpegtran`
-  (`libjpeg-turbo-progs`) and `libchromaprint-tools` (`fpcalc`) are installed
-  from apt, together with `libsndfile1` and `libgomp1` — the shared libraries
-  the pip-installed librosa/numba stack links against, without which script 12
-  and 16 fail at import — and a failure there fails the build: these are the
-  Linux counterparts
-  of `mlo/fetchdeps.py`'s Windows downloads, which the in-app installer refuses
-  to fetch on Linux and points at the distro package instead. `oxipng` and
-  `rsgain` are best-effort: Debian bookworm does not ship them, the image
-  installs them inside a `|| true` sub-shell, and the pipeline degrades
-  without them.
+  (`libjpeg-turbo-progs`), `libchromaprint-tools` (`fpcalc`) and `rsgain` are
+  installed from apt, together with `libsndfile1`, `libgomp1` and `libicu76` —
+  the shared libraries the runtime-installed tools need, without which an
+  install "succeeds" and the tool then fails to start (librosa's soundfile and
+  numba imports; slskd's .NET runtime, which dlopens ICU and refuses to boot
+  without it). A failure there fails the build: these are the Linux counterparts
+  of `mlo/fetchdeps.py`'s Windows downloads, and every one of them is a
+  `system` row in Settings → Dependencies (reported ready, no Install button).
+  The Debian release is **pinned** (`python:3.12-slim-trixie`) because those
+  package names are its own — `python:3.12-slim` floated from bookworm to
+  trixie on its own and silently invalidated the old notes here.
+  **oxipng is the exception**: no Debian package exists for it, so the in-app
+  installer fetches its upstream static Linux build into `/app/.dependencies`
+  like any other tool — one press on *Install / update all*, and the PNG
+  optimization path stops being degraded.
 - **yt-dlp** is not baked in: Settings → Dependencies installs it with
   `pip --target` into `/app/.dependencies`, exactly like beets and librosa. A
   pinned copy in the image would only save that first-run download — the
   YouTube acquisition works the same either way.
-- **Windows-only tools.** `slskd`, `CUETools`, `AudioAuditor` and
-  `Logchecker`+`php` have no Linux build; the installer reports them as
-  unsupported inside the container, so AccurateRip generation, the logchecker
-  grade, the AudioAuditor audit and the managed Soulseek daemon are not
-  available in Docker.
+- **Windows-only tools.** `CUETools`, `AudioAuditor` and `Logchecker`+`php`
+  have no Linux build; their rows read *No build here* (with the reason) and
+  are left out of `Install / update all`, so AccurateRip generation, the
+  logchecker grade and the AudioAuditor audit are not available in Docker.
+  `slskd` **is** (upstream ships a Linux build, and the app installs it) — the
+  managed Soulseek daemon works in the container.
 - **Automatic updates are on by default.** `docker-compose.yml` ships a
   `watchtower` service: it polls the registry and, when a newer image appears,
   stops this container, pulls and starts it again — so `docker compose pull` is
@@ -2620,7 +2659,8 @@ provider chain (`test_lyrics_providers.py`), AcoustID fingerprint parsing and
 quorum (`test_acoustid.py`), on-demand ReplayGain (`test_replaygain.py`), the
 import pipeline and bulk queue (`test_import_pipeline.py`), YouTube
 acquisition + the remux/subtitle pipeline (`test_video_pipeline.py`), the
-platform guards that keep the Windows-only downloads off Linux
+platform table that decides what an install fetches where — the Windows pin, a
+native Linux build, a distro package or a refusal
 (`test_platform_guards.py`), Home shelves, lyrics merge/repair, the Soulseek
 client and the layout scanner's capitalization reporting
 (`test_layout_case.py`). Most of them run offline by design — network

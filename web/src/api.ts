@@ -1399,6 +1399,15 @@ export const api = {
         upstream_checked_at?: string | null;
         update_available?: boolean;
         note?: string | null;
+        /** Whether an Install press can fetch this tool HERE: false for a
+         *  Windows-only tool on Linux, or one the host ships as a distro
+         *  package. The backend also skips those when there is no key list. */
+        installable?: boolean;
+        /** Why it cannot be installed here — the sentence the row shows. */
+        install_note?: string | null;
+        /** deps (the installer fetches it), system (a distro package this host
+         *  provides) or unsupported (no build for this platform). */
+        install_kind?: "deps" | "system" | "unsupported";
       }[];
     }>(`${API}/dependencies${refresh ? "?refresh=1" : ""}`),
   installDependencies: (keys?: string[]) =>

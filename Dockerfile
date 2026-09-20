@@ -9,36 +9,46 @@ COPY web/ ./
 RUN npm run build
 
 # ---------- Stage 2: Python backend + system toolchain ----------
-FROM python:3.12-slim AS runtime
+# The Debian release is PINNED (trixie) and not left to float: the package
+# names below are that release's — libicu76, libjxl-tools, rsgain — and
+# `python:3.12-slim` moved from bookworm to trixie on its own, which quietly
+# made every "bookworm has no such package" note here wrong and would have
+# broken the build the next time a name changed.
+FROM python:3.12-slim-trixie AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     MLO_MUSIC_FOLDER=/music \
     MLO_SERVER_HOST=0.0.0.0
 
-# Core audio/image tools for the optimization pipeline. These are also the
-# Linux counterparts of the Windows-only downloads in mlo/fetchdeps.py
-# (LINUX_PACKAGES): the in-app installer refuses to fetch .exe assets on Linux
-# and points the user at the distro package instead, so everything that has one
-# is installed here. oxipng and rsgain are best-effort - they are not in the
-# Debian release the base image is based on (bookworm), and the pipeline
-# degrades without them, so the image must not fail to build over them
-# (README says the same about oxipng).
+# Core audio/image tools for the optimization pipeline. These are the Linux
+# counterparts of the downloads in mlo/fetchdeps.py: the in-app installer
+# fetches the distro-provided ones' native Linux builds only where upstream
+# ships none (LINUX_BINARIES) and otherwise points at the system package
+# (LINUX_PACKAGES), so everything the distro has is installed here. That is the
+# whole set except oxipng — trixie has no package for it either, and upstream
+# ships a static Linux build, so Settings -> Dependencies installs that into
+# /app/.dependencies (fetchdeps LINUX_BINARIES) instead of the image faking an
+# apt package that does not exist.
+#
 # libsndfile1 / libgomp1 back the pip-vendored tools Settings -> Dependencies
 # installs at runtime (PIP_PACKAGES: librosa imports soundfile -> libsndfile,
 # and numba/llvmlite -> libgomp); without them the pip install "succeeds" and
-# the import dies.
+# the import dies. libicu76 is the same for the tool the app RUNS: slskd is a
+# .NET app, its runtime dlopens ICU at startup and refuses to boot without it
+# ("Couldn't find a valid ICU package installed on the system") — a dependency
+# no `ldd` shows, since it is loaded by name at run time.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         flac \
         libjxl-tools \
         libjpeg-turbo-progs \
         libchromaprint-tools \
+        rsgain \
         libsndfile1 \
         libgomp1 \
+        libicu76 \
         ca-certificates \
-    && (apt-get install -y --no-install-recommends oxipng || true) \
-    && (apt-get install -y --no-install-recommends rsgain || true) \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -72,7 +82,7 @@ ENV HOME=/home/mlo
 # leaves it empty, and the server then reports its own code version instead of
 # claiming to be a release it is not. `tools/check_versions.py` keeps the
 # ARG default in step with mlo/__init__.py.
-ARG MLO_VERSION=3.1.6
+ARG MLO_VERSION=3.1.7
 ENV MLO_VERSION=${MLO_VERSION}
 LABEL org.opencontainers.image.version="${MLO_VERSION}" \
       org.opencontainers.image.title="la musica" \
