@@ -132,7 +132,11 @@ with tempfile.TemporaryDirectory() as tmp:
     check("the path and its parent come back",
           listing["path"] == os.path.abspath(tmp)
           and listing["parent"] == os.path.dirname(os.path.abspath(tmp)))
-    check("roots are offered for navigation", listing["roots"] == ["/"] if os.name != "nt" else bool(listing["roots"]))
+    # POSIX always offers "/" (and the home folder when it is somewhere else,
+    # which is why this asserts the root rather than the whole list); Windows
+    # offers its drive letters.
+    check("roots are offered for navigation",
+          bool(listing["roots"]) and (os.name == "nt" or listing["roots"][0] == "/"))
     check("nothing pins the folder here", listing["pinned"] is None)
 
     # Errors are answers, not tracebacks.
