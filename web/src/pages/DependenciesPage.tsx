@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { FolderOpen, RotateCcw, Wrench } from "lucide-react";
-import { api, deviceUnavailable, unavailableFeatures } from "../api";
+import { api, deviceUnavailable, installSummary, unavailableFeatures } from "../api";
 import { toast } from "../store";
 import PageHeader from "../components/PageHeader";
 import { EmptyState } from "../components/Badges";
@@ -81,11 +81,14 @@ export default function DependenciesPage() {
     setBusy(true);
     try {
       const r = await api.installDependencies(keys);
-      const failed = r.results.filter((x) => !x.ok);
-      if (failed.length) toast.error(`Install finished with ${failed.length} failure(s): ${failed.map((f) => f.name).join(", ")}`);
-      else toast.success("Dependencies installed / updated");
+      const summary = installSummary(r.results);
+      if (r.results.some((x) => !x.ok)) toast.error(summary);
+      else toast.success(summary);
       refetch();
     } catch (e) {
+      // The error the server sent, verbatim: "sign in required" and "this
+      // server has no password yet" are the two this page can hit, and both
+      // have an action attached that a rewritten message would hide.
       toast.error(String(e));
     } finally {
       setBusy(false);
@@ -171,7 +174,7 @@ export default function DependenciesPage() {
       {noTools && (
         <EmptyState
           title="No tools reported"
-          hint="Could not read the tool list — is the backend running? Refresh once it answers."
+          hint="Could not read the tool list — the backend may be down, this client may have been signed out, or the server may still be unclaimed (it answers “finish setup to continue” until a password is set). Refresh once it answers."
         />
       )}
 
@@ -258,9 +261,10 @@ export default function DependenciesPage() {
       )}
 
       <div className="text-[10px] text-zinc-600">
-        Install downloads the pinned release from GitHub into the dependencies folder; PATH-installed tools
-        (scoop etc.) are shown as ready. <span className="text-zinc-500">Available</span> is what upstream has
-        published — the installer waits for the pin to be reviewed, so Install fetches Latest, not Available.
+        Install downloads from the tool's GitHub releases into the dependencies folder; PATH-installed tools
+        (scoop etc.) are shown as ready. A tool that is already installed takes the newest release{" "}
+        <span className="text-zinc-500">Available</span> names — that is what the Update chip offers. A first
+        install takes the reviewed pinned version instead.
         {deps?.note && <span className="text-amber-500"> Upstream check: {deps.note}</span>}
         {deps?.upstream_checked_at && (
           <span> Checked {new Date(deps.upstream_checked_at).toLocaleTimeString()}.</span>

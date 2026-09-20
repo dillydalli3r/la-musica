@@ -684,8 +684,9 @@ def manage_dependencies():
 
     print()
     name_w = max(len(name) for name in DISPLAY_NAMES.values())
-    # Same states, same words as the GUI: `installed` vs. the pinned `target`
-    # the installer fetches vs. what upstream actually releases.
+    # Same states, same words as the GUI: what is installed vs. the pinned
+    # `target` (what a FIRST install fetches — an installed tool takes the
+    # newest available release instead) vs. what upstream actually releases.
     state_text = {
         "ok": ("up to date", Color.GREEN),
         "update": ("update available", Color.YELLOW),

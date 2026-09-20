@@ -313,21 +313,37 @@ def _api_json(url):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def get_latest_release(key):
-    """Return the PINNED release dict for a tool (cached per session).
+def get_latest_release(key, upstream=False):
+    """The release `key` resolves to, cached per session.
 
-    Tools are pinned to exact versions (see PINNED) rather than "latest", so
-    installs are reproducible. Fetches the specific release tag from GitHub.
+    `upstream=False` (the default) is the PINNED release: tools are pinned to
+    exact versions (see PINNED) rather than "latest", so a FIRST install is
+    reproducible. Fetches the specific release tag from GitHub.
+
+    `upstream=True` asks the repo for its newest release instead. That is what
+    an already-installed tool installs, because the table advertises an update
+    the moment upstream moves past the pin — and an install that fetched the
+    pin anyway reported success while changing nothing, so the button looked
+    broken (see install_dependency). A tool with no GitHub repo (php) keeps the
+    pin, which is the only release it has.
+
     Rolling-release repos (ffmpeg autobuilds) delete old tags, so a 404 on
     the pinned tag falls back to the repo's current latest release.
     """
-    if key not in _release_cache:
+    cache_key = (key, bool(upstream) and key in REPOS)
+    if cache_key not in _release_cache:
         pin = PINNED[key]
         try:
-            data = _api_json(
-                f"https://api.github.com/repos/{REPOS[key]}/releases/tags/{pin['tag']}"
-            )
-            version = pin["version"]
+            if upstream and key in REPOS:
+                data = _api_json(
+                    f"https://api.github.com/repos/{REPOS[key]}/releases/latest"
+                )
+                version = str(data.get("tag_name") or pin["version"])
+            else:
+                data = _api_json(
+                    f"https://api.github.com/repos/{REPOS[key]}/releases/tags/{pin['tag']}"
+                )
+                version = pin["version"]
         except urllib.error.HTTPError as e:
             if e.code != 404 or not ASSET_PATTERNS.get(key):
                 raise
@@ -335,14 +351,29 @@ def get_latest_release(key):
                 f"https://api.github.com/repos/{REPOS[key]}/releases/latest"
             )
             version = str(data.get("tag_name") or pin["version"])
+        # A tag ("v10.2.1") and a version ("10.2.1") name the same release, and
+        # the rest of the app compares them through _version_label; store the
+        # comparable form so a folder name or a row never reads "vv10.2.1".
+        version = _version_label(version) or version
         urls = {a.get("name", ""): a.get("browser_download_url", "")
                 for a in data.get("assets", [])}
-        _release_cache[key] = {
+        _release_cache[cache_key] = {
             "version": version,
             "assets": list(urls),
             "urls": urls,
         }
-    return _release_cache[key]
+    return _release_cache[cache_key]
+
+
+def _release(key, upstream=False):
+    """`get_latest_release` for the path an install is on.
+
+    A one-line indirection so the default (pinned) path stays exactly the call
+    the installer's tests already stub: `get_latest_release(key)`.
+    """
+    if upstream:
+        return get_latest_release(key, upstream=True)
+    return get_latest_release(key)
 
 
 def latest_versions():
@@ -413,6 +444,41 @@ def _version_label(version):
         return None
     return ".".join(
         str(int(part)) if part.isdigit() else part for part in text.split("."))
+
+
+def same_version(a, b):
+    """True when two version strings name the same release.
+
+    A pin ("10.2.0"), a GitHub tag ("v10.2.0") and a detected version are three
+    spellings of one release; `_version_label` is the normal form they compare
+    through. An unreadable value is never "the same" as anything.
+    """
+    la, lb = _version_label(a), _version_label(b)
+    return bool(la) and la == lb
+
+
+def newer_version(candidate, current):
+    """True when *candidate* is strictly newer than *current*.
+
+    "Behind" is an ORDER, not a difference: a tool installed at 10.2.1 while the
+    pin says 10.2.0 differs from the pin but is not missing an update, and the
+    old `!=` test marked exactly that row "Update" forever — pointing at an
+    older release the installer would then fetch, changing nothing. Same-version
+    spellings ("10.2" vs "10.2.0") compare equal by padding the shorter one.
+
+    An unreadable label never counts as newer: a rolling build must not produce
+    an update the installer cannot perform.
+    """
+    a, b = _version_label(candidate), _version_label(current)
+    if not a or not b:
+        return False
+
+    def parts(v):
+        return [int(p) if p.isdigit() else 0 for p in v.split(".")]
+
+    pa, pb = parts(a), parts(b)
+    n = max(len(pa), len(pb))
+    return pa + [0] * (n - len(pa)) > pb + [0] * (n - len(pb))
 
 
 def _upstream_keys():
@@ -557,7 +623,7 @@ def dependency_rows(refresh=False, block=False):
         uv = entry.get("version")
         err = entry.get("error")
         update_available = bool(
-            uv and have and _version_label(uv) != _version_label(have))
+            uv and have and newer_version(uv, have))
         # A failed upstream check must NOT mark a healthy install as broken:
         # GitHub rate-limits unauthenticated callers, and a wall of red for a
         # transient 403 is worse than no check at all. The upstream cell and
@@ -567,7 +633,7 @@ def dependency_rows(refresh=False, block=False):
             state = "missing"
         elif uv:
             state = "update" if update_available else "ok"
-        elif target and have and _version_label(target) != _version_label(have):
+        elif target and have and newer_version(target, have):
             state = "update"
         else:
             state = "ok"
@@ -668,21 +734,25 @@ def _require_windows(key):
     )
 
 
-def pick_asset(key):
-    """Return the exact pinned asset name for a tool, if it exists."""
+def pick_asset(key, upstream=False):
+    """Return the exact pinned asset name for a tool, if it exists.
+
+    `upstream=True` picks from the newest release instead, so the asset and the
+    version it is installed as come from the same release (see
+    get_latest_release).
+    """
     _require_windows(key)
     pin = PINNED.get(key) or {}
     if pin.get("asset"):
-        rel = get_latest_release(key)
+        rel = _release(key, upstream)
         if pin["asset"] in rel["assets"]:
             return pin["asset"]
-    return _pattern_asset(key)
+    return _pattern_asset(key, upstream=upstream)
 
 
-def _pattern_asset(key, assets=None):
+def _pattern_asset(key, assets=None, upstream=False):
     """First release asset matching ASSET_PATTERNS for a tool."""
-    rel = get_latest_release(key)
-    names = assets if assets is not None else rel["assets"]
+    names = assets if assets is not None else _release(key, upstream)["assets"]
     for pattern in ASSET_PATTERNS.get(key, []):
         rx = re.compile(pattern, re.IGNORECASE)
         for name in names:
@@ -891,6 +961,39 @@ def _existing_install(prefix, markers):
     return found[0] if found else None
 
 
+def _rename_install(dest_dir, prefix, version, log=print):
+    """Rename an install folder to the version that is now inside it.
+
+    The detector reads a tool's version off its FOLDER name (see
+    mlo.tools._detect_tool), and an update installs into the folder the previous
+    version lived in — so replacing the binaries of "oxipng v10.2.0" left a
+    folder that still reported 10.2.0, the row kept saying "Update", and the
+    press looked like it had done nothing at all. Renaming keeps the single
+    folder that _existing_install exists to preserve AND makes the version the
+    app reports the version that is actually installed.
+
+    A `vlatest` rolling folder has no version to carry and is left alone. So is
+    a folder that cannot be renamed (a file held open on Windows): the tool
+    still works, and a stale label is the lesser problem. Returns the folder to
+    use from here on.
+    """
+    current = os.path.basename(dest_dir)
+    want = f"{prefix} v{version}"
+    if current == want:
+        return dest_dir
+    if not re.match(rf"^{re.escape(prefix)}\s+v\d", current, re.IGNORECASE):
+        return dest_dir          # `vlatest`, or a folder this app did not name
+    target = os.path.join(os.path.dirname(dest_dir), want)
+    if os.path.exists(target):
+        return dest_dir
+    try:
+        os.rename(dest_dir, target)
+    except OSError as e:
+        log(f"  could not rename {current} to {want}: {e}")
+        return dest_dir
+    return target
+
+
 def _remove_older_versions(prefix, keep_dir):
     if not os.path.isdir(DEPS_DIR):
         return
@@ -1085,18 +1188,35 @@ def install_dependency(key, log=print, progress=None):
     if key in PIP_PACKAGES and (key not in PIP_ON_LINUX or os.name != "nt"):
         return _install_pip_package(key, log=log, progress=progress)
 
-    rel = get_latest_release(key)
+    # An installed copy takes the NEWEST release; only a tool that is not there
+    # yet takes the reviewed pin.
+    #
+    # The table calls a row "Update" the moment GitHub publishes past the pin,
+    # and that row has an Install button. Fetching the pin for it downloaded the
+    # version already on disk: the request returned 200, the version column did
+    # not move, and the chip still said Update - i.e. the button looked broken,
+    # which is exactly how it was reported. Upstream is tried first and the pin
+    # stays the fallback, so an unreachable GitHub, a repo with no release or a
+    # release whose assets do not match our patterns all still install
+    # something known-good rather than failing.
+    prefix = INSTALL_PREFIX[key]
+    upstream = bool(_existing_install(prefix, MARKER_EXES[key]))
+    rel = _release(key, upstream)
     version = rel["version"]
-    asset = pick_asset(key)
+    asset = pick_asset(key, upstream)
+
+    if not asset and upstream:
+        log(f"{DISPLAY_NAMES[key]}: the newest release carries no asset this app "
+            f"installs — using the pinned release instead")
+        upstream = False
+        rel = _release(key)
+        version = rel["version"]
+        asset = pick_asset(key)
 
     if not asset:
         raise RuntimeError(f"No suitable Windows asset in latest {key} release")
 
     display = DISPLAY_NAMES[key]
-    prefix = INSTALL_PREFIX[key]
-    # Install into the folder a working copy already lives in (the shipped
-    # `ffmpeg vlatest`, or this tool's pinned folder) so a fresh install can
-    # never end up as a second folder beside it — see _existing_install.
     existing = _existing_install(prefix, MARKER_EXES[key])
     dest_dir = os.path.join(DEPS_DIR, existing or f"{prefix} v{version}")
 
@@ -1168,6 +1288,9 @@ def install_dependency(key, log=print, progress=None):
         if missing:
             raise RuntimeError(f"Installed folder is missing: {', '.join(missing)}")
 
+        # Before the pruner runs, and before anything reports a version: the
+        # folder has to carry the version that is now in it.
+        dest_dir = _rename_install(dest_dir, prefix, version, log)
         _remove_older_versions(prefix, os.path.basename(dest_dir))
         log(f"Installed {display} v{version} -> {dest_dir}")
         return version
@@ -1213,9 +1336,10 @@ def refresh_tool_cache():
 # switching it on starts one within a tick.
 AUTO_UPDATE_TICK_S = 300
 
-# One install pass per 6 h. Installing downloads the PINNED release and the pin
-# does not move between passes, so a shorter interval only re-fetches the same
-# file. ponytail: fixed interval, make it a config key if it ever needs tuning.
+# One install pass per 6 h. A pass only touches rows whose state is `missing`
+# or `update`, and `update` now means a strictly newer upstream release exists,
+# so a second pass with nothing published downloads nothing.
+# ponytail: fixed interval, make it a config key if it ever needs tuning.
 AUTO_UPDATE_INTERVAL_S = 6 * 3600
 
 _auto_thread = None
@@ -1248,17 +1372,17 @@ def auto_update_pass(log=print):
     for row in rows:
         if row["state"] not in ("missing", "update"):
             continue
-        # An "update" can mean only that UPSTREAM moved past the pin this app
-        # ships (the pin is what install_dependency fetches). Re-installing it
-        # every pass would download the same archive forever and change
-        # nothing — the pin only moves with an app release.
-        if (row.get("installed_version") and row.get("latest_version")
-                and _version_label(row["installed_version"]) == _version_label(row["latest_version"])):
-            continue
+        # No "installed == pin, so skip" guard here any more: it existed
+        # because install_dependency fetched the pin regardless, so a tool whose
+        # upstream had moved on would have been re-downloaded every pass for no
+        # change. Installs now take the newest release (and `update` means
+        # STRICTLY newer, see newer_version), so an update pass installs once
+        # and the row settles at `ok` — the guard would only hide the update
+        # this loop exists to perform.
         try:
-            install_dependency(row["key"], log=lambda m: None)
+            version = install_dependency(row["key"], log=lambda m: None)
             log(f"[deps] auto-update: {row['name']} was {row['state']}, "
-                f"installed {row['latest_version'] or 'the pinned release'}")
+                f"installed {version or 'the pinned release'}")
             changed += 1
         except Exception as e:
             log(f"[deps] auto-update: {row['name']} failed: {e}")

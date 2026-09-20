@@ -1,7 +1,20 @@
 # la musica
 
-**v3.1.4** — the release that made the library answer questions about itself.
-Genres are two slots now — the specific genre, then its family — spelled the way
+**v3.1.5** — the release where Install actually installs. The Dependencies
+button reported success while changing nothing: the table called a row an
+"Update" the moment GitHub published past the pin this app ships, the installer
+then fetched that pin — the version already on disk — and the folder kept the
+old version in its name, so the row could never leave `update`. An installed
+tool now takes the newest release, the folder is renamed to the version that is
+inside it, `update` means **strictly newer**, and the outcome is stated
+("Updated 1 tool · 15 already current" / "Nothing to do") instead of assumed.
+The setup wizard's table also polls the upstream check instead of leaving every
+row on "checking…" for as long as it is open, and `docker compose up -d` is
+now a self-updating install: the compose file ships watchtower, on by default
+and labelled so it never touches another container on the host.
+
+**v3.1.4** made the library answer questions about itself. Genres are two slots
+now — the specific genre, then its family — spelled the way
 MusicBrainz spells them, with the family derived instead of asked for. Paths
 carry the release-group id as well, so a file names its album even out of its
 folder. Playlists, likes and favourites are **per user**, and the trash bin
@@ -1852,15 +1865,16 @@ RateYourMusic first, then MusicBrainz, matching the documented chain.
 
 `GET /api/dependencies` reports, for every tool the installer knows, three
 versions — **Installed** (on disk / on PATH), **Latest** (the platform's
-target, `latest_version`: *the version this app would fetch*) and
+target, `latest_version`: the reviewed pin a first install fetches) and
 **Available** (`upstream_version`: the newest release GitHub actually has, for
 the tools published there). Settings → Dependencies, the sidebar page and the
 setup wizard all show the same three columns, and `python -m mlo`'s
 Dependency Manager prints the same table in the terminal.
 
-Latest is a deliberate *pin* (see `PINNED`): the installer downloads reviewed
-releases so installs and CI builds are reproducible, and a newer upstream tag
-is a release decision, not a runtime one. Available is the honest answer to
+Latest is a deliberate *pin* (see `PINNED`): a **first** install downloads
+reviewed releases so installs and CI builds are reproducible. It is not the
+target for a tool that is already there — see the install rule below.
+Available is the honest answer to
 "is there something newer?", checked against GitHub's `releases/latest` for
 every GitHub-published tool. php (windows.php.net), simple-dr-meter (a tag
 archive) and the two PyPI packages have no release to ask about; their rows
@@ -1874,9 +1888,12 @@ waiting out the TTL. A network or API failure never breaks the response — the
 affected tool keeps its previous value (or `null`) and carries a `note`; the
 row's state becomes `error` only when nothing is known at all.
 
-`state` is derived from Available, not from the pin: `ok` (installed ==
-upstream), `update` (upstream known and different — the row's hover shows the
-upstream version), `missing`, `error` (that tool's check failed). Rows with no
+`state` is derived from Available, not from the pin: `ok` (installed is that
+version or newer), `update` (upstream is **strictly newer** — the row's hover
+shows the upstream version), `missing`, `error` (that tool's check failed).
+"Behind" is an order, not a difference: a tool installed at 10.2.1 while the
+pin says 10.2.0 is not missing an update, and the old `!=` test marked exactly
+that row "Update" for good, pointing at an older release. Rows with no
 upstream at all fall back to the pinned pair.
 
 Updates are one click (*Install / update all*, or per tool) and land in
@@ -1891,12 +1908,22 @@ flac, libjxl, …) are reported ready from the image's own packages. Only the
 Windows-only tools (AudioAuditor, CUETools, Logchecker+php, slskd) cannot be
 fetched on Linux — their rows say so instead of failing an install.
 
-**Install always fetches the pinned Latest**, never Available: an upstream tag
-that has not been reviewed is exactly what the pin exists to keep out. With
-`dependencies_auto_update` (Settings → Dependencies, off by default) a
-background pass every few hours installs every tool whose state is `missing`
-or `update` through the same pinned path and logs one line per tool; the flag
-is re-read on every pass, so switching it off stops the next one.
+**An install takes the newest release for a tool that is already installed, and
+the reviewed pin for one that is not.** The Update chip is a promise: with the
+installer bound to the pin, pressing it downloaded the version already on disk,
+answered 200 and changed nothing — which is how a working install came to be
+reported as a dead button. The pin still governs a first install and remains the
+fallback whenever upstream cannot be used (no GitHub repo, no asset matching our
+patterns, GitHub unreachable). The install also **renames the tool's folder to
+the version that is now inside it**, because the detector reads a version off
+the folder name (see `mlo.tools._detect_tool`) — an update that left the old
+folder name behind kept reporting the old version, so the row could never leave
+`update` and the press still looked like it had done nothing.
+
+With `dependencies_auto_update` (Settings → Dependencies, off by default) a
+background pass every few hours installs every tool whose state is `missing` or
+`update` and logs one line per tool; the flag is re-read on every pass, so
+switching it off stops the next one.
 
 ### Terminal entry point
 

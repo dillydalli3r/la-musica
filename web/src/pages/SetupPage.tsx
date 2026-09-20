@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ArrowRight, ArrowLeft, RotateCcw, Users, Sparkles, Music2 } from "lucide-react";
-import { api, deviceUnavailable, unavailableFeatures } from "../api";
+import { api, deviceUnavailable, installSummary, unavailableFeatures } from "../api";
 import SourcesPanel from "../components/SourcesPanel";
 import AiTestButton from "../components/AiTestButton";
 import { toast } from "../store";
@@ -31,6 +31,14 @@ export default function SetupPage() {
     queryFn: () => api.dependencies(),
     retry: false,
     enabled: step >= 2,
+    // The upstream (GitHub) check runs in the backend's background thread and
+    // the first answer therefore says "checking…". Without this the wizard
+    // fetched ONCE, and every row kept that placeholder for as long as the page
+    // stayed open — so a tool with an update waiting looked Ready, the Install
+    // button looked like it had nothing to do, and the answer the server had
+    // already cached was never read. Same rule, and the same reason, as the
+    // Dependencies page: ask again while a check is in flight, then stop.
+    refetchInterval: (query) => (query.state.data?.checking ? 5000 : false),
   });
 
   // What THIS build can do, so the wizard never offers to install a tool the
@@ -43,6 +51,9 @@ export default function SetupPage() {
     staleTime: 5 * 60 * 1000,
   });
   const deviceReason = deviceUnavailable(caps);
+  // What the "Install N missing" button would install, so the wizard only
+  // offers it when there is something to install.
+  const missing = (deps?.tools ?? []).filter((t) => t.state === "missing");
 
   useEffect(() => {
     if (!config) return;
@@ -110,8 +121,9 @@ export default function SetupPage() {
     setBusy(true);
     try {
       const r = await api.installDependencies(keys);
-      const failed = r.results.filter((x) => !x.ok);
-      toast(failed.length ? "Install finished with " + failed.length + " failure(s)" : "Dependencies installed / updated");
+      const summary = installSummary(r.results);
+      if (r.results.some((x) => !x.ok)) toast.error(summary);
+      else toast.success(summary);
       refetchDeps();
     } catch (e) {
       toast.error(String(e));
@@ -227,14 +239,20 @@ export default function SetupPage() {
                 <button className="btn-ghost !py-1 text-xs" onClick={() => refetchDeps()} disabled={busy}>
                   <RotateCcw className="h-3 w-3" /> Refresh
                 </button>
-                <button
-                  className="btn-ghost !py-1 text-xs"
-                  onClick={() => installDeps(deps?.tools.filter((t) => t.state === "missing").map((t) => t.key))}
-                  disabled={busy || !!deviceReason}
-                  title={deviceReason ?? undefined}
-                >
-                  Install missing
-                </button>
+                {/* Only offered when there IS something missing: with an empty
+                    list the press sent `keys: []`, which the server read as
+                    "every tool" and answered with a full reinstall of all
+                    sixteen. */}
+                {missing.length > 0 && (
+                  <button
+                    className="btn-ghost !py-1 text-xs"
+                    onClick={() => installDeps(missing.map((t) => t.key))}
+                    disabled={busy || !!deviceReason}
+                    title={deviceReason ?? undefined}
+                  >
+                    Install {missing.length} missing
+                  </button>
+                )}
                 <button
                   className="btn-primary !py-1 text-xs"
                   onClick={() => installDeps()}

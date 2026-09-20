@@ -802,6 +802,30 @@ export interface MetadataFetchItem {
  *  caller leaves it off and stays as strict as before. */
 const stagedQ = (staged?: boolean) => (staged ? "&staged=1" : "");
 
+/** One line saying what an install just did.
+ *
+ *  Shared by the Dependencies page and the setup wizard so the two never tell
+ *  the same request two different stories. It names the no-op case on purpose:
+ *  a press that changes nothing used to end in "installed / updated", which is
+ *  how a button that had quietly fetched a version already on disk came to be
+ *  reported as "does nothing at all". */
+export function installSummary(
+  results: { ok: boolean; name: string; changed?: boolean }[]
+): string {
+  const failed = results.filter((r) => !r.ok);
+  if (failed.length) {
+    return `Install finished with ${failed.length} failure(s): ${failed.map((f) => f.name).join(", ")}`;
+  }
+  const changed = results.filter((r) => r.changed).length;
+  if (!changed) {
+    return results.length === 0
+      ? "Nothing to install"
+      : "Nothing to do — already at the newest release";
+  }
+  const already = results.length - changed;
+  return `Updated ${changed} tool${changed === 1 ? "" : "s"}${already ? ` · ${already} already current` : ""}`;
+}
+
 /** `/api/auth/status`. `required` is the server's own decision (a non-loopback
  *  bind always demands a login); `has_password` false means nobody has
  *  claimed this server yet, so the screen that makes sense is "create a
@@ -1378,7 +1402,11 @@ export const api = {
       }[];
     }>(`${API}/dependencies${refresh ? "?refresh=1" : ""}`),
   installDependencies: (keys?: string[]) =>
-    json<{ results: { key: string; name: string; ok: boolean; error?: string }[] }>(
+    json<{ results: { key: string; name: string; ok: boolean; error?: string;
+                      /** The version this install landed on. */
+                      version?: string;
+                      /** False when that version is the one already on disk. */
+                      changed?: boolean }[] }>(
       `${API}/dependencies/install`,
       {
         method: "POST",

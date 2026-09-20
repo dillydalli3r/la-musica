@@ -873,8 +873,22 @@ def dependencies_install(req: DepsInstallRequest):
     from mlo import fetchdeps
     from server import soulseek as slsk
 
-    wanted = set(req.keys or [])
-    keys = [k for k in fetchdeps.DISPLAY_NAMES if not wanted or k in wanted]
+    # `null` is "every tool" (the page's Install all); an EMPTY list is "the
+    # caller found nothing to do" (the wizard's Install missing with nothing
+    # missing) and must install nothing. `req.keys or []` collapsed the two,
+    # so one press of a button that had nothing to install started a full
+    # reinstall of all sixteen tools.
+    if req.keys is None:
+        keys = list(fetchdeps.DISPLAY_NAMES)
+    else:
+        wanted = set(req.keys)
+        keys = [k for k in fetchdeps.DISPLAY_NAMES if k in wanted]
+
+    before = {}
+    try:
+        before = fetchdeps.installed_versions()
+    except Exception:
+        before = {}
 
     # slskd is the one dependency this app RUNS. Windows refuses to replace a
     # file another process is executing, so installing it while the managed
@@ -896,8 +910,19 @@ def dependencies_install(req: DepsInstallRequest):
         for key in keys:
             name = fetchdeps.DISPLAY_NAMES[key]
             try:
-                fetchdeps.install_dependency(key, log=lambda m: None)
-                results.append({"key": key, "name": name, "ok": True})
+                version = fetchdeps.install_dependency(key, log=lambda m: None)
+                results.append({
+                    "key": key,
+                    "name": name,
+                    "ok": True,
+                    "version": version,
+                    # The version did not move: either the tool was already at
+                    # the newest release or the pin is what upstream has. The
+                    # page says so instead of a bare "installed", because a
+                    # press that changes nothing and says nothing is what reads
+                    # as "the button does not work".
+                    "changed": not fetchdeps.same_version(version, before.get(key)),
+                })
             except Exception as e:
                 results.append({"key": key, "name": name, "ok": False, "error": str(e)})
     finally:
