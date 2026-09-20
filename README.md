@@ -1,5 +1,22 @@
 # la musica
 
+**v3.1.8** — the release where the Dependencies table's numbers became real.
+Every distro-provided tool (flac, libjxl, jpegtran, rsgain, ffmpeg, `fpcalc`)
+showed `—` in the Installed column, because a distro package has no versioned
+folder name to read — and a row with no installed version can never be compared
+with what upstream ships. Each is now asked with its own version flag, the answer
+is cached with the rest of detection, and rsgain reads **3.6** against upstream
+**3.8** with a note saying who owns the upgrade, instead of a row that silently
+claims to be current. A system package is never an amber *Update* (apt owns it and
+that row has no Install button — an amber chip nothing can clear is a promise, not
+information), and *Install / update all* now means what it says: install what is
+missing, update what is behind, leave everything already current alone. It used to
+re-fetch slskd's 118 MB on every press and change nothing, which is what made the
+button look like it was doing something mysterious. Also: the container's `music/`
+folder — app state, `config.json` and auth database included — is now gitignored,
+so a `git add -A` in a checkout that is also running the compose template cannot
+commit a library's state.
+
 **v3.1.7** — the release where the dependency installer stops lying about what
 this platform can install. On Docker (and any Linux host) *Install / update all*
 attempted all sixteen tools and failed on twelve of them — the distro-provided
