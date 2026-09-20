@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, ArrowRight, ArrowLeft, RotateCcw, Users, Sparkles, Music2 } from "lucide-react";
+import { Check, ArrowRight, ArrowLeft, RotateCcw, Users, Sparkles, Music2, FolderOpen } from "lucide-react";
 import { api, deviceUnavailable, installSummary, unavailableFeatures } from "../api";
+import FolderPicker from "../components/FolderPicker";
 import SourcesPanel from "../components/SourcesPanel";
 import AiTestButton from "../components/AiTestButton";
 import { toast } from "../store";
@@ -15,6 +16,8 @@ export default function SetupPage() {
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
   const [step, setStep] = useState<Step>(1);
   const [musicFolder, setMusicFolder] = useState("");
+  // Step 1 picks the library folder; the dialog saves it as it closes.
+  const [picker, setPicker] = useState(false);
   const [busy, setBusy] = useState(false);
   // AI lyric transforms (step 4) — the keys script 17 reads.
   const [ai, setAi] = useState<Record<string, unknown>>({});
@@ -204,18 +207,23 @@ export default function SetupPage() {
           <div className="panel p-6 space-y-4">
             <div className="text-sm font-semibold">Your music library</div>
             <p className="text-xs text-zinc-400 leading-relaxed">
-              Everything the app grades, tags and optimizes lives under one folder (your artist/album tree). It is
-              chosen when the app starts — this step only shows what it resolved to.
+              Everything the app grades, tags and optimizes lives under one folder (your artist/album tree). Pick it
+              here, or accept the folder the app already resolved.
             </p>
             <div className="rounded-md border border-border bg-bg/60 px-3 py-2">
-              <div className="text-xs text-zinc-500 uppercase">Music folder</div>
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-xs text-zinc-500 uppercase">Music folder</div>
+                <button className="btn-ghost !py-1 text-xs tap" onClick={() => setPicker(true)} disabled={busy}>
+                  <FolderOpen className="h-3 w-3" /> Choose folder…
+                </button>
+              </div>
               <div className="font-mono text-xs text-zinc-200 break-all mt-1">
                 {musicFolder.trim() || "not configured yet"}
               </div>
               <div className="text-[11px] text-zinc-500 mt-1 leading-relaxed">
-                Fixed at startup, not editable here: set <code className="font-mono">MLO_MUSIC_FOLDER</code> (Docker /
-                compose) or <code className="font-mono">music_folder</code> in config.json, then restart. Settings →
-                General shows the resolved folder.
+                The picker browses this machine's folders and saves the choice at once — its state (
+                <code className="font-mono">&lt;music&gt;/.mlo</code>) moves with it.{" "}
+                <code className="font-mono">MLO_MUSIC_FOLDER</code> still seeds it for a first start (Docker / compose).
               </div>
             </div>
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -599,6 +607,16 @@ export default function SetupPage() {
             </div>
           </div>
         )}
+      {picker && (
+        <FolderPicker
+          startPath={musicFolder}
+          onClose={() => setPicker(false)}
+          onPicked={(chosen) => {
+            setMusicFolder(chosen);
+            setPicker(false);
+          }}
+        />
+      )}
       </div>
     </div>
   );

@@ -826,12 +826,19 @@ export function installSummary(
   return `Updated ${changed} tool${changed === 1 ? "" : "s"}${already ? ` · ${already} already current` : ""}`;
 }
 
-/** `/api/auth/status`. `required` is the server's own decision (a non-loopback
- *  bind always demands a login); `has_password` false means nobody has
- *  claimed this server yet, so the screen that makes sense is "create a
- *  password", not "sign in". */
+/** `/api/auth/status`. `required` answers THIS request — a client on the
+ *  network must sign in, while the machine the server runs on (its own browser,
+ *  a desktop shell, the host of a container) never has to; `gate` is the
+ *  server-wide answer behind it (is a password demanded of clients at all), and
+ *  `local` says which of the two this client is. `has_password` false means
+ *  nobody has claimed this server yet, so the screen that makes sense is
+ *  "create a password", not "sign in". */
 export interface AuthStatus {
   required: boolean;
+  /** Does this server ask a password of non-local clients at all? */
+  gate?: boolean;
+  /** Is this client the machine the server runs on? */
+  local?: boolean;
   has_password: boolean;
   authenticated: boolean;
   username: string;
@@ -966,6 +973,19 @@ export const api = {
     }, 30000),
   config: () => json<Record<string, unknown>>(`${API}/config`),
   configDefaults: () => json<Record<string, unknown>>(`${API}/config/defaults`),
+  /** Subdirectories of a path on the SERVER (GET /api/fs/dirs) — the music
+   *  folder picker. No path means "where the library already is". Directory
+   *  names only: nothing here opens a file. `pinned` is set when
+   *  MLO_MUSIC_FOLDER pins the folder (Docker/compose): browsing still works,
+   *  but a choice made here cannot stick. */
+  fsDirs: (path?: string) =>
+    json<{
+      path: string;
+      parent: string | null;
+      roots: string[];
+      dirs: { name: string; path: string; library: boolean; writable: boolean }[];
+      pinned: string | null;
+    }>(`${API}/fs/dirs${path ? `?path=${encodeURIComponent(path)}` : ""}`, {}, 30000),
   saveConfig: (cfg: Record<string, unknown>) =>
     json<Record<string, unknown>>(`${API}/config`, {
       method: "POST",

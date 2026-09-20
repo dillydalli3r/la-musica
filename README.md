@@ -1,5 +1,25 @@
 # la musica
 
+**v3.1.9** — the release where the server stops asking you for a password on your
+own machine, and where you can finally point it at a folder. **The login gate is
+for clients**: a request from the machine the server runs on — your browser, the
+desktop shell, or a container's own host reaching `localhost:8000` through the
+Docker bridge gateway — is let straight in, while a phone, a laptop or anything
+else on the network still signs in (and setting a password is still how those get
+in, offered right where it matters). `auth_mode: required` remains the explicit
+"always ask" override, and a forged `X-Forwarded-For` buys nothing: the address is
+the socket's peer. **And every dependency now installs everywhere**: AudioAuditor
+ships real Linux builds upstream (the pin predated them), CUETools' console tool
+runs under mono on Linux, and Logchecker's phar needed only PHP — so the four rows
+that used to read *No build here* on Linux are gone, together with the category,
+in the Docker image too (which now carries `php-cli` and `mono-runtime`). **The
+music folder is picked from the UI** — Settings → General → *Change…*, or step 1 of
+the wizard — with a picker that browses the server's own folders, flags the ones
+that already hold audio, warns on read-only ones, and moves the app's state
+(`.mlo`) into the folder it lands on; in Docker the folder is pinned by
+`MLO_MUSIC_FOLDER` and the picker says exactly that instead of accepting a choice
+that would silently revert.
+
 **v3.1.8** — the release where the Dependencies table's numbers became real.
 Every distro-provided tool (flac, libjxl, jpegtran, rsgain, ffmpeg, `fpcalc`)
 showed `—` in the Installed column, because a distro package has no versioned
@@ -115,13 +135,16 @@ machines.
   downloaded tracks, videos and lyrics previews play in the desktop and phone
   builds too, where there is no service worker to serve them. Writes, Soulseek
   and imports still need the server. See *Offline*.
-- **A login gate, because the server is no longer loopback-only** (new in
+- **A login gate for CLIENTS, not for the machine it runs on** (new in
   3.0.0) — one password, PBKDF2-HMAC-SHA256, sessions whose SHA-256 alone
-  touches the disk (`<music>/.mlo/data/auth.db`), and an
-  `auth_mode: auto` default that turns the gate ON the moment `server_host` is
-  not a loopback address. `off` on a non-loopback bind is treated as
-  `required`: a misconfiguration never publishes an open library. See *Security
-  & accounts*.
+  touches the disk (`<music>/.mlo/data/auth.db`), and an `auth_mode: auto`
+  default that demands it the moment `server_host` is not a loopback address —
+  from every caller that is not this machine. A browser on the host, a desktop
+  shell, and a container's own host reaching a published port (its request
+  arrives from the Docker bridge gateway, never from 127.0.0.1) are LOCAL and
+  are never asked; a phone, a laptop, anything else on the network is. `off` on
+  a non-loopback bind is treated as `required`: a misconfiguration never
+  publishes an open library. See *Security & accounts*.
 - **Notifications that reach you while the app is behind other windows** (new
   in 3.0.0) — the backend announces a found wish, a download that finished and
   was imported, and one that is sitting ready to import on `/ws/events`; each
@@ -1808,7 +1831,19 @@ settings describe. That address is also what decides whether the login gate
 applies (see *Security & accounts*); a hand-typed `uvicorn --host` bypasses the
 config, so bind through the config or set `auth_mode: required`.
 
-The music folder is chosen at startup, never from the UI: point
+The music folder is picked from the UI — **Settings → General → Music folder →
+Change…**, or step 1 of the setup wizard — with a picker that browses the
+server's own folders (`GET /api/fs/dirs`: directory names only, the ones that
+already hold audio flagged, and a warning on the ones the server cannot write).
+The desktop shell also offers the OS dialog, since that shell runs the backend
+on this machine. Choosing a folder *moves* the app's state
+(`<music>/.mlo`: config, playlists, sessions, downloads, trash) into it and
+restarts a running Soulseek daemon so it shares the new tree; the music files
+themselves are never moved. When `MLO_MUSIC_FOLDER` is set it PINS the folder —
+that is what the app uses, the stored value is rewritten to match, and the
+picker says so instead of accepting a choice that cannot stick.
+
+A folder can still be set before the first start: point
 `MLO_MUSIC_FOLDER` at your library (that is what the Docker image and the
 compose template do; it stays the only environment variable the container
 needs), or set `music_folder` in the app's own
@@ -2315,10 +2350,25 @@ port. That is what the gate covers; it is not a UI lock.
 
 `auto` follows the bind: `127.0.0.1`, `::1` and `localhost` are loopback and
 keep a single-user desktop install password-free; anything else (`0.0.0.0`, a
-LAN IP, a Tailscale address) requires a login. **`off` on a non-loopback bind
-is treated as `required`**, with a warning printed at startup — that
-combination is a misconfiguration, not a choice, and it must not publish an
-open library.
+LAN IP, a Tailscale address) asks for a login — **from clients**. Who counts as
+a client is decided per request, from the peer address, because the machine
+running the server is not one:
+
+| the request comes from | `auto` | `required` |
+|---|---|---|
+| loopback (127/8, `::1`, the IPv4-mapped form) | let in | password |
+| one of this machine's own addresses (its LAN IP, a shell's own view of itself) | let in | password |
+| the gateway of the container the server runs in — how the host's own browser reaches a published port | let in | password |
+| anything else (a phone, a laptop, a neighbour) | password | password |
+
+`auth_mode: required` is the explicit "always ask" override and is honoured
+locally too. `X-Forwarded-For` is never trusted for this: the address is the
+socket's peer, so a forged header cannot buy a password-free session.
+**`off` on a non-loopback bind is treated as `required`**, with a warning
+printed at startup — that combination is a misconfiguration, not a choice, and
+it must not publish an open library. Setting a password is still how other
+devices get in, so Settings → Security keeps offering it (and says when the
+gate is on for the network while you are local).
 
 ### How a login works
 
@@ -2457,8 +2507,11 @@ so `docker compose pull` and watchtower have something to compare against.
   (docker-compose repeats it) and that seeds the config's `server_host` — the
   same key the gate reads — so the container both binds the published port and
   gets the login gate: `auth_mode: auto` sees a non-loopback address and turns
-  itself ON. The first visit therefore lands on the first-run setup screen, and
-  the library is behind a password from the first request.
+  itself ON for **clients**. Opening `http://localhost:8000` on the machine
+  running Docker is not a client: that request arrives through the Docker
+  bridge gateway and is let straight in, so a single-user container needs no
+  password at all until a phone or another computer connects — set one then
+  (Settings → Security) and those devices sign in with it.
   `MLO_SERVER_PORT` seeds the port the same way.
 - **Toolchain in the image.** `ffmpeg`, `flac`, `libjxl`, `jpegtran`
   (`libjpeg-turbo-progs`), `libchromaprint-tools` (`fpcalc`) and `rsgain` are

@@ -35,11 +35,14 @@ Everything here is deliberately small and boring:
   up in a log or a history entry, so it is only accepted where the other two
   cannot be used.
 
-`auth_mode: auto` (the default) is what decides whether the gate applies at
-all: ON whenever `server_host` is not a loopback address, OFF for loopback.
-`required` gates loopback too; `off` never turns the gate off for a
-non-loopback bind — that combination is a misconfiguration, not a choice, and
-is treated as `required` with a warning.
+`auth_mode: auto` (the default) decides where the gate applies: OFF for a
+loopback bind, and for a non-loopback one, ON for every caller that is not this
+machine itself. A browser on the host — including one reaching a published
+Docker port, whose request arrives from the container's gateway — is LOCAL and
+is never asked for a password; a phone, a laptop, anything else on the network
+is a client and is. `required` asks everyone, locally included; `off` never
+turns the gate off for a non-loopback bind — that combination is a
+misconfiguration, not a choice, and is treated as `required` with a warning.
 """
 
 import hashlib
@@ -47,7 +50,9 @@ import hmac
 import ipaddress
 import os
 import secrets
+import socket
 import sqlite3
+import struct
 import threading
 import time
 
@@ -539,6 +544,111 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
+# --------------------------------------------------------------------------- #
+# Local, or a client on the network
+# --------------------------------------------------------------------------- #
+# The gate exists for CLIENT connections — another device reaching this server —
+# and not for the machine the server itself runs on. On a loopback bind that was
+# true by construction; a published Docker port is where it broke, because the
+# container binds 0.0.0.0 and the browser on the very host running it arrives
+# from the Docker bridge, never from 127.0.0.1 — so the person at the keyboard
+# was asked for a password meant for the network.
+#
+# "Local" is therefore measured per request, from the client address:
+#   * loopback — the same machine with no container in the way;
+#   * one of this machine's OWN addresses — a browser on the host that used the
+#     LAN address instead of localhost is still the host;
+#   * in a container, the default gateway — that is the Docker host, and it is
+#     how a request from the host's own browser reaches a published port.
+# A phone, a laptop, a neighbour: none of those, so they keep the gate.
+_LOCAL_TTL_S = 30.0
+_local = {"at": 0.0, "ips": set()}
+
+
+def in_container() -> bool:
+    """Whether this process runs in a container (Docker/Podman/k8s)."""
+    if os.path.exists("/.dockerenv"):
+        return True
+    try:
+        with open("/proc/1/cgroup", encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return False
+    return any(k in text for k in ("docker", "kubepods", "containerd", "podman"))
+
+
+def _default_gateway():
+    """This machine's default gateway, or None (Linux: /proc/net/route)."""
+    try:
+        with open("/proc/net/route", encoding="utf-8") as fh:
+            for line in fh.readlines()[1:]:
+                fields = line.split()
+                if len(fields) > 2 and fields[1] == "00000000":
+                    return socket.inet_ntoa(struct.pack("<L", int(fields[2], 16)))
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def local_addresses() -> set:
+    """Every address a request from which is LOCAL to this server.
+
+    Recomputed every `_LOCAL_TTL_S` seconds so a laptop moving between networks
+    keeps working without a restart; per request this is a set lookup.
+    """
+    now = time.time()
+    if _local["ips"] and now - _local["at"] < _LOCAL_TTL_S:
+        return set(_local["ips"])
+    ips = {"127.0.0.1", "::1"}
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None):
+            if info[4] and info[4][0]:
+                ips.add(info[4][0])
+    except OSError:
+        pass
+    if in_container():
+        gateway = _default_gateway()
+        if gateway:
+            ips.add(gateway)
+    _local.update(at=now, ips=ips)
+    return set(ips)
+
+
+def is_local_ip(ip) -> bool:
+    """Whether *ip* is this machine — or, in a container, its host."""
+    text = str(ip or "").strip()
+    try:
+        addr = ipaddress.ip_address(text)
+    except ValueError:
+        return False
+    if addr.is_loopback:
+        return True
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return str(mapped or addr) in local_addresses()
+
+
+def is_local_request(request) -> bool:
+    """The request's client is this machine (its own browser)."""
+    return is_local_ip(client_ip(request))
+
+
+def requires_login(request, state: dict = None) -> bool:
+    """Does THIS request need a session?
+
+    `auth_mode: required` is the explicit "always ask" override and is honoured
+    locally too; `auto` (the default) asks only the clients that are not this
+    machine (see local_addresses) — which is what makes a local install, a
+    desktop shell and a container on the host itself password-free while a
+    phone on the network still has to sign in.
+    """
+    state = state if state is not None else current_state()
+    if not state.get("required"):
+        return False
+    if str(state.get("mode") or "auto") != "required" and is_local_request(request):
+        return False
+    return True
+
+
 def gate_required(cfg: dict) -> bool:
     """Does this configuration demand a login?
 
@@ -564,7 +674,8 @@ def gate_warning(cfg: dict) -> str:
                 "that address is reachable from the network.")
     if not is_loopback_host(cfg.get("server_host")) and not cfg.get("auth_password_hash"):
         return ("the server binds a non-loopback address with no password set; "
-                "only the first-run setup endpoint answers until one is set.")
+                "only a device on this machine can use it — set a password so "
+                "clients on the network can sign in")
     return ""
 
 
@@ -618,7 +729,12 @@ def cached_state():
 
 
 def current_state(refresh: bool = False) -> dict:
-    """`{required, has_password, username, host, public_url, session_days}`.
+    """`{required, mode, has_password, username, host, public_url, session_days}`.
+
+    `required` is the CONFIG's answer — does this server demand a password at
+    all — and `mode` is what it was derived from (`auto`/`required`/`off`).
+    Whether a particular request must sign in is `requires_login(request)`,
+    which layers the local/client distinction on top of these.
 
     Never raises: an unreadable config answers "gate off, no password", which
     keeps a broken config from locking the owner out of their own server.
@@ -634,6 +750,7 @@ def current_state(refresh: bool = False) -> dict:
     _state.update(
         at=now,
         required=gate_required(cfg),
+        mode=str(cfg.get("auth_mode") or "auto").lower(),
         has_password=bool(cfg.get("auth_password_hash")),
         username=str(cfg.get("auth_username") or ""),
         host=str(cfg.get("server_host") or ""),

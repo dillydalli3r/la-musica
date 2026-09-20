@@ -23,21 +23,17 @@ ENV PYTHONUNBUFFERED=1 \
 
 # Core audio/image tools for the optimization pipeline. These are the Linux
 # counterparts of the downloads in mlo/fetchdeps.py: the in-app installer
-# fetches the distro-provided ones' native Linux builds only where upstream
-# ships none (LINUX_BINARIES) and otherwise points at the system package
-# (LINUX_PACKAGES), so everything the distro has is installed here. That is the
-# whole set except oxipng — trixie has no package for it either, and upstream
-# ships a static Linux build, so Settings -> Dependencies installs that into
-# /app/.dependencies (fetchdeps LINUX_BINARIES) instead of the image faking an
-# apt package that does not exist.
+# fetches the native Linux builds where upstream ships one (LINUX_BINARIES:
+# oxipng, slskd, AudioAuditor, and CUETools through the mono runtime) and points
+# at the system package for everything the distro provides (LINUX_PACKAGES), so
+# every tool the app knows is installable and runnable in this image.
 #
-# libsndfile1 / libgomp1 back the pip-vendored tools Settings -> Dependencies
-# installs at runtime (PIP_PACKAGES: librosa imports soundfile -> libsndfile,
-# and numba/llvmlite -> libgomp); without them the pip install "succeeds" and
-# the import dies. libicu76 is the same for the tool the app RUNS: slskd is a
-# .NET app, its runtime dlopens ICU at startup and refuses to boot without it
-# ("Couldn't find a valid ICU package installed on the system") — a dependency
-# no `ldd` shows, since it is loaded by name at run time.
+# libsndfile1 / libgomp1 / libicu76 back the runtime-installed tools — librosa's
+# soundfile and numba imports; slskd's and AudioAuditor's .NET runtimes, which
+# dlopen ICU at startup and refuse to boot without it (a dependency no `ldd`
+# shows, since it is loaded by name). php-cli is the Logchecker phar's runtime
+# and mono-runtime runs CUETools' console tool (both verified here: the phar
+# scores a log, CUETools.ARCUE.exe prints its usage under mono).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         flac \
@@ -45,6 +41,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libjpeg-turbo-progs \
         libchromaprint-tools \
         rsgain \
+        php-cli \
+        mono-runtime \
         libsndfile1 \
         libgomp1 \
         libicu76 \
@@ -82,7 +80,7 @@ ENV HOME=/home/mlo
 # leaves it empty, and the server then reports its own code version instead of
 # claiming to be a release it is not. `tools/check_versions.py` keeps the
 # ARG default in step with mlo/__init__.py.
-ARG MLO_VERSION=3.1.8
+ARG MLO_VERSION=3.1.9
 ENV MLO_VERSION=${MLO_VERSION}
 LABEL org.opencontainers.image.version="${MLO_VERSION}" \
       org.opencontainers.image.title="la musica" \

@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, Save, RotateCcw, LayoutGrid, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, Wand2, X } from "lucide-react";
+import { Bell, Save, RotateCcw, LayoutGrid, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, Wand2, X, FolderOpen } from "lucide-react";
 import { api, deviceUnavailable, unavailableFeatures } from "../api";
 import ConfirmButton from "../components/ConfirmButton";
+import FolderPicker from "../components/FolderPicker";
 import SourcesPanel from "../components/SourcesPanel";
 import SecurityPanel from "../components/SecurityPanel";
 import AiTestButton from "../components/AiTestButton";
@@ -325,6 +326,9 @@ export default function SettingsPage() {
   });
   const qc = useQueryClient();
   const [musicFolder, setMusicFolder] = useState("");
+  // The folder picker (Library card): a dialog of its own, because choosing
+  // the library folder is a different act from editing a form field.
+  const [picker, setPicker] = useState(false);
   const [lyricsFormat, setLyricsFormat] = useState("EMBEDDED");
   const [workerLimit, setWorkerLimit] = useState(0);
   // Filled from the config the server normalizes (naming_script is never
@@ -1548,13 +1552,19 @@ export default function SettingsPage() {
             <div className="panel space-y-3">
               <div className="text-xs font-semibold uppercase tracking-wider text-zinc-500">Library</div>
               <div className="rounded-md border border-border bg-zinc-950/40 px-3 py-2">
-                <div className="text-xs text-zinc-500 uppercase">Music folder</div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="text-xs text-zinc-500 uppercase">Music folder</div>
+                  <button className="btn-ghost !py-1 text-xs tap" onClick={() => setPicker(true)}>
+                    <FolderOpen className="h-3 w-3" /> Change…
+                  </button>
+                </div>
                 <div className="font-mono text-xs text-zinc-200 break-all mt-1">
                   {musicFolder.trim() || "not configured yet"}
                 </div>
                 <div className="text-[11px] text-zinc-600 mt-1 leading-relaxed">
-                  Decided at startup and read-only here: <code>MLO_MUSIC_FOLDER</code> (Docker / compose) or{" "}
-                  <code>music_folder</code> in config.json (the Raw config box below). Restart the app after changing it.
+                  Pick any folder this machine can open — the picker browses it and the choice is saved at once. The
+                  app's own state moves into <code>&lt;music&gt;/.mlo</code> with it. <code>MLO_MUSIC_FOLDER</code> (Docker
+                  / compose) or <code>music_folder</code> in config.json still work for a first start.
                 </div>
               </div>
               <label className="block">
@@ -2210,6 +2220,16 @@ export default function SettingsPage() {
           </details>
         </div>
       </div>
+      {picker && (
+        <FolderPicker
+          startPath={musicFolder}
+          onClose={() => setPicker(false)}
+          onPicked={(chosen) => {
+            setMusicFolder(chosen);
+            setPicker(false);
+          }}
+        />
+      )}
     </div>
   );
 }

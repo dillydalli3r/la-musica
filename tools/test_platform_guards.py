@@ -63,12 +63,14 @@ fetchdeps._download = boom
 fetchdeps._api_json = boom
 
 APT_KEYS = {k: v for k, v in fetchdeps.LINUX_PACKAGES.items() if v}
-UNSUPPORTED_KEYS = [k for k in fetchdeps.LINUX_PACKAGES if not fetchdeps.LINUX_PACKAGES[k]]
-WINDOWS_ONLY = list(APT_KEYS) + UNSUPPORTED_KEYS
+# Tools that install on Linux through an interpreter, with the runtime they
+# need on PATH (fetchdeps.LINUX_RUNNERS) — the interpreter's package is what the
+# row names when it is missing.
+RUNNER_KEYS = dict(fetchdeps.LINUX_RUNNERS)
 # Tools upstream publishes a native Linux build for: the *fetchable* half of a
 # Linux install, and the reason a container is no longer stuck without them.
 LINUX_NATIVE = tuple(fetchdeps.LINUX_BINARIES)
-PLATFORM_FREE = ("librosa", "beets", "simpledrmeter", "yt-dlp")
+PLATFORM_FREE = ("librosa", "beets", "simpledrmeter", "yt-dlp", "logchecker")
 
 
 class simulated_platform:
@@ -104,6 +106,35 @@ def install_fails(key):
     return None
 
 
+class runners:
+    """Say whether this machine has the interpreters (mono, php) a block needs.
+
+    Two things are pinned: `fetchdeps.LINUX_RUNNERS` stays the real table, and
+    the LOOKUP is stubbed — `shutil.which` follows the simulated platform
+    (`os.name` is patched inside these blocks), and what these blocks are
+    testing is the decision install_kind() makes, not the filesystem.
+    """
+
+    class _Which:
+        def __init__(self, present):
+            self._present = present
+
+        def which(self, name):
+            return f"/usr/bin/{name}" if self._present else None
+
+    def __init__(self, present: bool):
+        self.present = present
+
+    def __enter__(self):
+        self.real = fetchdeps.shutil
+        fetchdeps.shutil = self._Which(self.present)
+        return self
+
+    def __exit__(self, *exc):
+        fetchdeps.shutil = self.real
+        return False
+
+
 # --------------------------------------------------------------------------- #
 # The platform table: three answers, both platforms, no globals patched
 # --------------------------------------------------------------------------- #
@@ -113,31 +144,48 @@ for key in fetchdeps.DISPLAY_NAMES:
     check(f"Windows installs {key} itself",
           fetchdeps.install_kind(key, platform="windows") == "deps")
 
-for key in LINUX_NATIVE + PLATFORM_FREE:
-    check(f"Linux installs {key} from its own release",
-          fetchdeps.install_kind(key, platform="linux", machine="x86_64") == "deps")
-    check(f"...on arm64 too",
-          fetchdeps.install_kind(key, platform="linux", machine="aarch64") == "deps")
+with runners(True):
+    # EVERY tool the app knows, on Linux: upstream's native build (oxipng,
+    # slskd, AudioAuditor, CUETools through mono), the pip/source/phar set, or
+    # the distro package. There is no "cannot install this here" row left.
+    for key in LINUX_NATIVE + PLATFORM_FREE:
+        check(f"Linux installs {key} from its own release",
+              fetchdeps.install_kind(key, platform="linux", machine="x86_64") == "deps")
+        check(f"...on arm64 too",
+              fetchdeps.install_kind(key, platform="linux", machine="aarch64") == "deps")
+        check(f"...and offers it no refusal",
+              fetchdeps.install_problem(key, platform="linux") is None)
 
 for key in APT_KEYS:
     check(f"Linux reports {key} as the distro package",
           fetchdeps.install_kind(key, platform="linux", machine="x86_64") == "system")
 
-for key in UNSUPPORTED_KEYS:
-    check(f"Linux cannot install {key} at all",
-          fetchdeps.install_kind(key, platform="linux", machine="x86_64") == "unsupported")
+# The interpreter is what the tool runs on: without it there is nothing to
+# install, and the row names the package that provides it.
+with runners(False):
+    for key, (_bin, pkg) in RUNNER_KEYS.items():
+        check(f"Linux cannot install {key} without its interpreter",
+              fetchdeps.install_kind(key, platform="linux") == "unsupported")
+        problem = fetchdeps.install_problem(key, platform="linux")
+        check(f"...and the row names {pkg} ({problem!r})",
+              problem and f"apt-get install {pkg}" in problem)
 
 # A container on a 32-bit ARM/x86 host: upstream ships no build for it, so the
 # row must say so instead of promising a download that cannot happen.
-for key in LINUX_NATIVE:
-    check(f"{key} reports unsupported on an architecture it has no build for",
-          fetchdeps.install_kind(key, platform="linux", machine="armv7l") == "unsupported")
+with runners(True):
+    for key in LINUX_NATIVE:
+        check(f"{key} reports unsupported on an architecture it has no build for",
+              fetchdeps.install_kind(key, platform="linux", machine="armv7l") == "unsupported")
+    check("...and says why",
+          "architecture" in (fetchdeps.install_problem(
+              "oxipng", platform="linux", machine="armv7l") or ""))
 
 # macOS: apt is not the answer there, so nothing is a "system package" and only
 # the platform-independent downloads stay installable.
-for key in PLATFORM_FREE:
-    check(f"macOS installs {key} itself",
-          fetchdeps.install_kind(key, platform="other") == "deps")
+with runners(True):
+    for key in PLATFORM_FREE:
+        check(f"macOS installs {key} itself",
+              fetchdeps.install_kind(key, platform="other") == "deps")
 check("macOS does not pretend flac is an apt package",
       fetchdeps.install_kind("flac", platform="other") == "unsupported")
 
@@ -174,13 +222,9 @@ for key, pkg in APT_KEYS.items():
     problem = fetchdeps.install_problem(key, platform="linux")
     check(f"{key}'s row names the distro package ({problem!r})",
           problem and f"apt-get install {pkg}" in problem)
-for key in UNSUPPORTED_KEYS:
-    problem = fetchdeps.install_problem(key, platform="linux")
-    check(f"{key}'s row says it is unsupported here ({problem!r})",
-          problem and "unsupported on this platform" in problem)
 check("an installable tool carries no refusal",
       fetchdeps.install_problem("oxipng", platform="linux") is None
-      and fetchdeps.install_problem("flac", platform="windows") is None)
+      and fetchdeps.install_problem("cuetools", platform="windows") is None)
 
 # Markers follow the platform: the Windows install must still look for .exe
 # names, the Linux one for the bare binaries a machine here can exec.
@@ -239,16 +283,41 @@ try:
 finally:
     fetchdeps.musl_libc = real_musl
 
+# The two tools that used to read "no build here" on Linux: AudioAuditor has
+# real linux binaries upstream (the pin's Windows asset predates them), and
+# CUETools' Windows console tool runs under mono — so both install here, and
+# what callers execute is the launcher rather than the .exe.
+AUDIOAUDITOR_ASSETS = ["AudioAuditorCLI-win-x64.exe", "AudioAuditorCLI-linux-arm64",
+                       "AudioAuditorCLI-linux-x64"]
+check("Linux picks AudioAuditor's own linux build, never the Windows exe",
+      picks("audioauditor", AUDIOAUDITOR_ASSETS, platform="linux", machine="x86_64")
+      == "AudioAuditorCLI-linux-x64")
+check("...and the arm64 build for arm64",
+      picks("audioauditor", AUDIOAUDITOR_ASSETS, platform="linux", machine="aarch64")
+      == "AudioAuditorCLI-linux-arm64")
+check("Windows still picks the pinned .exe",
+      picks("audioauditor", AUDIOAUDITOR_ASSETS, platform="windows")
+      == "AudioAuditorCLI-win-x64.exe")
+check("Linux takes CUETools' Windows zip (mono runs it)",
+      picks("cuetools", ["CUETools_2.2.6.zip"], platform="linux", machine="x86_64")
+      == "CUETools_2.2.6.zip")
+check("...and callers run the mono launcher there, the .exe on Windows",
+      fetchdeps.run_name("cuetools", platform="linux") == "CUETools.ARCUE"
+      and fetchdeps.run_name("cuetools", platform="windows") == "CUETools.ARCUE.exe")
+
 
 # --------------------------------------------------------------------------- #
 # What a Linux host offers, end to end (with the network stubbed out)
 # --------------------------------------------------------------------------- #
-with simulated_platform("posix"):
-    # "Install / update all" and the per-tool buttons read this list: the
-    # fetchable tools only — never a distro package, never a Windows-only one.
+with runners(True), simulated_platform("posix"):
+    # "Install / update all" and the per-tool buttons read this list: every tool
+    # this platform can fetch — the native builds, the pip/source/phar set.
     installable = fetchdeps.installable_keys()
     check("Install all on Linux lists exactly what it can fetch",
           set(installable) == set(LINUX_NATIVE) | set(PLATFORM_FREE))
+    check("...and no tool is left without an install path",
+          set(installable) == {k for k in fetchdeps.DISPLAY_NAMES
+                               if fetchdeps.install_kind(k) != "system"})
 
     # The installer must go for oxipng's own release rather than refuse it.
     real_release = fetchdeps.get_latest_release
@@ -273,16 +342,13 @@ with simulated_platform("posix"):
     finally:
         fetchdeps.get_latest_release = real_release
 
-    # The distro-provided and Windows-only tools still refuse — with the reason
-    # the row shows, and before anything is downloaded.
+    # The distro-provided tools still refuse — with the reason the row shows,
+    # and before anything is downloaded. Nothing else does: every other tool
+    # now has a fetch path on Linux (see LINUX_BINARIES).
     for key, pkg in APT_KEYS.items():
         e = install_fails(key)
         check(f"{key}: refused on Linux, naming the package ({e})",
               e is not None and f"apt-get install {pkg}" in str(e))
-    for key in UNSUPPORTED_KEYS:
-        e = install_fails(key)
-        check(f"{key}: refused on Linux as unsupported ({e})",
-              e is not None and "unsupported on this platform" in str(e))
 
     # yt-dlp's Windows .exe is not what Linux installs: it is pip-routed
     # (PIP_ON_LINUX) and must NOT be refused, or Linux never gets it at all.
@@ -301,20 +367,20 @@ with simulated_platform("posix"):
           routed == ["librosa", "beets", "yt-dlp"])
 
     # The target column has to agree with the install path: a fetched tool shows
-    # its release, a distro tool its package, a Windows-only one nothing.
+    # its release, a distro tool its package.
     latest = fetchdeps.latest_versions()
-    for key in LINUX_NATIVE:
+    for key in LINUX_NATIVE + PLATFORM_FREE:
         check(f"Linux reports {key}'s own version as the target",
               latest[key] == fetchdeps.PINNED[key]["version"])
     for key in APT_KEYS:
         check(f"Linux reports {key}'s target as apt: {APT_KEYS[key]}",
               latest[key] == f"apt: {APT_KEYS[key]}")
-    for key in UNSUPPORTED_KEYS:
-        check(f"Linux reports no target for {key}", latest[key] is None)
+    check("every Linux row reports either a version or its package",
+          all(v for v in latest.values()))
 
 # ...and Windows behaviour is unchanged.
 with simulated_platform("nt"):
-    for key in WINDOWS_ONLY + list(PLATFORM_FREE) + list(LINUX_NATIVE):
+    for key in fetchdeps.DISPLAY_NAMES:
         check(f"Windows keeps {key} installable",
               fetchdeps.installable(key) and fetchdeps.install_problem(key) is None)
 
@@ -323,7 +389,9 @@ with simulated_platform("nt"):
     fetchdeps.get_latest_release = (
         lambda key, upstream=False: {"assets": [fetchdeps.PINNED[key]["asset"]]})
     try:
-        for key in WINDOWS_ONLY:
+        for key in fetchdeps.PINNED:
+            if not fetchdeps.PINNED[key].get("asset"):
+                continue          # pip packages and the source archive
             got = fetchdeps.pick_asset(key)
             pinned = fetchdeps.PINNED[key]["asset"]
             check(f"Windows picks {key}'s pinned asset (got {got!r})",

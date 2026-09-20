@@ -166,7 +166,11 @@ export default function SecurityPanel() {
     }
   };
 
-  const gateOn = !!status.data?.required;
+  // `gate` (not `required`): the panel reports whether this SERVER asks a
+  // password of clients at all. `required` answers the request that drew this
+  // screen, and a browser on the machine running the server is local — it is
+  // never asked, which must not read here as "the gate is off".
+  const gateOn = !!status.data?.gate;
 
   return (
     <div className="space-y-5">

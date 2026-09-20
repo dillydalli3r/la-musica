@@ -225,6 +225,7 @@ _VERSION_ARGS = {
     "chromaprint": ("-version",),    # fpcalc
     "slskd": ("--version",),
     "yt-dlp": ("--version",),
+    "php": ("-v",),                  # "PHP 8.4.11 (cli) …"
 }
 
 # The first dotted number in a tool's version banner: "flac 1.5.0",
@@ -320,6 +321,27 @@ def _detect_system_tools():
     if slskd:
         tools["slskd"] = _system_entry("slskd", slskd_exe=slskd)
 
+    # PHP: the Logchecker phar's runtime, and nothing else's. The distro
+    # package (Debian/Ubuntu: php-cli) is the Linux counterpart of the
+    # Windows php zip the installer fetches - without it the phar below is
+    # listed but cannot run, which is exactly what logchecker_available()
+    # decides on.
+    php = shutil.which("php")
+    if php:
+        tools["php"] = _system_entry("php", php_exe=php)
+
+    # The rip-log scorer is a phar - the SAME file on every platform - so only
+    # its runtime is platform-specific (see php above).
+    lc_version, lc_folder = _detect_tool("logchecker", DEPS_DIR)
+    if lc_folder:
+        phar = os.path.join(DEPS_DIR, lc_folder, "logchecker.phar")
+        if os.path.isfile(phar):
+            tools["logchecker"] = {
+                "version": lc_version,
+                "phar_path": phar,
+                "php_exe": tools.get("php", {}).get("php_exe"),
+            }
+
     # yt-dlp: on Linux the vendored pip package (fetchdeps installs it with
     # `pip --target`, see PIP_ON_LINUX) or a distro/pip install on PATH. There
     # is no Linux binary to point at, so ytdlp_exe stays None for the vendored
@@ -342,27 +364,45 @@ def _detect_system_tools():
     return tools
 
 
+# Which field a native install is reported under. These are the SAME names the
+# Windows detection uses, because they are what the consumers read: audit.py
+# takes `cli_exe`, accurip.py takes `arcue_exe`, and the capability report just
+# looks for a `*_exe`.
+_DEPS_NATIVE_FIELDS = {
+    "oxipng": "oxipng_exe",
+    "slskd": "slskd_exe",
+    "audioauditor": "cli_exe",
+    "cuetools": "arcue_exe",
+}
+
+
 def _detect_deps_native():
     """Tools installed as native binaries under .dependencies (POSIX only).
 
-    fetchdeps installs native Linux builds there (oxipng, slskd - see
-    fetchdeps.LINUX_BINARIES) and the .exe scan above cannot see them. A
-    Windows host sharing this folder must never pick one up: an .exe-less
-    folder is a file it cannot execute.
+    fetchdeps installs native Linux builds there (see fetchdeps.LINUX_BINARIES:
+    oxipng, slskd, AudioAuditor, and CUETools through its mono launcher) and the
+    .exe scan above cannot see them. A Windows host sharing this folder must
+    never pick one up: an .exe-less folder is a file it cannot execute.
     """
-    from .fetchdeps import INSTALL_PREFIX, LINUX_BINARIES
+    from .fetchdeps import INSTALL_PREFIX, LINUX_BINARIES, run_name
 
     tools = {}
     if os.name == "nt":
         return tools
     for key, spec in LINUX_BINARIES.items():
+        field = _DEPS_NATIVE_FIELDS.get(key)
+        if not field:
+            continue
         version, folder = _detect_tool(INSTALL_PREFIX.get(key, key), DEPS_DIR)
         if not folder:
             continue
         d = os.path.join(DEPS_DIR, folder)
-        if all(os.path.isfile(os.path.join(d, m)) for m in spec["markers"]):
-            tools[key] = {"version": version,
-                          f"{key}_exe": os.path.join(d, spec["markers"][0])}
+        # `run_name` is the launcher where the install wrote one (a Windows
+        # build under mono), so what callers execute is what is detected.
+        exe = os.path.join(d, run_name(key))
+        if (all(os.path.isfile(os.path.join(d, m)) for m in spec["markers"])
+                and os.path.isfile(exe)):
+            tools[key] = {"version": version, field: exe}
     return tools
 
 
@@ -558,7 +598,7 @@ def detect_all_tools():
     # category resolves even without the .dependencies downloader.
     system = _detect_system_tools()
     for key in ("flac", "libjxl", "libjpeg_turbo", "oxipng", "ffmpeg",
-                "rsgain", "chromaprint", "slskd", "yt-dlp"):
+                "rsgain", "chromaprint", "slskd", "yt-dlp", "php", "logchecker"):
         if key not in tools and key in system:
             tools[key] = system[key]
 

@@ -153,7 +153,12 @@ async def _auth_gate(request: Request, call_next):
         # event loop. A media seek issues many range requests back to back
         # and only the first of a burst pays this.
         state = await asyncio.to_thread(auth_mod.current_state)
-    if not state.get("required"):
+    # The gate is for CLIENT connections. A request from this machine — the
+    # host's own browser, a desktop shell, or the host of the container this
+    # server runs in, which reaches a published port through the Docker bridge
+    # gateway — never has to sign in; see auth.local_addresses. `auth_mode:
+    # required` overrides that and asks everyone.
+    if not auth_mod.requires_login(request, state):
         return await call_next(request)
     if not state.get("has_password"):
         return JSONResponse(
@@ -484,10 +489,51 @@ def set_config(cfg: dict):
     # re-issues the caller's own session. Dropped rather than rejected so a
     # stale client echoing the whole config back does not fail the save.
     cfg = {k: v for k, v in (cfg or {}).items() if k != "auth_password_hash"}
+    # The music folder is a path the BACKEND must be able to open — the picker
+    # in Settings/wizard sends one, and a path typed by hand or chosen on
+    # another machine has to fail here, loudly, rather than be stored and
+    # discovered broken at the next start.
+    wanted_folder = str(cfg.get("music_folder") or "").strip()
+    if wanted_folder and not os.path.isdir(os.path.expanduser(wanted_folder)):
+        raise HTTPException(
+            400,
+            f"the music folder does not exist on this machine: {wanted_folder} "
+            f"— pick a folder this server can open")
+    # MLO_MUSIC_FOLDER is the Docker/bootstrap source of truth: the folder it
+    # names is what the app USES, and the config's own value is rewritten to
+    # match on every save (mlo.config._migrate_to_data_dir). So a different
+    # folder posted here would be accepted, stored, and silently reverted —
+    # say so instead, and name where the pin lives.
+    pinned = (os.environ.get("MLO_MUSIC_FOLDER") or "").strip()
+    if (wanted_folder and pinned
+            and os.path.abspath(os.path.expanduser(wanted_folder))
+            != os.path.abspath(os.path.expanduser(pinned))):
+        raise HTTPException(
+            400,
+            f"the music folder is pinned to {pinned} by MLO_MUSIC_FOLDER "
+            f"(docker-compose.yml or the environment this server runs in) — "
+            f"change it there and restart, or remove the variable to pick one here")
+    folder_before = ""
+    try:
+        folder_before = _music_folder()
+    except HTTPException:
+        folder_before = ""
     ok = save_config(cfg)
     if not ok:
         reason = getattr(save_config, "last_error", "") or ""
         raise HTTPException(500, f"Failed to save config{(': ' + reason) if reason else ''}")
+    # The library folder is baked into slskd's generated config (its share root
+    # and its download dir), so a change has to reach a RUNNING daemon — or the
+    # share index keeps publishing the tree the library just left. A daemon that
+    # is not running picks the new folder up at its next start.
+    try:
+        if folder_before and _music_folder() != folder_before:
+            from server import soulseek as _soulseek
+            if _soulseek.is_running():
+                _soulseek.restart()
+                tagcache.invalidate_all()
+    except Exception:
+        pass
     # A settings change can alter what the recommendation shelf and the
     # discovery chains return (source order, counts, providers on/off), and
     # the library payload carries grading results that depend on the grader
@@ -716,6 +762,100 @@ def open_folder(req: AlbumRemove):
     except Exception as e:
         raise HTTPException(500, f"could not open folder: {e}")
     return {"ok": True}
+
+
+def _fs_roots():
+    """Where the folder picker can start: the filesystem root(s)."""
+    if os.name == "nt":
+        return [f"{ch}:\\" for ch in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                if os.path.isdir(f"{ch}:\\")]
+    roots = ["/"]
+    home = os.path.expanduser("~")
+    if home and home != "/":
+        roots.append(home)
+    return roots
+
+
+def _looks_like_library(path):
+    """Whether *path* holds audio files directly, so the picker can point at the
+    obvious choices. One bounded listing — never a walk."""
+    from mlo.paths import LIB_AUDIO_EXTS
+    try:
+        with os.scandir(path) as it:
+            for index, entry in enumerate(it):
+                if index > 400:
+                    break
+                if entry.is_file():
+                    ext = os.path.splitext(entry.name)[1].lower()
+                    if ext in LIB_AUDIO_EXTS:
+                        return True
+    except OSError:
+        return False
+    return False
+
+
+@app.get("/api/fs/dirs")
+def fs_dirs(path: str = Query("")):
+    """Subdirectories of a path ON THE SERVER — the music-folder picker.
+
+    The library folder is a path the BACKEND has to be able to open, and no
+    browser can hand it one from the client's own machine, so a client that is
+    not the server browses the server's filesystem through this route. It lists
+    DIRECTORY NAMES only (never file names), flags the ones that already hold
+    audio, and reports whether each is writable — the app keeps its state under
+    `<music>/.mlo`, so a read-only folder is a trap worth showing. Nothing here
+    opens a file. The login gate covers this route like any other.
+    """
+    raw = str(path or "").strip()
+    if raw:
+        target = os.path.abspath(os.path.expanduser(raw))
+    else:
+        # No path: open where the library already is, which is what a picker
+        # started from "change the music folder" wants to see.
+        try:
+            target = _music_folder()
+        except HTTPException:
+            target = (_fs_roots() or ["/"])[0]
+    if not os.path.exists(target):
+        raise HTTPException(404, f"no such folder: {target}")
+    if not os.path.isdir(target):
+        raise HTTPException(400, f"not a folder: {target}")
+    dirs = []
+    try:
+        with os.scandir(target) as it:
+            for entry in it:
+                try:
+                    if not entry.is_dir():
+                        continue
+                except OSError:
+                    continue          # a broken link or a race: skip, never fail
+                sub = os.path.join(target, entry.name)
+                dirs.append({
+                    "name": entry.name,
+                    "path": sub,
+                    "library": _looks_like_library(sub),
+                    "writable": os.access(sub, os.W_OK),
+                })
+    except PermissionError:
+        raise HTTPException(403, f"permission denied: {target}")
+    except OSError as e:
+        raise HTTPException(400, f"could not read {target}: {e}")
+    # Plain names first, dot-folders last — `.mlo`, `.Trash-1000` and friends are
+    # never what anyone is looking for here.
+    dirs.sort(key=lambda d: (d["name"].startswith("."), d["name"].lower()))
+    parent = os.path.dirname(target.rstrip(os.sep)) or None
+    if parent and os.path.normcase(parent) == os.path.normcase(target):
+        parent = None             # a drive root or "/": nothing above it
+    return {
+        "path": target,
+        "parent": parent,
+        "roots": _fs_roots(),
+        "dirs": dirs,
+        # When the folder is pinned by the environment (Docker/compose), the
+        # picker can browse but must not pretend a choice would stick — the
+        # config's own value is rewritten to the pin on every save.
+        "pinned": (os.environ.get("MLO_MUSIC_FOLDER") or "").strip() or None,
+    }
 
 
 @app.get("/api/dependencies")
@@ -7354,9 +7494,7 @@ async def ws_progress(ws: WebSocket):
     """
     token = (ws.query_params.get("token") or "").strip() or (ws.cookies.get("mlo_session") or "")
     state = await asyncio.to_thread(auth_mod.current_state)
-    if state.get("required") and not (token and await asyncio.to_thread(auth_mod.valid_session, token)):
-        # Accepted first, then closed: a close BEFORE accept is an HTTP 403
-        # handshake rejection, which the browser reports as error code 1006 —
+    if auth_mod.requires_login(ws, state) and not (token and await asyncio.to_thread(auth_mod.valid_session, token)):
         # the client could then not tell "sign in again" (4401) from "server
         # down" and would retry a stale token forever.
         await ws.accept()

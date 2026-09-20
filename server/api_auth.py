@@ -109,13 +109,29 @@ def status(request: Request):
     Public by design: the login screen has to render before anyone has a
     token. It never reports whether a guess was close — only whether a
     password exists at all.
+
+    `required` answers THIS request: a client reaches the server from another
+    device and must sign in, while the machine the server runs on (its own
+    browser, a desktop shell, the host of a container) never does — see
+    auth.local_addresses. `gate` is the server-wide answer behind it, which is
+    what a sign-in-and-security panel should show, and `local` says which of
+    the two this client is.
     """
     state = auth_mod.current_state()
     token = auth_mod.token_from_request(request)
+    needs_login = auth_mod.requires_login(request, state)
+    local = auth_mod.is_local_request(request)
     return {
-        "required": bool(state["required"]),
+        "required": bool(needs_login),
+        "gate": bool(state["required"]),
+        "local": bool(local),
         "has_password": bool(state["has_password"]),
-        "authenticated": bool(token and auth_mod.valid_session(token)),
+        # A local client is never asked for a session, so `authenticated` would
+        # read false on a server whose gate is on for the network — and the
+        # shell would show a login screen nobody needs. NOT NEEDING TO SIGN IN
+        # is the client's answer: the default scope answers for it, exactly as
+        # it did before the gate existed.
+        "authenticated": bool(token and auth_mod.valid_session(token)) or not needs_login,
         # The signed-in user's own name; before that it is the config's
         # display name (the claim that gave this server its password).
         "username": auth_mod.session_username(token) or state["username"],

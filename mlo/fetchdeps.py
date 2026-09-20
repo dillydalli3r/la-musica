@@ -168,17 +168,52 @@ LINUX_BINARIES = {
         },
         "markers": ("slskd",),
     },
+    "audioauditor": {
+        # Self-contained .NET builds, one bare executable per architecture (no
+        # archive), so the install copies the asset itself (SINGLE_EXE_TOOLS).
+        # The pin's Windows asset predates these, which is why this row used to
+        # read "No build here" on Linux — upstream had shipped them all along.
+        "patterns": {
+            "x64": r"^AudioAuditorCLI-linux-x64$",
+            "arm64": r"^AudioAuditorCLI-linux-arm64$",
+        },
+        "markers": ("AudioAuditorCLI",),
+    },
+    "cuetools": {
+        # Windows binaries only, and its console tool runs under the mono
+        # runtime — verified on trixie: CUETools.ARCUE.exe prints its usage
+        # under `mono`. Both architectures take the same x64/AnyCPU zip, and
+        # the install writes a launcher beside it (see _write_launcher) so
+        # callers keep invoking one executable.
+        "patterns": {
+            "x64": r"^CUETools_[\d.]+\.zip$",
+            "arm64": r"^CUETools_[\d.]+\.zip$",
+        },
+        "markers": ("CUETools.ARCUE.exe",),
+        "runner": "mono",
+        "launcher": ("CUETools.ARCUE", "CUETools.ARCUE.exe"),
+    },
+}
+
+# Tools whose Linux install needs an interpreter to exist on this machine: a
+# Windows build run through one (cuetools/mono, above), or a script (the
+# Logchecker phar is PHP). Without the interpreter there is nothing to install
+# — the row says which package provides it — and with it, the tool installs
+# and runs like any other.
+LINUX_RUNNERS = {
+    "cuetools": ("mono", "mono-runtime"),
+    "logchecker": ("php", "php-cli"),
 }
 
 # Tools whose install is the same download on every platform this app supports
-# (a pip package, a source archive), so no platform table decides anything
-# about them.
-PLATFORM_INDEPENDENT = {"simpledrmeter", "librosa", "beets", "yt-dlp"}
+# (a pip package, a source archive, or a script a runtime elsewhere executes —
+# the Logchecker phar is PHP), so no platform table decides anything about them.
+PLATFORM_INDEPENDENT = {"simpledrmeter", "librosa", "beets", "yt-dlp", "logchecker"}
 
-# Tools with no native build this app can use, mapped to the distro package
-# providing the same tool (None = no packaged equivalent). MARKER_EXES can only
-# check that files with the right NAMES landed, so on Linux a Windows download
-# would "succeed" with a folder of unrunnable .exe files. install_dependency()/
+# Tools with no build this app fetches, mapped to the distro package providing
+# the same tool (None = no packaged equivalent). MARKER_EXES can only check that
+# files with the right NAMES landed, so on Linux a Windows download would
+# "succeed" with a folder of unrunnable .exe files. install_dependency()/
 # pick_asset() refuse via _require_installable() instead, naming the distro
 # package to use (the Docker image installs them; see Dockerfile).
 LINUX_PACKAGES = {
@@ -188,10 +223,7 @@ LINUX_PACKAGES = {
     "ffmpeg": "ffmpeg",
     "rsgain": "rsgain",
     "chromaprint": "libchromaprint-tools",
-    "audioauditor": None,
-    "logchecker": None,
-    "php": None,
-    "cuetools": None,
+    "php": "php-cli",
 }
 
 # Vendored pure-Python tools: installed with `pip install --target` into a
@@ -313,6 +345,21 @@ def _linux_pattern(key, machine=None):
     return None
 
 
+def runner_missing(key, platform=None) -> str:
+    """The interpreter package *key* needs and this machine lacks, else "".
+
+    A Windows build run through mono, or a phar a PHP runtime executes: without
+    the interpreter there is nothing installable, and naming its package is the
+    whole help the row can give.
+    """
+    if _platform_of(platform) == "windows":
+        return ""
+    runner = LINUX_RUNNERS.get(key)
+    if not runner:
+        return ""
+    return "" if shutil.which(runner[0]) else runner[1]
+
+
 def install_kind(key, platform=None, machine=None):
     """How *key* installs on *platform*: `deps` | `system` | `unsupported`.
 
@@ -320,15 +367,20 @@ def install_kind(key, platform=None, machine=None):
                   Windows binary, a native Linux build, a pip package or a
                   source archive)
     `system`      the platform provides it as a distro package
-    `unsupported` nothing to fetch: upstream ships no build for this platform
+    `unsupported` nothing to fetch: upstream ships no build for this platform,
+                  or the interpreter its build needs is not here
     """
     plat = _platform_of(platform)
     if plat == "windows":
         return "deps"
     if key in PLATFORM_INDEPENDENT or key in PIP_PACKAGES:
-        return "deps"
-    if plat == "linux" and key in LINUX_BINARIES:
-        return "deps" if _linux_pattern(key, machine) else "unsupported"
+        fetchable = True
+    elif plat == "linux" and key in LINUX_BINARIES:
+        fetchable = bool(_linux_pattern(key, machine))
+    else:
+        fetchable = False
+    if fetchable:
+        return "unsupported" if runner_missing(key, platform=platform) else "deps"
     if plat == "linux" and key in LINUX_PACKAGES:
         return "system" if LINUX_PACKAGES[key] else "unsupported"
     return "unsupported"
@@ -358,6 +410,11 @@ def install_problem(key, platform=None, machine=None):
     display = DISPLAY_NAMES.get(key, key)
     plat = _platform_of(platform)
     pkg = LINUX_PACKAGES.get(key)
+    missing_runner = runner_missing(key, platform=platform)
+    if missing_runner:
+        return (f"{display} needs the {LINUX_RUNNERS[key][0]} runtime on this "
+                f"platform - install it with your package manager "
+                f"(Debian/Ubuntu: apt-get install {missing_runner})")
     if kind == "system" and pkg:
         return (f"{display} is a system package on this platform - install it "
                 f"with your package manager (Debian/Ubuntu: apt-get install "
@@ -370,6 +427,28 @@ def install_problem(key, platform=None, machine=None):
                 f"it is unsupported on this platform.")
     return (f"{display} has no build this app can install on this platform - "
             f"install it with your system package manager.")
+
+
+def launcher(key, platform=None):
+    """`(name, program, runner)` when an install of *key* is a Windows build
+    this platform runs through an interpreter, else None."""
+    spec = LINUX_BINARIES.get(key) or {}
+    if _platform_of(platform) == "windows" or not spec.get("launcher"):
+        return None
+    return (*spec["launcher"], spec["runner"])
+
+
+def run_name(key, platform=None):
+    """The file to EXECUTE inside *key*'s install folder.
+
+    The first marker, except where the install writes a launcher beside a
+    Windows build (cuetools): that launcher is what callers run, so it is what
+    detection has to point at.
+    """
+    spec = LINUX_BINARIES.get(key) or {}
+    if _platform_of(platform) != "windows" and spec.get("launcher"):
+        return spec["launcher"][0]
+    return (spec.get("markers") or MARKER_EXES[key])[0]
 
 
 def markers(key, platform=None):
@@ -962,10 +1041,12 @@ def _asset_patterns(key, platform=None, machine=None):
     """Asset-name patterns to try for *key* on this platform, best first.
 
     Windows names come from ASSET_PATTERNS; a native Linux tool names the one
-    asset its architecture is published as. A key with no platform table entry
-    (a pip package) matches nothing - it never reaches the download path.
+    asset its architecture is published as. A platform-independent tool has ONE
+    list — the Logchecker phar is the same file everywhere — and asking the
+    Linux table for it returned nothing at all (it is not in there, since
+    nothing about it is platform-specific).
     """
-    if _platform_of(platform) == "windows":
+    if key in PLATFORM_INDEPENDENT or _platform_of(platform) == "windows":
         return ASSET_PATTERNS.get(key, [])
     pattern = _linux_pattern(key, machine)
     return [pattern] if pattern else []
@@ -1205,6 +1286,25 @@ def _copy_licence_files(root, dest_dir, log=print):
     if copied:
         log(f"  licence files: {', '.join(sorted(copied))}")
     return copied
+
+
+def _write_launcher(dest_dir, name, program, runner):
+    """Write *name* as a script that runs *program* under *runner*.
+
+    CUETools ships Windows binaries, and its console tool runs under mono on
+    Linux (measured: CUETools.ARCUE.exe prints its usage under mono on trixie).
+    Everything downstream invokes ONE executable — `resolve_arcue_exe` returns a
+    path, `run_tool([exe, cue])` runs it — so the launcher is where the runtime
+    lives, rather than every caller learning about it.
+    """
+    path = os.path.join(dest_dir, name)
+    program = os.path.basename(program)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("#!/bin/sh\n"
+                 f"# Generated by la musica: {program} is a Windows build that\n"
+                 f"# runs under {runner} on this platform.\n"
+                 f'exec {runner} "$(dirname "$0")/{program}" "$@"\n')
+    os.chmod(path, 0o755)
 
 
 def _make_executable(dest_dir, marker_names):
@@ -1595,7 +1695,10 @@ def install_dependency(key, log=print, progress=None):
         missing = [m for m in wanted if m.lower() not in names]
         if missing:
             raise RuntimeError(f"Installed folder is missing: {', '.join(missing)}")
-        _make_executable(dest_dir, wanted)
+        wrapped = launcher(key)
+        if wrapped:
+            _write_launcher(dest_dir, *wrapped)
+        _make_executable(dest_dir, list(wanted) + ([wrapped[0]] if wrapped else []))
 
         # Before the pruner runs, and before anything reports a version: the
         # folder has to carry the version that is now in it.
