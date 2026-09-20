@@ -66,30 +66,10 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Export the Android SDK
-        # bundle.py refuses to start without ANDROID_HOME, and cibuildwheel
-        # discovers the SDK through it. The runner image already carries the
-        # SDK, so this only exports it (same idea as the build job's setup, less
-        # the Gradle packages the app project itself needs).
-        run: |
-          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
-          test -n "$SDK" || { echo "::error::no Android SDK on this runner"; exit 1; }
-          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
-
-      - name: Set up the Android NDK
-        # cibuildwheel needs an NDK to compile the extension for arm64; pinned
-        # rather than "latest" so an NDK release cannot change the wheel.
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27
-          add-to-path: false
-
-      - name: Rust for the Android wheel
-        # pydantic-core is a Rust extension: cibuildwheel drives cargo, and the
-        # target has to exist before it starts.
-        run: rustup target add aarch64-linux-android
-
+      # CACHE FIRST, toolchain second. The SDK export, the NDK download and the
+      # cibuildwheel install used to run before this check, so even a run that
+      # found the published wheel paid minutes of setup for a build it was never
+      # going to do.
       - name: Reuse the Android wheels if this repo has published them
         id: prebuilt
         env:
@@ -106,6 +86,27 @@ jobs:
             echo "no published Android wheel yet — building it (this also publishes it)"
           fi
 
+      - name: Export the Android SDK
+        if: steps.prebuilt.outputs.hit != '1'
+        # bundle.py refuses to start without ANDROID_HOME, and cibuildwheel
+        # discovers the SDK through it.
+        run: |
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          test -n "$SDK" || { echo "::error::no Android SDK on this runner"; exit 1; }
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+
+      - name: Set up the Android NDK
+        if: steps.prebuilt.outputs.hit != '1'
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27
+          add-to-path: false
+
+      - name: Rust for the Android wheel
+        if: steps.prebuilt.outputs.hit != '1'
+        run: rustup target add aarch64-linux-android
+
       - name: Cache the cibuildwheel environment
         if: steps.prebuilt.outputs.hit != '1'
         uses: actions/cache@v4
@@ -114,22 +115,16 @@ jobs:
           key: cibw-env-android-${{ hashFiles('tools/mobile/requirements-android.txt') }}
 
       - name: cibuildwheel
+        if: steps.prebuilt.outputs.hit != '1'
         run: python3 -m pip install cibuildwheel
 
       - name: Build the wheels Android needs
-        # The target is stated here as well as derived in bundle.py: the wheel
-        # must match the runtime the APK ships (Android stages Python 3.14), and
-        # a CI file that says so cannot drift from the build the way a default
-        # computed from the runner's own interpreter did.
         if: steps.prebuilt.outputs.hit != '1'
         env:
           CIBW_BUILD: cp314-*
         run: python3 tools/mobile/bundle.py wheels android
 
       - name: Publish the wheels for the next run
-        # Only from the default branch, and only when they were just built: two
-        # jobs racing to write the same release asset is how a cache gets
-        # corrupted, and the upload is what makes every later run fast.
         if: steps.prebuilt.outputs.hit != '1' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -161,11 +156,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Rust for the iOS wheel
-        # Same reason as the Android job: the target must exist before
-        # cibuildwheel hands the build to cargo.
-        run: rustup target add aarch64-apple-ios
-
       - name: Reuse the iOS wheels if this repo has published them
         id: prebuilt
         env:
@@ -182,6 +172,10 @@ jobs:
             echo "no published iOS wheel yet — building it (this also publishes it)"
           fi
 
+      - name: Rust for the iOS wheel
+        if: steps.prebuilt.outputs.hit != '1'
+        run: rustup target add aarch64-apple-ios
+
       - name: Cache the cibuildwheel environment
         if: steps.prebuilt.outputs.hit != '1'
         uses: actions/cache@v4
@@ -190,13 +184,10 @@ jobs:
           key: cibw-env-ios-${{ hashFiles('tools/mobile/requirements-ios.txt') }}
 
       - name: cibuildwheel
+        if: steps.prebuilt.outputs.hit != '1'
         run: python3 -m pip install --user cibuildwheel
 
       - name: Build the wheels iOS needs
-        # bundle.py supplies CIBW_XBUILD_TOOLS="cargo rustc" — the iOS build
-        # environment's PATH excludes everything it is not told about. The
-        # target is the runtime the IPA ships (iOS stages Python 3.13, the last
-        # version Pillow publishes an iOS wheel for).
         if: steps.prebuilt.outputs.hit != '1'
         env:
           CIBW_BUILD: cp313-*
