@@ -19,8 +19,10 @@
 #   docker compose down              # stop and remove
 #
 # Automatic updates are ON by default: the watchtower service at the bottom
-# polls the registry and restarts this container when a new image appears, so a
-# `docker compose pull` is something you never have to remember.
+# checks the registry every 5 minutes and restarts this container when a new
+# image appears, so a `docker compose pull` is something you never have to
+# remember. (It was a nightly 04:00 cron; a release now lands while you are
+# still reading its notes.)
 #
 # Two things worth knowing before it does that:
 #   * it keeps every OTHER container on the host alone (the label on this
@@ -30,9 +32,21 @@
 #     published one. To keep building from source, start just the app -
 #     `docker compose up -d lamusica` - or comment the service out.
 #
-# Change how often it checks with WATCHTOWER_SCHEDULE (a 6-field cron
-# expression, default 04:00 daily), e.g.
-#   WATCHTOWER_SCHEDULE="0 0 */6 * * *" docker compose up -d
+# How often it checks: WATCHTOWER_POLL_INTERVAL (seconds, default 300; 60 is
+# the aggressive end and still just one manifest request per minute). To check
+# inside a window instead, use the WATCHTOWER_SCHEDULE line in the service
+# below - and comment the interval out, because watchtower REFUSES TO START
+# when both are set ("Cannot define both interval and schedule").
+#   WATCHTOWER_POLL_INTERVAL=60 docker compose up -d watchtower
+
+# The compose project name is PINNED. It is derived from the FOLDER name
+# otherwise, and this repo's folder has already been renamed once (la-musica ->
+# MusicLibraryOptimizer): that silently started a second project whose
+# `musiclibraryoptimizer_lamusica-dependencies` volume was empty, while the real
+# installs (beets, librosa, yt-dlp, simple-dr-meter) sat in
+# `la-musica_lamusica-dependencies`. With the name pinned, the volumes and the
+# network follow the app, not the directory you happen to run compose from.
+name: la-musica
 
 services:
   lamusica:
@@ -83,6 +97,14 @@ services:
 # carrying the watchtower label (the app above is the only one), and CLEANUP
 # removes the image it replaced rather than leaving every version on disk.
 #
+# It checks every WATCHTOWER_POLL_INTERVAL (300 s by default) — the first check
+# is one interval after it starts, not at startup, so waiting out the first
+# tick is expected. To run a check NOW (a release you do not want to wait for):
+#
+#   docker compose run --rm watchtower --run-once
+#
+# which uses this service's own socket, label filter and cleanup flags.
+#
 # It needs the Docker socket. That is a privileged mount — it is how any
 # updater works — and on Docker Desktop it is the same path as on Linux.
 #
@@ -106,8 +128,15 @@ services:
       - WATCHTOWER_LABEL_ENABLE=true
       # Delete the image this one replaced, so updates do not accumulate.
       - WATCHTOWER_CLEANUP=true
-      # Daily at 04:00 by default; override without editing this file.
-      - WATCHTOWER_SCHEDULE=${WATCHTOWER_SCHEDULE:-0 0 4 * * *}
+      # Every 5 minutes, not nightly: the check is one manifest request against
+      # the registry, and an unchanged digest ends it there, so the image is
+      # pulled only when there is something new. Lower it for a faster pickup
+      # (`WATCHTOWER_POLL_INTERVAL=60`), raise it on a metered link.
+      - WATCHTOWER_POLL_INTERVAL=${WATCHTOWER_POLL_INTERVAL:-300}
+      # A cron WINDOW instead of polling all day is the alternative — but
+      # watchtower refuses to start when both are set, so uncomment this AND
+      # comment the interval above, never both:
+      #   - WATCHTOWER_SCHEDULE=${WATCHTOWER_SCHEDULE:-0 0 4 * * *}
       # Timestamps in the updater's log follow the host's clock.
       - TZ=${TZ:-Etc/UTC}
 

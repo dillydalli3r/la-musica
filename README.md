@@ -2446,15 +2446,25 @@ so `docker compose pull` and watchtower have something to compare against.
   `slskd` **is** (upstream ships a Linux build, and the app installs it) — the
   managed Soulseek daemon works in the container.
 - **Automatic updates are on by default.** `docker-compose.yml` ships a
-  `watchtower` service: it polls the registry and, when a newer image appears,
+  `watchtower` service: it checks the registry and, when a newer image appears,
   stops this container, pulls and starts it again — so `docker compose pull` is
-  something you never have to remember. Verified against Docker 29: it reports
-  `scanned=1` with three containers running, i.e. it looks at the labelled app
-  and nothing else on the host (`WATCHTOWER_LABEL_ENABLE=true` plus
+  something you never have to remember. It checks **every
+  `WATCHTOWER_POLL_INTERVAL` seconds (300 by default)**, so a release lands
+  within minutes of CI publishing it instead of waiting for a nightly window;
+  each check is one manifest request and an unchanged digest ends it there, so
+  nothing is pulled unless there is something new. (The first check is one
+  interval after the updater starts — `docker compose run --rm watchtower
+  --run-once` forces one immediately.) Verified against Docker 29: it reports
+  `scanned=1` with three containers running, i.e. it looks
+  at the labelled app and nothing else on the host
+  (`WATCHTOWER_LABEL_ENABLE=true` plus
   `com.centurylinklabs.watchtower.enable=true` on the app), and it deletes the
-  image it replaced (`WATCHTOWER_CLEANUP=true`). The schedule is daily at 04:00
-  and is an override, not an edit: `WATCHTOWER_SCHEDULE="0 0 */6 * * *"
-  docker compose up -d`.
+  image it replaced (`WATCHTOWER_CLEANUP=true`). Cadence is an override, not an
+  edit: `WATCHTOWER_POLL_INTERVAL=60 docker compose up -d watchtower` (that also
+  runs a check right then). For a cron **window** instead of polling, use the
+  `WATCHTOWER_SCHEDULE` line in the compose file — and comment the interval out,
+  because watchtower refuses to start with both (*"Cannot define both interval
+  and schedule"*).
   - It updates the **image**, so if you started with `docker compose up -d
     --build`, the first check replaces your local build with the published one.
     To keep building from source, start just the app (`docker compose up -d
