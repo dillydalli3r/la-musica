@@ -766,6 +766,37 @@ def verify_ipa(path: Path, require_runtime: bool) -> int:
             tops = sorted({n.split("site-packages/")[1].split("/")[0] for n in site})
             log(f"{path.name}: site-packages top level {tops[:12]}"
                 + (" …" if len(tops) > 12 else ""))
+
+        # The LAYOUT, not just the bytes: what the runner opens is
+        # <resources>/mobile/python/{lib/python<ver>,app}, and a resource
+        # mapping with a glob flattens the whole tree into one directory
+        # instead. That is not a cosmetic difference — every file lands by
+        # basename, so `unittest/main.py` overwrote `app/server/main.py`, and
+        # the app failed to start its own backend with "no Python standard
+        # library at ..." while this check happily printed "0 site-packages
+        # files". Assert the three things iOS actually resolves.
+        if require_runtime:
+            ver = str(manifest.get("python") or "")
+            tree = f"{root}/assets/mobile/python"
+            for needed, what in (
+                (f"{tree}/lib/python{ver}/runpy.py", "the Python standard library"),
+                (f"{tree}/app/server/main.py", "the backend's server package"),
+                (f"{tree}/app/mlo/__init__.py", "the backend's mlo package"),
+            ):
+                if needed not in names:
+                    die(f"{path} has no {needed} — {what} is not at the path the "
+                        "app imports (a glob in bundle.resources flattens the "
+                        "staged tree into one directory; map the directory "
+                        "instead)")
+            for mod in REQUIRED_IMPORTS:
+                if not any(n.startswith(f"{tree}/lib/python{ver}/site-packages/{mod}/")
+                           or n == f"{tree}/lib/python{ver}/site-packages/{mod}.py"
+                           for n in names):
+                    die(f"{path} carries no {mod} under "
+                        f"{tree}/lib/python{ver}/site-packages — the bundled "
+                        "interpreter cannot import the backend")
+            log(f"{path.name}: layout ok — lib/python{ver}, app/, "
+                f"{len(REQUIRED_IMPORTS)} required packages")
     log("verified " + path.name)
     return 0
 

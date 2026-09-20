@@ -1,5 +1,16 @@
 # la musica
 
+**v3.1.6** — the release that made the phone's own backend start. Until now the
+iOS build could not host a library at all: `bundle.resources` mapped the staged
+Python tree with a **glob**, and Tauri copies glob matches by *file name*, so
+every file landed flat in one directory — no `lib/python3.13`, no `app/server`,
+and `unittest/main.py` silently overwriting the backend's `main.py`. The app hit
+its own guard ("this build carries no Python standard library") and offered a
+server address instead. The mapping now names the directory, which preserves the
+tree, and `bundle.py verify` asserts the three paths iOS actually resolves — run
+against the shipped 3.1.4 and 3.1.5 IPAs it fails, which is how long this went
+unnoticed: it printed "0 site-packages files" and called the bundle verified.
+
 **v3.1.5** — the release where Install actually installs. The Dependencies
 button reported success while changing nothing: the table called a row an
 "Update" the moment GitHub published past the pin this app ships, the installer
@@ -26,8 +37,10 @@ source so the iOS build installs with its own name, icon and version attached.
 
 The mobile builds carry their own backend: a pinned CPython runtime, the
 backend's sources and (on Android) the CLI tools go inside the app, so a
-phone hosts its own library with no external software. What each platform
-cannot do is reported in the UI instead of failing on first use.
+phone hosts its own library with no external software. **On iOS that claim
+was not true as shipped — see v3.1.6 above**: the resources were flattened
+into one directory, so the app could not start the backend it carried. What
+each platform cannot do is reported in the UI instead of failing on first use.
 
 Two fixes from a real machine: the iOS favourite star is a real button outside its album link now (a `<button>` inside an `<a>` is invalid and WebKit hit-tests it differently, so a tap could navigate instead of toggling), and dependency installs work — slskd, the one tool the app runs, is stopped and restarted around its own update, which is the "used by another process" failure that made Install all look broken.
 

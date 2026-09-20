@@ -2117,7 +2117,7 @@ dependencies = [
 
 [[package]]
 name = "mlo-desktop"
-version = "3.1.5"
+version = "3.1.6"
 dependencies = [
  "flate2",
  "objc2-avf-audio",
