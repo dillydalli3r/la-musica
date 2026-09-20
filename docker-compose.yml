@@ -70,7 +70,7 @@ services:
       # metadata caches) lives in /music/.mlo/data, beside the transient
       # /music/.mlo/downloads and /music/.mlo/trash, so this one mount
       # persists everything across rebuilds.
-      - ./music:/music
+      - "F:/media/music:/music"
       # Runtime-installed tools (Settings -> Dependencies: beets, librosa, ...).
       - lamusica-dependencies:/app/.dependencies
     restart: unless-stopped

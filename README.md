@@ -1928,8 +1928,32 @@ pin says 10.2.0 is not missing an update, and the old `!=` test marked exactly
 that row "Update" for good, pointing at an older release. Rows with no
 upstream at all fall back to the pinned pair.
 
+**The installed version is real, distro package included.** A `.dependencies`
+install carries its version in its folder name; a distro package has no folder
+to read, so the Installed column showed `—` for flac, libjxl, jpegtran (in the
+`libjpeg-turbo-progs` package), rsgain, ffmpeg and fpcalc — and a row with no
+installed version can never be compared with what upstream ships. Each is now
+asked with its own flag (`flac --version`, `ffmpeg -version`, `jpegtran
+-version` — the last answers on stderr, as fpcalc does), the answer is cached
+with the rest of the detection, and a tool that will not say leaves the cell
+blank rather than failing the pass.
+
+A tool this host provides as a **system package** is never `update`: the
+package manager owns it, its row has no Install button, and an amber chip that
+nothing can clear is exactly the dangling promise this table exists to avoid.
+It reads Ready with the versions stated — installed 3.6, upstream 3.8 — the
+Available cell turns amber, and the note says which package provides it and who
+owns the upgrade.
+
 Updates are one click (*Install / update all*, or per tool) and land in
-`<app>/.dependencies`. **Installing slskd stops the managed daemon first and
+`<app>/.dependencies` — meaning **install what is missing, update what is
+behind**, the same rule the auto-update pass uses. Anything already at the
+newest release is left alone: re-fetching those downloaded slskd's 118 MB again
+on every press and changed nothing, which is what made the button look like it
+was doing something mysterious. A press that changes nothing says so
+(`changed: false`, "Nothing to do — already at the newest release"); to force a
+fresh copy, delete the tool's folder (the page opens it) and the row reads
+missing again. **Installing slskd stops the managed daemon first and
 starts it again afterwards** — Windows refuses to replace a file another process
 is executing, so without that an update to the one tool this app *runs* could
 never succeed, and `Install / update all` ended in a bare "used by another

@@ -854,16 +854,26 @@ def dependency_rows(refresh=False, block=False):
         # transient 403 is worse than no check at all. The upstream cell and
         # the note carry the failure; the status falls back to the pinned
         # pair, which is the one answer always available.
+        #
+        # A tool this host provides as a system package is never `update`: apt
+        # owns it, there is no Install button on that row, and an amber chip
+        # nothing can clear is the dangling promise this whole page exists to
+        # avoid. Ready + the versions is the honest pair — "installed 3.6,
+        # upstream ships 3.8, your package manager owns it".
+        system_row = install_kind(key) != "deps"
         if not (iv or info):
             state = "missing"
         elif uv:
-            state = "update" if update_available else "ok"
+            state = "update" if (update_available and not system_row) else "ok"
         elif target and have and newer_version(target, have):
             state = "update"
         else:
             state = "ok"
         if err:
             note = f"upstream check failed: {err} — status is against the pinned target"
+        elif system_row and update_available:
+            note = (f"the system package provides {have}; upstream ships {uv} — "
+                    f"upgrade it with your package manager")
         elif key not in REPOS:
             note = "no GitHub releases — only the pinned target is installable"
         elif entry and not uv:
@@ -1485,6 +1495,16 @@ def install_dependency(key, log=print, progress=None):
     upstream = bool(_existing_install(prefix, wanted))
     rel = _release(key, upstream)
     version = rel["version"]
+
+    # An install exists to replace a copy that is behind, and there is nothing
+    # behind when the folder already carries the newest release's version.
+    # Without this, "Install / update all" re-fetched slskd's 118 MB on every
+    # press with nothing to show for it.
+    if upstream and same_version(version, installed_versions().get(key)):
+        log(f"{DISPLAY_NAMES[key]} is already at the newest release "
+            f"({version}) — nothing to install")
+        return version
+
     asset = pick_asset(key, upstream)
 
     if not asset and upstream:

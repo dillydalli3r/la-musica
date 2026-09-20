@@ -142,8 +142,8 @@ export default function DependenciesPage() {
               onClick={() => install()}
               disabled={busy || !!deviceReason}
               title={deviceReason ?? (blocked.length
-                ? `Installs every tool this host can fetch — skips the ${blocked.length} it cannot`
-                : undefined)}
+                ? `Installs what is missing or behind — skips the ${blocked.length} tool(s) this host cannot install`
+                : "Installs what is missing or behind; anything already at the newest release is left alone")}
             >
               {busy ? "Installing…" : "Install / update all"}
             </button>

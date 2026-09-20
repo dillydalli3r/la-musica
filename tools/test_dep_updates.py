@@ -173,6 +173,35 @@ check("the pin-equality skip is gone from the auto-update pass",
 check("the pass still only touches missing/update rows",
       'row["state"] not in ("missing", "update")' in src)
 
+# --------------------------------------------------------------------------- #
+# 5. An install that would change nothing does not download
+# --------------------------------------------------------------------------- #
+# "Install / update all" re-fetched slskd's 118 MB on every press even when the
+# folder already carried the newest release's version. An install exists to
+# replace a copy that is BEHIND, so an already-current one is a no-op — and a
+# no-op must not touch the network at all.
+real = (fetchdeps._existing_install, fetchdeps.installed_versions,
+        fetchdeps.get_latest_release, fetchdeps._download)
+fetchdeps._existing_install = lambda prefix, markers: f"{prefix} v10.2.0"
+fetchdeps.installed_versions = lambda: {"oxipng": "10.2.0"}
+fetchdeps.get_latest_release = (
+    lambda key, upstream=False: {"version": "10.2.0", "assets": [], "urls": {}})
+
+
+def _refuse(*a, **k):
+    raise AssertionError("an already-current install fetched the release again")
+
+
+fetchdeps._download = _refuse
+try:
+    got = fetchdeps.install_dependency("oxipng", log=lambda m: None)
+    check(f"an already-current install is a no-op (got {got!r})", got == "10.2.0")
+except AssertionError as e:
+    check(f"an already-current install is a no-op ({e})", False)
+finally:
+    (fetchdeps._existing_install, fetchdeps.installed_versions,
+     fetchdeps.get_latest_release, fetchdeps._download) = real
+
 if FAILURES:
     print(f"{len(FAILURES)} failure(s)")
     sys.exit(1)

@@ -208,11 +208,68 @@ def _which_pair(exe_name):
     return real or any_hit or (None, None)
 
 
+# How to ask each tool for its own version, and the fact that a PATH-installed
+# tool has to be ASKED: a distro package has no versioned folder name to read
+# (that is how a .dependencies install reports one, see _detect_tool), so the
+# Dependencies table showed "—" for flac, ffmpeg, rsgain, fpcalc, cjxl and
+# jpegtran — and a row with no installed version can never be compared with
+# what upstream ships, which is exactly what the table is for. The flags are the
+# tools' own (jpegtran and fpcalc print to stderr; both are read).
+_VERSION_ARGS = {
+    "flac": ("--version",),
+    "libjxl": ("--version",),        # cjxl
+    "libjpeg_turbo": ("-version",),  # jpegtran
+    "oxipng": ("--version",),
+    "rsgain": ("--version",),
+    "ffmpeg": ("-version",),
+    "chromaprint": ("-version",),    # fpcalc
+    "slskd": ("--version",),
+    "yt-dlp": ("--version",),
+}
+
+# The first dotted number in a tool's version banner: "flac 1.5.0",
+# "ffmpeg version 7.1.5-0+deb13u1 Copyright …" -> 7.1.5, "libjpeg-turbo version
+# 2.1.5 (build 20250503)" -> 2.1.5 (the build date is not the version).
+_VERSION_RX = re.compile(r"\d+(?:\.\d+)+")
+
+
+def _first_version(text):
+    """The first dotted number in *text*, or None when there is none."""
+    found = _VERSION_RX.search(text or "")
+    return found.group(0) if found else None
+
+
+def _probe_version(exe, args=("--version",)):
+    """Ask *exe* for its version, None when it will not say.
+
+    Never raises: a tool that is present but mute (or that hangs until the
+    timeout) must not take the whole detection pass down with it — the version
+    is a label, not the detection itself.
+    """
+    if not exe:
+        return None
+    try:
+        from .subproc import run_tool
+        result = run_tool([exe, *args], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=15)
+    except Exception:
+        return None
+    return _first_version(f"{result.stdout or ''}\n{result.stderr or ''}")
+
+
+def _system_entry(key, **paths):
+    """A detected system tool, with the version its own binary reports."""
+    main = next((p for p in paths.values() if p), None)
+    return {"version": _probe_version(main, _VERSION_ARGS[key]), **paths}
+
+
 def _detect_system_tools():
     """Non-Windows detection: .dependencies installs, then distro tools on PATH.
 
     Docker/Linux/macOS: the app's own installs (native binaries, pip packages)
-    come first, and anything else is whatever the system provides.
+    come first, and anything else is whatever the system provides — including
+    the version the system's copy reports, so the row can be compared with
+    upstream instead of showing a blank.
     """
     import shutil
 
@@ -220,49 +277,48 @@ def _detect_system_tools():
 
     flac = shutil.which("flac")
     if flac:
-        tools["flac"] = {
-            "version": None,
-            "flac_exe": flac,
-            "metaflac_exe": shutil.which("metaflac"),
-        }
+        tools["flac"] = _system_entry(
+            "flac", flac_exe=flac, metaflac_exe=shutil.which("metaflac"))
 
     cjxl = shutil.which("cjxl")
     djxl = shutil.which("djxl")
     if cjxl and djxl:
-        tools["libjxl"] = {"version": None, "cjxl_exe": cjxl, "djxl_exe": djxl}
+        tools["libjxl"] = _system_entry("libjxl", cjxl_exe=cjxl, djxl_exe=djxl)
 
     jpegtran = shutil.which("jpegtran")
     if jpegtran:
-        tools["libjpeg_turbo"] = {"version": None, "jpegtran_exe": jpegtran}
+        tools["libjpeg_turbo"] = _system_entry(
+            "libjpeg_turbo", jpegtran_exe=jpegtran)
 
     oxipng = shutil.which("oxipng")
     if oxipng:
-        tools["oxipng"] = {"version": None, "oxipng_exe": oxipng}
+        tools["oxipng"] = _system_entry("oxipng", oxipng_exe=oxipng)
 
     ffmpeg, ffprobe = _which_pair("ffmpeg.exe")
     if not ffmpeg:
         ffmpeg = shutil.which("ffmpeg")
         ffprobe = shutil.which("ffprobe") if ffmpeg else None
     if ffmpeg and ffprobe:
-        tools["ffmpeg"] = {"version": None, "ffmpeg_exe": ffmpeg, "ffprobe_exe": ffprobe}
+        tools["ffmpeg"] = _system_entry(
+            "ffmpeg", ffmpeg_exe=ffmpeg, ffprobe_exe=ffprobe)
 
     rsgain = shutil.which("rsgain")
     if rsgain:
-        tools["rsgain"] = {"version": None, "rsgain_exe": rsgain}
+        tools["rsgain"] = _system_entry("rsgain", rsgain_exe=rsgain)
 
     # chromaprint's fpcalc: the Linux counterpart of the Windows download
     # (Debian/Ubuntu: libchromaprint-tools) - mlo/acoustid.py resolves it from
     # PATH on its own, this is only so Dependencies shows it.
     fpcalc = shutil.which("fpcalc")
     if fpcalc:
-        tools["chromaprint"] = {"version": None, "fpcalc_exe": fpcalc}
+        tools["chromaprint"] = _system_entry("chromaprint", fpcalc_exe=fpcalc)
 
     # slskd is the one dependency this app RUNS rather than invokes; the
     # Soulseek page starts it, and the capability report has to see the same
     # install (server/soulseek.py resolves it from .dependencies on its own).
     slskd = shutil.which("slskd")
     if slskd:
-        tools["slskd"] = {"version": None, "slskd_exe": slskd}
+        tools["slskd"] = _system_entry("slskd", slskd_exe=slskd)
 
     # yt-dlp: on Linux the vendored pip package (fetchdeps installs it with
     # `pip --target`, see PIP_ON_LINUX) or a distro/pip install on PATH. There
@@ -275,7 +331,7 @@ def _detect_system_tools():
     else:
         ytdlp = shutil.which("yt-dlp")
         if ytdlp:
-            tools["yt-dlp"] = {"version": None, "ytdlp_exe": ytdlp}
+            tools["yt-dlp"] = _system_entry("yt-dlp", ytdlp_exe=ytdlp)
 
     # A native install under .dependencies LAST, so it wins over a copy on
     # PATH: it is the versioned one the Dependencies page reports and updates,

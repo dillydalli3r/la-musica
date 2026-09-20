@@ -324,7 +324,11 @@ export default function SetupPage() {
                       </td>
                       <td className="td text-zinc-500">{t.installed_version ?? t.detected_version ?? "—"}</td>
                       <td className="td text-zinc-500" title={t.note ?? ""}>
-                        {t.upstream_version ?? (deps?.checking ? "checking…" : "—")}
+                        {t.upstream_version
+                          ? <span className={t.update_available ? "text-amber-300" : undefined}>{t.upstream_version}</span>
+                          : deps?.checking
+                            ? <span className="text-zinc-600 italic">checking…</span>
+                            : "—"}
                       </td>
                     </tr>
                   ))}

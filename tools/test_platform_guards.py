@@ -411,6 +411,78 @@ with simulated_platform("nt"):
 
 
 # --------------------------------------------------------------------------- #
+# Versions the table can only learn by ASKING the tool
+# --------------------------------------------------------------------------- #
+# A distro package has no versioned folder name to read (that is how a
+# .dependencies install reports one), so the row showed "—" and could never be
+# compared with upstream. Each tool is asked with its own flag, and jpegtran /
+# fpcalc answer on stderr.
+for text, want in (
+    ("flac 1.5.0", "1.5.0"),
+    ("cjxl v0.11.2 [AVX2,SSE4,SSE2]", "0.11.2"),
+    ("libjpeg-turbo version 2.1.5 (build 20250503)", "2.1.5"),
+    ("rsgain 3.6 - using:", "3.6"),
+    ("ffmpeg version 7.1.5-0+deb13u1 Copyright (c) 2000-2026", "7.1.5"),
+    ("fpcalc version 1.5.1 (FFmpeg Lavc61.19.100)", "1.5.1"),
+    ("no version in this banner", None),
+    ("", None),
+):
+    check(f"version parsed from {text[:32]!r}", tools._first_version(text) == want)
+
+check("a tool that cannot be run yields no version, not an exception",
+      tools._probe_version(None) is None
+      and tools._probe_version("/nonexistent/tool") is None)
+check("the probe reads what the tool prints on stdout",
+      tools._probe_version(sys.executable, ("-c", "print('tool 9.8.7')")) == "9.8.7")
+check("...and on stderr, where jpegtran and fpcalc answer",
+      tools._probe_version(
+          sys.executable,
+          ("-c", "import sys; print('tool 2.1.5', file=sys.stderr)")) == "2.1.5")
+
+
+# --------------------------------------------------------------------------- #
+# A distro package is never a dangling "Update"
+# --------------------------------------------------------------------------- #
+def rows_with(installed, target, upstream):
+    """dependency_rows() for every tool, with the four lookups stubbed out."""
+    real = (fetchdeps.detect_all_tools, fetchdeps.installed_versions,
+            fetchdeps.latest_versions, fetchdeps.upstream_versions)
+    fetchdeps.detect_all_tools = (
+        lambda: {k: {"version": v} for k, v in installed.items()})
+    fetchdeps.installed_versions = lambda: dict(installed)
+    fetchdeps.latest_versions = lambda: dict(target)
+    fetchdeps.upstream_versions = lambda refresh=False, block=False: {
+        k: {"version": v, "checked_at": 0.0, "error": None}
+        for k, v in upstream.items()}
+    try:
+        return {row["key"]: row for row in fetchdeps.dependency_rows()}
+    finally:
+        (fetchdeps.detect_all_tools, fetchdeps.installed_versions,
+         fetchdeps.latest_versions, fetchdeps.upstream_versions) = real
+
+
+with simulated_platform("posix"):
+    # rsgain: the distro ships 3.6, upstream has 3.8. There is no Install button
+    # for a distro package, so the row must not sit on an amber Update that
+    # nothing can clear — Ready, with the versions stated.
+    rows = rows_with({"rsgain": "3.6", "oxipng": "10.2.0"},
+                     {"rsgain": "apt: rsgain", "oxipng": "10.2.0"},
+                     {"rsgain": "3.8", "oxipng": "10.2.1"})
+    rs = rows["rsgain"]
+    check("a distro tool behind upstream still reads Ready", rs["state"] == "ok")
+    check("...and carries the versions in its note",
+          rs["note"] and "3.6" in rs["note"] and "3.8" in rs["note"])
+    check("...and still shows the newer upstream version",
+          rs["update_available"] is True and rs["upstream_version"] == "3.8")
+    check("...and is never offered an install", rs["installable"] is False)
+
+    # oxipng is app-managed: Update IS actionable, so it must stay.
+    ox = rows["oxipng"]
+    check("an app-managed tool behind upstream still reads Update",
+          ox["state"] == "update" and ox["installable"] is True)
+
+
+# --------------------------------------------------------------------------- #
 # Platform-independent installer invariants
 # --------------------------------------------------------------------------- #
 check("yt-dlp's Linux install is the pip package",

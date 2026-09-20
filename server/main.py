@@ -886,8 +886,26 @@ def dependencies_install(req: DepsInstallRequest):
     # tools reported broken. The rows carry the same flag (fetchdeps.
     # installable), so the page's per-tool buttons exclude them too; an
     # explicitly requested tool still gets its honest refusal below.
+    #
+    # It also means only the rows with something TO DO — missing, or behind
+    # upstream — the same rule the auto-update pass uses. Re-fetching tools
+    # that are already at the newest release downloaded slskd's 118 MB again on
+    # every press and changed nothing, which is what made the button look like
+    # it was doing something mysterious. (An installer that skipped a download
+    # this way reports the version it found: `changed: false`.) To force a
+    # fresh copy, delete the tool's folder — the page opens it — and the row
+    # reads missing again.
     if req.keys is None:
-        keys = fetchdeps.installable_keys()
+        try:
+            state = {row["key"]: row["state"]
+                     for row in fetchdeps.dependency_rows()}
+            keys = [k for k in fetchdeps.installable_keys()
+                    if state.get(k) in ("missing", "update")]
+        except Exception:
+            # The row list failed (an unreadable tool folder, a broken config):
+            # install what this platform can install rather than refusing the
+            # whole press.
+            keys = fetchdeps.installable_keys()
     else:
         wanted = set(req.keys)
         keys = [k for k in fetchdeps.DISPLAY_NAMES if k in wanted]
