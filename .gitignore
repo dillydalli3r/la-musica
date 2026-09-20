@@ -3,6 +3,14 @@ config.json
 config.local.json
 server/data/
 
+# The folder docker-compose.yml mounts as /music — app state, not source. The
+# app writes .mlo/data (config.json with the Soulseek password and the RYM
+# cookie, auth.db, playlists.db, slskd.yaml), downloads and trash under it, so
+# running the compose template inside the checkout must never put that in a
+# commit. Two empty files were committed once this way; nothing else was, and
+# this is the line that keeps it that way.
+music/
+
 # Python
 __pycache__/
 *.py[cod]
