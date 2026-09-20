@@ -18,12 +18,21 @@
 #   docker compose up -d             # (re)start on that image
 #   docker compose down              # stop and remove
 #
-# Automatic updates (optional): uncomment the watchtower service at the bottom.
-# watchtower polls the registry and restarts this container when a new image
-# tag/digest appears - i.e. it needs the `image:` line below (a locally built
-# image has nothing to compare against). The label on this service plus
-# WATCHTOWER_LABEL_ENABLE means watchtower touches la musica and nothing else
-# you may run on the same host.
+# Automatic updates are ON by default: the watchtower service at the bottom
+# polls the registry and restarts this container when a new image appears, so a
+# `docker compose pull` is something you never have to remember.
+#
+# Two things worth knowing before it does that:
+#   * it keeps every OTHER container on the host alone (the label on this
+#     service plus WATCHTOWER_LABEL_ENABLE);
+#   * it updates the IMAGE, so if you started with `--build` (a local build
+#     tagged with the same name) the first check replaces your build with the
+#     published one. To keep building from source, start just the app -
+#     `docker compose up -d lamusica` - or comment the service out.
+#
+# Change how often it checks with WATCHTOWER_SCHEDULE (a 6-field cron
+# expression, default 04:00 daily), e.g.
+#   WATCHTOWER_SCHEDULE="0 0 */6 * * *" docker compose up -d
 
 services:
   lamusica:
@@ -65,21 +74,42 @@ services:
       start_period: 30s
       retries: 3
 
+# ---------------------------------------------------------------------------
+# Automatic updates (on by default - see the note at the top of this file).
+#
+# watchtower polls the registry and, when a newer la musica image appears,
+# stops this container, pulls the new one and starts it again. Two deliberate
+# restrictions: WATCHTOWER_LABEL_ENABLE means it only ever touches containers
+# carrying the watchtower label (the app above is the only one), and CLEANUP
+# removes the image it replaced rather than leaving every version on disk.
+#
+# It needs the Docker socket. That is a privileged mount — it is how any
+# updater works — and on Docker Desktop it is the same path as on Linux.
+#
+# A restart interrupts playback for a few seconds; clients reconnect on their
+# own (the shell retries, the player resumes from where it was).
+# ---------------------------------------------------------------------------
+  watchtower:
+    # The maintained continuation of the archived containrrr image. The
+    # archived one negotiates Docker API 1.25 and a modern daemon refuses
+    # anything below 1.40 ("client version 1.25 is too old"), after which it
+    # panics on its own error path — verified here against Docker 29. This one
+    # speaks the current API with no workaround.
+    image: nickfedor/watchtower:latest
+    container_name: la-musica-updater
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      # Only containers that carry the label above — never anything else you
+      # run on this host.
+      - WATCHTOWER_LABEL_ENABLE=true
+      # Delete the image this one replaced, so updates do not accumulate.
+      - WATCHTOWER_CLEANUP=true
+      # Daily at 04:00 by default; override without editing this file.
+      - WATCHTOWER_SCHEDULE=${WATCHTOWER_SCHEDULE:-0 0 4 * * *}
+      # Timestamps in the updater's log follow the host's clock.
+      - TZ=${TZ:-Etc/UTC}
+
 volumes:
   lamusica-dependencies:
-
-# ---------------------------------------------------------------------------
-# Automatic updates - uncomment to enable (keeps every other container alone).
-#
-#   watchtower:
-#     image: containrrr/watchtower:latest
-#     container_name: watchtower
-#     restart: unless-stopped
-#     volumes:
-#       - /var/run/docker.sock:/var/run/docker.sock
-#     environment:
-#       - WATCHTOWER_LABEL_ENABLE=true      # only containers labelled above
-#       - WATCHTOWER_CLEANUP=true           # delete the replaced image
-#       - WATCHTOWER_SCHEDULE=0 0 4 * * *   # daily at 04:00 (6-field cron)
-#       - TZ=Etc/UTC
-# ---------------------------------------------------------------------------

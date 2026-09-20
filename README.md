@@ -2366,12 +2366,26 @@ so `docker compose pull` and watchtower have something to compare against.
   unsupported inside the container, so AccurateRip generation, the logchecker
   grade, the AudioAuditor audit and the managed Soulseek daemon are not
   available in Docker.
-- **Automatic updates (optional).** Uncomment the `watchtower` service at the
-  bottom of `docker-compose.yml` and set `WATCHTOWER_LABEL_ENABLE=true`: the
-  label on the la musica service (`com.centurylinklabs.watchtower.enable=true`)
-  plus that flag means watchtower touches this container and nothing else on
-  the host. It needs the `image:` line, and the example ships
-  `WATCHTOWER_CLEANUP=true` and a daily `WATCHTOWER_SCHEDULE`.
+- **Automatic updates are on by default.** `docker-compose.yml` ships a
+  `watchtower` service: it polls the registry and, when a newer image appears,
+  stops this container, pulls and starts it again — so `docker compose pull` is
+  something you never have to remember. Verified against Docker 29: it reports
+  `scanned=1` with three containers running, i.e. it looks at the labelled app
+  and nothing else on the host (`WATCHTOWER_LABEL_ENABLE=true` plus
+  `com.centurylinklabs.watchtower.enable=true` on the app), and it deletes the
+  image it replaced (`WATCHTOWER_CLEANUP=true`). The schedule is daily at 04:00
+  and is an override, not an edit: `WATCHTOWER_SCHEDULE="0 0 */6 * * *"
+  docker compose up -d`.
+  - It updates the **image**, so if you started with `docker compose up -d
+    --build`, the first check replaces your local build with the published one.
+    To keep building from source, start just the app (`docker compose up -d
+    lamusica`) or remove the service.
+  - It runs `nickfedor/watchtower` (the maintained continuation of the archived
+    `containrrr/watchtower`): the archived image negotiates Docker API 1.25 and
+    a modern daemon refuses anything below 1.40, after which it panics. That was
+    measured here, not assumed.
+  - A restart interrupts playback for a few seconds; clients reconnect by
+    themselves and the player resumes where it was.
 
 ## Languages (new in 3.0.0)
 
