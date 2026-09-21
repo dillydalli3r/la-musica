@@ -441,7 +441,12 @@ with Patch(auto, load_config=lambda: dict(CFG),
     b_down = PIPE.window("downloading", second_id)
     assert b_search and b_down, PIPE.windows[before:]
     assert b_down[3] >= a_down[4], (a_down, b_down)
-    assert not job_locks.holder(folder), "the claim was not released"
+    # The claim is released by the worker thread as its last act, and the job's
+    # state flips from the same thread a hair earlier: an instant check races
+    # the release (a loaded CI runner loses that race and fails a correct
+    # build). What is asserted is unchanged — the folder MUST be free once the
+    # job has settled — it just waits for the releasing thread to get there.
+    _wait_for(lambda: not job_locks.holder(folder), 5, "the claim to be released")
 
     # ------------------------------------------------------------------- #
     # 4. a completed download reports its own import outcome
