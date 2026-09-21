@@ -1469,7 +1469,7 @@ try:
     # A's and C's transfers are cancelled, B's are not, and the losers' folders
     # are GONE — nothing of theirs can keep arriving behind the import.
     assert sorted(run.cancelled) == batch_files("A", "C"), run.cancelled
-    assert _tree_files(run.ddir) == batch_files("B"), _tree_files(run.ddir)
+    assert sorted(_tree_files(run.ddir)) == batch_files("B"), _tree_files(run.ddir)
 finally:
     shutil.rmtree(run.ddir, ignore_errors=True)
 
@@ -1505,7 +1505,7 @@ try:
     assert _slow["username"] == "peerA" and "peerB delivered the album first" in _slow["reason"], _slow
     assert _lost["username"] == "peerC", run.job["attempts"]
     assert os.path.basename(run.imported[0]) == "Batch B", run.imported
-    assert _tree_files(run.ddir) == batch_files("B"), _tree_files(run.ddir)
+    assert sorted(_tree_files(run.ddir)) == batch_files("B"), _tree_files(run.ddir)
     # It did not sit out peerA at all: the batch's own clock says so.
     assert run.clock.now < 60, run.clock.now
 finally:
