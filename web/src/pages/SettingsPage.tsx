@@ -987,6 +987,7 @@ export default function SettingsPage() {
   ];
   const GRADE_CHECK_KEYS: CfgField[] = [
     { k: "grade_check_tag_spaces", label: "Tag spaces", type: "bool" },
+    { k: "grade_check_tag_case", label: "Tag value case", type: "bool" },
     { k: "grade_check_lyrics_spaces", label: "Lyrics spaces", type: "bool" },
     { k: "grade_check_cue_spaces", label: "CUE spaces", type: "bool" },
     { k: "grade_check_cover_crop", label: "Cover aspect ratio (squareness)", type: "bool" },
@@ -1067,7 +1068,8 @@ export default function SettingsPage() {
     // not part of any field group, so they are seeded explicitly — without
     // that they render unchecked while the server has them on (the default),
     // and the first click would set the value to true instead of false.
-    .concat("ui_locale", "notify_wish_found", "notify_download_done", "notify_import_ready");
+    .concat("ui_locale", "notify_wish_found", "notify_download_done", "notify_import_ready",
+            "notify_soulseek_download_start", "notify_soulseek_upload_start");
   const [scriptCfg, setScriptCfg] = useState<Record<string, unknown>>({});
   const setCfg = (k: string, v: unknown) => setScriptCfg((c) => ({ ...c, [k]: v }));
 
@@ -1157,6 +1159,8 @@ export default function SettingsPage() {
     { k: "notify_wish_found", label: "Wish found on Soulseek" },
     { k: "notify_download_done", label: "Download finished" },
     { k: "notify_import_ready", label: "Album ready to import" },
+    { k: "notify_soulseek_download_start", label: "Soulseek download started" },
+    { k: "notify_soulseek_upload_start", label: "A peer started downloading from you" },
   ];
 
   const NAV: { id: string; label: string; section?: string }[] = [

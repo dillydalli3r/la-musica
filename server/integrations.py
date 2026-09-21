@@ -1242,6 +1242,25 @@ def youtube_age_advisory(video_id, cfg=None):
     return (1, "youtube-age") if limit >= 18 else None
 
 
+def _isrc_codes(isrc):
+    """Every ISRC the caller named, in ask order, deduplicated.
+
+    `AudioFile.get_tag` reads repeated fields back "; "-joined (several ISRCs
+    on one recording arrive as "A; B"), and a caller may hand over a list of
+    its own, so both spellings mean the same thing here: ask EVERY one of
+    them. Taking the first alone made the file's own ISRC tag contribute one
+    code while this route's contract says "every ISRC the track has".
+    """
+    raw = list(isrc) if isinstance(isrc, (list, tuple, set)) else [isrc]
+    codes = []
+    for value in raw:
+        for piece in str(value or "").split(";"):
+            code = piece.strip()
+            if code and code.upper() not in {c.upper() for c in codes}:
+                codes.append(code)
+    return codes
+
+
 def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
                            album="", disc=None, track=None, track_count=None,
                            cfg=None, youtube_id="", tags=None):
@@ -1252,9 +1271,11 @@ def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
     short-circuits:
 
       1. Deezer by ISRC, then 2. Spotify by ISRC — for EVERY ISRC the track
-         has: the file's own tag plus every ISRC MusicBrainz holds for its
-         recording (Apple serves no ISRC lookup, so it is reached by edition
-         instead and is still cross-referenced with both);
+         has: every code on the file's own ISRC tag (see `_isrc_codes`, which
+         is also what a caller's list of codes means) plus every ISRC
+         MusicBrainz holds for its recording (Apple serves no ISRC lookup, so
+         it is reached by edition instead and is still cross-referenced with
+         both);
       3. Apple's artist route — artist → its album list → the explicit
          edition → track (disc/track, then a title match);
       4. Apple's song search — title match only;
@@ -1276,9 +1297,7 @@ def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
             cfg = load_config()
         except Exception:
             cfg = {}
-    codes = []
-    if str(isrc or "").strip():
-        codes.append(str(isrc).strip())
+    codes = _isrc_codes(isrc)
     if recording_mbid:
         # The file's own ISRC is asked first, then every ISRC MusicBrainz
         # holds for the recording — both ISRC sources see all of them.
@@ -1350,8 +1369,11 @@ def resolve_advisory(isrc="", recording_mbid="", **context):
 
     `context` may carry `title`, `artist`, `album`, `disc`, `track`,
     `track_count` and `cfg` (the Apple routes need them; the ISRC sources do
-    not). MusicBrainz supplies the ISRCs when the caller has only a recording
-    ID. Use `resolve_advisory_route` when the per-source answers matter too.
+    not). `isrc` may be the file's own ISRC tag exactly as `AudioFile.get_tag`
+    reads it — several codes "; "-joined — or a list of codes; every one of
+    them is asked. MusicBrainz supplies the ISRCs when the caller has only a
+    recording ID. Use `resolve_advisory_route` when the per-source answers
+    matter too.
     """
     return resolve_advisory_route(isrc=isrc, recording_mbid=recording_mbid,
                                   **context)["value"]
@@ -3475,8 +3497,8 @@ def _genre_complete(names, limit):
     This is the chain's one notion of "the answer is already there", and it is
     judged by the policy the WRITERS apply (`mlo.genres.normalize_genres`),
     not by a second rule of the chain's own: `limit` names, and — past a
-    single slot — the family in the last one. At `mb_genre_count = 2` that is
-    exactly "one specific genre plus its derived family", which is what makes
+    single slot — the family in the first one. At `mb_genre_count = 2` that is
+    exactly "the derived family plus one specific genre", which is what makes
     a single good answer enough; a name with no family in the vocabulary
     (an unrecognised one, or a RYM descriptor like "Concept Album") cannot
     complete a track and keeps the chain going.
@@ -4155,7 +4177,7 @@ def _genre_ai_rank(cfg, artist, album, title, candidates, count, extra=None):
     The answer goes through `mlo.genres.normalize_genres` before anyone sees
     it: the model named the SPECIFIC genres, and the normalizer resolves each
     to MusicBrainz's own spelling, derives the FAMILY of the first one and
-    appends it last — so the list this returns is the full one the writers
+    puts it first — so the list this returns is the full one the writers
     store and the grader reads.
     """
     if not (cfg or {}).get("ai_genre_inference"):
@@ -4213,7 +4235,7 @@ def genre_chain(artist="", album="", release=None, limit=None, sources=None,
     `mlo.config.DEFAULT_CONFIG`) **per track**. The names keep the spelling
     their source used — this is the merge point, not a writer: the tag writers
     canonicalize through `mlo.genres.normalize_genres` (which resolves each
-    name to MusicBrainz's own, derives the family and puts it last).
+    name to MusicBrainz's own, derives the family and puts it first).
 
     Each track's own answer is merged first, then the release-wide one, so a
     track that states its own genre keeps it ahead of the album's fallback.

@@ -32,7 +32,8 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 
 from mlo.config import load_config
-from mlo.paths import (ALL_IMAGE_EXTS, LIB_AUDIO_EXTS, SKIP_DIRS, app_data_dir,
+from mlo.paths import (ALL_IMAGE_EXTS, DEPS_DIR, LIB_AUDIO_EXTS, SKIP_DIRS,
+                       app_data_dir,
                        downloads_dir, incomplete_dir, library_root, mlo_root,
                        trash_root)
 # The one link test in the tree: the library walks use it too, so a junction
@@ -270,6 +271,23 @@ def _download_dirs(cfg, folder) -> List[str]:
     return out
 
 
+def _sum_rows(rows: List[Optional[Dict[str, Any]]]) -> Dict[str, int]:
+    """One figure from several sized rows — the app's own footprint.
+
+    A row the walk could not take (a folder that does not exist, a volume the
+    OS refused) contributes nothing instead of a zero, and a list where NO row
+    was measurable answers 0/0 with `measured: False`: "the app uses nothing"
+    and "nothing could be read" are different answers, and only the caller can
+    tell the user which one it is looking at.
+    """
+    present = [r for r in rows if r]
+    return {
+        "bytes": sum(int(r.get("bytes") or 0) for r in present),
+        "files": sum(int(r.get("files") or 0) for r in present),
+        "measured": bool(present),
+    }
+
+
 def storage_snapshot(cfg, folder: Optional[str]) -> Dict[str, Any]:
     """Everything GET /api/storage answers, given a resolved music folder."""
     started = time.monotonic()
@@ -305,6 +323,15 @@ def storage_snapshot(cfg, folder: Optional[str]) -> Dict[str, Any]:
         if p == staging:
             stage_bytes, stage_files = row["bytes"], row["files"]
 
+    # The app's own tools folder (ffmpeg, slskd, the analysers — DEPS_DIR, a
+    # bundled dir or `.dependencies`). It is the one part of the app that is
+    # NOT under the music folder, so it is measured where it actually lives;
+    # an install that has not downloaded a tool yet has no such folder, which
+    # is a null row and contributes nothing rather than a zero.
+    deps_res = scan(DEPS_DIR)
+    skips.add(deps_res)
+    deps_row = _row(DEPS_DIR, deps_res)
+
     # The volume to report is the one the library lives on; with no library
     # yet (an install before its music folder is set) it is the app's own data
     # folder, which is what the remaining numbers are about anyway.
@@ -325,6 +352,15 @@ def storage_snapshot(cfg, folder: Optional[str]) -> Dict[str, Any]:
         "downloads": ({"bytes": dl_bytes, "files": dl_files,
                        "staging_bytes": stage_bytes, "staging_files": stage_files,
                        "roots": dl_rows} if dl_rows else None),
+        "dependencies": deps_row,
+        # EVERYTHING the app itself occupies: its state, the bin, the
+        # transfers and its own tools — the library above is the user's music
+        # and deliberately not part of it. One number, because "how much is la
+        # musica using" is the question the per-folder rows answer only by
+        # addition.
+        "app_total": _sum_rows([data_row, _row(trash, trash_res),
+                               {"bytes": dl_bytes, "files": dl_files} if dl_rows else None,
+                               deps_row]),
         "skipped": skips.rows,
         "skipped_count": skips.count,
         "scanned_at": int(time.time()),

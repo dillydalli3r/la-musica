@@ -9,7 +9,7 @@ import type { AdvisoryFetchResult, CreditRow, InstrumentalFetchResult } from "..
 import type { Track } from "../types";
 import { fmtDuration, fmtTech } from "../lib/fmt";
 import { trackRef } from "../lib/refs";
-import { AuditBadge, GradeBadge, advisoryLine, instrumentalLine } from "./Badges";
+import { AuditBadge, GradeBadge, advisoryLine, advisoryOutcome, instrumentalLine } from "./Badges";
 import TrackDownloadExport from "./TrackDownloadExport";
 import Modal from "./Modal";
 import { tagLabel, tagTooltip, useTagRegistry } from "../lib/tags";
@@ -121,7 +121,7 @@ export default function TrackDetails({
       const { adv, inst, errors } = await checkTrackValues([trackPath]);
       setChecked({ adv: adv ?? undefined, inst: inst ?? undefined });
       if (errors.length) toast.error(errors.join(" · "));
-      else toast(`Checked — ${adv?.updated ?? 0} advisory, ${inst?.updated ?? 0} instrumental value(s) written`);
+      else toast(`Checked — ${advisoryOutcome(adv)}, ${inst?.updated ?? 0} instrumental value(s) written`);
       qc.invalidateQueries({ queryKey: ["album", albumPath] });
       qc.invalidateQueries({ queryKey: ["track-tags", trackPath] });
     } finally {

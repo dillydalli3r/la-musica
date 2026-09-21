@@ -222,7 +222,7 @@ def stub_search(slsk_, queries, wait_s, usable=None, response_limit=0):
 
 
 def stub_wait(slsk_, ddir, username, wanted, timeout_s, cancel_check=None,
-              phase="download", queue_budget_s=None):
+              phase="download", queue_budget_s=None, on_start=None):
     root = os.path.join(ddir, username, "album")
     got = {}
     take = wanted if PIPE.delivered == "all" else wanted[:1]

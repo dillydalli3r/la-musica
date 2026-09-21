@@ -33,6 +33,7 @@ network.
 import re
 import threading
 import time
+import unicodedata
 from html.parser import HTMLParser
 from urllib.parse import quote
 
@@ -327,8 +328,18 @@ def _json(url, params=None, headers=None, timeout=None, ttl=TTL_META, host=None)
 
 
 def _norm(text):
-    """Lowercase, punctuation-free comparison key."""
-    return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
+    """Lowercase, accent-folded, punctuation-free comparison key.
+
+    The fold is NFKD plus the combining marks dropped, i.e. the two spellings
+    of a title a provider may carry are the SAME key: "Störagéd" and
+    "Storaged" both read "storaged", "Björk" and "Bjork" both read "bjork".
+    Doing it by stripping non-[a-z0-9] alone does not fold anything — it turns
+    the letter into a SEPARATOR ("ö" → a space), which read "Störagéd" as
+    "st rag d" and made "Motörhead" collide with "Mot rhead".
+    """
+    folded = "".join(ch for ch in unicodedata.normalize("NFKD", str(text or ""))
+                     if not unicodedata.combining(ch))
+    return re.sub(r"[^a-z0-9]+", " ", folded.casefold()).strip()
 
 
 # Public alias — other modules (routes, integrations) match titles/artists

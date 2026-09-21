@@ -150,11 +150,7 @@ class _PlaylistsPageState extends State<PlaylistsPage> {
           if (smart.isNotEmpty) SectionLabel('Smart playlists'),
           for (final playlist in smart) _tile(playlist, index),
         ],
-        const RecommendationShelf(
-          kind: 'favorites',
-          target: 'tracks',
-          title: 'Recommended tracks',
-        ),
+        const RecommendationShelf(kind: 'favorites', target: 'tracks'),
       ],
     );
   }

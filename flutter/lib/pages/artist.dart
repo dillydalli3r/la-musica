@@ -151,7 +151,6 @@ class _ArtistPageState extends State<ArtistPage> {
           kind: 'artist',
           id: widget.artistPath,
           target: 'albums',
-          title: 'More like this',
         ),
       ],
     );

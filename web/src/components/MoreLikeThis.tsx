@@ -7,7 +7,14 @@ import { albumRef, trackRef } from "../lib/refs";
 import { toast, useStore, type QueueTrack } from "../store";
 import AlbumCard from "./AlbumCard";
 import CoverImg, { TrackCover } from "./CoverImg";
+import RecommendShelf from "./RecommendShelf";
 import type { Album } from "../types";
+
+/** What this shelf is, in one line — the LOCAL half of the pair of shelves an
+ *  artist/album/track page shows, and the half computed from the library's own
+ *  tags with nothing fetched. The online shelf beside it says the opposite, so
+ *  the pair is never read as a single list. */
+const HINT = "Scored from this library's own tags — nothing is fetched from the internet.";
 
 /** One row of GET/POST /api/recommend (server/recommend.py). `kind` is what
  *  the row IS, not what was asked for — an artist page is served albums, a
@@ -195,7 +202,6 @@ export default function MoreLikeThis({
   seeds,
   target,
   limit,
-  title = "More like this",
 }: {
   kind: RecommendKind;
   /** Library path or `mb:<uuid>` — the server resolves either. Required for
@@ -205,7 +211,6 @@ export default function MoreLikeThis({
   seeds?: string[];
   target?: RecommendTarget;
   limit?: number;
-  title?: string;
 }) {
   // Seeds are the same request whichever way they are spelled; a joined key
   // keeps react-query stable across renders without hashing the list.
@@ -243,18 +248,7 @@ export default function MoreLikeThis({
   if (!enabled || items.length === 0) return null;
   const albumShelf = items[0].kind === "album";
   return (
-    <section className="section">
-      <div className="flex items-center gap-1.5 mb-1">
-        <Sparkles className="h-3.5 w-3.5 text-zinc-500" />
-        <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">{title}</h2>
-      </div>
-      {/* WHERE these rows come from, in one line: the library's OWN tags,
-          scored on the server, with nothing fetched. The online shelf rendered
-          beside this one says the opposite ("fetched from the providers"), so
-          the pair is never read as a single list. */}
-      <p className="text-[11px] text-zinc-600 mb-2">
-        Scored from this library's own tags — nothing is fetched from the internet.
-      </p>
+    <RecommendShelf icon={Sparkles} title="Recommended (Local)" hint={HINT}>
       {albumShelf ? (
         <div className="flex gap-3 overflow-x-auto pb-1 -mx-1 px-1">
           {albums.map((item) => {
@@ -277,6 +271,6 @@ export default function MoreLikeThis({
           ))}
         </ul>
       )}
-    </section>
+    </RecommendShelf>
   );
 }

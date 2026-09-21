@@ -35,6 +35,7 @@ import AlbumRow, { type AlbumRowCell } from "../components/AlbumRow";
 import StatsPanel from "../components/StatsPanel";
 import TrackDetails from "../components/TrackDetails";
 import BulkTagsDialog from "../components/BulkTagsDialog";
+import { TrackActionsMenu } from "../components/TagActionsMenu";
 import type { Album, Artist, Track } from "../types";
 
 type View = "grid" | "compact" | "albums" | "artists" | "tracks";
@@ -1142,7 +1143,7 @@ export default function LibraryPage() {
                             albumCover={al.cover_file}
                             wrapperClass="h-8 w-8 rounded bg-raise border border-border overflow-hidden shrink-0"
                           />
-                          <Link to={trackRef(t)} className="break-words hover:text-accent-soft flex-1 min-w-0"
+                          <Link to={trackRef(t)} className="break-words hover:text-accent-soft flex-1 min-w-[8rem]"
                             title="Click to play · Ctrl-click to open track page"
                             onClick={(e) => entityLinkClick(e, () => navigate(trackRef(t)))}
                           >
@@ -1164,7 +1165,10 @@ export default function LibraryPage() {
                           <GradeBadge pass={!!t.grade_pass && !auditFails(t.audit)} audit={t.audit} size="sm" />
                           <AdvisoryMark value={t.tags.ITUNESADVISORY} />
                           <CachedMark path={t.path} />
-                          <span className="row-hover shrink-0"><FavHeart kind="track" id={t.path} mbid={t.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" /></span>
+                          <span className="shrink-0"><FavHeart kind="track" id={t.path} mbid={t.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" revealOnHover /></span>
+                          <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
+                            <TrackActionsMenu path={t.path} releaseMbid={t.tags.MUSICBRAINZ_ALBUMID} />
+                          </span>
                           {t.tags.INSTRUMENTAL === "1" && (
                             <span className="chip bg-zinc-800 text-zinc-400 border border-border text-[9px] shrink-0">INST</span>
                           )}
@@ -1370,10 +1374,10 @@ export default function LibraryPage() {
                       )}
                       {trackCols.includes("title") && (
                         <td className="td">
-                          <div className="flex items-center gap-1.5 min-w-0">
+                          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-w-0">
                             <Link
                               to={trackRef(tr)}
-                              className="hover:text-accent-soft break-words flex-1 min-w-0"
+                              className="hover:text-accent-soft break-words flex-1 min-w-[8rem]"
                               title="Click to play · Ctrl-click to open track page"
                               onClick={(e) => entityLinkClick(e, () => navigate(trackRef(tr)))}
                             >
@@ -1396,8 +1400,11 @@ export default function LibraryPage() {
                             <AdvisoryMark value={tr.tags.ITUNESADVISORY} />
                             <CachedMark path={tr.path} />
                             {tr.is_video && <span title="Music video" className="shrink-0 inline-flex"><FileVideo className="h-3.5 w-3.5 text-zinc-500" /></span>}
+                            <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                              <FavHeart kind="track" id={tr.path} mbid={tr.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" revealOnHover />
+                            </span>
                             <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
-                              <FavHeart kind="track" id={tr.path} mbid={tr.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" />
+                              <TrackActionsMenu path={tr.path} releaseMbid={tr.tags.MUSICBRAINZ_ALBUMID} />
                             </span>
                             <button
                               className="text-zinc-500 hover:text-accent-soft shrink-0"
@@ -1697,10 +1704,10 @@ function AlbumRowGroup({
                           )}
                           {trackCols.includes("title") && (
                             <td className="td">
-                              <div className="flex items-center gap-1.5 min-w-0">
+                              <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-w-0">
                                 <Link
                                   to={trackRef(t)}
-                                  className="hover:text-accent-soft break-words flex-1 min-w-0"
+                                  className="hover:text-accent-soft break-words flex-1 min-w-[8rem]"
                                   title="Click to play · Ctrl-click to open track page"
                                   onClick={(e) => entityLinkClick(e, () => navigate(trackRef(t)))}
                                 >
@@ -1723,8 +1730,11 @@ function AlbumRowGroup({
                                 <AdvisoryMark value={t.tags.ITUNESADVISORY} />
                                 <CachedMark path={t.path} />
                                 {t.is_video && <span title="Music video" className="shrink-0 inline-flex"><FileVideo className="h-3.5 w-3.5 text-zinc-500" /></span>}
+                                <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                                  <FavHeart kind="track" id={t.path} mbid={t.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" revealOnHover />
+                                </span>
                                 <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
-                                  <FavHeart kind="track" id={t.path} mbid={t.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" />
+                                  <TrackActionsMenu path={t.path} releaseMbid={t.tags.MUSICBRAINZ_ALBUMID} />
                                 </span>
                                 <button
                                   className="text-zinc-500 hover:text-accent-soft shrink-0"

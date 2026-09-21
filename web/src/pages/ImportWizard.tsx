@@ -10,7 +10,7 @@ import {
 import { api, answerSources, replyFor, IN_MOBILE_SHELL } from "../api";
 import type { AdvisoryFetchResult, MetadataFetchItem, MetadataItemKind } from "../api";
 import { toast, useStore } from "../store";
-import { advisoryLine } from "../components/Badges";
+import { advisoryLine, advisoryOutcome } from "../components/Badges";
 import { LinkValidChip } from "../components/Links";
 import LyricsViewer, { parseLrc } from "../components/LyricsViewer";
 import CoverSearchModal from "../components/CoverSearchModal";
@@ -1770,12 +1770,12 @@ export default function ImportWizard() {
       toast(`Genres per track is ${genreCap} — raise it in Settings → Import to add more`);
       return;
     }
-    // A list that already ends in its family keeps that slot: appending would
-    // make the family look like one more specific genre (the chip's own
-    // `familyOf` reads the LAST element), while the server reorders on write.
-    // Inserting in front of it is what the saved file will look like.
+    // A list that already opens with its family keeps that slot: inserting
+    // before it would push the family down and make it look like one more
+    // specific genre (the chip's own `familyOf` reads the FIRST element),
+    // while the server would reorder on write anyway.
     const family = familyOf(list);
-    setGenreList(path, family ? [...list.slice(0, -1), v, family] : [...list, v]);
+    setGenreList(path, family ? [family, ...list.slice(1), v] : [...list, v]);
   };
 
   const removeGenre = (path: string, genre: string) =>
@@ -2110,9 +2110,9 @@ export default function ImportWizard() {
       });
       const answered = targets.filter((p) => replyFor(res.answers, p)).length;
       toast(
-        res.updated
-          ? `Advisory written for ${res.updated} track(s) — ${answered} had a source answer`
-          : `Nothing written — ${answered} of ${targets.length} track(s) had an answer`
+        res.skipped
+          ? `Nothing written — ${res.skipped}`
+          : `${advisoryOutcome(res)} — ${answered} of ${targets.length} track(s) had a source answer`
       );
       qc.invalidateQueries({ queryKey: ["library"] });
       qc.invalidateQueries({ queryKey: ["album"] });

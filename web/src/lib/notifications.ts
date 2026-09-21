@@ -58,15 +58,18 @@ export interface NotificationRecord {
 
 /** Kinds that deserve an operating-system notification — the ones about
  *  something happening while the user was looking elsewhere (a wish landing
- *  hours later, a download finishing, an import waiting for a decision).
+ *  hours later, a download starting or finishing, a peer taking files from
+ *  you, an import waiting for a decision).
  *  A script run or a grade is the user's own foreground job: the tray and a
  *  toast say so, and an OS popup for it would be noise. */
 export const OS_KINDS: Record<string, true> = {
   wish_found: true,
   wish_failed: true,
   wish_not_found: true,
+  download_started: true,
   download_done: true,
   download_failed: true,
+  upload_started: true,
   import_ready: true,
   import_needs_data: true,
 };
@@ -101,6 +104,11 @@ export function linkFor(kind: string, data?: Record<string, unknown>): string {
       // A job that gave up: its subject is the row in the queue (there is no
       // album to open — nothing landed), which is where its retry is.
       return album ? `/album/${encodeURIComponent(album)}` : "/soulseek";
+    case "download_started":
+    case "upload_started":
+      // A transfer that is running RIGHT NOW: its subject is the queue page
+      // that shows it (a download has no album yet, an upload never will).
+      return "/soulseek";
     case "import_ready":
     case "import_needs_data":
       return album ? `/import?album=${encodeURIComponent(album)}` : "/import";

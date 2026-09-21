@@ -704,6 +704,24 @@ table td {
   50% { box-shadow: 0 0 0 5px rgb(239 68 68 / 0); }
 }
 
+/* The notification tray's bell tips when the tray is opened: the click has to
+   look like it did something even before the panel paints. It hangs from its
+   own top (a pendulum, not a spin), and the element is remounted per click
+   (React `key`), so opening it again replays the swing instead of hanging
+   still. 0.5 s of swing over a 0.15 s fade — the icon leads, the panel
+   follows. */
+@keyframes bell-swing {
+  0%   { transform: rotate(0deg); }
+  25%  { transform: rotate(-14deg); }
+  55%  { transform: rotate(11deg); }
+  80%  { transform: rotate(-5deg); }
+  100% { transform: rotate(0deg); }
+}
+.bell-swing {
+  transform-origin: 50% 10%;
+  animation: bell-swing 0.5s var(--ease-motion);
+}
+
 @keyframes fade-in {
   from { opacity: 0; }
   to   { opacity: 1; }

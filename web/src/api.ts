@@ -896,12 +896,22 @@ export type TrackAnswers = Record<string, Record<string, string | number>>;
 
 /** Advisory fetch reply. `values` is what the rating is (0 clean, 1 explicit,
  *  2 clean edition) and `sources` the one provider whose answer was written;
- *  `answers` carries all of them. */
+ *  `answers` carries all of them. `albums` is the ALBUMITUNESADVISORY the
+ *  server DERIVED per album folder from those values (`album_updated` counts
+ *  the writes), `gated` is how many files the ADVISORY write gate refused, and
+ *  `skipped` says why nothing was written when it refused every file — a fetch
+ *  that wrote nothing is never a success. */
 export interface AdvisoryFetchResult {
   updated: number;
   values?: Record<string, string | number>;
   sources?: Record<string, string>;
   answers?: TrackAnswers;
+  albums?: Record<string, string | number>;
+  album_updated?: number;
+  gated?: number;
+  /** Album tags the per-filetype/derivation gate refused (see `gated`). */
+  album_gated?: number;
+  skipped?: string;
 }
 
 /** Instrumental fetch reply: `values` is INSTRUMENTAL (0/1), `evidence` the

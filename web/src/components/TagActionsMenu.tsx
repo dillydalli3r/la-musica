@@ -1,15 +1,18 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Activity, BadgeInfo, Disc3, Flame, Gauge, ImagePlus, Info, Languages, ListMusic, Music2, Music4,
+  Activity, BadgeInfo, Disc3, Ellipsis, Flame, Gauge, ImagePlus, Info, Languages, ListMusic, Music2, Music4,
   RefreshCw, ShieldCheck, Sparkles, Tags, UploadCloud, Users,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { api } from "../api";
+import BulkTagsDialog from "./BulkTagsDialog";
 import OverflowMenu from "./OverflowMenu";
 import MetadataReviewModal from "./MetadataReviewModal";
 import Modal from "./Modal";
 import { CreditsPanel } from "./TrackDetails";
 import { DetailsDialog } from "./AlbumDetails";
+import { advisoryOutcome } from "./Badges";
 import { toast } from "../store";
 import type { LyricsPublishBatchResult, LyricsXlitResult, ScriptRunResult } from "../types";
 
@@ -29,6 +32,7 @@ export default function TagActionsMenu({
   buttonClass = "btn-ghost",
   buttonTitle = "Tag actions",
   buttonLabel,
+  icon: Icon = Tags,
 }: {
   /** The tracks/albums the actions apply to. */
   paths: string[];
@@ -47,8 +51,12 @@ export default function TagActionsMenu({
    *  square and icon-only like the buttons it sits beside, with `buttonTitle`
    *  as the tooltip. */
   buttonLabel?: string;
+  /** Trigger glyph. The tag glyph where this menu IS the tagging button; the
+   *  "…" where it is one more action among a row's others. */
+  icon?: LucideIcon;
 }) {
   const [review, setReview] = useState<null | "artist" | "album">(null);
+  const [tagsOpen, setTagsOpen] = useState(false);
   // Credits / Details of the CURRENT selection. Per release, so they need an
   // album folder (the whole release) or exactly one file (that recording);
   // a multi-track selection without an album has nothing to show.
@@ -115,7 +123,7 @@ export default function TagActionsMenu({
       <OverflowMenu
         buttonClass={buttonClass}
         buttonTitle={buttonTitle}
-        icon={Tags}
+        icon={Icon}
         label={buttonLabel}
         sections={[
           {
@@ -145,6 +153,13 @@ export default function TagActionsMenu({
             title: "Tags",
             items: [
               {
+                label: "Tag editor…",
+                icon: Tags,
+                disabled: !paths.length,
+                title: "Set or remove tags on the selection — the bulk editor, applied straight to the files",
+                onClick: () => setTagsOpen(true),
+              },
+              {
                 label: "Import genres (all sources)",
                 icon: Tags,
                 disabled: !paths.length,
@@ -164,7 +179,7 @@ export default function TagActionsMenu({
                 title: "Look the ITUNESADVISORY value up and write it",
                 onClick: () =>
                   run(() => api.mbAdvisoryFetch({ paths, release_mbid: releaseMbid }), (r) =>
-                    `${r?.updated ?? 0} track(s) re-rated`
+                    advisoryOutcome(r)
                   ),
               },
               {
@@ -325,6 +340,41 @@ export default function TagActionsMenu({
       {view === "details" && (
         <DetailsDialog albumPath={albumPath} trackPath={singleTrack} onClose={() => setView(null)} />
       )}
+      {tagsOpen && (
+        <BulkTagsDialog
+          paths={paths}
+          onClose={() => {
+            setTagsOpen(false);
+            onDone?.();
+          }}
+        />
+      )}
     </>
+  );
+}
+
+/** The "…" a LISTED track wears: one file in, its tagging, scripts and credits
+ *  out. The same menu the track page mounts, scoped to the one track — no
+ *  album folder, so the release-wide entries stay off a row that is not a
+ *  release. */
+export function TrackActionsMenu({
+  path,
+  releaseMbid,
+  buttonClass = "!p-1 text-zinc-500 hover:text-white",
+}: {
+  path: string;
+  /** The track's release MBID, when its tags carry one — lets the advisory
+   *  lookup go straight to the release instead of resolving it again. */
+  releaseMbid?: string | null;
+  buttonClass?: string;
+}) {
+  return (
+    <TagActionsMenu
+      paths={[path]}
+      releaseMbid={releaseMbid ?? undefined}
+      icon={Ellipsis}
+      buttonClass={buttonClass}
+      buttonTitle="Track actions — tagging, scripts, credits"
+    />
   );
 }

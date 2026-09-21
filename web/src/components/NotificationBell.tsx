@@ -48,6 +48,9 @@ export default function NotificationBell() {
   const navigate = useNavigate();
   const [state, setState] = useState<NotifyState>(() => notificationState());
   const [open, setOpen] = useState(false);
+  /** Clicks so far — the bell's swing animations, and the `key` that replays
+   *  one per click (see the button below). */
+  const [swings, setSwings] = useState(0);
   const { items, unread } = useNotifications();
 
   useEffect(() => {
@@ -67,6 +70,7 @@ export default function NotificationBell() {
   const toggle = () => {
     const next = !open;
     setOpen(next);
+    setSwings((n) => n + 1); // the bell tips on every click, open and close
     if (!next) return;
     markAllRead(); // the panel is being read: the badge goes out
     // Permission has to be asked for from a real gesture. Opening the tray is
@@ -89,9 +93,16 @@ export default function NotificationBell() {
   return (
     <div className="relative">
       <button
-        className={`h-9 w-9 rounded-full border border-border bg-panel/60 backdrop-blur flex items-center justify-center transition-colors ${
+        /* Every ornament stays INSIDE the 36 px circle: the unread ring is
+           drawn inset and the glow is an inset shadow, because the bar gives
+           the button only 6 px of headroom at the app's own top edge — an
+           outer ring, an outer glow or a badge hung off the corner is half
+           clipped by the shell's `overflow-hidden`, which is exactly the
+           "the bell is cut off" report. The press is a scale, the open is the
+           bell's own swing (see `bell-swing`), so the icon moves on click. */
+        className={`relative h-9 w-9 rounded-full border border-border bg-panel/60 backdrop-blur flex items-center justify-center transition-[color,transform,box-shadow] duration-150 active:scale-90 ${
           hot
-            ? "text-accent ring-2 ring-accent/60 shadow-accent/60 shadow-[0_0_12px]"
+            ? "text-accent ring-2 ring-inset ring-accent/70 shadow-[inset_0_0_12px_rgb(var(--accent)_/_0.35)]"
             : state === "granted"
             ? "text-accent-soft hover:text-accent"
             : "text-zinc-300 hover:text-white hover:border-accent/50"
@@ -102,9 +113,11 @@ export default function NotificationBell() {
         aria-haspopup="menu"
         aria-expanded={open}
       >
-        <Icon className="h-4 w-4" />
+        {/* `key` remounts the glyph so the swing replays on every click; the
+            first render (no click yet) must not animate, hence `swings`. */}
+        <Icon key={swings} className={`h-4 w-4${swings ? " bell-swing" : ""}`} />
         {hot && (
-          <span className="absolute -top-1 -right-1 h-4 min-w-4 px-1 rounded-full bg-accent text-[10px] font-semibold text-zinc-950 flex items-center justify-center">
+          <span className="absolute top-0 right-0 h-4 min-w-4 px-0.5 rounded-full bg-accent text-[10px] font-semibold text-zinc-950 flex items-center justify-center ring-1 ring-panel">
             {unread > 9 ? "9+" : unread}
           </span>
         )}

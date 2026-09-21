@@ -44,11 +44,19 @@ download_done for a finished import run (server/import_queue.py),
 import_needs_data (an album an import could not finish, waiting for a human
 decision), script_done / script_failed and grade_done (a run of the library
 scripts, from `/api/run`), update_available (a newer release exists).
+download_started and upload_started are the two "it began" halves of a Soulseek
+transfer, announced the moment there is something to watch instead of only at
+the end: a download whose first bytes actually moved (the wait in
+server/soulseek_auto.py), and a peer starting to take files FROM us (the
+uploads watcher in server/main.py). Both are one frame per job/user, never one
+per poll.
 
 The OUTCOME kinds — wish_failed, wish_not_found, download_failed and
 import_needs_data — are deliberately not switchable off in config: they are the
 only word the user gets that something they asked for did not happen, and the
-three `notify_*` switches cover the "this is nice to know" ones.
+`notify_*` switches cover the "this is nice to know" ones (`notify_wish_found`,
+`notify_download_done`, `notify_import_ready` and the two Soulseek start
+kinds).
 
 Clients filter by `event`; unknown kinds must be ignored, not fatal, so a
 newer client can talk to an older server.
@@ -87,6 +95,8 @@ def _notify_configured(kind: str, cfg: dict) -> bool:
         "wish_found": "notify_wish_found",
         "download_done": "notify_download_done",
         "import_ready": "notify_import_ready",
+        "download_started": "notify_soulseek_download_start",
+        "upload_started": "notify_soulseek_upload_start",
     }.get(kind)
     if not key:
         return True

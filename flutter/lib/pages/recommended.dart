@@ -206,7 +206,7 @@ class _RecommendedPageState extends State<RecommendedPage> {
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
       children: [
         SectionLabel(
-          _seed == 'library' ? 'Recommended' : 'Recommended from $_seed',
+          'Recommended (Online)',
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [

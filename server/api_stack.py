@@ -162,7 +162,8 @@ _GROUP_KEYS = {
     # The formatting family is named by what it compares, not by what it
     # compares it ON, so the lyrics/cue spellings sit here while the lyrics
     # presence checks below the prefix rules: order matters, exact keys first.
-    "formatting": ("grade_check_tag_spaces", "grade_check_tag_blank_lines",
+    "formatting": ("grade_check_tag_spaces", "grade_check_tag_case",
+                   "grade_check_tag_blank_lines",
                    "grade_check_lyrics_spaces", "grade_check_lyrics_blank_lines",
                    "grade_check_lyrics_zero", "grade_check_lyrics_format",
                    "grade_check_cue_spaces", "grade_check_cue_blank_lines",
@@ -207,6 +208,7 @@ RELAXED_OFF = frozenset((
     "grade_check_tag_spaces", "grade_check_lyrics_spaces",
     "grade_check_cue_spaces", "grade_check_cover_crop",
     "grade_check_lyrics_zero", "grade_check_tag_blank_lines",
+    "grade_check_tag_case",
     "grade_check_lyrics_blank_lines", "grade_check_cue_blank_lines",
     "grade_check_filename_case", "grade_check_ext_case",
     "grade_check_excess_tags", "grade_check_mb_links", "grade_check_rym_links",

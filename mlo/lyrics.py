@@ -13,6 +13,7 @@ from .stats import (
     _walk_files, is_audio_file, _find_albums, _clean_set, _summarize_values,
     _collect_targets, worker_count,
 )
+from .tagtext import canonical_text
 from .ui import print_header, log, c, Color
 import tempfile
 
@@ -715,7 +716,12 @@ def _normalize_album_media_source(args):
             source_clean = str(source_val).strip() if source_val is not None else ""
 
             if media_clean:
-                media_values.append(media_clean)
+                # Kept in the CANONICAL spelling (mlo.tagtext): the comparisons
+                # below ask "is this Digital Media / a CD", and a library where
+                # one track says "cd" and another "CD" names ONE medium — an
+                # exact-string summary called that INCONSISTENT and skipped the
+                # whole album's normalization.
+                media_values.append(canonical_text("MEDIA", media_clean))
 
             if source_clean:
                 source_values.append(source_clean)

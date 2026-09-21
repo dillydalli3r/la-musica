@@ -1,10 +1,10 @@
 /** The genre contract every genre-rendering screen shares with the backend.
  *
- *  A GENRE tag is a LIST of repeated fields: the SPECIFIC genres first, the
- *  FAMILY last (`mlo/genres.py`, `mlo/genre_vocab.py`). A file's repeats read
- *  back joined with "; " (mlo/audio.py) and the rendered form joins the slots
- *  with " / " (GENRE_ORDER_SEPARATOR) — so the display is one name per chip,
- *  split on both, and never the joined string. */
+ *  A GENRE tag is a LIST of repeated fields: the FAMILY first, the SPECIFIC
+ *  genres after it (`mlo/genres.py`, `mlo/genre_vocab.py`). A file's repeats
+ *  read back joined with "; " (mlo/audio.py) and the rendered form joins the
+ *  slots with " / " (GENRE_ORDER_SEPARATOR) — so the display is one name per
+ *  chip, split on both, and never the joined string. */
 
 /** The 28 families `mlo.genre_vocab.FAMILIES` publishes: the broad head a
  *  specific genre sits under, which the app derives from the specific genre
@@ -44,9 +44,9 @@ export const canonicalGenre = (name: unknown): string =>
   String(name ?? "").trim().replace(/\s+/g, " ").toLowerCase();
 
 /** The derived family slot of a genre list, or null when it holds none yet.
- *  Mirrors `mlo.genres.normalize_genres`, which writes the family LAST: a list
- *  ending in a family already carries its family slot. */
+ *  Mirrors `mlo.genres.normalize_genres`, which writes the family FIRST: a
+ *  list opening with a family already carries its family slot. */
 export const familyOf = (list: string[]): string | null => {
-  const last = list[list.length - 1];
-  return last && GENRE_FAMILIES[last.toLowerCase()] ? last : null;
+  const first = list[0];
+  return first && GENRE_FAMILIES[first.toLowerCase()] ? first : null;
 };

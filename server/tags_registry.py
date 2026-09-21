@@ -43,8 +43,12 @@ from mlo.audio import TAG_MAP, _mp4_specs, _mp3_specs
 from mlo.cli import SCRIPT_LABELS
 from mlo.config import (AUDIO_TAG_TYPES, DEFAULT_CONFIG, _LYRICS_PREFIXES,
                         _audio_tag_family, should_write_audio_tag)
-from mlo.grader import (ALBUM_TAGS, KNOWN_MEDIA, PER_TRACK_TAGS, TAG_ALLOWLIST,
+from mlo.grader import (ALBUM_TAGS, PER_TRACK_TAGS, TAG_ALLOWLIST,
                         TAG_PRESENCE_CHECKS, tag_key_allowed)
+# The canonical-value table the writers store (see _enum_for): the registry
+# owns no value policy of its own, so a tag's closed set is read from the
+# module that owns it.
+from mlo.tagtext import CANONICAL_VALUES
 
 # --------------------------------------------------------------------------- #
 # The display families — the one grouping no other module states, so it lives
@@ -262,7 +266,12 @@ _TAG_ENUM = {
     "ITUNESADVISORY": ("0", "1", "2"),
     "ALBUMITUNESADVISORY": ("0", "1", "2"),
     "INSTRUMENTAL": ("0", "1"),
-    "AUDIT": ("REAL", "FAKE"),
+    # REAL / FAKE are what mlo.audit writes; MIX is foobar2000's verdict for a
+    # file it heard both ways — a value the app reads (mlo.grader treats it as
+    # "not REAL", web/src/components/Badges.tsx badges it), so it is part of
+    # the vocabulary, not an anomaly. mlo.tagtext.AUDIT_VALUES states the same
+    # set for the write path.
+    "AUDIT": ("REAL", "FAKE", "MIX"),
     "AUDIOAUDITOR_OVERRIDE": ("REAL", "FAKE"),
     "INTEGRITY": ("OK", "FAIL"),
     "LOG_CRC": ("OK", "MISMATCH"),
@@ -282,19 +291,27 @@ def _range_for(tag: str):
     return [lo_hi[0], lo_hi[1]] if lo_hi else None
 
 
+# Tags whose `enum` comes from mlo.tagtext's canonical-value table (the table
+# every writer stores). AUDIT is not here: its vocabulary is stated in
+# _TAG_ENUM beside the other verdict tags.
+_CANONICAL_ENUM_TAGS = ("MEDIA", "MOOD", "RELEASETYPE", "RELEASESTATUS")
+
+
 def _enum_for(tag: str):
     if tag in _TAG_ENUM:
         return list(_TAG_ENUM[tag])
-    if tag == "MEDIA":
-        # The grader's own table, which its consistency check tests
-        # case-insensitively — the client folds before comparing, as it does
-        # for every enum value.
-        return sorted(KNOWN_MEDIA)
-    if tag == "MOOD":
-        # mlo.moods owns the mood words; imported here because the module
-        # pulls the audio analysis stack in with it.
-        from mlo.moods import MOODS
-        return list(MOODS)
+    # The canonical-value source mlo.tagtext owns (what every writer stores and
+    # what grade_check_tag_case compares against), for the tags whose value set
+    # is genuinely CLOSED — a value outside one is a tagger's mistake, which is
+    # what the client marks. MEDIA and MOOD are read from that one table rather
+    # than from the grader / mlo.moods' internal label list, so the option a
+    # filter offers is the spelling a file will actually hold.
+    #
+    # SOURCE is deliberately ABSENT: only two of its values are this app's
+    # (Soulseek, Digital — see mlo.tagtext), the rest is the user's own source
+    # word or a video id, and the client must not flag those as wrong.
+    if tag in _CANONICAL_ENUM_TAGS:
+        return list(CANONICAL_VALUES[tag])
     # GENRE is deliberately absent: the vocabulary is 2 200 MusicBrainz names
     # (see web/src/lib/genres.ts's same decision) and the grader already names
     # a bad one in its own GENRE_VOCAB issue — the client marks that verdict
@@ -320,7 +337,7 @@ TAG_CHECKS = {
     "BPM": ("grade_check_key_bpm",),
     "ACOUSTID_ID": ("grade_check_acoustid",),
     "ACOUSTID_FINGERPRINT": ("grade_check_acoustid",),
-    "AUDIT": ("grade_check_audit",),
+    "AUDIT": ("grade_check_audit", "grade_check_tag_case"),
     "AUDIOAUDITOR_OVERRIDE": ("grade_check_audit",),
     "LOG_GRADE": ("grade_check_log_grade",),
     "INSTRUMENTAL": ("grade_check_instrumental",),
@@ -330,8 +347,16 @@ TAG_CHECKS = {
     "TRANSLITERATION": ("grade_check_xlit_transliteration",),
     "MUSICBRAINZ_ALBUMID": ("grade_check_mb_links",),
     "RATEYOURMUSIC_ALBUM": ("grade_check_rym_links",),
-    "MEDIA": ("grade_check_media",),
-    "SOURCE": ("grade_check_source",),
+    # Tags whose VALUE has a canonical spelling (mlo.tagtext.CANONICAL_CASE)
+    # are graded by grade_check_tag_case, beside whatever checks already
+    # graded them.
+    "MOOD": ("grade_check_tag_case",),
+    "MEDIA": ("grade_check_media", "grade_check_tag_case"),
+    "SOURCE": ("grade_check_source", "grade_check_tag_case"),
+    "RELEASETYPE": ("grade_check_tag_case",),
+    "RELEASESTATUS": ("grade_check_tag_case",),
+    "RELEASECOUNTRY": ("grade_check_tag_case",),
+    "SCRIPT": ("grade_check_tag_case",),
     "AUDIO_MD5": ("grade_check_excess_tags",),
     "INTEGRITY": ("grade_check_excess_tags",),
     "LOG_CRC": ("grade_check_excess_tags",),
@@ -370,7 +395,7 @@ CHECK_LABELS = {
     "grade_check_energy": "Energy tag present",
     "grade_check_genre": "Genre tag present",
     "grade_check_genre_count": "Genre count per track",
-    "grade_check_genre_order": "Genre order (family last)",
+    "grade_check_genre_order": "Genre order (family first)",
     "grade_check_genre_vocab": "Genre vocabulary",
     "grade_check_replaygain": "ReplayGain tags present",
     "grade_check_encoder": "Encoder identity",
@@ -407,6 +432,7 @@ CHECK_LABELS = {
     "grade_check_cover_crop": "Cover aspect ratio (squareness)",
     "grade_check_sidecar_cover": "Per-track sidecar covers",
     "grade_check_tag_spaces": "Tags — no padding",
+    "grade_check_tag_case": "Tags — canonical value case",
     "grade_check_tag_blank_lines": "Tags — no blank lines",
     "grade_check_lyrics_spaces": "Lyrics — no padding",
     "grade_check_lyrics_blank_lines": "Lyrics — blank line rules",

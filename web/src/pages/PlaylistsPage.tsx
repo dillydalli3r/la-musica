@@ -264,8 +264,8 @@ function PlaylistGridCard({ playlist, trackMeta, onPlay }: {
           )}
         </div>
         </Link>
-        <div className="absolute top-1.5 right-1.5 row-hover transition-opacity">
-          <FavHeart kind="playlist" id={String(playlist.id)} className="!p-1.5 bg-black/60 tap-hit" iconClass="h-4 w-4" />
+        <div className="absolute top-1.5 right-1.5">
+          <FavHeart kind="playlist" id={String(playlist.id)} className="!p-1.5 bg-black/60 tap-hit" iconClass="h-4 w-4" revealOnHover />
         </div>
         <button
           className="btn-primary absolute left-2 top-9 !rounded-lg !p-3 row-hover transition-opacity shadow-2xl tap-hit"

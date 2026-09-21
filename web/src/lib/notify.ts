@@ -41,8 +41,11 @@ export type EventKind =
   /** A wish whose searches found nothing: it stops being searched and waits
    *  for the user's own retry (see server/wishes' retry policy). */
   | "wish_not_found"
+  | "download_started"
   | "download_done"
   | "download_failed"
+  /** A peer started downloading from us: our files are being shared. */
+  | "upload_started"
   | "import_ready"
   | "import_needs_data"
   | "script_done"
@@ -119,7 +122,9 @@ export async function requestNotifications(): Promise<NotifyState> {
  *  kind a newer one grew. */
 const FALLBACK_TITLE: Partial<Record<EventKind, MessageKey>> = {
   wish_found: "notify.wish_found",
+  download_started: "notify.download_started",
   download_done: "notify.download_done",
+  upload_started: "notify.upload_started",
   import_ready: "notify.import_ready",
 };
 

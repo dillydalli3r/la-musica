@@ -495,6 +495,7 @@ export const CONFIG_GROUPS: CfgGroup[] = [
       blurb: "Each check the grader runs, one by one. A check that is off is not evaluated at all — no pass, no fail, no issue code — so switch off what this library deliberately does without.",
       fields: [
         { k: "grade_check_tag_spaces", label: "Tag spaces", type: "bool" },
+        { k: "grade_check_tag_case", label: "Tag value case", type: "bool" },
         { k: "grade_check_lyrics_spaces", label: "Lyrics spaces", type: "bool" },
         { k: "grade_check_cue_spaces", label: "CUE spaces", type: "bool" },
         { k: "grade_check_cover_crop", label: "Cover aspect ratio (squareness)", type: "bool" },
@@ -601,11 +602,13 @@ export const CONFIG_GROUPS: CfgGroup[] = [
     },
     {
       title: "Notifications",
-      blurb: "The three events this server pushes to every client that has notifications enabled. Each client still asks for its own permission.",
+      blurb: "The events this server pushes to every client that has notifications enabled — outcomes (a wish found, a download finished, an album ready to import) and the two Soulseek starts (a download whose first bytes moved, a peer taking files from you). Each client still asks for its own permission.",
       fields: [
         { k: "notify_wish_found", label: "Wish found on Soulseek", type: "bool" },
         { k: "notify_download_done", label: "Download finished", type: "bool" },
         { k: "notify_import_ready", label: "Album ready to import", type: "bool" },
+        { k: "notify_soulseek_download_start", label: "Soulseek download started", type: "bool" },
+        { k: "notify_soulseek_upload_start", label: "A peer started downloading from you", type: "bool" },
       ],
     },
     {

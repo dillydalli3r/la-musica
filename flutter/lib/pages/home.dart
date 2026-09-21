@@ -92,11 +92,7 @@ class HomePage extends StatelessWidget {
           onOpen: (album) => openDetail(context, 'Album', album.path),
           onPlay: (album) => playAlbum(context, album),
         ),
-        const RecommendationShelf(
-          kind: 'library',
-          target: 'albums',
-          title: 'Recommended',
-        ),
+        const RecommendationShelf(kind: 'library', target: 'albums'),
         AlbumShelf(
           title: 'Rediscover',
           albums: random.take(12).toList(),
@@ -153,13 +149,11 @@ class RecommendationShelf extends StatefulWidget {
     required this.kind,
     this.id,
     this.target = 'albums',
-    this.title = 'More like this',
   });
 
   final String kind;
   final String? id;
   final String target;
-  final String title;
 
   @override
   State<RecommendationShelf> createState() => _RecommendationShelfState();
@@ -211,7 +205,7 @@ class _RecommendationShelfState extends State<RecommendationShelf> {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SectionLabel(widget.title),
+          SectionLabel('Recommended (Local)'),
           for (final item in _items)
             TrackRow(
               track: Track(
@@ -272,7 +266,7 @@ class _RecommendationShelfState extends State<RecommendationShelf> {
     }
     if (albums.isEmpty) return const SizedBox.shrink();
     return AlbumShelf(
-      title: widget.title,
+      title: 'Recommended (Local)',
       albums: albums,
       onOpen: (album) => openDetail(context, 'Album', album.path),
       onPlay: (album) => playAlbum(context, album),

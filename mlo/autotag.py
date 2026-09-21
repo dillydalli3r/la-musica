@@ -153,6 +153,12 @@ def trim_genres(af, count):
         if raw is None:
             return 0
         values = [raw]
+    # What the CONTAINER holds, verbatim. The guard below compares against
+    # THIS and not against the names split out of it: a file keeping one
+    # "; "-joined value has to be rewritten into repeated fields even when the
+    # names inside it are already canonical and in order — leaving the join in
+    # place is not "nothing to clean", it is the other tagger's spelling.
+    stored = [str(v) for v in values]
     if len(values) == 1 and ";" in str(values[0]):
         # ONE stored value that is really a "; "-joined list — the spelling
         # another tagger leaves behind, which tag_values() hands back whole
@@ -165,14 +171,16 @@ def trim_genres(af, count):
     # `count == 0` is this helper's "keep none" (delete the tag), which is NOT
     # normalize_genres' own 0 — there 0 means "no cap", for rendering.
     kept = normalize_genres(values, count) if count else []
-    if kept == values:
-        # Nothing to remove AND nothing to clean: at or under the cap, no
-        # duplicate and no stray spacing — never rewrite a container for
-        # nothing.
+    # What the tag should hold: repeated fields for a list, one plain value for
+    # a single genre — the shapes `set_tag` writes below.
+    want = [kept[0]] if len(kept) == 1 else kept
+    if want == stored:
+        # Nothing to remove, nothing to clean and nothing re-spelled: never
+        # rewrite a container for nothing.
         return 0
-    if kept:
+    if want:
         # A list writes repeated GENRE fields; one value stays a plain string.
-        af.set_tag("GENRE", kept if len(kept) > 1 else kept[0])
+        af.set_tag("GENRE", want if len(want) > 1 else want[0])
     else:
         # Nothing survives the cap — an empty GENRE is worse than no GENRE.
         af.delete_tag("GENRE")

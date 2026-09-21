@@ -477,7 +477,7 @@ ok("GENRE_COUNT" not in res["tracks"][0]["issues"],
 set_tags(flac, dict(NO_MOOD, MOOD="melancholic"))
 
 # ----------------------------------------------------------------------
-# Genre ORDER (grade_check_genre_order) — the family, if present, is LAST
+# Genre ORDER (grade_check_genre_order) — the family, if present, is FIRST
 # ----------------------------------------------------------------------
 print("== genre order ==")
 # The count check is off in every case here: order and count are separate
@@ -486,21 +486,21 @@ print("== genre order ==")
 # anyway, which is what makes this wording independent of the count rule).
 ord_cfg = dict(mood_cfg, grade_check_genre_count=False, mb_genre_count=3,
                grade_check_genre_order=True)
-set_multi(flac, "GENRE", ["rock", "shoegaze", "dream pop"])
+set_multi(flac, "GENRE", ["shoegaze", "dream pop", "rock"])
 res = _grade_album(album, "EMBEDDED", ord_cfg)
 ok(res["tracks"][0]["issues"] == ["GENRE_ORDER"],
-   f"a family in the first slot fails the order check "
+   f"a family in the last slot fails the order check "
    f"(got {res['tracks'][0]['issues']})")
-ok(any(i.startswith("family genre must be the last one") for i in res["issues"]),
+ok(any(i.startswith("family genre must be the first one") for i in res["issues"]),
    f"the issue names the rule (got {res['issues']})")
 ok(res["total_checks"] - res["pass_count"] == 1,
    f"and costs exactly one grade point ({res['pass_count']}/{res['total_checks']})")
 
-set_multi(flac, "GENRE", ["shoegaze", "dream pop", "rock"])
+set_multi(flac, "GENRE", ["rock", "shoegaze", "dream pop"])
 res = _grade_album(album, "EMBEDDED", ord_cfg)
 ok("GENRE_ORDER" not in res["tracks"][0]["issues"]
    and res["pass_count"] == res["total_checks"],
-   f"specifics first, family last passes ({res['pass_count']}/{res['total_checks']})")
+   f"family first, specifics behind it passes ({res['pass_count']}/{res['total_checks']})")
 # No family at all is fine too — it is derived, never required.
 set_multi(flac, "GENRE", ["shoegaze", "dream pop"])
 res = _grade_album(album, "EMBEDDED", ord_cfg)
@@ -523,7 +523,7 @@ ok("GENRE_ORDER" in res["tracks"][0]["issues"]
 
 # The OVERFLOW is the count check's business, not this one's: two checks may
 # not both fail one track over the same list.
-set_multi(flac, "GENRE", ["shoegaze", "dream pop", "post-britpop", "rock"])
+set_multi(flac, "GENRE", ["rock", "shoegaze", "dream pop", "post-britpop"])
 res = _grade_album(album, "EMBEDDED", ord_cfg)
 ok("GENRE_ORDER" not in res["tracks"][0]["issues"]
    and "GENRE_COUNT" not in res["tracks"][0]["issues"],
@@ -553,7 +553,7 @@ ok(res["total_checks"] - res["pass_count"] == 1,
 # A spelling the vocabulary DOES know is not a failure, whatever its case: the
 # writers canonicalize it (mlo.genres.canonical), so a library tagged by an
 # older build does not start failing.
-set_multi(flac, "GENRE", ["Shoegaze", "Rock"])
+set_multi(flac, "GENRE", ["Rock", "Shoegaze"])
 res = _grade_album(album, "EMBEDDED", voc_cfg)
 ok("GENRE_VOCAB" not in res["tracks"][0]["issues"]
    and res["pass_count"] == res["total_checks"],

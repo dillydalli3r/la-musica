@@ -8,6 +8,10 @@ from .deps import (
     TXXX, USLT, COMM, UFID, Encoding, TextFrame, Frames, APIC, MP4Cover, Picture,
 )
 from .stats import _decode_mp4_value
+# The ONE canonical tag-value rule (spelling + spacing). Applied here on every
+# write so an import, a wizard write, a script and a manual edit all land the
+# same, and re-applied by script 10 over an existing library.
+from .tagtext import canonical_text
 
 TAG_MAP = {
     # Standard sorting/display fields. These are semantic names; the
@@ -943,7 +947,9 @@ class AudioFile:
         for k, v in (mapping or {}).items():
             if v is None:
                 continue
-            v = str(v).strip()
+            # Same rule as set_tag (mlo.tagtext) before the trim, so a video's
+            # MEDIA/SOURCE/RELEASETYPE land canonical like an audio track's.
+            v = str(canonical_text(k, str(v))).strip()
             if not v:
                 continue
             clean[str(k).upper()] = v
@@ -1746,11 +1752,17 @@ class AudioFile:
             values = [str(v).strip() for v in value if str(v).strip()]
             if not values:
                 return False
+            # Canonicalise each PIECE, not just the joined string: a repeated
+            # field is written one comment per value, so canonicalising only
+            # the "; "-joined copy left the pieces on disk uncanonical.
+            values = [canonical_text(name, v) for v in values]
             value = "; ".join(values)
         # User request: all written tags must have no leading/trailing spaces.
         # Trim every value (except LYRICS which is handled separately) and
-        # enforce ITUNESADVISORY 0/1/2.
-        value = str(value).strip()
+        # enforce ITUNESADVISORY 0/1/2. The canonical spelling and spacing of
+        # the tags that have one is applied here too (mlo.tagtext): this is the
+        # ONE write choke point, so every writer's output compares equal.
+        value = canonical_text(name, str(value).strip())
         if name == "ITUNESADVISORY" and value not in ("0", "1", "2"):
             # Still write the trimmed value, but grading will flag invalid
             # values (non-0/1/2) as failure; we don't silently coerce.

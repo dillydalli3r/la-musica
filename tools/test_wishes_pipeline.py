@@ -168,7 +168,8 @@ class Pipeline:
         }]
 
     def wait_for_files(self, slsk_, ddir, username, wanted, timeout_s,
-                       cancel_check=None, phase="download", queue_budget_s=None):
+                       cancel_check=None, phase="download", queue_budget_s=None,
+                       on_start=None):
         root = os.path.join(ddir, username, "album")
         got = {}
         for w in wanted:

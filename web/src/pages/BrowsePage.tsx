@@ -33,6 +33,7 @@ import Modal from "../components/Modal";
 import { AdvisoryMark, CachedMark, EmptyState, GradeBadge, MediaChip, PageLoading, PendingMark, pendingSummary } from "../components/Badges";
 import { TrackCover } from "../components/CoverImg";
 import FavHeart from "../components/FavHeart";
+import { TrackActionsMenu } from "../components/TagActionsMenu";
 import { ExportButton } from "../components/ExportDialog";
 import { SortHeader, toggleSort } from "../lib/sort.tsx";
 import type { SortState } from "../lib/sort.tsx";
@@ -395,10 +396,10 @@ export default function BrowsePage() {
           />
         </td>
         <td className="td">
-          <div className="flex items-center gap-1.5 min-w-0">
+          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-w-0">
             <Link
               to={trackRef(tr)}
-              className="hover:text-accent-soft break-words flex-1 min-w-0"
+              className="hover:text-accent-soft break-words flex-1 min-w-[8rem]"
               title="Click to play · Ctrl-click to open track page"
               onClick={(e) => entityLinkClick(e, () => navigate(trackRef(tr)))}
             >
@@ -406,8 +407,11 @@ export default function BrowsePage() {
             </Link>
             <AdvisoryMark value={tr.tags.ITUNESADVISORY} />
             <CachedMark path={tr.path} />
+            <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+              <FavHeart kind="track" id={tr.path} mbid={tr.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" revealOnHover />
+            </span>
             <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
-              <FavHeart kind="track" id={tr.path} mbid={tr.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" />
+              <TrackActionsMenu path={tr.path} releaseMbid={tr.tags.MUSICBRAINZ_ALBUMID} />
             </span>
           </div>
         </td>

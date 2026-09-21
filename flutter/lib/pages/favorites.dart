@@ -150,11 +150,7 @@ class _FavoritesPageState extends State<FavoritesPage> {
         else
           for (var i = 0; i < _likes.length; i++)
             _likedRow(i, hits[i], queue, starts[i], muted),
-        const RecommendationShelf(
-          kind: 'favorites',
-          target: 'tracks',
-          title: 'Recommended tracks',
-        ),
+        const RecommendationShelf(kind: 'favorites', target: 'tracks'),
       ],
     );
   }
@@ -293,11 +289,7 @@ class _FavoritesPageState extends State<FavoritesPage> {
               onTap: () => openDetail(context, 'Artist', artist.path),
             ),
         for (final path in lostArtists) _lostFolder(path, 'artist'),
-        const RecommendationShelf(
-          kind: 'favorites',
-          target: 'albums',
-          title: 'Recommended albums',
-        ),
+        const RecommendationShelf(kind: 'favorites', target: 'albums'),
       ],
     );
   }

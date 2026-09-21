@@ -9,7 +9,7 @@ Two ideas, and nothing else:
    swap, try the alias map, and the name either is MusicBrainz's or it is not.
 
 2. **A family is the broad head a specific genre sits under.** `rock`,
-   `electronic`, `hip hop`, … — the "parent genre" the app appends after the
+   `electronic`, `hip hop`, … — the "parent genre" that goes in front of the
    specific one. MusicBrainz publishes no genre hierarchy, so the table below
    is curated, and the keyword rules after it catch the long tail. A genre
    whose family is unknown gets **no** parent rather than a wrong one.

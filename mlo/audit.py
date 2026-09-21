@@ -33,6 +33,7 @@ from .stats import (
     _diff_bytes, worker_count,
 )
 from .subproc import run_tool
+from .tagtext import canonical_text
 from .tools import detect_all_tools
 from .ui import print_header, log, c, Color
 
@@ -295,7 +296,10 @@ def _read_and_normalize_audit(path, write_tags=True, config=None):
     try:
         af = AudioFile(path)
         raw = str(af.get_tag("AUDIT") or "").strip()
-        v = raw.upper()
+        # mlo.tagtext owns the spelling rule; an unknown value (a word that is
+        # neither verdict) comes back unchanged and is reported as no verdict,
+        # exactly as the old .upper() did.
+        v = str(canonical_value("AUDIT", raw))
         changed = False
         if write_tags and raw and v in ("REAL", "FAKE") and raw != v:
             # Respect per-filetype AUDIT toggle
@@ -506,7 +510,9 @@ def run_audit_library(config):
                 af_tmp = AudioFile(pp)
                 if af_tmp.audio is None:
                     continue
-                if str(af_tmp.get_tag("MEDIA") or "").strip() == "CD":
+                # Through the canonical spelling (mlo.tagtext), so a "cd" a
+                # different tagger wrote is the same MEDIA this audit expects.
+                if canonical_text("MEDIA", af_tmp.get_tag("MEDIA")) == "CD":
                     cd_files_flagged.add(pp)
                     is_cd = True
             except Exception:

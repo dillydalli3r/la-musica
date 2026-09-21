@@ -13,6 +13,7 @@ import DownloadButton from "../components/DownloadButton";
 import { ExportButton, usePlaylistTracks } from "../components/ExportDialog";
 import MoreLikeThis from "../components/MoreLikeThis";
 import FavHeart from "../components/FavHeart";
+import { TrackActionsMenu } from "../components/TagActionsMenu";
 import { fmtDuration, GRID_SIZE_MIN } from "../lib/fmt";
 import Segmented from "../components/Segmented";
 import { sortRows, SortHeader, toggleSort, type SortState } from "../lib/sort.tsx";
@@ -106,11 +107,11 @@ export default function FavoritesPage() {
       {kind === "tracks" && <LikedTracks />}
       {/* the shelf renders null while it has nothing to suggest, so it costs
           the tabs without a recommendation nothing */}
-      {kind === "tracks" && <MoreLikeThis kind="favorites" target="tracks" title="Recommended tracks" />}
+      {kind === "tracks" && <MoreLikeThis kind="favorites" target="tracks" />}
       {kind === "albums" && <FavAlbums />}
       {kind === "artists" && <FavArtists />}
       {(kind === "albums" || kind === "artists") && (
-        <MoreLikeThis kind="favorites" target="albums" title="Recommended albums" />
+        <MoreLikeThis kind="favorites" target="albums" />
       )}
       {kind === "playlists" && <FavPlaylists />}
     </div>
@@ -363,7 +364,7 @@ function LikedTracks() {
                 {likedCols.includes("title") && (
                 <td className="td">
                   <div className="flex items-center gap-1.5 min-w-0">
-                    <span className={`break-words flex-1 min-w-0 ${r.missing ? "text-zinc-500" : "hover:text-accent-soft"}`} title={r.missing ? r.path : r.title}>
+                    <span className={`break-words flex-1 min-w-[8rem] ${r.missing ? "text-zinc-500" : "hover:text-accent-soft"}`} title={r.missing ? r.path : r.title}>
                       {r.title}
                     </span>
                     {!r.missing && <AdvisoryMark value={r.advisory} />}
@@ -371,8 +372,11 @@ function LikedTracks() {
                     {!r.missing && r.isVideo && (
                       <span title="Music video" className="shrink-0 inline-flex"><FileVideo className="h-3.5 w-3.5 text-zinc-500" /></span>
                     )}
+                    <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                      <FavHeart kind="track" id={r.path} mbid={r.mbid} iconClass="h-3.5 w-3.5" title="Unlike" revealOnHover />
+                    </span>
                     <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
-                      <FavHeart kind="track" id={r.path} mbid={r.mbid} iconClass="h-3.5 w-3.5" title="Unlike" />
+                      <TrackActionsMenu path={r.path} />
                     </span>
                   </div>
                 </td>
@@ -481,7 +485,7 @@ function FavArtists() {
             return (
               <tr key={a.path} className="table-row group">
                 <td className="td">
-                  <div className="flex items-center gap-1.5 min-w-0">
+                  <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-w-0">
                     <button
                       className="btn-ghost !px-1.5 !py-1 shrink-0 row-hover min-h-[2rem] md:min-h-0"
                       title="Play all"
@@ -492,8 +496,8 @@ function FavArtists() {
                     <Link to={artistRef(a)} className="font-medium hover:text-accent-soft break-words flex-1 min-w-0">
                       {displayName}
                     </Link>
-                    <span className="row-hover shrink-0">
-                      <FavHeart kind="artist" id={a.path} mbid={artistMbid(a)} iconClass="h-3.5 w-3.5" />
+                    <span className="shrink-0">
+                      <FavHeart kind="artist" id={a.path} mbid={artistMbid(a)} iconClass="h-3.5 w-3.5" revealOnHover />
                     </span>
                   </div>
                 </td>
@@ -582,8 +586,8 @@ function FavPlaylists() {
                     {p.name}
                   </button>
                   {p.kind === "smart" && <span className="chip bg-accent/10 text-accent-soft border border-accent/25 text-[10px] shrink-0">SMART</span>}
-                  <span className="row-hover shrink-0">
-                    <FavHeart kind="playlist" id={String(p.id)} iconClass="h-3.5 w-3.5" />
+                  <span className="shrink-0">
+                    <FavHeart kind="playlist" id={String(p.id)} iconClass="h-3.5 w-3.5" revealOnHover />
                   </span>
                 </div>
               </td>

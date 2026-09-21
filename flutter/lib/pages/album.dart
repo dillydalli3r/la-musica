@@ -185,7 +185,6 @@ class _AlbumPageState extends State<AlbumPage> {
           kind: 'album',
           id: widget.albumPath,
           target: 'albums',
-          title: 'More like this',
         ),
       ],
     );
@@ -412,10 +411,7 @@ class _PendingPanel extends StatelessWidget {
           const SizedBox(height: 4),
           Text(
             note.note,
-            style: TextStyle(
-              fontSize: 11,
-              color: body.withValues(alpha: 0.6),
-            ),
+            style: TextStyle(fontSize: 11, color: body.withValues(alpha: 0.6)),
           ),
         ],
       ),

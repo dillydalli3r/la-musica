@@ -59,7 +59,7 @@ export default function RecommendedPage() {
     <div className="p-6 space-y-5 mx-auto max-w-6xl">
       <PageHeader
         icon={Sparkles}
-        title="Recommended"
+        title="Recommended (Online)"
         subtitle="What the online providers suggest for your library — seeded by everything you have, or by one genre — with the library's own copy of each row whenever it already has one."
         actions={<Segmented value={kind} onChange={(k) => setParam("kind", k)} options={KINDS} />}
       >
@@ -81,6 +81,12 @@ export default function RecommendedPage() {
               </option>
             ))}
           </select>
+          {rows.length > 0 && (
+            <span className="text-[11px] text-zinc-500">
+              {rows.length} suggestion{rows.length === 1 ? "" : "s"} for{" "}
+              {seed === "library" ? "the whole library" : `“${seed}”`}
+            </span>
+          )}
           {recQ.data?.basis && (
             <span className="chip bg-raise border border-border text-zinc-400" title="What this answer was built from">
               basis: {recQ.data.basis}
@@ -109,17 +115,13 @@ export default function RecommendedPage() {
           action={{ label: "Browse this genre", to: `/discover?genre=${encodeURIComponent(seed)}` }}
         />
       ) : (
-        <div className="panel !p-0 overflow-hidden">
-          <div className="px-3 py-2 border-b border-border/60 text-[11px] text-zinc-500">
-            {rows.length} suggestion{rows.length === 1 ? "" : "s"} for{" "}
-            {seed === "library" ? "the whole library" : `“${seed}”`}
-          </div>
-          <ul className="divide-y divide-border/60 stagger">
-            {rows.map((item, i) => (
-              <DiscoverRow key={`${item.source}:${item.kind}:${item.mbid || item.path || item.title}-${i}`} item={item} />
-            ))}
-          </ul>
-        </div>
+        /* The same list the shelves render — no box of its own, so a page of
+           recommendations and a shelf of them are one format. */
+        <ul className="divide-y divide-border/60 stagger">
+          {rows.map((item, i) => (
+            <DiscoverRow key={`${item.source}:${item.kind}:${item.mbid || item.path || item.title}-${i}`} item={item} />
+          ))}
+        </ul>
       )}
     </div>
   );

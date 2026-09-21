@@ -183,6 +183,17 @@ def _audio_tag_family(tag_name):
         return "LYRICS"
     return _TAG_TO_FAMILY.get(name)
 
+
+# The two ADVISORY tags answer to DIFFERENT switches, because different things
+# write them: `ALBUMITUNESADVISORY` is script 8's derivation — "Auto Album
+# Advisory", derived from the per-track values — while `ITUNESADVISORY` is what
+# the advisory FETCH resolves from the providers (script 8 only ever zeroes it
+# for an instrumental). One family switch for both meant that turning the
+# derivation off silently disabled the explicit "Fetch advisory rating" action,
+# and the refused run replied exactly like "no provider knew this track".
+_TAG_WRITE_SWITCH = {"ITUNESADVISORY": "advisory_auto_fetch"}
+
+
 def _ext_to_audio_type(ext):
     ext = (ext or "").lower().lstrip(".")
     if ext == "flac":
@@ -236,7 +247,9 @@ def should_write_audio_tag(config, tag_name, filepath=None, filetype=None):
         "ENERGY": "mood_enabled",
         "LYRICS": None,  # lyrics_format gates this separately
     }
-    gkey = family_global.get(family)
+    # A tag whose own writer has a switch of its own wins over its family's
+    # (see _TAG_WRITE_SWITCH).
+    gkey = _TAG_WRITE_SWITCH.get(str(tag_name).upper()) or family_global.get(family)
     if gkey is not None and not config.get(gkey, True):
         return False
     # INSTRUMENTAL has two globals; require at least one path to be enabled.
@@ -451,6 +464,10 @@ DEFAULT_CONFIG = {
     # (squareness) and zero timestamps count as failures for the relevant
     # file types.
     "grade_check_tag_spaces": True,
+    # Tag VALUES with a canonical spelling must be stored that way (mlo.tagtext:
+    # "cd" -> "CD", "album; live" -> "Album; Live"). Its own toggle because it
+    # is its own kind of near-miss: not whitespace, a spelling.
+    "grade_check_tag_case": True,
     "grade_check_lyrics_spaces": True,
     "grade_check_cue_spaces": True,
     # Cover ASPECT RATIO (squareness) — |w/h - 1| <= cover_crop_threshold.
@@ -548,9 +565,9 @@ DEFAULT_CONFIG = {
     # genre is a complete answer (the family is optional), so there is no
     # exact-count quota and nothing is ever topped up to fill a slot.
     "grade_check_genre_count": True,
-    # Genre ORDER: the list is a hierarchy of specific genres with the FAMILY
-    # LAST ("shoegaze / dream pop / rock"). Fails a list whose family sits in
-    # an earlier slot or repeats; the names themselves are graded by
+    # Genre ORDER: the list is a hierarchy with the FAMILY FIRST
+    # ("rock / shoegaze / dream pop"). Fails a list whose family sits in a
+    # later slot or repeats; the names themselves are graded by
     # grade_check_genre_vocab below (see mlo/genres.py).
     "grade_check_genre_order": True,
     # Genre VOCABULARY: every stored name must be a MusicBrainz genre
@@ -798,7 +815,7 @@ DEFAULT_CONFIG = {
     # already answered with (plus whatever the other configured sources know)
     # and returns at most `mb_genre_count - 1` SPECIFIC genres, most specific
     # first: the family is not its to answer — the app derives it
-    # (mlo.genre_vocab.parent_of) and appends it last, see mlo.genres. On by
+    # (mlo.genre_vocab.parent_of) and puts it first, see mlo.genres. On by
     # default *when an AI endpoint is configured* — with no base URL/model the
     # import simply uses the source list as-is.
     "ai_genre_inference": True,
@@ -1096,11 +1113,11 @@ DEFAULT_CONFIG = {
     # disagree: how many genres an import writes onto a track (highest-voted
     # source first), how many a track may KEEP (script 8's auto tagging, the
     # genre import and script 10's canonical pass all trim the rest off), and
-    # the most grading accepts (`grade_check_genre_count`). Default 2: one
-    # specific genre and its family ("shoegaze / rock"). The family is DERIVED
+    # the most grading accepts (`grade_check_genre_count`). Default 2: the
+    # family and one specific genre ("rock / shoegaze"). The family is DERIVED
     # (mlo.genre_vocab.parent_of), never asked of a model and never invented,
-    # and it takes the LAST slot — so 3 means "two specific genres and the
-    # family", not a third synonym. Raising it past 3 would say less about the
+    # and it takes the FIRST slot — so 3 means "the family and two specific
+    # genres", not a third synonym. Raising it past 3 would say less about the
     # music, not more (GENRE_COUNT_MAX), and a merged "Rock; Alternative Rock;
     # Indie; Shoegaze; Post-Rock" list helps no one.
     "mb_genre_count": 2,
@@ -1276,11 +1293,15 @@ DEFAULT_CONFIG = {
     "server_public_url": "",
     # Desktop/mobile/web notifications for the events the app already has:
     # a wish found on Soulseek, a download finished, an album ready to
-    # import. Each client asks for its own OS permission; these switches are
-    # the server-side half (what gets published at all).
+    # import — plus the two "it began" halves of a Soulseek transfer, a
+    # download whose first bytes moved and a peer taking files from us. Each
+    # client asks for its own OS permission; these switches are the
+    # server-side half (what gets published at all).
     "notify_wish_found": True,
     "notify_download_done": True,
     "notify_import_ready": True,
+    "notify_soulseek_download_start": True,
+    "notify_soulseek_upload_start": True,
     # UI language for the web app and the client shells. English is the
     # shipped language and the fallback for every key a locale does not
     # translate (web/src/locales). The library's own tag language — the one

@@ -43,6 +43,11 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+# The canonical tag-value rule (mlo.tagtext) — dependency-free and importable
+# here by design, so the release types this plugin writes are spelled exactly
+# the way the tag layer, the organizer and the grader spell them.
+from mlo.tagtext import canonical_value  # noqa: E402
+
 UA = "MusicLibraryOptimizer/2.0 (beets mloplugin)"
 _MB_LOCK = threading.Lock()
 _MB_LAST = 0.0
@@ -146,13 +151,21 @@ def _work_for_recording(recording_mbid):
 
 
 def _cap_releasetypes(types):
-    """Picard release-type script: EP uppercased, everything else Title Case."""
+    """Release types in MusicBrainz's own casing — "ep" -> "EP", "album" ->
+    "Album", "dj-mix" -> "DJ-mix".
+
+    The rule is mlo.tagtext's (the same one the tag layer applies on every
+    write, and the same vocabulary mlo.naming resolves a folder path with), so
+    the value this stage writes and the value grading compares can never be
+    two spellings of one type. A type the vocabulary does not know is left as
+    the source spelled it.
+    """
     out = []
     for t in types or []:
         t = str(t).strip()
         if not t:
             continue
-        out.append("EP" if t.lower() == "ep" else t.title())
+        out.append(canonical_value("RELEASETYPE", t))
     return out
 
 

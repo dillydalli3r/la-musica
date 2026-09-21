@@ -118,6 +118,9 @@ async def _lifespan(app: FastAPI):
     # Soulseek status watcher: pushes a frame the moment the login state,
     # daemon state or port conflict changes (see _soulseek_watch).
     threading.Thread(target=_soulseek_watch, daemon=True).start()
+    # Soulseek UPLOADS watcher: announces a peer starting to download from us
+    # (see _soulseek_uploads_watch) — nothing else in the app watches uploads.
+    threading.Thread(target=_soulseek_uploads_watch, daemon=True).start()
     yield
     # Stop taking new work first (the two workers above are the app's own
     # source of new jobs), then the honest part: wait — bounded — for whatever
@@ -382,6 +385,49 @@ def _soulseek_watch():
         except Exception:
             pass
         time.sleep(_SLSK_INTERVAL_S)
+
+
+# --------------------------------------------------------------------------- #
+# Nothing in the app ever looked at slskd's UPLOAD tree: what others take from
+# us only showed up in the Shares page's own history, when the user went
+# looking. This watcher announces a peer that STARTS downloading from us — one
+# frame per user, the moment they go from quiet to taking files, and nothing
+# more while they are still taking the same ones.
+_ULSK_INTERVAL_S = 5.0     # uploads change slowly: one poll per 5 s is plenty
+_ULSK_STATE = {}           # {username: active uploads} from the last pass
+
+
+def _soulseek_uploads_check(cfg=None):
+    """One uploads pass: announce every user that just started downloading
+    from us. Returns the frames emitted — the loop ignores them, a test does
+    not have to.
+
+    Skipped entirely when slskd is not up (and before the config is read):
+    there is no upload tree to look at, and a daemon that is not running must
+    not cost a request — or a config read — every 5 seconds."""
+    from server import soulseek
+
+    global _ULSK_STATE
+    if not (soulseek.is_running() or soulseek.web_up()):
+        return []
+    cfg = cfg or load_config()
+    _ULSK_STATE, frames = soulseek.upload_start_frames(
+        _ULSK_STATE, soulseek.uploads_state(cfg))
+    for f in frames:
+        events_mod.emit("upload_started", f"Sharing started: {f['files']} file(s)",
+                        f"{f['username']} is downloading from you",
+                        {"link": "/soulseek", "username": f["username"],
+                         "files": f["files"]}, config=cfg)
+    return frames
+
+
+def _soulseek_uploads_watch():
+    while True:
+        try:
+            _soulseek_uploads_check()
+        except Exception:
+            pass
+        time.sleep(_ULSK_INTERVAL_S)
 
 
 # --------------------------------------------------------------------------- #
@@ -6132,7 +6178,7 @@ def _genre_names(value, cap):
     first as ONE genre literally named "['shoegaze', 'rock']" and the second as
     one named "Rock; Shoegaze" — one field, and a genre no reader recognises.
     `normalize_genres` splits it, resolves each name, derives the family and
-    puts it last, capped at *cap*.
+    puts it first, capped at *cap*.
     """
     from mlo.genres import normalize_genres
     return normalize_genres(value, cap)
@@ -6142,7 +6188,7 @@ def _write_album_genres(files, names, per_track=None, limit=None):
     """Write GENRE per track: the track's own genres first (MusicBrainz
     recording genres, when the release has them), then the album-level merged
     list, canonicalized and capped through `mlo.genres.normalize_genres`
-    (MusicBrainz's own spelling, the family last, at most *limit* names) — so
+    (MusicBrainz's own spelling, the family first, at most *limit* names) — so
     the file holds the same list the import and the trimming scripts keep.
     Returns the files written."""
     from mlo.audio import AudioFile
@@ -6444,20 +6490,27 @@ class AdvisoryFetchRequest(BaseModel):
 def mb_advisory_fetch(req: AdvisoryFetchRequest):
     """Resolve ITUNESADVISORY (0/1) for an album or a MusicBrainz release.
 
-    Tracks are identified by their ISRC tag — or by the MusicBrainz recording
-    ID an import already stamped, whose ISRCs MusicBrainz supplies — and rated
-    by EVERY applicable source in one pass (Deezer and Spotify by ISRC, Apple's
-    explicit-edition album route, Apple's exact-title song search), merged by
-    `integrations.merge_advisory`: 1 when any source states explicit, else 0 —
-    an unstated advisory is written as 0, and `answers` is what shows whether
-    any source actually spoke. A `cleaned` Apple entry states nothing and is
-    never written, an existing valid 0/1/2 is never overwritten, and a value
-    equal to the merged one is not rewritten.
+    Tracks are identified by every ISRC their own tag states — or by the
+    MusicBrainz recording ID an import already stamped, whose ISRCs
+    MusicBrainz supplies — and rated by EVERY applicable source in one pass
+    (Deezer and Spotify by ISRC, Apple's explicit-edition album route, Apple's
+    exact-title song search), merged by `integrations.merge_advisory`: 1 when
+    any source states explicit, else 0 — an unstated advisory is written as 0,
+    and `answers` is what shows whether any source actually spoke. A `cleaned`
+    Apple entry states nothing and is never written, an existing valid 0/1/2
+    is never overwritten, and a value equal to the merged one is not
+    rewritten. ALBUMITUNESADVISORY is derived from the per-track values for
+    every album folder the call touched (script 8's rule, `albums`).
 
-    Returns {updated, values, sources, answers}: `values` maps the file path
-    (paths mode) or "disc:position" (release mode) to the merged rating,
-    `sources` maps the same keys to the provider that stated it, and `answers`
-    maps them to what every source said ({source: 0|1})."""
+    Returns {updated, values, sources, answers, albums, album_updated, gated}:
+    `values` maps the file path (paths mode) or "disc:position" (release mode)
+    to the merged rating, `sources` maps the same keys to the provider that
+    stated it, `answers` maps them to what every source said ({source: 0|1}),
+    `albums` maps each album folder to the ALBUMITUNESADVISORY derived from
+    those values, `album_updated` counts the album-tag writes and `gated` the
+    files the ADVISORY write gate refused. `skipped` carries the reason (no
+    `updated`, no `values`) when that gate refused EVERY file, so a caller
+    never reports a silent no-op as "nothing was found"."""
     from server import imports as imports_mod
 
     if not req.paths and not req.release_mbid:
@@ -6465,7 +6518,12 @@ def mb_advisory_fetch(req: AdvisoryFetchRequest):
     values = {}
     sources = {}
     answers = {}
+    albums = {}
     updated = 0
+    album_updated = 0
+    gated = 0
+    album_gated = 0
+    skipped = ""
     if req.release_mbid:
         rid = intg._mbid(req.release_mbid)
         if not rid:
@@ -6479,11 +6537,18 @@ def mb_advisory_fetch(req: AdvisoryFetchRequest):
         _tag_paths_guard(req.paths, req.staged)
         result = imports_mod.fetch_advisories(req.paths, load_config())
         updated = int(result.get("updated") or 0)
+        album_updated = int(result.get("album_updated") or 0)
+        gated = int(result.get("gated") or 0)
+        album_gated = int(result.get("album_gated") or 0)
+        skipped = str(result.get("skipped") or "")
         values.update(result.get("values") or {})
         sources.update(result.get("sources") or {})
         answers.update(result.get("answers") or {})
+        albums.update(result.get("albums") or {})
     return {"updated": updated, "values": values, "sources": sources,
-            "answers": answers}
+            "answers": answers, "albums": albums,
+            "album_updated": album_updated, "gated": gated,
+            "album_gated": album_gated, "skipped": skipped}
 
 
 class InstrumentalFetchRequest(BaseModel):

@@ -314,7 +314,6 @@ class _TrackPageState extends State<TrackPage> {
           kind: 'track',
           id: widget.trackPath,
           target: 'tracks',
-          title: 'Recommended tracks',
         ),
       ],
     );

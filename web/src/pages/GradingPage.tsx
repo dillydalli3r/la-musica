@@ -109,6 +109,7 @@ const GROUPS: Group[] = [
     desc: "Whitespace / blank-line / canonical-form rules. These make near-miss files fail so the formatter scripts can fix them.",
     keys: [
       "grade_check_tag_spaces",
+      "grade_check_tag_case",
       "grade_check_tag_blank_lines",
       "grade_check_lyrics_spaces",
       "grade_check_lyrics_blank_lines",
@@ -202,7 +203,8 @@ const CHECK_DESC: Record<string, string> = {
   grade_check_cover: "The album must have cover art meeting the configured size, squareness and crop rules.",
   grade_check_cover_crop: "The cover's width/height must be square within cover_crop_threshold — an aspect-ratio test, not crop detection (issue: 'Cover aspect ratio WxH not square').",
   grade_check_sidecar_cover: "Sidecar covers (01 - Song.jpg) must meet the same cover rules.",
-  grade_check_tag_spaces: "Leading/trailing spaces or tabs in any tag value fail.",
+  grade_check_tag_spaces: "Leading/trailing spaces or tabs in any tag value fail, and so does a run of two or more internal spaces — script 10 collapses both.",
+  grade_check_tag_case: "A tag whose value has a canonical spelling must be stored that way: MEDIA (CD, Digital Media), SOURCE, RELEASETYPE (Album; Live), RELEASESTATUS, AUDIT, RELEASECOUNTRY, SCRIPT and MOOD (Happy). A vocabulary's unknown value — a mood you typed, a release type MusicBrainz does not publish — is left alone, and free text (TITLE, ALBUM, ARTIST, LABEL, …) is never touched, which is what keeps AC/DC and k.d. lang intact. One check per track (issue code TAG_CASE); run Format all (script 10) to fix a library.",
   grade_check_tag_blank_lines: "Blank lines inside tag values fail (LYRICS is exempt — its own rules apply).",
   grade_check_lyrics_spaces: "Leading/trailing spaces on lyric lines fail.",
   grade_check_lyrics_blank_lines: "Blank-line placement must match the lyrics formatter's canonical output.",
@@ -359,6 +361,7 @@ export default function GradingPage() {
     const relaxedOff = [
       "grade_check_tag_spaces", "grade_check_lyrics_spaces", "grade_check_cue_spaces",
       "grade_check_cover_crop", "grade_check_lyrics_zero", "grade_check_tag_blank_lines",
+      "grade_check_tag_case",
       "grade_check_lyrics_blank_lines", "grade_check_cue_blank_lines",
       "grade_check_filename_case", "grade_check_ext_case", "grade_check_excess_tags",
       "grade_check_mb_links", "grade_check_rym_links",

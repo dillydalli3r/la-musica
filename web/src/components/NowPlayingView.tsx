@@ -1273,7 +1273,7 @@ export default function NowPlayingView(p: Props) {
             fills the screen behind the top bar (see the video layer above)
             with the same controls overlaid at the bottom edge */}
         {!videoPath && (
-        <div className={`safe-np-body flex-1 min-h-0 flex flex-col lg:flex-row items-center gap-4 sm:gap-8 overflow-clip ${layoutHasLyrics ? "" : "lg:justify-center"}`}>
+        <div className={`safe-np-body flex-1 min-h-0 flex flex-col lg:flex-row items-center gap-4 sm:gap-8 overflow-y-auto lg:overflow-clip ${layoutHasLyrics ? "" : "lg:justify-center"}`}>
           {/* left column: cover, track/album/artist, all playback controls —
               centered as a group inside the full column height.
               `w-full`: this is a flex item in a column whose `items-center`
@@ -1333,9 +1333,16 @@ export default function NowPlayingView(p: Props) {
               double-count with the cover block and clip the bottom half
               outside the scroll pane). While the next track's lyrics load,
               the previous ones stay on screen dimmed instead of collapsing
-              the layout (which flashed the cover to the middle). */}
+              the layout (which flashed the cover to the middle).
+
+              `min-h-[45vh]` below lg is what keeps them READABLE there: the
+              cover block is content-sized and claimed the whole height of a
+              short (zoomed) window, which left this column 60 px tall at the
+              very bottom of a clipped body — lyrics that were rendered and
+              unreachable. With the floor the body scrolls (overflow-y-auto
+              below lg) and the pane is a real reading surface. */}
           {!videoPath && layoutHasLyrics && (
-            <div className="flex-1 min-h-0 w-full lg:h-full flex flex-col max-w-3xl lg:max-w-none lg:flex-none lg:w-[56%] lg:ml-auto">
+            <div className="flex-1 min-h-[45vh] lg:min-h-0 w-full lg:h-full flex flex-col max-w-3xl lg:max-w-none lg:flex-none lg:w-[56%] lg:ml-auto">
               <div
                 ref={lyricsScrollRef}
                 className={`relative flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-5 no-scrollbar transition-opacity duration-300 ${

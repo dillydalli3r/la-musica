@@ -4,7 +4,7 @@ import { Image as ImageIcon, BadgeInfo, Loader2, RefreshCw, Trash2, User, Disc3 
 import { api, answerSources, checkTrackValues, replyFor } from "../api";
 import type { AdvisoryFetchResult, InstrumentalFetchResult } from "../api";
 import Modal from "./Modal";
-import { advisoryLine, instrumentalLine } from "./Badges";
+import { advisoryLine, advisoryOutcome, instrumentalLine } from "./Badges";
 import { toast } from "../store";
 
 /** Provider id → the name a reader knows ("audiodb" → TheAudioDB). */
@@ -75,7 +75,7 @@ export default function MetadataReviewModal({
       const { adv, inst, errors } = await checkTrackValues(paths);
       setChecked({ adv: adv ?? undefined, inst: inst ?? undefined });
       if (errors.length) toast.error(errors.join(" · "));
-      else toast(`Checked — ${adv?.updated ?? 0} advisory, ${inst?.updated ?? 0} instrumental value(s) written`);
+      else toast(`Checked — ${advisoryOutcome(adv)}, ${inst?.updated ?? 0} instrumental value(s) written`);
       onSaved?.();
     } finally {
       setChecking(false);

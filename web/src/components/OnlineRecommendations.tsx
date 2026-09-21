@@ -3,6 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Globe, Loader2 } from "lucide-react";
 import { api, type DiscoverKind, type DiscoverSeedKind } from "../api";
 import DiscoverRow, { NotesChips } from "./DiscoverRow";
+import RecommendShelf from "./RecommendShelf";
 
 /** How many rows the shelf asks for: a starting point beside the page's own
  *  list, not a second library. */
@@ -36,7 +37,6 @@ export default function OnlineRecommendations({
   seedMbid = "",
   seedName,
   seedArtist = "",
-  title = "Recommended (online)",
   limit = LIMIT,
 }: {
   /** The rows the shelf shows — the page's own kind (an artist page: artists). */
@@ -49,7 +49,6 @@ export default function OnlineRecommendations({
   seedName: string;
   /** The entity's artist (an album's or a track's; unused by an artist seed). */
   seedArtist?: string;
-  title?: string;
   limit?: number;
 }) {
   const mbid = seedMbid.trim();
@@ -84,24 +83,36 @@ export default function OnlineRecommendations({
   }, [notes]);
 
   return (
-    <section className="section">
-      <div className="flex items-center gap-1.5 mb-1">
-        <Globe className="h-3.5 w-3.5 text-zinc-500" />
-        <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">{title}</h2>
-      </div>
-      <p className="text-[11px] text-zinc-600 mb-2">{HINT}</p>
-
+    <RecommendShelf
+      icon={Globe}
+      title="Recommended (Online)"
+      hint={HINT}
+      meta={
+        rows.length > 0 ? (
+          <>
+            <span className="text-[11px] text-zinc-500">
+              {rows.length} suggestion{rows.length === 1 ? "" : "s"}
+            </span>
+            {data?.basis && (
+              <span className="chip bg-raise border border-border text-zinc-400" title="What these rows were built from">
+                basis: {data.basis}
+              </span>
+            )}
+          </>
+        ) : null
+      }
+    >
       {isLoading ? (
-        <div className="panel px-3 py-3 flex items-center gap-2 text-[11px] text-zinc-500">
+        <div className="flex items-center gap-2 py-2 text-[11px] text-zinc-500">
           <Loader2 className="h-3.5 w-3.5 animate-spin" />
           Asking the providers for what is like this…
         </div>
       ) : error ? (
-        <div className="panel px-3 py-3 text-[11px] text-amber-300/90" title={String(error)}>
+        <p className="py-2 text-[11px] text-amber-300/90" title={String(error)}>
           The online shelf could not be read: {error instanceof Error ? error.message : String(error)}
-        </div>
+        </p>
       ) : rows.length === 0 ? (
-        <div className="panel px-3 py-3 space-y-1.5">
+        <div className="space-y-1.5">
           <p className="text-[11px] text-zinc-500" title={verdict}>
             {verdict ||
               (name
@@ -111,18 +122,7 @@ export default function OnlineRecommendations({
           <NotesChips notes={sourceNotes} sources={asked} />
         </div>
       ) : (
-        <div className="panel !p-0 overflow-hidden">
-          <div className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-border/60">
-            <span className="text-[11px] text-zinc-500">
-              {rows.length} suggestion{rows.length === 1 ? "" : "s"}
-            </span>
-            {data?.basis && (
-              <span className="chip bg-raise border border-border text-zinc-400" title="What these rows were built from">
-                basis: {data.basis}
-              </span>
-            )}
-            <NotesChips notes={sourceNotes} sources={asked} />
-          </div>
+        <>
           <ul className="divide-y divide-border/60 stagger">
             {rows.map((item, i) => (
               <DiscoverRow
@@ -131,8 +131,14 @@ export default function OnlineRecommendations({
               />
             ))}
           </ul>
-        </div>
+          {/* Below the rows, not above them: who was asked and who stayed
+              silent is the footnote to an answer, and the four lines it took
+              above the list are four more suggestions the reader never saw. */}
+          <div className="mt-2">
+            <NotesChips notes={sourceNotes} sources={asked} />
+          </div>
+        </>
       )}
-    </section>
+    </RecommendShelf>
   );
 }

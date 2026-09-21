@@ -630,6 +630,9 @@ def _notify_finish(state, result, release):
     frame about their own button press is noise. A job that is merely retried
     (or re-queued behind another) has not settled and says nothing either.
 
+    The BEGINNING is announced separately and much earlier: `download_started`
+    goes out from _wait_for_files the moment a candidate's first bytes move.
+
     Never raises: a notification must not fail the download that earned it.
     """
     if state == "cancelled":
@@ -695,6 +698,57 @@ def _notify_finish(state, result, release):
                      "staging_path": staging, "imported": False})
     except Exception:
         traceback.print_exc()
+
+
+def _notify_download_start(username, files):
+    """Announce that a candidate's transfer has actually started moving bytes.
+
+    The outcome frames say how a job ended; until now nothing said that it
+    ever began, so a job sitting in a peer's queue for an hour looked exactly
+    like one that was downloading (the queue row says "Downloading …" from the
+    moment the files were requested). One frame per candidate, thrown the
+    first tick a transfer is really in flight.
+
+    Never raises: a notification must not fail the download that earned it.
+    """
+    try:
+        from server import events
+
+        label = str(_job.get("label") or "") or "Soulseek download"
+        count = int(files or 0)
+        data = {"link": "/soulseek", "username": str(username or ""), "files": count}
+        # Where the album is HEADED, when the job already knows: the folder is
+        # claimed before a byte is searched for (see _AlbumClaim/_album_claim),
+        # so it is known for every release the library can name.
+        claim = _job.get("_claim")
+        album_path = str(getattr(claim, "path", "") or "")
+        if album_path:
+            data["album_path"] = album_path
+        events.emit("download_started", f"Download started: {label}",
+                    f"{count} file(s) from {username}", data)
+    except Exception:
+        traceback.print_exc()
+
+
+def _start_once(files):
+    """A per-candidate "download started" announcer.
+
+    A CD candidate is fetched in TWO waits — the .log gate, then the album —
+    and both are the same candidate's transfers: only the first one that sees
+    bytes move may announce it, so the announcer swallows every call after its
+    first. `files` is the CANDIDATE's own file count, not the count of the wait
+    that happens to speak first: the .log gate fetches one file, and announcing
+    the whole album as "1 file(s)" is exactly the kind of wrong number a
+    notification must not carry."""
+    announced = []
+
+    def announce(username, _wait_files):
+        if announced:
+            return
+        announced.append(True)
+        _notify_download_start(username, files)
+
+    return announce
 
 
 # --------------------------------------------------------------------------- #
@@ -1871,7 +1925,7 @@ def _log_fail_reason(name, score, state, min_score):
 
 
 def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
-                    phase="download", queue_budget_s=None):
+                    phase="download", queue_budget_s=None, on_start=None):
     """Poll until every wanted remote path is present locally AND slskd vouches
     for it.
 
@@ -1924,7 +1978,14 @@ def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
     The progress block SHOWS exactly the `wanted` set: the wait is only ever
     called once the transfers it waits for are the only ones queued (the .log
     gate's album is requested after the gate passes, see _run), so there is
-    nothing further to display."""
+    nothing further to display.
+
+    `on_start` is the "download started" announcer (see _notify_download_start),
+    called ONCE — on the first tick where a transfer of this wait is really
+    InProgress — with (username, the number of files asked for). It defaults to
+    publishing the frame itself; a caller that runs TWO waits over ONE candidate
+    (the CD .log gate, then the album) passes an announcer of its own so that
+    only the first of them speaks (see _start_once)."""
     deadline = time.time() + timeout_s
     started = time.time()
     from server.soulseek import _user_transfers
@@ -1937,6 +1998,7 @@ def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
     leaves = {_leaf_of(w["filename"]) for w in wanted} - {""}
     got = {}
     live = []
+    started_announced = False
     last_bytes = -1
     last_progress = time.time()
     rate = None            # measured bytes/s between the last two ticks
@@ -2002,6 +2064,12 @@ def _wait_for_files(slsk, ddir, username, wanted, timeout_s, cancel_check=None,
                 break
             moved = sum(t["bytes"] for t in moving)
             inprog = [t for t in moving if "InProgress" in t["state"]]
+            if inprog and not started_announced:
+                # Bytes are actually moving for this candidate — the one
+                # moment the tray can say "it started"; every later tick is
+                # the same news (see _notify_download_start).
+                started_announced = True
+                (on_start or _notify_download_start)(username, len(wanted))
             if moved > last_bytes:
                 last_bytes, last_progress = moved, time.time()
             elif inprog:
@@ -3034,6 +3102,9 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 continue
             if _cancelled():
                 return _finish("cancelled")
+            # One "download started" frame per CANDIDATE, however many waits it
+            # takes to fetch it (see _start_once).
+            announce = _start_once(len(wanted))
             wanted_logs = ([{"filename": f["file"], "size": f["size"]}
                             for f in cand["logs"]]
                            if is_cd and cand["logs"] else [])
@@ -3070,7 +3141,8 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 _log("Downloading .log file(s) first for a quality check…")
                 got_logs = _wait_for_files(slsk, ddir, uname, wanted_logs,
                                            timeout_s=_LOG_TIMEOUT_S,
-                                           cancel_check=_cancelled, phase="logging")
+                                           cancel_check=_cancelled, phase="logging",
+                                           on_start=announce)
                 if len(got_logs) < len(wanted_logs):
                     _reject(uname, folder,
                             f"{len(got_logs)} of {len(wanted_logs)} log(s) arrived "
@@ -3131,7 +3203,8 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                  f"({cand['total_size'] / (1024 * 1024):.0f} MB, up to {est_timeout}s)…")
             got = _wait_for_files(slsk, ddir, uname, album_wanted or wanted,
                                   timeout_s=est_timeout, cancel_check=_cancelled,
-                                  queue_budget_s=_queue_budget(cand))
+                                  queue_budget_s=_queue_budget(cand),
+                                  on_start=announce)
             if wanted_logs:
                 # The logs are already on disk with terminal transfers, and the
                 # album wait above did not cover them (they went out in the

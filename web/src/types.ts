@@ -26,6 +26,10 @@ export interface AlbumMeta {
   MUSICBRAINZ_RELEASEGROUPID?: string | null;
   RATEYOURMUSIC_ALBUM?: string | null;
   MEDIA?: string | null;
+  /** Every country the release was released in. One code on most files, a
+   *  list ("US; CA") on the ones tagged from a release group's events — the
+   *  album card's badge shows them all. */
+  RELEASECOUNTRY?: string | null;
   CATALOGNUMBER?: string | null;
   LABEL?: string | null;
   "ALBUM DYNAMIC RANGE"?: string | null;

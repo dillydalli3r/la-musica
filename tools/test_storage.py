@@ -240,11 +240,26 @@ assert r.status_code == 200, (r.status_code, r.text)
 body = r.json()
 assert set(body) == {"mount", "label", "type", "total_bytes", "free_bytes",
                      "used_bytes", "percent_used", "library", "app_data",
-                     "trash", "downloads", "skipped", "skipped_count",
+                     "trash", "downloads", "dependencies", "app_total",
+                     "skipped", "skipped_count",
                      "scanned_at", "took_ms"}, sorted(body)
 assert body["library"]["bytes"] == AUDIO + SIDECAR, body["library"]
 assert body["free_bytes"] == 400, body
 assert isinstance(body["scanned_at"], int) and body["scanned_at"] > 0, body
+
+# The app's OWN footprint is one figure, and it is the sum of the parts the
+# same reply carries (the music is deliberately not in it — that is the point
+# of the statistic).
+def _n(row, key="bytes"):
+    return int((row or {}).get(key) or 0)
+
+assert body["app_total"]["bytes"] == (
+    _n(body["app_data"]) + _n(body["trash"]) + _n(body["downloads"])
+    + _n(body["dependencies"])), body["app_total"]
+assert body["app_total"]["files"] == (
+    _n(body["app_data"], "files") + _n(body["trash"], "files")
+    + _n(body["downloads"], "files") + _n(body["dependencies"], "files")), body["app_total"]
+assert body["app_total"]["measured"] is True, body["app_total"]
 
 shutil.rmtree(ROOT, ignore_errors=True)
 

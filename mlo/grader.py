@@ -18,6 +18,11 @@ from .genres import issues as genre_issues
 # The vocabulary predicate the genre writers canonicalize with, so the
 # grade_check_genre_vocab check asks the SAME question of a name they do.
 from .genres import canonical as genre_canonical, iter_names
+# The tag CANONICAL-VALUE rule (spelling + spacing) the writers apply on every
+# write (mlo.audio), so grade_check_tag_case / grade_check_tag_spaces can only
+# ever fail what those writers would have fixed — and the case check is the
+# SAME function, not a second opinion about what canonical means.
+from .tagtext import MEDIA_VALUES as _MEDIA_VALUES, canonical_value, spacing_problem
 from .lyrics_xlit import (
     XLIT_SIDECAR, dominant_script, primary_translation_lang, xlit_needs,
 )
@@ -40,11 +45,11 @@ from .ui import print_header, log, c, Color, print_separator, _short_val
 # Everything outside CD / Digital Media in this set is graded like any other
 # release — the CUE/LOG/AccurateRip expectations are already gated on
 # _is_cd(media_summary) — while unknown values still fail grading.
-KNOWN_MEDIA = {
-    "cd", "cd-r", "digital media", "vinyl", '12" vinyl', '10" vinyl', '7" vinyl',
-    "sacd", "dvd", "dvd-video", "dvd-audio", "blu-ray", "blu-spec cd", "shm-cd",
-    "cassette", "minidisc", "8-track", "vhs", "laserdisc",
-}
+#
+# Folded from mlo.tagtext.MEDIA_VALUES, the table the writers canonicalize
+# against: the value this grader accepts is exactly the value a writer stores,
+# so a media the app can write can never be "unrecognized".
+KNOWN_MEDIA = frozenset(v.lower() for v in _MEDIA_VALUES)
 
 
 def _is_cd(media_summary):
@@ -1651,20 +1656,34 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                         track["issues"].append(t)
             elif t == "GENRE":
                 raw = str(val)
-                if raw != raw.strip():
-                    if cfg.get("grade_check_tag_spaces", True):
+                if cfg.get("grade_check_tag_spaces", True):
+                    # GENRE arrives here as the whole "; "-joined list, so its
+                    # leading/trailing answer is the whole-string trim, and an
+                    # internal run of spaces is the same near-miss every other
+                    # tag is graded on (the rule lives in mlo.tagtext).
+                    why = spacing_problem(t, raw)
+                    if not why and raw != raw.strip():
+                        why = "has leading/trailing spaces"
+                    if why:
                         failed_checks += 1
-                        add_issue(f"GENRE has leading/trailing spaces ({raw!r})", basename)
+                        add_issue(f"GENRE {why} ({raw!r})", basename)
                         track["issues"].append(t)
 
             # Configurable: check tags for blank lines (spaces already handled for GENRE above)
             # Only check per-line trailing/leading spaces for non-GENRE/ITUNESADVISORY when enabled
             if cfg.get("grade_check_tag_spaces", True) and t not in ("GENRE", "ITUNESADVISORY"):
                 raw_all = str(val) if val is not None else ""
-                # Per-line check: any line with leading/trailing spaces/tabs (not newlines)
-                if raw_all and any(ln != ln.strip(" \t") for ln in raw_all.splitlines()):
+                # Leading/trailing is judged per LINE — a value carrying
+                # newlines still has untrimmed lines — while a run of 2+ inner
+                # spaces is a per-VALUE near-miss that script 10 collapses.
+                # Both halves come from mlo.tagtext.spacing_problem, so grading
+                # can never fail a value a writer would have stored as it is.
+                why = spacing_problem(t, raw_all)
+                if not why and raw_all and any(ln != ln.strip(" \t") for ln in raw_all.splitlines()):
+                    why = "has leading/trailing spaces"
+                if why:
                     failed_checks += 1
-                    add_issue(f"{t} has leading/trailing spaces ({raw_all!r})", basename)
+                    add_issue(f"{t} {why} ({raw_all!r})", basename)
                     track["issues"].append(t)
             if cfg.get("grade_check_tag_blank_lines", True):
                 # LYRICS is exempt here: the lyrics formatter intentionally
@@ -1718,8 +1737,8 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                 track["issues"].append("GENRE_COUNT")
 
         # Genre ORDER (grade_check_genre_order) — the hierarchy half of the
-        # same contract: the specific genres come first and the FAMILY, if
-        # present, is the LAST one ("shoegaze / dream pop / rock"). The rules
+        # same contract: the FAMILY, if present, comes FIRST and the specific
+        # genres follow it ("rock / shoegaze / dream pop"). The rules
         # themselves live in mlo.genres, which the import and scripts 8/10
         # also apply, so the grader cannot fail a list those would leave alone.
         #
@@ -1929,9 +1948,12 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     # Per-line spaces check (not whole-string strip which flags trailing \n)
                     if cfg.get("grade_check_tag_spaces", True):
                         total_checks += 1
-                        if raw and any(ln != ln.strip(" \t") for ln in raw.splitlines()):
+                        why = spacing_problem(tag_key, raw)
+                        if not why and raw and any(ln != ln.strip(" \t") for ln in raw.splitlines()):
+                            why = "has leading/trailing spaces"
+                        if why:
                             failed_checks += 1
-                            add_issue(f"{tag_key} has leading/trailing spaces ({raw!r})", basename)
+                            add_issue(f"{tag_key} {why} ({raw!r})", basename)
                             track["issues"].append(tag_key)
                     if cfg.get("grade_check_tag_blank_lines", True):
                         total_checks += 1
@@ -1941,6 +1963,43 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                             track["issues"].append(tag_key)
             except Exception as e:
                 unavailable("Tag hygiene sweep (spaces/blank lines)", e, basename)
+
+        # Tag VALUE CASE (grade_check_tag_case) — a tag whose value has a
+        # canonical spelling (mlo.tagtext.CANONICAL_CASE: MEDIA, SOURCE,
+        # RELEASETYPE, RELEASESTATUS, AUDIT, RELEASECOUNTRY, SCRIPT, MOOD) must
+        # be stored that way. ONE check per track: how many tags a track got
+        # wrong does not change what the track costs, exactly like the path
+        # case check. The comparison is the write rule itself
+        # (mlo.tagtext.canonical_value), so grading can only ever fail a value
+        # those writers would have rewritten — a vocabulary's unknown value
+        # comes back unchanged and passes.
+        #
+        # Free text is never looked at: TITLE, ALBUM, ARTIST, ALBUMARTIST,
+        # LABEL, COMMENT and the lyrics have no canonical form, which is what
+        # keeps "AC/DC" and "k.d. lang" out of this check. The tags a filetype
+        # is not supposed to carry are skipped with every other write gate.
+        if cfg.get("grade_check_tag_case", True):
+            try:
+                total_checks += 1
+                wrong = []
+                for tag_key, tag_val in (af.all_tags() or {}).items():
+                    if tag_val is None:
+                        continue
+                    raw_val = str(tag_val)
+                    fixed = str(canonical_value(tag_key, raw_val))
+                    if fixed == raw_val:
+                        # No canonical form (free text), or already canonical.
+                        continue
+                    if not should_write_audio_tag(cfg, tag_key, filepath=ap):
+                        continue
+                    wrong.append(f"{tag_key} {raw_val!r} → {fixed!r}")
+                if wrong:
+                    failed_checks += 1
+                    add_issue("Tag case: " + ", ".join(wrong)
+                              + " (run Format all (script 10))", basename)
+                    track["issues"].append("TAG_CASE")
+            except Exception as e:
+                unavailable("Tag case check", e, basename)
 
         # ENCODER marker tags — per-format, only when that field is enabled.
         # For FLAC (the only audio type the app re-encodes), check PROGRAM/QUALITY/VERSION.

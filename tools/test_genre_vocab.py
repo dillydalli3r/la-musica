@@ -10,9 +10,10 @@ What this pins:
     alias table, and returns None for anything else;
   * `parent_of` answers with a FAMILY, never with a specific genre, and with
     None rather than a wrong guess;
-  * `normalize_genres` is the list policy: specific genres first, the family
-    LAST, the family derived rather than repeated, duplicates collapsed, the
-    cap enforced, and an unrecognised name kept verbatim (lossless);
+  * `normalize_genres` is the list policy: the family FIRST, the specific
+    genres behind it, the family derived rather than repeated, duplicates
+    collapsed, the cap enforced, and an unrecognised name kept verbatim
+    (lossless);
   * `split_stored` reads a repeated field, a " / "-joined value and a
     "; "-joined legacy value as the same list;
   * `issues` reports exactly the structural problems the grader acts on.
@@ -78,21 +79,21 @@ check(V.parent_of("qawwali") is None, "no family beats a wrong family")
 # --------------------------------------------------------------------------- #
 # 4. normalize_genres()
 # --------------------------------------------------------------------------- #
-check(G.normalize_genres(["Shoegaze"]) == ["Shoegaze", "Rock"],
-      "the family is derived and goes last", G.normalize_genres(["Shoegaze"]))
-check(G.normalize_genres(["Shoegaze", "Dream Pop"]) == ["Shoegaze", "Rock"],
-      "the family takes slot 2 from a second specific genre")
+check(G.normalize_genres(["Shoegaze"]) == ["Rock", "Shoegaze"],
+      "the family is derived and goes first", G.normalize_genres(["Shoegaze"]))
+check(G.normalize_genres(["Shoegaze", "Dream Pop"]) == ["Rock", "Shoegaze"],
+      "the family takes slot 1 from a second specific genre")
 check(G.normalize_genres(["Shoegaze", "Dream Pop"], count=3)
-      == ["Shoegaze", "Dream Pop", "Rock"], "count 3 fits two specifics")
-check(G.normalize_genres(["rock", "Shoegaze"]) == ["Shoegaze", "Rock"],
-      "a family given first is moved last, not repeated")
-check(G.normalize_genres(["Hip-Hop", "Trap"], count=3) == ["Trap", "Hip Hop"],
-      "a family given last is not duplicated by the derived one")
-check(G.normalize_genres(["Shoegaze", "shoegaze", "SHOEGAZE"]) == ["Shoegaze", "Rock"],
+      == ["Rock", "Shoegaze", "Dream Pop"], "count 3 fits two specifics")
+check(G.normalize_genres(["rock", "Shoegaze"]) == ["Rock", "Shoegaze"],
+      "a family given first is not duplicated by the derived one")
+check(G.normalize_genres(["Hip-Hop", "Trap"], count=3) == ["Hip Hop", "Trap"],
+      "a family given first keeps its slot, most specific behind it")
+check(G.normalize_genres(["Shoegaze", "shoegaze", "SHOEGAZE"]) == ["Rock", "Shoegaze"],
       "duplicates collapse case-insensitively")
 check(G.normalize_genres(["Shoegaze"], count=1) == ["Shoegaze"],
       "count 1 has no room for the family")
-check(G.normalize_genres(["Shoegaze", "Nonsense"]) == ["Shoegaze", "Rock"],
+check(G.normalize_genres(["Shoegaze", "Nonsense"]) == ["Rock", "Shoegaze"],
       "a recognised genre wins the slot a junk name would have taken",
       G.normalize_genres(["Shoegaze", "Nonsense"]))
 check(G.normalize_genres(["Nonsense"], count=2) == ["Nonsense"],
@@ -101,7 +102,7 @@ check(G.normalize_genres(["Nonsense"], count=2) == ["Nonsense"],
 check(G.normalize_genres([]) == [] and G.normalize_genres(None) == [],
       "nothing in, nothing out")
 check(G.normalize_genres(["Rock; Alternative Rock / Shoegaze"])
-      == ["Alternative Rock", "Rock"],
+      == ["Rock", "Alternative Rock"],
       "one stored value holding a list is read as names",
       G.normalize_genres(["Rock; Alternative Rock / Shoegaze"]))
 
@@ -112,17 +113,17 @@ check(G.split_stored("Rock / Shoegaze") == ["Rock", "Shoegaze"], "the ' / ' form
 check(G.split_stored("Rock; Shoegaze") == ["Rock", "Shoegaze"], "the '; ' form")
 check(G.split_stored("Shoegaze") == ["Shoegaze"], "the single form")
 check(G.split_stored("") == [] and G.split_stored(None) == [], "the empty form")
-check(G.format_genres(["Shoegaze", "dream pop"]) == "Shoegaze / Dream Pop / Rock",
-      "rendering puts the family last", G.format_genres(["Shoegaze", "dream pop"]))
+check(G.format_genres(["Shoegaze", "dream pop"]) == "Rock / Shoegaze / Dream Pop",
+      "rendering puts the family first", G.format_genres(["Shoegaze", "dream pop"]))
 
 # --------------------------------------------------------------------------- #
 # 6. issues()
 # --------------------------------------------------------------------------- #
-check(G.issues(["shoegaze", "rock"]) == [], "specific then family is in shape")
-check(G.issues(["shoegaze", "dream pop", "rock"], count=2)
+check(G.issues(["rock", "shoegaze"]) == [], "family then specific is in shape")
+check(G.issues(["rock", "shoegaze", "dream pop"], count=2)
       == ["too many (3 > 2)"], "over the cap")
-check(G.issues(["rock", "shoegaze"]) == ["family genre must be the last one"],
-      "family first is out of shape")
+check(G.issues(["shoegaze", "rock"]) == ["family genre must be the first one"],
+      "family last is out of shape")
 check("duplicate" in G.issues(["shoegaze", "shoegaze", "rock"]), "a duplicate")
 check(any("not a known genre" in p for p in G.issues(["nonsense", "rock"])),
       "an unrecognised name is reported")

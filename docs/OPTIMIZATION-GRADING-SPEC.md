@@ -122,7 +122,7 @@ per-script results are returned (`server/script_runners.py`).
 | 7 | DR & ReplayGain | in-process loudness-war DR (`mlo/dr.py`) + `rsgain` ReplayGain 2.0 | `DYNAMIC RANGE`, `ALBUM DYNAMIC RANGE`, the four `REPLAYGAIN_*` | no | no |
 | 8 | Auto tagging | `ITUNESADVISORY`, `ALBUMITUNESADVISORY`, `INSTRUMENTAL`, `MOOD`, `ENERGY`, `GENRE`, plus empty MusicBrainz identity/date completion | those tags | no | optional (advisory/genre providers) |
 | 9 | AccurateRip | CUETools `.accurip` generation and verification | writes `CD-N.accurip` | no | **yes** (AccurateRip DB) |
-| 10 | Format all | Final canonical pass: `.accurip`/`.cue`/`.lrc`/tag trim + embedded-cover policy | tags, sidecars, embedded art | **yes** (strips tags outside the allowlist) | no |
+| 10 | Format all | Final canonical pass: `.accurip`/`.cue`/`.lrc`/tag trim, the canonical tag-value spelling (`mlo/tagtext.py`) + embedded-cover policy | tags, sidecars, embedded art | **yes** (strips tags outside the allowlist) | no |
 | 11 | Remux videos (MKV) | Any video container → MKV, video copied bit-exact when possible, audio to FLAC, chapters kept | video files | **yes** when `video_remove_original` (ON) | no |
 | 12 | Key & BPM | librosa key/tempo analysis | `INITIALKEY`, `BPM` | no | no |
 | 13 | Fetch lyrics | The configured synced-lyrics chain into `lyrics_format` | `LYRICS`/`UNSYNCEDLYRICS`, `.lrc` | no | **yes** |
@@ -153,7 +153,7 @@ reports how many were removed.
 
 ## 3. Grading checks
 
-67 keys exist; `grade_check_audit` is the only check that ships **off** and
+68 keys exist; `grade_check_audit` is the only check that ships **off** and
 `grade_include_other` the only category that ships **off**. Every check is
 toggleable on the Grading page; a check the registry knows and the page does not
 group still renders (section *Other checks*).
@@ -169,7 +169,7 @@ group still renders (section *Other checks*).
 | `grade_check_energy` | Energy tag present | ON | `ENERGY` (0-100) exists (`ENERGY_MISSING`) |
 | `grade_check_genre` | Genre tag present | ON | `GENRE` exists (`GENRE_MISSING`) |
 | `grade_check_genre_count` | Genre count per track | ON | at most `mb_genre_count` genres (default 2, max 3) — a ceiling, never a quota (`GENRE_COUNT`) |
-| `grade_check_genre_order` | Genre order (family last) | ON | the family slot, if present, is LAST and no genre repeats (`GENRE_ORDER`) |
+| `grade_check_genre_order` | Genre order (family first) | ON | the family slot, if present, is FIRST and no genre repeats (`GENRE_ORDER`) |
 | `grade_check_genre_vocab` | Genre vocabulary | ON | every name is one MusicBrainz publishes (`GENRE_VOCAB`); grading never rewrites the tag |
 | `grade_check_replaygain` | ReplayGain tags present | ON | opt-in per file: any `REPLAYGAIN_*` tag means all four must exist |
 | `grade_check_acoustid` | AcoustID tags present | ON | opt-in pair: `ACOUSTID_ID` and `ACOUSTID_FINGERPRINT` together |
@@ -220,7 +220,8 @@ group still renders (section *Other checks*).
 | `grade_check_cover` | Cover art | ON | the album has a cover (`cover.jpg`/`jpeg`/`png`/`jxl`) meeting the size rules (`COVER`) |
 | `grade_check_cover_crop` | Cover aspect ratio (squareness) | ON | `|w/h − 1| ≤ cover_crop_threshold` (an aspect test, not crop detection) |
 | `grade_check_sidecar_cover` | Per-track sidecar covers | ON | per-track covers meet the same rules |
-| `grade_check_tag_spaces` | Tags — no padding | ON | no leading/trailing space or tab in a tag value |
+| `grade_check_tag_spaces` | Tags — no padding | ON | no leading/trailing space or tab, and no run of 2+ internal spaces, in a single-line tag value (a value carrying a newline is never judged — its whitespace is text) |
+| `grade_check_tag_case` | Tag value capitalisation | ON | `MEDIA`, `SOURCE`, `RELEASETYPE`, `RELEASESTATUS`, `AUDIT`, `RELEASECOUNTRY`, `SCRIPT` and `MOOD` hold the canonical spelling `mlo/tagtext.py` writes (`TAG_CASE`). Free text — `TITLE`, `ALBUM`, `ARTIST`, `LABEL`, lyrics — is never touched |
 | `grade_check_tag_blank_lines` | Tags — no blank lines | ON | no blank line inside a tag value (`LYRICS` exempt) |
 | `grade_check_lyrics_spaces` | Lyrics — no padding | ON | no leading/trailing space on a lyric line |
 | `grade_check_lyrics_blank_lines` | Lyrics — blank line rules | ON | blank lines match the formatter's canonical output |
@@ -271,9 +272,9 @@ the local config copy and only take effect on **Save** (`POST /api/config`).
 **R18 — Strict** loads the defaults and then sets every `grade_check_*` check to
 `true` (file-category keys are deliberately untouched).
 **R19 — Balanced** loads the defaults (`GET /api/config/defaults`).
-**R20 — Relaxed** loads the defaults and then switches these 17 keys **off**:
-`grade_check_tag_spaces`, `grade_check_lyrics_spaces`, `grade_check_cue_spaces`,
-`grade_check_cover_crop`, `grade_check_lyrics_zero`,
+**R20 — Relaxed** loads the defaults and then switches these 18 keys **off**:
+`grade_check_tag_spaces`, `grade_check_tag_case`, `grade_check_lyrics_spaces`,
+`grade_check_cue_spaces`, `grade_check_cover_crop`, `grade_check_lyrics_zero`,
 `grade_check_tag_blank_lines`, `grade_check_lyrics_blank_lines`,
 `grade_check_cue_blank_lines`, `grade_check_filename_case`,
 `grade_check_ext_case`, `grade_check_excess_tags`, `grade_check_mb_links`,
@@ -345,7 +346,7 @@ The default writer of everything else is *Beets tagging (14) · import*.
 | `GENRE` | identity | Auto tagging (8) · genre import · Format all (10) trims | `grade_check_genre`, `_genre_count`, `_genre_order`, `_genre_vocab` |
 | `MEDIA`, `SOURCE` | release | Format lyrics (1) · media/source normalization | `grade_check_media`, `grade_check_source` |
 | `ITUNESADVISORY` | identity | Auto tagging (8) · advisory fetch | `grade_check_missing_tags` |
-| `ALBUMITUNESADVISORY` | release | Auto tagging (8) | `grade_check_album_tags` |
+| `ALBUMITUNESADVISORY` | release | Auto tagging (8) · advisory fetch | `grade_check_album_tags` |
 | `INSTRUMENTAL` | identity | Auto tagging (8) · instrumental fetch | `grade_check_missing_tags`, `grade_check_instrumental` |
 | `MOOD`, `ENERGY` | audio | Auto tagging (8) · Mood & Energy (16) | `grade_check_mood`, `grade_check_energy` |
 | `BPM`, `INITIALKEY` | audio | Key & BPM (12) | `grade_check_key_bpm` |
@@ -365,6 +366,20 @@ Notes that are easy to get wrong: `MEDIA`/`SOURCE` belong to script 1, not to
 script 8; `ACOUSTID_*` come from the import/fingerprint path (script 14's beets
 pass), not from script 6; `ENCODER_*` are written by the FLAC optimizer (3) and,
 for images, by Process images (5).
+
+A tag's VALUE is normalised on the way in as well (§7.6): the eight tags with a
+closed value set hold the canonical spelling `mlo/tagtext.py` names, every
+single-line value gets its spacing collapsed, and script 10 re-applies both over
+an existing library. The writers' rules and the grader's `grade_check_tag_case`
+/ `grade_check_tag_spaces` are the same functions, so the import can never
+produce a value the grade would fail.
+
+The two advisory tags answer to **different switches**, because different things
+write them: `ITUNESADVISORY` to `advisory_auto_fetch` (the provider fetch — the
+import step, the wizard and the *Fetch advisory rating* action) and
+`ALBUMITUNESADVISORY` to script 8's *Auto Album Advisory* derivation
+(`mlo/config.py::_TAG_WRITE_SWITCH`). The advisory fetch derives the album tag
+too, with script 8's own rule, so a manual fetch never leaves it stale.
 
 ---
 
@@ -398,8 +413,9 @@ for images, by Process images (5).
 
 - **R37** — at most `mb_genre_count` genres per track (default **2**, hard
   ceiling `GENRE_COUNT_MAX = 3`) — a ceiling, never a quota: nothing is padded.
-- **R38** — slot order: the specific genre(s) first, the **family last**. A
-  family in an earlier slot, or a repeated genre, fails as `GENRE_ORDER`.
+- **R38** — slot order: the **family first**, the specific genre(s) behind it
+  (`Rock / Shoegaze`). A family in a later slot, or a repeated genre, fails as
+  `GENRE_ORDER`.
 - **R39** — every name must exist in MusicBrainz's 2 202-name list
   (`mlo/_genre_names.py`, canonicalized through `mlo/genre_vocab.py`); an alias
   table folds the spellings sources emit (`rnb` → `r&b`, `synthpop` →
@@ -479,6 +495,33 @@ for images, by Process images (5).
 - **R56** — per-track sidecar covers are graded under the same rules
   (`grade_check_sidecar_cover`), and any image that is neither the album cover
   nor a track sidecar fails `grade_check_extra_images`.
+
+### 7.6 Tag value spelling and spacing
+
+- **R57** — a tag VALUE is written in the one canonical form its family has:
+  `mlo/tagtext.py::canonical_value` resolves a closed-vocabulary tag (`MEDIA`,
+  `SOURCE`, `RELEASETYPE`, `RELEASESTATUS`, `AUDIT`, `MOOD`) case-insensitively
+  to the spelling `CANONICAL_VALUES` names, upper-cases a two-letter
+  `RELEASECOUNTRY` code and gives `SCRIPT` its ISO 15924 casing (four letters,
+  initial capital). A value the vocabulary does NOT know — a mood a person
+  typed, a `SOURCE` that is really a video id, a release type MusicBrainz has
+  since added — is returned unchanged rather than coerced into a wrong answer,
+  which is what makes the rule idempotent.
+- **R58** — free text is untouched, byte for byte: `TITLE`, `ALBUM`, `ARTIST`,
+  `ALBUMARTIST`, `LABEL`, `COMMENT` and the lyrics are somebody's words, and
+  "AC/DC" and "k.d. lang" must survive a tag write. Only the tags in
+  `CANONICAL_CASE` are looked at at all.
+- **R59** — spacing is part of the value: a leading or trailing space/tab, or a
+  run of two or more internal spaces, is wrong (`spacing_problem`) — fixed by
+  the writers and by script 10, failed by `grade_check_tag_spaces`. A value
+  carrying a newline is never judged and never collapsed: its whitespace is the
+  text.
+- **R60** — the rule is applied ON THE WRITE (`AudioFile.set_tag`,
+  `set_any_tag`, `set_video_tags`), so the beets import, the import wizard, the
+  auto-import chain, every script and a manual edit all land canonical; script
+  10 (Format all) re-applies it over an existing library; and
+  `grade_check_tag_case` fails a value the writers would have fixed. One rule
+  in one place — the grader can never fail what a writer produces.
 
 ---
 

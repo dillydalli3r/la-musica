@@ -171,8 +171,8 @@ export default function BulkTagsDialog({
         </datalist>
         {genreRow && (
           <div className="mt-2 text-[10px] text-zinc-500 leading-snug rounded border border-border/60 bg-panel/40 px-2 py-1.5">
-            <span className="font-mono text-zinc-400">GENRE</span> is a LIST, not one string: the specific
-            genres first and the family last — <span className="text-zinc-400">shoegaze / dream pop / rock</span>.
+            <span className="font-mono text-zinc-400">GENRE</span> is a LIST, not one string: the family
+            first and the specific genres after it — <span className="text-zinc-400">rock / shoegaze / dream pop</span>.
             Write MusicBrainz spellings (lowercase, as MusicBrainz publishes them); the server splits and
             canonicalises what it reads, and a name MusicBrainz does not know fails the vocabulary check
             (GENRE_VOCAB) until Auto tagging (8) or Format all (10) rewrites it.

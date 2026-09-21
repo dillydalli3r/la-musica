@@ -136,6 +136,9 @@ function matchesRoute(pattern, link) {
     linkFor("script_done", {}),
     linkFor("grade_done", {}),
     linkFor("update_available", {}),
+    // the two "it began" kinds: a running transfer lives in the queue
+    linkFor("download_started", {}),
+    linkFor("upload_started", {}),
   ];
   for (const link of links) {
     const hit = [...routes].some((p) => matchesRoute(p, link));

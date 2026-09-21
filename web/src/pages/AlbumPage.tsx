@@ -5,7 +5,7 @@ import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync
 import { api } from "../api";
 import { LinkChips, LinkEditorButton } from "../components/Links";
 import { SubtitledVideo } from "../components/SubtitledVideo";
-import { EmptyState, AdvisoryMark, CachedMark, GradeBadge, PageLoading, PendingMark, pendingSummary } from "../components/Badges";
+import { EmptyState, AdvisoryMark, CachedMark, GradeBadge, PageLoading, PendingMark, pendingSummary, mediaCountryLabel } from "../components/Badges";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import CoverSearchModal from "../components/CoverSearchModal";
 import Description from "../components/Description";
@@ -26,7 +26,7 @@ import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
 import StarRating from "../components/StarRating";
 import { ratingOf, useRatings, useSetRating, FOLDER_RATING_NOTE } from "../lib/ratings";
-import TagActionsMenu from "../components/TagActionsMenu";
+import TagActionsMenu, { TrackActionsMenu } from "../components/TagActionsMenu";
 import StatsPanel from "../components/StatsPanel";
 import TrackDetails, { CreditsPanel, creditTagsFrom } from "../components/TrackDetails";
 import { AlbumDetails } from "../components/AlbumDetails";
@@ -672,9 +672,10 @@ export default function AlbumPage() {
                   </div>
                 }
                 chips={[
-                  // media / tech / album DR / disc count, where the identity
-                  // block already showed them
-                  data.media,
+                  // media + release countries / tech / album DR / disc count,
+                  // where the identity block already showed them. The media
+                  // chip names the pressing the same way the album's card does.
+                  mediaCountryLabel(data.media, data.meta?.RELEASECOUNTRY),
                   albumTech(data.tracks),
                   data.meta?.["ALBUM DYNAMIC RANGE"] ? `ADR ${data.meta["ALBUM DYNAMIC RANGE"]}` : null,
                   maxDisc > 1 ? `${maxDisc} disc${maxDisc === 1 ? "" : "s"}` : null,
@@ -1351,10 +1352,10 @@ export default function AlbumPage() {
                 )}
                 {trackCols.includes("title") && (
                   <td className="td">
-                    <div className="flex items-center gap-1.5 min-w-0">
+                    <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-w-0">
                       <Link
                         to={trackRef(tr)}
-                        className="hover:text-accent-soft break-words min-w-0"
+                        className="hover:text-accent-soft break-words min-w-[8rem]"
                         title="Click to play · Ctrl-click to open track page"
                         onClick={(e) => entityLinkClick(e, () => navigate(trackRef(tr)))}
                       >
@@ -1393,6 +1394,7 @@ export default function AlbumPage() {
                           <OverflowMenu
                             buttonClass="!p-1 text-zinc-500 hover:text-white"
                             buttonTitle="Track actions"
+                            icon={Film}
                             sections={[
                               {
                                 items: [
@@ -1409,8 +1411,16 @@ export default function AlbumPage() {
                           />
                         </span>
                       )}
+                      <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                        <FavHeart kind="track" id={tr.path} mbid={tr.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" title={undefined} revealOnHover />
+                      </span>
+                      {/* The "…": what this ONE file can be asked to do —
+                          tagging, its scripts (lyrics among them), credits and
+                          the stored readout. Hover-revealed like the heart
+                          beside it: a row's actions are not worth permanent
+                          space. */}
                       <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
-                        <FavHeart kind="track" id={tr.path} mbid={tr.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" title={undefined} />
+                        <TrackActionsMenu path={tr.path} releaseMbid={tr.tags.MUSICBRAINZ_ALBUMID} />
                       </span>
                       {/* The rating lives HERE, in the title cell, next to the
                           other per-track marks — the same place the library

@@ -307,7 +307,7 @@ function RowCover({ item }: { item: DiscoverItem }) {
   if (!src && item.cover_url) {
     src = api.artUrl(item.cover_url, { artist: item.artist, album: item.title, rg: item.release_group_mbid });
   }
-  const box = "h-11 w-11 rounded bg-raise border border-border overflow-hidden shrink-0";
+  const box = "h-10 w-10 rounded bg-raise border border-border overflow-hidden shrink-0";
   if (!src || failed) {
     return (
       <div className={`${box} flex items-center justify-center text-zinc-700`} title={item.cover_url ? "The provider image could not be shown" : "No cover"}>
@@ -348,7 +348,7 @@ export default function DiscoverRow({ item }: { item: DiscoverItem }) {
   const alsoFrom = (item.also_from ?? []).filter((id) => id && id !== item.source);
   const sub = [item.artist, item.year].filter(Boolean).join(" · ");
   return (
-    <li className="flex items-center gap-3 px-3 py-2">
+    <li className="flex items-center gap-3 px-3 py-1.5">
       <RowCover item={item} />
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline gap-2 min-w-0">

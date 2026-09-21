@@ -43,6 +43,7 @@ from .paths import AUDIO_EXTS, fsync_dir
 from .stats import (is_audio_file, _collect_targets, new_stats,
                     _make_pbar, _pbar_skip, _pbar_update, worker_count)
 from .subproc import run_tool
+from .tagtext import canonical_text
 from .ui import log, c, Color, print_header
 
 
@@ -600,7 +601,10 @@ def run_generate_accurip(config):
                     continue
                 try:
                     af = AudioFile(os.path.join(ad, f))
-                    if str(af.get_tag("MEDIA") or "").strip() == "CD":
+                    # Compared through the canonical spelling: a library
+                    # another tagger wrote as "cd" names the same medium, and
+                    # mlo.tagtext is the one rule for what "CD" means.
+                    if canonical_text("MEDIA", af.get_tag("MEDIA")) == "CD":
                         has_cd = True
                         break
                 except Exception:

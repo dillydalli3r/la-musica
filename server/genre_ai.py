@@ -5,8 +5,8 @@ other configured sources first and hands their answers here; this module
 turns them — plus, when ``ai_genre_research`` is on, the model's own
 knowledge of the release — into at most ``mb_genre_count - 1`` SPECIFIC
 genres, most specific first. The family is NOT asked for and a family answer
-is dropped: the app derives it (`mlo.genre_vocab.parent_of`) and appends it
-last, see ``mlo.genres``.
+is dropped: the app derives it (`mlo.genre_vocab.parent_of`) and puts it
+first, see ``mlo.genres``.
 
 Optional end to end: no endpoint configured, a refusal, a timeout, an
 unparseable answer or an answer with nothing usable in it all mean ``None``,
@@ -43,11 +43,11 @@ SYSTEM = (
 
 # The shape the answer must have, spelled out in full: the model answers with
 # the SPECIFIC genres only, most specific first — the broad family is the
-# app's to derive (`mlo.genre_vocab.parent_of`) and append last, so asking for
-# it would be asking for a slot the caller has to throw away, and a model left
-# to itself answers with a flat bag of near-synonyms plus a family. Kept in
-# the prompt rather than re-derived from the reply, because "which genre is
-# more specific" is a judgement no word list reproduces.
+# app's to derive (`mlo.genre_vocab.parent_of`) and put in front of them, so
+# asking for it would be asking for a slot the caller has to throw away, and a
+# model left to itself answers with a flat bag of near-synonyms plus a family.
+# Kept in the prompt rather than re-derived from the reply, because "which
+# genre is more specific" is a judgement no word list reproduces.
 _SLOTS = (
     "Answer with AT MOST {count} SPECIFIC genre(s), most specific first — no "
     "numbering, no explanation, JSON only:\n"
@@ -244,7 +244,7 @@ def infer_genres(*, artist, album, title="", track_path="", candidates=None,
     by source priority) is the better answer then.
 
     *count* is the track's total slot budget (`mb_genre_count`): at most
-    `count - 1` SPECIFIC genres are asked for, because the last slot belongs
+    `count - 1` SPECIFIC genres are asked for, because the first slot belongs
     to the derived family. A *count* of 1 has no room for a specific genre at
     all, so there is nothing to ask and the answer is None.
 
@@ -256,8 +256,8 @@ def infer_genres(*, artist, album, title="", track_path="", candidates=None,
         count = max(1, int(count))
     except (TypeError, ValueError):
         count = DEFAULT_GENRE_COUNT
-    # The family takes the last slot, so the model is asked for the ones in
-    # front of it — at most `count - 1`, and never more than the ceiling
+    # The family takes the first slot, so the model is asked for the ones
+    # behind it — at most `count - 1`, and never more than the ceiling
     # mlo.genres enforces (a hand-edited config file cannot widen the ask).
     ask = min(GENRE_COUNT_MAX, count) - 1
     if ask < 1:

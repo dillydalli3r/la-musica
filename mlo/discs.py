@@ -34,6 +34,7 @@ from .config import should_write_audio_tag
 from .paths import AUDIO_EXTS, fsync_dir
 from .stats import is_audio_file
 from .subproc import run_tool
+from .tagtext import canonical_text
 
 # Optional: EAC checksum verifier (pypi eac-logchecker)
 try:
@@ -311,7 +312,10 @@ def verify_album_checksums(ffmpeg_exe, album_dir, paths, config=None):
     for pp in paths:
         try:
             af2 = AudioFile(pp)
-            if af2.audio is not None and str(af2.get_tag("MEDIA") or "").strip() == "CD":
+            # The canonical spelling is the comparison (mlo.tagtext): "cd" is
+            # the same medium as "CD", and a disc this engine must audit is
+            # not a case variant away from being missed.
+            if af2.audio is not None and canonical_text("MEDIA", af2.get_tag("MEDIA")) == "CD":
                 is_cd = True
                 break
         except Exception:
@@ -1329,8 +1333,8 @@ def grade_album_logs(cli_exe, album_dir, force=False, log_fn=None,
     af = AudioFile(first)
     if af.audio is None:
         return {}, notes, unscorable
-    media = str(af.get_tag("MEDIA") or "").strip()
-    if media != "CD":
+    # Canonical spelling, same rule as every other MEDIA comparison here.
+    if canonical_text("MEDIA", af.get_tag("MEDIA")) != "CD":
         return {}, notes, unscorable
 
     # Fix FILE entries first (conservative) so the subsequent

@@ -13,6 +13,7 @@ import MoreLikeThis from "../components/MoreLikeThis";
 import { TrackCover } from "../components/CoverImg";
 import DownloadButton from "../components/DownloadButton";
 import { ExportButton } from "../components/ExportDialog";
+import { TrackActionsMenu } from "../components/TagActionsMenu";
 import FavHeart from "../components/FavHeart";
 import OverflowMenu from "../components/OverflowMenu";
 import { trackRef, entityLinkClick } from "../lib/refs";
@@ -438,17 +439,20 @@ export default function PlaylistDetailPage() {
                         />
                       </td>
                       <td className="td">
-                        <div className="flex items-center gap-1.5 min-w-0">
+                        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 min-w-0">
                           <Link
                             to={trackRef({ path: t, tags: { MUSICBRAINZ_TRACKID: m?.mbid ?? undefined } })}
-                            className="break-words flex-1 min-w-0 hover:text-accent-soft"
+                            className="break-words flex-1 min-w-[8rem] hover:text-accent-soft"
                             title="Click to play · Ctrl-click to open track page"
                             onClick={(e) => entityLinkClick(e, () => navigate(trackRef({ path: t, tags: { MUSICBRAINZ_TRACKID: m?.mbid ?? undefined } })))}
                           >
                             {m?.title ?? t.split("/").pop()}
                           </Link>
+                          <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                            <FavHeart kind="track" id={t} iconClass="h-3.5 w-3.5" revealOnHover />
+                          </span>
                           <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
-                            <FavHeart kind="track" id={t} iconClass="h-3.5 w-3.5" />
+                            <TrackActionsMenu path={t} />
                           </span>
                         </div>
                       </td>

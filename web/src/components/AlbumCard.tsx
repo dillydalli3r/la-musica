@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import { Play } from "lucide-react";
 import { useStore } from "../store";
 import { statusFor } from "../lib/status";
-import { mediaShort } from "./Badges";
+import { mediaCountryLabel, releaseCountries } from "./Badges";
 import { albumTech } from "../lib/fmt";
 import CoverImg from "./CoverImg";
 import FavHeart from "./FavHeart";
@@ -37,7 +37,9 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
   const st = statusFor(!!al.pass, al.audit_summary);
   const ref = href === undefined ? albumRef(al) : href;
   const artist = artistName ?? al.artist ?? al.album_artist ?? al.path.split(/[\\/]/).slice(0, -1).pop() ?? "";
-  const ms = mediaShort(al.media || al.meta?.MEDIA);
+  const media = al.media || al.meta?.MEDIA;
+  const countries = releaseCountries(al.meta?.RELEASECOUNTRY);
+  const mediaBadge = mediaCountryLabel(media, al.meta?.RELEASECOUNTRY);
   const { t } = useI18n();
   // The pending mark's own sentence (null for a complete album), used both for
   // the dot and for the reason the play button is off.
@@ -81,25 +83,41 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
           const dr = al.meta?.["ALBUM DYNAMIC RANGE"] ?? null;
           return (
             <>
-              {/* quality bottom-left · media type bottom-right · DR top-left.
-                  The play button lives top-left below the DR chip so it can
-                  never cover the bitrate readout. */}
-              {tech && (
-                <span
-                  className="absolute bottom-1.5 left-1.5 bg-black/65 text-zinc-300 text-[9px] font-mono tracking-wide rounded px-1 py-0.5 border border-white/10"
-                  title={`Formats: ${albumTech(al.tracks)}`}
-                >
-                  {tech}
-                </span>
+              {/* quality bottom-left · media + release countries bottom-right ·
+                  DR top-left. The play button lives top-left below the DR chip
+                  so it can never cover the bitrate readout.
+
+                  The two bottom badges share ONE wrapping row: the media badge
+                  carries the release countries too, and a release tagged for
+                  several ("CD · US, CA, JP") needs the width to say so instead
+                  of a fixed corner chip it would overflow. The row itself is
+                  not clickable — only the badges are — so the cover link
+                  underneath still takes a click between them. */}
+              {(tech || mediaBadge) && (
+                <div className="absolute inset-x-1.5 bottom-1.5 flex flex-wrap items-end gap-1.5 pointer-events-none">
+                  {tech && (
+                    <span
+                      className="pointer-events-auto shrink-0 bg-black/65 text-zinc-300 text-[9px] font-mono tracking-wide rounded px-1 py-0.5 border border-white/10"
+                      title={`Formats: ${albumTech(al.tracks)}`}
+                    >
+                      {tech}
+                    </span>
+                  )}
+                  {mediaBadge && (
+                    <span
+                      className="pointer-events-auto ml-auto shrink-0 max-w-full text-right text-[9px] font-semibold tracking-wide leading-snug break-words rounded px-1 py-0.5 border border-white/10 bg-black/65 text-zinc-200"
+                      title={[
+                        media ? `Media: ${media}` : "",
+                        countries.length ? `Released in ${countries.join(", ")}` : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    >
+                      {mediaBadge}
+                    </span>
+                  )}
+                </div>
               )}
-              {ms ? (
-                <span
-                  className="absolute bottom-1.5 right-1.5 bg-black/65 text-zinc-200 text-[9px] font-semibold tracking-wide rounded px-1 py-0.5 border border-white/10"
-                  title={`Media: ${al.media || al.meta?.MEDIA}`}
-                >
-                  {ms}
-                </span>
-              ) : null}
               {dr ? (
                 <span
                   className="absolute top-1.5 left-1.5 bg-black/65 text-zinc-200 text-[9px] font-mono tracking-wide rounded px-1 py-0.5 border border-white/10"
@@ -111,8 +129,8 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
             </>
           );
         })()}
-        <div className="absolute top-1.5 right-1.5 row-hover transition-opacity">
-          <FavHeart kind="album" id={al.path} mbid={al.meta?.MUSICBRAINZ_ALBUMID} className="!p-1.5 bg-black/60" iconClass="h-4 w-4" />
+        <div className="absolute top-1.5 right-1.5">
+          <FavHeart kind="album" id={al.path} mbid={al.meta?.MUSICBRAINZ_ALBUMID} className="!p-1.5 bg-black/60" iconClass="h-4 w-4" revealOnHover />
         </div>
         {actions ?? (
           /* A framework album has no audio to play, so the button is OFF

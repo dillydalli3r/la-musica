@@ -7,7 +7,9 @@ detects what needs formatting, fixing only what is incorrect:
   blank lines (top/bottom) removed, middle blanks preserved. Per user spec.
 * .cue — canonical_cue_text
 * .lrc / embedded LYRICS — canonical_lyrics + format_lyrics_text
-* Audio tags — leading/trailing spaces and blank lines stripped
+* Audio tags — leading/trailing spaces and blank lines stripped, and the tags
+  that have a canonical spelling written in it (mlo.tagtext: MEDIA, SOURCE,
+  RELEASETYPE, RELEASESTATUS, AUDIT, RELEASECOUNTRY, SCRIPT, MOOD)
 
 It is intentionally non-destructive: it only rewrites files that are not
 already in canonical form, and it never regenerates .accurip via CUETools
@@ -29,6 +31,7 @@ from .images import _exif_transposed
 from .lyrics import _canonical_lyrics, format_lyrics_text
 from .paths import AUDIO_EXTS, IMAGE_EXTS, fsync_dir
 from .stats import _collect_targets, _walk_files, new_stats, _make_pbar, worker_count
+from .tagtext import canonical_text
 from .ui import print_header, log, c, Color
 
 # Canonical on-disk cover names (the grader's COVER_NAMES) plus the
@@ -353,9 +356,21 @@ def _trim_tag_lines(raw):
     return "\n".join(ln for ln in lines if ln != "")
 
 
+def _format_tag_values(key, raw):
+    """The value script 10 would WRITE for one stored *raw* value.
+
+    Lines trimmed and blank ones dropped (as before), then the canonical
+    spelling and spacing the write path applies for this tag (mlo.tagtext) —
+    the same rule set_tag uses, so the comparison below and the write can
+    never disagree about whether a file needs rewriting.
+    """
+    return canonical_text(key, _trim_tag_lines(raw))
+
+
 def _format_audio_tags(path, cfg, force=False, af=None):
-    """Trim every tag's lines and drop blank ones — and cap GENRE at
-    `mb_genre_count`. Returns (path, ok, err, genres_trimmed).
+    """Trim every tag's lines, drop blank ones, canonicalise the tags that have
+    a canonical spelling (mlo.tagtext) and cap GENRE at `mb_genre_count`.
+    Returns (path, ok, err, genres_trimmed, canonicalized).
 
     *af* is an already-open handle (the fused pass opens the file once);
     the caller then owns nothing about it — this pass still flushes its own
@@ -364,8 +379,12 @@ def _format_audio_tags(path, cfg, force=False, af=None):
     try:
         af = af or AudioFile(path)
         if af.audio is None:
-            return (path, False, None, 0)
+            return (path, False, None, 0, 0)
         changed = False
+        # How many values this pass rewrote INTO canonical form (spelling or
+        # spacing) — the count the run reports, the way genres_trimmed counts
+        # the genre cap.
+        canonicalized = 0
         af.defer_save(True)
         for key, val in list(af.all_tags().items()):
             if val is None:
@@ -387,7 +406,7 @@ def _format_audio_tags(path, cfg, force=False, af=None):
                             changed = True
                         else:
                             af.defer_save(False)
-                            return (path, False, af.error or "set_tag failed", 0)
+                            return (path, False, af.error or "set_tag failed", 0, 0)
                     continue
                 except Exception:
                     pass
@@ -398,13 +417,19 @@ def _format_audio_tags(path, cfg, force=False, af=None):
             # literally named "Rock; Pop" — the other two genres were gone
             # from the file. tag_values() gives the pieces back.
             values = af.tag_values(key) or [raw]
-            fixed = [_trim_tag_lines(v) for v in values]
+            # Lines trimmed, blank ones dropped, and the tags that HAVE a
+            # canonical spelling/spacing rewritten here (mlo.tagtext) — the
+            # same rule set_tag applies, so a value this decides is "already
+            # right" is one set_tag would not have changed either.
+            fixed = [_format_tag_values(key, v) for v in values]
+            canonicalized += sum(1 for before, after in zip(values, fixed)
+                                 if before != after)
             if force or fixed != values:
                 if af.set_tag(key, fixed if len(fixed) > 1 else fixed[0]):
                     changed = True
                 else:
                     af.defer_save(False)
-                    return (path, False, af.error or "set_tag failed", 0)
+                    return (path, False, af.error or "set_tag failed", 0, 0)
         # The per-track genre cap (`mb_genre_count`) is swept here too, over
         # the whole library, so an existing album that carries more genres than
         # the setting allows is fixed by running this one script — the same cap
@@ -442,12 +467,12 @@ def _format_audio_tags(path, cfg, force=False, af=None):
         # file, a full disk) must NOT be reported as "formatted" — the tags
         # never reached disk and grading would keep failing on them.
         if af.defer_save(False) is False:
-            return (path, False, af.error or "tag write failed", 0)
+            return (path, False, af.error or "tag write failed", 0, 0)
         if changed:
-            return (path, True, None, trimmed)
-        return (path, False, None, trimmed)
+            return (path, True, None, trimmed, canonicalized)
+        return (path, False, None, trimmed, canonicalized)
     except Exception as e:
-        return (path, False, str(e), 0)
+        return (path, False, str(e), 0, 0)
 
 
 def _format_audio_file(path, cfg, force, cover_cache):
@@ -457,15 +482,15 @@ def _format_audio_file(path, cfg, force, cover_cache):
     opened and its container parsed twice per Format All run. Runs the
     cover pass first (its art write is immediate either way), then the tag
     pass, which owns the deferred write of this file.
-    Returns ((tag_ok, err), (cover_ok, err), genres_trimmed).
+    Returns ((tag_ok, err), (cover_ok, err), genres_trimmed, canonicalized).
     """
     try:
         af = AudioFile(path)
     except Exception as e:
-        return (path, (False, str(e)), (False, str(e)), 0)
+        return (path, (False, str(e)), (False, str(e)), 0, 0)
     covers = _format_embedded_covers(path, cfg, cover_cache, af=af)
     tags = _format_audio_tags(path, cfg, force, af=af)
-    return (path, (tags[1], tags[2]), (covers[1], covers[2]), tags[3])
+    return (path, (tags[1], tags[2]), (covers[1], covers[2]), tags[3], tags[4])
 
 
 def run_format_all(config):
@@ -480,6 +505,9 @@ def run_format_all(config):
     # Extra GENRE values this run dropped to reach `mb_genre_count`; always
     # present so a caller reads a count, not a missing key.
     stats["genres_trimmed"] = 0
+    # Tag values this run rewrote into their canonical spelling or spacing
+    # (mlo.tagtext) — always present for the same reason.
+    stats["tags_canonicalized"] = 0
     print_header("Format All (Final Pass)")
     log(f"music folder: {folder} · detects incorrect formatting and fixes only what needs it")
 
@@ -648,7 +676,7 @@ def run_format_all(config):
             fut = ex.submit(_format_audio_file, f, config, force["tags"], cover_cache)
             futures[fut] = f
         for fut in as_completed(futures):
-            fn, tag_res, cover_res, genres_trimmed = fut.result()
+            fn, tag_res, cover_res, genres_trimmed, tags_canonicalized = fut.result()
             # Tags: only log when actually changed to avoid noise; tagged
             # files are many, and unreadable ones must not spam.
             ok, err = tag_res
@@ -657,7 +685,11 @@ def run_format_all(config):
             elif ok:
                 stats["modified_count"] += 1
                 stats["total_scanned"] += 1
-                extra = f" ({genres_trimmed} extra genre value(s) dropped)" if genres_trimmed else ""
+                extra = ""
+                if genres_trimmed:
+                    extra += f" ({genres_trimmed} extra genre value(s) dropped)"
+                if tags_canonicalized:
+                    extra += f" ({tags_canonicalized} tag value(s) canonicalized)"
                 log(f"  ✓ {os.path.relpath(fn, folder) if os.path.commonpath([folder, fn])==folder else fn} → tags trimmed{extra}")
                 counts["ok"] += 1
             else:
@@ -667,6 +699,9 @@ def run_format_all(config):
                 # The canonical sweep's own count: what the per-track genre
                 # cap actually removed from the library in this run.
                 stats["genres_trimmed"] += genres_trimmed
+            if tags_canonicalized:
+                # …and how many values the canonical VALUE rule rewrote.
+                stats["tags_canonicalized"] += tags_canonicalized
             # Embedded art — removed (default) or the album cover embedded.
             ok, err = cover_res
             if err:
@@ -698,4 +733,10 @@ def run_format_all(config):
         # (Settings → Import) that defines it.
         cap = genre_count(config)
         log(f"  GENRE: {trimmed_total} extra genre value(s) trimmed — genres per track is {cap} (Settings → Import)")
+    canon_total = stats.get("tags_canonicalized", 0)
+    if canon_total:
+        # The canonical VALUE rule's own count (mlo.tagtext): values that were
+        # spelled or spaced differently from what every writer now stores.
+        log(f"  TAGS: {canon_total} value(s) rewritten to their canonical "
+            f"spelling/spacing")
     return stats

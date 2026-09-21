@@ -2,6 +2,7 @@ import { Link } from "react-router-dom";
 import { Check, X, Disc3, CircleAlert, CheckCircle2, Loader2 } from "lucide-react";
 import { useCachedPaths } from "../lib/mediaCache";
 import { useI18n, type MessageKey } from "../lib/i18n";
+import type { AdvisoryFetchResult } from "../api";
 import type { Album } from "../types";
 
 /** The translate function `useI18n` hands out — what the pending sentences
@@ -65,12 +66,40 @@ export function MediaChip({ media }: { media: string | null | undefined }) {
 }
 
 /** Compact media label for album cards/icons: the first word of the media
- * value in its OWN capitalization ("CD", "Digital", "SACD", "Vinyl"…). */
+ *  value in its OWN capitalization ("CD", "Digital", "SACD", "Vinyl"…). */
 export function mediaShort(media: string | null | undefined): string | null {
   const m = (media ?? "").trim();
   if (!m) return null;
   const first = (m.split(/[\s/;,]+/)[0] ?? "").slice(0, 10);
   return first || null;
+}
+
+/** Every country a release was released in, in the order the tag lists them.
+ *  RELEASECOUNTRY is one value on most files and a LIST on the ones tagged
+ *  from a release group's events ("US; CA; JP" — the separators beets,
+ *  Picard and foobar write), so the badge it feeds has to cope with several
+ *  rather than print the raw string as if it were one place. */
+export function releaseCountries(value: string | null | undefined): string[] {
+  const out: string[] = [];
+  for (const part of (value ?? "").split(/[;,/]/)) {
+    const c = part.trim();
+    // A handful of codes at most, so the linear scan IS the dedupe.
+    if (!c || out.some((x) => x.toUpperCase() === c.toUpperCase())) continue;
+    out.push(c);
+  }
+  return out;
+}
+
+/** The one media label every album/release badge wears: the medium, then the
+ *  release countries — "CD · US, CA". A card and the page header it opens
+ *  name the same pressing the same way, and an album released in several
+ *  countries says so instead of showing a single code it picked. */
+export function mediaCountryLabel(
+  media: string | null | undefined,
+  country: string | null | undefined
+): string | null {
+  const parts = [mediaShort(media), releaseCountries(country).join(", ")].filter(Boolean);
+  return parts.length ? parts.join(" · ") : null;
 }
 
 export function AdvisoryBadge({ value }: { value: string | null | undefined }) {
@@ -109,6 +138,33 @@ export function instrumentalLine(value: string | number | null | undefined, sour
   const v = String(value ?? "").trim();
   const list = sources.length ? sources.join(", ") : "source unknown";
   return `${v === "1" ? "instrumental" : v === "0" ? "not instrumental" : "unknown"} · ${list}`;
+}
+
+/** What one advisory fetch amounts to, in the words every surface reports it
+ *  with: the per-track values it wrote, the album tag it DERIVED from them,
+ *  and — when the write gate refused files — that, instead of a bare "0
+ *  re-rated" that reads like a silent success. */
+export function advisoryOutcome(reply: AdvisoryFetchResult | null | undefined): string {
+  if (!reply) return "no reply";
+  // A reply that wrote NOTHING is the one case where the server's own reason
+  // leads: the counts below would otherwise read as "the sources answered".
+  if (reply.skipped && !reply.updated && !reply.album_updated) {
+    return `nothing written — ${reply.skipped}`;
+  }
+  const parts = [`${reply.updated ?? 0} track(s) re-rated`];
+  if (reply.album_updated) {
+    const values = Object.values(reply.albums ?? {}).map(String);
+    parts.push(`album tag ${values.filter((v, i) => values.indexOf(v) === i).join("/")}`
+      + ` on ${reply.album_updated} track(s)`);
+  }
+  if (reply.gated) parts.push(`${reply.gated} left alone — writing ITUNESADVISORY is off for their file type`);
+  // The album tag answers to its own switch (script 8's derivation), so a
+  // fetch can rate every track and still leave the album tag refused.
+  if (reply.album_gated) {
+    parts.push(`${reply.album_gated} album tag(s) left alone — Auto Album Advisory is off`);
+  }
+  if (reply.skipped) parts.push(reply.skipped);
+  return parts.join(" · ");
 }
 
 /** iTunes-style advisory mark: a tiny boxed letter shown beside track and

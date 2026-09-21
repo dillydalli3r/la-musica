@@ -28,6 +28,13 @@ interface StoragePayload {
   library: StorageRow | null;
   app_data: StorageRow | null;
   trash: StorageRow | null;
+  /** The app's own tools folder (ffmpeg, slskd, the analysers) — the one part
+   *  of the app that does not live under the music folder. */
+  dependencies: StorageRow | null;
+  /** Everything the app itself occupies: state + bin + transfers + tools, with
+   *  `measured: false` when none of those folders could be read (a total of 0
+   *  is then "unread", not "empty"). */
+  app_total: { bytes: number; files: number; measured: boolean } | null;
   downloads: {
     bytes: number;
     files: number;
@@ -120,7 +127,7 @@ export default function StorageCard() {
     );
   }
 
-  const { total_bytes: total, free_bytes: free, used_bytes: used, percent_used: percent } = data;
+  const { total_bytes: total, free_bytes: free, percent_used: percent } = data;
   // Clamped once: a volume can report a hair over 100 (reserved blocks) and a
   // bar has no room for that.
   const pct = percent === null ? null : Math.min(100, Math.max(0, percent));
@@ -148,7 +155,8 @@ export default function StorageCard() {
       </div>
 
       {/* Used vs free of the whole volume. It is a bar of the DISK, not of the
-          library: the library row below is what the app itself occupies. */}
+          app: the Library and App total rows below are what la musica itself
+          accounts for, and the exact disk figures ride this line's tooltip. */}
       <div className="space-y-1">
         <div className="h-1.5 rounded-sm bg-raise overflow-hidden">
           {/* An unmeasurable volume gets a live-looking placeholder rather
@@ -163,7 +171,10 @@ export default function StorageCard() {
             style={pct === null ? undefined : { width: `${pct}%` }}
           />
         </div>
-        <div className="flex items-baseline justify-between gap-2 text-[11px]">
+        <div
+          className="flex items-baseline justify-between gap-2 text-[11px]"
+          title={`${fmtBytes(total)} total · ${fmtBytes(data.used_bytes)} used · ${fmtBytes(free)} free`}
+        >
           <span className={`tabular-nums ${tight ? "text-red-400" : "text-zinc-400"}`}>
             {pct === null ? "used space unknown" : `${fmtPercent(pct)} used`}
           </span>
@@ -186,36 +197,35 @@ export default function StorageCard() {
             ? `${files(data.library.files)} under ${data.library.path}`
             : "no library folder yet (the music folder is not set)"}
         />
+        {/* Everything the app itself keeps, in ONE figure: its state, the bin,
+            the transfers and its own tools. The library above is the user's
+            music and deliberately not part of it — "how much is la musica
+            using" is the question the per-folder rows answered only by
+            addition. Its parts follow on their own line, so the total and the
+            breakdown are one glance instead of five rows. */}
         <Row
-          label="App data"
-          value={data.app_data ? fmtBytes(data.app_data.bytes) : "—"}
-          hint={data.app_data ? `(${files(data.app_data.files)})` : undefined}
-          title={data.app_data?.path}
+          label="App total"
+          value={data.app_total?.measured ? fmtBytes(data.app_total.bytes) : "—"}
+          hint={data.app_total?.measured ? `(${files(data.app_total.files)})` : undefined}
+          title={[
+            `State ${data.app_data ? fmtBytes(data.app_data.bytes) : "—"}  ${data.app_data?.path ?? ""}`,
+            `Bin ${data.trash ? fmtBytes(data.trash.bytes) : "—"}  ${data.trash?.path ?? "no bin yet"}`,
+            `Transfers ${dl ? fmtBytes(dl.bytes) : "—"}${dl?.staging_bytes ? `  (${fmtBytes(dl.staging_bytes)} still staging)` : ""}`,
+            `Tools ${data.dependencies ? fmtBytes(data.dependencies.bytes) : "—"}  ${data.dependencies?.path ?? "no tools installed"}`,
+          ].join("\n")}
         />
-        <Row
-          label="Trash"
-          value={data.trash ? fmtBytes(data.trash.bytes) : "—"}
-          hint={data.trash ? `(${files(data.trash.files)})` : undefined}
-          title={data.trash?.path ?? "the bin is empty or not created yet"}
-        />
-        <Row
-          label="Downloads"
-          value={dl ? fmtBytes(dl.bytes) : "—"}
-          hint={dl && dl.staging_bytes
-            ? `(${fmtBytes(dl.staging_bytes)} still staging)`
-            : undefined}
-          title={dl
-            ? dl.roots.map((r) => `${r.path} — ${files(r.files)}`).join("\n")
-            : "no downloads or staging folder yet"}
-        />
-      </div>
-
-      <div className="space-y-1.5 border-t border-border pt-2">
-        <Row label="Disk total" value={fmtBytes(total)} />
-        <Row label="Disk used" value={fmtBytes(used)} hint={total && used !== null
-          ? `(${fmtPercent(percent)} of ${fmtBytes(total)})`
-          : undefined} />
-        <Row label="Disk free" value={fmtBytes(free)} />
+        {data.app_total?.measured && (
+          <div className="text-[10px] text-zinc-500 leading-snug pl-1">
+            {[
+              data.app_data ? `state ${fmtBytes(data.app_data.bytes)}` : "",
+              data.trash ? `bin ${fmtBytes(data.trash.bytes)}` : "",
+              dl ? `transfers ${fmtBytes(dl.bytes)}${dl.staging_bytes ? ` (${fmtBytes(dl.staging_bytes)} staging)` : ""}` : "",
+              data.dependencies ? `tools ${fmtBytes(data.dependencies.bytes)}` : "",
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </div>
+        )}
       </div>
 
       {data.skipped_count > 0 && (

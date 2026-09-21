@@ -391,7 +391,7 @@ def check_format_all_art_single_write(tmp):
     from mlo.format_all import _format_audio_file
     saves, restore = count_calls(mlo_audio.AudioFile, "_save_container")
     try:
-        path, tag_res, cover_res, _genres = _format_audio_file(
+        path, tag_res, cover_res, _genres, _canon = _format_audio_file(
             track, cfg(embed_covers=True), False, {})
     finally:
         restore()

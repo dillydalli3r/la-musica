@@ -224,7 +224,6 @@ class _PlaylistDetailPageState extends State<PlaylistDetailPage> {
           kind: 'playlist',
           id: '${widget.playlistId}',
           target: 'tracks',
-          title: 'Recommended tracks',
         ),
       ],
     );

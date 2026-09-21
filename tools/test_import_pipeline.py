@@ -582,11 +582,11 @@ try:
     # the grader counts the values a file carries, so a joined string would
     # read as one genre and fail the per-track count check. The names are
     # canonicalised to MusicBrainz's own spelling and the FAMILY is derived
-    # into the last slot — the stub above answers "Shoegaze / Noise Pop", and
-    # what lands is `shoegaze` plus its family `rock` (mb_genre_count = 2, so
-    # the second specific genre yields the family's slot).
-    assert _written["01 - track.wav"]["GENRE"] == ["Shoegaze", "Rock"], _written["01 - track.wav"]
-    assert _written["02 - track.wav"]["GENRE"] == ["Shoegaze", "Rock"], _written["02 - track.wav"]
+    # into the FIRST slot — the stub above answers "Shoegaze / Noise Pop", and
+    # what lands is `rock` followed by the specific `shoegaze` (mb_genre_count
+    # = 2, so the second specific genre yields the family's slot).
+    assert _written["01 - track.wav"]["GENRE"] == ["Rock", "Shoegaze"], _written["01 - track.wav"]
+    assert _written["02 - track.wav"]["GENRE"] == ["Rock", "Shoegaze"], _written["02 - track.wav"]
 
     # A stated rating IS written, for every track — and the provider that
     # stated it is reported back per track.

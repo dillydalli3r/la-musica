@@ -134,16 +134,24 @@ outdated tools in the background.
 Artists → albums → tracks, with live grade/audit badges, a search box, a *fail
 only* filter, bulk tag tools, custom tag columns and sortable/resizable columns
 (year, grade, audit, genre, advisory, duration, bitrate, dynamic range…); music
-videos are first-class tracks. The top search bar searches the library (with
+videos are first-class tracks. An album's cover carries its own badges — the
+measured dynamic range, the release's formats/sample rate, and the medium with
+every country it was released in (`CD · US, CA`) — and every track row offers the
+same "…" menu wherever it is listed: tagging (the tag editor, genre and advisory
+imports), its scripts (lyrics, re-audit, ReplayGain, re-encode, re-grade),
+credits, the stored readout and the track's own editor. A filled heart is drawn
+whether or not the row is hovered: a favourite is a state, not an action.
+
+The top search bar searches the library (with
 `composer:`, `person:`, `genre:` and `tag:` prefixes) or MusicBrainz, and
 `/mb/search` is a full in-app MusicBrainz browser (artists, release groups,
 releases, recordings) with *Auto-import* and wishlist actions. Entity pages carry
 grading and auditing detail, MusicBrainz + RateYourMusic links, cover
 upload/search, Wikipedia descriptions, manual tag editing, a lyrics editor, and a
 **Credits** view built from MusicBrainz `artist-rels` (falling back to the file's
-own PERFORMER/COMPOSER/… tags, and saying so). **More like this** and **Home**
-are computed locally from the library's own tags (genre and family, mood, energy,
-era, artist) — no provider, no model, no network.
+own PERFORMER/COMPOSER/… tags, and saying so). **Recommended (Local)** and
+**Home** are computed locally from the library's own tags (genre and family,
+mood, energy, era, artist) — no provider, no model, no network.
 
 **LIBRARY → BROWSE** turns the library into a query: 120 fields (tags, ratings,
 grades, audit verdicts, technical facts, audio analysis, library/album/artist
@@ -172,8 +180,11 @@ albums/artists/tracks switch. Every row names its source, whether you already ow
 it, and what else holds it; each source's outcome is shown as a chip — *0
 answered*, *skipped: needs a key*, *failed: the provider's own words* — never
 swallowed. Owned rows open the real page; everything else offers **Add to
-library**, which queues a wish and searches for its audio. **RECOMMENDED** takes a
-seed (the whole library, or one of its genres) and explains its basis on screen.
+library**, which queues a wish and searches for its audio. **RECOMMENDED
+(ONLINE)** takes a seed (the whole library, or one of its genres) and explains
+its basis on screen — the online half of the pair of shelves an album, artist or
+track page shows, whose **RECOMMENDED (LOCAL)** half is scored from the library's
+own tags.
 
 **WATCHED ARTISTS** keeps a MusicBrainz artist under watch: policy (`new_only` /
 `backfill`), the release types worth taking, an allow/never list of specific
@@ -186,7 +197,10 @@ scheduled yet). Watches inherit the whole acquisition chain below.
 
 A persistent player bar (queue, drag-reorder, shuffle, repeat-one, speed, sleep
 timer, ReplayGain, visualizer, app-wide volume) plus a fullscreen player with
-animated karaoke lyrics. ReplayGain is applied through the WebAudio gain stage in
+animated karaoke lyrics. The fullscreen view is a two-column layout on a wide
+window (cover + controls, lyrics beside it) and a scrolling single column on a
+narrow or heavily zoomed one, where the lyrics pane keeps a real minimum height
+instead of being squeezed under the fold. ReplayGain is applied through the WebAudio gain stage in
 **track**, **album** or **off** mode (`replaygain_mode`) with a preamp
 (`replaygain_preamp_db`, ±24 dB); a file without ReplayGain tags is measured on
 the fly with ffmpeg's EBU R128 meter when `replaygain_analyze_missing` is on
@@ -208,6 +222,19 @@ the whole `run_all_order` over that album. The **import script chain** then runs
 10 → 4); `import_auto_scripts` turns it off, and the chain only ever *fills* a
 tag, so what you typed in the wizard survives. **Bulk import** queues several
 albums with `import_bulk_concurrency` (2 by default, 1–8).
+
+The **Advisory** step resolves `ITUNESADVISORY` from every applicable source —
+Deezer and Spotify by ISRC (every ISRC the file states *and* every one
+MusicBrainz holds for its recording), Apple's explicit-edition album route and
+Apple's exact-title song search — merged so explicit anywhere wins, and derives
+`ALBUMITUNESADVISORY` from the per-track values with script 8's own rule (the
+*Fetch advisory rating* action derives it too, so a manual fetch never leaves
+the album tag stale). Each track's value names the provider behind it; a track no
+source could state anything about is not invented — `mlo/advisory.py` decides
+(instrumental → configured AI → the multilingual lyrics scan → `advisory_fallback`)
+and reports the stage it used. The two tags answer to their own switches:
+`advisory_auto_fetch` for the per-track rating, *Auto Album Advisory*
+(`auto_advisory`) for the album tag script 8 derives.
 
 ### Soulseek & wishes
 
@@ -276,7 +303,7 @@ characters for paths that need the room.
 
 ### Grading
 
-**67 checks** across tracks, albums, artist folders and folders, all toggleable
+**68 checks** across tracks, albums, artist folders and folders, all toggleable
 on the **Grading** page with a live filter, enable/disable-all and the **Strict /
 Balanced / Relaxed** presets; `grade_check_audit` is the only check that ships
 **off**. A verdict is binary: an album is `PASS` only when every enabled check
@@ -290,6 +317,18 @@ percentage always covers every enabled check. Two checks follow the codec target
 is an uncompressed container (`wav`/`aiff`) or `keep`, and `grade_check_cd_format`
 exempts a file that already is the configured lossy target. Artist folders are graded on
 exactly two things — image and description — by `grade_artist()`.
+
+A tag **value** has one canonical form (`mlo/tagtext.py`), applied on every
+write — the beets import, the wizard, the auto-import chain, every script and a
+manual edit — and re-applied over a whole library by **Format all** (script 10):
+the tags whose value set is closed (`MEDIA`, `SOURCE`, `RELEASETYPE`,
+`RELEASESTATUS`, `AUDIT`, `RELEASECOUNTRY`, `SCRIPT`, `MOOD`) are spelled the way
+the app stores them, spacing is collapsed, and a value the vocabulary does not
+know is left alone rather than coerced. `grade_check_tag_case` and
+`grade_check_tag_spaces` fail what those writers would have fixed; free text
+(`TITLE`, `ALBUM`, `ARTIST`, `LABEL`, the lyrics) is never touched, which is what
+keeps `AC/DC` and `k.d. lang` intact. Genres are stored broad-first too:
+`Rock / Shoegaze / Dream Pop`, the family and then what names the music.
 
 **The specification** — every check id, what it asserts, its default, the
 presets, the audit workflow, tag families, quality bars, score semantics and a
@@ -319,12 +358,19 @@ server.
 
 ### Notifications and languages
 
-The backend publishes `wish_found`, `download_done` and `import_ready` on
-`/ws/events`; each client keeps that socket open and raises an OS notification
+The backend publishes every settled outcome on `/ws/events` — `wish_found`,
+`wish_failed`, `wish_not_found`, `download_started` and `download_done` (a
+Soulseek job beginning and landing), `upload_started` (a peer starting to
+download from your share), `download_failed`, `import_ready`, `import_needs_data`,
+`script_done`, `script_failed`, `grade_done` and `update_available`; each client
+keeps that socket open and raises an OS notification
 (Tauri's plugin on desktop and mobile, the Web Notification API in the browser)
-with an in-app toast when permission is refused, and `notify_wish_found`,
-`notify_download_done`, `notify_import_ready` decide which kinds are published.
-This is **not** remote push. The UI ships in six languages — English, Español,
+with an in-app toast when permission is refused. The tray keeps every kind;
+`notify_wish_found`, `notify_download_done`, `notify_import_ready`,
+`notify_soulseek_download_start` and `notify_soulseek_upload_start` decide which
+kinds are published, and `?since=` replays the 100-event ring so a client that
+reconnects does not miss one. This is **not** remote push. The UI ships in six
+languages — English, Español,
 Français, Deutsch, 日本語, Português (Brasil) — picked as this browser's own choice
 (`localStorage: mlo.locale`), then the server's `ui_locale`, then
 `navigator.language`, then English; the deeper tool pages are still English.
@@ -496,7 +542,8 @@ Where the app stores what it fetches (all under `<music>/.mlo/`):
 | `GET /api/library` | tag-rich library tree (grades, audits, tags, tech info; gzipped) |
 | `GET /api/health` `GET /api/version` | liveness (`status`, `version`); `{version, latest, update_available, release_url, checked_at, source}` cached 6 h, `latest: null` when GitHub is unreachable — a container reports its image's `MLO_VERSION` |
 | `GET /api/auth/status`, `POST /api/auth/setup` `…/login` `…/logout` `…/password` `…/revoke-all`, `GET …/sessions`, `GET/POST /api/auth/users`, `DELETE …/{name}` | the gate's state (`required`, `has_password`, `username`, `host`, `public_url`, `session_days`); first-run password, sign in (optional `username`), sign out, change, revoke everywhere, session count, user management |
-| `GET /api/library/layout` | read-only layout scan (misplaced audio, stray files, empty albums, `wrong_case`); `GET /api/home` and `GET /api/recommend` back the Home shelves and "More like this" |
+| `GET /api/library/layout` | read-only layout scan (misplaced audio, stray files, empty albums, `wrong_case`); `GET /api/home` and `GET /api/recommend` back the Home shelves and **Recommended (Local)** |
+| `GET /api/storage` | one disk snapshot for the Home card: the volume, the library, the **app's own footprint** (`app_total` = state + bin + transfers + tools, with `dependencies` measured where it lives), the bin and the transfer folders — every figure the OS refused is `null`, never 0 |
 | `GET /api/album` `GET /api/artist` `GET /api/artist/artwork`, `GET /api/stream` `GET /api/videos/stream` `GET /api/videos/meta` `GET /api/videos/thumb` | entity details, stored artist image/description + provenance and the artist's own grade; audio/video streaming (Range; `?transcode=1`), codec probe, scrub frames |
 | `GET /api/tags` `POST /api/tags/bulk` `…/videos/tag`, `POST /api/run`, `POST /api/organize` | per-track tag read view; bulk tag surgery; video tag writes; run scripts 1–19; apply the naming script (dry-run supported) |
 | `POST /api/export`, `GET /api/export/codecs` `…/drives` `…/defaults` | multi-format export plus its codec table, drives and saved defaults |
@@ -506,7 +553,7 @@ Where the app stores what it fetches (all under `<music>/.mlo/`):
 | `POST /api/import/upload` `…/commit` `…/acoustid` `…/finish` `…/bulk`, `POST /api/lyrics/auto` `…/write` `…/embed` `…/wordsync`, `GET /api/lyrics/find` `…/providers` | the import pipeline, its fingerprint step, the chain and the bulk queue; the lyrics chain, previews and writes |
 | `GET /api/cover/search` `…/sources`, `POST /api/cover` `…/fromurl` | cover meta-search, upload and save-as-cover |
 | `POST /api/soulseek/download-bulk` `…/download-user` `…/search/cancel`, `GET /api/soulseek/ready`, `POST …/import-one` `…/import-all` `GET …/import-all/status` `POST …/import-all/cancel` | Soulseek downloads, the ready list and the sequential importer |
-| `WS /ws/progress` `WS /ws/events` | live script progress; the notification channel (`wish_found` / `download_done` / `import_ready`, `?since=` replays the 100-event ring) |
+| `WS /ws/progress` `WS /ws/events` | live script progress; the notification channel (every published kind — `wish_found`, `download_started`, `download_done`, `upload_started`, `import_ready`, `script_done`, `grade_done`, `update_available`, …), `?since=` replays the 100-event ring |
 
 ## Tests & development
 

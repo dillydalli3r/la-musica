@@ -494,8 +494,10 @@ _ACOUSTID_ROW = {"release_group_id": None, "release_group_title": None,
 def fetch_advisories(paths, cfg=None):
     """Resolve and write ITUNESADVISORY for these albums / tracks.
 
-    Each track is identified by its ISRC tag (or by the MusicBrainz recording
-    ID the import just stamped, whose ISRCs MusicBrainz supplies) and rated by
+    Each track is identified by EVERY ISRC its own tag states — a file may
+    carry several (";"-joined, the way `AudioFile.get_tag` reads a repeated
+    field), and they are all asked — or by the MusicBrainz recording ID the
+    import just stamped, whose ISRCs MusicBrainz supplies. It is rated by
     `integrations.resolve_advisory_route`, which asks EVERY applicable source
     in one pass — Deezer and Spotify by ISRC, Apple's explicit-edition album
     route, Apple's exact-title song search — and merges them with
@@ -511,12 +513,27 @@ def fetch_advisories(paths, cfg=None):
     A file that already carries a valid 0/1/2 is left alone (the user's manual
     edit wins) and a value equal to the decided one is not rewritten.
 
+    ALBUMITUNESADVISORY is DERIVED here for every album folder the call
+    touched, from the per-track values by script 8's own rule
+    (`mlo.autotag._derive_advisory`: any explicit → 1, else any clean edition
+    → 2, else 0). Script 8 runs it behind the import chain, but the manual
+    surfaces — the wizard's advisory step, the album page's Check, the
+    tag-actions item — have no script 8 behind them, and leaving it to the
+    script left every track rated and the album tag empty, which the grader
+    reports as "Missing album tag ALBUMITUNESADVISORY".
+
     Returns ``{"updated": n, "values": {path: 0|1|2}, "sources": {path:
-    provider}, "answers": {path: {source: 0|1}}, "hits": {path: [word, ...]}}``
-    — `sources` is who stated each value ("instrumental", "ai-lyrics",
-    "lyrics-scan" and "fallback" included), `answers` is what every provider
-    said about the track, and `hits` is the words the scan matched, so a
-    caller can show why a track reads explicit.
+    provider}, "answers": {path: {source: 0|1}}, "hits": {path: [word, ...]},
+    "albums": {folder: 0|1|2}, "album_updated": n, "gated": n}``
+    — `updated`/`values`/`sources`/`answers`/`hits` are the per-track writes
+    (`sources` is who stated each value — "instrumental", "ai-lyrics",
+    "lyrics-scan" and "fallback" included, so a value NOBODY stated is
+    distinguishable from one a provider stated: the ladder's stage is named,
+    `answers` stays empty), `hits` is the words the scan matched,
+    `albums`/`album_updated` are the album tag derived from them, and `gated`
+    counts the files the ADVISORY write gate refused. When it refused EVERY
+    file, `skipped` carries the reason instead of an empty result that would
+    read as "nobody stated anything".
     """
     from mlo.audio import AudioFile
     from mlo.config import should_write_audio_tag
@@ -542,6 +559,7 @@ def fetch_advisories(paths, cfg=None):
         per_folder[folder] = per_folder.get(folder, 0) + 1
 
     updated = 0
+    gated = 0
     values = {}
     sources = {}
     answers = {}
@@ -556,9 +574,11 @@ def fetch_advisories(paths, cfg=None):
                 values[path] = int(current)
                 continue
             if not should_write_audio_tag(cfg, "ITUNESADVISORY", filepath=path):
+                gated += 1
                 continue
             route = intg.resolve_advisory_route(
-                isrc=str(af.get_tag("ISRC") or "").split(";")[0].strip(),
+                # The file's own tag, as stored: every ISRC on it is asked.
+                isrc=str(af.get_tag("ISRC") or ""),
                 recording_mbid=str(af.get_tag("MUSICBRAINZ_TRACKID") or "").strip(),
                 title=str(af.get_tag("TITLE") or ""),
                 artist=str(af.get_tag("ARTIST") or af.get_tag("ALBUMARTIST") or ""),
@@ -590,10 +610,71 @@ def fetch_advisories(paths, cfg=None):
                 hits[path] = decision["hits"]
         except Exception:
             continue
-    if updated:
+
+    if gated and not values:
+        # Nothing at all was recorded because the write gate refused every file
+        # (Settings → "Set advisory automatically" is the ADVISORY family's
+        # master switch, or the per-filetype toggle). Say so: the all-zero
+        # reply this used to return reads exactly like "nobody stated
+        # anything", and a caller cannot act on a lie. Nothing was looked up
+        # and nothing was written, so there is no album tag to derive either.
+        return {"updated": 0, "values": {}, "sources": {}, "answers": {},
+                "hits": {}, "albums": {}, "album_updated": 0, "gated": gated,
+                "skipped": (f"{gated} track(s) not rated: writing "
+                            "ITUNESADVISORY is off for their file type "
+                            "(auto_advisory / audio_tag_writes['ADVISORY'])")}
+
+    # The album tag, from the values this pass just settled (and from whatever
+    # the album's other tracks already carried — the rule is album-wide).
+    from mlo.autotag import _derive_advisory
+    albums = {}
+    album_updated = 0
+    album_gated = 0
+    for folder in sorted(per_folder):
+        try:
+            files = _audio_files(folder)
+            handles = {}
+            for p in files:
+                try:
+                    af = AudioFile(p)
+                except Exception:
+                    continue
+                if af.audio is None:
+                    continue
+                handles[p] = af
+            if not handles:
+                continue
+            advisories = [str(values[p]) if p in values
+                          else str(handles[p].get_tag("ITUNESADVISORY") or "").strip()
+                          for p in handles]
+            want = _derive_advisory(advisories)
+            albums[folder] = want
+            for p, af in handles.items():
+                if str(af.get_tag("ALBUMITUNESADVISORY") or "").strip() == str(want):
+                    continue
+                if not should_write_audio_tag(cfg, "ALBUMITUNESADVISORY", filepath=p):
+                    album_gated += 1
+                    continue
+                if af.set_tag("ALBUMITUNESADVISORY", str(want)):
+                    album_updated += 1
+        except Exception:
+            continue
+
+    if updated or album_updated:
         _invalidate_caches()
-    return {"updated": updated, "values": values, "sources": sources,
-            "answers": answers, "hits": hits}
+    out = {"updated": updated, "values": values, "sources": sources,
+           "answers": answers, "hits": hits, "albums": albums,
+           "album_updated": album_updated, "gated": gated,
+           "album_gated": album_gated}
+    if album_gated and not album_updated:
+        # The per-track values landed and the ALBUM tag was refused: that tag
+        # answers to script 8's derivation switch ("Auto Album Advisory",
+        # `auto_advisory`), which is off. Say it — an album whose tracks are all
+        # rated and whose album tag is empty fails `grade_check_album_tags`,
+        # and the caller has to know which switch to flip.
+        out["skipped"] = (f"{album_gated} album tag(s) not written: "
+                          "ALBUMITUNESADVISORY derivation is off (auto_advisory)")
+    return out
 
 
 def fetch_instrumentals(paths, cfg=None):

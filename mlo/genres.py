@@ -1,19 +1,19 @@
-"""Genre formatting: the SPECIFIC genres first, the FAMILY last.
+"""Genre formatting: the FAMILY first, the SPECIFIC genres after it.
 
 Two slots, not three. The middle slot of the old parent/main/sub model was a
 judgement nobody could make consistently — "is this album Alternative Rock or
 Post-Britpop, and which one is the *main* genre?" — so it is gone. What is
 left is what can actually be answered:
 
-  * the **specific** genres, which the sources and the model answer with, and
   * the **family** (the broad head: `rock`, `electronic`, `hip hop`), which is
-    derived from the specific one by :mod:`mlo.genre_vocab` rather than asked
-    for.
+    derived from the specific genre by :mod:`mlo.genre_vocab` rather than asked
+    for, and
+  * the **specific** genres, which the sources and the model answer with.
 
-`rock` / `shoegaze` is a hierarchy; three near-synonyms in a row is not. The
-family takes the LAST slot, so `mb_genre_count` = 2 means "one specific genre
-and its family", and raising it to 3 allows a second specific genre in front of
-the family.
+`rock` / `shoegaze` reads as the hierarchy it is: broad first, narrowing. The
+family takes the FIRST slot, so `mb_genre_count` = 2 means "the family and one
+specific genre", and raising it to 3 allows a second specific genre behind the
+family.
 
 Names are MusicBrainz's own (:mod:`mlo.genre_vocab`): canonical casing, an
 alias table for the spellings the sources emit, and a curated genre -> family
@@ -34,11 +34,11 @@ __all__ = [
     "split_stored", "iter_names", "normalize_genres", "format_genres", "issues",
 ]
 
-# Two slots: one specific genre and its family. `mb_genre_count` is the
+# Two slots: the family and one specific genre. `mb_genre_count` is the
 # user-facing knob and defaults to this same number.
 DEFAULT_GENRE_COUNT = 2
 
-# The knob's ceiling. Three is "two specific genres and the family"; past that
+# The knob's ceiling. Three is "the family and two specific genres"; past that
 # a genre list stops describing the music and starts describing the reviewer.
 GENRE_COUNT_MAX = 3
 
@@ -128,7 +128,7 @@ def split_stored(value) -> List[str]:
 
 def normalize_genres(names: Iterable, count: int = DEFAULT_GENRE_COUNT,
                      caps: bool = True) -> List[str]:
-    """The canonical list for one track: specifics first, family last.
+    """The canonical list for one track: family first, specifics after.
 
     * every name is resolved to MusicBrainz's spelling when it is a genre
       (`Nonsense` is kept as written, because dropping evidence is worse),
@@ -136,8 +136,10 @@ def normalize_genres(names: Iterable, count: int = DEFAULT_GENRE_COUNT,
     * a name that IS a family is pulled out of the specific list and used as
       the family slot rather than repeated,
     * the family of the first specific genre is derived when none was given,
-    * the result is capped at *count*, and the family is placed last — a
+    * the result is capped at *count*, and the family is placed first — a
       second specific genre yields its slot to the family, never the reverse,
+    * a single slot has no room for a family, so it holds the specific genre:
+      a family on its own says almost nothing about the music,
     * each name is capitalized for display (`display_name`) unless *caps* is
       off — the stored value is what a person reads, and MusicBrainz's own
       lowercase spelling is a database convention, not a tag convention.
@@ -185,10 +187,11 @@ def normalize_genres(names: Iterable, count: int = DEFAULT_GENRE_COUNT,
     if not family:
         out = specifics[:count]
     elif count == 1:
-        # No room for both, and the specific genre is the informative one.
+        # No room for both, and the specific genre is the informative one: a
+        # family on its own ("Rock") says almost nothing about the track.
         out = (specifics[:1] or [family])[:1]
     else:
-        out = (specifics[:count - 1] + [family])[:count]
+        out = ([family] + specifics[:count - 1])[:count]
     return [display_name(n) for n in out] if caps else out
 
 
@@ -212,7 +215,7 @@ def iter_names(names: Iterable) -> List[str]:
 
 
 def format_genres(names: Iterable) -> str:
-    """The rendered form: `Specific / Family`. Empty list renders empty."""
+    """The rendered form: `Family / Specific`. Empty list renders empty."""
     return GENRE_ORDER_SEPARATOR.join(normalize_genres(names, count=GENRE_COUNT_MAX))
 
 
@@ -220,7 +223,7 @@ def issues(values: Iterable, count: int = DEFAULT_GENRE_COUNT) -> List[str]:
     """Structural problems with a track's genre list, for the grader.
 
     Empty means "in shape": recognized names, no duplicates, at most *count*
-    of them, family last.
+    of them, family first.
     """
     names = iter_names(values)
     out: List[str] = []
@@ -234,8 +237,8 @@ def issues(values: Iterable, count: int = DEFAULT_GENRE_COUNT) -> List[str]:
         if canonical(name) is None:
             out.append(f"not a known genre: {name}")
     family_at = [i for i, n in enumerate(names) if is_parent(n)]
-    if family_at and family_at != [len(names) - 1]:
-        out.append("family genre must be the last one")
+    if family_at and family_at != [0]:
+        out.append("family genre must be the first one")
     for name in names:
         if name != _clean(name):
             out.append("spacing")

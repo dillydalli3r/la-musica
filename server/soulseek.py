@@ -1264,6 +1264,48 @@ def uploads_state(cfg=None):
         raise
 
 
+def upload_start_frames(prev, uploads):
+    """Which users just STARTED downloading from us, and the state to keep.
+
+    `uploads` is slskd's upload tree (uploads_state()); `prev` is the `state`
+    this function answered with last time: {username: active count}. A user is
+    active while ANY of their transfers is not in a finished state — Queued,
+    Initializing, InProgress and Requested all mean slskd still owes the peer
+    a file, and a transfer slskd reports as finished must never announce
+    anything at first sight (it may have been taken hours before this watcher
+    ever ran).
+
+    Returns (state, frames): the state for the next pass, and one
+    {"username", "files"} per user whose count went from nothing to something
+    — ONE frame per user-session, not one per poll (the watcher runs every
+    few seconds and a transfer takes minutes). A user whose transfers all
+    finished is dropped from the state, so their next download re-arms the
+    frame.
+
+    Pure — slskd, the clock and the event bus stay outside — which is what
+    makes the dedupe itself testable with plain dicts."""
+    prev = prev or {}
+    state, frames = {}, []
+    for entry in uploads or []:
+        if not isinstance(entry, dict):
+            continue
+        user = str(entry.get("username") or "")
+        if not user:
+            continue
+        active = 0
+        for d in entry.get("directories") or []:
+            for f in (d or {}).get("files") or []:
+                if not finished_transfer((f or {}).get("state")):
+                    active += 1
+        if active:
+            state[user] = active
+    for user, count in state.items():
+        if prev.get(user):
+            continue      # already sharing: the frame went out when it started
+        frames.append({"username": user, "files": count})
+    return state, frames
+
+
 def server_state(cfg=None):
     """Login status + server stats (or None when logged out)."""
     try:

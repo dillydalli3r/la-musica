@@ -11,6 +11,7 @@ export default function FavHeart({
   className = "",
   iconClass = "h-4 w-4",
   title,
+  revealOnHover = false,
 }: {
   kind: FavKind | "track";
   id?: string | null;
@@ -18,6 +19,12 @@ export default function FavHeart({
   className?: string;
   iconClass?: string;
   title?: string;
+  /** Row hearts keep their space and appear when the row is hovered (the
+   *  caller's `.group`), so an action column costs no layout. A FAVOURITED
+   *  heart is a STATE, not an action: it is drawn whether or not the pointer
+   *  is anywhere near, or the row reads as unfavourited until the mouse lands
+   *  on it. */
+  revealOnHover?: boolean;
 }) {
   const { fav, toggle } = useFav(kind, id, mbid);
   return (
@@ -26,7 +33,9 @@ export default function FavHeart({
     <button
       type="button"
       className={`tap-hit p-1.5 rounded-md hover:bg-raise shrink-0 transition-colors ${
-        fav ? "text-accent" : "text-zinc-500 hover:text-zinc-200"
+        fav
+          ? "text-accent"
+          : `text-zinc-500 hover:text-zinc-200${revealOnHover ? " row-hover" : ""}`
       } ${className}`}
       onClick={(e) => {
         e.preventDefault();
