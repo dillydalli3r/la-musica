@@ -467,6 +467,7 @@ check("no job is left in this thread's context between sections",
 
 mlo_main = None
 try:
+    import httpx                                # noqa: E402  (TestClient's own client)
     from fastapi.testclient import TestClient  # noqa: E402  (heavy import)
 
     from server import beetscfg, main as mlo_main, soulseek  # noqa: E402
@@ -586,6 +587,45 @@ if mlo_main is not None:
                                   f"?source={staging}&target=Ingested"))
         check("the ingest really moved the album",
               os.path.isdir(os.path.join(music, "Artists", "Ingested")))
+
+        # Two COVER WRITES at once, through the real app on one event loop.
+        # The first suspends inside its own body (its image fetch runs in a
+        # worker thread, so the loop stays free) — the second must be refused.
+        # Scoping the job to the thread made the second JOIN the first and
+        # write the same album unchallenged.
+        _first_inside = threading.Event()
+        _quick_bytes = mlo_main._cover_url_bytes
+
+        def _slow_bytes(*a, **k):
+            _first_inside.set()
+            time.sleep(0.5)
+            return png, "image/png"
+
+        mlo_main._cover_url_bytes = _slow_bytes
+
+        async def concurrent_covers():
+            transport = httpx.ASGITransport(app=mlo_main.app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+                url = f"/api/cover/fromurl?album={album}&url=http://127.0.0.1:1/c.png"
+                first = asyncio.create_task(ac.post(url))
+                while not _first_inside.is_set():
+                    await asyncio.sleep(0.01)
+                second = asyncio.create_task(ac.post(url))
+                return await first, await second
+
+        try:
+            _first, _second = asyncio.run(concurrent_covers())
+        finally:
+            mlo_main._cover_url_bytes = _quick_bytes
+        if _first.status_code in (401, 428):
+            print("  SKIP  the concurrent check (auth gate on)")
+        else:
+            check("the first of two concurrent cover writes goes through",
+                  _first.status_code == 200, f"{_first.status_code} {_first.text[:160]}")
+            check("the second, on the same album, is refused 409",
+                  _second.status_code == 409, f"{_second.status_code} {_second.text[:160]}")
+            check("and its refusal names the write holding the album",
+                  "in use by" in _second.json().get("detail", ""), _second.text[:160])
 
         # The downloads import claims the albums it is about to move, so a
         # second import (or a run over the library) cannot take them first.
