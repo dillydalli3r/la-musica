@@ -255,19 +255,13 @@ def host_platform():
 
     Linux is the only non-Windows platform with downloads of its own
     (LINUX_BINARIES); everywhere else a tool is a pip package or one the user
-    installs with the system package manager.
-
-    Android reports itself as Linux (sys.platform is "linux" there too) but is
-    NOT one for this installer: `sys.getandroidapilevel` exists only on Android,
-    the platform refuses to exec a file in app storage, and the mobile builds
-    bundle their own tools instead (see tools/mobile). Without this, a phone
-    would be offered a musl desktop binary that lands "installed" and cannot run.
+    installs with the system package manager. The server runs in Docker or from
+    a checkout on a desktop OS — no phone hosts a backend any more — so this is
+    simply what the interpreter reports.
     """
     if os.name == "nt":
         return "windows"
     if sys.platform.startswith("linux"):
-        if hasattr(sys, "getandroidapilevel"):
-            return "other"
         return "linux"
     return "other"
 

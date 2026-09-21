@@ -2,11 +2,13 @@ name: Release
 
 # Creating a v* tag runs CI first and only then builds the web frontend,
 # publishes a GitHub release carrying the packaged source zip
-# (la-musica-<version>-windows-x64.zip: mlo/, server/, tools/, web/dist,
-# start_app.py, tray.py) plus the desktop bundles (Windows/macOS/Linux) and
-# the mobile builds (an unsigned Android APK and an unsigned iOS IPA — see
-# .github/workflows/mobile.yml for why they cannot be signed here), and pushes
-# a Docker image to GHCR. The tag is checked against mlo/__init__.py first: the
+# (la-musica-<version>-windows-x64.zip: mlo/, server/, tools/, web/dist plus
+# docker-compose.yml and the Dockerfile — the container is how the server is
+# installed, and the zip exists for people who want the sources under it) plus
+# the desktop bundles (Windows/macOS/Linux) and the mobile builds (an unsigned
+# Android APK and an unsigned iOS IPA — see .github/workflows/mobile.yml for why
+# they cannot be signed here), and pushes a Docker image to GHCR. The tag is
+# checked against mlo/__init__.py first: the
 # app reports that version, so a mistagged release would ship two different
 # answers to "which version is this?".
 # There is no in-app updater (desktop/src-tauri/tauri.conf.json configures no
@@ -96,14 +98,16 @@ jobs:
           mkdir -p "${STAGE}/web"
           cp -r mlo server tools "${STAGE}/"
           cp -r web/dist "${STAGE}/web/dist"
-          cp start_app.py tray.py README.md LICENSE THIRD-PARTY-NOTICES.md "${STAGE}"/
-          # The Windows entry point is not optional: a renamed/missing launcher
-          # must fail the release, not silently ship a zip you cannot start.
-          test -f "Start la musica.bat" || {
-            echo "::error::Start la musica.bat is missing - the release zip would have no Windows entry point"
-            exit 1
-          }
-          cp "Start la musica.bat" "${STAGE}/"
+          cp README.md LICENSE THIRD-PARTY-NOTICES.md "${STAGE}"/
+          # The server is installed from a container now — the local launchers
+          # (start_app.py, tray.py, the .bat wrappers) are gone with host-local
+          # hosting — so the compose file and the Dockerfile travel with the
+          # source. A zip without them has no install path at all, which must
+          # fail the release rather than ship.
+          for f in docker-compose.yml Dockerfile; do
+            test -f "$f" || { echo "::error::$f is missing - the source zip would have nothing to install with"; exit 1; }
+            cp "$f" "${STAGE}/"
+          done
           zip -qr "la-musica-${VERSION}-windows-x64.zip" "${STAGE}"
           rm -rf "${STAGE}"
 

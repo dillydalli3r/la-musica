@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { api } from "../api";
+import { api, getToken, serverUrl } from "../api";
 import { isVideoFile } from "./fmt";
 import type { Library, Track } from "../types";
 
@@ -76,12 +76,39 @@ function absolute(base: string): string {
   return new URL(base, window.location.href).toString();
 }
 
+/** An absolute URL for an API path this module builds by hand. `absolute()`
+ *  cannot be used for those: in the Tauri shell the document's own origin is
+ *  `tauri://localhost` while the backend lives at api.ts's serverUrl, so a
+ *  relative path resolved against the document would name a URL nothing ever
+ *  requests (and the warmed entry is then never found again). On the web app
+ *  serverUrl() is "" and this is the origin that served the page. */
+function apiAbsolute(path: string): string {
+  return new URL(path, serverUrl() || window.location.href).toString();
+}
+
+/** The URL the PLAYER asks for — and with it the key a track's bytes are
+ *  cached under: the service worker matches the element's own request, so the
+ *  download is what makes offline playback work. */
+function playbackUrl(path: string): string {
+  return absolute(isVideoFile(path) ? api.videoStreamUrl(path) : api.streamUrl(path));
+}
+
+/** Headers every download request carries: the session, as the app's own
+ *  `json()` sends it. The gate is off for a loopback browser, but the Tauri
+ *  shells and any client on a LAN need the token. */
+function authHeaders(extra?: HeadersInit): Headers {
+  const headers = new Headers(extra);
+  const token = getToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  return headers;
+}
+
 /** Every URL a track's stream may have been cached under: the direct one,
  * plus the live transcode for videos (the player retries a failed direct
  * stream through it). Lets lookups and removals work without a probe, so
  * "Downloaded" survives a server that is down. */
 function cacheUrls(path: string): string[] {
-  if (!isVideoFile(path)) return [absolute(api.streamUrl(path))];
+  if (!isVideoFile(path)) return [playbackUrl(path)];
   return [absolute(api.videoStreamUrl(path)), absolute(api.videoStreamUrl(path, true))];
 }
 
@@ -114,9 +141,9 @@ function artworkUrls(trackPath: string): string[] {
 function entityUrls(trackPath: string): string[] {
   const album = parentDir(trackPath);
   return [
-    absolute(`/api/album?path=${encodeURIComponent(album)}`),
-    absolute(`/api/artist?path=${encodeURIComponent(parentDir(album))}`),
-    absolute(`/api/credits?album=${encodeURIComponent(album)}`),
+    apiAbsolute(`/api/album?path=${encodeURIComponent(album)}`),
+    apiAbsolute(`/api/artist?path=${encodeURIComponent(parentDir(album))}`),
+    apiAbsolute(`/api/credits?album=${encodeURIComponent(album)}`),
   ];
 }
 
@@ -200,7 +227,11 @@ function revoke(key: string): void {
 async function warm(c: Cache, url: string): Promise<void> {
   try {
     const resp = await fetch(url);
-    if (resp.ok) await c.put(url, resp);
+    // Only a FULL body can be stored: `resp.ok` would accept a 206 as well,
+    // and Cache Storage refuses those. Nothing warmed here is ever asked for
+    // as a range, so any other answer is one this cache cannot hold.
+    if (resp.status !== 200) return;
+    await c.put(url, resp);
   } catch {
     /* offline or absent — the audio cache is what matters */
   }
@@ -212,49 +243,180 @@ async function warm(c: Cache, url: string): Promise<void> {
  *  reported as failed with nothing to show for the wait. */
 const STREAM_TIMEOUT_MS = 120_000;
 
-/** Fetch a stream with a deadline and one retry.
+/** A download failure, and whether another attempt is worth making.
  *
- *  A dropped connection or a 5xx is worth a second attempt (the server may be
- *  mid-restart); a 4xx is the server saying no, so it is reported as-is —
- *  "could not be downloaded" with a status is actionable, a bare count is
- *  not. */
-async function fetchStream(url: string): Promise<Response> {
-  const attempt = () => fetch(url, { signal: AbortSignal.timeout(STREAM_TIMEOUT_MS) });
-  let resp: Response;
-  try {
-    resp = await attempt();
-  } catch {
-    resp = await attempt();
+ *  `retryable` is what the queue reads: a dropped connection, a 5xx or a
+ *  partial answer are worth one more try, while "no such file" or "not signed
+ *  in" would only say the same thing again. */
+class DownloadError extends Error {
+  readonly retryable: boolean;
+
+  constructor(message: string, retryable = false) {
+    super(message);
+    this.name = "DownloadError";
+    this.retryable = retryable;
   }
-  if (!resp.ok && resp.status >= 500) resp = await attempt();
-  if (!resp.ok) {
-    throw new Error(
-      resp.status === 404 ? "the server has no file at that path" : `the server answered ${resp.status}`
-    );
-  }
-  return resp;
 }
 
-export async function cacheTrack(path: string): Promise<void> {
-  // Optimistic direct URL — no probe up front; the player retries via
-  // transcode only if direct playback actually fails.
-  const url = isVideoFile(path) ? absolute(api.videoStreamUrl(path)) : absolute(api.streamUrl(path));
-  const c = await cache();
-  // The response is explicitly moved into the cache; the stream endpoint
-  // has no custom headers we need to preserve beyond the defaults.
-  const resp = await fetchStream(url);
-  await c.put(url, resp);
+/** The caller's cancel joined with our own deadline: whichever fires first
+ *  aborts the one signal the fetch sees. Hand-rolled rather than
+ *  `AbortSignal.any` so a browser that predates it still downloads. */
+function withDeadline(signal?: AbortSignal): AbortSignal {
+  const timeout = AbortSignal.timeout(STREAM_TIMEOUT_MS);
+  if (!signal) return timeout;
+  const ctrl = new AbortController();
+  const stop = () => ctrl.abort();
+  signal.addEventListener("abort", stop, { once: true });
+  timeout.addEventListener("abort", stop, { once: true });
+  return ctrl.signal;
+}
+
+/** One field of a JSON value, when that value is an object carrying it — the
+ *  boundary every framing field is read through, so an unexpected shape reads
+ *  as a missing field instead of a TypeError. */
+function prop(value: unknown, name: string): unknown {
+  if (!value || typeof value !== "object" || !(name in value)) return undefined;
+  return Reflect.get(value, name);
+}
+
+/** What a refused download answer means, in words the user can act on — with
+ *  the server's own `detail` when it sent one. */
+async function describeStatus(resp: Response): Promise<string> {
+  let detail = "";
+  try {
+    const body: unknown = await resp.json();
+    const sent = prop(body, "detail");
+    detail = typeof sent === "string" ? sent : "";
+  } catch {
+    /* not JSON: the status is all there is to say */
+  }
+  const tail = detail ? ` — ${detail}` : "";
+  if (resp.status === 401 || resp.status === 403) return `not signed in, or the session expired${tail}`;
+  if (resp.status === 404) return `the server has no file at that path${tail}`;
+  if (resp.status === 416) return `the server could not read that file${tail}`;
+  return `the server answered ${resp.status}${tail}`;
+}
+
+/** The stream response as the full 200 a cache entry can hold, or null when it
+ *  is genuinely partial.
+ *
+ *  Cache Storage takes a 200 and nothing else — `Cache.put()` throws on a 206
+ *  ("Cache got basic response with bad status 206"), which is exactly how
+ *  every download used to fail. A 206 that happens to BE the whole file (what
+ *  `Range: bytes=0-` comes back as, and what the service worker's own media
+ *  branch produces) carries every byte and is rebuilt as the 200 the cache
+ *  wants; a real slice is refused, because storing it would leave the player a
+ *  truncated track with nothing in the cache to say why. */
+async function asFullBody(resp: Response): Promise<Response | null> {
+  if (resp.status === 200 && !resp.headers.get("content-range")) return resp;
+  const range = /^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i.exec((resp.headers.get("content-range") || "").trim());
+  let body: ArrayBuffer;
+  try {
+    body = await resp.arrayBuffer();
+  } catch (e) {
+    // Reading the body is where a connection dropped mid-transfer shows up,
+    // and it shows up as the browser's own TypeError. A fresh request can
+    // still deliver the file, so this is a failure worth one more attempt.
+    throw new DownloadError(
+      `the download was cut off mid-file${e instanceof Error && e.message ? ` (${e.message})` : ""}`,
+      true
+    );
+  }
+  const total = range && range[3] !== "*" ? Number(range[3]) : 0;
+  if (!range || Number(range[1]) !== 0 || !total || body.byteLength !== total) return null;
+  const headers = new Headers({ "Content-Length": String(body.byteLength) });
+  const mime = resp.headers.get("content-type");
+  if (mime) headers.set("Content-Type", mime);
+  return new Response(body, { status: 200, headers });
+}
+
+/** Whether the browser's cache REFUSED a response rather than losing the
+ *  transfer under it — the one case a second attempt cannot change.
+ *
+ *  The Cache API reports both the same way: a thrown TypeError whose message
+ *  is the browser's own wording ("...status code 206 is unsupported", "quota
+ *  exceeded", "Cache got basic response with bad status 206" in Firefox). A
+ *  transfer that died says something about the network instead, so those words
+ *  are the only signal there is — and being wrong the other way (retrying what
+ *  a refusal already settled) costs one wasted attempt, while being wrong THIS
+ *  way loses a track the user could have had. */
+function cacheRefused(message: string): boolean {
+  return /quota|status|partial|unsupported|exceeded/i.test(message);
+}
+
+/** Fetch one track's WHOLE audio.
+ *
+ *  The URL is the stream endpoint asked for the full file (`download=1`), so
+ *  the range path that answered the old request with a 206 — and the range
+ *  path the service worker keeps for playback — is out of the way; `no-store`
+ *  keeps a browser's HTTP cache from handing back whatever partial entry a
+ *  media element left at this origin. A 206 is still handled rather than
+ *  trusted (see asFullBody), because a download must not depend on every hop
+ *  honouring `download=1`. */
+async function fetchStream(path: string, signal?: AbortSignal): Promise<Response> {
+  const url = api.streamUrl(path);
+  const full = absolute(`${url}${url.includes("?") ? "&" : "?"}download=1`);
+  let resp: Response;
+  try {
+    resp = await fetch(full, {
+      cache: "no-store",
+      credentials: "include",
+      headers: authHeaders(),
+      signal: withDeadline(signal),
+    });
+  } catch (e) {
+    if (signal?.aborted) throw e; // the user's own cancel, not a failure
+    throw new DownloadError(
+      `could not reach the server${e instanceof Error && e.message ? ` (${e.message})` : ""}`,
+      true
+    );
+  }
+  if (!resp.ok) {
+    const retryable = resp.status >= 500 || resp.status === 408 || resp.status === 429;
+    throw new DownloadError(await describeStatus(resp), retryable);
+  }
+  const whole = await asFullBody(resp);
+  if (!whole) {
+    throw new DownloadError(
+      `the server answered ${resp.status} Partial Content to a full download` +
+        ` (${resp.headers.get("content-range") || "no range given"}) — the request went through the media range path`,
+      true
+    );
+  }
+  return whole;
+}
+
+/** Move one track's response into the cache, under the key playback uses. */
+async function storeStream(c: Cache, path: string, resp: Response): Promise<void> {
+  const key = playbackUrl(path);
+  const want = Number(resp.headers.get("content-length") || 0);
+  try {
+    await c.put(key, resp);
+  } catch (e) {
+    // put() consumes the body, so this is also where a connection that died
+    // mid-transfer surfaces — with the browser's own wording either way
+    // ("Cache got basic response with bad status 206" names the refused
+    // status; a lost transfer names the network). Say which happened in the
+    // download's own terms, and retry the ones a fresh request can fix.
+    const message = e instanceof Error ? e.message : String(e);
+    throw new DownloadError(`the browser could not store the download: ${message}`, !cacheRefused(message));
+  }
   // A short body is worse than no body: the service worker would serve a
   // truncated stream as if it were the whole track, and the player would fail
   // at the end of it with the server long gone. Both the server and the cache
   // entry carry a Content-Length, so the mismatch is visible without reading
   // the payload back.
-  const want = Number(resp.headers.get("content-length") || 0);
-  const got = Number((await c.match(url))?.headers.get("content-length") || 0);
+  const got = Number((await c.match(key))?.headers.get("content-length") || 0);
   if (want && got && want !== got) {
-    await c.delete(url);
-    throw new Error(`the download was cut short (${got} of ${want} bytes)`);
+    await c.delete(key);
+    throw new DownloadError(`the download was cut short (${got} of ${want} bytes)`, true);
   }
+}
+
+/** Everything a downloaded track drags along: the artwork and payloads its
+ *  pages need offline, and the identity row that keeps it attached to the
+ *  track once the organizer moves the file. */
+async function finishTrack(c: Cache, path: string): Promise<void> {
   // Covers, the artist image and the album/artist payloads ride along, so
   // offline playback is not left with a placeholder where the artwork should
   // be, and the album page still has its description.
@@ -266,6 +428,7 @@ export async function cacheTrack(path: string): Promise<void> {
   // the next time it is cached.
   const mbid = await trackMbid(c, path);
   if (!mbid) return;
+  const url = playbackUrl(path);
   const key = trackIdentity(path, mbid);
   const index = await readIndex(c);
   const prev = index[key];
@@ -278,6 +441,13 @@ export async function cacheTrack(path: string): Promise<void> {
   }
   index[key] = { url, path };
   await writeIndex(c, index);
+}
+
+/** Cache one track's audio for offline playback, once. */
+export async function cacheTrack(path: string, opts: { signal?: AbortSignal } = {}): Promise<void> {
+  const c = await cache();
+  await storeStream(c, path, await fetchStream(path, opts.signal));
+  await finishTrack(c, path);
 }
 
 export async function uncacheTrack(target: CacheTarget): Promise<void> {
@@ -499,14 +669,25 @@ export async function offlineMediaUrl(target: CacheTarget): Promise<string | nul
 export async function offlineArtworkUrl(url: string): Promise<string | null> {
   try {
     const key = absolute(url);
-    // Not `searchParams.delete`: re-serializing would rewrite `%20` as `+` and
-    // never match the warmed key for an album path with a space in it.
-    const cut = key.indexOf("&file=");
-    const keys = [key];
-    if (cut > 0) {
-      const next = key.indexOf("&", cut + 1);
-      keys.push(key.slice(0, cut) + (next < 0 ? "" : key.slice(next)));
+    // A URL carrying a cover version (`&v=`) names a SPECIFIC image, and the
+    // warmed entry is whatever the download stored — possibly an earlier
+    // version of the same file. It is therefore only consulted as itself: no
+    // entry means the network URL paints, which is the fresh one. Matching it
+    // against the version-less key would resurrect the image the write just
+    // replaced.
+    const versioned = key.includes("&v=");
+    // Otherwise the warmed key is the plain `?album=` the download wrote (see
+    // artworkUrls), while what is rendered may add `&file=` (a track's own
+    // art) or `&staged=` — neither of which the cache knows. Cut at the FIRST
+    // of them rather than `searchParams.delete`: re-serializing would rewrite
+    // `%20` as `+` and never match the warmed key for an album path with a
+    // space in it.
+    let cut = -1;
+    for (const part of ["&file=", "&staged="]) {
+      const at = key.indexOf(part);
+      if (at > 0 && (cut < 0 || at < cut)) cut = at;
     }
+    const keys = versioned || cut < 0 ? [key] : [key, key.slice(0, cut)];
     const c = await cache();
     for (const k of keys) {
       const hit = await c.match(k);
@@ -515,6 +696,44 @@ export async function offlineArtworkUrl(url: string): Promise<string | null> {
     return null;
   } catch {
     return null; // Cache Storage unavailable (insecure context), or no entry
+  }
+}
+
+/** Drop an album's cached cover from the offline copy.
+ *
+ *  That copy is served in preference to the network one (the swap-in above),
+ *  which is right for a downloaded album and wrong the moment its cover is
+ *  REPLACED: the stored body is the image the user just changed away from, and
+ *  it would paint over the new one on every later view. The service worker
+ *  keeps its own entries in this same cache, so deleting a key drops it from
+ *  both. Called after a cover write (see api.cover/coverFromUrl); the net
+ *  loses nothing — the album is re-warmed by its next download. */
+export async function forgetAlbumArtwork(
+  albumPath: string,
+  coverFile?: string | null
+): Promise<void> {
+  try {
+    const c = await cache();
+    // `token: null` names the VERSION-LESS key — the one warm() wrote and the
+    // page asks for (see artworkUrls). Left to fall back to the remembered
+    // version, these would resolve to the URL the write just recorded, and the
+    // stale key would survive.
+    const plain = absolute(api.coverUrl(albumPath, null, { token: null }));
+    const keys = [plain];
+    if (coverFile) keys.push(absolute(api.coverUrl(albumPath, coverFile, { token: null })));
+    // A version an EARLIER write left behind is dead weight — every future
+    // write carries a new token, so nothing can name it again, and a cover is
+    // megabytes of it. The prefix cannot reach `&color=1`: that entry, the
+    // album's tint, has no `&file=`.
+    for (const req of await c.keys()) {
+      if (req.url.startsWith(`${plain}&file=`)) keys.push(req.url);
+    }
+    for (const key of keys) {
+      await c.delete(key);
+      revoke(key);
+    }
+  } catch {
+    /* no Cache Storage (insecure context): the network copy is the only one */
   }
 }
 
@@ -560,4 +779,374 @@ export function useCachedPaths(): Set<string> {
     }
     return set;
   }, [tracks, lib]);
+}
+
+/* ------------------------------------------------------------------ *
+ * The download queue
+ * ------------------------------------------------------------------ */
+
+/** The shipped `download_concurrency`, and the ceiling the config loader
+ *  enforces on it. A queue wider than that mostly thrashes the disk and the
+ *  socket, and the browser caps a handful of connections per origin anyway. */
+const DEFAULT_CONCURRENCY = 3;
+const MAX_CONCURRENCY = 8;
+
+/** Tracks per bulk request. The endpoint accepts 500; a smaller chunk keeps a
+ *  dropped connection from costing the whole selection, and keeps the JSON
+ *  header line that names them short. */
+const BULK_CHUNK = 100;
+
+/** How many tracks a run has finished, which one is in flight, and how many
+ *  have failed — what a download control shows while it works. */
+export type DownloadProgress = {
+  done: number;
+  total: number;
+  current: string | null;
+  failed: number;
+};
+
+export type DownloadFailure = { path: string; message: string };
+
+export type DownloadReport = {
+  /** Tracks this run cached. */
+  done: number;
+  /** One row per track that could not be cached, with the real reason. */
+  failures: DownloadFailure[];
+  /** True when the user stopped the run before the queue was empty. */
+  cancelled: boolean;
+};
+
+/** The run in flight, so a second press can stop it. One at a time on purpose:
+ *  two runs over the same tracks would double the load and report the same
+ *  failures twice. */
+let activeRun: AbortController | null = null;
+
+/** Stop the running download: in-flight requests are aborted and the queue
+ *  empties. Tracks that already landed stay cached. */
+export function cancelDownloads(): void {
+  activeRun?.abort();
+}
+
+/** `download_concurrency` from the server config, clamped. The app's query
+ *  cache already holds the payload, but this module has no React context to
+ *  read it from, so it asks — an ordinary GET, cached like any other. */
+async function queueWidth(explicit?: number): Promise<number> {
+  if (explicit && explicit > 0) return Math.min(MAX_CONCURRENCY, Math.max(1, Math.trunc(explicit)));
+  try {
+    const n = Number((await api.config())?.download_concurrency);
+    return n > 0 ? Math.min(MAX_CONCURRENCY, Math.max(1, Math.trunc(n))) : DEFAULT_CONCURRENCY;
+  } catch {
+    return DEFAULT_CONCURRENCY; // server unreachable: the default is still a queue
+  }
+}
+
+const UTF8 = new TextDecoder();
+
+/** One file of a bulk header line, as the server described it. */
+type BulkFile = { path: string; size: number; mime: string; error: string | null };
+
+/** A cursor that hands out exactly the bytes the framing promised.
+ *
+ *  A bulk body is one JSON header line followed by the files' bytes back to
+ *  back, so a reader that could not ask for an exact count would have to hold
+ *  the whole batch. Running out before the promised count is fatal for the
+ *  batch: every following file would start wherever the missing bytes ended. */
+class BodyReader {
+  private readonly reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>;
+  private buffer = new Uint8Array(0);
+
+  constructor(body: ReadableStream<Uint8Array<ArrayBuffer>>) {
+    this.reader = body.getReader();
+  }
+
+  private async fill(want: number): Promise<void> {
+    while (this.buffer.byteLength < want) {
+      let chunk: ReadableStreamReadResult<Uint8Array<ArrayBuffer>>;
+      try {
+        chunk = await this.reader.read();
+      } catch (e) {
+        // The connection died under the batch: the reader's own TypeError,
+        // which a fresh request may well not repeat.
+        throw new DownloadError(
+          `the download stream was cut off${e instanceof Error && e.message ? ` (${e.message})` : ""}`,
+          true
+        );
+      }
+      const { done, value } = chunk;
+      if (done) return;
+      if (!value || !value.byteLength) continue;
+      const grown = new Uint8Array(this.buffer.byteLength + value.byteLength);
+      grown.set(this.buffer, 0);
+      grown.set(value, this.buffer.byteLength);
+      this.buffer = grown;
+    }
+  }
+
+  /** The next line, up to and excluding its newline. */
+  async line(): Promise<string> {
+    for (;;) {
+      const end = this.buffer.indexOf(10);
+      if (end >= 0) {
+        const out = this.buffer.slice(0, end);
+        this.buffer = this.buffer.slice(end + 1);
+        return UTF8.decode(out);
+      }
+      const had = this.buffer.byteLength;
+      await this.fill(had + 1);
+      if (this.buffer.byteLength === had) {
+        throw new DownloadError("the download stream ended before it named the files");
+      }
+    }
+  }
+
+  /** Exactly `want` bytes. */
+  async take(want: number): Promise<ArrayBuffer> {
+    await this.fill(want);
+    if (this.buffer.byteLength < want) {
+      throw new DownloadError(
+        `the download stream ended early — ${this.buffer.byteLength} of ${want} bytes of the track had not arrived`
+      );
+    }
+    const out = new ArrayBuffer(want);
+    new Uint8Array(out).set(this.buffer.subarray(0, want));
+    this.buffer = this.buffer.slice(want);
+    return out;
+  }
+
+  /** Give up on the rest of the body (a cancel, or a batch gone wrong). */
+  close(): void {
+    void this.reader.cancel().catch(() => undefined);
+  }
+}
+
+/** The batch description out of a bulk header line. A shape this version does
+ *  not know is refused rather than guessed: guessing would file the wrong
+ *  bytes under a track's key. */
+function parseBulkHeader(line: string): BulkFile[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    throw new DownloadError("the download stream did not start with a file list");
+  }
+  const files = prop(parsed, "files");
+  if (!Array.isArray(files)) throw new DownloadError("the download stream did not start with a file list");
+  return files.map((raw) => {
+    const size = prop(raw, "size");
+    const error = prop(raw, "error");
+    return {
+      path: String(prop(raw, "path") ?? ""),
+      size: Math.max(0, Math.trunc(Number(size)) || 0),
+      mime: String(prop(raw, "mime") ?? ""),
+      error: error ? String(error) : null,
+    };
+  });
+}
+
+/** Cache ONE chunk through the bulk endpoint.
+ *
+ *  Returns the paths whose bytes did not land — they are then fetched one by
+ *  one, where a failure carries the single-track error and gets its retry — or
+ *  null when the batch cannot be used at all (no such route on this server, a
+ *  server having a bad moment, an unusable body), which sends the queue to the
+ *  per-track pool. */
+async function bulkChunk(
+  chunk: string[],
+  signal: AbortSignal,
+  report: DownloadReport,
+  progress: (current: string | null) => void
+): Promise<string[] | null> {
+  let resp: Response;
+  try {
+    resp = await fetch(apiAbsolute("/api/media/bulk"), {
+      method: "POST",
+      cache: "no-store",
+      credentials: "include",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ paths: chunk }),
+      signal,
+    });
+  } catch (e) {
+    if (signal.aborted) throw e;
+    return null; // no answer at all: the per-track path says why
+  }
+  // A server without the bulk route (404/405) or one that finds this chunk too
+  // large (413) still serves every track — one request each. So does a server
+  // having a bad moment (a 5xx, or a 429 telling us to slow down): the tracks
+  // are still downloadable, just one request at a time.
+  if (resp.status === 404 || resp.status === 405 || resp.status === 413) return null;
+  if (resp.status >= 500 || resp.status === 408 || resp.status === 429) return null;
+  // Anything else is the server's final answer (a 4xx): asking again per track
+  // would repeat it, so it travels as one reason for the chunk.
+  if (!resp.ok) throw new DownloadError(await describeStatus(resp));
+  if (!resp.body) throw new DownloadError("the server sent no body for the download batch");
+
+  const reader = new BodyReader(resp.body);
+  let files: BulkFile[];
+  try {
+    files = parseBulkHeader(await reader.line());
+  } catch {
+    // Nothing usable arrived — no header, or one this version cannot read.
+    // Every track in the chunk is still downloadable on its own, where the
+    // failure is reported per track with the response it got.
+    reader.close();
+    return null;
+  }
+  const c = await cache();
+  const missed: string[] = [];
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    if (signal.aborted) {
+      reader.close();
+      return missed;
+    }
+    progress(file.path);
+    // A path the server could not read (gone, or outside the library) is not
+    // reported here: the per-track path words that failure better than the
+    // header can.
+    if (file.error) {
+      missed.push(file.path);
+      continue;
+    }
+    let data: ArrayBuffer;
+    try {
+      data = await reader.take(file.size);
+    } catch {
+      // Short by however much was missing: every following file would start in
+      // the wrong place, so the rest of the batch goes the slow way — where a
+      // dropped connection gets the retry the batch could not give it.
+      reader.close();
+      missed.push(...files.slice(i).map((f) => f.path));
+      return missed;
+    }
+    const headers = new Headers({ "Content-Length": String(data.byteLength) });
+    if (file.mime) headers.set("Content-Type", file.mime);
+    try {
+      await storeStream(c, file.path, new Response(data, { status: 200, headers }));
+      report.done += 1;
+      await finishTrack(c, file.path);
+      progress(file.path);
+    } catch {
+      // The cache would not take them (or the body was cut short): either way
+      // this file goes the slow way, where the failure is reported per track.
+      missed.push(file.path);
+    }
+  }
+  return missed;
+}
+
+/** Cache one track, trying once more when the failure looked transient: a
+ *  dropped connection or a 5xx is worth a second attempt, while a 404 ("no
+ *  such file") or a 401 would only say the same thing again. */
+async function cacheWithRetry(path: string, signal: AbortSignal): Promise<void> {
+  try {
+    await cacheTrack(path, { signal });
+  } catch (e) {
+    if (signal.aborted || !(e instanceof DownloadError) || !e.retryable) throw e;
+    await cacheTrack(path, { signal });
+  }
+}
+
+/** Cache `paths` one request each, `width` of them at a time.
+ *
+ *  Bounded on purpose: a 5000-track selection must not open 5000 requests at
+ *  once. Workers take the next index off a shared counter, so the queue drains
+ *  in order and every track is attempted once. */
+async function runPool(
+  paths: string[],
+  width: number,
+  signal: AbortSignal,
+  report: DownloadReport,
+  progress: (current: string | null) => void
+): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= paths.length || signal.aborted) return;
+      const path = paths[index];
+      progress(path);
+      try {
+        await cacheWithRetry(path, signal);
+        report.done += 1;
+        progress(path);
+      } catch (e) {
+        if (signal.aborted) return;
+        report.failures.push({ path, message: e instanceof Error ? e.message : String(e) });
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(width, paths.length)) }, worker));
+}
+
+/** Which of `paths` are already cached, probed a few at a time: an album of
+ *  5000 tracks must not fire 5000 Cache Storage lookups at once. */
+export async function cachedFlags(paths: string[]): Promise<boolean[]> {
+  const out: boolean[] = new Array(paths.length).fill(false);
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const index = next++;
+      if (index >= paths.length) return;
+      out[index] = await isTrackCached(paths[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(8, paths.length)) }, worker));
+  return out;
+}
+
+/** Cache every track in `paths` for offline playback.
+ *
+ *  The work happens in two shapes, both bounded by `download_concurrency`:
+ *  chunks of the queue through the bulk endpoint (one response, the server's
+ *  own pool reading them N at a time), and — for whatever the bulk route
+ *  cannot carry, on a server without it, or after a stream dies mid-batch —
+ *  the per-track pool, N requests at a time.
+ *
+ *  Never throws for a track that failed: every failure comes back in the
+ *  report with its reason, because one dead file must not abandon the rest of
+ *  a selection. A cancel stops what is in flight and empties the queue; what
+ *  already landed stays cached. */
+export async function downloadTracks(
+  paths: string[],
+  opts: { onProgress?: (p: DownloadProgress) => void; concurrency?: number } = {}
+): Promise<DownloadReport> {
+  const total = paths.length;
+  const report: DownloadReport = { done: 0, failures: [], cancelled: false };
+  const ctrl = new AbortController();
+  activeRun?.abort();
+  activeRun = ctrl;
+  // Reports are coalesced: a 5000-track queue would otherwise re-render the
+  // control once per track start AND once per track end. The count is what the
+  // user reads, so a second apart is plenty — and the last one always lands,
+  // because the run's own toast is built from the report, not from this.
+  let reportedAt = 0;
+  const progress = (current: string | null) => {
+    if (!opts.onProgress) return;
+    const at = Date.now();
+    if (current !== null && at - reportedAt < 250) return;
+    reportedAt = at;
+    opts.onProgress({ done: report.done, total, current, failed: report.failures.length });
+  };
+  const pending = [...paths];
+  try {
+    const width = await queueWidth(opts.concurrency);
+    while (pending.length && !ctrl.signal.aborted) {
+      const chunk = pending.splice(0, BULK_CHUNK);
+      progress(null);
+      const missed = await bulkChunk(chunk, ctrl.signal, report, progress);
+      if (missed === null || missed.length) {
+        // Not (all) carried: the rest of the queue goes one request per track.
+        await runPool([...(missed ?? chunk), ...pending.splice(0)], width, ctrl.signal, report, progress);
+      }
+    }
+  } catch (e) {
+    if (!ctrl.signal.aborted) {
+      report.failures.push({ path: "", message: e instanceof Error ? e.message : String(e) });
+    }
+  } finally {
+    if (activeRun === ctrl) activeRun = null;
+    report.cancelled = ctrl.signal.aborted;
+  }
+  return report;
 }

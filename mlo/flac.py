@@ -1,4 +1,5 @@
-"""Lossless FLAC re-encoding via the reference flac.exe toolchain."""
+"""FLAC re-encoding via the reference flac.exe toolchain, and conversion of
+the whole library to the configured codec target (`library_codec`)."""
 import json
 import os
 import re
@@ -8,10 +9,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .config import DEFAULT_CONFIG
 from .containers import (
-    _read_flac_tags, _write_flac_tags, _identity_missing, _enabled,
+    CODECS, CODEC_KEEP, codec_extra_args, codec_is_lossless, encoder_args,
+    file_codec, _read_flac_tags, _write_flac_tags, _identity_missing, _enabled,
 )
 from .subproc import run_tool
-from .paths import DEPS_DIR
+from .paths import AUDIO_EXTS, DEPS_DIR, trash_file
 from .tools import detect_all_tools, _version_is_older
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _diff_bytes, _walk_files,
@@ -24,20 +26,42 @@ from .ui import print_header, log, c, Color
 # decodes all of them; tags are copied from ffprobe metadata.
 LOSSLESS_SOURCE_EXTS = (".wav", ".aif", ".aiff", ".ape", ".wv", ".shn", ".tta")
 
-# Config `lossless_target_codec` -> (output extension, ffmpeg encoder args).
-# FLAC is the default and what the rest of the pipeline is built around
-# (metaflac optimizer, ENCODER identity tags, `flac -t` verification); ALAC
-# is the compressed-lossless alternative for Apple-centric libraries.
-LOSSLESS_TARGETS = {
-    "flac": (".flac", ["-c:a", "flac", "-f", "flac"]),
-    "alac": (".m4a", ["-c:a", "alac", "-f", "ipod"]),
-}
+# Every extension the conversion pass looks at: the library's own audio
+# containers (the PCM targets included) plus the lossless sources ffmpeg
+# decodes but this library never keeps (APE/WV/SHN/TTA). A music VIDEO is not
+# here on purpose — .mp4/.m4v are library video (paths.LIB_VIDEO_EXTS), and
+# rewriting one to its audio would throw the video away.
+CONVERSION_EXTS = tuple(dict.fromkeys(tuple(AUDIO_EXTS) + LOSSLESS_SOURCE_EXTS))
+
+# How many refused files a run spells out (see _report_refusals).
+_REFUSAL_LOG_CAP = 20
+
+# Config `library_codec` -> the codec every converted file ends up in. FLAC
+# is the shipped default and what the rest of the pipeline is built around
+# (metaflac optimizer, ENCODER identity tags, `flac -t` verification); the
+# table of every target (extensions, encoder args, lossless flag) is
+# mlo.containers.CODECS.
+CODEC_POLICIES = ("all", "lossless_to_lossy", CODEC_KEEP)
 
 
 def target_codec(cfg):
-    """Normalized `lossless_target_codec` (unknown/missing -> flac)."""
-    name = str((cfg or {}).get("lossless_target_codec") or "flac").strip().lower()
-    return name if name in LOSSLESS_TARGETS else "flac"
+    """Normalized `library_codec`: a CODECS key, or CODEC_KEEP for no target.
+
+    An unknown or missing value falls back to the shipped default (flac), so
+    a hand-edited config can never leave the pass without a target.
+    """
+    name = str((cfg or {}).get("library_codec") or "flac").strip().lower()
+    return name if name in CODECS or name == CODEC_KEEP else "flac"
+
+
+def library_codec_policy(cfg):
+    """Normalized `library_codec_optimize` (the default when unusable).
+
+    See DEFAULT_CONFIG: the default converts LOSSLESS sources only and never
+    re-encodes a lossy file.
+    """
+    name = str((cfg or {}).get("library_codec_optimize") or "").strip().lower()
+    return name if name in CODEC_POLICIES else "lossless_to_lossy"
 
 
 def is_alac(path):
@@ -45,14 +69,10 @@ def is_alac(path):
 
     The extension cannot tell ALAC from AAC (both live in MP4 containers),
     and re-containerizing an AAC file as "lossless" would silently keep the
-    lossy audio — mutagen reports the codec ('alac', 'mp4a.40.2')."""
-    if os.path.splitext(str(path))[1].lower() not in (".m4a", ".mp4"):
-        return False
-    try:
-        from mutagen.mp4 import MP4
-        return str(MP4(path).info.codec or "").lower().startswith("alac")
-    except Exception:
-        return False
+    lossy audio — mutagen reports the codec ('alac', 'mp4a.40.2'), see
+    mlo.containers.file_codec.
+    """
+    return file_codec(path) == "alac"
 
 # ffprobe metadata key -> semantic tag name. ffprobe echoes an ID3 TXXX
 # frame as its description verbatim ("MusicBrainz Album Id") and a Vorbis
@@ -154,29 +174,194 @@ def _set_semantic_tag(af, name, value):
     return af.set_any_tag(key, value)
 
 
-def _convert_lossless_source(args):
-    """Convert one lossless source file to the configured target codec.
+# The verdicts that describe the LOSSLESS master's own PCM: AudioAuditor's
+# real/fake-lossless read, the integrity test, and the CD rip log's per-track
+# CRC. A lossy re-encode invalidates every one of them (decoded MP3 frames can
+# never match the CRC the rip printed), so they are dropped from a lossy
+# output and the audit pass re-derives them from the file that now exists.
+# MEDIA/SOURCE are release facts rather than byte facts and travel with the
+# file; AUDIOAUDITOR_OVERRIDE is the user's OWN verdict and is never dropped
+# silently.
+_LOSSLESS_VERDICT_TAGS = frozenset({"AUDIT", "INTEGRITY", "LOG_CRC",
+                                    "AUDIO_MD5"})
 
-    ffmpeg decodes (handles every extension in LOSSLESS_SOURCE_EXTS, plus
-    FLAC when the target is ALAC) and encodes the target codec losslessly;
-    tags are copied from ffprobe metadata; the FLAC target additionally gets
-    metaflac block stripping and this pipeline's ENCODER identity tags. The
-    original is removed only after a verified conversion when
-    lossless_remove_original is set.
+
+def convert_command(ffmpeg_exe, filepath, dest, cfg):
+    """The ffmpeg command that converts *filepath* to the configured target.
+
+    The ONE place the codec table, the quality/rate settings and
+    `library_codec_args` meet, and pure enough that a test can assert the
+    exact command line without encoding anything.
+    """
+    cmd = [ffmpeg_exe, "-y", "-v", "error", "-nostdin", "-i", filepath,
+           "-map", "0:a:0"]
+    # Embedded art is an attached_pic VIDEO stream, so mapping audio alone
+    # dropped it before the original — the only copy of that artwork — left
+    # the library. Copied only when the library is set to keep covers: the "?"
+    # keeps an audio-only source working, and copy keeps the picture
+    # bit-exact.
+    if (bool(cfg.get("embed_covers", False))
+            or bool(cfg.get("flac_preserve_picture", False))):
+        cmd += ["-map", "0:v?", "-c:v", "copy"]
+    return cmd + encoder_args(target_codec(cfg), cfg) + [dest]
+
+
+def conversion_verdict(path, cfg):
+    """(verdict, reason) for ONE file under the configured target + policy.
+
+    "convert" — the pass converts this file.
+    "skip"    — nothing to do: already the target, or the policy does not
+                cover the file. Silent by design.
+    "refuse"  — the policy asked for it and the pass must not. Reported.
+
+    The rules are the whole policy:
+      * `library_codec` or `library_codec_optimize` = "keep" converts nothing;
+      * a file that already matches the target EXTENSION and CODEC is done.
+        The extension alone cannot answer that — .m4a holds ALAC or AAC, .ogg
+        holds Vorbis or Opus — so an AAC-in-MP4 under a lossless target used
+        to read as "already .m4a" and stayed lossy;
+      * a LOSSLESS source always converts to the target: that is the
+        lossless -> lossy transcode the default policy is named for when the
+        target is lossy, and a lossless re-container when it is not;
+      * a LOSSY source under a LOSSLESS target is REFUSED whatever the policy
+        says, "all" included: its samples are already gone, so encoding them
+        again cannot restore one and can only lose more. The pass only asks
+        this question about its CANDIDATES (_candidate_exts), so under the
+        default policy a lossy file is never considered and never reported —
+        the refusal is what "all" gets told when it tries anyway;
+      * a LOSSY source otherwise converts only under "all" — lossy -> lossy is
+        a generation loss the default policy refuses.
+    """
+    spec = CODECS.get(target_codec(cfg))
+    if spec is None or library_codec_policy(cfg) == CODEC_KEEP:
+        return ("skip", "nothing is converted — the library codec is kept "
+                        "as it is")
+    ext = os.path.splitext(str(path))[1].lower()
+    src = file_codec(path)
+    if ext == spec["ext"] and src == spec["codec"]:
+        return ("skip", f"already {spec['codec']} in {spec['ext']}")
+    if codec_is_lossless(src) or (not src and ext in LOSSLESS_SOURCE_EXTS):
+        # An unparsable source whose extension is a lossless one still counts
+        # as lossless: ffmpeg decodes it, and skipping it would strand the
+        # file in a format the library is not supposed to hold.
+        return ("convert", "")
+    label = src or ext.lstrip(".") or "unknown"
+    if spec["lossless"]:
+        return ("refuse",
+                f"{label} is lossy and {spec['codec']} is lossless — "
+                f"re-encoding cannot restore a sample, so the file is left "
+                f"as it is")
+    if library_codec_policy(cfg) == "all":
+        return ("convert", "")
+    return ("skip", f"{label} is lossy — only the 'all' policy re-encodes "
+                    f"a lossy source")
+
+
+def _candidate_exts(cfg):
+    """The extensions the conversion pass has to LOOK at under *cfg*.
+
+    Under `all` that is every audio container the library tracks. Under the
+    default policy only a LOSSLESS source can ever be converted, so the walk
+    (and the codec probe behind it) covers the containers that can hold one,
+    plus the target's own extension — whose files are the no-op "already
+    there" case. This is what keeps a lossy source from being reported as a
+    refusal on every run of a FLAC library: it is never a candidate, so the
+    rule is never applied to it.
+    """
+    spec = CODECS.get(target_codec(cfg))
+    out_ext = spec["ext"] if spec else ""
+    if library_codec_policy(cfg) == "all":
+        return CONVERSION_EXTS
+    return tuple(dict.fromkeys(tuple(LOSSLESS_SOURCE_EXTS)
+                               + (".flac", ".m4a") + (out_ext,)))
+
+
+def conversion_candidates(target, targets, cfg, files=None):
+    """(files to convert, refusals) for the whole run, in path order.
+
+    *files* is a list the caller already walked (the FLAC pass scans the same
+    tree for its own extensions, so a FLAC run hands its union over instead of
+    walking the library a second time); it is filtered to the extensions this
+    policy has to consider (see _candidate_exts).
+    """
+    exts = _candidate_exts(cfg)
+    if files is None:
+        files = (sorted(_walk_files(target, exts)) if targets is None
+                 else sorted(_collect_targets(targets, exts)))
+    out, refusals, seen = [], [], set()
+    for p in files:
+        if not str(p).lower().endswith(exts):
+            continue
+        key = os.path.normcase(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        verdict, reason = conversion_verdict(p, cfg)
+        if verdict == "convert":
+            out.append(p)
+        elif verdict == "refuse":
+            refusals.append((p, reason))
+    return out, refusals
+
+
+def _report_refusals(refusals):
+    """Print the files the policy wanted converted and the pass refused.
+
+    Only the head of the list is spelled out: a library-wide "all" run over a
+    lossless target refuses every lossy file in it, and a thousand identical
+    lines explain nothing a count does not.
+    """
+    for path, reason in refusals[:_REFUSAL_LOG_CAP]:
+        log(c(f"  {os.path.basename(path)}: not converted — {reason}",
+              Color.YELLOW))
+    if len(refusals) > _REFUSAL_LOG_CAP:
+        log(c(f"  … and {len(refusals) - _REFUSAL_LOG_CAP} more file(s) "
+              f"refused for the same reasons", Color.YELLOW))
+
+
+def _trash_converted(path, cfg):
+    """Move a converted ORIGINAL into the app's trash bin ("" on failure).
+
+    The bin is per user and a script run carries no session, so the scope is
+    the install's own auth_username — the bin its Trash page lists — falling
+    back to the `default` scope of an unclaimed install. mlo.paths.trash_file
+    records the origin, which is what lets the page restore the file.
+    """
+    return trash_file(path, music_folder=(cfg or {}).get("music_folder") or "",
+                      user=(cfg or {}).get("auth_username") or "")
+
+
+def _convert_lossless_source(args):
+    """Convert one source file to the configured target codec.
+
+    ffmpeg decodes (every extension in LOSSLESS_SOURCE_EXTS, plus FLAC/ALAC
+    when the target is another codec) and encodes the target codec — its
+    rate/quality and `library_codec_args` come from the config (see
+    mlo.containers.encoder_args); tags are copied from ffprobe metadata (minus
+    the lossless-master verdicts when the target is lossy); the FLAC target
+    additionally gets metaflac block stripping and this pipeline's ENCODER
+    identity tags. The original moves to the app's trash only after a
+    verified conversion, and only when lossless_remove_original is set.
     Returns (filename, ok, message, bytes_removed, bytes_added).
     """
     (
         ffmpeg_exe, ffprobe_exe, metaflac_exe, filepath,
-        flac_level, target_version, enabled, config,
+        quality, target_version, enabled, config,
     ) = args
     filename = os.path.basename(filepath)
     codec = target_codec(config)
-    out_ext, enc_args = LOSSLESS_TARGETS[codec]
+    spec = CODECS[codec]
+    out_ext = spec["ext"]
     # Forward slashes: ffmpeg's demuxer probing is cleaner with them (VOB
     # phantom streams) and every Windows tool accepts them.
     filepath = str(filepath).replace("\\", "/")
     dest = os.path.splitext(filepath)[0] + out_ext
-    if os.path.exists(dest):
+    # A codec change inside the SAME container (AAC-in-M4A -> ALAC) targets the
+    # file it is decoded from: the pass reads the source, writes the temp
+    # output, and only then replaces it (see the end of the function).
+    in_place = (os.path.normcase(os.path.abspath(dest))
+                == os.path.normcase(os.path.abspath(filepath)))
+    if not in_place and os.path.exists(dest):
         return (filename, False, f"skipped (same-stem {out_ext} exists)", 0, 0)
 
     src_dur = 0.0
@@ -202,19 +387,7 @@ def _convert_lossless_source(args):
         prefix=".conv_", suffix=out_ext, dir=os.path.dirname(filepath) or ".")
     os.close(fd)
     try:
-        if codec == "flac":
-            enc_args = enc_args + ["-compression_level", str(flac_level)]
-        cmd = [ffmpeg_exe, "-y", "-v", "error", "-nostdin", "-i", filepath,
-               "-map", "0:a:0"]
-        # Embedded art is an attached_pic VIDEO stream, so mapping audio alone
-        # dropped it before the original — the only copy of that artwork — was
-        # deleted. Copied only when the library is set to keep covers: the "?"
-        # keeps an audio-only source working, and copy keeps the picture
-        # bit-exact.
-        if (bool(config.get("embed_covers", False))
-                or bool(config.get("flac_preserve_picture", False))):
-            cmd += ["-map", "0:v?", "-c:v", "copy"]
-        cmd += enc_args + [tmp]
+        cmd = convert_command(ffmpeg_exe, filepath, tmp, config)
         try:
             proc = run_tool(cmd, capture_output=True, text=True,
                             encoding="utf-8", errors="replace", timeout=60 * 60)
@@ -253,6 +426,8 @@ def _convert_lossless_source(args):
                     continue
                 if v is None or not str(v).strip():
                     continue
+                if not spec["lossless"] and name in _LOSSLESS_VERDICT_TAGS:
+                    continue
                 val = str(v).strip()
                 if name in ("TRACKNUMBER", "DISCNUMBER") and "/" in val:
                     val = val.split("/")[0].strip()
@@ -266,6 +441,8 @@ def _convert_lossless_source(args):
                         or name in seen or not str(v or "").strip()):
                     continue
                 if len(name) > 40:
+                    continue
+                if not spec["lossless"] and name in _LOSSLESS_VERDICT_TAGS:
                     continue
                 # The built name is a container key; write it under this
                 # app's own name when TAG_MAP has one (the two differ for
@@ -294,7 +471,7 @@ def _convert_lossless_source(args):
                 except Exception:
                     pass
             try:
-                _write_flac_tags(tmp, flac_level, target_version, enabled)
+                _write_flac_tags(tmp, quality, target_version, enabled)
             except Exception:
                 pass
 
@@ -309,20 +486,39 @@ def _convert_lossless_source(args):
             src_size = os.path.getsize(filepath)
         except OSError:
             src_size = 0
+        b_rem = b_add = 0
+        moved = ""
+        # Moved into the app's trash, never deleted: the source is the
+        # lossless master (or the only copy of a lossy source the "all" policy
+        # re-encoded), and the Trash page can put it back where it came from.
+        # b_rem still counts it — the run's byte story is about the library
+        # tree, and the bin is emptied by the user, not by script 3.
+        keep_source = not config.get("lossless_remove_original", True)
+        if in_place:
+            if keep_source:
+                # One path cannot hold two encodings, so "keep the original"
+                # has nothing to keep here. Reported instead of silently
+                # overwriting the file with itself.
+                return (filename, False,
+                        "skipped (the target container is the file's own — "
+                        "keeping the original is impossible)", 0, 0)
+            moved = _trash_converted(filepath, config)
+            if not moved:
+                return (filename, False,
+                        "cannot move the original to the trash", 0, 0)
+            b_rem = src_size
         os.replace(tmp, dest)
         tmp = None
-        b_rem = b_add = 0
-        if config.get("lossless_remove_original", True):
-            try:
-                os.remove(filepath)
+        if not in_place and not keep_source:
+            moved = _trash_converted(filepath, config)
+            if moved:
                 b_rem = src_size
-            except OSError:
-                pass
         b_add = out_size
         src_label = os.path.splitext(filepath)[1].lstrip(".").upper()
         dst_label = out_ext.lstrip(".").upper()
         return (filename, True,
-                f"{src_size // 1024} KB {src_label} -> {out_size // 1024} KB {dst_label}",
+                f"{src_size // 1024} KB {src_label} -> {out_size // 1024} KB "
+                f"{dst_label}" + (" (original moved to trash)" if moved else ""),
                 b_rem, b_add)
     except Exception as e:
         return (filename, False, f"exception: {e}", 0, 0)
@@ -389,7 +585,7 @@ def _optimize_flac(args):
             flac_exe,
             metaflac_exe,
             filepath,
-            flac_level,
+            quality,
             add_seektables,
             target_version,
             force,
@@ -401,7 +597,7 @@ def _optimize_flac(args):
             flac_exe,
             metaflac_exe,
             filepath,
-            flac_level,
+            quality,
             add_seektables,
             target_version,
             force,
@@ -414,7 +610,7 @@ def _optimize_flac(args):
 
     should_reencode, reason, _ours = _should_reencode_flac(
         filepath,
-        flac_level,
+        quality,
         target_version,
         force,
         enabled,
@@ -491,7 +687,7 @@ def _optimize_flac(args):
     # -V makes flac.exe decode its own output and compare it with the source,
     # so a bad encode fails here (returncode != 0) and the verified original is
     # never replaced by a broken file.
-    flac_args = [f"-{flac_level}", "-f", "-V"]
+    flac_args = [f"-{quality}", "-f", "-V"]
     # --padding is a CAP on the padding block flac.exe writes. flac_no_padding
     # (the default) asks for none: the file is as small as it can be, at the
     # price of a whole-file rewrite for every later tag pass (scripts 8/7/12/
@@ -501,6 +697,11 @@ def _optimize_flac(args):
 
     if not add_seektables:
         flac_args.append("--no-seektable")
+
+    # library_codec_args: for a FLAC target these are flac.exe's own options
+    # (see DEFAULT_CONFIG), appended verbatim after the flags this pass sets,
+    # so a user's later flag wins wherever flac.exe honours the last one.
+    flac_args += codec_extra_args(config) if config else []
 
     cmd = [flac_exe] + flac_args + ["-o", temp_path, filepath]
 
@@ -576,7 +777,7 @@ def _optimize_flac(args):
                 pass
 
         try:
-            _write_flac_tags(temp_path, flac_level, target_version, enabled)
+            _write_flac_tags(temp_path, quality, target_version, enabled)
         except Exception as e:
             log(c(f"[tag warn] {filename}: {e}", Color.YELLOW))
 
@@ -600,41 +801,14 @@ def _optimize_flac(args):
                 pass
 
 
-def _lossless_conversion_sources(target, targets, out_ext, files=None):
-    """Files whose lossless audio should be re-containerized into the target.
-
-    LOSSLESS_SOURCE_EXTS (uncompressed or externally compressed lossless)
-    always qualify; ALAC-in-MP4 qualifies for a FLAC target — `.m4a` is
-    usually AAC, so those are probed rather than trusted by extension; and
-    FLACs qualify when the target is another codec (the setting means the
-    library ends up in that codec). Files already in the target are left
-    alone.
-
-    *files* is a candidate list the caller already walked (the FLAC pass
-    scans the same tree for its own extensions, so a FLAC-target run hands
-    its union list over instead of walking the library a second time).
-    """
-    if files is None:
-        exts = LOSSLESS_SOURCE_EXTS + ((".m4a", ".mp4") if out_ext == ".flac" else (".flac",))
-        files = (sorted(_walk_files(target, exts)) if targets is None
-                 else sorted(_collect_targets(targets, exts)))
-    out = []
-    for p in files:
-        low = str(p).lower()
-        if low.endswith(out_ext):
-            continue
-        if low.endswith((".m4a", ".mp4")) and not is_alac(p):
-            continue  # AAC in MP4 is lossy — never rewritten as "lossless"
-        out.append(p)
-    return out
-
-
 def convert_album_lossless(album_dir, cfg):
-    """Convert one album's lossless sources to the configured target codec.
+    """Convert one album's files to the configured library codec target.
 
     Scoped run of the script-3 conversion: only this folder is scanned, so an
-    import never rewrites the rest of the library. Returns the optimizer stats
-    (empty stats when the folder holds nothing to convert).
+    import never rewrites the rest of the library, and the POLICY still
+    decides what may happen (a lossy source is never up-converted). Returns
+    the optimizer stats (empty stats when the folder holds nothing to
+    convert).
     """
     scoped = dict(cfg or {})
     scoped["targets"] = [str(album_dir)]
@@ -645,7 +819,8 @@ def convert_album_lossless(album_dir, cfg):
 def run_optimize_flacs(config):
     # `.get` with the shipped default, like the rest of this module: a partial
     # cfg (a test, the album-scoped conversion helper) must not KeyError here.
-    flac_level = config.get("flac_level", DEFAULT_CONFIG["flac_level"])
+    quality = config.get("library_codec_quality",
+                         DEFAULT_CONFIG["library_codec_quality"])
     add_seektables = config.get("add_seektables", DEFAULT_CONFIG["add_seektables"])
     force = config.get("force_reencode_flac", False)
     stats = new_stats()
@@ -653,13 +828,19 @@ def run_optimize_flacs(config):
     tools = detect_all_tools()
     flac_tool = tools.get("flac")
 
-    # With a non-FLAC target the existing FLACs are re-containerized by the
-    # conversion step below, so the flac.exe optimizer is never needed and
-    # re-encoding them first would be pure wasted work.
     codec = target_codec(config)
-    out_ext = LOSSLESS_TARGETS[codec][0]
+    spec = CODECS.get(codec)
+    out_ext = spec["ext"] if spec else ""
+    policy = library_codec_policy(config)
+    # The flac.exe pass re-compresses FLACs IN PLACE — same codec, no
+    # conversion — so it is this script's own job and runs whenever FLAC is
+    # what the library holds, including both "keep" choices. With another
+    # target the existing FLACs are re-containerized by the conversion step
+    # below instead, and re-encoding them first would be pure wasted work.
+    optimize_flac = codec in ("flac", CODEC_KEEP)
+    convert = spec is not None and policy != CODEC_KEEP
 
-    if not flac_tool and codec == "flac":
+    if not flac_tool and optimize_flac:
         log(c("ERROR: Could not auto-detect flac.exe in .dependencies folder.", Color.RED))
         log(f"Expected a folder like: {os.path.join(DEPS_DIR, 'flac v1.5.0')}")
         return stats
@@ -669,7 +850,8 @@ def run_optimize_flacs(config):
     target_version = (flac_tool or {}).get("version") or ""
 
     print_header("FLAC Optimizer")
-    log(f"lossless target codec: {out_ext.lstrip('.').upper()}")
+    target_label = out_ext.lstrip(".").upper() if out_ext else CODEC_KEEP.upper()
+    log(f"library codec: {target_label} · policy: {policy}")
     if codec == "flac":
         strip_msg = ("PICTURE, " if not (config or {}).get("embed_covers", False)
                      and not (config or {}).get("flac_preserve_picture", False) else "")
@@ -679,11 +861,13 @@ def run_optimize_flacs(config):
         if not add_seektables:
             strip_msg += ", SEEKTABLE"
         log(
-            f"level=-{flac_level} · seektables={'on' if add_seektables else 'off'} · "
+            f"level=-{quality} · seektables={'on' if add_seektables else 'off'} · "
             f"encoder={target_version} · force={'on' if force else 'off'} · "
             f"padding={'none' if config.get('flac_no_padding', True) else '8 KB'} · "
             f"strip={strip_msg}"
         )
+    elif out_ext and config.get("library_codec_args"):
+        log(f"extra encoder args: {config['library_codec_args']}")
 
     target = os.path.abspath(config["music_folder"] or os.getcwd())
 
@@ -697,32 +881,32 @@ def run_optimize_flacs(config):
     targets = config.get("targets")
     flac_files = []
     conv_scan = None
-    if codec == "flac":
-        # One walk for both passes: the conversion step below needs
-        # LOSSLESS_SOURCE_EXTS (+ ALAC-in-MP4) and used to walk the whole
-        # library again for them after this one had finished. The union is
-        # collected here and split, which is the same file set with one
-        # directory scan.
-        walk_exts = (".flac",) + LOSSLESS_SOURCE_EXTS + (".m4a", ".mp4")
-        walked = (sorted(_walk_files(target, walk_exts)) if targets is None
-                  else sorted(_collect_targets(targets, walk_exts)))
-        flac_files = sorted(
-            f for f in walked
-            if f.lower().endswith(".flac")
-            and not f.lower().endswith(".opttmp.flac")
-        )
-        conv_scan = walked
+    if optimize_flac or convert:
+        # One walk for both passes: the conversion step below needs the
+        # lossless sources (+ ALAC-in-MP4) and used to walk the whole library
+        # again for them after this one had finished. The union is collected
+        # here and split, which is the same file set with one directory scan.
+        walked = (sorted(_walk_files(target, CONVERSION_EXTS))
+                  if targets is None
+                  else sorted(_collect_targets(targets, CONVERSION_EXTS)))
+        if optimize_flac:
+            flac_files = sorted(
+                f for f in walked
+                if f.lower().endswith(".flac")
+                and not f.lower().endswith(".opttmp.flac")
+            )
 
-        # Deduplicate (Select All checks album + tracks -> duplicates) + normcase for Windows
-        if len(flac_files) != len(set(os.path.normcase(p) for p in flac_files)):
-            log(c(f"WARNING: flac_files has duplicates: {len(flac_files)} vs {len(set(os.path.normcase(p) for p in flac_files))} unique", Color.YELLOW))
-            seen = {}
-            for p in flac_files:
-                seen[os.path.normcase(p)] = p
-            flac_files = sorted(seen.values())
+            # Deduplicate (Select All checks album + tracks -> duplicates) + normcase for Windows
+            if len(flac_files) != len(set(os.path.normcase(p) for p in flac_files)):
+                log(c(f"WARNING: flac_files has duplicates: {len(flac_files)} vs {len(set(os.path.normcase(p) for p in flac_files))} unique", Color.YELLOW))
+                seen = {}
+                for p in flac_files:
+                    seen[os.path.normcase(p)] = p
+                flac_files = sorted(seen.values())
 
-        if not flac_files:
-            log("No FLAC files found.")
+            if not flac_files:
+                log("No FLAC files found.")
+        conv_scan = walked if convert else None
 
     workers = worker_count(config, default=os.cpu_count() or 1,
                           items=len(flac_files))
@@ -733,7 +917,7 @@ def run_optimize_flacs(config):
             flac_exe,
             metaflac_exe,
             fp,
-            flac_level,
+            quality,
             add_seektables,
             target_version,
             force,
@@ -784,31 +968,34 @@ def run_optimize_flacs(config):
         if pbar:
             pbar.close()
 
-    # ---- Lossless source conversion -> configured target codec ----
-    if config.get("optimize_convert_lossless", True):
-        conv_files = _lossless_conversion_sources(target, targets, out_ext,
-                                                  conv_scan)
-        seen_conv = {}
-        for p in conv_files:
-            seen_conv.setdefault(os.path.normcase(p), p)
-        conv_files = sorted(seen_conv.values())
+    # ---- Conversion -> the configured library codec target ----
+    if convert:
+        conv_files, refusals = conversion_candidates(target, targets, config,
+                                                     conv_scan)
+        if refusals:
+            _report_refusals(refusals)
+            # Refusals are skips, not failures: the file is exactly as it was
+            # and nothing about the run went wrong — the policy just forbids
+            # the conversion (see conversion_verdict).
+            stats["skipped_count"] += len(refusals)
 
         if conv_files:
             ffmpeg_tool = (tools.get("ffmpeg") or {})
             ffmpeg_exe = ffmpeg_tool.get("ffmpeg_exe")
             ffprobe_exe = ffmpeg_tool.get("ffprobe_exe")
             if not ffmpeg_exe or not ffprobe_exe:
-                log(c("WARNING: ffmpeg/ffprobe missing — lossless source conversion skipped.", Color.YELLOW))
+                log(c("WARNING: ffmpeg/ffprobe missing — conversion to "
+                      f"{target_label} skipped.", Color.YELLOW))
             else:
-                log(f"Converting {len(conv_files)} lossless source file(s) to "
-                    f"{out_ext.lstrip('.').upper()}…")
+                log(f"Converting {len(conv_files)} file(s) to {target_label} "
+                    f"(policy: {policy})…")
                 conv_args = [
                     (
                         ffmpeg_exe,
                         ffprobe_exe,
                         metaflac_exe,
                         fp,
-                        flac_level,
+                        quality,
                         target_version,
                         (config.get("encoder_tags") or {}).get("flac") or {},
                         config,

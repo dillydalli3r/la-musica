@@ -6,4 +6,3 @@ aiofiles==25.1.0
 httpx==0.28.1
 mutagen==1.48.1
 Pillow==12.3.0
-pystray==0.19.5

@@ -72,7 +72,7 @@ export default function TrackDownloadExport({ path, title, compact, iconOnly, di
       qc.invalidateQueries({ queryKey: CACHED_PATHS_KEY });
       qc.invalidateQueries({ queryKey: ["cachedBytes"] });
     } catch (e) {
-      toast(`Cache failed: ${e instanceof Error ? e.message : e}`);
+      toast.error(`Cache failed: ${e instanceof Error ? e.message : e}`);
     } finally {
       setCacheBusy(false);
     }

@@ -1,48 +1,14 @@
 import { useMemo, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, HardDriveDownload, Library, RotateCcw, Save, Search } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { HardDriveDownload, Library, Search } from "lucide-react";
 import { api } from "../api";
-import type { ExportCodecSpec, ExportForm } from "../api";
-import { toast } from "../store";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import { fmtDuration } from "../lib/fmt";
 import Segmented from "../components/Segmented";
 import PageHeader from "../components/PageHeader";
 import { EmptyState } from "../components/Badges";
-
-/** The dropdown's synthetic entry for a codec's "custom value" field; the
- * backend takes the plain number the field holds (kbps, or 0-10 for Vorbis),
- * so nothing but the form needs to know the word. */
-const CUSTOM = "custom";
-
-const STRUCTURES = [
-  { v: "artist_album", label: "Artist / Album / 01 - Title" },
-  { v: "album", label: "Album / 01 - Title" },
-  { v: "flat", label: "Flat — one folder" },
-  { v: "mirror", label: "Mirror library layout" },
-];
-
-/** Rendered while the saved defaults are still loading; the same shape and the
- * same first-run values the backend ships. */
-const BLANK_FORM: ExportForm = {
-  dest: "",
-  subfolder: "Music",
-  codec: "copy",
-  quality: "",
-  structure: "artist_album",
-  embed_covers: true,
-  embed_cover_jpeg_quality: 90,
-  embed_cover_resolution: 1200,
-  id3v2: "2.3",
-  id3v1: false,
-  replaygain: false,
-  clean_tags: true,
-  playlists: true,
-  sidecars: true,
-  verify: true,
-  prune: false,
-  workers: 0,
-};
+import { ExportOptionsPanel, useExportOptions } from "../components/ExportDialog";
+import type { Album, Artist } from "../types";
 
 const SOURCE_KINDS = [
   { id: "playlist", label: "Playlist" },
@@ -53,62 +19,17 @@ const SOURCE_KINDS = [
 ] as const;
 type SourceKind = (typeof SOURCE_KINDS)[number]["id"];
 
-function fmtGB(n: number | null): string {
-  return n === null ? "—" : `${(n / 1024 ** 3).toFixed(1)} GB`;
-}
-
-/** Effective kbps for the drive-fit estimate, from the server's own preset
- * hints (server/exporter.py CODECS). null = unpredictable: a bit-exact copy,
- * a lossless re-encode, or a custom Vorbis q. */
-function effectiveKbps(spec: ExportCodecSpec | undefined, quality: string, custom: string): number | null {
-  if (!spec) return null;
-  const preset = spec.presets.find((p) => p.v === quality);
-  if (preset) return preset.kbps;
-  if (spec.custom && spec.custom.mode === "kbps") {
-    const n = parseInt(quality === CUSTOM ? custom : quality, 10);
-    if (!Number.isFinite(n)) return null;
-    return Math.min(spec.custom.max, Math.max(spec.custom.min, n));
-  }
-  return null;
-}
-
-/** One option row: the checkbox plus its one-line explanation. The
- * compatibility switches are numerous enough that bare checkbox rows would
- * not say what they do. */
-function Opt({ checked, onChange, label, hint, danger }: {
-  checked: boolean;
-  onChange: (v: boolean) => void;
-  label: string;
-  hint: string;
-  danger?: boolean;
-}) {
-  return (
-    <label className="flex items-start gap-2 mt-2 text-xs text-zinc-300 cursor-pointer">
-      <input
-        type="checkbox"
-        className="mt-0.5"
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-      />
-      <span className="min-w-0">
-        <span className={"block " + (danger ? "text-amber-300" : "")}>{label}</span>
-        <span className="block text-[10px] text-zinc-600">{hint}</span>
-      </span>
-    </label>
-  );
-}
-
 /** Export any slice of the library — playlists, albums, artists, single
  * tracks or everything — to a target drive with a codec / bitrate
  * configurator and folder-structure choices. The "put music on my MP3
- * player" feature. */
+ * player" feature.
+ *
+ * This page owns the SOURCE half (what to export); the destination, format
+ * and tag options are the shared ExportOptionsPanel, so the per-page Export
+ * dialog offers exactly the same surface. */
 export default function ExportPage() {
   const { data: lib } = useQuery({ queryKey: ["library"], queryFn: api.library });
   const { data: playlists } = useQuery({ queryKey: ["playlists"], queryFn: api.playlists });
-  const { data: drivesData } = useQuery({ queryKey: ["exportDrives"], queryFn: api.exportDrives });
-  const { data: specs } = useQuery({ queryKey: ["exportCodecs"], queryFn: api.exportCodecs });
-  const { data: savedDefaults } = useQuery({ queryKey: ["exportDefaults"], queryFn: api.exportDefaults });
-  const queryClient = useQueryClient();
 
   const [sourceKind, setSourceKind] = useState<SourceKind>("playlist");
   const [playlistId, setPlaylistId] = useState<number | null>(null);
@@ -116,20 +37,9 @@ export default function ExportPage() {
   const [artistPaths, setArtistPaths] = useState<Set<string>>(new Set());
   const [trackPaths, setTrackPaths] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState("");
-  const [form, setForm] = useState<ExportForm | null>(null);
-  const [customValue, setCustomValue] = useState("192");
-  const [busy, setBusy] = useState(false);
 
-  // What the form shows (and what a run sends): the user's edits, else the
-  // saved `export_*` config values, else the shipped defaults. An export uses
-  // exactly what is displayed; nothing is written back to config until "Save
-  // as default" is pressed.
-  const f = form ?? savedDefaults ?? BLANK_FORM;
-  const set = <K extends keyof ExportForm>(key: K, value: ExportForm[K]) =>
-    setForm({ ...f, [key]: value });
-
-  const artists = useMemo(() => lib?.artists ?? [], [lib]);
-  const albums = useMemo(() => artists.flatMap((a: any) => a.albums ?? []), [artists]);
+  const artists = useMemo<Artist[]>(() => lib?.artists ?? [], [lib]);
+  const albums = useMemo(() => artists.flatMap((a) => a.albums ?? []), [artists]);
 
   // One flat track metadata table for every source kind / the preview.
   const trackRows = useMemo(() => {
@@ -159,7 +69,7 @@ export default function ExportPage() {
   const filteredAlbums = useMemo(() => {
     const q = filter.toLowerCase();
     return albums.filter(
-      (a) =>
+      (a: Album) =>
         !q ||
         (a.meta?.ALBUM ?? "").toLowerCase().includes(q) ||
         (a.album_artist ?? a.meta?.ALBUMARTIST ?? a.meta?.ARTIST ?? "").toLowerCase().includes(q)
@@ -167,7 +77,7 @@ export default function ExportPage() {
   }, [albums, filter]);
   const filteredArtists = useMemo(() => {
     const q = filter.toLowerCase();
-    return artists.filter((a: any) => !q || (a.display_name || a.name || "").toLowerCase().includes(q));
+    return artists.filter((a: Artist) => !q || (a.display_name || a.name || "").toLowerCase().includes(q));
   }, [artists, filter]);
   const filteredTracks = useMemo(() => {
     const q = filter.toLowerCase();
@@ -179,8 +89,8 @@ export default function ExportPage() {
   // Bulk selection over the FILTERED list: "All" means "everything the filter
   // shows", the only reading that cannot surprise after a search.
   const listKeys = useMemo(() => {
-    if (sourceKind === "albums") return filteredAlbums.map((a: any) => a.path);
-    if (sourceKind === "artists") return filteredArtists.map((a: any) => a.path);
+    if (sourceKind === "albums") return filteredAlbums.map((a) => a.path);
+    if (sourceKind === "artists") return filteredArtists.map((a) => a.path);
     if (sourceKind === "tracks") return filteredTracks.map((t) => t.path);
     return [];
   }, [sourceKind, filteredAlbums, filteredArtists, filteredTracks]);
@@ -225,64 +135,16 @@ export default function ExportPage() {
     () => paths.reduce((sum, p) => sum + (trackByPath.get(p)?.dur ?? 0), 0),
     [paths, trackByPath]
   );
-  const spec = specs?.codecs?.[f.codec];
-  const quality = f.quality;
-  const kbps = effectiveKbps(spec, quality, customValue);
-  const estBytes = kbps !== null ? (totalSeconds * kbps * 1000) / 8 : null;
-  const selectedDrive = drivesData?.drives.find((d) => d.root === f.dest) ?? null;
-  const overCapacity = estBytes !== null && selectedDrive?.free != null && estBytes > selectedDrive.free;
+
+  // The destination/format half lives in the shared panel, driven by this
+  // exact selection.
+  const e = useExportOptions(paths, totalSeconds);
 
   const toggle = (set: Set<string>, path: string, apply: (s: Set<string>) => void) => {
     const next = new Set(set);
     if (next.has(path)) next.delete(path);
     else next.add(path);
     apply(next);
-  };
-
-  const run = async () => {
-    if (!paths.length) return toast("Select something to export first");
-    const destRoot = drivesData?.drives.find((d) => d.root === f.dest)?.root;
-    if (!destRoot) return toast("Choose a destination drive");
-    setBusy(true);
-    toast(`Exporting ${paths.length} track(s)…`);
-    try {
-      const r = await api.exportRun({
-        ...f,
-        dest: destRoot,
-        quality: quality === CUSTOM ? customValue : quality || spec?.default || "",
-        paths,
-      });
-      const gb = (r.bytes / 1024 ** 3).toFixed(2);
-      const extras = [
-        r.skipped ? `${r.skipped} already there` : "",
-        r.playlists ? `${r.playlists} playlist(s)` : "",
-        r.sidecars ? `${r.sidecars} sidecar file(s)` : "",
-        r.pruned ? `${r.pruned} removed from the device` : "",
-      ].filter(Boolean).join(" · ");
-      if (r.failed) toast.error(`Export finished with ${r.failed} failure(s): ${r.errors[0] ?? ""}`);
-      else toast.success(`Exported ${r.exported} track(s)${extras ? ` (${extras})` : ""} · ${gb} GB`);
-      if (r.warnings?.length) toast(r.warnings[0]);
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const saveDefaults = async () => {
-    try {
-      await api.exportSaveDefaults(f);
-      queryClient.invalidateQueries({ queryKey: ["exportDefaults"] });
-      queryClient.invalidateQueries({ queryKey: ["config"] });
-      toast.success("Export defaults saved");
-    } catch (e) {
-      toast.error(String(e));
-    }
-  };
-
-  const resetDefaults = () => {
-    if (savedDefaults) setForm(savedDefaults);
-    toast("Form reset to the saved defaults");
   };
 
   return (
@@ -311,7 +173,7 @@ export default function ExportPage() {
             <select
               className="input !py-1 text-xs w-full min-w-0 tap"
               value={playlistId ?? ""}
-              onChange={(e) => setPlaylistId(e.target.value ? Number(e.target.value) : null)}
+              onChange={(ev) => setPlaylistId(ev.target.value ? Number(ev.target.value) : null)}
             >
               <option value="">Choose a playlist…</option>
               {(playlists ?? []).map((pl) => (
@@ -344,7 +206,7 @@ export default function ExportPage() {
                     : "Filter tracks / artists / albums…"
                   }
                   value={filter}
-                  onChange={(e) => setFilter(e.target.value)}
+                  onChange={(ev) => setFilter(ev.target.value)}
                 />
               </div>
               <div className="flex items-center gap-2 mb-2 text-[11px]">
@@ -367,7 +229,7 @@ export default function ExportPage() {
               )}
               {listKeys.length > 0 && (
               <div className="stagger max-h-64 overflow-y-auto border border-border rounded-md divide-y divide-border/60">
-                {sourceKind === "albums" && filteredAlbums.map((a: any) => (
+                {sourceKind === "albums" && filteredAlbums.map((a) => (
                   <label
                     key={a.path}
                     className="flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-300 hover:bg-panel cursor-pointer"
@@ -379,10 +241,10 @@ export default function ExportPage() {
                     />
                     <CoverImg albumPath={a.path} coverFile={a.cover_file} wrapperClass="h-6 w-6 rounded bg-raise border border-border overflow-hidden shrink-0" />
                     <span className="break-words flex-1 min-w-0">{a.meta?.ALBUM ?? a.path}</span>
-                    <span className="max-w-[45%] truncate text-zinc-600 shrink-0">{a.artist}</span>
+                    <span className="max-w-[45%] truncate text-zinc-600 shrink-0">{a.album_artist ?? a.meta?.ALBUMARTIST ?? a.meta?.ARTIST ?? ""}</span>
                   </label>
                 ))}
-                {sourceKind === "artists" && filteredArtists.map((a: any) => (
+                {sourceKind === "artists" && filteredArtists.map((a) => (
                   <label
                     key={a.path}
                     className="flex items-center gap-2 px-2 py-1.5 text-xs text-zinc-300 hover:bg-panel cursor-pointer"
@@ -394,7 +256,7 @@ export default function ExportPage() {
                     />
                     <span className="break-words flex-1 min-w-0">{a.display_name || a.name}</span>
                     <span className="hidden sm:block text-zinc-600 shrink-0">
-                      {a.albums?.length ?? 0} albums · {(a.albums ?? []).reduce((n: number, al: any) => n + (al.tracks?.length ?? 0), 0)} tracks
+                      {a.albums?.length ?? 0} albums · {(a.albums ?? []).reduce((n, al) => n + (al.tracks?.length ?? 0), 0)} tracks
                     </span>
                   </label>
                 ))}
@@ -416,16 +278,6 @@ export default function ExportPage() {
               )}
             </>
           )}
-
-          <div className="text-[11px] text-zinc-500 mt-2 flex items-center gap-2 flex-wrap">
-            <span>
-              {paths.length} track{paths.length === 1 ? "" : "s"} selected
-              {totalSeconds > 0 ? ` · ${fmtDuration(totalSeconds)}` : ""}
-            </span>
-            {estBytes !== null && totalSeconds > 0 && (
-              <span className="text-zinc-600">· ~{(estBytes / 1024 ** 3).toFixed(2)} GB after export</span>
-            )}
-          </div>
 
           {/* track preview — same table language as the library views */}
           {paths.length > 0 && (
@@ -473,247 +325,9 @@ export default function ExportPage() {
           )}
         </div>
 
-        {/* ---- destination + format ------------------------------------ */}
+        {/* ---- destination + format (the shared option surface) --------- */}
         <div className="panel min-w-0">
-          <div className="flex items-center justify-between mb-2">
-            <div className="text-xs font-bold text-zinc-300">Destination</div>
-            <button
-              className="btn !py-0.5 !px-2 text-[11px] tap"
-              onClick={() => queryClient.invalidateQueries({ queryKey: ["exportDrives"] })}
-              title="Rescan the drives (a device plugged in after the page opened)"
-            >
-              <RotateCcw className="h-3 w-3" />
-              Rescan
-            </button>
-          </div>
-          <select
-            className="input !py-1 text-xs w-full min-w-0 tap"
-            value={f.dest}
-            onChange={(e) => set("dest", e.target.value)}
-          >
-            <option value="">Choose a drive…</option>
-            {(drivesData?.drives ?? []).map((d) => (
-              <option key={d.root} value={d.root}>
-                {d.letter} {d.type !== "fixed" ? `(${d.type})` : ""} — {fmtGB(d.free)} free
-              </option>
-            ))}
-          </select>
-          <label className="flex items-center gap-2 mt-2 text-xs text-zinc-300">
-            <span className="shrink-0">Subfolder</span>
-            <input className="input !py-1 text-xs flex-1 min-w-0 tap" value={f.subfolder} onChange={(e) => set("subfolder", e.target.value)} />
-          </label>
-          {overCapacity && (
-            <div className="flex items-start gap-2 mt-2 text-[11px] text-amber-300 border border-amber-500/30 bg-amber-500/10 rounded-md p-2">
-              <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
-              <span>
-                Estimated output (~{(estBytes! / 1024 ** 3).toFixed(2)} GB) may not fit this drive
-                ({fmtGB(selectedDrive?.free ?? null)} free). Pick fewer tracks or a lower bitrate.
-              </span>
-            </div>
-          )}
-
-          <div className="text-xs font-bold text-zinc-300 mt-4 mb-2">Format</div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
-              Codec
-              <select
-                className="input !py-1 text-xs min-w-0 tap"
-                value={f.codec}
-                onChange={(e) => {
-                  set("codec", e.target.value);
-                  set("quality", "");
-                }}
-              >
-                {Object.entries(specs?.codecs ?? {}).map(([v, cs]) => (
-                  <option key={v} value={v}>{cs.label}</option>
-                ))}
-              </select>
-            </label>
-            <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
-              Quality
-              <select
-                className="input !py-1 text-xs min-w-0 tap"
-                value={quality || spec?.default || ""}
-                onChange={(e) => set("quality", e.target.value)}
-                disabled={!spec?.presets.length && !spec?.custom}
-              >
-                {/* copy has no knobs — a disabled placeholder keeps the box legible */}
-                {!spec?.presets.length && !spec?.custom ? (
-                  <option value="">—</option>
-                ) : (
-                  <>
-                    {spec.presets.map((q) => (
-                      <option key={q.v} value={q.v}>{q.label}</option>
-                    ))}
-                    {spec.custom && (
-                      <option value={CUSTOM}>
-                        {spec.custom.mode === "q" ? "Custom q…" : "Custom bitrate…"}
-                      </option>
-                    )}
-                  </>
-                )}
-              </select>
-            </label>
-          </div>
-          {/* custom bitrate / q — the server clamps to the same range again */}
-          {spec?.custom && quality === CUSTOM && (
-            <label className="flex flex-wrap items-center gap-2 mt-2 text-[10px] text-zinc-500">
-              {spec.custom.mode === "q"
-                ? `Custom q (${spec.custom.min}–${spec.custom.max})`
-                : `Custom bitrate (${spec.custom.min}–${spec.custom.max} kbps)`}
-              <input
-                className="input !py-1 text-xs w-24 min-w-0 tap"
-                type="number"
-                min={spec.custom.min}
-                max={spec.custom.max}
-                value={customValue}
-                onChange={(e) => setCustomValue(e.target.value)}
-              />
-              {kbps !== null && <span className="text-zinc-600">~{kbps} kbps effective</span>}
-            </label>
-          )}
-          <label className="text-[10px] text-zinc-500 flex flex-col gap-1 mt-2">
-            Folder structure
-            <select
-              className="input !py-1 text-xs w-full min-w-0 tap"
-              value={f.structure}
-              onChange={(e) => set("structure", e.target.value)}
-            >
-              {STRUCTURES.map((st) => (
-                <option key={st.v} value={st.v}>{st.label}</option>
-              ))}
-            </select>
-          </label>
-          <div className="text-[10px] text-zinc-600 mt-1">
-            A multi-disc album gets a &quot;1-01 - Title&quot; file name, so the two discs
-            cannot collide.
-          </div>
-
-          {/* ---- artwork, tags, extras -------------------------------- */}
-          <div className="text-xs font-bold text-zinc-300 mt-4 mb-2">Artwork &amp; tags</div>
-          <Opt
-            checked={f.embed_covers}
-            onChange={(v) => set("embed_covers", v)}
-            label="Embed cover art into the exported files"
-            hint="The album's cover.* (or the file's own art when the folder has none) is embedded, re-encoded at the quality below. Off leaves art exactly as the source had it."
-          />
-          {f.embed_covers && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-1 pl-6">
-              <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
-                Embedded JPEG quality — {f.embed_cover_jpeg_quality}
-                <input
-                  type="range"
-                  min={60}
-                  max={100}
-                  value={f.embed_cover_jpeg_quality}
-                  onChange={(e) => set("embed_cover_jpeg_quality", Number(e.target.value))}
-                />
-              </label>
-              <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
-                Max resolution (px, 0 = original)
-                <input
-                  className="input !py-1 text-xs min-w-0 tap"
-                  type="number"
-                  min={0}
-                  max={4000}
-                  value={f.embed_cover_resolution}
-                  onChange={(e) => set("embed_cover_resolution", Number(e.target.value))}
-                />
-              </label>
-            </div>
-          )}
-          <Opt
-            checked={f.clean_tags}
-            onChange={(v) => set("clean_tags", v)}
-            label="Write only the canonical tag set"
-            hint="Transcodes drop the source's leftover frames instead of carrying them along beside the tags this app writes."
-          />
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2 items-end">
-            <label className="text-[10px] text-zinc-500 flex flex-col gap-1">
-              ID3 version (MP3)
-              <select
-                className="input !py-1 text-xs min-w-0 tap"
-                value={f.id3v2}
-                onChange={(e) => set("id3v2", e.target.value)}
-              >
-                <option value="2.3">2.3 — older players, car stereos</option>
-                <option value="2.4">2.4 — newest frames</option>
-              </select>
-            </label>
-            <Opt
-              checked={f.id3v1}
-              onChange={(v) => set("id3v1", v)}
-              label="Also write ID3v1"
-              hint="For players that read nothing else (short, latin-1 fields)."
-            />
-          </div>
-          <Opt
-            checked={f.replaygain}
-            onChange={(v) => set("replaygain", v)}
-            label="Write ReplayGain tags"
-            hint="Measures each track (ffmpeg EBU R128, one pass that rides along with the transcode) and stores track + album gain/peak, so the player matches your library's loudness."
-          />
-          <Opt
-            checked={f.playlists}
-            onChange={(v) => set("playlists", v)}
-            label="Write .m3u8 playlists"
-            hint="One per exported album, plus all.m3u8 for the whole export — UTF-8 with relative paths and durations."
-          />
-          <Opt
-            checked={f.sidecars}
-            onChange={(v) => set("sidecars", v)}
-            label="Copy covers, lyrics, cue, log and descriptions"
-            hint="cover.*, description.txt, .lrc, .cue, .log and the artist image travel with the tracks."
-          />
-          <Opt
-            checked={f.verify}
-            onChange={(v) => set("verify", v)}
-            label="Verify every written file"
-            hint="Re-opens each export and proves it parses with the source's duration before reporting success."
-          />
-          <label className="flex flex-wrap items-center gap-2 mt-2 text-xs text-zinc-300">
-            <span className="shrink-0">Parallel workers</span>
-            <select
-              className="input !py-1 text-xs min-w-0 tap"
-              value={f.workers}
-              onChange={(e) => set("workers", Number(e.target.value))}
-            >
-              <option value={0}>Auto (half the cores, max 8)</option>
-              {[1, 2, 3, 4, 6, 8, 12, 16].map((n) => (
-                <option key={n} value={n}>{n}</option>
-              ))}
-            </select>
-          </label>
-          <Opt
-            checked={f.prune}
-            onChange={(v) => set("prune", v)}
-            danger
-            label="Sync mode — remove audio the export does not write"
-            hint="Deletes audio files under the export folder that this run did not produce. Meant for mirroring a player: leave it off unless you want the destination to match this selection exactly."
-          />
-
-          <div className="grid grid-cols-2 sm:grid-cols-[2fr_1fr_auto] gap-2 mt-4">
-            <button className="btn-primary text-xs col-span-2 sm:col-span-1 tap" disabled={busy || !paths.length} onClick={run}>
-              <HardDriveDownload className="h-3.5 w-3.5" />
-              {busy ? "Exporting…" : `Export ${paths.length || ""} track${paths.length === 1 ? "" : "s"}`}
-            </button>
-            <button className="btn text-xs tap" disabled={busy} onClick={saveDefaults} title="Save these choices as the defaults for the next export">
-              <Save className="h-3.5 w-3.5" />
-              Save as default
-            </button>
-            <button className="btn text-xs !px-2 tap" disabled={busy} onClick={resetDefaults} title="Reload the saved defaults">
-              <RotateCcw className="h-3.5 w-3.5" />
-            </button>
-          </div>
-          <div className="text-[10px] text-zinc-600 mt-2">
-            {f.codec === "copy"
-              ? "Copy keeps the original files bit-exact (an embed-cover pass still rewrites tags when art must change)."
-              : f.codec === "flac"
-                ? "FLAC → FLAC exports are bit-copies; anything else is re-encoded with ffmpeg and fully re-tagged."
-                : f.codec === "wav" || f.codec === "aiff"
-                  ? `${spec?.label ?? f.codec} carries no tag set this app can write — the export keeps the audio only.`
-                  : `Exporting as ${spec?.label ?? f.codec} — files are re-encoded with ffmpeg and fully re-tagged.`}
-          </div>
+          <ExportOptionsPanel e={e} />
         </div>
       </div>
     </div>

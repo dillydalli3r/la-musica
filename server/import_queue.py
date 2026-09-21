@@ -20,7 +20,13 @@ inversion keeps this module importable from the routes without importing
 would race over the same folders; the second call answers "already running"
 with the live status instead. Revisit only if per-album parallelism is ever
 wanted — the chain scripts hold a process-wide lock anyway
-(server.script_runners.RUN_LOCK), so parallel albums would only queue up."""
+(server.script_runners.RUN_LOCK), so parallel albums would only queue up.
+
+The run also registers itself in :mod:`server.job_locks`: one job for the whole
+run, holding the album it is on while it works on it, so a delete, a move or a
+tag write aimed at that album is refused (409) rather than racing the import —
+and MAINTAIN → In progress can show the run and its progress."""
+import os
 import threading
 import time
 import traceback
@@ -119,6 +125,7 @@ def start(paths=None, on_done=None):
 def _run(work, on_done=None):
     """The worker: one album fully through the import, then the next."""
     from server import events
+    from server import job_locks
     imported = 0
     # This run's own results, kept locally: reading them back off the shared
     # job would race a new run that has already reset it (the callback can land
@@ -126,32 +133,42 @@ def _run(work, on_done=None):
     # them — marking a wish imported with another album's path is not a race
     # worth tolerating.
     mine = []
-    for path in work:
-        if _stop.is_set():
-            break
-        with _lock:
-            _job["current"] = path
-        try:
-            res = _importer(path) or {}
-            ok = not res.get("errors")
-        except Exception as e:
-            traceback.print_exc()
-            res = {"path": path, "errors": [str(e)]}
-            ok = False
-        entry = {
-            "path": path,
-            "ok": bool(ok),
-            "album_root": res.get("album_root") or path,
-            "error": "; ".join(str(x) for x in (res.get("errors") or [])) or "",
-        }
-        mine.append(entry)
-        with _lock:
-            _job["results"].append(dict(entry))
-            _job["done"] = len(_job["results"])
-            if not ok:
-                _job["errors"].append(f"{path}: {'; '.join(str(x) for x in (res.get('errors') or []))}")
-        if ok:
-            imported += 1
+    # One job for the whole run, so the in-progress list shows one row for it
+    # (with the album it is on); each album is held only while it is being
+    # worked on, so the rest of the library stays editable in between.
+    with job_locks.holding((), kind="import",
+                           label="Import all downloads") as job:
+        for index, path in enumerate(work, 1):
+            if _stop.is_set():
+                break
+            name = os.path.basename(path.rstrip("\\/")) or path
+            with _lock:
+                _job["current"] = path
+            try:
+                with job_locks.holding([path], job, wait=True):
+                    job_locks.set_progress(job, index - 1, len(work),
+                                           f"importing {name}")
+                    res = _importer(path) or {}
+                ok = not res.get("errors")
+                job_locks.set_progress(job, index, len(work), name)
+            except Exception as e:
+                traceback.print_exc()
+                res = {"path": path, "errors": [str(e)]}
+                ok = False
+            entry = {
+                "path": path,
+                "ok": bool(ok),
+                "album_root": res.get("album_root") or path,
+                "error": "; ".join(str(x) for x in (res.get("errors") or [])) or "",
+            }
+            mine.append(entry)
+            with _lock:
+                _job["results"].append(dict(entry))
+                _job["done"] = len(_job["results"])
+                if not ok:
+                    _job["errors"].append(f"{path}: {'; '.join(str(x) for x in (res.get('errors') or []))}")
+            if ok:
+                imported += 1
     with _lock:
         cancelled = _stop.is_set() and _job["done"] < _job["total"]
         _job["state"] = "cancelled" if cancelled else ("error" if _job["errors"] else "done")

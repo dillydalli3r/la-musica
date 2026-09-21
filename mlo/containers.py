@@ -1,13 +1,16 @@
 """Container-level metadata readers/writers for FLAC, JXL, JPEG and PNG.
 
-Implements the ENCODER marker tag standard (see package docstring).
+Implements the ENCODER marker tag standard (see package docstring), and holds
+the library codec table (CODECS) — the codecs an optimisation pass may
+convert the library to, with the extension and encoder arguments each one
+needs.
 """
 import os
 import re
 import tempfile
 import zlib
 
-from .config import should_write_audio_tag
+from .config import DEFAULT_CONFIG, should_write_audio_tag
 from .deps import FLAC
 
 
@@ -622,4 +625,183 @@ def _inject_png_text(png_path, tags_dict):
     _atomic_write(png_path, bytes(out))
 
     return True
+
+
+# --------------------------------------------------------------------------- #
+# Library codec targets (config `library_codec`)
+# --------------------------------------------------------------------------- #
+# ONE table for every codec the library may be converted to: the encoder
+# arguments, the extension a converted file gets and the lossless/lossy
+# answer all come from here, so the conversion pass, the grader's codec-aware
+# checks and the UI cannot disagree. `web/src/lib/codecMeta.ts` carries the
+# same list for Settings and the setup wizard (labels, help text, the field
+# each codec's quality/bitrate setting feeds) — a value added here has to be
+# added there too.
+#
+#   ext       the extension every converted file gets
+#   codec     the codec name a probe of an existing file reports (file_codec)
+#             — the half of "is this file already the target" an extension
+#             cannot answer, because .m4a holds ALAC or AAC and .ogg holds
+#             Vorbis or Opus
+#   lossless  whether encoding to it keeps every sample
+#   args      encoder arguments; `-f` fixes the container (ipod = M4A)
+#   level     the ffmpeg option that takes `library_codec_quality`, for the
+#             compressed-lossless targets. PCM has nothing to compress and
+#             ALAC exposes no such control through ffmpeg, so those targets
+#             ignore the setting (the FLAC re-encode in mlo.flac also uses
+#             it, as flac.exe's own -0..-8 level).
+#   rate      the lossy rate: (flag, shipped default, low, high, unit).
+#             mp3/aac/opus take kbps; ogg takes libvorbis' own 0-10 quality
+#             scale (-q:a 6 is roughly 192 kbps VBR).
+CODECS = {
+    "flac": {
+        "ext": ".flac", "codec": "flac", "lossless": True,
+        "args": ["-c:a", "flac", "-f", "flac"],
+        "level": "-compression_level",
+    },
+    "alac": {
+        "ext": ".m4a", "codec": "alac", "lossless": True,
+        "args": ["-c:a", "alac", "-f", "ipod"],
+    },
+    "wav": {
+        "ext": ".wav", "codec": "pcm", "lossless": True,
+        "args": ["-c:a", "pcm_s16le", "-f", "wav"],
+    },
+    "aiff": {
+        "ext": ".aiff", "codec": "pcm", "lossless": True,
+        "args": ["-c:a", "pcm_s16be", "-f", "aiff"],
+    },
+    "mp3": {
+        "ext": ".mp3", "codec": "mp3", "lossless": False,
+        "args": ["-c:a", "libmp3lame", "-f", "mp3"],
+        "rate": ("-b:a", 320, 8, 320, "kbps"),
+    },
+    "aac": {
+        "ext": ".m4a", "codec": "aac", "lossless": False,
+        "args": ["-c:a", "aac", "-f", "ipod"],
+        "rate": ("-b:a", 256, 8, 512, "kbps"),
+    },
+    "ogg": {
+        "ext": ".ogg", "codec": "vorbis", "lossless": False,
+        "args": ["-c:a", "libvorbis", "-f", "ogg"],
+        "rate": ("-q:a", 6, 0, 10, ""),
+    },
+    "opus": {
+        "ext": ".opus", "codec": "opus", "lossless": False,
+        "args": ["-c:a", "libopus", "-f", "opus"],
+        "rate": ("-b:a", 128, 6, 512, "kbps"),
+    },
+}
+
+# The `library_codec` / `library_codec_optimize` value that converts nothing.
+CODEC_KEEP = "keep"
+
+# Codecs that lose nothing when re-encoded — the vocabulary mlo.remux already
+# uses for video streams, plus the PCM containers a library may hold.
+LOSSLESS_CODECS = frozenset({
+    "flac", "alac", "wavpack", "tta", "ape", "tak", "als", "shorten",
+    "truehd", "mlp", "pcm",
+})
+
+# The codec of an extension that can only carry one. `file_codec` probes the
+# file itself for the extensions missing here (see _AMBIGUOUS_EXTS).
+_EXT_CODECS = {
+    ".flac": "flac", ".mp3": "mp3", ".aac": "aac", ".opus": "opus",
+    ".ogg": "vorbis", ".m4a": "aac", ".mp4": "aac", ".wav": "pcm",
+    ".aif": "pcm", ".aiff": "pcm", ".ape": "ape", ".wv": "wavpack",
+    ".shn": "shorten", ".tta": "tta",
+}
+# mutagen's class -> codec, for the ambiguity probe below.
+_MUTAGEN_CODECS = {
+    "FLAC": "flac", "OggVorbis": "vorbis", "OggOpus": "opus", "MP3": "mp3",
+    "WAVE": "pcm", "AIFF": "pcm",
+}
+# Extensions whose codec the extension itself cannot answer: the MP4 family
+# holds ALAC or AAC, and an Ogg container holds Vorbis or Opus.
+_AMBIGUOUS_EXTS = (".m4a", ".mp4", ".ogg")
+
+
+def codec_is_lossless(codec):
+    """Whether *codec* keeps every sample. Unknown names count as lossy —
+    the pass must never treat a codec it cannot name as lossless."""
+    return str(codec or "").lower() in LOSSLESS_CODECS
+
+
+def file_codec(path):
+    """The codec of an existing audio file ("" when it cannot be told).
+
+    Content decides where the extension is ambiguous — .m4a asks the codec
+    field (alac vs aac), .ogg tells Vorbis from Opus — and mutagen reads
+    headers only. Every other extension maps to exactly one codec, so those
+    files are never opened: this runs once per candidate of a library-wide
+    pass. A file mutagen cannot parse falls back to its extension's answer.
+    """
+    ext = os.path.splitext(str(path))[1].lower()
+    fallback = _EXT_CODECS.get(ext, "")
+    if ext not in _AMBIGUOUS_EXTS:
+        return fallback
+    try:
+        from mutagen import File as _mutagen_file
+        audio = _mutagen_file(str(path))
+    except Exception:
+        return fallback
+    if audio is None:
+        return fallback
+    if type(audio).__name__ == "MP4":
+        # ALAC and AAC share the container; mutagen reports 'alac' or
+        # 'mp4a.40.2' (mlo.flac.is_alac reads the same field).
+        codec = str(getattr(getattr(audio, "info", None), "codec", "") or "")
+        return "alac" if codec.lower().startswith("alac") else "aac"
+    return _MUTAGEN_CODECS.get(type(audio).__name__, fallback)
+
+
+def clamped_int(cfg, key, low, high):
+    """`cfg[key]` clamped into [low, high], with the shipped default when the
+    value is missing or unusable."""
+    try:
+        value = int((cfg or {}).get(key, DEFAULT_CONFIG[key]))
+    except (TypeError, ValueError):
+        value = DEFAULT_CONFIG[key]
+    return max(low, min(high, value))
+
+
+def codec_extra_args(cfg):
+    """`library_codec_args` as an argv fragment: whitespace-split, verbatim.
+
+    The field is free text the app does not validate (mlo.config only strips
+    control characters and caps its length), so an argument that has to
+    contain a space cannot be expressed that way.
+    """
+    return str((cfg or {}).get("library_codec_args") or "").split()
+
+
+def encoder_args(codec, cfg):
+    """The encoder arguments that convert *cfg*'s target *codec* gets.
+
+    Quality first (`library_codec_quality`, the compression level of a codec
+    that has one), then the lossy rate (`library_codec_bitrate`, clamped to
+    the codec's own range; 0 = the codec's shipped default), then
+    `library_codec_args` verbatim. ffmpeg lets the LAST flag win, so a user
+    who writes their own "-b:a 128k" overrides the bitrate above.
+    """
+    spec = CODECS.get(codec)
+    if not spec:
+        return []
+    args = list(spec["args"])
+    if spec.get("level"):
+        args += [spec["level"],
+                 str(clamped_int(cfg, "library_codec_quality", 0, 8))]
+    rate = spec.get("rate")
+    if rate:
+        flag, default, low, high, unit = rate
+        try:
+            # 0 (the shipped default) means "the codec's own rate", which is
+            # why it is resolved BEFORE the clamp: clamping the sentinel would
+            # turn it into the codec's minimum, not its default.
+            value = int((cfg or {}).get("library_codec_bitrate") or 0)
+        except (TypeError, ValueError):
+            value = 0
+        value = max(low, min(high, value)) if value else default
+        args += [flag, f"{value}{unit}"]
+    return args + codec_extra_args(cfg)
 

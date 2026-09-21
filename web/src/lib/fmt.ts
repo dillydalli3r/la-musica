@@ -203,3 +203,18 @@ export function fmtPercent(p: number | null | undefined): string {
   const v = Math.max(0, Math.min(100, Number(p ?? 0) || 0));
   return `${fmtCount(v)}%`;
 }
+
+/** A byte count off the disk, in binary units ("14.62 GB") — the units every
+ *  OS reports drive and folder sizes in, so nothing it formats is converted
+ *  twice. `null` means the OS would not say (an unmeasurable volume, a folder
+ *  that is not there): that reads as "unknown", never "0 B", which a storage
+ *  readout must not claim. A real 0 is a real 0. */
+export function fmtBytes(n: number | null | undefined): string {
+  if (n === null || n === undefined || !Number.isFinite(n)) return "unknown";
+  const v = Math.max(0, n);
+  if (v >= 1024 ** 4) return `${(v / 1024 ** 4).toFixed(2)} TB`;
+  if (v >= 1024 ** 3) return `${(v / 1024 ** 3).toFixed(2)} GB`;
+  if (v >= 1024 ** 2) return `${(v / 1024 ** 2).toFixed(1)} MB`;
+  if (v >= 1024) return `${Math.round(v / 1024)} kB`;
+  return `${Math.round(v)} B`;
+}

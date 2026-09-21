@@ -55,6 +55,19 @@ services:
     container_name: la-musica
     ports:
       - "8000:8000"
+      # Soulseek listen port. Sharing is not just the web UI: other users
+      # BROWSE and DOWNLOAD from this share by connecting to the port the
+      # Soulseek network publishes for you, which slskd opens inside the
+      # container (Settings -> Soulseek -> Listen port, default 50000). Not
+      # publishing it means your library is searchable but downloads from it
+      # fail, which is the one thing a share is for.
+      #
+      # The two numbers must be the SAME port: slskd listens on the one in its
+      # own config, so change both together — set MLO_SOULSEEK_LISTEN_PORT in
+      # the environment to whatever you configured (or change the setting to
+      # 50000, the app's default) and restart compose. On the host, forward
+      # that port to this machine as well if a router sits in front of it.
+      - "${MLO_SOULSEEK_LISTEN_PORT:-50000}:${MLO_SOULSEEK_LISTEN_PORT:-50000}"
     environment:
       # Folder inside the container to treat as the music library.
       - MLO_MUSIC_FOLDER=/music
@@ -73,6 +86,12 @@ services:
       # metadata caches) lives in /music/.mlo/data, beside the transient
       # /music/.mlo/downloads and /music/.mlo/trash, so this one mount
       # persists everything across rebuilds.
+      #
+      # This IS the Soulseek share as well: slskd - the Soulseek client this
+      # app runs - is configured with /music as its shared folder, so whatever
+      # this mount points at is what other users search and browse. Point it at
+      # the library, nothing narrower (a mount holding only part of the library
+      # shares only that part) and never at the download folder.
       - "F:/media/music:/music"
       # Runtime-installed tools (Settings -> Dependencies: beets, librosa, ...).
       - lamusica-dependencies:/app/.dependencies
@@ -83,7 +102,9 @@ services:
     # Mirrors the image's HEALTHCHECK so `docker compose ps` and watchtower
     # see readiness. The container runs as uid 1000; if your library is owned
     # by someone else, rebuild the image with matching build args or chown the
-    # host folder to 1000 - otherwise the app cannot write /music/.mlo.
+    # host folder to 1000 - otherwise the app cannot write /music/.mlo, and
+    # slskd cannot READ the library it is supposed to share (an unreadable
+    # subfolder is skipped silently, so the share just comes up short).
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)"]
       interval: 30s

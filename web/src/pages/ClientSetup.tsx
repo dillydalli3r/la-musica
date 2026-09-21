@@ -1,8 +1,7 @@
-import { useEffect, useState } from "react";
-import { ArrowLeft, ArrowRight, Bell, Check, HardDrive, KeyRound, Loader2, Server } from "lucide-react";
+import { useState } from "react";
+import { ArrowLeft, ArrowRight, Bell, Check, KeyRound, Loader2, Server } from "lucide-react";
 import { api, normalizeServerUrl, serverUrl, setToken } from "../api";
 import PageHeader from "../components/PageHeader";
-import BackgroundHostingToggle from "../components/BackgroundHostingToggle";
 import ServerVersionNotice from "../components/ServerVersionNotice";
 import { toast } from "../store";
 import { useI18n } from "../lib/i18n";
@@ -10,14 +9,9 @@ import { notificationState, requestNotifications, type NotifyState } from "../li
 import {
   STEP_IDS,
   STEP_LABELS,
-  hostOnDeviceUrl,
-  isHostingOnThisDevice,
-  localBackendSummary,
   markClientSetupDone,
-  probeLocalBackend,
   probeServer,
   saveServer,
-  type LocalBackend,
   type ProbeResult,
   type StepId,
 } from "../lib/clientSetup";
@@ -40,29 +34,6 @@ export default function ClientSetup({ onDone }: { onDone: () => void }) {
   const [address, setAddress] = useState(serverUrl());
   const [probe, setProbe] = useState<ProbeResult | null>(null);
   const [testing, setTesting] = useState(false);
-  const [mode, setMode] = useState<"server" | "host">(() => (isHostingOnThisDevice() ? "host" : "server"));
-  // What this device's own address answers. Null until the probe lands, and
-  // the wizard offers only "connect to a server" until then: an option that
-  // appears and then retracts reads worse than one that arrives a moment late.
-  const [local, setLocal] = useState<LocalBackend | null>(null);
-
-  useEffect(() => {
-    let live = true;
-    probeLocalBackend().then((r) => {
-      if (live) setLocal(r);
-    });
-    return () => {
-      live = false;
-    };
-  }, []);
-
-  // "Host on this device" is only honest when a backend actually answers on
-  // this device, so the answer decides whether the choice is offered at all —
-  // and the same answer keeps a client that already points at 127.0.0.1 from
-  // sitting on a mode whose address is dead.
-  const hostPossible = local?.possible === true;
-  const activeMode = hostPossible ? mode : "server";
-  const hostNote = localBackendSummary(local?.capabilities ?? null);
 
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -78,11 +49,10 @@ export default function ClientSetup({ onDone }: { onDone: () => void }) {
   const needsSetup = probe?.hasPassword === false;
 
   const test = async () => {
-    // "Host on this device" probes this device's own address; "Connect to a
-    // server" probes what was typed, normalised first so the field shows the
-    // address that is about to be saved (`example.com:8000` → `http://…`).
-    const target = activeMode === "host" ? hostOnDeviceUrl() : normalizeServerUrl(address);
-    if (activeMode === "server") setAddress(target);
+    // Normalised first so the field shows the address that is about to be
+    // saved (`example.com:8000` → `http://…`).
+    const target = normalizeServerUrl(address);
+    setAddress(target);
     setTesting(true);
     setProbe(null);
     const r = await probeServer(target);
@@ -153,116 +123,60 @@ export default function ClientSetup({ onDone }: { onDone: () => void }) {
         <div className="panel p-6 space-y-4">
           {step === "server" && (
             <>
-              {/* The first question is not "where" but "which way": this
-                  device either reaches a server, or is the server. The two
-                  pick different addresses, so the answer is asked before the
-                  address is typed — and Settings → Security asks it again,
-                  because a phone that starts hosting later should not need
-                  the wizard re-run by hand.
+              {/* One question, one answer: which server this device talks to.
+                  A shell hosts no backend of its own, so an address that does
+                  not answer leaves nothing to fall back on — the step is
+                  blocked until one does, and says which error came back
+                  rather than offering a mode that cannot work.
 
-                  "Host on this device" is offered only when a backend
-                  actually answers here (see probeLocalBackend): on a build
-                  that bundles no local backend — a phone whose Python cannot
-                  start one, a desktop whose backend failed to launch — the
-                  honest answer is that there is nothing to host, and the
-                  reason is said instead of the option. */}
-              <div className="grid gap-2 sm:grid-cols-2">
-                {(["server", "host"] as const)
-                  .filter((id) => id === "server" || hostPossible)
-                  .map((id) => (
-                    <label
-                      key={id}
-                      className={`tap flex items-center gap-2 rounded-md border px-3 py-2 text-xs cursor-pointer ${
-                        activeMode === id
-                          ? "border-accent bg-accent/10 text-zinc-100"
-                          : "border-border bg-bg/60 text-zinc-400"
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="client-mode"
-                        checked={activeMode === id}
-                        onChange={() => {
-                          setMode(id);
-                          setProbe(null); // the other mode's answer says nothing about this one
-                        }}
-                      />
-                      {id === "server" ? <Server className="h-3.5 w-3.5" /> : <HardDrive className="h-3.5 w-3.5" />}
-                      {t(id === "server" ? "client.mode_connect" : "client.mode_host")}
-                    </label>
-                  ))}
-              </div>
-
-              {local && !hostPossible && (
-                <p className="text-[11px] text-zinc-500 leading-relaxed">
-                  {t("client.host_impossible", { reason: local.error || "" })}
-                </p>
-              )}
-
-              {activeMode === "server" ? (
-                <label className="block">
-                  <span className="text-xs text-zinc-400 flex items-center gap-1.5 mb-1.5">
-                    <Server className="h-3.5 w-3.5" /> {t("auth.server_address")}
-                  </span>
-                  <div className="flex gap-2">
-                    {/* Deliberately no autoFocus: this is the first screen a phone
-                        sees, and the keyboard would cover the help text and the
-                        Test button before the address has even been read. */}
-                    {/* `min-w-0` is what keeps this row inside the card on
-                        every engine: `min-width: auto` (the flex default)
-                        floors a text input at its own intrinsic width, and
-                        Safari reads that floor off the `size` attribute — the
-                        field would refuse to shrink and push "Test connection"
-                        past the card's edge on a phone. Chromium already
-                        shrinks it, so nothing moves on the desktop. */}
-                    <input
-                      className="input font-mono text-xs min-w-0"
-                      value={address}
-                      onChange={(e) => {
-                        setAddress(e.target.value);
-                        setProbe(null); // a changed address makes the old answer meaningless
-                      }}
-                      placeholder="http://127.0.0.1:8000"
-                      spellCheck={false}
-                      autoComplete="off"
-                    />
-                    <button
-                      type="button"
-                      className="btn-ghost !py-1.5 text-xs shrink-0"
-                      onClick={test}
-                      disabled={testing || !address.trim()}
-                    >
-                      {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Server className="h-3.5 w-3.5" />}
-                      {t("client.test")}
-                    </button>
-                  </div>
-                  {/* What is about to be saved, as it will be saved: a typed
-                      `example.com:8000` becomes `http://example.com:8000`, and
-                      the user sees that before the probe, not after. */}
-                  {normalizeServerUrl(address) && normalizeServerUrl(address) !== address.trim() && (
-                    <span className="text-[11px] text-zinc-500 font-mono block mt-1">
-                      → {normalizeServerUrl(address)}
-                    </span>
-                  )}
-                  <span className="text-[11px] text-zinc-600 block mt-1">{t("auth.server_address_help")}</span>
-                </label>
-              ) : (
-                <div className="space-y-2">
-                  <div className="font-mono text-xs text-zinc-300 break-all">
-                    {hostOnDeviceUrl() || window.location.origin}
-                  </div>
-                  {/* One line, from the backend's own report: what THIS
-                      device can do once it hosts. Absent when the report did
-                      not arrive (a gated server wants a session first) — the
-                      Dependencies page then carries the detail. */}
-                  <p className="text-[11px] text-zinc-600 leading-relaxed">{hostNote ?? t("client.host_help")}</p>
-                  <BackgroundHostingToggle caps={local?.capabilities ?? null} />
-                  <button type="button" className="btn-ghost !py-1.5 text-xs" onClick={test} disabled={testing}>
+                  A build with no local backend is therefore not a case the
+                  wizard has to ask about: the honest answer is the address. */}
+              <label className="block">
+                <span className="text-xs text-zinc-400 flex items-center gap-1.5 mb-1.5">
+                  <Server className="h-3.5 w-3.5" /> {t("auth.server_address")}
+                </span>
+                <div className="flex gap-2">
+                  {/* Deliberately no autoFocus: this is the first screen a phone
+                      sees, and the keyboard would cover the help text and the
+                      Test button before the address has even been read. */}
+                  {/* `min-w-0` is what keeps this row inside the card on
+                      every engine: `min-width: auto` (the flex default)
+                      floors a text input at its own intrinsic width, and
+                      Safari reads that floor off the `size` attribute — the
+                      field would refuse to shrink and push "Test connection"
+                      past the card's edge on a phone. Chromium already
+                      shrinks it, so nothing moves on the desktop. */}
+                  <input
+                    className="input font-mono text-xs min-w-0"
+                    value={address}
+                    onChange={(e) => {
+                      setAddress(e.target.value);
+                      setProbe(null); // a changed address makes the old answer meaningless
+                    }}
+                    placeholder="http://127.0.0.1:8000"
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                  <button
+                    type="button"
+                    className="btn-ghost !py-1.5 text-xs shrink-0"
+                    onClick={test}
+                    disabled={testing || !address.trim()}
+                  >
                     {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Server className="h-3.5 w-3.5" />}
                     {t("client.test")}
                   </button>
                 </div>
-              )}
+                {/* What is about to be saved, as it will be saved: a typed
+                    `example.com:8000` becomes `http://example.com:8000`, and
+                    the user sees that before the probe, not after. */}
+                {normalizeServerUrl(address) && normalizeServerUrl(address) !== address.trim() && (
+                  <span className="text-[11px] text-zinc-500 font-mono block mt-1">
+                    → {normalizeServerUrl(address)}
+                  </span>
+                )}
+                <span className="text-[11px] text-zinc-600 block mt-1">{t("auth.server_address_help")}</span>
+              </label>
 
               {probe &&
                 (probe.ok ? (

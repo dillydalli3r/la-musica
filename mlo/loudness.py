@@ -15,6 +15,8 @@ a clear message instead of failing.
 The player also uses this module on demand: replaygain_for_path() answers one
 track's playback gain from its tags, measuring the file with ffmpeg's EBU R128
 filter (and caching the result under <music>/.mlo/data/) when they are missing.
+Playback bounds that measurement (``wait_s`` / PLAYBACK_WAIT_S) so a track never
+waits on a decode to start; the run finishes in the background and is cached.
 """
 import json
 import math
@@ -816,8 +818,59 @@ def store_analysis(cfg, path, data):
                     pass
 
 
+# How long a PLAYBACK request may wait for an on-demand measurement before it
+# is answered at unity and the decode keeps running in the background (see
+# replaygain_for_path's ``wait_s``). The player installs the gain BEFORE the
+# track starts, so this bound is the longest a song can be held at the click:
+# one round trip is fine, a full-song ffmpeg EBU R128 pass (seconds) is not.
+PLAYBACK_WAIT_S = 1.0
+
+# One measurement per file at a time. The player asks for the same path from
+# two places at once (the track load that needs the gain before play, and the
+# gain readout), and a second ffmpeg decode of the same bytes is pure waste —
+# so a request that arrives while a run is going waits on THAT run.
+_ANALYZE_LOCK = threading.Lock()
+_ANALYZE_RUNS = {}
+
+
+def _analyze_bounded(cfg, path, wait_s):
+    """Measure *path* on demand, waiting at most *wait_s* seconds for it.
+
+    The cached measurement, or None while the decode is still running — that
+    run is left to finish (daemon thread) and store its value, so the next
+    request is answered from the cache instead of decoding again. Never
+    raises: a measurement is playback metadata, never worth losing a request.
+    """
+    key = _cache_key(path)
+    with _ANALYZE_LOCK:
+        run = _ANALYZE_RUNS.get(key)
+        started = run is None
+        if started:
+            run = _ANALYZE_RUNS[key] = threading.Event()
+
+    if started:
+        def _measure():
+            try:
+                data = analyze_file(path, cfg)
+                if data:
+                    store_analysis(cfg, path, data)
+            except Exception:
+                pass
+            finally:
+                with _ANALYZE_LOCK:
+                    _ANALYZE_RUNS.pop(key, None)
+                run.set()
+
+        threading.Thread(target=_measure, name="mlo-replaygain",
+                         daemon=True).start()
+
+    if not run.wait(max(0.0, float(wait_s))):
+        return None
+    return cached_analysis(cfg, path)
+
+
 def replaygain_for_path(cfg, path, mode=None, preamp_db=None,
-                        clip_protection=None):
+                        clip_protection=None, wait_s=None):
     """Playback gain for one track: ``{"gain", "peak", "mode", "source",
     "analyzed"}``.
 
@@ -830,6 +883,13 @@ def replaygain_for_path(cfg, path, mode=None, preamp_db=None,
     0 dBFS and says so in ``source`` ("tags+clamp"). Defaults come from *cfg*
     (``replaygain_mode`` / ``_preamp_db`` / ``_clip_protection``); the
     arguments override them. Never raises.
+
+    ``wait_s`` bounds that on-demand measurement: None (batch callers, and
+    the command line) waits for the decode, a number returns unity once it
+    runs out — the decode finishes in the background and the value is cached,
+    so asking again costs one cache read. Playback passes
+    ``PLAYBACK_WAIT_S``: the gain has to be known before the track starts, so
+    a request must not sit on a multi-second decode to get it.
     """
     cfg = cfg or {}
     if mode is None:
@@ -856,9 +916,12 @@ def replaygain_for_path(cfg, path, mode=None, preamp_db=None,
     if gain is None and cfg.get("replaygain_analyze_missing"):
         data = cached_analysis(cfg, path)
         if data is None:
-            data = analyze_file(path, cfg)
-            if data:
-                store_analysis(cfg, path, data)
+            if wait_s is None:
+                data = analyze_file(path, cfg)
+                if data:
+                    store_analysis(cfg, path, data)
+            else:
+                data = _analyze_bounded(cfg, path, wait_s)
         if data:
             gain = data.get("gain_db")
             peak = data.get("peak")

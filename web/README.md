@@ -13,8 +13,9 @@ npm run build    # type-check (tsc -b) + production build into dist/
 npm run lint     # oxlint
 ```
 
-The backend must be running for anything to load (`python -m server.main` from
-the repository root, or `start_app.py`).
+The backend must be running for anything to load: `docker compose up -d` in the
+repository root (see the main README), or `python -m server.main` from a source
+checkout.
 
 ## Layout
 

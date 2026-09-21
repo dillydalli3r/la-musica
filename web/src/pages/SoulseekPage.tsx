@@ -16,7 +16,7 @@ import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
 import Segmented from "../components/Segmented";
 import type { DownloadEntry, ImportBulkJob, Wish } from "../types";
-import { fmtCounts, fmtPercent } from "../lib/fmt";
+import { fmtCount, fmtCounts, fmtPercent } from "../lib/fmt";
 
 interface SlskFile {
   username: string;
@@ -1685,16 +1685,63 @@ function ReviewPanel() {
   );
 }
 
+/** What other Soulseek users can see of this library, derived server-side from
+ *  slskd's own state (scan state, live share list, live filters) and compared
+ *  with the disk. One `status` per distinct failure mode, so "nobody can see my
+ *  files" arrives with its cause instead of a guess. `browse` is only filled in
+ *  by the on-demand probe (it reads slskd's whole share index). */
+interface SlskShareAudit {
+  ok: boolean;
+  status: string;
+  summary: string;
+  problems: { code: string; message: string; hint: string }[];
+  notes: string[];
+  shares: {
+    configured: { path: string; alias: string }[];
+    live: { host: string; local: string; remote: string; alias: string;
+            files: number; directories: number; excluded: boolean }[];
+    mismatch: boolean;
+    dropped: { path: string; reason: string }[];
+  };
+  filters: { applied: string[];
+             invalid: { pattern: string; reason: string }[];
+             mismatch: boolean };
+  scan: { state: string; scanning: boolean; pending: boolean; ready: boolean;
+          faulted: boolean; cancelled: boolean; progress: number; files: number;
+          directories: number; log: string[] };
+  disk: { roots: { path: string; exists: boolean; readable: boolean;
+                   audio_files: number }[];
+          audio_files: number; truncated: boolean; probe_file: string };
+  browse: { checked: boolean; ok: boolean | null; directories: number;
+            detail: string };
+  port: { listen_port: number; container: boolean };
+  running: boolean;
+}
+
+/** Chip tone per audit status: green only when slskd really is serving the
+ *  index, amber for "working but incomplete", red for a share nobody sees. */
+const AUDIT_TONE: Record<string, string> = {
+  ok: "bg-emerald-900/40 text-emerald-300 border-emerald-800",
+  scanning: "bg-sky-900/40 text-sky-300 border-sky-800",
+  misconfigured: "bg-amber-900/40 text-amber-300 border-amber-800",
+  disabled: "bg-raise border-border text-zinc-400",
+};
+
 /** Share configuration (la musica settings are the source of truth — the
- * slskd yaml is regenerated from them at start) with live rescan and the
- * autostart preference. Reserved folders (.mlo/data / .mlo/downloads /
- * .mlo/trash) are filtered server-side and never shared. */
+ * slskd yaml is regenerated from them at start) with the live share audit,
+ * rescan and the autostart preference. Reserved folders (.mlo/data /
+ * .mlo/downloads / .mlo/trash) are filtered server-side and never shared. */
 function SharingCard({ running }: { running: boolean }) {
   const qc = useQueryClient();
-  const { data } = useQuery({ queryKey: ["soulseekShares"], queryFn: api.soulseekShares });
+  const { data } = useQuery({ queryKey: ["soulseekShares"], queryFn: () => api.soulseekShares() });
   const [dirs, setDirs] = useState<string[] | null>(null);
   const [newDir, setNewDir] = useState("");
   const [busy, setBusy] = useState(false);
+  // The probed audit replaces the polled one until the next fetch: it is the
+  // only one that looked inside the index, so it must not be overwritten by a
+  // cheaper answer.
+  const [probed, setProbed] = useState<SlskShareAudit | null>(null);
+  const [probing, setProbing] = useState(false);
 
   useEffect(() => {
     if (data && dirs === null) setDirs((data.dirs as string[]) ?? []);
@@ -1702,18 +1749,23 @@ function SharingCard({ running }: { running: boolean }) {
   }, [data]);
 
   const autostart: boolean = data?.autostart ?? true;
-  const scanState: string | undefined = data?.slskd?.scanState;
+  const audit = (probed ?? (data?.audit as SlskShareAudit | undefined)) ?? null;
   const savedDirs: string[] = data?.dirs ?? [];
   const dirty =
     dirs !== null &&
     (JSON.stringify([...dirs].sort()) !== JSON.stringify([...savedDirs].sort()));
+
+  const refresh = () => {
+    setProbed(null);
+    qc.invalidateQueries({ queryKey: ["soulseekShares"] });
+  };
 
   const save = async (autostartOverride?: boolean) => {
     setBusy(true);
     try {
       const r = await api.soulseekSharesSave(dirs ?? [], autostartOverride ?? null, true);
       toast(r.restarted ? "Shares saved — slskd restarted and rescanning" : "Shares saved");
-      qc.invalidateQueries({ queryKey: ["soulseekShares"] });
+      refresh();
       qc.invalidateQueries({ queryKey: ["soulseekStatus"] });
     } catch (e) {
       toast.error(String(e));
@@ -1727,7 +1779,40 @@ function SharingCard({ running }: { running: boolean }) {
     try {
       await api.soulseekSharesRescan();
       toast("Share rescan started");
-      qc.invalidateQueries({ queryKey: ["soulseekShares"] });
+      refresh();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** Read slskd's own share index and look for a file that is on disk — the
+   *  browse a remote user would get. Reported as observed, including "could
+   *  not tell". */
+  const verifyBrowsable = async () => {
+    setProbing(true);
+    try {
+      const r = await api.soulseekShares(true);
+      const a = r.audit as SlskShareAudit;
+      setProbed(a);
+      const b = a.browse;
+      if (b.ok === true) toast.success(`Browse verified — ${b.detail}`);
+      else if (b.ok === false) toast.error(`Browse check failed — ${b.detail}`);
+      else toast(`Browse check could not confirm anything: ${b.detail || "no answer"}`);
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setProbing(false);
+    }
+  };
+
+  const applyConfig = async () => {
+    setBusy(true);
+    try {
+      await api.soulseekRestart();
+      toast("slskd restarted — reading the share config");
+      refresh();
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -1742,7 +1827,7 @@ function SharingCard({ running }: { running: boolean }) {
       // an empty list, and the server stores it verbatim (every configured
       // share folder would be gone). The checkbox is disabled in that window.
       await api.soulseekSharesSave(dirs ?? [], !autostart, false);
-      qc.invalidateQueries({ queryKey: ["soulseekShares"] });
+      refresh();
       qc.invalidateQueries({ queryKey: ["soulseekStatus"] });
     } catch (e) {
       toast.error(String(e));
@@ -1755,9 +1840,14 @@ function SharingCard({ running }: { running: boolean }) {
     <div className="panel text-xs space-y-2">
       <div className="flex items-center gap-2 flex-wrap">
         <span className="text-[10px] uppercase tracking-widest text-zinc-500">Sharing</span>
-        {scanState && (
-          <span className={`chip text-[9px] border ${scanState === "Complete" ? "bg-emerald-900/40 text-emerald-300 border-emerald-800" : "bg-raise border-border text-zinc-400"}`}>
-            scan: {scanState.toLowerCase()}
+        {audit && (
+          <span className={`chip text-[9px] border ${AUDIT_TONE[audit.status] ?? "bg-red-900/40 text-red-300 border-red-800"}`}>
+            {audit.status === "ok" ? "shared" : audit.status.replace(/_/g, " ")}
+          </span>
+        )}
+        {audit?.scan.ready && audit.scan.files > 0 && (
+          <span className="chip text-[9px] border bg-raise border-border text-zinc-400">
+            {fmtCount(audit.scan.files)} files · {fmtCount(audit.scan.directories)} folders indexed
           </span>
         )}
         <div className="ml-auto flex items-center gap-2.5">
@@ -1771,11 +1861,55 @@ function SharingCard({ running }: { running: boolean }) {
             />
             Start with the app
           </label>
+          <button
+            className="btn-ghost !py-1 text-xs tap"
+            onClick={verifyBrowsable}
+            disabled={probing || !running}
+            title="Read slskd's own share index and look for a file that is on disk — what a browse by another user returns"
+          >
+            {probing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Eye className="h-3.5 w-3.5" />} Verify browse
+          </button>
           <button className="btn-ghost !py-1 text-xs tap" onClick={rescan} disabled={busy || !running}>
             <RefreshCw className="h-3.5 w-3.5" /> Rescan
           </button>
         </div>
       </div>
+
+      {audit && (
+        <div className="space-y-1.5">
+          <div className={`${audit.ok ? "text-zinc-400" : audit.status === "scanning" || audit.status === "misconfigured" ? "text-amber-300" : "text-red-300"}`}>
+            {audit.summary}
+          </div>
+          {audit.problems.length > 0 && (
+            <ul className="space-y-1">
+              {audit.problems.map((p) => (
+                <li key={p.code + p.message} className="rounded border border-border/60 bg-raise/40 px-2 py-1.5">
+                  <div className="text-[11px] text-zinc-300">{p.message}</div>
+                  {p.hint && <div className="text-[10px] text-zinc-500 mt-0.5">{p.hint}</div>}
+                </li>
+              ))}
+            </ul>
+          )}
+          {audit.shares.mismatch && running && (
+            <button className="btn-ghost !py-1 text-xs tap text-amber-300" onClick={applyConfig} disabled={busy}>
+              <RotateCw className="h-3.5 w-3.5" /> Restart slskd to apply the generated config
+            </button>
+          )}
+          {audit.browse.checked && (
+            <div className={`text-[10px] ${audit.browse.ok === true ? "text-emerald-300" : audit.browse.ok === false ? "text-red-300" : "text-zinc-500"}`}>
+              browse check: {audit.browse.detail || "no answer"}
+            </div>
+          )}
+          {audit.scan.log.length > 0 && (
+            <div className="text-[10px] text-zinc-600 font-mono truncate" title={audit.scan.log.join("\n")}>
+              slskd scan log: {audit.scan.log[audit.scan.log.length - 1]}
+            </div>
+          )}
+          {audit.notes.map((n) => (
+            <div key={n} className="text-[10px] text-zinc-600">{n}</div>
+          ))}
+        </div>
+      )}
       {dirs !== null && (
         <div className="space-y-1">
           {dirs.map((d) => (

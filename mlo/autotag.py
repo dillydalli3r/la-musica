@@ -27,16 +27,15 @@ filled in by hand:
    (mlo.moods extracts their audio through ffmpeg), and the GENRE they carry
    is written through the same video tag writer.
 
-4) GENRE completion: the tags are canonicalized up to ``mb_genre_count`` (the
-   track's own values first, they are deliberate) — the family of the specific
-   genre is DERIVED and appended last, and only when a slot is still free is a
-   caller-supplied provider hook (``set_genre_lookup``) asked for one more
-   specific genre. Never past the cap — the same count the trimmer and the
-   grader's "Genre count" check use (which accepts AT MOST this many). The
-   engine deliberately does not
-   ship an HTTP client for this: the server and the import pipeline register
-   their discovery/MusicBrainz chain, the CLI leaves it unset and step 4 is
-   skipped.
+4) GENRE is TRIMMED, never imported. This script asks no provider for a
+   genre and derives no family of its own: genres come from the import
+   pipeline (`server/imports.py`, the genre chain — MusicBrainz and
+   RateYourMusic per track, with the configured sources behind them) or from
+   a manual tag edit. What the script does enforce is the cap every writer and
+   the grader share: a list already carrying more than ``mb_genre_count``
+   genres is brought down to it (`trim_genres`), so a pre-existing over-long
+   list is fixed by re-running Auto tagging instead of failing grading
+   forever.
 
 Albums / tracks that already carry the correct values are skipped unless
 the run is forced.
@@ -97,22 +96,6 @@ def _instrumental_fetch(paths, config):
         return detect_instrumental(paths, config)
     except Exception:
         return {}
-
-
-# Genre autofill provider, registered by whoever HAS a provider chain (the
-# server's discovery layer, the import pipeline). The engine never imports the
-# server, so an unset hook simply means "step 4 does not run".
-_genre_lookup = None
-
-
-def set_genre_lookup(fn):
-    """Install `fn(artist, album, track_path) -> list[str]` for script 8.
-
-    The callable must never raise; returning an empty list means "no genres
-    found". Passing None removes the hook again (the CLI's default).
-    """
-    global _genre_lookup
-    _genre_lookup = fn
 
 
 def genre_count(cfg, requested=None):
@@ -500,7 +483,7 @@ def run_auto_tagging(config):
     log("  DATE / ORIGINALDATE (the album folder's two dates): filled when "
         "empty, and sharpened to MusicBrainz's full date when the tag holds "
         "only a year or a year-month of the same date")
-    if config.get("auto_zero_advisory_for_instrumental", False):
+    if config.get("auto_zero_advisory_for_instrumental", True):
         log("  ITUNESADVISORY: zeroed on instrumentals (auto_zero_advisory_for_instrumental)")
     if config.get("auto_instrumental", True):
         log("  INSTRUMENTAL: " + (
@@ -512,26 +495,23 @@ def run_auto_tagging(config):
             " (refined by GENRE)" if config.get("mood_source", "hybrid") == "hybrid"
             else f" (source: {config.get('mood_source', 'hybrid')})"))
     if config.get("genre_autofill", True):
-        log("  GENRE: completed to the configured count (family derived, "
-            "provider chain when a slot is free)"
-            if _genre_lookup else
-            "  GENRE: autofill skipped (no provider chain in this runner)")
+        log(f"  GENRE: trimmed to {genre_count(config)} — genres are never "
+            f"imported by a script (only the import and manual edits write them)")
 
     force = config.get("force_auto_tag", False)
     do_advisory = config.get("auto_advisory", True)
     do_instrumental = config.get("auto_instrumental", True)
     do_mood = config.get("mood_enabled", True)
-    do_genre = config.get("genre_autofill", True) and _genre_lookup is not None
+    do_genre = config.get("genre_autofill", True)
     # The per-track cap this app's writers keep (`mb_genre_count`, clamped to
     # its own ceiling by the one helper above); grading accepts at most this
     # many genres per track.
     genre_cap = genre_count(config)
     if do_mood:
         from . import moods  # local: keeps librosa discovery out of import time
-    # Advisory zero-fill is OFF by default: a missing ITUNESADVISORY means
-    # "unrated" and stays missing — only an explicit setting turns the
-    # instrumental zero-fill back on.
-    do_zero_advisory_for_instrumental = config.get("auto_zero_advisory_for_instrumental", False)
+    # An instrumental has no words to be explicit with, so its advisory is
+    # zeroed; a setting can turn that off (see mlo.config).
+    do_zero_advisory_for_instrumental = config.get("auto_zero_advisory_for_instrumental", True)
 
     if config.get("targets") is not None:
         target_files = _collect_targets(config["targets"], AUDIO_EXTS)
@@ -722,49 +702,20 @@ def run_auto_tagging(config):
         notes = list(notes or [])
 
         mood_modified = 0
-        genre_modified = 0
         genre_trimmed = 0
         for d in info:
             af = d["af"]
             path = af.path
             if do_genre:
-                # GENRE is top-up-and-canonicalize, not just fill-from-empty:
-                # the track's own values come first (they are deliberate), and
-                # the shared normalizer completes them — it derives the FAMILY
-                # of the specific genre it finds (mlo.genre_vocab.parent_of)
-                # and appends it last, which is what makes a track carrying one
-                # specific genre already complete.
-                current = [g for g in (af.tag_values("GENRE") or [])
-                           if str(g).strip()]
-                merged = normalize_genres(current, genre_cap)
-                if len(merged) < genre_cap:
-                    # Still short of the cap, so only a provider can add
-                    # anything: one more SPECIFIC genre is what is missing
-                    # (the family came free from the normalizer above). The
-                    # chain's names follow in its own priority order and the
-                    # cap is the same `mb_genre_count` the trimmer and the
-                    # grader use.
-                    artist = af.get_tag("ALBUMARTIST") or af.get_tag("ARTIST") or ""
-                    album_tag = af.get_tag("ALBUM") or ""
-                    try:
-                        names = _genre_lookup(artist, album_tag, path) or []
-                    except Exception:
-                        names = []
-                    merged = normalize_genres(current + list(names), genre_cap)
-                if merged != current:
-                    # The list goes in as a list: set_tag writes repeated
-                    # GENRE fields, so players see several genres instead
-                    # of one called "Dance-Punk; Electronic; Funk Rock".
-                    # (No should_write_audio_tag() here: the per-filetype
-                    # GENRE gate is checked where the family is written —
-                    # genre_autofill, checked above, is the global switch.)
-                    if af.set_tag("GENRE", merged):
-                        genre_modified += 1
-                        af = d["af"] = AudioFile(path)  # refresh for the mood prior
-            if do_genre:
-                # The cap is enforced on EVERY track, not only on the ones
-                # filled above: a library that already carries more genres than
-                # `mb_genre_count` is brought down by re-running Auto tagging.
+                # GENRE is never IMPORTED here: this script does not ask any
+                # provider for a genre, and it does not invent the family of
+                # what it finds either. Genres come from the import pipeline
+                # (server/imports.py, the genre chain) or from a manual edit —
+                # a background pass that silently rewrites a deliberate tag is
+                # exactly what the user does not want. What is left is the one
+                # job the writer must do on every track: bring a list that
+                # exceeds `mb_genre_count` down to it, the same cap the
+                # importer, the format pass and the grader use.
                 try:
                     if trim_genres(af, genre_cap):
                         genre_trimmed += 1
@@ -790,11 +741,9 @@ def run_auto_tagging(config):
                 except Exception:
                     continue
 
-        modified = (modified or 0) + mood_modified + genre_modified + genre_trimmed
+        modified = (modified or 0) + mood_modified + genre_trimmed
         if mood_modified:
             notes.append("mood")
-        if genre_modified:
-            notes.append("genre")
         if genre_trimmed:
             notes.append(f"genre trimmed to {genre_cap}")
         return album, modified, notes, advisory_value, info

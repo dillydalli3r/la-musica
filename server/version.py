@@ -126,10 +126,11 @@ def _fresh_enough(cached: dict, now: float) -> bool:
 def cached() -> dict:
     """The last answer, and NEVER the network.
 
-    `/api/health` is what the launchers (tray.py, start_app.py, the Tauri
-    shell) probe with a two-second timeout to prove the port is ours, so a
-    health reply must not wait on GitHub: it reports what the last check
-    found, or the unavailable shape when nothing has been checked yet.
+    `/api/health` is what a client's setup wizard probes with a two-second
+    timeout to prove the address answers as la musica (and what the container's
+    HEALTHCHECK polls), so a health reply must not wait on GitHub: it reports
+    what the last check found, or the unavailable shape when nothing has been
+    checked yet.
     """
     return _result(_read_cache())
 

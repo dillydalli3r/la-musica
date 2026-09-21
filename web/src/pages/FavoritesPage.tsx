@@ -9,6 +9,9 @@ import { AdvisoryMark, CachedMark, EmptyState, PageLoading } from "../components
 import PageHeader from "../components/PageHeader";
 import { TrackCover } from "../components/CoverImg";
 import AlbumCard from "../components/AlbumCard";
+import DownloadButton from "../components/DownloadButton";
+import { ExportButton, usePlaylistTracks } from "../components/ExportDialog";
+import MoreLikeThis from "../components/MoreLikeThis";
 import FavHeart from "../components/FavHeart";
 import { fmtDuration, GRID_SIZE_MIN } from "../lib/fmt";
 import Segmented from "../components/Segmented";
@@ -31,6 +34,37 @@ export default function FavoritesPage() {
   const navigate = useNavigate();
   const kind: Kind = (TABS.some((t) => t.id === raw) ? raw : "tracks") as Kind;
 
+  const { artists, albums, tracks } = useLibraryMaps();
+  const { data: likes } = useTrackLikes();
+  const { data: favs } = useFavorites();
+
+  // A liked playlist holds no paths of its own — only the playlists tab needs
+  // them, so the detail fetches wait for that tab (same shared hook the
+  // Playlists page uses for its own bulk actions).
+  const playlistIds = useMemo(
+    () => (favs?.playlists ?? []).map(Number).filter((n) => Number.isFinite(n)),
+    [favs]
+  );
+  const { data: playlistPaths = [] } = usePlaylistTracks(playlistIds, kind === "playlists");
+
+  // What the header's Download/Export act on: the CURRENT tab's liked set —
+  // "the whole liked set" as the page presents it.
+  const favPaths = useMemo(() => {
+    if (kind === "tracks") return likes?.paths ?? [];
+    if (kind === "albums")
+      return (favs?.albums ?? []).flatMap((p) => albums.get(p)?.album.tracks.map((t) => t.path) ?? []);
+    if (kind === "artists")
+      return (favs?.artists ?? []).flatMap(
+        (p) => artists.get(p)?.albums.flatMap((al) => al.tracks.map((t) => t.path)) ?? []
+      );
+    return playlistPaths;
+  }, [kind, likes, favs, albums, artists, playlistPaths]);
+
+  const favSeconds = useMemo(
+    () => favPaths.reduce((s, p) => s + (tracks.get(p)?.track.tech?.length ?? 0), 0),
+    [favPaths, tracks]
+  );
+
   return (
     <div className="p-6 space-y-5 mx-auto max-w-6xl">
       <PageHeader
@@ -44,17 +78,40 @@ export default function FavoritesPage() {
           // buttons' own `.tap` sets the phone floor (44px) and would lose to
           // a `[&>button]:min-h-…` utility on this wrapper, which is more
           // specific than the class.
-          <Segmented
-            value={kind}
-            onChange={(k) => navigate(`/favorites/${k}`)}
-            options={TABS.map((t) => ({ id: t.id, label: t.label, icon: t.icon }))}
-            className="max-w-[calc(100vw-9rem)] flex-wrap justify-end"
-          />
+          <>
+            <Segmented
+              value={kind}
+              onChange={(k) => navigate(`/favorites/${k}`)}
+              options={TABS.map((t) => ({ id: t.id, label: t.label, icon: t.icon }))}
+              className="max-w-[calc(100vw-9rem)] flex-wrap justify-end"
+            />
+            {/* both act on the tab in view — a like list is the set this page
+                represents */}
+            <DownloadButton
+              paths={favPaths}
+              label={kind === "tracks" ? "Download likes" : "Download all"}
+              emptyReason="Nothing to download — this favorites tab is empty"
+            />
+            <ExportButton
+              paths={favPaths}
+              seconds={favSeconds}
+              label={kind === "tracks" ? "Export likes" : "Export all"}
+              emptyReason="Nothing to export — this favorites tab is empty"
+              title="Export these favorites to a drive"
+              dialogSubtitle={`${favPaths.length} track${favPaths.length === 1 ? "" : "s"} from your favorites`}
+            />
+          </>
         }
       />
       {kind === "tracks" && <LikedTracks />}
+      {/* the shelf renders null while it has nothing to suggest, so it costs
+          the tabs without a recommendation nothing */}
+      {kind === "tracks" && <MoreLikeThis kind="favorites" target="tracks" title="Recommended tracks" />}
       {kind === "albums" && <FavAlbums />}
       {kind === "artists" && <FavArtists />}
+      {(kind === "albums" || kind === "artists") && (
+        <MoreLikeThis kind="favorites" target="albums" title="Recommended albums" />
+      )}
       {kind === "playlists" && <FavPlaylists />}
     </div>
   );

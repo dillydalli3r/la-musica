@@ -12,6 +12,7 @@ import Modal from "../components/Modal";
 import MoreLikeThis from "../components/MoreLikeThis";
 import { TrackCover } from "../components/CoverImg";
 import DownloadButton from "../components/DownloadButton";
+import { ExportButton } from "../components/ExportDialog";
 import FavHeart from "../components/FavHeart";
 import OverflowMenu from "../components/OverflowMenu";
 import { trackRef, entityLinkClick } from "../lib/refs";
@@ -306,7 +307,19 @@ export default function PlaylistDetailPage() {
                       className="btn-icon"
                       iconClass="h-4 w-4"
                     />
-                    <DownloadButton paths={tracks} size="md" />
+                    <DownloadButton
+                      paths={tracks}
+                      size="md"
+                      emptyReason="Nothing to download — this playlist is empty"
+                    />
+                    <ExportButton
+                      paths={tracks}
+                      seconds={totalDur}
+                      iconOnly
+                      title="Export this playlist to a drive"
+                      emptyReason="Nothing to export — this playlist is empty"
+                      dialogSubtitle={`${playlist.name} · ${tracks.length} track${tracks.length === 1 ? "" : "s"}`}
+                    />
                     {playlist.kind === "smart" && (
                       <button className="btn-icon" onClick={openFilterEditor} title="Edit smart filter">
                         <Pencil className="h-4 w-4" />

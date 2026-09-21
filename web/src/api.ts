@@ -32,14 +32,17 @@ import type {
 } from "./types";
 import { toast } from "./store";
 import * as offline from "./lib/offlineCache";
+import { coverVersion, rememberCoverVersion } from "./lib/invalidate";
 
 // The Tauri shell (desktop, iOS, Android) serves the frontend from
-// tauri://localhost, so relative /api paths cannot reach the Python backend:
-// the shell talks to a backend by absolute URL — 127.0.0.1 for the desktop
-// app (which spawns its own), and whatever address the user entered on the
-// login screen for a phone or tablet, which has no backend of its own to
-// spawn and must be told where the server is.
-export const IN_TAURI = !!(window as any).__TAURI_INTERNALS__;
+// tauri://localhost, so relative /api paths cannot reach any server: a shell
+// has to be told the address, because it hosts no backend of its own to fall
+// back on. The setup wizard collects it on first run (`mlo.server`) and
+// Settings → Security changes it later; the empty base below therefore means
+// "the origin that served this page", which only the browser build can use.
+// `in` rather than a cast on `window`: Tauri injects this global into the
+// webview before any script runs, and its presence is the whole question.
+export const IN_TAURI = "__TAURI_INTERNALS__" in window;
 
 /** True inside the Tauri shell ON A PHONE OR TABLET.
  *
@@ -75,12 +78,6 @@ function writeStore(key: string, value: string | null) {
   }
 }
 
-/** The address the desktop shell's own backend listens on (see
- *  desktop/src-tauri/src/lib.rs: the shell spawns `server` and expects it
- *  here). A phone has no bundled Python — this is the address an on-device
- *  one (a-Shell, iSH, Termux) would use, and often nothing answers it. */
-export const HOST_DEVICE_URL = "http://127.0.0.1:8000";
-
 /** Normalise a server address the user typed (login screen, the client
  *  wizard's first step, Settings → Security).
  *
@@ -108,9 +105,11 @@ export function normalizeServerUrl(raw: string): string {
 }
 
 function resolveBase(): string {
-  const saved = normalizeServerUrl(readStore(SERVER_KEY));
-  if (saved) return saved;
-  return IN_TAURI ? HOST_DEVICE_URL : "";
+  // "" means "the origin that served this page" (the browser build, where the
+  // session cookie is same-site). A shell has no origin to fall back on — it is
+  // a client of a server the user named, and until one is saved every request
+  // fails, which is exactly the state the setup wizard exists to leave.
+  return normalizeServerUrl(readStore(SERVER_KEY));
 }
 
 /** The server address this client talks to. "" means "the origin that served
@@ -121,17 +120,17 @@ let API = `${BASE}/api`;
 /** Point this client at another server — the login screen's address field and
  *  the setup wizard's first step both land here, as does Settings → Security,
  *  which is the only one the web app offers (its address is otherwise fixed to
- *  the origin that served it). "Host on this device" arrives as the shell's
- *  own address, so there is exactly one way a client is pointed anywhere. */
+ *  the origin that served it). This is the one way a client is pointed
+ *  anywhere, and the only place a shell gets its address from: no client hosts
+ *  a server of its own to fall back on. */
 export function setServerUrl(url: string | null) {
   const clean = normalizeServerUrl(url || "");
   writeStore(SERVER_KEY, clean || null);
-  const next = clean || (IN_TAURI ? HOST_DEVICE_URL : "");
   // The offline copy is keyed by endpoint, not by server: left in place, a
   // client pointed at a second server would answer from the first one's
   // library the moment the network is gone.
-  if (next !== BASE) offline.clearAll();
-  BASE = next;
+  if (clean !== BASE) offline.clearAll();
+  BASE = clean;
   API = `${BASE}/api`;
 }
 
@@ -202,6 +201,26 @@ function coverQuery(track?: string, tracks?: string[]): string {
   );
 }
 
+/** Remember the token a cover write reported for the file it wrote, so the
+ *  next `coverUrl` for that album+file is a different URL than the previous
+ *  image's (see lib/invalidate's cover versions). Every write path — the
+ *  album page, the import wizard, the cover finder — goes through the two
+ *  methods below, so no caller has to carry the token around.
+ *
+ *  The album's copy in the offline cache is dropped with it: that copy is
+ *  painted IN PREFERENCE to the network one, so a replaced cover would
+ *  otherwise keep showing the image it replaced. Imported lazily — the offline
+ *  cache itself renders covers (it imports this module), and a write is the
+ *  one moment the two need to meet. */
+const noteCoverWrite =
+  (albumPath: string) =>
+  (res: CoverWriteResult): CoverWriteResult => {
+    const file = res.path.split("/").pop() ?? null;
+    rememberCoverVersion(albumPath, file, res.token);
+    void import("./lib/mediaCache").then((m) => m.forgetAlbumArtwork(albumPath, file));
+    return res;
+  };
+
 /** Set while what the app is showing came out of the offline copy (or out of
  *  the service worker's own) instead of from the server, so a banner can say
  *  "offline — showing what was saved". `at` is when that copy was written;
@@ -262,7 +281,11 @@ function setOffline(info: OfflineInfo | null) {
  *  transcode for the same reason.
  *
  *  The cover endpoint is listed as itself alone: /api/cover/info,
- *  /api/cover/search and /api/cover/sources are ordinary JSON and cache fine. */
+ *  /api/cover/search and /api/cover/sources are ordinary JSON and cache fine.
+ *
+ *  `/api/jobs/locks` is the "what is running right now" list: an answer from
+ *  disk would show jobs that finished (or never started, after a restart) as
+ *  still holding files, which is the one thing that page must never say. */
 const NEVER_CACHE_EXACT: Record<string, true> = {
   "/api/config": true,
   "/api/cover": true,
@@ -272,6 +295,7 @@ const NEVER_CACHE_EXACT: Record<string, true> = {
   "/api/videos/subtitle": true,
   "/api/soulseek/local-file": true,
   "/api/artist/image": true,
+  "/api/jobs/locks": true,
 };
 const NEVER_CACHE_PREFIX = ["/api/auth/", "/api/soulseek/preview"];
 
@@ -917,6 +941,25 @@ export interface ImportRunStatus {
   finished_at: number;
 }
 
+/** One in-flight job in the library lock registry (server/job_locks): the work
+ *  running now and the paths it holds, so nothing else deletes, moves or
+ *  retags them. `progress` is null for a job that has not reported any (a tag
+ *  write, an organize); `elapsed` is measured on the server in seconds. */
+export interface JobLock {
+  job: string;
+  kind: string;
+  label: string;
+  started_at: number;
+  elapsed: number;
+  paths: string[];
+  progress: { done: number; total: number | null; text: string } | null;
+}
+
+/** GET /api/jobs/locks — everything holding library paths right now. */
+export interface JobLocksPayload {
+  jobs: JobLock[];
+}
+
 export const api = {
   health: () => json<{ status: string; version: string }>(`${API}/health`),
   /** The running server's version, checked against the latest GitHub release
@@ -1048,6 +1091,11 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ paths, dry_run: dryRun }),
     }),
+  /** MAINTAIN → In progress: the jobs holding library paths right now
+   *  (server.job_locks). Polled while the page is open; a job that has ended
+   *  is gone from the next answer, because the registry releases with the
+   *  work. */
+  jobLocks: () => json<JobLocksPayload>(`${API}/jobs/locks`),
 
   streamUrl: (path: string) => media(`${API}/stream?path=${encodeURIComponent(path)}`),
   /** Library music-video stream: direct bytes by default (?transcode=1 pipes
@@ -1285,8 +1333,41 @@ export const api = {
       `${API}/rym/resolve?artist=${encodeURIComponent(artist)}&album=${encodeURIComponent(album)}`,
     ),
 
-  coverUrl: (albumPath: string, coverFile?: string | null) =>
-    media(`${API}/cover?album=${encodeURIComponent(albumPath)}${coverFile ? `&file=${encodeURIComponent(coverFile)}` : ""}`),
+  /** The cover URL. `token` (the `CoverWriteResult.token` of the write that
+   *  just happened) rides along as `&v=`: a cover is replaced IN PLACE, so
+   *  without it a replaced cover.jpg is the same URL — and neither the
+   *  rendered `<img>` nor a browser cache would ever ask for the new bytes.
+   *  Omitted, it falls back to the version this session wrote for that
+   *  album+file (see lib/invalidate), which is what keeps the grids, the
+   *  player bar and the ambient background on the freshly written image
+   *  without any of them knowing about the write.
+   *
+   *  `staged` marks the import wizard's album — the folder the library does
+   *  not list yet: the server serves its cover only to a request that carries
+   *  the same opt-in every other wizard call passes, so a preview that leaves
+   *  it out is refused (400) and stays empty however well the cover was
+   *  written.
+   *
+   *  An explicit `token` — including `null` — wins over the remembered
+   *  version, which is how a caller names the version-less key the offline
+   *  cache stores (see mediaCache's forgetAlbumArtwork). */
+  coverUrl: (
+    albumPath: string,
+    coverFile?: string | null,
+    opts?: { token?: string | null; staged?: boolean }
+  ) => {
+    const v = opts && "token" in opts
+      ? opts.token
+      : coverFile
+        ? coverVersion(albumPath, coverFile)
+        : null;
+    return media(
+      `${API}/cover?album=${encodeURIComponent(albumPath)}` +
+        (coverFile ? `&file=${encodeURIComponent(coverFile)}` : "") +
+        (v ? `&v=${encodeURIComponent(v)}` : "") +
+        (opts?.staged ? "&staged=true" : "")
+    );
+  },
   /** A remote provider image (`/api/art`), proxied and cached by the backend —
    *  NEVER the provider URL itself. Several cover CDNs (Deezer's among them)
    *  refuse the browser outright, and the app can both get past them and fall
@@ -1455,7 +1536,7 @@ export const api = {
     return json<CoverWriteResult>(
       `${API}/cover?album=${encodeURIComponent(albumPath)}${coverQuery(track, tracks)}${stagedQ(staged)}`,
       { method: "POST", body: fd }
-    );
+    ).then(noteCoverWrite(albumPath));
   },
 
   /** Album covers for artist/album. `releaseGroupMbid`, when the caller knows
@@ -1493,7 +1574,7 @@ export const api = {
         stagedQ(staged),
       { method: "POST" },
       120000
-    ),
+    ).then(noteCoverWrite(albumPath)),
   /** Drop `tracks` from the album's per-track cover manifest (all of them when
    *  omitted). The image file itself is never deleted. */
   coverClear: (albumPath: string, tracks?: string[], staged = false) =>
@@ -1524,7 +1605,11 @@ export const api = {
     json<{ ok: boolean; ready: boolean; message: string; has_credentials: boolean }>(`${API}/soulseek/start`, { method: "POST" }, 30000),
   soulseekRestart: () =>
     json<{ ok: boolean }>(`${API}/soulseek/restart`, { method: "POST" }, 60000),
-  soulseekShares: () => json<any>(`${API}/soulseek/shares`),
+  /** Share config + the live share audit. `probe` also pulls slskd's own share
+   *  index (tens of megabytes on a large library) to look for a file that is on
+   *  disk, so it is only asked for on demand. */
+  soulseekShares: (probe = false) =>
+    json<any>(`${API}/soulseek/shares${probe ? "?probe=1" : ""}`, undefined, probe ? 180000 : undefined),
   soulseekSharesSave: (dirs: string[], autostart: boolean | null, apply = true) =>
     json<{ ok: boolean; dirs: string[]; restarted: boolean }>(`${API}/soulseek/shares`, {
       method: "POST",
@@ -2131,11 +2216,8 @@ export type CapabilityKey =
   | "can_spawn";
 
 export type Capabilities = Record<CapabilityKey, Capability> & {
-  /** `sys.platform` of the backend that answered ("win32", "linux", "darwin", "ios"). */
+  /** `sys.platform` of the host that answered ("win32", "linux", "darwin"). */
   platform: string;
-  /** How that backend was started: inside the app ("embedded"), as a
-   *  launcher's child process ("child"), or one reached over the network. */
-  backend: string;
   python: string;
   /** Whether the Dependencies installer can help at all on this platform. */
   installable: boolean;

@@ -44,10 +44,15 @@ from server import exporter
 from server import api_discovery
 from server import api_imports
 from server import api_lyrics
+from server import api_media
 from server import api_auth
+from server import api_jobs
 from server import api_recommend
+from server import api_stack
+from server import api_storage
 from server import auth as auth_mod
 from server import events as events_mod
+from server import job_locks
 from server import discovery
 from server import artcache
 from server import version as version_mod
@@ -204,13 +209,30 @@ app.include_router(api_imports.router)
 app.include_router(api_lyrics.router)
 app.include_router(api_auth.router)
 app.include_router(api_recommend.router)
+app.include_router(api_jobs.router)
+app.include_router(api_media.router)
+app.include_router(api_stack.router)
+app.include_router(api_storage.router)
 
-# Script 8 (Auto tagging) writes MOOD from the audio itself and fills a
-# missing GENRE through a provider hook its caller supplies — the engine
-# never imports this layer. Registering the discovery chain here means a
-# library-wide Auto tagging run gets genres exactly like the import pipeline.
+# Script 8 (Auto tagging) never imports a genre: it derives MOOD/ENERGY from
+# the audio, cross-references INSTRUMENTAL and derives the album advisory.
+# GENRE is written by the import pipeline's genre chain and by manual edits
+# only — see mlo.autotag's module docstring.
 from mlo import autotag as _autotag  # noqa: E402
-_autotag.set_genre_lookup(discovery.genre_lookup)
+
+# --------------------------------------------------------------------------- #
+# Busy library paths (server.job_locks)
+# --------------------------------------------------------------------------- #
+# Runs, imports and the organizer claim the paths they work on; a route that
+# asks for a path another job holds raises PathLocked and is answered 409 with
+# the holder named — the same status the script-run routes already use for "a
+# run is already in progress", so the UI's error path shows it. Registering it
+# once here means the routes themselves only declare which paths they touch
+# (`@job_locks.holds(...)`), and never leak the registry's exception type.
+@app.exception_handler(job_locks.PathLocked)
+def _path_locked(request, exc):
+    """409 for a path another job is using (message names that job)."""
+    return JSONResponse({"detail": str(exc)}, status_code=409)
 
 # --------------------------------------------------------------------------- #
 # Progress relay (WebSocket + original hook)
@@ -421,35 +443,14 @@ class TrashRestore(BaseModel):
 # --------------------------------------------------------------------------- #
 # Health / config
 # --------------------------------------------------------------------------- #
-@app.post("/api/shutdown")
-def shutdown_backend():
-    """Stop the backend process itself.
-
-    Only honored when this backend was spawned by a launcher that set
-    MLO_ALLOW_SHUTDOWN=1 (the tray app / desktop shell), so they can stop
-    even backends they didn't spawn (e.g. after a restart of the shell).
-    """
-    if os.environ.get("MLO_ALLOW_SHUTDOWN") != "1":
-        raise HTTPException(403, "shutdown not enabled for this backend")
-
-    def _die():
-        time.sleep(0.3)
-        os._exit(0)
-
-    threading.Thread(target=_die, daemon=True).start()
-    return {"ok": True}
-
-
 @app.get("/api/health")
 def health():
-    """Liveness for the launchers (tray.py, start_app.py, the Tauri shell),
-    plus the update fields — a client that already polls this can show the
-    "newer release" banner without a second request.
+    """Liveness, plus the update fields — a client that already polls this can
+    show the "newer release" banner without a second request.
 
-    The reply comes from the cached check and NEVER waits on the network: the
-    launchers give this route two seconds to say the port is ours, so a stale
-    cache only starts a background refresh for the next poll. See
-    server.version.
+    The reply comes from the cached check and NEVER waits on the network: every
+    probe of this route gives it a couple of seconds, so a stale cache only
+    starts a background refresh for the next poll. See server.version.
     """
     version_mod.refresh_soon()
     return {"status": "ok", **version_mod.cached()}
@@ -890,39 +891,18 @@ def _check_source_kind(kind):
                                  f"(one of {', '.join(health_mod.KINDS)})")
 
 
-def _backend_kind():
-    """How this backend was started, for the client's own report.
-
-    `embedded`: it runs inside the app's own process (a mobile build that
-    bundles Python sets MLO_EMBEDDED). `child`: a launcher spawned it — the
-    desktop shell, tray.py and start_app.py all pass MLO_ALLOW_SHUTDOWN, which
-    is that launcher's own way of saying so. `remote`: anything else (Docker,
-    a server, a manually started backend), which is how a client pointed at
-    this address sees it.
-    """
-    if os.environ.get("MLO_EMBEDDED") == "1":
-        return "embedded"
-    if os.environ.get("MLO_ALLOW_SHUTDOWN") == "1":
-        return "child"
-    return "remote"
-
-
 @app.get("/api/capabilities")
 def capabilities_report():
-    """What THIS build can do, so the UI can say so before it is asked to.
+    """What THIS server can do, so the UI can say so before it is asked to.
 
     Cheap and offline: the answer comes from the cached tool detection and a
-    one-time spawn probe (mlo.deps), never from the network. `platform`,
-    `backend` and `python` say which build answered — a phone running the
-    backend inside the app, a desktop shell's child process and a server in
-    Docker all execute the same code and differ only here and in the
-    per-feature rows, which is exactly what a client has to know before it
-    offers "host on this device" or an Install button.
+    one-time spawn probe (mlo.deps), never from the network. `platform` and
+    `python` say which host answered; the per-feature rows are what decides
+    whether the UI offers an Install button or names the tool that is missing.
     """
     from mlo.deps import capabilities
 
     return {"platform": sys.platform,
-            "backend": _backend_kind(),
             "python": sys.version.split()[0],
             **capabilities()}
 
@@ -1258,13 +1238,25 @@ _CTYPES = {
 
 
 @app.get("/api/stream")
-def stream(path: str = Query(...)):
+def stream(path: str = Query(...), download: int = Query(0)):
+    """Stream one library file.
+
+    `download=1` is the offline-download path: the WHOLE file as a single 200
+    body that refuses ranges, because the browser's offline cache (Cache
+    Storage) rejects a 206 outright — the download button used to fetch this
+    same URL and every track failed with "Cache got basic response with bad
+    status 206". See server/api_media.py. Without it, a player gets exactly
+    what it wants: byte ranges and a 206.
+    """
     p = os.path.normpath(mbresolve.resolve_track(path) or path)
     if not os.path.isfile(p):
         raise HTTPException(404, "file not found")
     if not _in_music_folder(p, _music_folder()):
         raise HTTPException(400, "file outside music folder")
     ctype = _CTYPES.get(os.path.splitext(p)[1].lower(), "application/octet-stream")
+    if download:
+        from server.api_media import full_body_response
+        return full_body_response(p, ctype)
     # ponytail: unknown extensions stream as octet-stream; add explicit
     # mapping above when a supported player format is missing.
     return FileResponse(p, media_type=ctype, headers={"Accept-Ranges": "bytes"})
@@ -1543,7 +1535,12 @@ def get_replaygain(path: str = Query(...), mode: str = Query("")):
     for one request; album mode prefers REPLAYGAIN_ALBUM_GAIN and falls back
     to the track value. A file whose tags carry no ReplayGain is measured on
     the spot (ffmpeg EBU R128) and cached under `.mlo/data/replaygain.json`,
-    so a library that was never run through script 7 still plays level.
+    so a library that was never run through script 7 still plays level. That
+    measurement is BOUNDED (`loudness.PLAYBACK_WAIT_S`): the player installs
+    the gain before the track starts, so this request must never sit on a
+    multi-second decode — a file that is not measured in time answers unity,
+    the decode finishes in the background and its value is cached for the
+    next request.
     """
     from mlo import loudness
 
@@ -1553,7 +1550,8 @@ def get_replaygain(path: str = Query(...), mode: str = Query("")):
     if not _in_music_folder(p, _music_folder()):
         raise HTTPException(400, "file outside music folder")
     cfg = load_config()
-    res = loudness.replaygain_for_path(cfg, p, mode=(mode or None))
+    res = loudness.replaygain_for_path(cfg, p, mode=(mode or None),
+                                       wait_s=loudness.PLAYBACK_WAIT_S)
     return {
         "path": p.replace("\\", "/"),
         "gain": res.get("gain"),
@@ -1569,7 +1567,18 @@ def get_cover(request: Request, album: str = Query(...), file: Optional[str] = Q
               color: int = Query(0), staged: bool = Query(False)):
     """Serve an album's cover art, cached with ETag; ?color=1 returns the
     dominant color instead of the image bytes (UI tinting). Accepts an
-    "mb:<release MBID>" album reference."""
+    "mb:<release MBID>" album reference, and `staged=1` for the import
+    wizard's album — the folder the library does not list yet, which the
+    preview <img> therefore has to ask for the same way every other wizard
+    call does (without it the folder guard refuses it, and the preview stays
+    empty however well the cover was written).
+
+    The response tells caches to REVALIDATE, and the ETag is the byte hash of
+    the file: a cover is replaced in place (cover.jpg stays cover.jpg), so
+    "fresh for an hour" would keep serving the previous image long after the
+    write. An unchanged cover still costs only a 304 — the bytes come from the
+    mtime+size-keyed cache below, never a stale entry.
+    """
     alb = os.path.normpath(mbresolve.resolve_album(album) or album)
     if not os.path.isdir(alb):
         raise HTTPException(404, "album not found")
@@ -1583,7 +1592,7 @@ def get_cover(request: Request, album: str = Query(...), file: Optional[str] = Q
     if data is None:
         raise HTTPException(404, "no cover")
     from fastapi.responses import Response
-    headers = {"Cache-Control": "public, max-age=3600", "Accept-Ranges": "bytes"}
+    headers = {"Cache-Control": "no-cache", "Accept-Ranges": "bytes"}
     if etag:
         headers["ETag"] = f'"{etag}"'
         inm = request.headers.get("if-none-match")
@@ -1637,6 +1646,7 @@ def _cover_url_bytes(url, artist="", album="", rg=""):
 
 
 @app.post("/api/cover")
+@job_locks.holds(lambda album, **_: [album], kind="cover", label="Cover write")
 async def upload_cover(album: str = Query(...), file: UploadFile = File(...),
                        track: Optional[str] = Query(None),
                        tracks: Optional[str] = Query(None),
@@ -1869,7 +1879,7 @@ def _write_cover_bytes(alb: str, stem: str, ext: str, data: bytes):
         _drop_stale_cover(alb, f"{stem}{orig_ext}")
     tagcache.invalidate_all()
     mbresolve.invalidate()
-    out = {"ok": True, "path": dest.replace("\\", "/")}
+    out = {"ok": True, "path": dest.replace("\\", "/"), "token": _cover_token(dest)}
     out.update(_cover_metrics(dest))
     for k, v in info.items():
         out.setdefault(k, v)
@@ -1893,6 +1903,21 @@ def _drop_stale_cover(alb: str, stale: str):
             os.remove(path)
     except OSError:
         pass
+
+
+def _cover_token(path: str):
+    """A value that changes whenever a cover file's bytes do — mtime + size.
+
+    The UI puts it in the cover URL (`&v=<token>`), which is the only way a
+    REPLACED cover is a different URL: a new image written over cover.jpg
+    keeps the same album, the same file name and therefore the same URL, so
+    neither the rendered <img> nor any HTTP cache would ever ask for it again.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return ""
+    return f"{st.st_mtime_ns}-{st.st_size}"
 
 
 def _cover_metrics(path):
@@ -1999,6 +2024,7 @@ def cover_sources():
 
 
 @app.post("/api/cover/fromurl")
+@job_locks.holds(lambda album, **_: [album], kind="cover", label="Cover write")
 async def cover_from_url(album: str = Query(...), url: str = Query(...),
                          track: Optional[str] = Query(None),
                          tracks: Optional[str] = Query(None),
@@ -2038,6 +2064,7 @@ class CoverClearRequest(BaseModel):
 
 
 @app.post("/api/cover/clear")
+@job_locks.holds(lambda req: [req.album], kind="cover", label="Cover write")
 def cover_clear(req: CoverClearRequest):
     """Drop per-track cover mappings for an album (no `tracks` = all of them).
     The image files stay on disk — clearing a mapping is not deleting art."""
@@ -2135,6 +2162,8 @@ class VideoTagRequest(BaseModel):
 
 
 @app.post("/api/videos/tag")
+@job_locks.holds(lambda req: [req.path], kind="tags",
+                 label="Video tag write (remux)")
 def videos_tag(req: VideoTagRequest):
     """Write tags into a music video (TITLE/ARTIST/ALBUM/DISCNUMBER/...).
 
@@ -2251,6 +2280,8 @@ class VideoMatchRequest(BaseModel):
 
 
 @app.post("/api/videos/match")
+@job_locks.holds(lambda req: [req.album_path], kind="tags",
+                 label="Video tag write (remux)")
 def videos_match(req: VideoMatchRequest):
     """Write TITLE/DISCNUMBER/TRACKNUMBER onto an album's music videos.
 
@@ -2374,6 +2405,7 @@ def cover_info(album: str = Query(...), file: str = Query(None),
 
 
 @app.post("/api/lyrics/embed")
+@job_locks.holds(lambda req: [req.path], kind="tags", label="Embed lyrics")
 def lyrics_embed(req: LyricsEmbedRequest):
     """Write ONLY the embedded LYRICS tag (the last tag-write path the UI
     still needs; everything else is grading-script territory)."""
@@ -2500,6 +2532,7 @@ class BulkTagsRequest(BaseModel):
 
 
 @app.post("/api/tags/bulk")
+@job_locks.holds(lambda req: req.paths, kind="tags", label="Bulk tag write")
 def tags_bulk(req: BulkTagsRequest):
     """Bulk tag surgery across the given tracks: delete the named tags and
    /or set tags to values (an empty value deletes that tag instead). Built
@@ -2728,10 +2761,15 @@ def export_codecs():
 
 
 @app.post("/api/export")
+@job_locks.holds(lambda req: req.paths, kind="export", label="Export")
 def export_run(req: ExportRequest):
     """Copy/transcode the selected tracks onto the target drive. Runs in the
     worker thread pool (sync def) and reports progress via the shared hook,
-    so the header progress bar behaves exactly like a library script run."""
+    so the header progress bar behaves exactly like a library script run.
+
+    The SOURCE tracks are held (not the destination drive): an export reads the
+    library files it was pointed at, and a script run rewriting them mid-copy
+    is exactly the collision the lock exists to prevent."""
     if not req.paths:
         raise HTTPException(400, "no tracks selected")
     dest_root = os.path.abspath(req.dest)
@@ -3099,6 +3137,8 @@ def mb_match(req: MatchRequest):
 
 
 @app.post("/api/mb/assign")
+@job_locks.holds(lambda req: list((req.tracks or {}).keys()), kind="tags",
+                 label="Write MB links")
 def mb_assign(req: AssignTagsRequest):
     """Write per-track MB/RYM link tags. tracks: {path: {TAG: value}}.
 
@@ -3295,6 +3335,7 @@ class LyricsWriteRequest(BaseModel):
 
 
 @app.post("/api/lyrics/write")
+@job_locks.holds(lambda req: [req.path], kind="lyrics", label="Lyrics write")
 def lyrics_write(req: LyricsWriteRequest):
     """Write .lrc sidecar atomically, canonicalized via mlo.lyrics."""
     from mlo.lyrics import _format_for_storage
@@ -3543,6 +3584,8 @@ def is_audio_file(name):
 
 
 @app.post("/api/album/remove")
+@job_locks.holds(lambda req, **_: [req.path], kind="remove",
+                 label="Remove from library")
 def album_remove(req: AlbumRemove, request: Request = None):
     """Remove an album from the library by moving it into
     <music_folder>/.mlo/trash/<user>/ (recoverable, nothing is deleted)."""
@@ -3973,6 +4016,7 @@ def beets_install():
 
 
 @app.post("/api/beets/import")
+@job_locks.holds(lambda req: req.paths, kind="beets", label="Beets tagging")
 def beets_import(req: BeetsImportRequest):
     """Tag albums with managed beets (MusicBrainz match + Picard-parity
     plugin: locale aliases, work/movement, release-type caps), then
@@ -4111,9 +4155,13 @@ def soulseek_restart():
 
 
 @app.get("/api/soulseek/shares")
-def soulseek_shares():
+def soulseek_shares(probe: int = 0):
     """Share configuration (la musica settings are the source of truth —
-    the slskd yaml is regenerated from them) plus slskd's live scan state."""
+    the slskd yaml is regenerated from them) plus slskd's live scan state.
+
+    `audit` says what other users can actually see right now, and `probe=1`
+    additionally pulls slskd's own share index (a large library's index is tens
+    of megabytes) and looks for a file that is on disk."""
     from server import soulseek
     cfg = load_config()
     return {
@@ -4122,6 +4170,7 @@ def soulseek_shares():
         "share_library": bool(cfg.get("soulseek_share_library", True)),
         "autostart": bool(cfg.get("soulseek_autostart", True)),
         "slskd": soulseek.shares_state(cfg),
+        "audit": soulseek.share_audit(cfg, probe=bool(probe)),
     }
 
 
@@ -4156,11 +4205,20 @@ def soulseek_shares_update(req: SoulseekSharesRequest):
 
 @app.post("/api/soulseek/shares/rescan")
 def soulseek_shares_rescan():
-    """Ask slskd to rescan its share index (picks up library changes)."""
+    """Ask slskd to rescan its share index (picks up library changes).
+
+    slskd's own reason is republished instead of a bare 500: a rescan it
+    refused (409, one is already running) or an API that failed must not look
+    like a scan that started."""
     from server import soulseek
     if not (soulseek.is_running() or soulseek.web_up(load_config())):
         raise HTTPException(400, "slskd is not running")
-    soulseek.rescan_shares()
+    try:
+        soulseek.rescan_shares()
+    except soulseek.SlskdError as e:
+        raise HTTPException(409, str(e))
+    except soulseek.SlskdHTTPError as e:
+        raise HTTPException(502, str(e))
     return {"ok": True}
 
 
@@ -4795,6 +4853,16 @@ def _stamp_import_identity(album_dirs):
 # one-click route, the per-album row, the sequential "import all completed"
 # runner, and a wish whose download has landed — goes through here, so what an
 # album ends up as cannot depend on which button was pressed.
+#
+# The album folder is claimed in server.job_locks for the whole of that trip
+# (convert, tag, organize, chain), so nothing else deletes, moves or retags it
+# halfway through: a foreign holder refuses the import with PathLocked (409)
+# before any file is touched. With chain_async the background chain TAKES OVER
+# that claim before this call returns (see job_locks.in_background below), so
+# the album is never unclaimed between the HTTP response and the chain's end.
+@job_locks.holds(lambda album, *a, **k: [album], kind="import",
+                 label=lambda album, *a, **k: "Import " + (
+                     os.path.basename(str(album).rstrip("\\/")) or str(album)))
 def _import_one_album(album, cfg, chain_async=True, progress=None):
     """Take ONE downloaded album folder all the way into the library.
 
@@ -4808,15 +4876,16 @@ def _import_one_album(album, cfg, chain_async=True, progress=None):
            "media_tagged": 0, "identity_stamped": 0, "organized": False,
            "chain_started": False, "chain": None, "errors": []}
     try:
-        # Lossless sources (WAV/APE/ALAC…) become the configured lossless
-        # codec before anything is tagged or named, so the naming script and
-        # the grader both see the final files.
+        # Everything that is not already in the configured library codec
+        # (library_codec, WAV/APE/ALAC/… and — under the "all" policy — lossy
+        # sources too) is converted before anything is tagged or named, so the
+        # naming script and the grader both see the final files.
         from mlo.flac import convert_album_lossless
         out["converted"] = int(
             (convert_album_lossless(album, cfg) or {}).get("modified_count") or 0)
     except Exception as e:
         traceback.print_exc()
-        out["errors"].append(f"lossless conversion failed: {e}")
+        out["errors"].append(f"library codec conversion failed: {e}")
     try:
         # Classify the rip (CD / DVD-Video / Blu-ray / Digital Media) and
         # write the tags BEFORE organizing, so they travel with the files.
@@ -4859,9 +4928,15 @@ def _import_one_album(album, cfg, chain_async=True, progress=None):
         return out
     if chain_async:
         # Fire-and-forget: the HTTP call returns at once and the chain runs on
-        # a background thread (what the one-click route has always done).
-        threading.Thread(target=imports_mod.finish_album,
-                         args=(out["album_root"], cfg), daemon=True).start()
+        # a background thread (what the one-click route has always done) — but
+        # the thread TAKES OVER this job's claim on the album before this call
+        # returns (job_locks.in_background gives it a reference of its own).
+        # The chain writes tags, covers and lyrics for minutes after the HTTP
+        # response, and only claims anything itself at its run_chain step, so
+        # without the hand-off the album was unlocked for all of that: a
+        # delete, an organize or a bulk tag could land on it mid-chain.
+        job_locks.in_background([out["album_root"]], imports_mod.finish_album,
+                                out["album_root"], cfg)
         out["chain_started"] = True
     else:
         try:
@@ -4913,7 +4988,35 @@ def _importable_paths(paths, cfg):
     return out
 
 
+def _ready_download_albums():
+    """The folders ``POST /api/soulseek/import`` is about to touch.
+
+    ``server.soulseek.ready_albums`` is the list ``import_completed()`` itself
+    works from, and each of those albums lands in ``<library>/<its folder
+    name>`` (a " (n)" suffix only when that name is taken), so BOTH ends of the
+    move are claimed before the body runs. The per-album import that follows
+    claims the album again the moment it exists and hands that claim to its
+    background chain. An unreadable download dir claims nothing: the route
+    reports that in its own words.
+    """
+    from server import soulseek
+    cfg = load_config()
+    try:
+        albums = list(soulseek.ready_albums(cfg) or [])
+    except Exception:
+        return []
+    root = library_root(cfg.get("music_folder"))
+    out = list(albums)
+    if root and os.path.isdir(root):
+        for src in albums:
+            name = os.path.basename(str(src).rstrip("\\/"))
+            if name:
+                out.append(os.path.join(root, name))
+    return out
+
+
 @app.post("/api/soulseek/import")
+@job_locks.holds(_ready_download_albums, kind="import", label="Import downloads")
 def soulseek_import():
     """Move completed downloads from the download dir into the library, one
     album folder per shared folder, then immediately organize each imported
@@ -6371,6 +6474,8 @@ def _rewrite_track_covers(old_root, new_root, renames):
 
 
 @app.post("/api/organize")
+@job_locks.holds(lambda req: [] if req.dry_run else req.paths,
+                 kind="organize", label="Organize")
 def organize(req: OrganizeRequest):
     """Rename/move albums according to the configured naming script.
 
@@ -6713,7 +6818,26 @@ def import_scan(path: str = Query(...)):
     return {"root": p.replace("\\", "/"), "files": out}
 
 
+def _ingest_paths(source, target):
+    """The folders ``POST /api/import/ingest`` touches: the album being moved
+    and the library folder it lands in.
+
+    `target` is an album NAME, not a path (the body resolves it to
+    ``<library>/<target>``), so the claim has to resolve it the same way —
+    otherwise the destination of the very move this guard protects would be
+    unclaimed, and a same-named album could be organized while it is being
+    replaced.
+    """
+    name = re_safe_filename(os.path.basename(target or os.path.basename(source)))
+    folder = str(load_config().get("music_folder") or "")
+    paths = [source]
+    if folder and name:
+        paths.append(os.path.join(library_root(folder), name))
+    return paths
+
+
 @app.post("/api/import/ingest")
+@job_locks.holds(_ingest_paths, kind="import", label="Import album")
 def import_ingest(source: str = Query(...), target: str = Query(...)):
     """Move an album folder into the library. Same volume it is one rename;
     across devices it is a verified copy followed by the source's removal —

@@ -206,7 +206,7 @@ def _probe_genre(pid, cfg):
         # asked again with whatever cookie is saved now — otherwise the row
         # would report an earlier run's block however fresh the cookie is.
         intg._rym_clear_block()
-        data = intg.rym_genres(SAMPLE_ARTIST, SAMPLE_ALBUM)
+        data = intg.rym_genres(SAMPLE_ARTIST, SAMPLE_ALBUM, cfg, archive=True)
         if intg._rym_failures != before:
             # WHY RYM said no, in RYM's own recorded words: "403/challenge"
             # was one sentence for five different problems, and the fix for

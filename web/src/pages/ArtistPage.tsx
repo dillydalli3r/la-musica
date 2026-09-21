@@ -11,6 +11,7 @@ import { EmptyState, GradeBadge, PageLoading } from "../components/Badges";
 import AlbumCard from "../components/AlbumCard";
 import Description from "../components/Description";
 import DownloadButton from "../components/DownloadButton";
+import { ExportButton } from "../components/ExportDialog";
 import FavHeart from "../components/FavHeart";
 import ArtistImageModal from "../components/ArtistImageModal";
 import MetadataReviewModal from "../components/MetadataReviewModal";
@@ -104,6 +105,11 @@ export default function ArtistPage() {
       coverFile: t.cover_file ?? null, albumCover: a.cover_file ?? null,
       advisory: t.tags.ITUNESADVISORY ?? null,
     }))
+  );
+  // The catalogue's total runtime — the export dialog's drive-fit estimate.
+  const allSeconds = data.albums.reduce(
+    (s, a) => s + a.tracks.reduce((n, t) => n + (t.tech?.length ?? 0), 0),
+    0
   );
   // Identity links for this artist: MBID from any album's album-artist tag,
   // RYM artist URL from any track that carries one.
@@ -375,7 +381,21 @@ export default function ArtistPage() {
                 <button className="btn-primary" onClick={() => playNow(allTracks)} title={`Play all ${allTracks.length} tracks`}>
                   <Play className="h-4 w-4 fill-current" /> Play all
                 </button>
-                <DownloadButton paths={allTracks.map((t) => t.path)} size="md" label="Download all" />
+                <DownloadButton
+                  paths={allTracks.map((t) => t.path)}
+                  size="md"
+                  label="Download all"
+                  emptyReason="Nothing to download — this artist has no tracks"
+                />
+                <ExportButton
+                  paths={allTracks.map((t) => t.path)}
+                  seconds={allSeconds}
+                  size="md"
+                  label="Export all"
+                  emptyReason="Nothing to export — this artist has no tracks"
+                  title="Export this artist's tracks to a drive"
+                  dialogSubtitle={`Every track by ${name}`}
+                />
                 <TagActionsMenu
                   paths={allTracks.map((t) => t.path)}
                   artist={decoded}

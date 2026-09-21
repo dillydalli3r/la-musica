@@ -11,6 +11,7 @@ import { useStore, toast } from "../store";
 import { AuditBadge, GradeBadge, IssueList, EmptyState, PageLoading } from "../components/Badges";
 import CoverImg from "../components/CoverImg";
 import DownloadButton from "../components/DownloadButton";
+import { ExportButton } from "../components/ExportDialog";
 import LyricsViewer from "../components/LyricsViewer";
 import LyricsManagerModal from "../components/LyricsManagerModal";
 import LyricsEditorModal from "./../components/LyricsEditorModal";
@@ -265,7 +266,21 @@ export default function TrackPage() {
             <button className="btn-ghost" onClick={() => playNow([queueTrack])} title="Play this track">
               <Play className="h-4 w-4 fill-current" /> Play
             </button>
-            <DownloadButton paths={[realPath]} size="md" />
+            <DownloadButton
+              paths={realPath ? [realPath] : []}
+              size="md"
+              emptyReason="Nothing to download — this track has no file"
+            />
+            {/* one track in, one file out — the server never archives a
+                single-track export */}
+            <ExportButton
+              paths={realPath ? [realPath] : []}
+              seconds={track?.tech?.length ?? 0}
+              size="md"
+              title="Export this track to a drive"
+              emptyReason="Nothing to export — this track has no file"
+              dialogSubtitle="This track — one file on the device, not an archive"
+            />
             <LinkEditorButton mode="track" paths={[decoded]} current={tags} />
             {/* cover search for this track = the per-track cover upload below */}
             <TagActionsMenu

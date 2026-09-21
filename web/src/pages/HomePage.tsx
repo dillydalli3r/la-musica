@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { AlertTriangle, ArrowDownUp, Clock, Disc3, Heart, RefreshCw, Sparkles, Star, Users } from "lucide-react";
 import { api } from "../api";
 import { EmptyState, PageLoading } from "../components/Badges";
+import StorageCard from "../components/StorageCard";
 import PageHeader from "../components/PageHeader";
 import { useI18n } from "../lib/i18n";
 import CoverImg from "../components/CoverImg";
@@ -288,6 +289,10 @@ export default function HomePage() {
           />
         </div>
       </div>
+
+      {/* How much room the library is taking, against what the disk has —
+          the first thing a user checks before importing another batch. */}
+      <StorageCard />
 
       <Shelf title={t("home.shelf.recent")} icon={Clock} items={data.recent} />
       <Shelf

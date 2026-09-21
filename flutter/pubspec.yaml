@@ -1,0 +1,28 @@
+name: la_musica
+description: "la musica client — the Flutter UI for the la musica library server"
+publish_to: 'none'
+version: 3.2.0
+
+environment:
+  sdk: ^3.9.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # The server is a REST API (FastAPI) reached over http(s); no gRPC, no
+  # websockets in the client core except the event stream the shell opens.
+  http: ^1.2.2
+  # Server address + token + the user's theme choice survive a restart.
+  shared_preferences: ^2.3.2
+  # Playback. ReplayGain is applied by setting the player's volume BEFORE the
+  # first frame of audio (see playback.dart), which every platform supports.
+  just_audio: ^0.9.42
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true

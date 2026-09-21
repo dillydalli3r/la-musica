@@ -6,6 +6,8 @@ import { api } from "../api";
 import { toast, useStore } from "../store";
 import { EmptyState, PageLoading } from "../components/Badges";
 import PageHeader from "../components/PageHeader";
+import DownloadButton from "../components/DownloadButton";
+import { ExportButton, usePlaylistTracks } from "../components/ExportDialog";
 import { TrackCover } from "../components/CoverImg";
 import FavHeart from "../components/FavHeart";
 import { fmtDuration, GRID_SIZE_MIN } from "../lib/fmt";
@@ -43,6 +45,17 @@ export default function PlaylistsPage() {
   }, [lib]);
 
   const refresh = () => qc.invalidateQueries({ queryKey: ["playlists"] });
+
+  // Every playlist's tracks, deduplicated and in playlist order — what this
+  // page's Download/Export header actions cover (the page IS the playlists
+  // collection, and no card is "selected"). The hook is one query keyed by
+  // the id list, so the fetches dedupe and cache.
+  const playlistIds = useMemo(() => (playlists ?? []).map((p) => p.id), [playlists]);
+  const { data: allPaths = [] } = usePlaylistTracks(playlistIds);
+  const allSeconds = useMemo(
+    () => allPaths.reduce((s, p) => s + (trackMeta.get(p)?.dur ?? 0), 0),
+    [allPaths, trackMeta]
+  );
 
   const create = useMutation({
     mutationFn: async () => {
@@ -129,6 +142,23 @@ export default function PlaylistsPage() {
             <button className="btn-ghost tap" onClick={() => fileRef.current?.click()}>
               <Upload className="h-4 w-4" /> Import .m3u8
             </button>
+            {/* bulk actions on every playlist's tracks: nothing here is
+                "selected", so the page covers all of them */}
+            <DownloadButton
+              paths={allPaths}
+              size="md"
+              label="Download all"
+              emptyReason="Nothing to download — the playlists hold no tracks"
+            />
+            <ExportButton
+              paths={allPaths}
+              seconds={allSeconds}
+              size="md"
+              label="Export all"
+              emptyReason="Nothing to export — the playlists hold no tracks"
+              title="Export every playlist's tracks to a drive"
+              dialogSubtitle={`${allPaths.length} track${allPaths.length === 1 ? "" : "s"} across ${(playlists ?? []).length} playlist${(playlists ?? []).length === 1 ? "" : "s"}`}
+            />
           </>
         }
       />

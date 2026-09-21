@@ -120,9 +120,19 @@ export function attachAnalyser(el: HTMLMediaElement): AnalyserNode | null {
 }
 
 /** Apply a ReplayGain preamp (dB, e.g. −7.20) to an element's playback
- * chain. Unity (0 dB) when no value is given. Smoothed to avoid clicks.
- * No-op for an element that has no graph yet (it is re-applied on attach). */
-export function applyReplayGain(el: HTMLMediaElement, db?: number | null) {
+ * chain. Unity (0 dB) when no value is given. No-op for an element that has
+ * no graph yet.
+ *
+ * The value is STEPPED onto a paused element and RAMPED onto a running one:
+ * a ramp is what stops a mid-song preamp drag from clicking, but it would
+ * also leak the old gain into the first tens of milliseconds of a track
+ * whose gain is being installed for the first time — the loud start this
+ * stage exists to prevent. ``immediate`` says "installing before playback"
+ * for the caller that knows it (a track load, a gapless handover reusing the
+ * element that was just playing); everywhere else a paused element is
+ * stepped too, since it cannot be making sound. */
+export function applyReplayGain(el: HTMLMediaElement, db?: number | null,
+                                immediate = false) {
   // Optional property we are the only writer of — the cast widens the
   // element type, no unchecked read.
   const tag: Attached = el;
@@ -133,7 +143,12 @@ export function applyReplayGain(el: HTMLMediaElement, db?: number | null) {
       ? Math.pow(10, Math.max(-24, Math.min(24, db)) / 20)
       : 1;
   try {
-    chain.gain.gain.setTargetAtTime(v, graphCtx.currentTime, 0.05);
+    if (immediate || el.paused) {
+      chain.gain.gain.cancelScheduledValues(graphCtx.currentTime);
+      chain.gain.gain.setValueAtTime(v, graphCtx.currentTime);
+    } else {
+      chain.gain.gain.setTargetAtTime(v, graphCtx.currentTime, 0.05);
+    }
   } catch {
     /* never let loudness matching break playback */
   }

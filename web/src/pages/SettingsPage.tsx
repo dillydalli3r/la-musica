@@ -13,6 +13,7 @@ import { toast } from "../store";
 import { applyAccent } from "../App";
 import { DEFAULT_RUN_ALL, SCRIPT_LABEL, isScriptId } from "../lib/scripts";
 import { LOCALES, applyConfigLocale, setLocale, useI18n } from "../lib/i18n";
+import { CODEC_CHOICES } from "../lib/codecMeta";
 import { notificationState, requestNotifications, type NotifyState } from "../lib/notify";
 
 const ACCENT_OPTIONS: { id: string; name: string; color: string }[] = [
@@ -371,7 +372,7 @@ export default function SettingsPage() {
   type CfgField =
     | { k: string; label: string; type: "bool"; help?: string }
     | { k: string; label: string; type: "number"; min?: number; max?: number; step?: number; help?: string }
-    | { k: string; label: string; type: "select"; options: [string, string][] }
+    | { k: string; label: string; type: "select"; options: [string, string][]; help?: string }
     | { k: string; label: string; type: "text"; help?: string }
     | { k: string; label: string; type: "password"; help?: string }
     /** Ordered provider preference list; an empty list means the built-in order. */
@@ -406,13 +407,46 @@ export default function SettingsPage() {
       ],
     },
     {
-      title: "FLACs & lossless sources (script 3)",
-      blurb: "Re-encodes FLACs at the target level and converts every other lossless source (WAV/AIFF/APE/WV/SHN/TTA, ALAC in MP4) to the target codec below, losslessly — the same conversion runs on Soulseek imports. FLAC is what the rest of the pipeline assumes; choosing ALAC re-containers FLACs into .m4a as well.",
+      title: "Library codec (script 3)",
+      blurb: "The audio format the whole library ends up as — the same conversion runs on imports. By default a LOSSLESS source is converted to the target while a lossy one is left exactly as it is: lossy → lossless cannot restore a sample, and lossy → lossy is a generation loss. A converted original is moved to Trash, never deleted.",
       fields: [
-        { k: "optimize_convert_lossless", label: "Convert lossless sources to the target codec", type: "bool" },
-        { k: "lossless_target_codec", label: "Target lossless codec", type: "select", options: [["flac", "FLAC (.flac)"], ["alac", "ALAC (.m4a)"]] },
-        { k: "lossless_remove_original", label: "Remove original after verified conversion", type: "bool" },
-        { k: "flac_level", label: "Compression level", type: "number", min: 0, max: 8 },
+        {
+          k: "library_codec", label: "Library codec", type: "select",
+          // The list lives in lib/codecMeta.ts — the same one the setup wizard
+          // and the Python side (mlo.containers.CODECS) are pinned to, so a
+          // codec added there cannot be missing here.
+          options: CODEC_CHOICES,
+          help: "What every file in the library ends up as. Lossless targets: FLAC (the shipped default — "
+                + "what the verification tools are built around), ALAC (.m4a), WAV, AIFF. Lossy targets: "
+                + "MP3 and AAC (CBR), Ogg Vorbis and Opus. \"Keep\" never converts anything.",
+        },
+        {
+          k: "library_codec_optimize", label: "What the optimisation pass may convert", type: "select",
+          help: "The default converts a lossless source to the target above and leaves lossy sources alone. "
+                + "\"Anything\" also re-encodes lossy sources (a generation loss) — it still refuses a lossy "
+                + "source under a lossless target, which can only lose quality.",
+          options: [
+            ["lossless_to_lossy", "Lossless → the target (lossy left alone) — default"],
+            ["all", "Anything → the target"],
+            ["keep", "Never convert"],
+          ],
+        },
+        {
+          k: "library_codec_bitrate", label: "Lossy bitrate (kbps) / Vorbis quality", type: "number", min: 0, max: 512,
+          help: "Applies to the lossy targets only: kbps for MP3/AAC/Opus, Vorbis' own 0-10 quality scale for "
+                + "Ogg. 0 uses the codec's own default (MP3 320, AAC 256, Ogg 6, Opus 128).",
+        },
+        {
+          k: "library_codec_quality", label: "Lossless compression level (FLAC 0-8)", type: "number", min: 0, max: 8,
+          help: "Used by the FLAC encode and re-encode. ALAC and the PCM targets have no such control and ignore it.",
+        },
+        {
+          k: "library_codec_args", label: "Extra encoder arguments (appended verbatim)", type: "text",
+          help: "flac.exe options when the target is FLAC, ffmpeg options for every other target — added after "
+                + "the quality/bitrate flags, so your own flag wins. They are not validated: a bad flag fails the "
+                + "encode of that file, and the run reports it per file.",
+        },
+        { k: "lossless_remove_original", label: "Move the converted original to Trash", type: "bool" },
         { k: "add_seektables", label: "Add seektables", type: "bool" },
         { k: "flac_preserve_picture", label: "Preserve embedded picture", type: "bool" },
         { k: "flac_no_padding", label: "No padding", type: "bool" },
@@ -572,8 +606,33 @@ export default function SettingsPage() {
       fields: [
         { k: "auto_advisory", label: "Set advisory automatically", type: "bool" },
         { k: "advisory_auto_fetch", label: "Fetch the advisory rating automatically (import + advisory fetch)", type: "bool" },
+        {
+          k: "advisory_ai_classify", label: "Judge the lyrics with the AI provider", type: "bool",
+          help: "When no provider states an advisory, the configured AI model reads the track's lyrics "
+                + "and answers 0/1/2 (3 = it cannot tell, which falls through). Needs an AI base URL "
+                + "and model in the AI section; with no AI configured the word scan below answers instead.",
+        },
+        {
+          k: "advisory_lyrics_scan", label: "Scan the lyrics for profanity", type: "bool",
+          help: "The multilingual word list: any hit is explicit (1), no hit is clean (0). Runs when the "
+                + "AI is not configured (or could not tell) and the track has lyrics.",
+        },
+        {
+          k: "advisory_fallback", label: "When nothing states an advisory", type: "select",
+          help: "The last resort for a track with no provider answer, no AI answer and no lyrics evidence.",
+          options: [
+            ["0", "Store 0 — not explicit"],
+            ["2", "Store 2 — clean edition"],
+            ["none", "Store nothing — leave it unrated"],
+          ],
+        },
         { k: "mood_enabled", label: "Write mood tags", type: "bool" },
-        { k: "genre_autofill", label: "Fill in missing genres", type: "bool" },
+        {
+          k: "genre_autofill", label: "Trim genres to the configured count", type: "bool",
+          help: "Genres are never imported by a script: the import (MusicBrainz/RateYourMusic per track, "
+                + "then the configured sources) and manual edits are the only writers. Script 8 only brings "
+                + "a list longer than the genre count back down to it.",
+        },
         {
           k: "mood_source", label: "Mood source", type: "select",
           options: [
@@ -583,7 +642,7 @@ export default function SettingsPage() {
           ],
         },
         { k: "auto_instrumental", label: "Set INSTRUMENTAL automatically", type: "bool" },
-        { k: "auto_zero_advisory_for_instrumental", label: "Zero advisory on instrumentals", type: "bool" },
+        { k: "auto_zero_advisory_for_instrumental", label: "Zero advisory on instrumentals (no words, no explicit content)", type: "bool" },
         { k: "fix_instrumental_from_lyrics", label: "Fix INSTRUMENTAL from lyrics", type: "bool" },
         { k: "force_auto_tag", label: "Force re-tag", type: "bool" },
         { k: "force_mood", label: "Force mood & energy re-analysis (script 16)", type: "bool" },
@@ -689,7 +748,7 @@ export default function SettingsPage() {
         { k: "soulseek_up_limit", label: "Upload speed limit (kB/s, 0 = unlimited)", type: "number", min: 0, max: 100000 },
         { k: "soulseek_down_limit", label: "Download speed limit (kB/s, 0 = unlimited)", type: "number", min: 0, max: 100000 },
         { k: "soulseek_download_slots", label: "Concurrent download slots", type: "number", min: 1, max: 20 },
-        { k: "soulseek_upload_slots", label: "Concurrent upload slots (0 = unlimited)", type: "number", min: 0, max: 20 },
+        { k: "soulseek_upload_slots", label: "Concurrent upload slots (empty/0 = slskd's own default, 10)", type: "number", min: 0, max: 20 },
         { k: "soulseek_upload_limit_kib", label: "Per-transfer upload limit (KiB/s, 0 = unlimited)", type: "number", min: 0, max: 1000000 },
         { k: "soulseek_download_limit_kib", label: "Per-transfer download limit (KiB/s, 0 = unlimited)", type: "number", min: 0, max: 1000000 },
         {
@@ -825,6 +884,10 @@ export default function SettingsPage() {
           // row says whether it can answer per track or only for the release.
           options: genreOptions,
           help: "The genres the sources answer with are merged, deduped and capped at the count above, per track. MusicBrainz is the app's own identity anchor — it also supplies the family every list ends with — so leave it on in most setups.",
+        },
+        {
+          k: "rym_archive_fallback", label: "RateYourMusic: fall back to archived pages", type: "bool",
+          help: "A release rateyourmusic.com will not serve — no cookie, or a refused request — is read from the Wayback Machine's snapshot of the SAME page and parsed the same way, so the genres still come from RYM; the import report names the snapshot and its date. Off, RateYourMusic contributes nothing without a cookie.",
         },
         {
           k: "ai_genre_inference", label: "Let a model rank the genres", type: "bool",
@@ -1411,17 +1474,20 @@ export default function SettingsPage() {
               {f.help && <div className="text-[10px] text-zinc-600 mt-0.5">{f.help}</div>}
             </div>
           ) : f.type === "select" ? (
-            <div className="flex items-center gap-2 w-full">
-              <span className="flex-1 min-w-0 truncate">{f.label}</span>
-              <select
-                className="input !w-32 !py-0.5 text-[11px] shrink-0 tap"
-                value={String(scriptCfg[f.k] ?? "")}
-                onChange={(e) => setCfg(f.k, e.target.value)}
-              >
-                {f.options.map(([v, l]) => (
-                  <option key={v} value={v}>{l}</option>
-                ))}
-              </select>
+            <div className="w-full">
+              <div className="flex items-center gap-2 w-full">
+                <span className="flex-1 min-w-0 truncate">{f.label}</span>
+                <select
+                  className="input !w-32 !py-0.5 text-[11px] shrink-0 tap"
+                  value={String(scriptCfg[f.k] ?? "")}
+                  onChange={(e) => setCfg(f.k, e.target.value)}
+                >
+                  {f.options.map(([v, l]) => (
+                    <option key={v} value={v}>{l}</option>
+                  ))}
+                </select>
+              </div>
+              {f.help && <div className="text-[10px] text-zinc-600 mt-0.5">{f.help}</div>}
             </div>
           ) : f.type === "text" ? (
             <div className="w-full">

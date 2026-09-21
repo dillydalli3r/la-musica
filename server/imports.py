@@ -30,6 +30,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from mlo.config import load_config
 from mlo.paths import library_root, move_path
+from mlo import advisory
 
 from server import script_runners
 from server import tagcache
@@ -310,15 +311,24 @@ def fetch_advisories(paths, cfg=None):
     `integrations.resolve_advisory_route`, which asks EVERY applicable source
     in one pass — Deezer and Spotify by ISRC, Apple's explicit-edition album
     route, Apple's exact-title song search — and merges them with
-    `integrations.merge_advisory`: 1 when any source states explicit, else 0.
-    An unstated advisory is therefore written as 0 (the user's policy): the
-    per-track `answers` map is what shows whether any source actually spoke.
-    A file that already carries a valid 0/1/2 is left alone (the user's manual
-    edit wins) and a value equal to the merged one is not rewritten.
+    `integrations.merge_advisory`: explicit (1) when any source states it,
+    else a plain 0, else a clean edition's 2.
 
-    Returns ``{"updated": n, "values": {path: 0|1}, "sources": {path:
-    provider}, "answers": {path: {source: 0|1}}}`` — `sources` is who stated
-    each value, `answers` is what every source said about the track.
+    When NO source states anything, the track is not assumed clean:
+    `mlo.advisory.decide_advisory` runs the rest of the ladder — an
+    instrumental track is 0, then the configured AI provider judges the lyrics
+    (when one is set up and `advisory_ai_classify` is on), then the
+    multilingual lyrics word scan, and finally `advisory_fallback` decides
+    what an unstated advisory becomes (0 by default, 2, or nothing at all).
+    A file that already carries a valid 0/1/2 is left alone (the user's manual
+    edit wins) and a value equal to the decided one is not rewritten.
+
+    Returns ``{"updated": n, "values": {path: 0|1|2}, "sources": {path:
+    provider}, "answers": {path: {source: 0|1}}, "hits": {path: [word, ...]}}``
+    — `sources` is who stated each value ("instrumental", "ai-lyrics",
+    "lyrics-scan" and "fallback" included), `answers` is what every provider
+    said about the track, and `hits` is the words the scan matched, so a
+    caller can show why a track reads explicit.
     """
     from mlo.audio import AudioFile
     from mlo.config import should_write_audio_tag
@@ -347,6 +357,7 @@ def fetch_advisories(paths, cfg=None):
     values = {}
     sources = {}
     answers = {}
+    hits = {}
     for path in targets:
         try:
             af = AudioFile(path)
@@ -369,22 +380,32 @@ def fetch_advisories(paths, cfg=None):
                 track_count=per_folder.get(os.path.dirname(path)),
                 cfg=cfg,
             )
-            value = route.get("value")
+            # No provider stated anything? Then the ladder decides — an
+            # instrumental is 0, the AI judges the lyrics when one is
+            # configured, the word scan is the fallback, and
+            # `advisory_fallback` is the last resort. None means "write
+            # nothing", which is a legitimate answer ("none").
+            decision = advisory.decide_advisory(
+                cfg, value=route.get("value"), source=route.get("source") or "",
+                answers=route.get("answers") or {}, path=path, af=af)
+            value = decision.get("value")
             if value is None:
                 continue
             if str(value) != current and af.set_tag("ITUNESADVISORY", str(value)):
                 updated += 1
-            values[path] = value
-            if route.get("source"):
-                sources[path] = route["source"]
+            values[path] = int(value)
+            if decision.get("source"):
+                sources[path] = decision["source"]
             if route.get("answers"):
                 answers[path] = route["answers"]
+            if decision.get("hits"):
+                hits[path] = decision["hits"]
         except Exception:
             continue
     if updated:
         _invalidate_caches()
     return {"updated": updated, "values": values, "sources": sources,
-            "answers": answers}
+            "answers": answers, "hits": hits}
 
 
 def fetch_instrumentals(paths, cfg=None):

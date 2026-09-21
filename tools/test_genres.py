@@ -892,7 +892,7 @@ intg._ADVISORY_CACHE.clear()
 route = intg.resolve_advisory_route(title="Track One", artist="Test Artist",
                                     album="Test Album", cfg={})
 assert route["checked"] == ["apple-album", "itunes-song"], route
-assert route["answers"] == {} and route["value"] == 0, route
+assert route["answers"] == {} and route["value"] is None, route
 
 # A known video id is asked, and only ever adds an explicit signal.
 _real_age = intg.youtube_age_advisory
@@ -943,7 +943,7 @@ stub_json(discogs_router([{"name": "CD", "descriptions": ["Album"]}]))
 route = intg.resolve_advisory_route(title="Track One", artist="Test Artist",
                                     album="Test Album", cfg={"discogs_token": "t"})
 assert "discogs-parental" in route["checked"], route
-assert route["answers"] == {} and route["value"] == 0, route
+assert route["answers"] == {} and route["value"] is None, route
 
 # --------------------------------------------------------------------------- #
 # 8) The 30-day cache answers the second run instead of the network

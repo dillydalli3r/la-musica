@@ -543,8 +543,8 @@ try:
     # into the last slot — the stub above answers "Shoegaze / Noise Pop", and
     # what lands is `shoegaze` plus its family `rock` (mb_genre_count = 2, so
     # the second specific genre yields the family's slot).
-    assert _written["01 - track.wav"]["GENRE"] == ["shoegaze", "rock"], _written["01 - track.wav"]
-    assert _written["02 - track.wav"]["GENRE"] == ["shoegaze", "rock"], _written["02 - track.wav"]
+    assert _written["01 - track.wav"]["GENRE"] == ["Shoegaze", "Rock"], _written["01 - track.wav"]
+    assert _written["02 - track.wav"]["GENRE"] == ["Shoegaze", "Rock"], _written["02 - track.wav"]
 
     # A stated rating IS written, for every track — and the provider that
     # stated it is reported back per track.
@@ -557,14 +557,26 @@ try:
     for tags in _written.values():
         assert tags["ITUNESADVISORY"] == "1", tags
 
-    # Nobody states a rating -> the tag stays ABSENT. A missing advisory means
-    # "unrated"; writing 0 would claim the audio is clean.
+    # Nobody states a rating -> the LADDER decides (mlo.advisory): with no AI
+    # configured and no lyrics in these silent test files, the last resort is
+    # `advisory_fallback` (0 by default), and the stage that wrote it is
+    # reported per track. What the providers said stays empty: no source spoke.
     for tags in _written.values():
         tags.pop("ITUNESADVISORY")
     _intg.resolve_advisory_route = lambda **kw: {
         "value": None, "source": None, "checked": ["deezer-isrc", "apple-album"]}
     adv = imports.fetch_advisories([_stamp_lib], CFG)
-    assert adv["updated"] == 0 and adv["values"] == {} and adv["sources"] == {}, adv
+    assert adv["updated"] == 2, adv
+    assert set(adv["sources"].values()) == {"fallback"}, adv
+    assert adv["answers"] == {} and adv["hits"] == {}, adv
+    for tags in _written.values():
+        assert tags["ITUNESADVISORY"] == "0", tags
+    # With the fallback switched off nothing is written at all — an unrated
+    # track stays unrated rather than claiming to be clean.
+    for tags in _written.values():
+        tags.pop("ITUNESADVISORY")
+    adv = imports.fetch_advisories([_stamp_lib], dict(CFG, advisory_fallback="none"))
+    assert adv["updated"] == 0 and adv["values"] == {}, adv
     for tags in _written.values():
         assert "ITUNESADVISORY" not in tags, tags
 finally:

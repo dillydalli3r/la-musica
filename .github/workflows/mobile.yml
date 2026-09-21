@@ -7,30 +7,18 @@ name: Mobile bundles
 # carries none of the SDK, NDK, provisioning profile or signing identity those
 # projects need.
 #
-# Reusable (`release.yml` can call it) and manually dispatchable.
+# Both artifacts are CLIENTS, like every other build of this UI: the same React
+# app, pointed at a server the user runs (the Docker container on their own
+# machine, or one on the LAN/Tailscale). Nothing here stages a Python runtime
+# or a CLI toolchain into the app, and nothing here starts uvicorn — a mobile
+# build used to carry its own backend, and that is what this workflow stopped
+# doing (see README.md, *Clients*).
 #
-# SPEED. The two things these jobs need — the mobile wheels (pydantic-core has
-# no iOS/Android wheel on PyPI, so it is cross-built) and the Android CLI tools
-# (ffmpeg/flac, cross-compiled for arm64) — are INPUTS, not per-run outputs:
-# they change only when the pinned versions change. So they are published once
-# as assets of a `mobile-deps` release and downloaded from there on every later
-# run. `actions/cache` alone was not enough: it is evicted and key-scoped, and a
-# cold run paid ~25 minutes rebuilding wheels plus ~10 minutes rebuilding
-# ffmpeg before the app build even started. The build path stays as the seed —
-# a version bump rebuilds once, republishes, and every run after that is a
-# download. A run that finds the assets is minutes instead of tens of minutes.
+# Reusable (`release.yml` can call it) and manually dispatchable.
 
 on:
   workflow_dispatch:
   workflow_call:
-
-# The wheel/tools jobs publish what they build as assets of the `mobile-deps`
-# release, so every later run downloads instead of cross-compiling. That needs a
-# token that may write to the repository: without this block the default token
-# is read-only and `gh release create` is denied — which is exactly how the
-# first attempt at seeding the cache failed, after the wheel had already built.
-permissions:
-  contents: write
 
 # See desktop.yml: the same ref must not build twice in parallel.
 concurrency:
@@ -38,185 +26,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ---------------------------------------------------------------------- #
-  # The mobile wheels nobody publishes.
-  #
-  # The backend runs on the device, and FastAPI needs pydantic v2, which needs
-  # pydantic-core — a Rust extension with NO iOS or Android wheel on PyPI
-  # (checked: 137 files, none for either platform). BeeWare's own mobile-wheels
-  # index says the way to get one is cibuildwheel, which builds for both mobile
-  # platforms from a POSIX host. So each platform gets a wheel job, and the
-  # build jobs below refuse to run without it: an app that cannot import its own
-  # API would install, open, and fail on first use.
-  #
-  # Cached on the requirements hash, because the first build pays for itself and
-  # every release after that should not.
-  # ---------------------------------------------------------------------- #
-  wheels-android:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      # CACHE FIRST, toolchain second. The SDK export, the NDK download and the
-      # cibuildwheel install used to run before this check, so even a run that
-      # found the published wheel paid minutes of setup for a build it was never
-      # going to do.
-      - name: Reuse the Android wheels if this repo has published them
-        id: prebuilt
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p desktop/src-tauri/target/mobile-wheels/android
-          if gh release download mobile-deps \
-               --pattern "*android_24_arm64_v8a.whl" --dir desktop/src-tauri/target/mobile-wheels/android --clobber 2>/dev/null \
-             && ls desktop/src-tauri/target/mobile-wheels/android/*.whl >/dev/null 2>&1; then
-            echo "hit=1" >> "$GITHUB_OUTPUT"
-            echo "reusing the published Android wheel(s)"
-          else
-            echo "hit=0" >> "$GITHUB_OUTPUT"
-            echo "no published Android wheel yet — building it (this also publishes it)"
-          fi
-
-      - name: Export the Android SDK
-        if: steps.prebuilt.outputs.hit != '1'
-        # bundle.py refuses to start without ANDROID_HOME, and cibuildwheel
-        # discovers the SDK through it.
-        run: |
-          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
-          test -n "$SDK" || { echo "::error::no Android SDK on this runner"; exit 1; }
-          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
-
-      - name: Set up the Android NDK
-        if: steps.prebuilt.outputs.hit != '1'
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27
-          add-to-path: false
-
-      - name: Rust for the Android wheel
-        if: steps.prebuilt.outputs.hit != '1'
-        run: rustup target add aarch64-linux-android
-
-      - name: Cache the cibuildwheel environment
-        if: steps.prebuilt.outputs.hit != '1'
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/cibuildwheel
-          key: cibw-env-android-${{ hashFiles('tools/mobile/requirements-android.txt') }}
-
-      - name: cibuildwheel
-        if: steps.prebuilt.outputs.hit != '1'
-        run: python3 -m pip install cibuildwheel
-
-      - name: Build the wheels Android needs
-        if: steps.prebuilt.outputs.hit != '1'
-        env:
-          CIBW_BUILD: cp314-*
-        run: python3 tools/mobile/bundle.py wheels android
-
-      - name: Publish the wheels for the next run
-        if: steps.prebuilt.outputs.hit != '1' && github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -e
-          for w in desktop/src-tauri/target/mobile-wheels/android/*/*.whl; do
-            [ -f "$w" ] || continue
-            cp "$w" "desktop/src-tauri/target/mobile-wheels/android/$(basename "$w")"
-          done
-          gh release view mobile-deps >/dev/null 2>&1 || \
-            gh release create mobile-deps --title "mobile build dependencies" \
-              --notes "Wheels and CLI tools the mobile builds bundle. Built once when the pinned versions change; downloaded by every later run."
-          gh release upload mobile-deps desktop/src-tauri/target/mobile-wheels/android/*.whl --clobber
-
-      - name: Upload the wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: mobile-wheels-android
-          if-no-files-found: error
-          path: desktop/src-tauri/target/mobile-wheels/android/**/*.whl
-
-  wheels-ios:
-    # iOS wheels are built with Apple's SDK, so this job has to be a Mac.
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Reuse the iOS wheels if this repo has published them
-        id: prebuilt
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p desktop/src-tauri/target/mobile-wheels/ios
-          if gh release download mobile-deps \
-               --pattern "*ios_13_0_arm64_iphoneos.whl" --dir desktop/src-tauri/target/mobile-wheels/ios --clobber 2>/dev/null \
-             && ls desktop/src-tauri/target/mobile-wheels/ios/*.whl >/dev/null 2>&1; then
-            echo "hit=1" >> "$GITHUB_OUTPUT"
-            echo "reusing the published iOS wheel(s)"
-          else
-            echo "hit=0" >> "$GITHUB_OUTPUT"
-            echo "no published iOS wheel yet — building it (this also publishes it)"
-          fi
-
-      - name: Rust for the iOS wheel
-        if: steps.prebuilt.outputs.hit != '1'
-        run: rustup target add aarch64-apple-ios
-
-      - name: Cache the cibuildwheel environment
-        if: steps.prebuilt.outputs.hit != '1'
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/cibuildwheel
-          key: cibw-env-ios-${{ hashFiles('tools/mobile/requirements-ios.txt') }}
-
-      - name: cibuildwheel
-        if: steps.prebuilt.outputs.hit != '1'
-        run: python3 -m pip install --user cibuildwheel
-
-      - name: Build the wheels iOS needs
-        if: steps.prebuilt.outputs.hit != '1'
-        env:
-          CIBW_BUILD: cp313-*
-        run: python3 tools/mobile/bundle.py wheels ios
-
-      - name: Publish the wheels for the next run
-        if: steps.prebuilt.outputs.hit != '1' && github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -e
-          for w in desktop/src-tauri/target/mobile-wheels/ios/*/*.whl; do
-            [ -f "$w" ] || continue
-            cp "$w" "desktop/src-tauri/target/mobile-wheels/ios/$(basename "$w")"
-          done
-          gh release view mobile-deps >/dev/null 2>&1 || \
-            gh release create mobile-deps --title "mobile build dependencies" \
-              --notes "Wheels and CLI tools the mobile builds bundle. Built once when the pinned versions change; downloaded by every later run."
-          gh release upload mobile-deps desktop/src-tauri/target/mobile-wheels/ios/*.whl --clobber
-
-      - name: Upload the wheels
-        uses: actions/upload-artifact@v4
-        with:
-          name: mobile-wheels-ios
-          if-no-files-found: error
-          path: desktop/src-tauri/target/mobile-wheels/ios/**/*.whl
-
   android:
-    needs: [wheels-android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -270,8 +80,11 @@ jobs:
           ndk-version: r27
           add-to-path: false
 
-      - name: Add the Android Rust targets
-        run: rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+      - name: Add the Android Rust target
+        # One ABI, and the same one the build below names: an arm64 phone is
+        # what this sideload build is for, and four ABI slices of a webview app
+        # would be four times the download for three of them nobody asked for.
+        run: rustup target add aarch64-linux-android
 
       - name: npm ci (web)
         working-directory: web
@@ -280,58 +93,6 @@ jobs:
       - name: npm ci (desktop)
         working-directory: desktop
         run: npm ci
-
-      - name: Get the wheel the Android app needs
-        uses: actions/download-artifact@v4
-        with:
-          name: mobile-wheels-android
-          path: desktop/src-tauri/target/mobile-wheels/android
-
-      - name: Reuse the bundled CLI tools if this repo has published them
-        id: prebuilt-tools
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          mkdir -p desktop/src-tauri/target/mobile-tools
-          if gh release download mobile-deps --pattern "android-tools.tar.gz" \
-               --dir desktop/src-tauri/target --clobber 2>/dev/null; then
-            tar -xzf desktop/src-tauri/target/android-tools.tar.gz \
-              -C desktop/src-tauri/target/mobile-tools
-            echo "hit=1" >> "$GITHUB_OUTPUT"
-            echo "reusing the published CLI tools"
-          else
-            echo "hit=0" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Build the bundled CLI tools (ffmpeg, flac)
-        if: steps.prebuilt-tools.outputs.hit != '1'
-        # Android may execute a binary it ships, which is the one thing the
-        # platform can do that iOS cannot — so the tools it needs are built for
-        # arm64 and shipped inside the APK.
-        run: bash tools/mobile/build_android_tools.sh "$GITHUB_WORKSPACE/desktop/src-tauri/target/mobile-tools"
-
-      - name: Publish the CLI tools for the next run
-        if: steps.prebuilt-tools.outputs.hit != '1' && github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -e
-          tar -czf desktop/src-tauri/target/android-tools.tar.gz \
-            -C desktop/src-tauri/target/mobile-tools .
-          gh release view mobile-deps >/dev/null 2>&1 || \
-            gh release create mobile-deps --title "mobile build dependencies" \
-              --notes "Wheels and CLI tools the mobile builds bundle. Built once when the pinned versions change; downloaded by every later run."
-          gh release upload mobile-deps desktop/src-tauri/target/android-tools.tar.gz --clobber
-
-      - name: Stage the bundled Python runtime
-        # BEFORE `android init`: the runtime is staged as a single
-        # `libmlopy.so` payload (an APK gives assets no filesystem path, and
-        # only lib*.so survives packaging), and the injector below copies it
-        # into the project that init just generated.
-        run: |
-          python3 tools/mobile/bundle.py android \
-            --wheels desktop/src-tauri/target/mobile-wheels/android \
-            --tools desktop/src-tauri/target/mobile-tools
 
       - name: Regenerate the committed icon sets
         # `tauri icon` is the only thing that writes app icons anywhere in this
@@ -366,26 +127,32 @@ jobs:
                  src-tauri/icons/android/mipmap-xxxhdpi/ic_launcher_foreground.png \
             || { echo "::error::the generated Android project does not carry the la musica icons"; exit 1; }
 
-      - name: Wire the runtime into the generated Android project
-        # `gen/android` is generated in CI and never committed, so the payload
-        # and the foreground service are injected the same way the
-        # cleartext-traffic edit above is. inject.py is idempotent and fails
-        # loudly when tauri's template changes shape, so a silent no-op here is
-        # not possible.
+      - name: Pin the generated project to one ABI
+        # The generated project lists several ABIs and the packaging step fails
+        # on a slice nothing built — the build below asks for aarch64 alone, so
+        # the project is told the same thing. `gen/android` is never committed,
+        # so this is a workflow edit rather than a repo one; the keys are edited
+        # where they exist and appended where they do not, so it holds whichever
+        # shape tauri-cli's template has.
         working-directory: desktop
         run: |
-          python3 ../tools/mobile/android/inject.py \
-            --project src-tauri/gen/android \
-            --jni-libs src-tauri/resources/mobile/android/jniLibs/arm64-v8a
+          props=src-tauri/gen/android/gradle.properties
+          if grep -qE '^(abiList|targetList)=' "$props"; then
+            sed -i -E 's/^(abiList|targetList)=.*/\1=arm64-v8a/' "$props"
+          else
+            printf '\n# One ABI: the build asks for aarch64 alone.\nabiList=arm64-v8a\ntargetList=arm64-v8a\n' >> "$props"
+          fi
+          grep -q '^abiList=arm64-v8a' "$props" && grep -q '^targetList=arm64-v8a' "$props" \
+            || { echo "::error::could not pin $props to arm64-v8a"; exit 1; }
 
       - name: Allow plain-http servers in the release build type
         # Tauri v2 has no config key for Android's cleartext policy, and the
         # generated project is not committed, so the switch lives here. The
         # generated `app/build.gradle.kts` sets the `usesCleartextTraffic`
         # manifest placeholder to "false" for every build type and to "true"
-        # only for debug, while every self-hosted la musica server is plain
-        # http on a LAN address, a Tailscale name or 127.0.0.1 — a release APK
-        # would otherwise refuse every request the webview makes
+        # only for debug, while a la musica server on a LAN address, a Tailscale
+        # name or 127.0.0.1 is plain http — a release APK would otherwise
+        # refuse every request the webview makes
         # (net::ERR_CLEARTEXT_NOT_PERMITTED on API 28+). This permits nothing
         # but the http the app exists to talk to: the app ships no other
         # network client. desktop/README.md names the same one-liner for a
@@ -400,7 +167,7 @@ jobs:
           fi
 
       - name: Cache the Rust crate graph
-        # The cross-compile of every dependency for four Android ABIs is what
+        # The cross-compile of every dependency for the Android ABI is what
         # makes this job long; the cache takes it back to compiling just the
         # shell. Keyed by NDK version as well, because the linker inputs
         # change with it.
@@ -416,23 +183,19 @@ jobs:
         # generated locally and never committed, so a release build here would
         # be an unsigned APK no phone will install. A release APK is one
         # keystore away: add the signing config and swap the flag.
+        #
+        # `--target aarch64` is what decides the ABI list, and it is the only
+        # one built above: a phone install of a client does not need x86 slices.
         working-directory: desktop
         env:
           NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        # `--target aarch64` is what actually decides the ABI list: the
-        # generated project's `abiList`/`targetList` (which inject.py pins to
-        # arm64) are not enough — the CLI still drove Gradle through
-        # `rustBuildArmDebug`, and THAT link failed against the arm64-only
-        # libpython the payload stages ("incompatible with armelf_linux_eabi").
-        # One ABI is the honest build anyway: it is the only one we ship a
-        # Python for, and it halves the APK.
         run: npx tauri android build --apk --debug --target aarch64
 
       - name: Verify the icons inside the built APK
         # The launcher rasters are copied out of `icons/android/**` by the
         # Android toolchain, so a build that embedded stale or placeholder
         # artwork is invisible in the repo and obvious on the phone's home
-        # screen. Same script, same metric as the iOS check above — a cat
+        # screen. Same script, same metric as the iOS check below — a cat
         # cannot ship as a play triangle on either platform without this job
         # going red.
         working-directory: desktop
@@ -442,17 +205,6 @@ jobs:
           echo "inspecting $APK"
           python3 ../tools/bundle_icons.py --apk "$APK"
 
-      - name: Verify the runtime inside the built APK
-        # The assertion that makes "the app can host its own backend" a fact
-        # rather than a claim: the packaged APK must carry the interpreter, the
-        # site-packages and the CLI tools. Without this, a build that lost the
-        # payload would ship and only fail on someone's phone.
-        working-directory: desktop
-        run: |
-          APK="$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -1)"
-          test -n "$APK" || { echo "::error::the build produced no .apk to inspect"; exit 1; }
-          python3 ../tools/mobile/bundle.py verify --require-tools "$APK"
-
       - name: Upload the APK
         uses: actions/upload-artifact@v4
         with:
@@ -461,7 +213,6 @@ jobs:
           path: desktop/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
 
   ios:
-    needs: [wheels-ios]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -490,20 +241,6 @@ jobs:
       - name: npm ci (desktop)
         working-directory: desktop
         run: npm ci
-
-      - name: Get the wheel the iOS app needs
-        uses: actions/download-artifact@v4
-        with:
-          name: mobile-wheels-ios
-          path: desktop/src-tauri/target/mobile-wheels/ios
-
-      - name: Stage the bundled Python runtime
-        # BEFORE `ios init`: `bundle.iOS.frameworks` names the staged
-        # Python.xcframework, and init is what turns that into an embedded
-        # framework in the generated Xcode project.
-        run: |
-          python3 tools/mobile/bundle.py ios \
-            --wheels desktop/src-tauri/target/mobile-wheels/ios
 
       - name: Regenerate the committed icon sets
         # See the Android job: with no generated project in the tree,
@@ -574,7 +311,7 @@ jobs:
         # premultiplied BGRA) because no stock reader takes them and Pillow
         # cannot be pip-installed into the runner's Homebrew Python (PEP 668),
         # and it applies the metric `tools/test_icons.py` documents. The same
-        # script checks the Android APK below, from the same decoder.
+        # script checks the Android APK above, from the same decoder.
         working-directory: desktop
         run: |
           APP="$(find src-tauri/gen/apple/build -maxdepth 6 -name '*.app' -type d | head -1)"
@@ -608,15 +345,6 @@ jobs:
             rm -rf Payload
           fi
           ls -l "$OUT"
-
-      - name: Verify the runtime inside the built IPA
-        # Same assertion as the APK above: the framework, the stdlib, the
-        # site-packages and the backend's own sources must be in the bundle.
-        working-directory: desktop
-        run: |
-          IPA="$(ls la-musica_*_ios-unsigned.ipa | head -1)"
-          test -n "$IPA" || { echo "::error::no .ipa was packaged"; exit 1; }
-          python3 ../tools/mobile/bundle.py verify "$IPA"
 
       - name: Upload the unsigned IPA
         uses: actions/upload-artifact@v4

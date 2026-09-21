@@ -3,9 +3,9 @@
 
 Sources checked:
   * ``EXPECTED_SCRIPTS`` below — the frozen expected registry (number + name)
-  * ``server/main.py``       RUNNERS      — the numbers /api/run accepts
+  * ``server/script_runners.py`` RUNNERS — the numbers /api/run accepts
   * ``web/src/lib/scripts.ts`` SCRIPTS    — the UI's single source of truth
-  * ``README.md``            the 15-script table
+  * ``README.md``            the 18-script table
   * ``web/src/lib/force.ts`` FORCE_SCRIPTS, ``SettingsPage`` FORCE_KEYS —
     the one-shot force switches must map onto /api/run's force dict keys
 
@@ -20,7 +20,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # The registry every surface must agree on: number -> what the script is called.
 # Kept here on purpose — a gate that reads its expectation out of the code under
 # test cannot notice that code losing a script. Adding a script means adding it
-# here as well as to server/main.py, web/src/lib/scripts.ts and README.md.
+# here as well as to server/script_runners.py, web/src/lib/scripts.ts and README.md.
 EXPECTED_SCRIPTS = {
     1: "Format Lyrics",
     2: "Format CUEs",

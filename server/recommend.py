@@ -7,6 +7,14 @@ year and the artist name. No provider, no model, no network, so the same
 library answers the same list every time and every row can say why it is
 there (`reasons`).
 
+A request names its seed set one of two ways: an entity (`artist`, `album`,
+`track`, `playlist`) or an explicit list of references (`tracks`, `albums`) —
+a playlist page, a favourites page and a "more like this" shelf on a track
+all reach the same scorer, they only differ in what seeds them and whether
+the shelf is made of albums or of tracks. `favorites` reads the caller's own
+favourites and likes as its seed set, so the favourites page needs no client
+round trip to assemble one.
+
 One index of the payload is built per call site and reused while that payload
 lives: `server/library.py` already TTL-caches the tree, so holding its own
 object is the honest freshness check — a rebuilt payload (a tag write, a
@@ -41,9 +49,20 @@ ENERGY_SPAN = 100.0
 NEAR_ENERGY = 20
 
 DEFAULT_LIMIT = 12
+# A track shelf is read row by row rather than scanned like covers, so it
+# carries a few more rows than an album shelf carries covers.
+DEFAULT_TRACK_LIMIT = 20
 MAX_LIMIT = 50
 
-KINDS = ("artist", "album", "track", "playlist")
+KINDS = ("artist", "album", "track", "playlist", "tracks", "albums", "favorites")
+TARGETS = ("albums", "tracks")
+
+# What each seed shape is scored against unless the caller says otherwise: a
+# page about one record suggests other records, a list of tracks suggests
+# other tracks.
+_DEFAULT_TARGET = {"artist": "albums", "album": "albums", "albums": "albums",
+                   "track": "tracks", "playlist": "tracks", "tracks": "tracks",
+                   "favorites": "tracks"}
 
 _lock = threading.Lock()
 _cache = {"lib": None, "index": None}
@@ -161,13 +180,18 @@ def _track_entry(track, album, album_artist):
     meta = (album or {}).get("meta") or {}
     specs, fams = _genres(tags)
     path = _norm(track.get("path"))
+    artist = _display_artist(tags, album_artist)
     return {
         "kind": "track",
         "path": path,
+        # What a track shelf needs to queue a row without a second lookup:
+        # the file inside the folder, the folder, and the release it came from.
+        "file": str(track.get("file") or "") or _stem(path),
+        "album_name": str(meta.get("ALBUM") or "").strip() or None,
         "mbid": str(tags.get("MUSICBRAINZ_TRACKID") or "").strip() or None,
         "title": str(tags.get("TITLE") or "").strip() or _stem(path),
-        "subtitle": _display_artist(tags, album_artist),
-        "artist_key": _display_artist(tags, album_artist).casefold(),
+        "subtitle": artist,
+        "artist_key": artist.casefold(),
         "album_path": _norm((album or {}).get("path")),
         "cover_path": _norm((album or {}).get("path")) or os.path.dirname(path),
         "cover": track.get("cover_file") or (album or {}).get("cover_file"),
@@ -208,7 +232,7 @@ def _build(lib):
     """
     albums, tracks = [], []
     album_by_path, track_by_path = {}, {}
-    artist_albums, artist_tracks = {}, {}
+    artist_tracks = {}
     for artist in lib.get("artists", []):
         artist_name = str(artist.get("name") or "").strip()
         artist_dir = _norm(artist.get("path"))
@@ -221,7 +245,6 @@ def _build(lib):
             entry = _album_entry(album, artist_name, entries)
             albums.append(entry)
             album_by_path[path] = entry
-            artist_albums.setdefault(artist_dir, []).append(entry)
             for t in entries:
                 tracks.append(t)
                 track_by_path[t["path"]] = t
@@ -231,7 +254,6 @@ def _build(lib):
         "tracks": tracks,
         "album_by_path": album_by_path,
         "track_by_path": track_by_path,
-        "artist_albums": artist_albums,
         "artist_tracks": artist_tracks,
     }
 
@@ -331,6 +353,12 @@ def _item(src, cand, score):
         "reasons": _reasons(src, cand),
         "cover_path": cand["cover_path"],
         "cover": cand["cover"],
+        # Enough to build a queue entry for a track row, or to look the album
+        # up in the client's cached payload — the shelf adds no extra fetch.
+        "file": cand.get("file"),
+        "album_path": cand.get("album_path") or cand["path"],
+        "album": cand.get("album_name") or cand["title"],
+        "artist": cand["subtitle"],
     }
 
 
@@ -351,8 +379,92 @@ def _playlist_paths(ref, lib, cfg, user=""):
     return playlist.get("tracks") or []
 
 
-def _source(idx, kind, ref, cfg, lib, user=""):
-    """(profile, candidates) for one request, or None when nothing matches."""
+def _seed_entries(idx, refs):
+    """The track entries a set of seed references stands for.
+
+    A reference is resolved against the same payload the index was built from,
+    and may be a track file, an album folder or an artist folder: a favourites
+    set mixes all three, a playlist hands over track paths. References the
+    library no longer holds are skipped — a stale favourite must thin the seed
+    set, never empty the shelf or raise.
+    """
+    from server import mbresolve
+
+    out, seen = [], set()
+    for raw in refs or []:
+        ref = str(raw or "").strip()
+        if not ref:
+            continue
+        entry = idx["track_by_path"].get(_norm(mbresolve.resolve_track(ref) or ""))
+        if entry is not None:
+            entries = [entry]
+        else:
+            album = idx["album_by_path"].get(_norm(mbresolve.resolve_album(ref) or ""))
+            if album is not None:
+                entries = [idx["track_by_path"][p] for p in album["track_paths"]
+                           if p in idx["track_by_path"]]
+            else:
+                entries = idx["artist_tracks"].get(
+                    _norm(mbresolve.resolve_artist(ref) or "")) or []
+        for e in entries:
+            if e["path"] not in seen:
+                seen.add(e["path"])
+                out.append(e)
+    return out
+
+
+def _favorite_entries(idx, target, user=""):
+    """The caller's own favourites as seeds — likes for a track shelf,
+    favourite albums and artists for an album shelf.
+
+    Favourite PLAYLISTS are deliberately not seeds of an album shelf: a smart
+    playlist can hold the whole library, and excluding "the albums it already
+    contains" from the shelf would leave nothing to suggest.
+    """
+    from server import playlists as pl
+
+    if target == "tracks":
+        refs = pl.list_likes(user)
+    else:
+        favs = pl.list_favorites(user)
+        refs = list(favs.get("albums") or []) + list(favs.get("artists") or [])
+    return _seed_entries(idx, refs)
+
+
+def _seed_profile(entries):
+    """The profile of a seed SET (a playlist, a favourites set, explicit refs).
+
+    One artist is claimed only when every seed agrees on it: a mixed set that
+    pretended to have one would put "same artist" on rows that do not share
+    one, and its weight is better spent on the tags the seeds do share.
+    """
+    keys = {e["artist_key"] for e in entries if e["artist_key"]}
+    return {**_aggregate(entries), "artist_key": keys.pop() if len(keys) == 1 else None}
+
+
+def _candidates(idx, entries, target, extra_albums=frozenset()):
+    """Everything the seeds are not.
+
+    A seed's own album is never a suggestion — the user already holds it, and
+    on a track shelf every remaining track on it would match on artist and
+    genre alone. An album shelf loses the album itself that way, a track shelf
+    loses the rest of the record. `extra_albums` covers a seed album the
+    payload holds no tracks for.
+    """
+    albums = frozenset(e["album_path"] for e in entries if e["album_path"]) | extra_albums
+    paths = frozenset(e["path"] for e in entries)
+    if target == "albums":
+        return [a for a in idx["albums"] if a["path"] not in albums]
+    return [t for t in idx["tracks"]
+            if t["path"] not in paths and t["album_path"] not in albums]
+
+
+def _source(idx, kind, ref, cfg, lib, user="", seeds=None, target="tracks"):
+    """(profile, seed entries, album to exclude) for one request, or None.
+
+    Every kind is reduced to the same pair — a profile to compare against and
+    the tracks that seeded it — so one exclusion rule serves all of them.
+    """
     from server import mbresolve
 
     if kind == "playlist":
@@ -363,20 +475,17 @@ def _source(idx, kind, ref, cfg, lib, user=""):
                    if _norm(p) in idx["track_by_path"]]
         if not entries:
             return None
-        skip = frozenset(e["path"] for e in entries)
-        candidates = [t for t in idx["tracks"] if t["path"] not in skip]
         # A playlist has no single artist, so artist affinity is dropped and
         # its weight spread over the tags the playlist's tracks do share.
-        return {**_aggregate(entries), "artist_key": None}, candidates
+        return _seed_profile(entries), entries, frozenset()
 
     if kind == "artist":
         path = _norm(mbresolve.resolve_artist(ref) or "")
         entries = idx["artist_tracks"].get(path)
         if not entries:
             return None
-        own = frozenset(a["path"] for a in idx["artist_albums"].get(path, []))
-        candidates = [a for a in idx["albums"] if a["path"] not in own]
-        return {**_aggregate(entries), "artist_key": entries[0]["artist_key"]}, candidates
+        return ({**_aggregate(entries), "artist_key": entries[0]["artist_key"]},
+                entries, frozenset())
 
     if kind == "album":
         source = idx["album_by_path"].get(_norm(mbresolve.resolve_album(ref) or ""))
@@ -385,40 +494,66 @@ def _source(idx, kind, ref, cfg, lib, user=""):
         entries = [idx["track_by_path"][p] for p in source["track_paths"]
                    if p in idx["track_by_path"]]
         profile = _aggregate(entries) if entries else source
-        candidates = [a for a in idx["albums"] if a["path"] != source["path"]]
-        return {**profile, "artist_key": source["artist_key"]}, candidates
+        return {**profile, "artist_key": source["artist_key"]}, entries, \
+            frozenset({source["path"]})
 
     if kind == "track":
         source = idx["track_by_path"].get(_norm(mbresolve.resolve_track(ref) or ""))
         if source is None:
             return None
-        # The rest of the source's own album is not a discovery — every one of
-        # those tracks would match on artist and genre alone.
-        candidates = [t for t in idx["tracks"] if t["album_path"] != source["album_path"]]
-        return source, candidates
+        return source, [source], frozenset()
+
+    if kind in ("tracks", "albums"):
+        entries = _seed_entries(idx, seeds)
+        return (_seed_profile(entries), entries, frozenset()) if entries else None
+
+    if kind == "favorites":
+        entries = _favorite_entries(idx, target, user)
+        return (_seed_profile(entries), entries, frozenset()) if entries else None
 
     raise ValueError(f"unknown kind: {kind}")
 
 
-def recommend(cfg, kind, ref, limit=DEFAULT_LIMIT, user=""):
-    """Scored library items similar to the entity `ref` addresses.
+def _target(kind, target):
+    """Which kind of library item the caller wants back."""
+    want = str(target or "").strip().lower()
+    if want and want not in TARGETS:
+        raise ValueError(f"unknown target: {want}")
+    return want or _DEFAULT_TARGET[kind]
+
+
+def recommend(cfg, kind, ref="", limit=None, user="", seeds=None, target=None):
+    """Scored library items similar to a seed set.
+
+    `kind` picks the seed set: `artist` / `album` / `track` / `playlist` name
+    one library entity, `tracks` / `albums` take explicit `seeds` (paths or
+    `mb:<uuid>` refs, each a track file, album folder or artist folder), and
+    `favorites` reads the caller's own favourites and likes. `target` says
+    whether the shelf is made of albums or tracks and defaults per kind;
+    `limit` defaults to 12 album covers or 20 track rows.
 
     `ref` is a library path or a `mb:<uuid>` reference — `server/mbresolve.py`
     resolves either against the same payload this index is built from. An
-    unknown id, an empty library or a playlist that no longer exists returns
-    an empty list: "nothing to suggest" is not an error. `user` selects whose
-    playlists a `kind=playlist` request may read ("" is the default scope).
+    unknown id, an empty seed set, an empty library or a playlist that no
+    longer exists returns an empty list: "nothing to suggest" is not an error.
+    `user` selects whose playlists, likes and favourites a request may read
+    ("" is the default scope).
     """
     kind = str(kind or "").strip().lower()
     if kind not in KINDS:
         raise ValueError(f"unknown kind: {kind}")
-    limit = max(1, min(int(limit or DEFAULT_LIMIT), MAX_LIMIT))
+    target = _target(kind, target)
+    if limit is None:
+        limit = DEFAULT_LIMIT if target == "albums" else DEFAULT_TRACK_LIMIT
+    limit = max(1, min(int(limit), MAX_LIMIT))
     from server import library as lib_mod
     lib = lib_mod.build_library(cfg)
-    picked = _source(index(cfg), kind, ref, cfg, lib, user)
+    idx = index(cfg)
+    picked = _source(idx, kind, ref, cfg, lib, user, seeds, target)
     if picked is None:
         return []
-    profile, candidates = picked
+    profile, entries, extra = picked
+    candidates = _candidates(idx, entries, target, extra)
     scored = [(s, c) for s, c in ((_score(profile, c), c) for c in candidates) if s > 0]
     # Path last, so two rows with the same score always come back in the same
     # order — the shelf must not reshuffle between two identical requests.

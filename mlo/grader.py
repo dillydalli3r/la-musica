@@ -56,6 +56,49 @@ def _is_cd(media_summary):
     return str(media_summary or "").strip().lower() == "cd"
 
 
+def _library_codec_spec(cfg):
+    """mlo.containers' spec of the configured `library_codec` target, or None
+    when the setting names no target ("keep") or the module is unavailable."""
+    try:
+        from .containers import CODECS
+        from .flac import target_codec
+    except Exception:
+        return None
+    return CODECS.get(target_codec(cfg or {}))
+
+
+def _uncompressed_source_target(cfg):
+    """The codec script 3 converts uncompressed sources to, or None.
+
+    None means the pass will never convert one — either the library is kept
+    as it is, or the target IS one of those containers (WAV/AIFF are PCM
+    targets too) — which is what lets the grading check that flags stray
+    WAV/AIFF files stand down instead of failing such an album forever.
+    """
+    try:
+        from .flac import LOSSLESS_SOURCE_EXTS as src_exts
+    except Exception:
+        return "FLAC"
+    spec = _library_codec_spec(cfg)
+    if spec is None or spec["ext"] in src_exts:
+        return None
+    return spec["codec"].upper()
+
+
+def _lossy_target_file(path, cfg):
+    """Whether *path* is a file in the configured LOSSY library target.
+
+    The CD-DA 16-bit/44.1 kHz check describes the master a rip produced; once
+    the library has been converted to a lossy target those bytes are gone, so
+    the check cannot judge such a file any more (Opus resamples to 48 kHz by
+    design, and a CD album the user chose to convert must not fail over it).
+    """
+    spec = _library_codec_spec(cfg)
+    if spec is None or spec["lossless"]:
+        return False
+    return os.path.splitext(str(path))[1].lower() == spec["ext"]
+
+
 def _is_digital(media_summary):
     """Whether the album's MEDIA summary is Digital Media (case-insensitive
     for the same reason as _is_cd)."""
@@ -2695,6 +2738,12 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                         continue
                     if _is_video_file(tr_track.get("file")):
                         continue
+                    if _lossy_target_file(ap, cfg):
+                        # This album was deliberately converted to the
+                        # configured lossy target: the CD-DA stream the check
+                        # describes is gone, so there is nothing left to judge
+                        # (see _lossy_target_file).
+                        continue
                     # Format info captured when the file was parsed for its
                     # tags — no second AudioFile() per track.
                     bits, rate = format_by_path.get(ap) or (None, None)
@@ -3465,8 +3514,13 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             add_issue(f"Un-remuxed video file(s): {shown} (run Remux)", "album")
 
     # Lossless but uncompressed sources (WAV/AIFF/APE/WV/SHN) fail grading —
-    # script 3 converts them to FLAC losslessly.
-    if cfg.get("grade_check_lossless_source", True):
+    # script 3 converts them to the library codec target. The check is skipped
+    # when that pass will never touch them: the target IS one of those
+    # containers (a WAV/AIFF library keeps them by design) or the user chose
+    # to keep the library as it is. Failing those albums would be a permanent
+    # verdict about a decision, not a defect, and nothing could ever fix it.
+    _src_target = _uncompressed_source_target(cfg)
+    if cfg.get("grade_check_lossless_source", True) and _src_target:
         try:
             from .flac import LOSSLESS_SOURCE_EXTS as _LOSSLESS_SRC_EXTS
         except Exception:
@@ -3479,7 +3533,8 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
             shown = ", ".join(uncompressed[:4])
             if len(uncompressed) > 4:
                 shown += f" (+{len(uncompressed) - 4} more)"
-            add_issue(f"Uncompressed lossless file(s): {shown} (convert to FLAC)", "album")
+            add_issue(f"Uncompressed lossless file(s): {shown} "
+                      f"(script 3 converts them to {_src_target})", "album")
 
     # Every album must carry the MusicBrainz release's own tracklist manifest
     # (.mlo_expected.json, written at import and by script 15). The files on
@@ -4152,3 +4207,39 @@ def run_grade_library(config):
               f"— the library badges them FAIL (Audit column)", Color.YELLOW))
 
     return stats
+
+
+# --------------------------------------------------------------------------- #
+# Check gates — read-only introspection, for MAINTAIN → Check stack
+# --------------------------------------------------------------------------- #
+# The config keys this module consults to gate a check. Read out of this
+# file's OWN source instead of being typed out a second time: server/api_stack
+# and tools/test_check_stack.py compare this set against the keys
+# mlo.config.DEFAULT_CONFIG defines, so a gate that is read here but settable
+# nowhere (or a check nothing reads any more) is REPORTED rather than hiding —
+# which is the only meaning "every workflow uses the latest checks" can have in
+# code. Grading logic itself does not change here; nothing below is consulted
+# by a grade.
+
+CHECK_PREFIXES = ("grade_check_", "grade_include_")
+
+
+def check_gates():
+    """Sorted ``grade_check_*`` / ``grade_include_*`` keys this module reads.
+
+    A string constant anywhere in the module counts — a config lookup, a
+    table value, a docstring, a comment naming the check. Prose is a claim:
+    a name mentioned here is one this module says it owns, so a stale mention
+    is something the stack test reports instead of a silent no-op.
+    """
+    import ast
+    with open(__file__, "r", encoding="utf-8") as fh:
+        tree = ast.parse(fh.read(), filename=__file__)
+    gates = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            # the prefixes themselves are not keys
+            if (node.value.startswith(CHECK_PREFIXES)
+                    and node.value not in CHECK_PREFIXES):
+                gates.add(node.value)
+    return sorted(gates)

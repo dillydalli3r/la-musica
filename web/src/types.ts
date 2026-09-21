@@ -267,6 +267,11 @@ export interface CoverSearch {
 export interface CoverWriteResult {
   ok: boolean;
   path: string;
+  /** Identifies the file's BYTES (its mtime + size). A cover is replaced in
+   *  place — the album and file name, and therefore the plain cover URL, are
+   *  the same before and after — so this is what makes the new image a new
+   *  URL. `api.coverUrl` picks it up automatically after a write. */
+  token?: string;
   width?: number;
   height?: number;
   megapixels?: number;

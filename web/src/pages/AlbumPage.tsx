@@ -10,6 +10,7 @@ import CoverImg, { TrackCover } from "../components/CoverImg";
 import CoverSearchModal from "../components/CoverSearchModal";
 import Description from "../components/Description";
 import DownloadButton from "../components/DownloadButton";
+import { ExportButton } from "../components/ExportDialog";
 import FavHeart from "../components/FavHeart";
 import { trackRef, entityLinkClick } from "../lib/refs";
 import { invalidateLibrary } from "../lib/invalidate";
@@ -674,7 +675,19 @@ export default function AlbumPage() {
                       className="btn-icon"
                       iconClass="h-4 w-4"
                     />
-                    <DownloadButton paths={data.tracks.map((t) => t.path)} iconOnly />
+                    <DownloadButton
+                      paths={data.tracks.map((t) => t.path)}
+                      iconOnly
+                      emptyReason="Nothing to download — this album has no tracks"
+                    />
+                    <ExportButton
+                      paths={data.tracks.map((t) => t.path)}
+                      seconds={data.tracks.reduce((s, t) => s + (t.tech?.length ?? 0), 0)}
+                      iconOnly
+                      title="Export this album to a drive"
+                      emptyReason="Nothing to export — this album has no tracks"
+                      dialogSubtitle={`${data.meta?.ALBUM ?? data.path.split("/").pop() ?? ""} · ${data.tracks.length} track${data.tracks.length === 1 ? "" : "s"}`}
+                    />
                     <LinkEditorButton
                       mode="album"
                       paths={data.tracks.map((t) => t.path)}

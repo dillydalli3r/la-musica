@@ -29,9 +29,11 @@ Modules:
     audit       audio integrity auditing via the AudioAuditor CLI
     cli         interactive console menu
 
-Only FLAC is losslessly re-encoded; all other audio formats receive safe tag
-operations only. Encoder marker tags (ENCODER_PROGRAM / QUALITY / VERSION) are
-written to every processed artifact so re-runs can skip finished files.
+Audio is kept in `library_codec` — the codec the library is converted to —
+and converted by mlo.flac (script 3), which never re-encodes a lossy source
+into a lossless one: that can only lose quality. Encoder marker tags
+(ENCODER_PROGRAM / QUALITY / VERSION) are written to every processed FLAC so
+re-runs can skip finished files.
 """
 from .config import load_config, save_config, DEFAULT_CONFIG
 from .autotag import run_auto_tagging
@@ -47,7 +49,7 @@ try:
 except ImportError:
     run_format_all = None
 
-__version__ = "3.1.9"
+__version__ = "3.2.0"
 __all__ = [
     "load_config", "save_config", "DEFAULT_CONFIG",
     "run_auto_tagging",

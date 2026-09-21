@@ -80,7 +80,7 @@ ENV HOME=/home/mlo
 # leaves it empty, and the server then reports its own code version instead of
 # claiming to be a release it is not. `tools/check_versions.py` keeps the
 # ARG default in step with mlo/__init__.py.
-ARG MLO_VERSION=3.1.9
+ARG MLO_VERSION=3.2.0
 ENV MLO_VERSION=${MLO_VERSION}
 LABEL org.opencontainers.image.version="${MLO_VERSION}" \
       org.opencontainers.image.title="la musica" \

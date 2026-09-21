@@ -72,7 +72,6 @@ exactly that).
 | [websockets](https://github.com/python-websockets/websockets) | BSD-3-Clause | progress relay |
 | [python-multipart](https://github.com/kludex/python-multipart) | Apache-2.0 | uploads |
 | [aiofiles](https://github.com/Tinche/aiofiles) | Apache-2.0 | async file IO |
-| [pystray](https://github.com/moses-palmer/pystray) | LGPL-3.0 | system tray |
 | [librosa](https://github.com/librosa/librosa) (+ numpy/scipy) | ISC | BPM/key analysis |
 
 ### In-process copyleft: mutagen and Unidecode

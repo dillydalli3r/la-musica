@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Platform guards: where a dependency install is allowed to go, and who owns :8000.
+"""Platform guards: where a dependency install is allowed to go.
 
 What an install can do is decided in ONE place — fetchdeps.install_kind() — and
 all three answers are checked here on both platforms, with the download and
@@ -21,18 +21,13 @@ Linux builds for, were refused for ever and stayed "missing" behind an Install
 button that could not work.
 
 Both branches are simulated rather than read off the host (see
-simulated_platform), and tray.py's GUI import is stubbed — a headless CI runner
-has no display.
+simulated_platform).
 """
-import json
 import os
 import re
 import sys
 import tarfile
 import tempfile
-import threading
-import types
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -189,32 +184,6 @@ with runners(True):
 check("macOS does not pretend flac is an apt package",
       fetchdeps.install_kind("flac", platform="other") == "unsupported")
 
-
-class simulated_android:
-    """Android as CPython reports it: posix + "linux", plus getandroidapilevel.
-
-    The doc'd test for Android is that attribute's presence (`sys.platform` is
-    "linux" there too), which is why the installer has to ask.
-    """
-
-    def __enter__(self):
-        self.real = (os.name, sys.platform)
-        os.name, sys.platform = "posix", "linux"
-        sys.getandroidapilevel = lambda: 24
-        return self
-
-    def __exit__(self, *exc):
-        os.name, sys.platform = self.real
-        del sys.getandroidapilevel
-        return False
-
-
-with simulated_android():
-    check("Android is not a Linux host with downloads of its own",
-          fetchdeps.host_platform() == "other")
-    for key in LINUX_NATIVE:
-        check(f"Android is not offered a desktop {key} build",
-              fetchdeps.install_kind(key) == "unsupported")
 
 # The refusal is the row's own text, so what a user reads and what an install
 # would say cannot drift apart.
@@ -581,62 +550,6 @@ with tempfile.TemporaryDirectory() as tmp:
     check("licence/readme files copied", names == ["COPYING", "LICENSE.txt", "README.md"])
     check("nothing else copied", sorted(copied) == ["COPYING", "LICENSE.txt", "README.md"])
 
-
-# --------------------------------------------------------------------------- #
-# The two launchers agree on who owns :8000
-# --------------------------------------------------------------------------- #
-class _Health(BaseHTTPRequestHandler):
-    status = "ok"
-
-    def do_GET(self):  # noqa: N802 - http.server API
-        body = json.dumps({"status": self.status}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *a):
-        pass
-
-
-import start_app  # noqa: E402
-
-# tray.py imports pystray at module scope, and on a headless host that import
-# dies on Xlib ("Bad display name \"\"": no DISPLAY on a CI runner). The
-# ownership probes below never touch the GUI, so the backend is stubbed out for
-# the import and put back afterwards.
-_saved_pystray = sys.modules.get("pystray")
-sys.modules["pystray"] = types.ModuleType("pystray")
-try:
-    import tray  # noqa: E402
-finally:
-    if _saved_pystray is None:
-        del sys.modules["pystray"]
-    else:
-        sys.modules["pystray"] = _saved_pystray
-
-server = HTTPServer(("127.0.0.1", 0), _Health)
-port = server.server_address[1]
-threading.Thread(target=server.serve_forever, daemon=True).start()
-for mod in (start_app, tray):
-    mod.PORT = port
-    mod.URL = f"http://127.0.0.1:{port}"
-try:
-    # A foreign server: HTTP 200 on /api/health, but not our status.
-    _Health.status = ""
-    check("start_app: a foreign 200 is not our backend", start_app._backend_ours() is False)
-    check("tray: a foreign 200 is not our backend", tray.backend_ours() is False)
-    check("tray calls it foreign", tray.backend_state() == "foreign")
-
-    # Our backend: the same JSON start_app is now required to check for.
-    _Health.status = "ok"
-    check("start_app: ours is recognised", start_app._backend_ours() is True)
-    check("tray: ours is recognised", tray.backend_ours() is True)
-    check("tray calls it ours", tray.backend_state() == "ours")
-finally:
-    server.shutdown()
-    server.server_close()
 
 if FAILURES:
     print(f"{len(FAILURES)} failure(s)")

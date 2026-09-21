@@ -4,9 +4,11 @@
 The player asks for one track's gain while a batch run may be tagging a
 whole folder — so the on-demand path must (a) trust the four tags when they
 are all there, (b) measure with ffmpeg's EBU R128 filter when they are not,
-(c) never raise, and (d) cache a measurement so replaying a track costs one
-stat(). The batch shell-out paths (rsgain / simple-dr-meter) are untouched
-and untested here: they need the tools installed.
+(c) never raise, (d) cache a measurement so replaying a track costs one
+stat(), and (e) bound the wait for that measurement on a playback request,
+which is the one caller that cannot afford to hold a track at the click. The
+batch shell-out paths (rsgain / simple-dr-meter) are untouched and untested
+here: they need the tools installed.
 
 Run:  python tools/test_replaygain.py
 """
@@ -15,6 +17,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -252,6 +256,87 @@ try:
         assert second == first, second
         assert calls == [track2], calls   # second call hit the cache
     finally:
+        loudness.analyze_file = _real_analyze
+finally:
+    shutil.rmtree(root, ignore_errors=True)
+
+
+# ----------------------------------------------------------------------
+# Playback budget: the player installs a track's gain BEFORE it starts the
+# element, so its request must never wait for a whole decode to answer.
+# wait_s bounds that wait; the decode finishes in the background and its
+# value is cached, so the next request is a cache read.
+# ----------------------------------------------------------------------
+assert 0 < loudness.PLAYBACK_WAIT_S <= 2.0, loudness.PLAYBACK_WAIT_S
+
+root = tempfile.mkdtemp(prefix="mlo_rg_wait_")
+try:
+    cfg = dict(DEFAULT_CONFIG)
+    cfg["music_folder"] = root
+    cfg["replaygain_analyze_missing"] = True
+    slow = os.path.join(root, "slow.flac")
+    with open(slow, "wb") as f:
+        f.write(b"s" * 8)
+
+    calls = []
+    started = threading.Event()
+    release = threading.Event()
+    _real_analyze = loudness.analyze_file
+
+    def _slow_analyze(p, cfg=None, force=False):
+        calls.append(p)
+        started.set()
+        release.wait(30)
+        return {"gain_db": -5.0, "peak": 0.8, "lufs": -13.0,
+                "album_gain_db": None, "album_peak_db": None,
+                "analyzed": True, "source": "ffmpeg"}
+
+    loudness.analyze_file = _slow_analyze
+    try:
+        # A decode that outlives the budget answers unity long before the
+        # decode itself would: the request is not held for the measurement.
+        t0 = time.monotonic()
+        first = loudness.replaygain_for_path(
+            cfg, slow, mode="track", preamp_db=0.0, clip_protection=False,
+            wait_s=loudness.PLAYBACK_WAIT_S)
+        waited = time.monotonic() - t0
+        assert first["gain"] is None and first["analyzed"] is False, first
+        assert waited < 2.0, waited
+        assert started.wait(10), "the measurement never started"
+        assert loudness.cached_analysis(cfg, slow) is None
+
+        # A request that arrives while that run is going joins it instead of
+        # starting a second decode of the same file.
+        second = loudness.replaygain_for_path(
+            cfg, slow, mode="track", preamp_db=0.0, clip_protection=False,
+            wait_s=0.0)
+        assert second["gain"] is None, second
+        assert calls == [slow], calls
+
+        # Once it lands, playback is answered from the cache — one decode.
+        release.set()
+        deadline = time.monotonic() + 10
+        while (loudness.cached_analysis(cfg, slow) is None
+               and time.monotonic() < deadline):
+            time.sleep(0.02)
+        settled = loudness.replaygain_for_path(
+            cfg, slow, mode="track", preamp_db=0.0, clip_protection=False,
+            wait_s=loudness.PLAYBACK_WAIT_S)
+        assert settled == {"gain": -5.0, "peak": 0.8, "mode": "track",
+                           "source": "ffmpeg", "analyzed": True}, settled
+        assert calls == [slow], calls
+
+        # wait_s=None — the batch callers — still waits for the decode.
+        other = os.path.join(root, "other.flac")
+        with open(other, "wb") as f:
+            f.write(b"o" * 8)
+        blocked = loudness.replaygain_for_path(cfg, other, mode="track",
+                                               preamp_db=0.0,
+                                               clip_protection=False)
+        assert blocked["gain"] == -5.0, blocked
+        assert loudness.cached_analysis(cfg, other) is not None
+    finally:
+        release.set()
         loudness.analyze_file = _real_analyze
 finally:
     shutil.rmtree(root, ignore_errors=True)

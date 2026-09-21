@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Lossless-source conversion contract (mlo.flac).
+"""Conversion-to-library-codec contract (mlo.flac).
 
-The auto-importer and the Soulseek import button re-containerize whatever
-lossless codec a download arrived in into the configured target codec, and
-delete the original once the conversion verified. Two things must never
-break: an AAC file must NOT be touched (it is lossy — rewriting it as
-"lossless" would launder it), and the tags must survive the conversion.
+The auto-importer and the Soulseek import button convert whatever codec a
+download arrived in into the configured library codec target, and take the
+original out of the library once the conversion verified. Two things must
+never break: an AAC file must NOT be touched under the default policy (it is
+lossy — rewriting it as "lossless" would launder it), and the tags must
+survive the conversion.
 
 Needs the bundled ffmpeg (.dependencies/ffmpeg*); skips without it.
 
@@ -62,10 +63,10 @@ def _cfg(folder, codec, remove_original=True):
     cfg.update({
         "music_folder": folder,
         "targets": [folder],
-        "lossless_target_codec": codec,
+        "library_codec": codec,
+        "library_codec_optimize": "lossless_to_lossy",
         "lossless_remove_original": remove_original,
-        "optimize_convert_lossless": True,
-        "flac_level": 5,
+        "library_codec_quality": 5,
         "add_seektables": False,
         "force_reencode_flac": False,
     })

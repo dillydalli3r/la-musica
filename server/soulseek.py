@@ -14,6 +14,7 @@ The generated config lives at <music folder>/.mlo/data/slskd.yaml; a random
 web API key is minted per start and kept in memory (the web UI is bound to
 localhost).
 """
+import json
 import os
 import re
 import subprocess
@@ -95,6 +96,17 @@ _RESERVED_SHARE_FILTERS = [
     "'\\.data'",
     "'(^|[\\\\/])Data([\\\\/]|$)'",
     "'(^|[\\\\/])\\.data([\\\\/]|$)'",
+    # Junk a library folder picked up on a NAS or a network share: Synology's
+    # metadata dir and recycle bin, Finder/Explorer droppings, and the
+    # AppleDouble sidecars a Mac leaves beside every file. slskd's own example
+    # config excludes the same three file names — nobody wants to browse them,
+    # and they inflate every share listing with entries that are not music.
+    "'(^|[\\\\/])@eaDir([\\\\/]|$)'",
+    "'(^|[\\\\/])#recycle([\\\\/]|$)'",
+    "'(^|[\\\\/])\\.DS_Store$'",
+    "'(^|[\\\\/])Thumbs\\.db$'",
+    "'(^|[\\\\/])desktop\\.ini$'",
+    "'(^|[\\\\/])\\._[^\\\\/]*$'",
 ]
 
 
@@ -106,6 +118,108 @@ def share_dirs(cfg=None):
     if not dirs and music:
         dirs = [music]
     return dirs
+
+
+def _int_setting(cfg, key, default=0):
+    """One numeric setting, or `default` when it is missing or not a number.
+
+    The settings blob arrives as JSON from a browser, so a string can land
+    where a number belongs; `int()` on it would raise out of generate_yaml and
+    take the whole slskd start (and every share) with it."""
+    try:
+        return int(str(cfg.get(key)).strip() or 0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_absolute_share_path(path):
+    """True when slskd accepts the path as a share root.
+
+    slskd validates every entry of `shares.directories` at boot and exits on a
+    relative one ("only absolute paths are supported"), so a bad entry is not
+    one missing share — it takes the whole daemon, and with it search, browse
+    and downloads."""
+    p = str(path or "")
+    if os.name == "nt":
+        return bool(re.match(r"^(\\\\[^\\/]|[a-zA-Z]:[\\/])", p))
+    return p.startswith("/")
+
+
+def _share_entries(cfg=None):
+    """The share list as slskd must receive it: [(path, alias)], plus what was
+    left out as [(raw, reason)].
+
+    Two entries that normalize to the same folder, or two folders with the same
+    leaf name, make slskd refuse to start ("alias the same path" / "collide") —
+    and the settings field for extra folders is free text, so both are one typo
+    away. A folder that is not absolute kills it the same way. Duplicates and
+    unusable entries are dropped here (reported by share_audit) and a colliding
+    leaf gets an explicit `[alias]`, which is the only form slskd can tell
+    apart. The alias is the leaf name otherwise, so the remote path a share has
+    today does not change."""
+    entries, dropped, seen = [], [], {}
+    for raw in share_dirs(cfg):
+        path = os.path.normpath(os.path.expanduser(str(raw).strip()))
+        if not _is_absolute_share_path(path):
+            dropped.append((raw, "not an absolute path"))
+            continue
+        key = os.path.normcase(path)
+        if key in seen:
+            dropped.append((raw, f"already configured as {seen[key]}"))
+            continue
+        seen[key] = path
+        entries.append(path)
+    leaves = {}
+    for path in entries:
+        leaves.setdefault(_share_leaf(path), 0)
+        leaves[_share_leaf(path)] += 1
+    used, out = set(), []
+    for path in entries:
+        leaf = _share_leaf(path)
+        alias = leaf
+        if leaves.get(leaf, 0) > 1:
+            i = 2
+            while alias in used:
+                alias = f"{leaf}-{i}"
+                i += 1
+        used.add(alias)
+        out.append((path, alias))
+    return out, dropped
+
+
+def _share_leaf(path):
+    """slskd's own alias for a share with no `[alias]`: the last path segment
+    (Share(string share) -> Alias = share.Split('/','\\').Last())."""
+    text = str(path or "").rstrip("\\/")
+    return text.split("\\")[-1].split("/")[-1] or text
+
+
+def _share_entry_yaml(path, alias):
+    """One `shares.directories` entry: the bare path, or `[alias]path` when the
+    leaf name would collide with another share."""
+    if alias and alias != _share_leaf(path):
+        return _yq(f"[{alias}]{path}")
+    return _yq(path)
+
+
+def invalid_share_filters(cfg=None):
+    """User exclude patterns slskd would reject: [(pattern, reason)].
+
+    slskd compiles every `shares.filters` entry as a .NET regex at boot and
+    exits when one does not compile — the same "no daemon, no share" failure as
+    a bad path. They are left out of the generated config and reported instead
+    of being written."""
+    cfg = cfg or load_config()
+    out = []
+    for raw in (cfg.get("soulseek_share_exclude") or []):
+        text = str(raw).strip()
+        if not text:
+            continue
+        try:
+            re.compile(text)
+        except re.error as e:
+            out.append((text, str(e)))
+    return out
 
 
 def _inside(path, folder):
@@ -153,10 +267,14 @@ def _download_exclude(cfg):
 
 
 def share_exclude(cfg=None):
-    """Extra share exclude regexes from settings, on top of the reserved ones."""
+    """Extra share exclude regexes from settings, on top of the reserved ones.
+
+    A pattern slskd cannot compile is left out (see invalid_share_filters):
+    writing it would stop the daemon from booting at all."""
     cfg = cfg or load_config()
+    bad = {p for p, _why in invalid_share_filters(cfg)}
     extra = [str(x).strip() for x in (cfg.get("soulseek_share_exclude") or []) if str(x).strip()]
-    out = _RESERVED_SHARE_FILTERS + [f"'{x}'" for x in extra]
+    out = _RESERVED_SHARE_FILTERS + [f"'{x}'" for x in extra if x not in bad]
     d = _download_exclude(cfg)
     if d:
         out.append(d)
@@ -191,8 +309,14 @@ def generate_yaml(cfg=None):
     description = str(cfg.get("soulseek_description") or "").strip()
     listen_port = int(cfg.get("soulseek_listen_port") or 50000)
     web_port = int(cfg.get("soulseek_web_port") or 5030)
-    dl_slots = max(1, min(20, int(cfg.get("soulseek_download_slots") or 3)))
-    ul_slots = max(0, min(20, int(cfg.get("soulseek_upload_slots") or 2)))
+    dl_slots = max(1, min(20, _int_setting(cfg, "soulseek_download_slots", 3)))
+    # slskd validates `transfers.upload.slots` as Range(1, int.MaxValue) and
+    # EXITS when a value falls outside it (Program.TryValidate), so the "0 =
+    # unlimited" the settings field documents was a config slskd refused to
+    # boot with: no daemon, no share, no search. slskd has no unlimited slot
+    # count — 0/blank now means slskd's own default of 10 simultaneous
+    # uploads, which is the behaviour the setting was asking for.
+    ul_slots = max(1, min(20, _int_setting(cfg, "soulseek_upload_slots", 0) or 10))
     # Speed limits, in KiB/s (0 = unlimited, emitted as slskd's int.MaxValue
     # default). The Settings UI's "kB/s" fields write soulseek_up_limit /
     # soulseek_down_limit, which the old YAML never read at all — so a limit
@@ -203,7 +327,9 @@ def generate_yaml(cfg=None):
     down_kib = max(0, int(cfg.get("soulseek_download_limit_kib") or 0)
                    or int(cfg.get("soulseek_down_limit") or 0) * 1000)
     downloads = download_dir(cfg)
-    shared = share_dirs(cfg)
+    # slskd's own share list: deduped, absolute, with an explicit alias where a
+    # leaf name would collide — anything else makes slskd refuse to start.
+    shares, _dropped_shares = _share_entries(cfg)
     exclude = share_exclude(cfg)
 
     lines = [
@@ -271,9 +397,9 @@ def generate_yaml(cfg=None):
         f"  downloads: {_yq(downloads)}",
         f"  incomplete: {_yq(_incomplete_dir(cfg))}",
     ]
-    if shared and cfg.get("soulseek_share_library", True):
+    if shares and cfg.get("soulseek_share_library", True):
         lines += ["shares:", "  directories:"]
-        lines += [f"    - {_yq(d)}" for d in shared]
+        lines += [f"    - {_share_entry_yaml(p, alias)}" for p, alias in shares]
         lines.append("  filters:")
         lines += [f"    - {x}" for x in exclude]
     text = "\n".join(lines) + "\n"
@@ -463,15 +589,7 @@ def login_error(cfg=None):
 
 def _options_dirs(cfg=None):
     """slskd's live download dirs from GET /options, or {} when unreadable."""
-    try:
-        client = _http_client(cfg)
-        r = client.get("/options", headers={"Accept": "application/json"},
-                       timeout=1.0)
-        if r.status_code != 200:
-            return {}
-        return (r.json() or {}).get("directories") or {}
-    except Exception:
-        return {}
+    return (_live_options(cfg, timeout=1.0).get("directories") or {})
 
 
 def _uses_our_downloads(cfg):
@@ -1379,9 +1497,656 @@ def shares_state(cfg=None):
 
 
 def rescan_shares(cfg=None):
-    """Ask slskd to rescan its share index (PUT /shares)."""
-    _request("PUT", "/shares", timeout=30.0)
+    """Ask slskd to rescan its share index (PUT /shares).
+
+    slskd answers 409 while a scan is already running; that is not a failure
+    of this call but it is also not a scan this call started, so it is
+    reported as such instead of being swallowed."""
+    try:
+        _request("PUT", "/shares", timeout=30.0)
+    except httpx.HTTPStatusError as e:
+        if e.response is not None and e.response.status_code == 409:
+            raise SlskdError("slskd is already scanning its shares") from e
+        raise
     return True
+
+
+# --------------------------------------------------------------------------- #
+# Share audit: is this library actually searchable and browsable by others?
+# --------------------------------------------------------------------------- #
+# Almost every way a Soulseek share "works" while nobody can see it is silent
+# in slskd: an unreadable subdirectory is skipped (IgnoreInaccessible), a share
+# path that does not exist is logged and skipped, filters prune whole subtrees,
+# and the index is only rebuilt when the daemon scans. In all of those cases
+# slskd reports a *successful* scan of fewer — or no — files.
+#
+# What the network can see is slskd's own share state, so the audit reads that
+# (GET /application -> shares for the scan state, /shares for the live share
+# list, /options for what the running daemon was started with, /server for the
+# login) and compares it with the disk and with the config this app generates.
+# Nothing is inferred from intent: a daemon that does not answer, a config it
+# never loaded, an empty index and an index that is missing a file that is on
+# disk are each reported as their own state.
+
+# Worst first: the audit's status is the first of these that applies.
+_AUDIT_STATUS_RANK = (
+    "not_running", "not_logged_in", "unconfigured", "path_unreadable",
+    "config_mismatch", "scan_failed", "not_scanned", "scanning",
+    "empty_share", "unbrowsable", "misconfigured", "ok", "disabled",
+)
+_AUDIT_RANK = {name: i for i, name in enumerate(_AUDIT_STATUS_RANK)}
+
+# The directory names the reserved filters exclude — the disk walk prunes the
+# same ones so its file count is comparable with slskd's index (which always
+# skips hidden/system entries).
+_JUNK_DIR_NAMES = {".mlo", ".mlo_data", ".mlo_trash", ".mlo_downloads",
+                   ".data", "Data", "@eaDir", "#recycle", ".AppleDouble"}
+
+# The object slskd's share index is pulled with. A large library's index is
+# tens of megabytes and this runs from a button press, so the read is capped
+# and a capped read reports "could not verify" instead of a verdict it did not
+# observe.
+_PROBE_MAX_BYTES = 24 * 1024 * 1024
+# The disk walk that says how much there is to share: bounded, and memoized so
+# a tab that keeps refetching the share state does not re-walk the library.
+_DISK_WALK_MAX = 60000
+_DISK_DIR_MAX = 20000
+_DISK_WALK_TTL = 120.0
+_DISK_CACHE: dict = {}
+_DISK_LOCK = threading.Lock()
+
+
+def _live_options(cfg=None, timeout=5.0):
+    """slskd's live options (GET /options), {} when unreadable.
+
+    These are the options the RUNNING daemon was started with — the only way
+    to tell "the config this app writes" from "the config slskd is using"."""
+    try:
+        client = _http_client(cfg)
+        r = client.get("/options", headers={"Accept": "application/json"},
+                       timeout=timeout)
+        if r.status_code != 200:
+            return {}
+        return r.json() or {}
+    except Exception:
+        return {}
+
+
+def live_share_state(cfg=None):
+    """slskd's live share state, or None when it cannot be read.
+
+    slskd 0.26 publishes the scan state on GET /application (`shares`:
+    scanPending/scanning/ready/faulted/cancelled/scanProgress/directories/
+    files). `GET /shares` answers only the configured entries
+    ({host: [{localPath, remotePath, alias, directories, files, isExcluded}]})
+    and carries no scan state at all, which is why the UI reading a scan state
+    out of it never showed one. Per-share directories/files stay null until a
+    scan has updated the statistics."""
+    try:
+        info = _request("GET", "/application", timeout=5.0) or {}
+        shares = _request("GET", "/shares", timeout=10.0) or {}
+    except Exception:
+        return None
+    raw_scan = info.get("shares") if isinstance(info, dict) else None
+    raw_scan = raw_scan if isinstance(raw_scan, dict) else {}
+    scan = {
+        "scanning": bool(raw_scan.get("scanning")),
+        "pending": bool(raw_scan.get("scanPending")),
+        "ready": bool(raw_scan.get("ready")),
+        "faulted": bool(raw_scan.get("faulted")),
+        "cancelled": bool(raw_scan.get("cancelled")),
+        "progress": round(float(raw_scan.get("scanProgress") or 0.0) * 100.0, 1),
+        "files": int(raw_scan.get("files") or 0),
+        "directories": int(raw_scan.get("directories") or 0),
+        "hosts": [str(h) for h in (raw_scan.get("hosts") or [])],
+    }
+    entries = []
+    if isinstance(shares, dict):
+        for host, rows in shares.items():
+            for row in rows or []:
+                if not isinstance(row, dict):
+                    continue
+                entries.append({
+                    "host": str(host),
+                    "local": str(row.get("localPath") or ""),
+                    "remote": str(row.get("remotePath") or ""),
+                    "alias": str(row.get("alias") or ""),
+                    "files": int(row.get("files") or 0),
+                    "directories": int(row.get("directories") or 0),
+                    "excluded": bool(row.get("isExcluded")),
+                })
+    options = _live_options(cfg)
+    return {"scan": scan, "shares": entries, "options": options}
+
+
+def _share_log_lines(limit=6):
+    """slskd's own last lines about scanning shares, newest last.
+
+    slskd's REST API carries no scan timestamps or reasons, so the daemon's
+    words are read from the log this app starts it with (the same source the
+    login error comes from)."[HH:MM:SS LVL]" is its console format."""
+    log = os.path.join(os.path.dirname(config_path()), "slskd.log")
+    # slskd's own wording: "Starting shared file scan", "Scan found N files",
+    # "Found N shared directories", "Failed to scan share ...", and the scan
+    # error ("Encountered error during scan of shared files: ...").
+    keys = ("shared file", "shared directories", "scan found",
+            "failed to scan share", "share cache", "enumerating shared",
+            "sharing ", "excluding ")
+    try:
+        with open(log, "rb") as f:
+            lines = [l.strip() for l in
+                     f.read().decode("utf-8", "replace").splitlines() if l.strip()]
+    except OSError:
+        return []
+    out = [l for l in lines if any(k in l.lower() for k in keys)]
+    return [l[-300:] for l in out[-limit:]]
+
+
+def _walk_share_root(root, refresh=False):
+    """(audio_files, newest_audio_path, newest_mtime, truncated) under a root.
+
+    What the network *should* be able to see. Hidden entries and the same junk
+    names slskd's filters exclude are pruned, so the count is comparable with
+    the daemon's index. Bounded twice over (files and directories) so a share
+    that holds a whole NAS does not stall the audit, and memoized briefly: this
+    runs on every share-status fetch and the answer only feeds a comparison
+    with slskd's own count. `refresh` forces the walk for the browse probe,
+    which looks the file up by name — a file deleted in the last two minutes
+    must not be reported as missing from the index.
+
+    The newest file is what the probe asks slskd's index about — a file that
+    certainly exists on disk right now."""
+    key = os.path.normcase(os.path.abspath(root))
+    if not refresh:
+        with _DISK_LOCK:
+            hit = _DISK_CACHE.get(key)
+            if hit and time.time() - hit[0] < _DISK_WALK_TTL:
+                return hit[1]
+    count, visited, truncated = 0, 0, False
+    newest = (0.0, "")
+    for dirpath, dirnames, filenames in os.walk(root, onerror=lambda _e: None):
+        visited += 1
+        dirnames[:] = [d for d in dirnames
+                       if not d.startswith(".") and d not in _JUNK_DIR_NAMES]
+        for name in filenames:
+            if name.startswith(".") or not name.lower().endswith(tuple(LIB_AUDIO_EXTS)):
+                continue
+            count += 1
+            try:
+                mtime = os.stat(os.path.join(dirpath, name)).st_mtime
+            except OSError:
+                continue
+            if mtime > newest[0]:
+                newest = (mtime, os.path.join(dirpath, name))
+        if count >= _DISK_WALK_MAX or visited >= _DISK_DIR_MAX:
+            truncated = True
+            break
+    out = (count, newest[1], newest[0], truncated)
+    with _DISK_LOCK:
+        _DISK_CACHE[key] = (time.time(), out)
+        if len(_DISK_CACHE) > 8:
+            _DISK_CACHE.pop(min(_DISK_CACHE, key=lambda k: _DISK_CACHE[k][0]), None)
+    return out
+
+
+def _probe_file_rel(root, path):
+    """A disk file's path below its share root, in slskd's own separator."""
+    try:
+        rel = os.path.relpath(path, root)
+    except ValueError:
+        return ""
+    if rel.startswith(".."):
+        return ""
+    return rel.replace("/", "\\").replace(os.sep, "\\")
+
+
+def _index_has_file(dirs, root, path):
+    """Is the disk file `path` in the index slskd serves? -> (found, detail).
+
+    slskd names a directory by its REMOTE path (share alias + the folders below
+    it) and each entry's file by its bare name, so the check matches the
+    relative parent directory as a suffix — the alias cannot be assumed (it is
+    the folder's leaf name, or an explicit one where two shares collide)."""
+    rel = _probe_file_rel(root, path)
+    if not rel:
+        return False, f"{path} is outside the shared folder {root}"
+    parent, _, name = rel.rpartition("\\")
+    target = parent.lower()
+    size = 0
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        pass
+    scanned = 0
+    for row in dirs:
+        scanned += len(row.get("files") or [])
+        d = str(row.get("directory") or "").lower().replace("/", "\\")
+        if target and not (d == target or d.endswith("\\" + target)):
+            continue
+        for f in row.get("files") or []:
+            if str(f.get("filename") or "").split("\\")[-1].split("/")[-1].lower() != name.lower():
+                continue
+            got = int(f.get("size") or 0)
+            if size and got and got != size:
+                return False, (f"{name} is in the index but its size differs "
+                               f"(index: {got} bytes, disk: {size} bytes)")
+            return True, f"{rel} is in the index slskd serves"
+    return False, (f"{rel} is not in the index slskd serves "
+                   f"({len(dirs)} folders / {scanned} files were read)")
+
+
+def _share_contents(cfg=None, limit_bytes=_PROBE_MAX_BYTES):
+    """slskd's share index (GET /shares/contents) -> (dirs, truncated, error).
+
+    This is the tree slskd answers a browse with, so it is the honest way to
+    ask "can someone else see my files". [] with `error` set means it could not
+    be read (slskd's or httpx's own words)."""
+    client = _http_client(cfg)
+    try:
+        with client.stream("GET", "/shares/contents", headers=_headers(),
+                           timeout=60.0) as r:
+            if r.status_code >= 300:
+                r.read()
+                return [], False, (_error_text(r) or f"slskd answered {r.status_code}")
+            chunks, size = [], 0
+            for chunk in r.iter_bytes():
+                chunks.append(chunk)
+                size += len(chunk)
+                if size > limit_bytes:
+                    return [], True, ""
+            body = b"".join(chunks)
+    except Exception as e:
+        return [], False, " ".join(str(e).split())[:200]
+    if not body:
+        return [], False, ""
+    try:
+        payload = json.loads(body.decode("utf-8", "replace"))
+    except ValueError:
+        return [], False, "slskd's share index was not valid JSON"
+    return _normalize_browse(payload), False, ""
+
+
+def share_audit(cfg=None, probe=False):
+    """What other Soulseek users can find, browse and download right now.
+
+    `status` names one failure mode per distinct cause (no share configured, a
+    folder slskd cannot read, a config the running daemon never loaded, a scan
+    that failed, a scan that never finished, an index with no files, an index
+    that does not hold a file that is on disk) so the UI can say what is
+    actually wrong instead of "not sharing". `probe=True` additionally pulls
+    slskd's own share index and looks for a file that is on the disk.
+
+    Every claim here is read back from slskd or from the filesystem; nothing is
+    reported as working that was not observed working."""
+    cfg = cfg or load_config()
+    problems, notes, fired = [], [], set()
+
+    def add(status, code, message, hint=""):
+        fired.add(status)
+        for p in problems:
+            if p["code"] == code and p["message"] == message:
+                return
+        problems.append({"code": code, "message": message, "hint": hint})
+
+    def note(message):
+        if message not in notes:
+            notes.append(message)
+
+    entries, dropped = _share_entries(cfg)
+    bad_filters = invalid_share_filters(cfg)
+    applied = [x.strip("'") for x in share_exclude(cfg)]
+    audit = {
+        "ok": False,
+        "status": "ok",
+        "summary": "",
+        "problems": problems,
+        "notes": notes,
+        "shares": {
+            "configured": [{"path": p, "alias": a} for p, a in entries],
+            "live": [],
+            "mismatch": False,
+            "dropped": [{"path": p, "reason": r} for p, r in dropped],
+        },
+        "filters": {
+            "applied": applied,
+            "invalid": [{"pattern": p, "reason": r} for p, r in bad_filters],
+            "mismatch": False,
+        },
+        "scan": {"state": "unknown", "scanning": False, "pending": False,
+                 "ready": False, "faulted": False, "cancelled": False,
+                 "progress": 0.0, "files": 0, "directories": 0, "log": []},
+        "disk": {"roots": [], "audio_files": 0, "truncated": False,
+                 "probe_file": ""},
+        "browse": {"checked": False, "ok": None, "directories": 0, "detail": ""},
+        "port": {"listen_port": _int_setting(cfg, "soulseek_listen_port", 50000),
+                 "container": False},
+        "running": False,
+    }
+
+    if not bool(cfg.get("soulseek_share_library", True)):
+        audit["status"] = "disabled"
+        audit["summary"] = ("Sharing is switched off in settings — this library is "
+                            "not offered to the Soulseek network.")
+        audit["ok"] = True
+        # ...unless the daemon is still serving the old list: the share is off in
+        # the config, not in the process, and "switched off" must not be claimed
+        # while strangers can still browse it.
+        if entries and web_up(cfg):
+            live = live_share_state(cfg)
+            audit["running"] = live is not None
+            if live and live["shares"]:
+                audit["shares"]["live"] = live["shares"]
+                audit["scan"].update(live["scan"])
+                audit["status"] = "config_mismatch"
+                audit["ok"] = False
+                audit["summary"] = ("Sharing is switched off in settings, but the "
+                                    "running slskd still serves "
+                                    f"{len(live['shares'])} shared folder(s).")
+                add("config_mismatch", "still_sharing",
+                    "slskd is still sharing this library: its configuration is "
+                    "read at boot.",
+                    "Restart slskd (or save the share list) to stop sharing, or "
+                    "turn the setting back on.")
+        return audit
+
+    def finish():
+        status = min(fired, key=lambda s: _AUDIT_RANK.get(s, 0)) if fired else "ok"
+        scan = audit["scan"]
+        disk = audit["disk"]
+        root = entries[0][0] if entries else ""
+        if status == "ok":
+            summary = (f"slskd is sharing {scan['files']} files in "
+                       f"{scan['directories']} folders — other users can search, "
+                       f"browse and download them.")
+        elif status == "disabled":
+            summary = "Sharing is switched off in settings."
+        elif status == "not_running":
+            summary = ("slskd is not running, so nothing is shared right now "
+                       "(and searches fail too).")
+        elif status == "not_logged_in":
+            summary = ("slskd is not signed in to the Soulseek network — while it "
+                       "is offline nobody can find or browse this share.")
+        elif status == "unconfigured":
+            summary = "No folder is shared, so the network cannot see this library."
+        elif status == "path_unreadable":
+            summary = "A shared folder cannot be read, so slskd shares nothing from it."
+        elif status == "config_mismatch":
+            summary = ("slskd is running with a share list this app did not write — "
+                       "restart it to load the generated config.")
+        elif status == "scan_failed":
+            summary = "slskd's share scan failed, so its index is empty or stale."
+        elif status == "not_scanned":
+            summary = ("slskd has not finished indexing the shared folders yet — "
+                       "other users find nothing until it does.")
+        elif status == "scanning":
+            summary = (f"slskd is indexing the shared folders "
+                       f"({scan['progress']}% done) — the files it has reached "
+                       f"are already visible.")
+        elif status == "empty_share":
+            audio = disk["audio_files"]
+            summary = (f"slskd's index holds {scan['files']} files while {audio} "
+                       f"audio file{'s' if audio != 1 else ''} sit"
+                       f"{'s' if audio == 1 else ''} under {root} — other users "
+                       f"can browse nothing.")
+        elif status == "unbrowsable":
+            summary = ("slskd's share index did not answer for a file that is on "
+                       "disk — a browse of this share comes up short.")
+        elif status == "misconfigured":
+            summary = ("slskd is sharing, but part of the share configuration was "
+                       "left out of the generated config.")
+        audit["status"] = status
+        audit["ok"] = status == "ok"
+        audit["summary"] = summary
+        return audit
+
+    for path, reason in dropped:
+        add("misconfigured", "share_dropped",
+            f"Share folder left out of slskd's config: {path} ({reason}).",
+            "slskd validates its share list at boot and will not start on an "
+            "entry it cannot use, so this one is dropped. Fix the path in the "
+            "shared folders list.")
+    for pattern, reason in bad_filters:
+        add("misconfigured", "filter_invalid",
+            f"Share exclude pattern is not a valid regular expression and was "
+            f"left out: {pattern} ({reason}).",
+            "slskd refuses to start on an invalid filter, so it is not written "
+            "to its config. Remove or fix the pattern in settings.")
+
+    if not entries:
+        add("unconfigured", "no_share_dir", "No shared folder is configured.",
+            "Add the music folder in the list above (or set the music folder in "
+            "Settings) — without one slskd shares nothing.")
+        return finish()
+
+    # ---- the disk: what is there to share at all -------------------------- #
+    newest = (0.0, "", "")
+    for path, _alias in entries:
+        info = {"path": path, "exists": os.path.isdir(path), "readable": False,
+                "audio_files": 0}
+        if not info["exists"]:
+            add("path_unreadable", "share_missing",
+                f"{path} does not exist — slskd logs a warning and shares "
+                f"nothing from there.",
+                "Point the shared folder at the folder the music is actually in.")
+        else:
+            try:
+                with os.scandir(path) as it:
+                    next(it, None)
+                info["readable"] = True
+            except OSError as e:
+                add("path_unreadable", "share_unreadable",
+                    f"{path} cannot be read ({e.strerror or e}) — slskd shares "
+                    f"nothing from it.",
+                    "slskd runs as this app's user and needs READ access to the "
+                    "whole folder; an unreadable subfolder is skipped silently.")
+        if info["readable"]:
+            try:
+                count, newest_path, mtime, truncated = _walk_share_root(
+                    path, refresh=probe)
+            except OSError as e:
+                count, newest_path, mtime, truncated = 0, "", 0.0, False
+                add("path_unreadable", "share_unwalkable",
+                    f"{path} could not be walked ({e}).")
+            info["audio_files"] = count
+            if truncated:
+                audit["disk"]["truncated"] = True
+            if mtime > newest[0]:
+                newest = (mtime, newest_path, path)
+        audit["disk"]["roots"].append(info)
+    audit["disk"]["audio_files"] = sum(r["audio_files"] for r in audit["disk"]["roots"])
+    audit["disk"]["probe_file"] = newest[1]
+
+    # ---- is anything running to serve it? --------------------------------- #
+    if not web_up(cfg):
+        add("not_running", "slskd_down",
+            "slskd is not answering on its web port, so nothing is shared.",
+            "Press Start (or turn on Start with the app) — sharing lives in the "
+            "daemon.")
+        return finish()
+    audit["running"] = True
+    try:
+        from server.auth import in_container
+        audit["port"]["container"] = bool(in_container())
+    except Exception:
+        pass
+    if audit["port"]["container"]:
+        note("This app runs in a container: other users download from this share "
+             "over the Soulseek listen port, which has to be published by "
+             "docker-compose.yml (ports: \"<port>:<port>\") to the same port "
+             "configured here.")
+
+    live = live_share_state(cfg)
+    if live is None:
+        add("not_running", "share_state_unreadable",
+            "slskd answered, but its share state could not be read "
+            "(GET /application or /shares failed).",
+            "Check the backend log — slskd may be starting or refusing the API key.")
+        return finish()
+
+    scan, live_shares, options = live["scan"], live["shares"], live["options"]
+    audit["scan"].update(scan)
+    audit["scan"]["log"] = _share_log_lines()
+    audit["shares"]["live"] = live_shares
+    if scan["faulted"]:
+        audit["scan"]["state"] = "failed"
+    elif scan["cancelled"]:
+        audit["scan"]["state"] = "cancelled"
+    elif scan["scanning"]:
+        audit["scan"]["state"] = "scanning"
+    elif scan["pending"]:
+        audit["scan"]["state"] = "pending"
+    elif scan["ready"]:
+        audit["scan"]["state"] = "complete"
+    else:
+        audit["scan"]["state"] = "not_started"
+
+    flags = options.get("flags") if isinstance(options.get("flags"), dict) else {}
+    if flags.get("no_share_scan"):
+        add("not_scanned", "scan_disabled",
+            "slskd was started with `flags.no_share_scan`, so it never indexes "
+            "the shared folders.",
+            "That flag comes from a config this app does not generate — remove "
+            "it and restart slskd.")
+    if flags.get("no_connect") or flags.get("no_start"):
+        add("not_logged_in", "connection_disabled",
+            "slskd was started with "
+            f"`flags.{'no_connect' if flags.get('no_connect') else 'no_start'}`, "
+            "so it never connects to the Soulseek network.",
+            "A share nobody is signed in to cannot be searched, browsed or "
+            "downloaded. Remove the flag — this app never writes it — and "
+            "restart slskd.")
+    try:
+        server = server_state(cfg) or {}
+    except Exception as e:
+        server = {}
+        note(f"slskd's login state could not be read ({e}).")
+    if server and server.get("isLoggedIn") is False:
+        add("not_logged_in", "logged_out",
+            "slskd is not signed in to the Soulseek network.",
+            "While it is offline, nobody can find, browse or download from this "
+            "share. Sign in on this page.")
+
+    # ---- what the running daemon actually shares -------------------------- #
+    def covered(path):
+        """A live share entry that publishes `path` (same folder or a parent
+        of it), as slskd reports it."""
+        key = os.path.normcase(os.path.normpath(path))
+        for row in live_shares:
+            if not row["local"]:
+                continue
+            local = os.path.normcase(os.path.normpath(row["local"]))
+            if key == local or key.startswith(local.rstrip("\\/") + os.sep):
+                return row
+        return None
+
+    for path, _alias in entries:
+        # an EMPTY live list is the loudest mismatch of all: the daemon is up
+        # and sharing nothing, so nobody can browse anything
+        row = covered(path)
+        if row is None:
+            audit["shares"]["mismatch"] = True
+            add("config_mismatch", "share_not_live",
+                f"slskd is not sharing {path} — its live share list holds "
+                f"{len(live_shares)} other entr"
+                f"{'y' if len(live_shares) == 1 else 'ies'}.",
+                "slskd reads its share list at boot: restart it to load the "
+                "config this app just generated.")
+        elif row["excluded"]:
+            audit["shares"]["mismatch"] = True
+            add("config_mismatch", "share_excluded",
+                f"slskd has {path} EXCLUDED from the share "
+                f"({row['local']} with a '-' or '!' prefix).",
+                "Restart slskd so it reads the config this app generates.")
+    live_filters = options.get("shares", {}).get("filters") \
+        if isinstance(options.get("shares"), dict) else None
+    if isinstance(live_filters, list):
+        ours = sorted(str(x) for x in applied)
+        theirs = sorted(str(x) for x in live_filters)
+        if ours != theirs:
+            audit["filters"]["mismatch"] = True
+            audit["shares"]["mismatch"] = True
+            add("config_mismatch", "filters_stale",
+                f"slskd is filtering its shares with {len(theirs)} pattern(s), "
+                f"not the {len(ours)} this app generates.",
+                "Restart slskd to apply the generated config (a stale filter "
+                "can hide every file).")
+
+    # ---- the scan and the index ------------------------------------------- #
+    if scan["faulted"]:
+        last = audit["scan"]["log"][-1] if audit["scan"]["log"] else ""
+        add("scan_failed", "scan_faulted",
+            "slskd's share scan failed" + (f": {last}" if last else "."),
+            "The index stays empty or stale until a scan completes — press "
+            "Rescan and check the log line above.")
+    elif scan["cancelled"]:
+        add("scan_failed", "scan_cancelled",
+            "slskd's share scan was cancelled, so the index may be incomplete.",
+            "Press Rescan.")
+    if (scan["scanning"] or scan["pending"]) and not scan["faulted"]:
+        add("scanning", "scan_in_progress",
+            f"slskd is indexing the shared folders "
+            f"({scan['progress']}% done) — files become visible as the scan "
+            f"reaches them."
+            + (" A rescan is queued." if scan["pending"] and not scan["scanning"] else ""))
+    elif not scan["ready"] and not scan["files"]:
+        add("not_scanned", "no_scan_yet",
+            "slskd has not completed a share scan: its index holds no files.",
+            "Other users find nothing until the first scan finishes — start it "
+            "with Rescan and watch the log line above.")
+    elif not scan["files"] and not scan["scanning"]:
+        root = entries[0][0]
+        add("empty_share", "index_empty",
+            f"slskd's share scan reports 0 files while "
+            f"{audit['disk']['audio_files']} audio file(s) sit under {root}.",
+            "The usual causes are a share filter matching everything, a folder "
+            "the daemon cannot read, or a download folder shared instead of the "
+            "library.")
+    elif scan["files"] and audit["disk"]["audio_files"] >= 20 and \
+            scan["files"] < audit["disk"]["audio_files"] // 2:
+        add("misconfigured", "index_undercount",
+            f"slskd indexes {scan['files']} files but the shared folders hold "
+            f"{audit['disk']['audio_files']} audio files.",
+            "Part of the library is not being shared: an unreadable subfolder, "
+            "an exclude filter, or a folder that was not in the share list when "
+            "slskd scanned.")
+
+    # ---- can a browse actually be answered? ------------------------------- #
+    if probe:
+        audit["browse"]["checked"] = True
+        dirs, truncated, error = _share_contents(cfg)
+        if error:
+            audit["browse"]["ok"] = False
+            audit["browse"]["detail"] = error
+            add("unbrowsable", "browse_unreachable",
+                f"slskd's share index did not answer ({error}).",
+                "A browse request from another user fails the same way; check "
+                "the backend log and that slskd's web API is up.")
+        elif truncated:
+            audit["browse"]["detail"] = (
+                f"the share index is larger than the {_PROBE_MAX_BYTES // (1024 * 1024)} "
+                f"MB this check reads, so it was not verified")
+        elif not dirs:
+            audit["browse"]["ok"] = False
+            add("unbrowsable", "browse_empty",
+                "slskd's share index answered with no folders at all.",
+                "Nothing is in the index: see the scan state above.")
+        elif not audit["disk"]["probe_file"]:
+            audit["browse"]["detail"] = ("no audio file was found on disk to look "
+                                         "for in the index")
+        else:
+            audit["browse"]["directories"] = len(dirs)
+            found, detail = _index_has_file(dirs, newest[2] or entries[0][0],
+                                            audit["disk"]["probe_file"])
+            audit["browse"]["ok"] = found
+            audit["browse"]["detail"] = detail
+            if not found:
+                add("unbrowsable", "file_not_in_index",
+                    f"The index slskd serves does not hold a file that is on "
+                    f"disk: {detail}.",
+                    "Other users browsing this share do not see that file — "
+                    "rescan, and check the filters and permissions on its folder.")
+
+    return finish()
 
 
 # --------------------------------------------------------------------------- #

@@ -1,6 +1,6 @@
 {
   "identifier": "mobile",
-  "description": "Android/iOS capability for the main window: the mobile shell only hosts the web UI, so it gets the core commands and native notifications — no folder picker (no dialog permission) and no autostart, which do not exist there.",
+  "description": "Android/iOS capability for the main window: the mobile shell only hosts the web UI, so it gets the core commands and native notifications — no folder picker (no dialog permission) and no autostart, which do not exist there. There are no app commands to permit either: the shell is a client of a server the user runs.",
   "platforms": ["android", "iOS"],
   "windows": ["main"],
   "permissions": [

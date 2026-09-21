@@ -122,12 +122,6 @@ def _host_unreachable(host, reason):
 TTL_META = 1800.0        # artist/album metadata, images, descriptions, MBIDs
 TTL_CHART = 900.0        # charts (they move)
 
-# Per-album memo for `genre_lookup`: script 8 asks per TRACK, and the genre
-# chain (RYM, community sources, providers, MusicBrainz) must not run a dozen
-# times for one album.
-_GENRE_MEMO: dict = {}
-_GENRE_MEMO_LOCK = threading.Lock()
-
 
 def source_order(cfg, key, default):
     """Configured provider order for *key*, filtered to real providers.
@@ -1692,44 +1686,3 @@ def album_genres(artist, album, dz_id=None, cfg=None):
     return out
 
 
-def genre_lookup(artist, album, track_path=None, cfg=None):
-    """Genre names for one track/album — the hook script 8 completes GENRE with.
-
-    Delegates to ``integrations.genre_chain``, the ONE genre resolver (RYM →
-    community sources → streaming providers → MusicBrainz, merged and deduped,
-    capped at `mb_genre_count`), so a library-wide Auto tagging run and an
-    import write genres the same way. The merged names keep the spelling the
-    sources used; the writer that stores them canonicalizes (mlo.genres).
-
-    The answer is memoised per album for TTL_META: script 8 calls this hook
-    once PER TRACK, and a chain that reaches the network must not run a dozen
-    times for one album. Never raises — an offline machine returns [] and the
-    tag stays missing (grading then flags it, which is the honest outcome).
-    """
-    if cfg is None:
-        try:
-            from mlo.config import load_config
-            cfg = load_config()
-        except Exception:
-            cfg = {}
-    # The cap has ONE home (mlo.autotag.genre_count): a literal here drifts the
-    # moment `mb_genre_count` changes, and the value is clamped to its ceiling
-    # either way (it is Settings → Import's number).
-    from mlo.autotag import genre_count
-    limit = genre_count(cfg)
-    key = (_norm(artist), _norm(album), limit)
-    with _GENRE_MEMO_LOCK:
-        hit = _GENRE_MEMO.get(key)
-    if hit and time.time() - hit[0] < TTL_META:
-        return list(hit[1])
-    try:
-        names = integrations.genre_chain(artist=artist or "", album=album or "",
-                                         limit=limit, cfg=cfg).get("genres") or []
-    except Exception:
-        names = []
-    with _GENRE_MEMO_LOCK:
-        _GENRE_MEMO[key] = (time.time(), list(names))
-        if len(_GENRE_MEMO) > _CACHE_MAX:
-            oldest = min(_GENRE_MEMO.items(), key=lambda kv: kv[1][0])[0]
-            _GENRE_MEMO.pop(oldest, None)
-    return list(names)

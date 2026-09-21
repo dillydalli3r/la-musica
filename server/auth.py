@@ -807,8 +807,8 @@ def set_password(password: str, username: str = None) -> str:
 
 
 # Paths that answer without a session. Everything else under the API does not.
-# `/api/health` is what the launchers (tray.py, start_app.py, the Tauri shell)
-# probe to prove the port is OURS before adopting or killing it, and the
+# `/api/health` is what a client's setup wizard probes to prove the address
+# answers as la musica, and what the container's own HEALTHCHECK polls, and the
 # login screen needs `/api/auth/status` before it has a token. The SPA shell
 # itself is public by design: it is the same bytes for everyone and contains
 # no library data.

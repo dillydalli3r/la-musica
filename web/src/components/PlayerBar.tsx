@@ -302,6 +302,74 @@ export default function PlayerBar() {
       .catch((e) => toast.error(String(e)));
   };
 
+  // ---- ReplayGain: decided BEFORE a track makes a sound ------------------
+  // The gain has to be in the WebAudio stage by the time the first sample is
+  // audible: starting the element at the outgoing track's gain (or unity) and
+  // correcting it once /api/replaygain answers is the "really loud for a
+  // second, then cut to the right level" the issue reports. So the load below
+  // resolves this track's gain and only then calls play(), and the gapless
+  // handover element already carries the next track's gain from its preload.
+  //
+  // The gain is fetched per track for the mode saved in the config (album mode
+  // asks for the album gain, off means unity) — the backend already adds
+  // `replaygain_preamp_db` and the clip protection, so the returned dB is
+  // exactly what goes into the gain stage. Untagged tracks play at unity.
+  // A settled gain is cached per path and dropped when mode or preamp changes.
+  const { data: cfg } = useQuery({ queryKey: ["config"], queryFn: api.config, staleTime: 5 * 60 * 1000 });
+  const rgModeRaw = cfg?.replaygain_mode;
+  const rgMode: RgMode = rgModeRaw === "album" || rgModeRaw === "off" ? rgModeRaw : "track";
+  const rgPreamp = typeof cfg?.replaygain_preamp_db === "number" ? cfg.replaygain_preamp_db : 0;
+  const rgCache = useRef<Map<string, RgResult>>(new Map());
+  // One in-flight request per path: the load (which needs the gain before it
+  // plays) and the readout effect below share it, so awaiting a track's gain
+  // costs one round trip, not two.
+  const rgPending = useRef<Map<string, Promise<RgResult | null>>>(new Map());
+  // Bumped whenever the cached gains stop being valid (a mode/preamp change),
+  // so an answer that started under the old settings is never applied.
+  const rgGen = useRef(0);
+  const rgFor = (path: string): Promise<RgResult | null> => {
+    const hit = rgCache.current.get(path);
+    if (hit) return Promise.resolve(hit);
+    const flight = rgPending.current.get(path);
+    if (flight) return flight;
+    // The generation this answer belongs to: a mode/preamp edit while it is
+    // in flight means the value never even enters the cache.
+    const gen = rgGen.current;
+    const p = api
+      .replaygain(path, rgMode)
+      .then((r) => {
+        // Unity is never cached: with on-demand analysis the backend answers
+        // "not measured yet" and finishes the decode in the background, so the
+        // next load asks again (one tag read) instead of pinning unity onto
+        // this path for the whole session. A failure reads as unity too.
+        if (r.gain !== null && rgGen.current === gen) rgCache.current.set(path, r);
+        return r;
+      })
+      .catch(() => null)
+      .finally(() => rgPending.current.delete(path));
+    rgPending.current.set(path, p);
+    return p;
+  };
+  /** Install a path's gain on whichever element holds that path — never on the
+   *  other one: it may be holding the preloaded next track, and writing this
+   *  track's gain there is the wrong-loudness handover. */
+  const applyGainForPath = (path: string, gain: number | null) => {
+    if (pathOnA.current === path && aRef.current) applyReplayGain(aRef.current, gain);
+    if (pathOnB.current === path && bRef.current) applyReplayGain(bRef.current, gain);
+  };
+  /** Re-assert the gain that belongs to the track an element holds, read from
+   *  the cache; unity when that path has no settled gain. Never another
+   *  track's value — that is the loud start this stage exists to avoid.
+   *  `immediate` is for the gapless handover, which calls this on the element
+   *  it is about to start. */
+  const applyElGain = (el: HTMLAudioElement, immediate = false) => {
+    const path = el === aRef.current ? pathOnA.current : pathOnB.current;
+    const hit = path ? rgCache.current.get(path) : undefined;
+    applyReplayGain(el, hit?.gain ?? null, immediate);
+  };
+  // The result behind that gain — drives the readout beside the volume bar.
+  const [rgRes, setRgRes] = useState<RgResult | null>(null);
+
   // Reload + play whenever the queue identity or index changes (keyed on
   // queueId so a fresh queue at the same index still reloads). Skipped when
   // the gapless swap already loaded and started the next track.
@@ -386,8 +454,12 @@ export default function PlayerBar() {
     // path gets the stream URL exactly as before; the network case only pays
     // for one Cache Storage lookup.
     void (async () => {
-      const cached = await offlineMediaUrl(track.path);
-      // A quick next/previous while the lookup was in flight means a newer
+      const gen = rgGen.current;
+      // Both lookups run together, and the gain is INSTALLED BEFORE play():
+      // see the ReplayGain block above for why an element must never start
+      // on the previous track's gain and be corrected afterwards.
+      const [cached, r] = await Promise.all([offlineMediaUrl(track.path), rgFor(track.path)]);
+      // A quick next/previous while the lookups were in flight means a newer
       // load owns this element's src by now — that one wins.
       if (loadedPath.current !== track.path) return;
       if (!cached && isOffline()) {
@@ -397,7 +469,13 @@ export default function PlayerBar() {
       el.src = cached ?? api.streamUrl(track.path);
       setElPath(el, track.path);
       el.playbackRate = speed; // fresh <src> resets the rate
-      applyReplayGain(el, rgDb.current);
+      // The element is reused from the previous track, so its `paused` is not
+      // a reliable "silent yet" signal here: immediate steps the gain in, and
+      // the first sample of the track already carries its own value. An edit
+      // made while the lookup was in flight invalidated this answer (gen) and
+      // unity is the honest value — the readout effect installs the new
+      // setting on the spot.
+      applyReplayGain(el, rgGen.current === gen ? r?.gain ?? null : null, true);
       el.play().catch(() => {});
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -437,6 +515,17 @@ export default function PlayerBar() {
       }
       idle.src = cached ?? api.streamUrl(nextPath);
       setElPath(idle, nextPath);
+      // The handover swaps this element in with no further load step, so the
+      // next track's gain is fetched NOW — seconds of slack before it plays —
+      // while the element is still paused, so the value is stepped in. After
+      // a handover that already happened this lands on the playing element
+      // with the value it started on, which is no audible change.
+      const gen = rgGen.current;
+      void rgFor(nextPath).then((r) => {
+        // A mode/preamp edit while this was in flight owns the gain stage now.
+        if (rgGen.current !== gen) return;
+        applyGainForPath(nextPath, r?.gain ?? null);
+      });
       idle.load();
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -471,56 +560,41 @@ export default function PlayerBar() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isVideo, current?.path, preferTranscode]);
 
-  // ReplayGain: fetched per track for the mode saved in the config (album
-  // mode asks for the album gain, off means unity) and applied to the WebAudio
-  // gain stage of BOTH elements (the gapless handover may swap them mid-album)
-  // so loudness stays even across tracks. The backend already adds
-  // `replaygain_preamp_db` and the clip protection, so the returned dB is
-  // exactly what goes into the gain stage. Untagged tracks play at unity.
-  // Results are cached per path and dropped when mode or preamp changes.
-  const { data: cfg } = useQuery({ queryKey: ["config"], queryFn: api.config, staleTime: 5 * 60 * 1000 });
-  const rgModeRaw = cfg?.replaygain_mode;
-  const rgMode: RgMode = rgModeRaw === "album" || rgModeRaw === "off" ? rgModeRaw : "track";
-  const rgPreamp = typeof cfg?.replaygain_preamp_db === "number" ? cfg.replaygain_preamp_db : 0;
-  const rgCache = useRef<Map<string, RgResult>>(new Map());
-  // Last applied gain; re-applied when a WebAudio chain attaches (play).
-  const rgDb = useRef<number | null>(null);
-  // The result behind that gain — drives the readout beside the volume bar.
-  const [rgRes, setRgRes] = useState<RgResult | null>(null);
-  const applyRG = (r: RgResult | null) => {
-    rgDb.current = r?.gain ?? null;
-    applyReplayGain(aRef.current!, rgDb.current);
-    applyReplayGain(bRef.current!, rgDb.current);
-    setRgRes(r);
-  };
   // Both mode and preamp are baked into the returned dB — a change invalidates
-  // every cached gain. Declared before the fetch effect so the clear runs first.
+  // every cached gain (and the generation, so answers already in flight are
+  // not applied under the new settings). The cache clear is declared before
+  // the fetch effect so it runs first.
   useEffect(() => {
+    rgGen.current += 1;
     rgCache.current.clear();
+    rgPending.current.clear();
   }, [rgMode, rgPreamp]);
+  // The gain readout for the current track — and the path a mode/preamp edit
+  // takes to reach the element that is playing right now. The gain itself was
+  // already installed before play by the load above; this never moves the
+  // stage under a track from a stale answer.
   useEffect(() => {
     if (!current) {
-      applyRG(null);
+      setRgRes(null);
       return;
     }
     const path = current.path;
-    const cached = rgCache.current.get(path);
-    if (cached) {
-      applyRG(cached);
+    const gen = rgGen.current;
+    const hit = rgCache.current.get(path);
+    if (hit) {
+      applyGainForPath(path, hit.gain);
+      setRgRes(hit);
       return;
     }
     let dead = false;
-    api
-      .replaygain(path, rgMode)
-      .then((r) => {
-        if (!dead) {
-          rgCache.current.set(path, r);
-          applyRG(r);
-        }
-      })
-      .catch(() => {
-        if (!dead) applyRG(null);
-      });
+    void rgFor(path).then((r) => {
+      // The user moved on (or edited the settings) while this was in flight:
+      // dropping it here is what keeps a slower answer for the previous track
+      // from landing on the one that is playing now.
+      if (dead || rgGen.current !== gen || queue[index]?.path !== path) return;
+      applyGainForPath(path, r?.gain ?? null);
+      setRgRes(r);
+    });
     return () => {
       dead = true;
     };
@@ -765,6 +839,11 @@ export default function PlayerBar() {
       if (el) {
         el.playbackRate = speed;
         el.volume = vol;
+        // This element was loaded by the preload, which installed the next
+        // track's gain on it — re-assert it from the cache first anyway: the
+        // handover is the one place a track starts with no load step in
+        // between, so a cold cache entry here would be an audible burst.
+        applyElGain(el, true);
         el.play().catch(() => {});
       }
       return;
@@ -814,9 +893,9 @@ export default function PlayerBar() {
             can read them; attachAnalyser resumes the context it opens, so the
             very first play is not read from a suspended (all-zero) graph */}
         <audio ref={aRef} hidden crossOrigin="anonymous" onTimeUpdate={onTime} onLoadedMetadata={onMeta} onEnded={handleEnded}
-          onPlay={(e) => { attachAnalyser(e.currentTarget); applyReplayGain(e.currentTarget, rgDb.current); }} />
+          onPlay={(e) => { attachAnalyser(e.currentTarget); applyElGain(e.currentTarget); }} />
         <audio ref={bRef} hidden crossOrigin="anonymous" onTimeUpdate={onTime} onLoadedMetadata={onMeta} onEnded={handleEnded}
-          onPlay={(e) => { attachAnalyser(e.currentTarget); applyReplayGain(e.currentTarget, rgDb.current); }} />
+          onPlay={(e) => { attachAnalyser(e.currentTarget); applyElGain(e.currentTarget); }} />
 
         {/* full layout from tablet width up: cover+title / centered seek /
             actions+volume, balanced 1fr-auto-1fr so the seek bar sits dead

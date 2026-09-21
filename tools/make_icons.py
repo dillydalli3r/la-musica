@@ -7,8 +7,8 @@ here so the source of the source is not a mystery. What this script writes
 from it:
 
 - ``web/public/icon.png`` (512x512, square centre-crop + LANCZOS). It is the
-  browser favicon (``web/index.html``), the sidebar brand and the copy
-  ``tray.py`` puts in the tray.
+  browser favicon (``web/index.html``), the sidebar brand and the home-screen
+  icon the manifest points at.
 - everything else — the desktop set (``icons/*.png``, ``icon.ico``,
   ``icon.icns``, the Windows Store logos), ``icons/ios/**`` and
   ``icons/android/**`` — is left to ``tools/make_tauri_icons.py``, which

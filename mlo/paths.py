@@ -229,6 +229,72 @@ def trash_dir(music_folder=None, user=""):
     return os.path.join(root, user_segment(user)) if root else None
 
 
+# The bin's origin manifest: server/main.py writes and reads the same file
+# (same name, same schema — {"version": 1, "entries": {name: {origin, at}}}),
+# because the Trash page restores an entry to the path recorded here.
+TRASH_MANIFEST_NAME = ".mlo_manifest.json"
+
+
+def _trash_manifest_path(bin_dir):
+    return os.path.join(bin_dir, TRASH_MANIFEST_NAME)
+
+
+def _trash_manifest_entries(bin_dir):
+    """{entry name: {"origin", "at"}}; a missing or corrupt manifest reads as
+    empty — entries trashed before the file existed are a normal state."""
+    try:
+        with open(_trash_manifest_path(bin_dir), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    entries = data.get("entries") if isinstance(data, dict) else None
+    return entries if isinstance(entries, dict) else {}
+
+
+def trash_file(path, music_folder=None, user="") -> str:
+    """Move one FILE into the app's trash bin; returns its new path ("" on
+    failure). Nothing is deleted — this is the same destination and origin
+    manifest server.main's "Remove from library" uses, so the Trash page
+    lists the entry and can put it back where it came from.
+
+    A same-named entry already in the bin gets the "(2)" suffix the album
+    move uses, so a second conversion of a regenerated source never
+    overwrites the master already in there.
+    """
+    bin_dir = trash_dir(music_folder, user)
+    src = os.path.abspath(path)
+    if not bin_dir or not os.path.isfile(src):
+        return ""
+    try:
+        os.makedirs(bin_dir, exist_ok=True)
+    except OSError:
+        return ""
+    name = os.path.basename(src)
+    dest = os.path.join(bin_dir, name)
+    n = 2
+    while os.path.exists(dest):
+        dest = os.path.join(bin_dir, f"{os.path.splitext(name)[0]} ({n})"
+                                    f"{os.path.splitext(name)[1]}")
+        n += 1
+    if not move_path(src, dest):
+        return ""
+    entries = _trash_manifest_entries(bin_dir)
+    entries[os.path.basename(dest)] = {
+        "origin": src.replace("\\", "/"),
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    try:
+        tmp = _trash_manifest_path(bin_dir) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "entries": entries}, f)
+        os.replace(tmp, _trash_manifest_path(bin_dir))
+    except OSError:
+        # The file IS in the bin either way; without a record the Trash page
+        # asks for a destination instead of guessing one.
+        pass
+    return dest
+
+
 def previous_state_dirs(music_folder=None):
     """State dirs of the PREVIOUS music folder, as recorded in the stub.
 
@@ -294,7 +360,13 @@ def ensure_data_dirs():
         return f"{e}"
 
 
-AUDIO_EXTS = (".flac", ".ogg", ".opus", ".aac", ".m4a", ".mp3")
+AUDIO_EXTS = (".flac", ".ogg", ".opus", ".aac", ".m4a", ".mp3",
+              # WAV/AIFF are library AUDIO when the codec target is one of
+              # them (library_codec = wav/aiff): a converted file nothing
+              # grades, tags or scans is not a library file, and the whole
+              # point of that setting is a PCM library. They were export-only
+              # before, which is why they were absent here.
+              ".wav", ".aif", ".aiff")
 
 # Music-video containers the library treats as first-class tracks. They
 # appear in album tracklists (a disc of music videos is still a disc),

@@ -5,6 +5,7 @@ import { api, deviceUnavailable, installSummary, unavailableFeatures } from "../
 import { toast } from "../store";
 import PageHeader from "../components/PageHeader";
 import { EmptyState } from "../components/Badges";
+import StorageCard from "../components/StorageCard";
 
 type DepTool = {
   key: string;
@@ -163,6 +164,8 @@ export default function DependenciesPage() {
           {unavailable.length === 1 ? "" : "s"} need a tool this device can start.
         </div>
       )}
+
+      <StorageCard />
 
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-zinc-500">
         <span>

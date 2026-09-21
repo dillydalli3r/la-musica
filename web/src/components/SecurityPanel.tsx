@@ -1,22 +1,11 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { HardDrive, KeyRound, Loader2, LogOut, Server, ShieldCheck, Trash2, UserPlus, Wand2 } from "lucide-react";
+import { KeyRound, Loader2, LogOut, Server, ShieldCheck, Trash2, UserPlus, Wand2 } from "lucide-react";
 import { api, IN_TAURI, normalizeServerUrl, serverUrl, setServerUrl, setToken } from "../api";
 import ConfirmButton from "./ConfirmButton";
-import BackgroundHostingToggle from "./BackgroundHostingToggle";
 import ServerVersionNotice from "./ServerVersionNotice";
 import { useI18n } from "../lib/i18n";
-import {
-  hostOnDeviceUrl,
-  isClientShell,
-  isHostingOnThisDevice,
-  localBackendSummary,
-  probeLocalBackend,
-  probeServer,
-  resetClientSetup,
-  type LocalBackend,
-  type ProbeResult,
-} from "../lib/clientSetup";
+import { isClientShell, probeServer, resetClientSetup, type ProbeResult } from "../lib/clientSetup";
 import { toast } from "../store";
 
 /** Settings → Security: the password, this client's session, and the facts a
@@ -35,26 +24,9 @@ export default function SecurityPanel() {
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
-  const [mode, setMode] = useState<"server" | "host">(() => (isHostingOnThisDevice() ? "host" : "server"));
   const [address, setAddress] = useState(serverUrl());
   const [probe, setProbe] = useState<ProbeResult | null>(null);
   const [testing, setTesting] = useState(false);
-  // What this device's own address answers, when the client is a shell. The
-  // browser build never asks: for it "this device" IS the origin that served
-  // the page, which is alive by definition.
-  const [local, setLocal] = useState<LocalBackend | null>(null);
-  useEffect(() => {
-    let live = true;
-    probeLocalBackend().then((r) => {
-      if (live) setLocal(r);
-    });
-    return () => {
-      live = false;
-    };
-  }, []);
-  const hostPossible = !isClientShell() || local?.possible === true;
-  const activeMode = hostPossible ? mode : "server";
-  const hostNote = localBackendSummary(local?.capabilities ?? null);
   const status = useQuery({
     queryKey: ["auth", "status"],
     queryFn: api.authStatus,
@@ -107,13 +79,12 @@ export default function SecurityPanel() {
     }
   };
 
-  /** Probe whichever address the chosen mode means, so Save can only be
-   *  pressed for an address that has actually answered — the same rule the
-   *  wizard applies, and the reason a wrong address here cannot leave a
-   *  client pointed at nothing. */
+  /** Probe the address so Save can only be pressed for a server that has
+   *  actually answered — the same rule the wizard applies, and the reason a
+   *  wrong address here cannot leave a client pointed at nothing. */
   const test = async () => {
-    const target = activeMode === "host" ? hostOnDeviceUrl() : normalizeServerUrl(address);
-    if (activeMode === "server") setAddress(target);
+    const target = normalizeServerUrl(address);
+    setAddress(target);
     setTesting(true);
     setProbe(null);
     const r = await probeServer(target);
@@ -122,7 +93,7 @@ export default function SecurityPanel() {
   };
 
   const save = () => {
-    setServerUrl(activeMode === "host" ? hostOnDeviceUrl() : normalizeServerUrl(address));
+    setServerUrl(normalizeServerUrl(address));
     // Reload rather than re-point by hand: the API base, every cached query and
     // the event socket are fixed when the module loads, and the session token
     // belongs to the server we just left.
@@ -183,78 +154,38 @@ export default function SecurityPanel() {
           {t("settings.connection")}
         </div>
         <div className="rounded-md border border-border bg-zinc-950/40 px-3 py-2 space-y-2">
-          <div className="flex items-center justify-between gap-3 text-xs text-zinc-300">
-            {activeMode === "host" ? <HardDrive className="h-3.5 w-3.5" /> : <Server className="h-3.5 w-3.5" />}
-            <select
-              className="input tap !w-auto !py-1 tap"
-              aria-label={t("settings.connection")}
-              value={activeMode}
-              onChange={(e) => {
-                setMode(e.target.value as "server" | "host");
-                setProbe(null); // the other mode's answer says nothing about this one
-              }}
-            >
-              <option value="server">{t("client.mode_connect")}</option>
-              {/* Offered only when a backend of this device's own answers
-                  (see probeLocalBackend) — the browser build keeps it, where
-                  "this device" is the origin that served the page. */}
-              {hostPossible && <option value="host">{t("client.mode_host")}</option>}
-            </select>
-          </div>
-
-          {local && !hostPossible && (
-            <p className="text-[11px] text-zinc-500 leading-relaxed">
-              {t("client.host_impossible", { reason: local.error || "" })}
-            </p>
-          )}
-
-          {activeMode === "server" ? (
-            <div className="space-y-1">
-              <div className="flex gap-2">
-                <input
-                  className="input font-mono text-xs"
-                  value={address}
-                  onChange={(e) => {
-                    setAddress(e.target.value);
-                    setProbe(null); // a changed address makes the old answer meaningless
-                  }}
-                  placeholder="http://127.0.0.1:8000"
-                  spellCheck={false}
-                  autoComplete="off"
-                />
-                <button
-                  type="button"
-                  className="btn-ghost tap !py-1.5 text-xs shrink-0"
-                  onClick={() => void test()}
-                  disabled={testing || !address.trim()}
-                >
-                  {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Server className="h-3.5 w-3.5" />}
-                  {t("client.test")}
-                </button>
-              </div>
-              {normalizeServerUrl(address) && normalizeServerUrl(address) !== address.trim() && (
-                <div className="text-[11px] text-zinc-500 font-mono">→ {normalizeServerUrl(address)}</div>
-              )}
-              <p className="text-[11px] text-zinc-600 leading-relaxed">{t("auth.server_address_help")}</p>
-            </div>
-          ) : (
-            <div className="space-y-1">
-              <div className="font-mono text-[11px] text-zinc-400 break-all">
-                {hostOnDeviceUrl() || window.location.origin}
-              </div>
-              <p className="text-[11px] text-zinc-600 leading-relaxed">{hostNote ?? t("client.host_help")}</p>
-              <BackgroundHostingToggle caps={local?.capabilities ?? null} />
+          {/* One question: where the server runs. A shell hosts no backend of
+              its own any more, so there is no "on this device" answer to
+              choose between — an address that does not answer is the whole
+              failure mode, and Test is the one thing that settles it. */}
+          <div className="space-y-1">
+            <div className="flex gap-2">
+              <input
+                className="input font-mono text-xs"
+                value={address}
+                onChange={(e) => {
+                  setAddress(e.target.value);
+                  setProbe(null); // a changed address makes the old answer meaningless
+                }}
+                placeholder="http://127.0.0.1:8000"
+                spellCheck={false}
+                autoComplete="off"
+              />
               <button
                 type="button"
-                className="btn-ghost tap !py-1.5 text-xs"
+                className="btn-ghost tap !py-1.5 text-xs shrink-0"
                 onClick={() => void test()}
-                disabled={testing}
+                disabled={testing || !address.trim()}
               >
                 {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Server className="h-3.5 w-3.5" />}
                 {t("client.test")}
               </button>
             </div>
-          )}
+            {normalizeServerUrl(address) && normalizeServerUrl(address) !== address.trim() && (
+              <div className="text-[11px] text-zinc-500 font-mono">→ {normalizeServerUrl(address)}</div>
+            )}
+            <p className="text-[11px] text-zinc-600 leading-relaxed">{t("auth.server_address_help")}</p>
+          </div>
 
           {probe &&
             (probe.ok ? (

@@ -1,0 +1,419 @@
+import 'dart:convert';
+
+import 'package:http/http.dart' as http;
+
+import 'models.dart';
+
+/// The server answered with an error the caller should show as-is.
+class ApiException implements Exception {
+  ApiException(this.status, this.message);
+
+  final int status;
+  final String message;
+
+  /// The session is gone or was never established — the shell shows the login
+  /// screen instead of an error toast.
+  bool get isAuth => status == 401 || status == 403;
+
+  @override
+  String toString() => message.isEmpty ? 'HTTP $status' : message;
+}
+
+/// The `/api/replaygain` answer: the dB the player must apply before the first
+/// sample, and where that number came from.
+class ReplayGain {
+  ReplayGain({
+    this.gain,
+    this.peak,
+    this.mode = 'track',
+    this.source,
+    this.analyzed = false,
+  });
+
+  final double? gain;
+  final double? peak;
+  final String mode;
+  final String? source;
+  final bool analyzed;
+
+  /// Linear amplitude for a dB gain — what a player's volume control takes.
+  /// Unity when the server sent nothing (an untagged file at `off`).
+  double get linear {
+    final db = gain ?? 0;
+    final value = _pow10(db / 20);
+    return value.clamp(0.0, 4.0);
+  }
+
+  static double _pow10(double exponent) {
+    // 10^x without dart:math's pow double-dispatch: exp(x * ln 10).
+    var result = 1.0;
+    var term = 1.0;
+    final x = exponent * 2.302585092994046;
+    for (var i = 1; i <= 12; i++) {
+      term *= x / i;
+      result += term;
+    }
+    return result;
+  }
+
+  factory ReplayGain.fromJson(Map<String, dynamic> json) => ReplayGain(
+    gain: (json['gain'] as num?)?.toDouble(),
+    peak: (json['peak'] as num?)?.toDouble(),
+    mode: json['mode']?.toString() ?? 'track',
+    source: json['source']?.toString(),
+    analyzed: json['analyzed'] == true,
+  );
+}
+
+/// The auth state a client checks before showing a login screen.
+class AuthStatus {
+  AuthStatus({
+    this.hasPassword = false,
+    this.authenticated = false,
+    this.required = false,
+    this.gate = false,
+    this.local = false,
+    this.username = '',
+    this.setupHint = '',
+  });
+
+  final bool hasPassword;
+
+  /// "Does THIS request need to sign in?" — already true for a client that
+  /// does not (loopback, and the machine running the server), which is why a
+  /// local user is never shown a sign-in screen nobody needs.
+  final bool authenticated;
+
+  /// Whether this request is one the server wants authenticated.
+  final bool required;
+
+  /// The server-wide policy behind [required] — what a security panel shows.
+  final bool gate;
+  final bool local;
+  final String username;
+
+  /// A sentence for the UI when the configuration is unsafe, else "".
+  final String setupHint;
+
+  factory AuthStatus.fromJson(Map<String, dynamic> json) => AuthStatus(
+    hasPassword: json['has_password'] == true,
+    authenticated: json['authenticated'] == true,
+    required: json['required'] == true,
+    gate: json['gate'] == true,
+    local: json['local'] == true,
+    username: json['username']?.toString() ?? '',
+    setupHint: json['setup_hint']?.toString() ?? '',
+  );
+}
+
+/// The `/api/favorites` answer: the folder paths the user hearted, by kind.
+/// A favourite whose folder is gone comes back here too — dropping it is the
+/// client's job to explain, never to hide.
+class Favorites {
+  Favorites({
+    this.albums = const [],
+    this.artists = const [],
+    this.playlists = const [],
+  });
+
+  final List<String> albums;
+  final List<String> artists;
+  final List<String> playlists;
+
+  factory Favorites.fromJson(Map<String, dynamic> json) => Favorites(
+    albums: _paths(json['albums']),
+    artists: _paths(json['artists']),
+    playlists: _paths(json['playlists']),
+  );
+
+  static List<String> _paths(dynamic value) =>
+      value is List ? [for (final path in value) path.toString()] : const [];
+}
+
+/// The REST client for one server. Every method either returns the parsed
+/// payload or throws [ApiException] with the server's own message: a client
+/// that swallows an error is a client that lies about what it did.
+class ApiClient {
+  ApiClient({required String baseUrl, this.token, http.Client? client})
+    : baseUrl = _normalize(baseUrl),
+      _client = client ?? http.Client();
+
+  /// "" means "same origin" — the web build is served BY the server, so a
+  /// relative URL is both correct and immune to a changed address.
+  String baseUrl;
+  String? token;
+  final http.Client _client;
+
+  static String _normalize(String value) {
+    var url = value.trim();
+    if (url.isEmpty) return '';
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      url = 'http://$url';
+    }
+    while (url.endsWith('/')) {
+      url = url.substring(0, url.length - 1);
+    }
+    return url;
+  }
+
+  Uri uri(String path, [Map<String, String?>? query]) =>
+      Uri.parse('$baseUrl$path').replace(
+        queryParameters: query == null
+            ? null
+            : {
+                for (final entry in query.entries)
+                  if (entry.value != null) entry.key: entry.value!,
+              },
+      );
+
+  Map<String, String> get _headers => {
+    'Accept': 'application/json',
+    if (token != null && token!.isNotEmpty) 'Authorization': 'Bearer $token',
+  };
+
+  Future<dynamic> _send(
+    String method,
+    String path, {
+    Map<String, String?>? query,
+    Object? body,
+    Duration? timeout,
+  }) async {
+    final request = http.Request(method, uri(path, query));
+    request.headers.addAll(_headers);
+    if (body != null) {
+      request.headers['Content-Type'] = 'application/json';
+      request.body = jsonEncode(body);
+    }
+    final streamed = await _client
+        .send(request)
+        .timeout(timeout ?? const Duration(seconds: 30));
+    final response = await http.Response.fromStream(streamed);
+    if (response.statusCode >= 400) {
+      throw ApiException(response.statusCode, _errorMessage(response));
+    }
+    if (response.body.isEmpty) return null;
+    try {
+      return jsonDecode(utf8.decode(response.bodyBytes));
+    } on FormatException {
+      return response.body;
+    }
+  }
+
+  String _errorMessage(http.Response response) {
+    try {
+      final decoded = jsonDecode(utf8.decode(response.bodyBytes));
+      if (decoded is Map && decoded['detail'] != null) {
+        final detail = decoded['detail'];
+        if (detail is String) return detail;
+        return jsonEncode(detail);
+      }
+    } on FormatException {
+      // fall through to the raw body
+    }
+    final text = response.body.trim();
+    return text.isEmpty ? 'HTTP ${response.statusCode}' : text;
+  }
+
+  Future<dynamic> getJson(
+    String path, {
+    Map<String, String?>? query,
+    Duration? timeout,
+  }) => _send('GET', path, query: query, timeout: timeout);
+
+  Future<dynamic> postJson(
+    String path, {
+    Object? body,
+    Map<String, String?>? query,
+    Duration? timeout,
+  }) => _send('POST', path, body: body, query: query, timeout: timeout);
+
+  // ---- auth ---------------------------------------------------------------
+
+  Future<AuthStatus> authStatus() async => AuthStatus.fromJson(
+    await getJson('/api/auth/status') as Map<String, dynamic>,
+  );
+
+  /// Sign in. The server answers `{token, expires_at, session_days, username}`
+  /// and ALSO sets an HttpOnly cookie for browsers; this client keeps the
+  /// token and sends it as a bearer header, which is what a native shell does.
+  Future<String> login(String password, {String? username}) async {
+    final reply =
+        await postJson(
+              '/api/auth/login',
+              body: {
+                'password': password,
+                if (username != null && username.isNotEmpty)
+                  'username': username,
+              },
+            )
+            as Map<String, dynamic>;
+    return reply['token']?.toString() ?? '';
+  }
+
+  /// First run: set the password (and the first user) on a fresh server.
+  Future<String> setup(
+    String password, {
+    String? username,
+    int? sessionDays,
+  }) async {
+    final reply =
+        await postJson(
+              '/api/auth/setup',
+              body: {
+                'password': password,
+                if (username != null && username.isNotEmpty)
+                  'username': username,
+                if (sessionDays != null) 'session_days': sessionDays,
+              },
+            )
+            as Map<String, dynamic>;
+    return reply['token']?.toString() ?? '';
+  }
+
+  Future<void> logout() async {
+    try {
+      await postJson('/api/auth/logout');
+    } on ApiException {
+      // A session the server already forgot is still a signed-out client.
+    }
+  }
+
+  // ---- library ------------------------------------------------------------
+
+  Future<Map<String, dynamic>> health() async =>
+      (await getJson('/api/health') as Map).cast<String, dynamic>();
+
+  Future<Library> library() async => Library.fromJson(
+    await getJson('/api/library', timeout: const Duration(seconds: 120))
+        as Map<String, dynamic>,
+  );
+
+  Future<Album> album(String path) async => Album.fromJson(
+    await getJson('/api/album', query: {'path': path}) as Map<String, dynamic>,
+  );
+
+  Future<Artist> artist(String path) async => Artist.fromJson(
+    await getJson('/api/artist', query: {'path': path}) as Map<String, dynamic>,
+  );
+
+  Future<Map<String, String>> trackTags(String path) async {
+    final json = await getJson('/api/tags', query: {'path': path});
+    if (json is Map && json['tags'] is Map) {
+      return (json['tags'] as Map).map(
+        (k, v) => MapEntry(k.toString(), v?.toString() ?? ''),
+      );
+    }
+    return const {};
+  }
+
+  Future<List<Playlist>> playlists() async {
+    final json = await getJson('/api/playlists');
+    if (json is! List) return const [];
+    return json
+        .whereType<Map>()
+        .map((p) => Playlist.fromJson(p.cast<String, dynamic>()))
+        .toList();
+  }
+
+  Future<Playlist> playlist(int id) async => Playlist.fromJson(
+    await getJson('/api/playlists/$id') as Map<String, dynamic>,
+  );
+
+  Future<List<JobLock>> jobLocks() async {
+    final json = await getJson('/api/jobs/locks');
+    final rows = json is Map ? json['jobs'] : json;
+    if (rows is! List) return const [];
+    return rows
+        .whereType<Map>()
+        .map((j) => JobLock.fromJson(j.cast<String, dynamic>()))
+        .toList();
+  }
+
+  Future<List<Recommendation>> recommendations({
+    required String kind,
+    String? id,
+    String target = 'albums',
+    int limit = 12,
+  }) async {
+    final json = await getJson(
+      '/api/recommend',
+      query: {
+        'kind': kind,
+        if (id != null) 'id': id,
+        'target': target,
+        'limit': '$limit',
+      },
+    );
+    final rows = json is Map ? json['items'] : json;
+    if (rows is! List) return const [];
+    return rows
+        .whereType<Map>()
+        .map((r) => Recommendation.fromJson(r.cast<String, dynamic>()))
+        .toList();
+  }
+
+  // ---- likes & favorites --------------------------------------------------
+
+  /// The liked (hearted) track paths, newest first.
+  Future<List<String>> likes() async {
+    final json = await getJson('/api/likes');
+    if (json is! Map) return const [];
+    final paths = json['paths'];
+    if (paths is! List) return const [];
+    return [for (final path in paths) path.toString()];
+  }
+
+  Future<Favorites> favorites() async => Favorites.fromJson(
+    (await getJson('/api/favorites') as Map).cast<String, dynamic>(),
+  );
+
+  // ---- playback -----------------------------------------------------------
+
+  Future<ReplayGain> replaygain(String path, {String? mode}) async =>
+      ReplayGain.fromJson(
+        await getJson(
+              '/api/replaygain',
+              query: {'path': path, if (mode != null) 'mode': mode},
+            )
+            as Map<String, dynamic>,
+      );
+
+  /// The audio stream URL. `token` rides as a query parameter because a media
+  /// element cannot send headers on every platform.
+  String streamUrl(String path) => uri('/api/stream', {
+    'path': path,
+    if (token != null && token!.isNotEmpty) 'token': token,
+  }).toString();
+
+  String coverUrl(String albumPath, String? coverFile) => uri('/api/cover', {
+    'album': albumPath,
+    if (coverFile != null && coverFile.isNotEmpty) 'file': coverFile,
+    if (token != null && token!.isNotEmpty) 'token': token,
+  }).toString();
+
+  // ---- config -------------------------------------------------------------
+
+  Future<Map<String, dynamic>> config() async =>
+      (await getJson('/api/config') as Map).cast<String, dynamic>();
+
+  /// The whole config is written back (the server validates every key), which
+  /// is what the React settings form does too.
+  Future<Map<String, dynamic>> saveConfig(Map<String, dynamic> values) async =>
+      (await postJson('/api/config', body: values) as Map)
+          .cast<String, dynamic>();
+
+  /// Run optimisation scripts on a selection (`ids` are the script numbers).
+  Future<void> runScripts(
+    List<int> ids,
+    List<String> paths, {
+    bool force = false,
+  }) async {
+    await postJson(
+      '/api/run',
+      body: {'ids': ids, 'paths': paths, 'force': force},
+      timeout: const Duration(minutes: 5),
+    );
+  }
+
+  void close() => _client.close();
+}

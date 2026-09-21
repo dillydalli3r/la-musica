@@ -7,81 +7,6 @@ from .paths import DEPS_DIR
 # Vendored pip packages whose import name differs from the pip name.
 PIP_IMPORT_NAMES = {"yt-dlp": "yt_dlp"}
 
-# The folder the SHELL that started this backend ships tools in, when the build
-# has any. A mobile build cannot install into .dependencies the way a desktop
-# one does: an app bundle is read-only, and the only place Android lets an app
-# keep an executable is the APK's own native-lib folder (see tools/mobile).
-# The launcher knows that path at runtime and passes it here; nothing is
-# assumed about the layout beyond "one flat directory of binaries".
-BUNDLED_TOOLS_ENV = "MLO_BUNDLED_TOOLS"
-
-
-def bundled_tools_dir():
-    """The directory this build ships external tools in, or None."""
-    root = os.environ.get(BUNDLED_TOOLS_ENV)
-    return root if root and os.path.isdir(root) else None
-
-
-def _bundled_file(root, name, exe=True):
-    """A bundled file called *name*, in whichever spelling a mobile build uses.
-
-    Android's native-lib folder only loads names of the shape lib<name>.so —
-    that is what a bundled ffmpeg is called there — while an extracted assets
-    folder keeps the plain name. Both are tried so the shell is free to pick
-    either, and a `.exe` is accepted for a desktop build that bundles its own.
-    """
-    names = [name, name + ".exe", f"lib{name}.so", name + ".so"] if exe else [name]
-    for cand in names:
-        path = os.path.join(root, cand)
-        if os.path.isfile(path):
-            return path
-    return None
-
-
-def _detect_bundled_tools(root):
-    """The tools *root* ships, in the same shapes the tables below use.
-
-    Assembled by NAME, not by scanning versioned folders: a bundled tool has no
-    version directory to scan, and a mobile build has no way to install a
-    second copy beside it.
-    """
-    tools = {}
-
-    def add(key, exe=True, **names):
-        found = {k: _bundled_file(root, v, exe) for k, v in names.items()}
-        if any(found.values()):
-            tools[key] = {"version": None, **found}
-
-    add("flac", flac_exe="flac", metaflac_exe="metaflac")
-    add("libjxl", cjxl_exe="cjxl", djxl_exe="djxl")
-    add("libjpeg_turbo", jpegtran_exe="jpegtran")
-    add("oxipng", oxipng_exe="oxipng")
-    add("audioauditor", cli_exe="AudioAuditorCLI")
-    add("rsgain", rsgain_exe="rsgain")
-    add("ffmpeg", ffmpeg_exe="ffmpeg", ffprobe_exe="ffprobe")
-    add("php", php_exe="php")
-    add("yt-dlp", ytdlp_exe="yt-dlp")
-    add("chromaprint", fpcalc_exe="fpcalc")
-    add("slskd", slskd_exe="slskd")
-    add("cuetools", exe="CUETools", arcue_exe="CUETools.ARCUE")
-    # The rip-log checker is a PHP phar, not a program of its own.
-    add("logchecker", exe=False, phar_path="logchecker.phar")
-    return tools
-
-
-def _with_bundled(tools):
-    """Overlay the tools this BUILD ships over *tools* (see bundled_tools_dir).
-
-    A bundled copy WINS over PATH and .dependencies: it is the one built for
-    this device, and preferring a desktop install over it would run the wrong
-    architecture.
-    """
-    root = bundled_tools_dir()
-    if not root:
-        return tools
-    merged = dict(tools)
-    merged.update(_detect_bundled_tools(root))
-    return merged
 
 def _parse_version(s):
     if not s:
@@ -418,12 +343,12 @@ def detect_all_tools():
     # scan below is Windows-only: a folder of Windows binaries must never be
     # selected as an install on a host that cannot run them.
     if os.name != "nt":
-        return _store_tools_cache(_with_bundled(_detect_system_tools()), sig)
+        return _store_tools_cache(_detect_system_tools(), sig)
 
     tools = {}
 
     if not os.path.isdir(DEPS_DIR):
-        return _store_tools_cache(_with_bundled(_detect_system_tools()), sig)
+        return _store_tools_cache(_detect_system_tools(), sig)
 
     fv, ff = _detect_tool("flac", DEPS_DIR)
     if ff:
@@ -602,7 +527,7 @@ def detect_all_tools():
         if key not in tools and key in system:
             tools[key] = system[key]
 
-    return _store_tools_cache(_with_bundled(tools), sig)
+    return _store_tools_cache(tools, sig)
 
 
 SIMPLE_DR_METER_DIRNAME = "simple-dr-meter"

@@ -171,7 +171,7 @@ def show_config_menu(config):
         ov = tools.get("oxipng", {}).get("version", "(none)")
 
         print(f"  1. Music Folder             : {config['music_folder']}")
-        print(f"  2. FLAC Level               : -{config['flac_level']} (0-8)")
+        print(f"  2. Library Codec / Level    : {config['library_codec']} · -{config['library_codec_quality']} (0-8)")
         print(f"  3. Add SeekTables           : {config['add_seektables']}")
         print(f"  4. Force Re-encode FLACs    : {config.get('force_reencode_flac', False)}")
         print(f"  5. JPEG XL Effort           : {config['jpegxl_effort']} (1-10)")
@@ -247,9 +247,9 @@ def show_config_menu(config):
 
         elif choice == "2":
             try:
-                new_val = int(input("Enter FLAC level (0-8): ").strip())
+                new_val = int(input("Enter lossless compression level (0-8): ").strip())
                 if 0 <= new_val <= 8:
-                    config["flac_level"] = new_val
+                    config["library_codec_quality"] = new_val
                     save_config(config)
                     print(c("\nSaved.", Color.GREEN))
                     pause_for_input()

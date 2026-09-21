@@ -78,21 +78,21 @@ check(V.parent_of("qawwali") is None, "no family beats a wrong family")
 # --------------------------------------------------------------------------- #
 # 4. normalize_genres()
 # --------------------------------------------------------------------------- #
-check(G.normalize_genres(["Shoegaze"]) == ["shoegaze", "rock"],
+check(G.normalize_genres(["Shoegaze"]) == ["Shoegaze", "Rock"],
       "the family is derived and goes last", G.normalize_genres(["Shoegaze"]))
-check(G.normalize_genres(["Shoegaze", "Dream Pop"]) == ["shoegaze", "rock"],
+check(G.normalize_genres(["Shoegaze", "Dream Pop"]) == ["Shoegaze", "Rock"],
       "the family takes slot 2 from a second specific genre")
 check(G.normalize_genres(["Shoegaze", "Dream Pop"], count=3)
-      == ["shoegaze", "dream pop", "rock"], "count 3 fits two specifics")
-check(G.normalize_genres(["rock", "Shoegaze"]) == ["shoegaze", "rock"],
+      == ["Shoegaze", "Dream Pop", "Rock"], "count 3 fits two specifics")
+check(G.normalize_genres(["rock", "Shoegaze"]) == ["Shoegaze", "Rock"],
       "a family given first is moved last, not repeated")
-check(G.normalize_genres(["Hip-Hop", "Trap"], count=3) == ["trap", "hip hop"],
+check(G.normalize_genres(["Hip-Hop", "Trap"], count=3) == ["Trap", "Hip Hop"],
       "a family given last is not duplicated by the derived one")
-check(G.normalize_genres(["Shoegaze", "shoegaze", "SHOEGAZE"]) == ["shoegaze", "rock"],
+check(G.normalize_genres(["Shoegaze", "shoegaze", "SHOEGAZE"]) == ["Shoegaze", "Rock"],
       "duplicates collapse case-insensitively")
-check(G.normalize_genres(["Shoegaze"], count=1) == ["shoegaze"],
+check(G.normalize_genres(["Shoegaze"], count=1) == ["Shoegaze"],
       "count 1 has no room for the family")
-check(G.normalize_genres(["Shoegaze", "Nonsense"]) == ["shoegaze", "rock"],
+check(G.normalize_genres(["Shoegaze", "Nonsense"]) == ["Shoegaze", "Rock"],
       "a recognised genre wins the slot a junk name would have taken",
       G.normalize_genres(["Shoegaze", "Nonsense"]))
 check(G.normalize_genres(["Nonsense"], count=2) == ["Nonsense"],
@@ -101,7 +101,7 @@ check(G.normalize_genres(["Nonsense"], count=2) == ["Nonsense"],
 check(G.normalize_genres([]) == [] and G.normalize_genres(None) == [],
       "nothing in, nothing out")
 check(G.normalize_genres(["Rock; Alternative Rock / Shoegaze"])
-      == ["alternative rock", "rock"],
+      == ["Alternative Rock", "Rock"],
       "one stored value holding a list is read as names",
       G.normalize_genres(["Rock; Alternative Rock / Shoegaze"]))
 
@@ -112,7 +112,7 @@ check(G.split_stored("Rock / Shoegaze") == ["Rock", "Shoegaze"], "the ' / ' form
 check(G.split_stored("Rock; Shoegaze") == ["Rock", "Shoegaze"], "the '; ' form")
 check(G.split_stored("Shoegaze") == ["Shoegaze"], "the single form")
 check(G.split_stored("") == [] and G.split_stored(None) == [], "the empty form")
-check(G.format_genres(["Shoegaze", "dream pop"]) == "shoegaze / dream pop / rock",
+check(G.format_genres(["Shoegaze", "dream pop"]) == "Shoegaze / Dream Pop / Rock",
       "rendering puts the family last", G.format_genres(["Shoegaze", "dream pop"]))
 
 # --------------------------------------------------------------------------- #

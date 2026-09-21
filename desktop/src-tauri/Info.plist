@@ -3,15 +3,16 @@
 <plist version="1.0">
 <dict>
 	<!--
-	  App Transport Security exemption for the webview, and nothing else.
+	  App Transport Security exemption for the webview — the file's other job
+	  is the background-audio declaration further down.
 
 	  A self-hosted la musica server is plain http on an address only the user
 	  knows: a LAN IP, a Tailscale/MagicDNS name, or 127.0.0.1:8000 for the
-	  desktop shell's own backend. TLS is not optional for the project to run
-	  without it - the server ships without a certificate, so every request the
-	  React UI makes (fetch, WebSocket, audio/video playback) is http:// or
-	  ws://. ATS blocks exactly those requests by default, which is what makes
-	  the app unusable against a real install.
+	  Docker container running on the same machine. TLS is not optional for the
+	  project to run without it - the server ships without a certificate, so
+	  every request the React UI makes (fetch, WebSocket, audio/video playback)
+	  is http:// or ws://. ATS blocks exactly those requests by default, which
+	  is what makes the app unusable against a real install.
 
 	  NSAllowsArbitraryLoadsInWebContent keeps the exemption inside the webview:
 	  the shell's native URLSession calls (there are none today - lib.rs has no
@@ -25,17 +26,15 @@
 	  documented in desktop/README.md.
 	-->
 	<!--
-	  Background execution, which an app is otherwise denied the moment the user
-	  switches away or locks the phone — and a suspended app serves nothing: the
-	  embedded backend stops answering until the app is resumed.
+	  Audio keeps playing when the app is not in front — a music client that
+	  stopped the moment the screen locked would be useless.
 
-	  `audio` is the mode this app can claim honestly, because it IS a music
-	  player: while audio plays, the process keeps running, which is what keeps
-	  the local backend (and Soulseek sharing, and an in-flight import) alive.
-	  The shell's "keep hosting in the background" setting activates a playback
-	  audio session even with nothing playing — the silent-audio trick, marked in
-	  desktop/src-tauri/src/mobile_backend.rs as a sideload-only affordance,
-	  off by default, and not something an App Store build may ship turned on.
+	  This is the mode the app can claim honestly, because it IS a music
+	  player. It used to carry a second job as well: keeping the process (and
+	  so the embedded backend) alive in the background with a silent playback
+	  session. The app hosts no backend any more — the server is the user's own
+	  Docker container — so nothing here holds a session open for its own sake,
+	  which also removes what Apple's review guidance names as abuse.
 	-->
 	<key>UIBackgroundModes</key>
 	<array>

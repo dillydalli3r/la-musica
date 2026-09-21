@@ -30,7 +30,7 @@ from .genre_vocab import FAMILIES, canonical, is_parent, parent_of
 
 __all__ = [
     "DEFAULT_GENRE_COUNT", "GENRE_COUNT_MAX", "GENRE_ORDER_SEPARATOR",
-    "FAMILIES", "canonical", "is_parent", "parent_of",
+    "FAMILIES", "canonical", "is_parent", "parent_of", "display_name",
     "split_stored", "iter_names", "normalize_genres", "format_genres", "issues",
 ]
 
@@ -57,6 +57,61 @@ def _clean(name) -> str:
     return " ".join(str(name or "").split())
 
 
+# Words that stay lowercase inside a capitalized genre name ("Drum and Bass",
+# "Woman of the World") — normal title-case practice, and the reason a plain
+# str.title() is wrong here.
+_SMALL_WORDS = frozenset({
+    "and", "or", "of", "the", "in", "on", "a", "an", "with", "for", "to",
+})
+
+# Names whose accepted spelling is NOT title case: initialisms and acronyms a
+# str.title() would mangle ("Idm", "Uk Garage", "Hi-Nrg", "R&B" → "R&B" is
+# already right, but "r&b" would become "R&B" only by luck). Keyed folded.
+_ACRONYMS = frozenset({
+    "idm", "edm", "ebm", "uk", "us", "usa", "r&b", "rnb", "nrg", "dnb",
+    "nwobhm", "dj", "mc", "lo-fi", "ea", "ac", "alt",
+})
+
+
+def _cap_chunk(chunk: str) -> str:
+    """One hyphen-separated piece, capitalized (acronyms upper-cased whole)."""
+    folded = chunk.casefold()
+    if folded in _ACRONYMS:
+        return chunk.upper() if folded not in ("r&b", "rnb", "lo-fi") else (
+            "R&B" if folded in ("r&b", "rnb") else "Lo-Fi")
+    return chunk[:1].upper() + chunk[1:].lower() if chunk else chunk
+
+
+def display_name(name) -> str:
+    """The app's own capitalization of a genre name.
+
+    MusicBrainz publishes its genre names lowercase ("shoegaze", "drum and
+    bass") and this app stores what it publishes — but a tag is read by a
+    person, and "Shoegaze / Rock" is the form every other tagger writes. The
+    rule is title case with three deliberate exceptions: the small connective
+    words stay lowercase, known acronyms keep their capitals, and each
+    hyphen-separated piece is treated as a word of its own ("post-punk" →
+    "Post-Punk", "hi-nrg" → "Hi-NRG").
+
+    Capitalization is display, never identity: every comparison in the app
+    (`genre_vocab.canonical`, `is_parent`, `parent_of`, the grader's checks)
+    folds case, so "Shoegaze" and "shoegaze" are the same genre to all of it.
+    """
+    text = _clean(name)
+    if not text:
+        return ""
+    words = []
+    for index, word in enumerate(text.split(" ")):
+        folded = word.casefold()
+        if folded in _ACRONYMS:
+            words.append(_cap_chunk(word))
+        elif index and folded in _SMALL_WORDS:
+            words.append(folded)
+        else:
+            words.append("-".join(_cap_chunk(p) for p in word.split("-")))
+    return " ".join(words)
+
+
 def split_stored(value) -> List[str]:
     """The genre names inside one stored value.
 
@@ -71,7 +126,8 @@ def split_stored(value) -> List[str]:
     return [p for p in (_clean(p) for p in _SPLIT_RE.split(text)) if p]
 
 
-def normalize_genres(names: Iterable, count: int = DEFAULT_GENRE_COUNT) -> List[str]:
+def normalize_genres(names: Iterable, count: int = DEFAULT_GENRE_COUNT,
+                     caps: bool = True) -> List[str]:
     """The canonical list for one track: specifics first, family last.
 
     * every name is resolved to MusicBrainz's spelling when it is a genre
@@ -81,7 +137,10 @@ def normalize_genres(names: Iterable, count: int = DEFAULT_GENRE_COUNT) -> List[
       the family slot rather than repeated,
     * the family of the first specific genre is derived when none was given,
     * the result is capped at *count*, and the family is placed last — a
-      second specific genre yields its slot to the family, never the reverse.
+      second specific genre yields its slot to the family, never the reverse,
+    * each name is capitalized for display (`display_name`) unless *caps* is
+      off — the stored value is what a person reads, and MusicBrainz's own
+      lowercase spelling is a database convention, not a tag convention.
     """
     count = max(1, int(count or DEFAULT_GENRE_COUNT))
     known: List[str] = []
@@ -124,11 +183,13 @@ def normalize_genres(names: Iterable, count: int = DEFAULT_GENRE_COUNT) -> List[
                 family = found
                 break
     if not family:
-        return specifics[:count]
-    if count == 1:
+        out = specifics[:count]
+    elif count == 1:
         # No room for both, and the specific genre is the informative one.
-        return (specifics[:1] or [family])[:1]
-    return (specifics[:count - 1] + [family])[:count]
+        out = (specifics[:1] or [family])[:1]
+    else:
+        out = (specifics[:count - 1] + [family])[:count]
+    return [display_name(n) for n in out] if caps else out
 
 
 def iter_names(names: Iterable) -> List[str]:

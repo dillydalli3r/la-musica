@@ -1,8 +1,0 @@
-# Staged build inputs, produced by tools/mobile/bundle.py — never committed.
-# The iOS Python tree is the exception: its runtime.json is committed so a build
-# that was never staged still has a manifest to answer "no local backend here,
-# and why" instead of failing the bundle.
-android/
-ios/Python.xcframework/
-ios/python/*
-!ios/python/runtime.json

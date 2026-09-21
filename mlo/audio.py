@@ -402,12 +402,15 @@ TAG_MAP = {
 }
 
 # Containers whose tags are ID3v2 frames — mutagen's MP3 and ID3 objects share
-# one frame API, so every ID3 branch below serves both. Raw ADTS .aac is the
-# second one: mutagen's AAC reader cannot carry tags at all ("Tagging is not
+# one frame API, so every ID3 branch below serves all of them. Raw ADTS .aac is
+# the second one: mutagen's AAC reader cannot carry tags at all ("Tagging is not
 # supported. Use the ID3/APEv2 classes directly instead"), so its tags live in
 # a leading ID3v2 chunk — what Picard and foobar2000 write for .aac, and what
-# ffmpeg/ffprobe skip past when decoding the stream.
-_ID3_KINDS = ("mp3", "aac")
+# ffmpeg/ffprobe skip past when decoding the stream. WAVE and AIFF are here for
+# the same reason (mutagen exposes `.tags` as an ID3 object for both): they are
+# `library_codec` targets, and a target the library cannot tag would be a
+# target it cannot grade.
+_ID3_KINDS = ("mp3", "aac", "wav", "aiff")
 
 # Lyrics transforms carry the language in the tag NAME (TRANSLATION-EN,
 # TRANSLITERATION-JA-LATN) — the same prefixes mlo.config keys the LYRICS
@@ -747,6 +750,13 @@ class AudioFile:
             # MP4-family (M4V is the video-flavored same container) — mutagen
             # reads and writes tags for both audio and music-video files.
             return "mp4"
+        if self.ext == ".wav":
+            # `library_codec` targets (see mlo.containers.CODECS): WAVE and
+            # AIFF carry ID3 tags exactly like MP3, so their branches below
+            # are the ID3 ones.
+            return "wav"
+        if self.ext in (".aif", ".aiff"):
+            return "aiff"
         if self.ext in VIDEO_FFMPEG_EXTS:
             return "video"
         return None
@@ -765,6 +775,12 @@ class AudioFile:
                     self.audio.add_tags()
             elif self.kind == "mp4":
                 self.audio = MP4(self.path)
+            elif self.kind in ("wav", "aiff"):
+                from mutagen.aiff import AIFF
+                from mutagen.wave import WAVE
+                # Tags are created by the first write, never here: a reader
+                # must not rewrite the file it opens.
+                self.audio = (WAVE if self.kind == "wav" else AIFF)(self.path)
             elif self.kind == "video":
                 self._load_video()
             elif self.kind == "aac":

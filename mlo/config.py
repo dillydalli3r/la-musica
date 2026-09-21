@@ -192,6 +192,11 @@ def _ext_to_audio_type(ext):
         return "ogg"
     if ext == "opus":
         return "opus"
+    if ext in ("wav", "aif", "aiff"):
+        # WAVE/AIFF carry ID3 frames exactly like MP3 (mutagen exposes `.tags`
+        # as an ID3 object for both), so the per-filetype tag switches that
+        # apply to ID3 files apply to them.
+        return "mp3"
     return None
 
 def should_write_audio_tag(config, tag_name, filepath=None, filetype=None):
@@ -262,8 +267,8 @@ DEFAULT_CONFIG = {
     # library path in the application defaults.
     "music_folder": "",
 
-    # FLAC
-    "flac_level": 8,
+    # FLAC optimizer (script 3) — the compression level it re-encodes at is
+    # `library_codec_quality`, next to the codec target it belongs to.
     "add_seektables": False,
     "force_reencode_flac": False,
     "flac_preserve_picture": False,
@@ -667,25 +672,67 @@ DEFAULT_CONFIG = {
     "youtube_enabled": True,
     "youtube_max_height": 0,
 
-    # Lossless source conversion (part of script 3): uncompressed WAV /
-    # AIFF (and ffmpeg-decodable APE/WV/SHN/TTA, plus ALAC in MP4) are
-    # re-encoded to the target lossless codec with tags copied over. The
-    # original is only removed after a verified conversion and when
-    # lossless_remove_original is on.
-    "optimize_convert_lossless": True,
-    # Target codec every lossless file ends up in ("flac" or "alac"). FLAC is
-    # what the rest of the pipeline assumes; ALAC exists for Apple-centric
-    # libraries (m4a containers, no metaflac).
-    "lossless_target_codec": "flac",
+    # Library codec target (script 3 and every import). The library's audio
+    # format is a SETTING, not an assumption: `library_codec` names what the
+    # whole library ends up as, and script 3 converts the files that are not
+    # there yet. Values, extensions and encoder arguments all come from
+    # mlo.containers.CODECS (and web/src/lib/codecMeta.ts renders the same
+    # list in Settings / the setup wizard):
+    #   flac   .flac  lossless (the shipped default: what metaflac, the
+    #                 ENCODER identity tags and `flac -t` verification are
+    #                 built around)
+    #   alac   .m4a   compressed lossless, for Apple-centric libraries
+    #   wav    .wav   uncompressed lossless (PCM)
+    #   aiff   .aiff  uncompressed lossless (PCM)
+    #   mp3    .mp3   lossy, CBR
+    #   aac    .m4a   lossy, CBR
+    #   ogg    .ogg   lossy (Vorbis)
+    #   opus   .opus  lossy
+    #   keep          never convert anything
+    "library_codec": "flac",
+    # Lossy rate/quality for the codec above: kbps for the CBR targets
+    # (mp3/aac/opus), libvorbis' own 0-10 quality scale for ogg (-q:a 6 ≈
+    # 192 kbps VBR). 0 = the codec's own shipped default (mp3 320, aac 256,
+    # ogg 6, opus 128 kbps — see mlo.containers.CODECS). Clamped to the
+    # codec's usable range, and ignored by a lossless target, which has no
+    # bitrate setting.
+    "library_codec_bitrate": 0,
+    # Lossless compression level: FLAC -0..-8, used both by the ffmpeg
+    # conversion and by script 3's own flac.exe re-encode. ALAC and the PCM
+    # targets expose no such control and ignore it.
+    "library_codec_quality": 5,
+    # Extra encoder arguments, appended verbatim: flac.exe options when the
+    # target is FLAC, ffmpeg options for every other target (added after the
+    # quality/bitrate flags above, so a user's own flag wins). The app does
+    # NOT validate them — a bad flag fails the encode, which is reported per
+    # file — it only strips control characters and caps the length.
+    "library_codec_args": "",
+    # What the optimisation pass may DO with the target:
+    #   lossless_to_lossy (default) — a LOSSLESS source is converted to the
+    #     target (that is the lossless -> lossy transcode the name refers to
+    #     when the target is lossy, and a lossless re-container otherwise).
+    #     A LOSSY source is never re-encoded: lossy -> lossless cannot
+    #     restore a sample, and lossy -> lossy is a generation loss.
+    #   all — additionally re-encode lossy sources to the target. The one
+    #     thing it still refuses is a LOSSY source under a LOSSLESS target,
+    #     which can only lose quality.
+    #   keep — never convert; only the existing format/naming work runs
+    #     (script 3's own FLAC re-compression still does, since it stays in
+    #     the same codec).
+    "library_codec_optimize": "lossless_to_lossy",
+    # Whether the converted ORIGINAL is taken out of the library afterwards.
+    # It is moved into the app's trash bin (<music>/.mlo/trash/, with its
+    # origin recorded), never deleted, so the lossless master can be
+    # restored from the Trash page.
     "lossless_remove_original": True,
 
     # Auto Tagging (script 8)
     "auto_advisory": True,
     "auto_instrumental": True,
-    # OFF by default: a track without a specified advisory stays untagged —
-    # ITUNESADVISORY=0 is never assumed just because a track is instrumental
-    # (or for any other reason). Re-enable to restore the old zero-fill.
-    "auto_zero_advisory_for_instrumental": False,
+    # ON by default: a track with no words cannot be explicit, so an
+    # instrumental's advisory is 0. Turn it off to leave an instrumental's
+    # advisory exactly as it is (an explicit instrumental stays explicit).
+    "auto_zero_advisory_for_instrumental": True,
     # Fetch INSTRUMENTAL (0/1) from the external sources during auto tagging + import.
     "instrumental_auto_fetch": True,
     "force_auto_tag": False,
@@ -814,8 +861,10 @@ DEFAULT_CONFIG = {
     "soulseek_web_port": 5030,
     "soulseek_up_limit": 0,
     "soulseek_down_limit": 0,
-    # slskd transfer slots (concurrent transfers) and speed limits in KiB/s
-    # (0 = unlimited, emitted as slskd's int.MaxValue default).
+    # slskd transfer slots (concurrent transfers) and speed limits in KiB/s.
+    # A SPEED limit of 0 is "unlimited" (emitted as slskd's int.MaxValue); a
+    # SLOT count of 0 is not a number of slots — slskd refuses a count below 1,
+    # so a blank/0 slots value is left to slskd's own default.
     "soulseek_download_slots": 3,
     "soulseek_upload_slots": 2,
     "soulseek_upload_limit_kib": 0,
@@ -936,13 +985,26 @@ DEFAULT_CONFIG = {
     # is skipped instead of guessed (Discogs' search endpoint requires a
     # token; Last.fm requires an API key). RYM answers only a real browser
     # session: paste the Cookie header of a logged-in rateyourmusic.com tab
-    # (it carries Cloudflare's cf_clearance). There is no gate in the code —
-    # empty, RYM is simply asked and refuses, which latches it off for a few
-    # minutes (`integrations._rym_blocked`), so the genre chain falls through
-    # to the next source. Deezer/iTunes/TheAudioDB/MusicBrainz are keyless.
+    # (it carries Cloudflare's cf_clearance). Empty, RYM's live pages are not
+    # asked at all while the archived-snapshot fallback below is on — a
+    # refused request would latch the source off for a few minutes anyway
+    # (`integrations._rym_blocked`) — so the genre chain either reads a
+    # snapshot or falls through to the next source. Deezer/iTunes/TheAudioDB/
+    # MusicBrainz are keyless.
     "discogs_token": "",
     "lastfm_api_key": "",
     "rym_cookie": "",
+    # Read RateYourMusic's genre pages from the Wayback Machine when the live
+    # site will not serve them: no `rym_cookie`, or one RYM refused to honour.
+    # An archived copy is RYM's OWN data — the same page, read by the same
+    # scrapers — so the answer still comes from that source, and the report
+    # says which snapshot answered and how old it is. Off, and with no cookie,
+    # RYM contributes nothing, exactly as it did before this key existed.
+    # Ships ON because it is the only route that works on an install nobody
+    # has pasted a cookie into, and it costs one politely throttled request per
+    # album (1 req/s, and cached for 30 days like every other RYM page) — the
+    # fallback is skipped entirely when the live page can answer.
+    "rym_archive_fallback": True,
     # Auto-resolve RateYourMusic album + artist links during import; off =
     # links are only ever set by hand in the link editor.
     "rym_links_auto": True,
@@ -953,6 +1015,16 @@ DEFAULT_CONFIG = {
     # anything else is 0. MusicBrainz supplies the ISRCs when the file has
     # none. An existing 0/1/2 is never overwritten (the user's edit wins).
     "advisory_auto_fetch": True,
+    # What happens when NO source states an advisory — the ladder in
+    # `mlo.advisory`: an instrumental is 0 (`auto_zero_advisory_for_instrumental`),
+    # then the configured AI provider judges the lyrics when this is on,
+    # then the multilingual word scan runs when `advisory_lyrics_scan` is on,
+    # and `advisory_fallback` is the last resort: "0" (not explicit, the
+    # shipped default), "2" (clean edition) or "none" (write nothing at all,
+    # leaving the track unrated).
+    "advisory_ai_classify": True,
+    "advisory_lyrics_scan": True,
+    "advisory_fallback": "0",
     # Optional Spotify Web API credentials (client-credentials flow). Used by
     # the advisory cross-reference (the ISRC search) and by instrumental
     # detection (audio-features `instrumentalness`). Empty = both are skipped
@@ -989,6 +1061,11 @@ DEFAULT_CONFIG = {
     # 0 means automatic. A positive value caps every module's worker pool,
     # which is useful on slower disks or shared machines.
     "worker_limit": 0,
+    # How many tracks an offline download fetches at once — the browser's own
+    # download queue and the bulk transfer endpoint both read it, so one key
+    # describes the whole path. A local server can stream several FLACs in
+    # parallel; more than a handful mostly thrashes the disk and the network.
+    "download_concurrency": 3,
     "run_all_order": list(DEFAULT_RUN_ALL_ORDER),
 
     # Export to device (Export page). Each key is the SAVED DEFAULT behind one
@@ -1097,7 +1174,6 @@ _BOOL_KEYS = {
     key for key, value in DEFAULT_CONFIG.items() if isinstance(value, bool)
 }
 _INT_RANGES = {
-    "flac_level": (0, 8),
     "video_crf": (0, 51),
     "soulseek_listen_port": (1024, 65535),
     "soulseek_web_port": (1024, 65535),
@@ -1124,6 +1200,7 @@ _INT_RANGES = {
     "grade_log_score_threshold": (0, 100),
     "audit_log_score_threshold": (0, 100),
     "worker_limit": (0, 64),
+    "download_concurrency": (1, 8),
     "cover_target_size": (0, 4000),
     "cover_jpeg_target_size": (0, 4000),
     "cover_png_target_size": (0, 4000),
@@ -1143,10 +1220,17 @@ _INT_RANGES = {
     "export_workers": (0, 64),
     "server_port": (1, 65535),
     "auth_session_days": (1, 3650),
+    # The library codec target's rate and compression level. The bitrate is
+    # clamped per codec when it is USED (mlo.containers.encoder_args — ogg
+    # takes 0-10, mp3 up to 320 kbps), so this is the widest legal span; 0
+    # means "the codec's own shipped default".
+    "library_codec_bitrate": (0, 512),
+    "library_codec_quality": (0, 8),
 }
 _CHOICES = {
     "lyrics_format": {"EMBEDDED", "LRC", "BOTH"},
     "auth_mode": {"auto", "required", "off"},
+    "advisory_fallback": {"0", "2", "none"},
     "ai_genre_effort": {"minimal", "low", "medium", "high"},
     "lrc_zero_timestamp_target": {"EMBEDDED", "LRC", "BOTH"},
     # Sync granularity required of (and targeted for) synced lyrics:
@@ -1160,6 +1244,11 @@ _CHOICES = {
                      "medium", "slow", "slower", "veryslow"},
     "mood_source": {"audio", "provider", "hybrid"},
     "replaygain_mode": {"track", "album", "off"},
+    # The library's audio codec target and what the optimisation pass may do
+    # with it — the values mlo.containers.CODECS and mlo.flac define.
+    "library_codec": {"flac", "alac", "wav", "aiff", "mp3", "aac", "ogg",
+                      "opus", "keep"},
+    "library_codec_optimize": {"all", "lossless_to_lossy", "keep"},
 }
 
 
@@ -1195,6 +1284,33 @@ def normalize_config(user=None) -> dict:
                 user[k] = merged
         cfg.update(user)
 
+    # The codec settings used to be split across three keys: the FLAC-only
+    # `flac_level`, the lossless target `lossless_target_codec` and the on/off
+    # `optimize_convert_lossless`. They are one target now (`library_codec`
+    # with its quality/bitrate/args and `library_codec_optimize`), so a saved
+    # install is carried over: a level or codec the user actually CHOSE is a
+    # decision and is kept, while the old shipped defaults were never a
+    # decision (the same rule the LEGACY_* rewrites below follow) and move to
+    # the new ones. Runs before validation, so a migrated value is normalized
+    # like any other.
+    saved = user if isinstance(user, dict) else {}
+    if "library_codec_quality" not in saved:
+        try:
+            level = int(saved.get("flac_level"))
+        except (TypeError, ValueError):
+            level = None
+        # 8 was the old shipped default: an install still holding it never
+        # chose it and follows the new default (5).
+        if level is not None and level != 8:
+            cfg["library_codec_quality"] = level
+    if "library_codec" not in saved and str(saved.get("lossless_target_codec") or "").strip():
+        cfg["library_codec"] = saved["lossless_target_codec"]
+    if "library_codec_optimize" not in saved and saved.get("optimize_convert_lossless") is False:
+        cfg["library_codec_optimize"] = "keep"
+    cfg.pop("flac_level", None)
+    cfg.pop("lossless_target_codec", None)
+    cfg.pop("optimize_convert_lossless", None)
+
     for key in _BOOL_KEYS:
         cfg[key] = _as_bool(cfg.get(key), DEFAULT_CONFIG.get(key, False))
 
@@ -1217,6 +1333,15 @@ def normalize_config(user=None) -> dict:
     cfg["digital_media_source_value"] = (
         str(source).strip() or DEFAULT_DIGITAL_SOURCE
     )
+
+    # `library_codec_args` reaches the encoder verbatim (mlo.containers.
+    # codec_extra_args splits it on whitespace), so the app does not validate
+    # its content — only its shape: control characters and newlines become
+    # spaces (a hand-edited config must not smuggle a NUL into an argv) and
+    # the field is length-capped.
+    codec_args = "".join(ch if ch.isprintable() else " "
+                         for ch in str(cfg.get("library_codec_args") or ""))
+    cfg["library_codec_args"] = " ".join(codec_args.split())[:200]
 
     # `last_update_check` / `update_check_interval_days` belonged to an
     # app-update checker that no longer exists; nothing reads them, so they
@@ -1311,6 +1436,14 @@ def normalize_config(user=None) -> dict:
     # LEGACY_DEFAULT_GENRE_COUNTS) and follows the new one.
     if cfg.get("mb_genre_count") in LEGACY_DEFAULT_GENRE_COUNTS:
         cfg["mb_genre_count"] = DEFAULT_CONFIG["mb_genre_count"]
+
+    # The instrumental advisory zero-fill shipped OFF and is ON now. An install
+    # whose saved config carries the old default never chose it (the settings
+    # form wrote the shipped value on the first save), so it follows the new
+    # one — the same rule the naming script and the genre defaults use. A
+    # config that genuinely wants the old behavior sets it off again.
+    if cfg.get("auto_zero_advisory_for_instrumental") is False:
+        cfg["auto_zero_advisory_for_instrumental"] = True
 
     # Auto-import query templates: the old shipped defaults narrow to the
     # catalog-number-only (CD) / artist-album-year (digital) wording.

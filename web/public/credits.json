@@ -57,8 +57,7 @@
         { "name": "Pillow", "license": "HPND (MIT-CMU)", "url": "https://github.com/python-pillow/Pillow" },
         { "name": "websockets", "license": "BSD-3-Clause", "url": "https://github.com/python-websockets/websockets" },
         { "name": "python-multipart", "license": "Apache-2.0", "url": "https://github.com/kludex/python-multipart" },
-        { "name": "aiofiles", "license": "Apache-2.0", "url": "https://github.com/Tinche/aiofiles" },
-        { "name": "pystray", "license": "LGPL-3.0", "url": "https://github.com/moses-palmer/pystray" }
+        { "name": "aiofiles", "license": "Apache-2.0", "url": "https://github.com/Tinche/aiofiles" }
       ]
     },
     {

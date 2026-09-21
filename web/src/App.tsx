@@ -2,8 +2,8 @@ import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowDownUp, ArrowUpRight, ChevronLeft, ChevronRight, ClipboardCheck, Disc3, Download, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
-  Keyboard, Library, ListMusic, Menu, Music2, Music4, PanelLeftClose, Search, Tags, Trash2, User, WifiOff, X,
+  Activity, ArrowDownUp, ArrowUpRight, ChevronLeft, ChevronRight, ClipboardCheck, Disc3, Download, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
+  Keyboard, Library, ListChecks, ListMusic, Menu, Music2, Music4, PanelLeftClose, Search, Tags, Trash2, User, WifiOff, X,
   Settings as SettingsIcon, Wrench,
 } from "lucide-react";
 import { api, AuthError, getToken, IN_TAURI, onAuthLost, serverUrl } from "./api";
@@ -40,6 +40,8 @@ const GenrePage = lazy(() => import("./pages/GenrePage"));
 const DownloadsPage = lazy(() => import("./pages/DownloadsPage"));
 const ImportWizard = lazy(() => import("./pages/ImportWizard"));
 const DonationsPage = lazy(() => import("./pages/DonationsPage"));
+const InProgressPage = lazy(() => import("./pages/InProgressPage"));
+const CheckStackPage = lazy(() => import("./pages/CheckStackPage"));
 const MBSearchPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBSearchPage })));
 const MBArtistPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBArtistPage })));
 const MBReleaseGroupPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBReleaseGroupPage })));
@@ -94,6 +96,12 @@ const NAV_GROUPS: { labelKey: MessageKey; items: { to: string; labelKey: Message
     items: [
       { to: "/optimize", labelKey: "nav.optimize", icon: Gauge, end: false },
       { to: "/grading", labelKey: "nav.grading", icon: ClipboardCheck, end: false },
+      // What the library is DOING right now, and what the app is doing it
+      // WITH: the two answers a user needs while a run is in flight — which
+      // files are locked and by what, and the whole check/script stack the
+      // runs are made of, editable in one place.
+      { to: "/in-progress", labelKey: "nav.inProgress", icon: Activity, end: false },
+      { to: "/checks", labelKey: "nav.checks", icon: ListChecks, end: false },
       { to: "/dependencies", labelKey: "nav.dependencies", icon: Wrench, end: false },
       { to: "/settings", labelKey: "nav.settings", icon: SettingsIcon, end: false },
       // The donation page sits with the app's own pages rather than in a
@@ -1126,6 +1134,8 @@ export default function App() {
             <Route path="/export" element={<ExportPage />} />
             <Route path="/optimize" element={<OptimizationPage />} />
             <Route path="/grading" element={<GradingPage />} />
+            <Route path="/in-progress" element={<InProgressPage />} />
+            <Route path="/checks" element={<CheckStackPage />} />
             <Route path="/dependencies" element={<DependenciesPage />} />
             <Route path="/import" element={<ImportWizard />} />
             <Route path="/settings" element={<SettingsPage />} />

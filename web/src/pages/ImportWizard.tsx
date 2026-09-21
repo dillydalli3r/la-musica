@@ -2817,6 +2817,7 @@ const finish = async () => {
               <CoverImg
                 albumPath={albumPath}
                 coverFile={coverInfo?.file}
+                staged={staged}
                 wrapperClass="h-40 w-40 rounded-lg bg-raise border border-border overflow-hidden"
               />
               <div className="text-xs text-zinc-500">
@@ -3006,7 +3007,7 @@ const finish = async () => {
                       }`}
                     >
                       <input type="checkbox" checked={coverSel.has(t.path)} onChange={() => toggleCoverSel(t.path)} />
-                      <TrackCover albumPath={albumPath} trackCover={t.cover_file} albumCover={coverInfo?.file} />
+                      <TrackCover albumPath={albumPath} trackCover={t.cover_file} albumCover={coverInfo?.file} staged={staged} />
                       <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
                       <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
                       {t.cover_file ? (

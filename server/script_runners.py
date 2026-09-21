@@ -1,4 +1,4 @@
-"""The 17 library scripts, in one place every caller shares.
+"""The 18 library scripts, in one place every caller shares.
 
 Extracted from ``server/main.py``'s ``RUNNERS`` table so the import pipeline
 (:mod:`server.imports`), the bulk queue and the Soulseek importer run exactly
@@ -23,9 +23,10 @@ from mlo import (
 )
 from mlo import stats as mlo_stats
 from mlo.loudness import run_calc_dr_replaygain
-from mlo.paths import (SKIP_DIRS, load_expected_tracks, prune_empty_dirs,
-                       save_expected_tracks)
+from mlo.paths import (SKIP_DIRS, library_root, load_expected_tracks,
+                       prune_empty_dirs, save_expected_tracks)
 from mlo.ui import Color, c, log, print_header
+from server import job_locks
 
 
 def _optional(module, name):
@@ -180,7 +181,7 @@ RUNNERS: dict[int, tuple[str, "callable"]] = {
     5: ("Process images", run_process_images),
     6: ("Audit library", run_audit_library),
     7: ("DR & ReplayGain", run_calc_dr_replaygain),
-    8: ("Auto tagging (mood & energy)", run_auto_tagging),
+    8: ("Auto Tagging", run_auto_tagging),
     9: ("AccurateRip", _optional("mlo.accurip", "run_generate_accurip")),
     10: ("Format all", _optional("mlo.format_all", "run_format_all")),
     11: ("Remux videos (MKV)", _optional("mlo.remux", "run_remux_videos")),
@@ -459,6 +460,42 @@ class RunBusy(RuntimeError):
 RUN_LOCK = threading.Lock()
 
 
+def held_paths(cfg, targets):
+    """The library paths a run is about to touch, for the lock registry.
+
+    A scoped run holds its own targets. An unscoped one — Run All, an import
+    chain with no target — reads and rewrites whatever it finds, so it holds
+    the library root itself: that is the claim a delete, a move or a tag write
+    is refused against while the scripts are running.
+    """
+    scope = targets if targets is not None else cfg.get("targets")
+    paths = [os.path.normpath(str(t)) for t in (scope or []) if str(t).strip()]
+    if paths:
+        return paths
+    folder = str(cfg.get("music_folder") or "").strip()
+    root = library_root(folder) if folder else None
+    return [root] if root and os.path.isdir(root) else []
+
+
+def run_label(ids):
+    """The run's name in MAINTAIN → In progress: the first script, plus how
+    many follow it when the caller asked for a chain."""
+    names = [RUNNERS.get(i, (f"Script {i}", None))[0] for i in ids]
+    if not names:
+        return "Script run"
+    return names[0] if len(names) == 1 else f"{names[0]} + {len(names) - 1} more"
+
+
+def _job_progress(job, progress):
+    """Forward each finished script to the caller AND to the lock registry, so
+    the in-progress list shows which step of the run is going."""
+    def report(done, total, label, result):
+        job_locks.set_progress(job, done, total, label)
+        if progress is not None:
+            progress(done, total, label, result)
+    return report
+
+
 def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
               timeout=None):
     """Run *ids* in order against a COPY of *cfg*; report after every script.
@@ -476,13 +513,22 @@ def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
       must not silently skip its chain: the album is already on disk and the
       user asked for it to be finished. ``timeout`` (default 1 h) bounds the
       wait so a wedged run cannot hold an import forever.
+
+    The run claims the paths it works on in `server.job_locks` under the same
+    *wait* rule: a delete, a tag write or an organize landing on a folder these
+    scripts are rewriting is refused (409) instead of racing them. The claim
+    ends with the run — including when it raises or is cancelled.
     """
     acquired = RUN_LOCK.acquire(blocking=False) if not wait else \
         RUN_LOCK.acquire(timeout=3600 if timeout is None else timeout)
     if not acquired:
         raise RunBusy("a script run is already in progress")
     try:
-        return _run_chain_locked(cfg, ids, targets=targets, force=force, progress=progress)
+        with job_locks.holding(held_paths(cfg, targets), kind="scripts",
+                               label=run_label(ids), wait=wait,
+                               timeout=timeout) as job:
+            return _run_chain_locked(cfg, ids, targets=targets, force=force,
+                                     progress=_job_progress(job, progress))
     finally:
         RUN_LOCK.release()
 
