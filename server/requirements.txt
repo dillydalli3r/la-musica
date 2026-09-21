@@ -6,3 +6,10 @@ aiofiles==25.1.0
 httpx==0.28.1
 mutagen==1.48.1
 Pillow==12.3.0
+# Audio analysis the app now performs ITSELF, in-process, rather than through a
+# downloaded helper script: dynamic range (the loudness-war DR convention, a
+# 3-second-block RMS/peak measurement over decoded PCM — see mlo/dr.py) and the
+# mood/energy and key/tempo analysis in mlo/moods.py + mlo/audiometa.py. It was
+# absent here, which is why a Docker install could not measure DR at all: the
+# measurement needs numpy, and nothing installed it.
+numpy==2.5.2

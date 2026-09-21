@@ -94,7 +94,13 @@ try {
     ["its artist", "Bicep"],
     ["byte-weighted progress", "50%"],
     ["the live rate", "500 kB/s"],
-    ["the release facts line", "2018-04-20 · Digital Media · 12 tracks"],
+    ["the release identity line's tooltip (a job row)", "ZEN-124 · CD · GB 2018-04-20 · 12 track(s) · (Deluxe Edition) · Official · Ninja Tune"],
+    ["the pressing's catalogue number", ">ZEN-124<"],
+    ["its track count", "12 track(s)"],
+    ["the edition's disambiguation", "(Deluxe Edition)"],
+    ["MusicBrainz's own status for it", "Official"],
+    ["a wish row's own identity line (tooltip)", "PRO-CD-1 · CD · US 1990-03 · 3 track(s) · (promo) · Promotion · Void Recordings"],
+    ["the wish row's catalog number", ">PRO-CD-1<"],
     ["a finished download's import outcome", "In the download folder — ready to import"],
     ["a parked item says what it waits for", "Only lossy copies found"],
     ["a wish nothing was found for says so", "not searched again unless you retry it"],
@@ -102,6 +108,10 @@ try {
     ["an album link into the library", "/album/F%3A%2FMusic%2FArtists%2FDaft%20Punk%20-%20Homework"],
     ["the MusicBrainz source chip", "MusicBrainz"],
     ["the Soulseek source chip", "Soulseek"],
+    ["the per-item clear on a finished row", "Remove this wish from the list — nothing is searched for it again"],
+    ["the section-wide clear", "Clear finished ("],
+    ["a section's own clear", "Take the finished rows off this list"],
+    ["a finished job's own clear", "Take this finished row off the queue — nothing in your library is deleted"],
     ["the per-item cancel", "Cancel this item"],
     ["cancelling a waiting row", "Take it back off the queue"],
   ];
@@ -111,6 +121,17 @@ try {
       JSON.stringify(missing.map(([what]) => what)));
     console.error(flat.replace(/></g, ">\n<").split("\n")
       .filter((l) => /chip|Completed|Failed/.test(l)).slice(0, 20).join("\n"));
+    process.exit(1);
+  }
+  // ONE section-wide clear per list that has something to lose: this payload
+  // has a clearable row in completed, in failed and in needs-you (the imported
+  // job, the job that gave up, the wish nothing was found for), and none in
+  // queued / in progress — so the button is per section, not one global control
+  // wearing three labels.
+  const sectionClears = (flat.match(/Take the finished rows off this list/g) || []).length;
+  if (sectionClears !== 3) {
+    console.error("[queue] the section-wide clear rendered " + sectionClears +
+      " time(s) — expected one each for completed, failed and needs-you");
     process.exit(1);
   }
   console.log(`ok  the Soulseek page renders the queue sections and their rows ` +

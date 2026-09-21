@@ -2316,6 +2316,32 @@ def _prune_jobs_locked():
         _order.remove(jid)
 
 
+def forget(job_id):
+    """Take ONE SETTLED job out of the registry — the queue's own "clear".
+
+    A job that finished is history: the queue row for it is what the user reads
+    after the fact, and this is how they take it off the list (the bulk of the
+    registry was already dropping the oldest, see _prune_jobs_locked). Nothing
+    else changes: the album it imported is in the library, its transfers are
+    slskd's own, and a job the wish worker owns is re-created by the wish's
+    next search. A job that is still RUNNING (or parked on a question) is
+    refused — that one is cancelled, which is a different action, and pretending
+    to forget a live job would leave its thread writing into a registry entry
+    nobody holds."""
+    try:
+        jid = int(job_id)
+    except (TypeError, ValueError):
+        return False
+    with _lock:
+        job = _jobs.get(jid)
+        if job is None or job["state"] in ("running", "confirm"):
+            return False
+        _jobs.pop(jid, None)
+        if jid in _order:
+            _order.remove(jid)
+        return True
+
+
 def start_job(release_mbid=None, release=None, queries=None, username=None,
               target_dir=None, confirm_lossy=False, kind=None, mode=None,
               wish_id=None, source=""):
@@ -2500,7 +2526,10 @@ def _ask_to_wish(release, queries, waited, cfg, confirm_lossy):
         release.get("id"), title=release.get("title") or "",
         artist=((release.get("artists") or [{}])[0].get("name", "")),
         year=str(release.get("date") or "")[:4],
-        queries=list(queries))
+        queries=list(queries),
+        # The release the job just resolved, so the new wish's own row can name
+        # the exact pressing it is waiting for without a second lookup.
+        release=release)
     # add_wish is idempotent: a wish from an earlier attempt comes back
     # unchanged, so refresh its queries — the worker hunts with the stored
     # set, and stale ones would silently drop this job's better templates.
@@ -2669,12 +2698,19 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 "media": is_cd and "CD" or "Digital Media",
                 # What the release's OWN data says, for a row that shows which
                 # release is being fetched: the medium(s) it is pressed on and
-                # how many tracks it has. Both are already in hand here — the
-                # queue view must never spend a MusicBrainz request per row to
-                # learn them (the network is throttled to 1 req/s and the view
-                # is polled every few seconds).
+                # how many tracks it has, plus the two facts that tell two
+                # pressings of the same album apart — MusicBrainz's own
+                # disambiguation comment and its release status (Official /
+                # Promotion / Bootleg …) — and the label that put it out. All
+                # of them are already in hand here — the queue view must never
+                # spend a MusicBrainz request per row to learn them (the
+                # network is throttled to 1 req/s and the view is polled every
+                # few seconds).
                 "media_formats": list(release.get("medium_formats") or []),
                 "tracks": len(release.get("media") or []),
+                "status": release.get("status") or "",
+                "disambiguation": release.get("disambiguation") or "",
+                "label": release.get("label") or "",
             }
             _job["label"] = label
         _log(f"Target: {(release.get('artists') or [{}])[0].get('name', '?')} — "

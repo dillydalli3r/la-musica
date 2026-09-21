@@ -50,6 +50,7 @@ from server import api_auth
 from server import api_jobs
 from server import api_query
 from server import api_ratings
+from server import api_plays
 from server import api_recommend
 from server import api_watch
 from server import api_queue
@@ -78,6 +79,16 @@ _MAIN_LOOP = None
 async def _lifespan(app: FastAPI):
     global _MAIN_LOOP
     _MAIN_LOOP = asyncio.get_running_loop()
+    # Whatever an interrupted run left behind — the auto-updater stops this
+    # container at any moment, so this is the normal case, not an edge one:
+    # sweep the temp files our own writers abandoned, reconcile framework
+    # albums left half-filled, and report interrupted jobs. Runs BEFORE any
+    # worker or request can add more work (server.interrupt_recovery).
+    try:
+        from server import interrupt_recovery
+        interrupt_recovery.startup_recovery(load_config())
+    except Exception as e:
+        print(f"[mlo] interrupted-run recovery failed: {e}")
     # Optionally bring up the managed slskd process with the backend.
     if load_config().get("soulseek_autostart", False):
         def _autostart_slskd():
@@ -108,6 +119,13 @@ async def _lifespan(app: FastAPI):
     # daemon state or port conflict changes (see _soulseek_watch).
     threading.Thread(target=_soulseek_watch, daemon=True).start()
     yield
+    # Stop taking new work first (the two workers above are the app's own
+    # source of new jobs), then the honest part: wait — bounded — for whatever
+    # is still running, say what it is waiting for, and record what had to be
+    # abandoned so the next start can reconcile it. Every write is atomic, so
+    # the worst case for a job that does not finish in time is a repeated
+    # album, never a torn file. GRACE_SECONDS stays below the container's stop
+    # grace (docker-compose.yml) so this ordered abort always beats SIGKILL.
     try:
         from server import wishes_worker
         wishes_worker.stop()
@@ -118,6 +136,11 @@ async def _lifespan(app: FastAPI):
         artist_watch_worker.stop()
     except Exception:
         pass
+    try:
+        from server import interrupt_recovery
+        interrupt_recovery.shutdown()
+    except Exception as e:
+        print(f"[mlo] graceful shutdown failed: {e}")
 
 
 app = FastAPI(title="la musica API", version=APP_VERSION, lifespan=_lifespan)
@@ -229,6 +252,7 @@ app.include_router(api_lyrics.router)
 app.include_router(api_auth.router)
 app.include_router(api_recommend.router)
 app.include_router(api_ratings.router)
+app.include_router(api_plays.router)
 app.include_router(api_query.router)
 app.include_router(api_discover.router)
 app.include_router(api_watch.router)
@@ -1203,10 +1227,16 @@ def get_artist(path: str = Query(...)):
     if not _in_music_folder(p, _music_folder()):
         raise HTTPException(400, "artist outside music folder")
     cfg = load_config()
-    albums = lib_mod._find_albums(p)
+    dir_scan = {}
+    albums = lib_mod._find_albums(p, dir_scan)
     direct = [alb for alb in sorted(albums)
               if os.path.dirname(alb).lower() == p.lower()]
-    albums_data = lib_mod.build_albums_parallel(direct, cfg)
+    # Framework albums (`server.pending_albums`) hold no audio yet, so the walk
+    # above — which looks for audio — never lists them. They are albums the
+    # user asked for, so the artist page lists them exactly as the library does
+    # (`build_album` answers their folder with the pending row).
+    direct += lib_mod.pending_album_dirs(p, dir_scan)
+    albums_data = lib_mod.build_albums_parallel(sorted(direct), cfg)
     # Display name: the tag-derived artist (folders carry an MBID suffix).
     display_name = next((a.get("album_artist") for a in albums_data
                          if a.get("album_artist")), None)
@@ -1271,6 +1301,21 @@ _CTYPES = {
 }
 
 
+def _refuse_locked(path: str) -> None:
+    """409 when a job in the registry holds *path* (or a folder above it).
+
+    Reading bytes OUT of a file a script is rewriting is the same race the
+    registry already refuses from the write side, seen from the other end: the
+    listener gets a torn read, and on Windows the script's temp-then-replace
+    fails outright while a stream still holds the file open. Raising
+    PathLocked puts this on the app's one handler for it, so the refusal names
+    the job and the fix in the registry's own words.
+    """
+    holder = job_locks.holder(path)
+    if holder:
+        raise job_locks.PathLocked(path, holder)
+
+
 @app.get("/api/stream")
 def stream(path: str = Query(...), download: int = Query(0)):
     """Stream one library file.
@@ -1281,8 +1326,15 @@ def stream(path: str = Query(...), download: int = Query(0)):
     same URL and every track failed with "Cache got basic response with bad
     status 206". See server/api_media.py. Without it, a player gets exactly
     what it wants: byte ranges and a 206.
+
+    A path a job holds right now is refused 409 (both modes) instead of
+    streaming a file that is being rewritten; the PLAYER does not change
+    otherwise — an unlocked file answers ranges exactly as before, and a stream
+    that is already open keeps its handle when a job claims the file (the
+    registry guards new reads, it does not cut live ones).
     """
     p = os.path.normpath(mbresolve.resolve_track(path) or path)
+    _refuse_locked(p)
     if not os.path.isfile(p):
         raise HTTPException(404, "file not found")
     if not _in_music_folder(p, _music_folder()):
@@ -1307,8 +1359,12 @@ def videos_stream(path: str = Query(...), transcode: int = Query(0)):
     MP4 (H.264/AAC) browsers always play. Transcoded streams are not
     seekable; the picture/sound are identical in content. Files the
     browser decodes natively never touch ffmpeg.
+
+    Refused 409 like /api/stream while a job holds the file: a transcode would
+    read the very bytes being rewritten.
     """
     p = os.path.normpath(mbresolve.resolve_track(path) or path)
+    _refuse_locked(p)
     if not os.path.isfile(p):
         raise HTTPException(404, "file not found")
     if not _in_music_folder(p, _music_folder()):
@@ -2011,15 +2067,25 @@ async def cover_search(artist: str = Query(""), album: str = Query(""),
                        limit: int = Query(40, ge=1, le=100),
                        sources: Optional[str] = Query(None),
                        country: Optional[str] = Query(None),
-                       release_group_mbid: Optional[str] = Query(None)):
-    """Search covers.musichoarders.xyz (aggregates Apple Music, Deezer,
-    Qobuz, Tidal, Discogs, ...) for album covers matching artist/album, and
-    fall back to the Cover Art Archive / Deezer / iTunes when it has nothing.
+                       release_group_mbid: Optional[str] = Query(None),
+                       release_mbid: Optional[str] = Query(None)):
+    """Album covers for artist/album, RANKED by the one cover policy.
 
-    `results` rows carry `width`/`height` — the image's real pixel size, probed
-    from the file for the first results and `null` when unknown (never a
-    guess). `provider` names who answered: "cov", a fallback id, or null when
-    nobody had anything, so an empty result is never silent.
+    Sources: covers.musichoarders.xyz (aggregates Apple Music, Deezer, Qobuz,
+    Tidal, Discogs, ...) by name, the Cover Art Archive by the identities the
+    caller holds — the release's own front cover by `release_mbid`, its release
+    group's stand-in by `release_group_mbid` — and, only when those have
+    nothing, the keyless Deezer/iTunes fallbacks. `sources` in the reply is the
+    per-source report (used / empty / error / skipped, with the reason), so a
+    query that found nothing says what was tried and what was never asked.
+
+    `results` are `mlo.cover_choice`'s ranked candidates — best first, each row
+    carrying the image's real pixel size, container and byte count as measured
+    from the file, whether it is the release's own cover or a group stand-in,
+    the reasons that put it where it is, and `rejected` when it cannot be the
+    automatic pick (below the cover target, undecodable, an empty answer) —
+    with `chosen` (the winner) and `notes` alongside, so the finder's first
+    row is first for a stated reason.
 
     `sources` (comma-separated ids) and `country` override the saved defaults
     for this one search — the finder's source picker and region dropdown.
@@ -2027,14 +2093,27 @@ async def cover_search(artist: str = Query(""), album: str = Query(""),
     if not artist.strip() and not album.strip():
         raise HTTPException(400, "artist or album is required")
     src = [s.strip() for s in (sources or "").split(",") if s.strip()] or None
+    from mlo import cover_choice
+    cfg = load_config()
     try:
-        return await asyncio.to_thread(
+        found = await asyncio.to_thread(
             intg.cover_search, artist.strip(), album.strip(), limit,
-            60.0, src, country, None, (release_group_mbid or "").strip())
+            60.0, src, country, cfg, (release_group_mbid or "").strip(),
+            (release_mbid or "").strip())
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(502, f"cover search failed: {e}")
+    payload = cover_choice.cover_payload(
+        found.get("results") or [], cfg, sources=found.get("sources"),
+        provider=found.get("provider"))
+    return {"provider": found.get("provider"),
+            "results": payload["candidates"],
+            "chosen": payload["chosen"],
+            "notes": payload["notes"],
+            "policy": payload["policy"],
+            "candidate_count": payload["candidate_count"],
+            "rejected_count": payload["rejected_count"]}
 
 
 @app.get("/api/cover/sources")
@@ -3063,6 +3142,16 @@ def mb_release_group(mbid: str, limit: int = Query(300), offset: int = Query(0))
 
 
 # ---- generic MusicBrainz browser (search + entity pages) -------------------
+@app.get("/api/mb/search/fields")
+def mb_search_fields():
+    """The fields the search box may put in a query, and the syntax to use
+    them: MusicBrainz's own index fields per entity kind (field, kind, example,
+    whether it takes quotes, and what it means), served from the same dict the
+    server's own query builder is written against, so the UI's completion and
+    its help can never offer a field the index would not answer."""
+    return intg.search_help()
+
+
 @app.get("/api/mb/search")
 def mb_search(q: str = Query(""), type: str = Query("release"),
               limit: int = Query(100), offset: int = Query(0),
@@ -3079,7 +3168,17 @@ def mb_search(q: str = Query(""), type: str = Query("release"),
     label Y". `q` may be empty when a constraint says enough (a label/year
     browse). Returns {rows, total, offset, next, query}: `next` is the offset
     of the following page (null at the end) and `query` the Lucene query the
-    index was asked, so the UI can show it."""
+    index was asked, so the UI can show it.
+
+    `q` travels to the index AS THE USER WROTE IT — `artist:"Radiohead" AND
+    releasegroup:"OK Computer"` is a query the index answers, not a phrase to
+    search for, so the app neither escapes nor re-quotes it (see
+    `intg.search_query`, the one place that says what the app does to it:
+    trim, and AND the constraint boxes on). A query MusicBrainz itself
+    refuses answers 400 carrying MusicBrainz's own words, which the browser
+    shows verbatim rather than a generic failure.
+
+    `GET /api/mb/search/fields` serves the catalogue of what may go in it."""
     if type not in intg.MB_ENTITIES:
         raise HTTPException(400, "type must be one of " + ", ".join(intg.MB_ENTITIES))
     if mode not in ("free", "catno", "barcode"):
@@ -3093,6 +3192,13 @@ def mb_search(q: str = Query(""), type: str = Query("release"),
                               secondary_type=secondary_type.strip(),
                               artist=artist.strip(), year=year.strip(),
                               label=label.strip(), catno=catno.strip())
+    except intg.MusicBrainzError as e:
+        # MusicBrainz REFUSED this query and said why (its search server names
+        # the reason in the body). That is the request's fault, not an outage:
+        # 400 with MusicBrainz's own text, never "MusicBrainz search failed".
+        if e.status and 400 <= int(e.status) < 500:
+            raise HTTPException(400, str(e))
+        raise HTTPException(502, f"MusicBrainz search failed: {e}")
     except Exception as e:
         raise HTTPException(502, f"MusicBrainz search failed: {e}")
 
@@ -5899,8 +6005,13 @@ def _refresh_slskd_shares_soon():
 
 @app.get("/api/track/download")
 def track_download(path: str = Query(...)):
-    """Serve the original, untouched audio file as a browser download."""
+    """Serve the original, untouched audio file as a browser download.
+
+    Same refusal as /api/stream: "untouched" is a promise a job mid-rewrite
+    cannot keep, and handing over a half-written file is worse than saying why.
+    """
     p = os.path.normpath(mbresolve.resolve_track(path) or path)
+    _refuse_locked(p)
     if not os.path.isfile(p):
         raise HTTPException(404, "file not found")
     if not _in_music_folder(p, _music_folder()):

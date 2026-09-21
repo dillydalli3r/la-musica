@@ -24,7 +24,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from mlo import audio as mlo_audio
-from mlo import autotag, audiometa, flac, grader, images, loudness, paths, remux
+from mlo import autotag, audiometa, flac, grader, images, paths, remux
 from mlo.config import DEFAULT_CONFIG
 from mlo.deps import HAS_PIL
 from mlo.ui import log
@@ -627,39 +627,6 @@ def check_remux_single_probe(tmp):
 
 
 # --------------------------------------------------------------------------- #
-# Script 7 — DR & ReplayGain: a failed meter left dr.txt in the album folder.
-# --------------------------------------------------------------------------- #
-def check_loudness_no_dr_leak(tmp):
-    album = os.path.join(tmp, "dr_album")
-    os.makedirs(album)
-    dr_path = os.path.join(album, "dr.txt")
-
-    class FakeProc:
-        returncode = 1
-        stderr = "simple-dr-meter: decode failed"
-
-    real_run = loudness.run_tool
-
-    def failing_run(*a, **kw):
-        # The tool writes its log beside the music before it dies.
-        with open(dr_path, "w", encoding="utf-8") as fh:
-            fh.write("partial log\n")
-        return FakeProc()
-
-    loudness.run_tool = failing_run
-    try:
-        got = loudness._run_dr_meter("meter.py", ".", album, tmp, python="python")
-        leaked = os.path.exists(dr_path)
-    finally:
-        loudness.run_tool = real_run
-
-    ok(got is None, "script 7: a failed meter run still reports None")
-    ok(leaked is False,
-       "script 7: the failed run leaves NO dr.txt in the album folder "
-       "(grading would have failed the album on that stray file)")
-
-
-# --------------------------------------------------------------------------- #
 # Script 13 / 18 — the network loops ran one track at a time.
 # --------------------------------------------------------------------------- #
 def _lyric_album(tmp, name, count):
@@ -899,7 +866,6 @@ def main():
         ("script 5  Process images (artist art)", check_images_artist_art_kept),
         ("script 5  Process images (converted PNG)", check_images_converted_png_optimized),
         ("script 11 Remux videos", check_remux_single_probe),
-        ("script 7  DR & ReplayGain", check_loudness_no_dr_leak),
         ("script 13 Fetch lyrics (lanes)", check_lyrics_fetch_concurrency),
         ("script 18 Publish lyrics (lanes)", check_publish_concurrency),
         ("all       atomic sidecar writes", check_fsync_dir),

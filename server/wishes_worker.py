@@ -112,6 +112,7 @@ def _wish_found(wish, album_path="", note=""):
         events.emit("wish_found", f"Wish found: {label}", body,
                     {"wish_id": wish.get("id"),
                      "release_mbid": str(wish.get("release_mbid") or ""),
+                     "release": wish.get("release") or {},
                      "album_path": album_path,
                      "chain": note,
                      "link": f"/album/{album_path}" if album_path else "/soulseek"})
@@ -156,6 +157,20 @@ def _wait_job(job_id, cancel_check, timeout_s=3 * 3600 + 600):
         if time.time() >= deadline:
             return st  # still running past every pipeline ceiling: give up waiting
         time.sleep(2.0)
+
+
+def _prime_identities(cfg):
+    """Fill in the release identity of wishes that have none yet.
+
+    DISPLAY data, never an acquisition: a row has to say which pressing it is
+    waiting for, and the lookup is the same MusicBrainz call the pass itself
+    makes. It runs in this worker's own thread — never in a route the UI polls
+    — and also while the automation is off, because a wish the user has to fill
+    by hand is exactly the one whose row must say what to look for."""
+    try:
+        wishes.prime_identities(cfg)
+    except Exception:
+        traceback.print_exc()
 
 
 def _run_one(wish, cfg):
@@ -206,6 +221,10 @@ def _run_one(wish, cfg):
         return _settle_attempt(wish, cfg,
                                "MusicBrainz release could not be resolved "
                                f"({wish['release_mbid']})")
+    # Which PRESSING this wish is about, recorded on the wish itself: the
+    # release is in hand here, so the queue row never spends a MusicBrainz
+    # request of its own to say it (server.wishes.RELEASE_KEYS).
+    wishes.store_identity(wid, wishes.release_identity(release, release_mbid))
     r = soulseek_auto.start_job(
         release_mbid=release_mbid,
         release=release,
@@ -289,7 +308,11 @@ def _settle_attempt(wish, cfg, err):
         if cap and empty >= cap:
             wishes.mark_not_found(wid, err, attempts)
             return "not_found"
-        wishes.mark_wanted(wid, error=str(err)[:300], attempts=attempts)
+        # The spent empty search is RECORDED here: it is the counter the cap is
+        # compared against, so a wish with a budget above one really does run
+        # out of it instead of re-reading the same zero forever.
+        wishes.mark_wanted(wid, error=str(err)[:300], attempts=attempts,
+                           not_found=empty)
         return "pending"
     cap = wishes.max_attempts(cfg)
     if cap and attempts >= cap:
@@ -383,6 +406,7 @@ def run_cycle(wid=None):
             # imported", which would read as "nothing was found".
             _set(last_result=import_policy.AUTO_OFF_NOTE, last_cycle=time.time(),
                  next_run=0.0)
+            _prime_identities(cfg)
             return {"ok": False, "error": import_policy.AUTO_OFF_NOTE,
                     "automation": False, "imported": 0, "pending": 0,
                     "not_found": 0, "failed": 0, "resolved": 0}
@@ -424,6 +448,9 @@ def run_cycle(wid=None):
             resolved = wishes.reconcile_with_library(cfg)
         except Exception:
             traceback.print_exc()
+
+        # AFTER the pass: naming the pressing must never delay a search.
+        _prime_identities(cfg)
 
         summary = (f"{imported} imported, {pending} still wanted, "
                    f"{resolved} resolved from library")

@@ -142,12 +142,16 @@ class _AlbumPageState extends State<AlbumPage> {
     if (albumError != null) {
       return ErrorView(message: albumError, onRetry: _load);
     }
+    // A framework album: nothing on disk to play and nothing to grade, so the
+    // page states what it is waiting for instead of drawing an empty album.
+    final pending = pendingNote(album);
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
       children: [
         _hero(context, album),
-        if (album.tracks.isEmpty)
+        if (pending != null) _PendingPanel(note: pending),
+        if (pending == null && album.tracks.isEmpty)
           const EmptyHint(
             text: 'This album folder has no tracks.',
             icon: Icons.audiotrack_outlined,
@@ -199,6 +203,7 @@ class _AlbumPageState extends State<AlbumPage> {
     final gradePct = album.gradePct;
     final hasTracks = album.tracks.isNotEmpty;
     final artistFolder = parentFolder(album.path);
+    final pending = pendingNote(album);
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -228,6 +233,9 @@ class _AlbumPageState extends State<AlbumPage> {
                 ),
                 const SizedBox(width: 8),
                 AdvisoryMark(value: album.advisory, size: 18),
+                const SizedBox(width: 8),
+                // The same marker the rows carry, saying the same sentence.
+                PendingMark(album, size: 18, label: true),
               ],
             ),
             if (meta.isNotEmpty)
@@ -236,19 +244,30 @@ class _AlbumPageState extends State<AlbumPage> {
                 child: Text(meta, style: TextStyle(fontSize: 13, color: muted)),
               ),
             const SizedBox(height: 10),
-            _verdict(context, album, gradePct),
-            const SizedBox(height: 12),
+            // Nothing was graded — the verdict's red "Not graded" would report
+            // an album the app itself created on purpose as a broken one. The
+            // panel below carries what is actually known about the folder.
+            if (pending == null) ...[
+              _verdict(context, album, gradePct),
+              const SizedBox(height: 12),
+            ],
             Wrap(
               spacing: 8,
               runSpacing: 8,
               children: [
                 FilledButton.icon(
-                  onPressed: hasTracks ? () => playAlbum(context, album) : null,
+                  // A framework album has no audio: the button is off rather
+                  // than starting an empty queue.
+                  onPressed: hasTracks && pending == null
+                      ? () => playAlbum(context, album)
+                      : null,
                   icon: const Icon(Icons.play_arrow, size: 18),
                   label: const Text('Play'),
                 ),
                 OutlinedButton.icon(
-                  onPressed: hasTracks ? () => _queue(album) : null,
+                  onPressed: hasTracks && pending == null
+                      ? () => _queue(album)
+                      : null,
                   icon: const Icon(Icons.playlist_add, size: 18),
                   label: const Text('Queue'),
                 ),
@@ -331,6 +350,75 @@ class _AlbumPageState extends State<AlbumPage> {
           ),
         ],
       ],
+    );
+  }
+}
+
+/// The amber panel an album page shows for a framework album: what the folder
+/// is waiting for, where the search stands, and what is already there — the
+/// block the React page draws (`web/src/pages/AlbumPage.tsx`), so a folder the
+/// app created on purpose reads the same in both clients.
+class _PendingPanel extends StatelessWidget {
+  const _PendingPanel({required this.note});
+
+  final PendingNote note;
+
+  @override
+  Widget build(BuildContext context) {
+    const title = Color(0xFFFDE68A);
+    const body = Color(0xFFFCD34D);
+    final reason = note.reason;
+    return Container(
+      margin: const EdgeInsets.only(top: 14),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0x14F59E0B),
+        border: Border.all(color: const Color(0x4DF59E0B)),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.schedule, size: 16, color: Color(0xFFFBBF24)),
+              const SizedBox(width: 8),
+              const Text(
+                pendingTitle,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: title,
+                ),
+              ),
+              if (reason != null) ...[
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Text(
+                    reason,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: body.withValues(alpha: 0.7),
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(note.state, style: const TextStyle(fontSize: 12, color: body)),
+          const SizedBox(height: 4),
+          Text(
+            note.note,
+            style: TextStyle(
+              fontSize: 11,
+              color: body.withValues(alpha: 0.6),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

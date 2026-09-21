@@ -267,11 +267,116 @@ def _album_artwork(album_dir, light=False):
     }
 
 
+def _wish_state(wish_id, cfg):
+    """The wish filling a framework album, as the album page reads it.
+
+    `status`, `attempts` and the reason a run left behind come straight from
+    the queue row; `due_at`/`due_in`/`terminal` answer "when will it be tried
+    again" the way the worker itself decides it (`server.wishes.due_at`), so a
+    page can say "searching — attempt 2, next try in 12 min" without owning a
+    second copy of the retry policy. None when there is no wish to report.
+
+    One folder's wish — the album page's own read. A payload that lists EVERY
+    pending album takes `_wish_lookup` instead, which reads the queue once.
+    """
+    if not wish_id:
+        return None
+    try:
+        from server import wishes
+        w = wishes.get_wish(int(wish_id))
+    except Exception:
+        return None
+    return _wish_state_of(w, cfg)
+
+
+def _wish_lookup(cfg):
+    """``wish_id -> that wish's state``, reading the queue ONCE per payload.
+
+    Every album-shaped payload (library tree, album page, Home shelves, the
+    query's album rows — they all read this same row) carries the pending
+    album's wish through this one map, so a page listing every pending album
+    never asks the queue per row: `server.wishes.list_wishes` is one query, and
+    it is not even run until a row actually has a wish to report.
+    """
+    rows = None
+
+    def state(wish_id):
+        nonlocal rows
+        if not wish_id:
+            return None
+        if rows is None:
+            try:
+                from server import wishes
+                rows = {w.get("id"): w for w in (wishes.list_wishes() or [])}
+            except Exception:
+                rows = {}
+        return _wish_state_of(rows.get(int(wish_id)), cfg)
+
+    return state
+
+
+def _wish_state_of(w, cfg):
+    """The state block for ONE queue row (None when there is none)."""
+    if not w:
+        return None
+    try:
+        from server import wishes
+        due = wishes.due_at(w, cfg)
+        terminal = wishes.is_terminal(w, cfg)
+    except Exception:
+        due, terminal = 0.0, False
+    import math
+    import time as _time
+    due_in = None if (terminal or not math.isfinite(due)) else max(0, int(due - _time.time()))
+    return {
+        "id": w.get("id"),
+        "status": str(w.get("status") or ""),
+        "attempts": int(w.get("attempts") or 0),
+        "retry_at": float(w.get("retry_at") or 0.0),
+        "last_search": float(w.get("last_search") or 0.0),
+        "due_at": None if (terminal or not math.isfinite(due)) else float(due),
+        "due_in": due_in,
+        "terminal": bool(terminal),
+        "reason": str(w.get("last_error") or w.get("note") or ""),
+        "note": str(w.get("note") or ""),
+        "source": str(w.get("source") or ""),
+        "queries": list(w.get("queries") or []),
+    }
+
+
+def pending_album_payload(folder, cfg, light=False):
+    """The ALBUM PAGE's payload for a framework album, or None when *folder*
+    is not one (`server.pending_albums`: the folder "Add to library" created
+    before any audio exists).
+
+    The same row the library tree lists (`_pending_album_row`) — the release's
+    own tracklist, every entry missing, the placeholder cover, the marker's
+    identity — enriched the way `build_album` enriches a real album: the
+    artwork the add pre-fetched (the description's text unless `light`) and the
+    wish that is filling the folder. A folder the app created on purpose is
+    never a 404 on a page that was linked to it.
+    """
+    if not load_pending(folder):
+        return None
+    from mlo.paths import library_root
+    root = library_root(str(cfg.get("music_folder") or ""))
+    # One folder: read that one wish (`_wish_state`), not the whole queue.
+    row = _pending_album_row(folder, root,
+                             lambda wid: _wish_state(wid, cfg))
+    row["artwork"] = _album_artwork(folder, light=light)
+    return row
+
+
 def build_album(album_dir, cfg, light=False):
     """Grade + enrich a single album. Returns the enriched dict or None."""
     res = _grade_album(album_dir, str(cfg.get("lyrics_format", "EMBEDDED")).upper(), cfg)
     if res is None:
-        return None
+        # No audio to grade — but a FRAMEWORK album is one the app itself put
+        # in the library before its audio arrived, so its page renders what
+        # exists (identity, pre-fetched artwork, the release tracklist, the
+        # wish filling it) instead of "not found". Any other audio-less folder
+        # keeps answering None.
+        return pending_album_payload(album_dir, cfg, light=light)
     if "error" in res:
         res["path"] = album_dir.replace("\\", "/")
         res["tracks"] = []
@@ -318,7 +423,38 @@ def _empty_album_row(folder, root):
     return row
 
 
-def _pending_album_row(folder, root):
+def framework_dirs(dir_scan):
+    """The FRAMEWORK folders in a library walk's own directory scan.
+
+    `_walk_files` records what each directory held (`WALK_FILES` = files but no
+    audio), which is exactly the shape a framework album has: the release
+    manifest, the placeholder cover and the pending marker, and no audio at
+    all. Only a marker makes it one — an audio-less folder WITHOUT one is the
+    empty-folder case (`_find_empty_folders`), not a placeholder.
+    """
+    return [d for d, held in dir_scan.items()
+            if held == WALK_FILES and load_pending(d)]
+
+
+def pending_album_dirs(artist_dir, dir_scan=None):
+    """The FRAMEWORK albums directly under *artist_dir*, sorted.
+
+    The artist page finds its albums by walking for AUDIO (`_find_albums`), so
+    a folder whose audio has not arrived yet would never be listed there — and
+    an album the user asked for that the artist's own page hides is the one
+    gap this closes. Same marker read as the library tree (`framework_dirs`):
+    pass the walk's directory scan when the caller has one, else this reads the
+    subtree itself (one walk, the same `_find_albums` the caller needs anyway).
+    """
+    if dir_scan is None:
+        dir_scan = {}
+        _find_albums(artist_dir, dir_scan)
+    low = os.path.normpath(artist_dir).lower()
+    return sorted(d for d in framework_dirs(dir_scan)
+                  if os.path.dirname(d).lower() == low)
+
+
+def _pending_album_row(folder, root, wish_state=None):
     """Library row for a FRAMEWORK album (see ``server.pending_albums``): the
     folder "Add to library" created before any audio arrived.
 
@@ -329,6 +465,12 @@ def _pending_album_row(folder, root):
     framework album was created with, so the page greys out exactly the tracks
     the search is still filling, and the placeholder cover is the album's cover
     until the import writes a real one.
+
+    *wish_state* is `_wish_lookup(cfg)` when the payload lists more than one
+    album (library tree, Home, a query — all of them read this same row): the
+    queue is then read ONCE for the whole payload. A caller with a single
+    folder to answer for (the album page) leaves it out and reads that one
+    wish itself, in `pending_album_payload`.
     """
     row = _empty_folder_result(folder, root)
     info = load_pending(folder) or {}
@@ -343,7 +485,12 @@ def _pending_album_row(folder, root):
     row["audit_summary"] = None
     row["pending"] = True
     row["pending_reason"] = str(info.get("waiting_for") or "")
-    row["wish_id"] = info.get("wish_id")
+    wid = info.get("wish_id")
+    row["wish_id"] = wid
+    # The wish filling this folder, in the payload's own row: a reader states
+    # "searching — attempt 2, next try in 12 min" / "nothing is searching for
+    # it right now" from HERE rather than asking the queue again per row.
+    row["wish"] = wish_state(wid) if wish_state else None
     cover = info.get("cover") or {}
     row["cover_file"] = str(cover.get("file") or "")
     row["cover_ok"] = bool(row["cover_file"])
@@ -351,6 +498,11 @@ def _pending_album_row(folder, root):
                            if row["cover_file"] else "")
     row["album_artist"] = str(info.get("artist") or "")
     meta = {t: None for t in ALBUM_LEVEL_TAGS}
+    # The links and the page content the ADD pre-fetched (`server.imports
+    # .prefetch_album`): they are on the marker because a framework album has
+    # no tags to carry them yet, and the album's page shows them from the
+    # moment the album is added.
+    links = info.get("links") or {}
     meta.update({
         "ALBUM": info.get("title") or None,
         "ALBUMARTIST": info.get("artist") or None,
@@ -359,16 +511,25 @@ def _pending_album_row(folder, root):
         "MUSICBRAINZ_ALBUMID": info.get("release_id") or None,
         "MUSICBRAINZ_RELEASEGROUPID": info.get("release_group_id") or None,
         "RELEASETYPE": info.get("release_type") or None,
+        "RATEYOURMUSIC_ALBUM": links.get("album") or None,
+        "RATEYOURMUSIC_ARTIST": links.get("artist") or None,
     })
     row["meta"] = meta
     for key, val in (("ALBUM", info.get("title")), ("ALBUMARTIST", info.get("artist")),
-                     ("ARTIST", info.get("artist")), ("DATE", info.get("year"))):
+                     ("ARTIST", info.get("artist")), ("DATE", info.get("year")),
+                     ("RATEYOURMUSIC_ALBUM", links.get("album")),
+                     ("RATEYOURMUSIC_ARTIST", links.get("artist"))):
         if key in row["album_values"]:
             row["album_values"][key] = str(val or "").strip()
     # The release's own tracklist, with nothing on disk matching it: every
     # entry is missing, which is exactly what the album page should show.
     _add_expected_tracks(row, folder)
     row["artwork"] = _album_artwork(folder, light=True)
+    # What the ADD already fetched for this folder (see `server.imports
+    # .prefetch_album`): the artist image and the descriptions are listed with
+    # the paths they were written to, so a reader can see the page content
+    # exists before a byte of audio does.
+    row["prefetched"] = info.get("prefetched") or None
     return row
 
 
@@ -488,12 +649,14 @@ def build_library(cfg, progress=None):
         # marker is: an audio-less folder WITHOUT one is the empty-folder case
         # below, not a placeholder.
         pending_rows = {}
-        for d, held in dir_scan.items():
-            if held != WALK_FILES or not load_pending(d):
-                continue
+        for d in framework_dirs(dir_scan):
             parent = os.path.dirname(d)
             artists.setdefault(parent, [])
             pending_rows.setdefault(parent, []).append(d)
+
+        # One queue read for the whole payload, so the pending rows' wish
+        # state costs no lookup per album (`_wish_lookup`).
+        wish_state = _wish_lookup(cfg)
 
         result = []
         total = len(artists)
@@ -502,7 +665,7 @@ def build_library(cfg, progress=None):
                 progress(i + 1, total, "Scanning library")
             albums_data = (build_albums_parallel(sorted(alb_list), cfg, light=True)
                            if alb_list else [])
-            albums_data.extend(_pending_album_row(d, folder)
+            albums_data.extend(_pending_album_row(d, folder, wish_state)
                                for d in pending_rows.get(artist_dir, []))
             albums_data.extend(_empty_album_row(d, folder)
                                for d in empty_rows.get(artist_dir, []))

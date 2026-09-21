@@ -23,6 +23,12 @@ failed and why (`reason`), what the state means (`note`), what is missing
 (`missing`), which action the row offers (`action`/`action_link`) and whether
 that action can be pressed at all (`retryable`, `dismissable`).
 
+ONE album is ONE row, and the row's section is its CURRENT state: a wish and
+the job filling it are one row while the job runs, and a stalled album's prompt
+(needs you) supersedes the settled row that reported the same folder — an album
+never reads as both "Needs you" and "Completed", and the history returns, still
+clearable, once the prompt is answered.
+
 The stage each row carries is the vocabulary in server.soulseek_auto.STAGES —
 `queued`, `searching`, `downloading`, `verifying`, `importing`, `completed`,
 `failed`, `needs_attention` — so a wish from the MusicBrainz queue and a job
@@ -35,9 +41,28 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from mlo.config import load_config
-from server import soulseek_auto
+from server import soulseek_auto, wishes
 
 router = APIRouter()
+
+# Every row carries a `release` block — the release identity in
+# server.wishes.RELEASE_KEYS (catalog number, medium, country, date, track
+# count, disambiguation, status …), on the rows that know one and EMPTY on the
+# rows that cannot (a prompt about an album already in the library, a finished
+# download waiting in the folder). A row is never missing the block and never
+# invents a fact: the UI renders what is there and shows nothing where there is
+# nothing. What fills it, and why no row ever costs a MusicBrainz request of
+# its own: server/wishes' release identity section.
+#
+# `clearable` is the OTHER per-row verdict: whether this row may be taken off
+# the list (POST /api/queue/clear). Clearing is for rows whose work is OVER —
+# an imported wish, a failed job, a wish nothing was found for — and never for
+# one that is still going: a running row is CANCELLED, which is a different
+# thing that happens to the item, not to the list. Two rows the user can still
+# act on are deliberately NOT clearable here: a finished download waiting in
+# the download folder (its clear would delete the bytes the user is about to
+# import — the staging card and the Downloads tab own that, and they say so),
+# and an import prompt (its own "Mark complete" dismisses it).
 
 
 def _clock(ts):
@@ -196,28 +221,55 @@ def _job_row(job, wish_id=None):
         "action": action,
         "action_link": action_link,
         "retryable": stage == "failed" and bool(str(release.get("id") or "")),
-        # The release's own facts, straight off the job (no per-row lookup —
-        # this route is polled every few seconds): the row can say WHICH
-        # edition was searched for without a MusicBrainz request.
-        "release": {"id": str(release.get("id") or ""),
-                    "date": release.get("date"),
-                    "media": [m for m in (release.get("media_formats")
-                                          or [release.get("media")]) if m],
-                    "track_count": release.get("tracks")},
+        # WHICH edition this job is fetching, straight off the job (no per-row
+        # lookup — this route is polled every few seconds): the catalogue
+        # number and medium that identify the pressing, where and when it came
+        # out, how much it carries, and the edition's own disambiguation and
+        # MusicBrainz status. `release_identity` reads the compact summary the
+        # job carries as well as a full MusicBrainz payload, so the shape is
+        # the ONE documented block (server.wishes.RELEASE_KEYS) either way.
+        "release": wishes.release_identity(release, str(release.get("id") or "")),
         "created_at": float(job.get("started_at") or 0),
         "updated_at": float(job.get("ended_at") or job.get("started_at") or 0),
         "cancelable": stage in ("queued", "searching", "downloading", "verifying",
                                 "importing", "needs_attention"),
+        # A SETTLED job is history the user can take off the list (the album it
+        # imported is in the library; a running one is cancelled, not cleared).
+        "clearable": stage in ("completed", "failed"),
         "log_tail": [l.get("msg") for l in (job.get("log") or [])[-4:]],
     }
 
 
-def _wish_rows(wishes_list, jobs_by_wish):
-    """Wish rows, merged with the job filling them when one is running.
+def _no_release():
+    """The EMPTY identity block, for a row with no release to name (a stalled
+    album already in the library, a finished download in the folder): every
+    documented key with nothing in it, so the UI never has a field to guard and
+    never has a fact to guess."""
+    return wishes.release_identity({})
+
+
+def _album_key(path):
+    """One album's identity inside the payload, for the rows that name a
+    folder: the same normalization the prompt table keys its entries by, so a
+    row and a prompt about one album compare equal however each side spelled
+    the path."""
+    return os.path.normpath(str(path or "")).replace("\\", "/").lower()
+
+
+def _wish_rows(wishes_list, jobs_by_wish, cfg=None):
+    """Wish rows, merged with the job filling them WHILE THAT JOB RUNS.
 
     A wish being downloaded is ONE row with the download's stage and progress —
     not a "searching" wish and a "downloading" job side by side, which is how a
-    single album looked like two items doing unrelated things."""
+    single album looked like two items doing unrelated things.
+
+    A job that has SETTLED is history, not state: the wish's own status is what
+    the store holds now. Letting the finished job's stage win put a wish whose
+    searches found nothing (terminal, waiting for the user) in the failed
+    section as if the album had been given up on, and a wish that was already
+    re-armed for its next attempt read as still failing — the row contradicted
+    the store it was built from. The settled job still CLAIMS its id (so it
+    does not draw a second row of its own) and still lends its log tail."""
     rows = []
     for w in wishes_list:
         status = str(w.get("status") or "")
@@ -229,8 +281,9 @@ def _wish_rows(wishes_list, jobs_by_wish):
                  # fill it by hand. needs_attention is exactly that section.
                  "not_found": "needs_attention"}.get(status, "queued")
         job = jobs_by_wish.get(w["id"])
+        live = job is not None and job["stage"] not in ("completed", "failed")
         progress, note, reason = None, "", str(w.get("last_error") or "")
-        if job is not None:
+        if live:
             stage = job["stage"]
             progress = job["progress"]
             note = job["note"]
@@ -246,6 +299,19 @@ def _wish_rows(wishes_list, jobs_by_wish):
         retry_at = float(w.get("retry_at") or 0)
         if stage == "queued" and retry_at > time.time():
             note = note or f"Retrying after a failure at {_clock(retry_at)}"
+        # The store's own verdict, read once: whether the worker will search
+        # this wish again on its own is what decides every action the row has
+        # (see server/wishes' retry policy).
+        terminal = bool(wishes.is_terminal(w, cfg or {}))
+        if stage == "failed" and not terminal:
+            # A failed ATTEMPT is not a given-up wish — with attempts left in
+            # its budget the worker searches it again by itself — and the row
+            # says so instead of reading as a dead end nobody can act on. It is
+            # cancelled (the standing request goes), never "cleared": clearing
+            # is for rows whose work is over.
+            note = (note + " · " if note else "") + (
+                "failed this attempt — searched again automatically at "
+                + _clock(wishes.due_at(w, cfg or {})))
         key, label = _wish_source(w)
         rows.append({
             "id": f"wish:{w['id']}",
@@ -263,6 +329,14 @@ def _wish_rows(wishes_list, jobs_by_wish):
             "reason": reason,
             "note": note,
             "attempts": int(w.get("attempts") or 0),
+            # WHICH pressing this wish is waiting for, resolved once and kept
+            # on the wish itself (server/wishes' release identity section):
+            # every key is present and a fact nobody could resolve is empty, so
+            # a wish whose release was never looked up still renders. A row read
+            # out of a store that predates the block still gets the documented
+            # shape with the id the wish is keyed by.
+            "release": w.get("release")
+            or wishes.release_identity({}, w.get("release_mbid") or ""),
             # Empty searches so far, and when the next automatic one may run
             # (0 = it will not: the wish is terminal until the user retries).
             "not_found": int(w.get("not_found") or 0),
@@ -277,9 +351,22 @@ def _wish_rows(wishes_list, jobs_by_wish):
             "updated_at": float(w.get("updated_at") or 0),
             # A wish still waiting can be taken back off the queue; one that is
             # being downloaded is cancelled as ITS JOB (same button, and the
-            # wish returns to 'wanted' by itself when the job stops).
+            # wish returns to 'wanted' by itself when the job stops). A wish
+            # that FAILED an attempt but is still within its budget belongs
+            # here too: the worker will search it again by itself, so the row
+            # is still in the pipeline and the way out is to stop wanting the
+            # release — cancel, not clear. Without this the row sat in Failed
+            # with no action at all until the attempts cap gave up for good.
             "cancelable": stage in ("queued", "searching", "downloading",
-                                    "verifying", "importing", "needs_attention"),
+                                    "verifying", "importing", "needs_attention",
+                                    "failed"),
+            # A TERMINAL wish (imported, nothing found, or failed for good —
+            # `wishes.is_terminal`) is one the user may take off the list
+            # entirely; one that is still wanted or being searched is not
+            # cleared but CANCELLED, which is its own button and its own
+            # meaning (the wish goes back off the queue only because the user
+            # says so, not because "clear" sounded harmless).
+            "clearable": terminal,
             "log_tail": (job or {}).get("log_tail") or [],
         })
     return rows
@@ -308,9 +395,19 @@ def _bulk_rows(queued):
             "progress": None,
             "reason": "",
             "note": "Waiting for a free slot in the pipeline",
+            # The queued item carries the release it was queued with (a
+            # MusicBrainz payload when the route resolved it), so a row that has
+            # not started yet still names the exact edition it is waiting to
+            # fetch.
+            "release": wishes.release_identity(
+                release, str(item.get("release_mbid") or "")),
             "created_at": 0.0,
             "updated_at": 0.0,
             "cancelable": True,
+            # Not "clearable": this release has not run yet — taking it off the
+            # list is its cancel (the drop from the bulk queue), which is a
+            # different word for a different thing.
+            "clearable": False,
             "log_tail": [],
         })
     return rows
@@ -342,6 +439,7 @@ def _import_rows(status):
         "title": os.path.basename(current.rstrip("\\/")) or "Importing downloads",
         "artist": "",
         "release_mbid": "",
+        "release": _no_release(),
         "album_path": current,
         "progress": {"text": current, "done": done, "total": total,
                      "percent": (100.0 * done / total) if total else None},
@@ -350,6 +448,7 @@ def _import_rows(status):
         "created_at": float(status.get("started_at") or 0),
         "updated_at": float(status.get("finished_at") or status.get("started_at") or 0),
         "cancelable": True,
+        "clearable": False,       # a RUN is stopped, not cleared (see cancel)
         "log_tail": [],
     }]
 
@@ -373,6 +472,7 @@ def _done_rows(ready):
             "title": os.path.basename(str(path).rstrip("\\/")) or str(path),
             "artist": "",
             "release_mbid": "",
+            "release": _no_release(),
             "album_path": "",
             # The download folder's own path: a "completed" row is imported
             # from HERE, and it is not a library album to link to.
@@ -383,6 +483,11 @@ def _done_rows(ready):
             "created_at": 0.0,
             "updated_at": 0.0,
             "cancelable": False,      # nothing to cancel: the import is the action
+            # Deliberately NOT clearable: "clear" on this row could only mean
+            # deleting the downloaded bytes the user is about to import. The
+            # staging card and the Downloads tab own those bytes and their own
+            # clear says what it deletes; this row's action is the import.
+            "clearable": False,
             "log_tail": [],
         })
     return rows
@@ -422,6 +527,7 @@ def _prompt_rows(prompts):
             "title": str(p.get("album_name") or os.path.basename(album.rstrip("/")) or album),
             "artist": "",
             "release_mbid": "",
+            "release": _no_release(),
             "album_path": album,
             "progress": None,
             # What is missing, in the wizard's own order: the ids the wizard's
@@ -437,8 +543,11 @@ def _prompt_rows(prompts):
             "created_at": float(p.get("at") or 0),
             "updated_at": float(p.get("at") or 0),
             # Nothing to cancel: the album is IN the library. The row's actions
-            # are the two above.
+            # are the two above (the wizard and the dismiss — which IS how a
+            # prompt is taken off the list, so `clearable` would be a second
+            # word for the same button).
             "cancelable": False,
+            "clearable": False,
             "log_tail": [],
         })
     return rows
@@ -446,7 +555,7 @@ def _prompt_rows(prompts):
 
 def build_queue(cfg=None):
     """The whole pipeline as one payload, grouped into SECTIONS."""
-    from server import import_queue, soulseek, wishes
+    from server import import_queue, soulseek
 
     cfg = cfg or load_config()
     all_jobs = soulseek_auto.jobs()
@@ -462,7 +571,7 @@ def build_queue(cfg=None):
         wid = row.get("wish_id")
         if wid:
             jobs_by_wish[int(wid)] = row
-    rows = _wish_rows(wishes.list_wishes(), jobs_by_wish)
+    rows = _wish_rows(wishes.list_wishes(), jobs_by_wish, cfg)
     # A job whose wish is no longer in the list (deleted mid-download, or a
     # wish_id nothing matches) keeps its OWN row: it is still downloading, and
     # hiding real work because the row it belonged to went away is exactly the
@@ -475,12 +584,29 @@ def build_queue(cfg=None):
     # ones, in the same needs-you section as a download parked on a question —
     # one place to see everything that is waiting on a person, whether it is
     # waiting for a search or for a decision about an album already on disk.
+    prompt_rows = []
     try:
         from server import import_autonomy
-        rows += _prompt_rows(import_autonomy.prompts(cfg))
+        prompt_rows = _prompt_rows(import_autonomy.prompts(cfg))
+        rows += prompt_rows
     except Exception:
         # A prompt file that cannot be read must not blank the whole queue.
         pass
+    # ONE row per album, in its CURRENT state: a stalled album's prompt IS that
+    # state, and the settled row that reported its download or its import is
+    # the history of the same album — showing both is how one release read as
+    # "Needs you" and "Completed" at once. The prompt wins; the history is not
+    # lost (the list its kind owns still shows it, and the settled row comes
+    # back here, clearable, once the prompt is gone). Only SETTLED rows are
+    # suppressed: an album being downloaded or awaited right now is live work
+    # and stays whatever a prompt about the same folder says.
+    stalled = {_album_key(r.get("album_path")) for r in prompt_rows
+               if r.get("album_path")}
+    if stalled:
+        rows = [r for r in rows
+                if not (r.get("album_path")
+                        and r.get("stage") in ("completed", "failed")
+                        and _album_key(r.get("album_path")) in stalled)]
     try:
         rows += _done_rows(soulseek.ready_albums(cfg))
     except Exception:
@@ -493,6 +619,10 @@ def build_queue(cfg=None):
         sections[_section_of(row["stage"])].append(row)
     for rows_ in sections.values():
         rows_.sort(key=lambda r: (-(r.get("created_at") or 0), r["id"]))
+    # The counts are DERIVED from the rows, never a tally kept beside them: a
+    # section header and the header line can then never disagree with the list
+    # underneath (and a client that renders `sections` alone still shows the
+    # numbers this says).
     counts = {
         "queued": len(sections["queued"]),
         "in_progress": len(sections["in_progress"]),
@@ -523,6 +653,19 @@ class QueueCancelRequest(BaseModel):
 
 class QueueRetryRequest(BaseModel):
     id: str
+
+
+class QueueClearRequest(BaseModel):
+    """One queue row to clear (`id`), or a scope of finished ones.
+
+    `scope` is "finished" (every finished row the queue owns), "wishes" (the
+    same, narrowed to the wishlist — the Wishes tab's own "Clear finished"), or
+    one section name from `SECTIONS` (that list's own button clears exactly
+    what its header counted). Neither field is a required one in the sense that
+    the other must be empty — the route refuses a body that names nothing (see
+    queue_clear)."""
+    id: str = ""
+    scope: str = ""
 
 
 def _drop_pipeline_item(item_id):
@@ -588,6 +731,103 @@ def queue_retry(req: QueueRetryRequest):
             409, "this album is already in the library — enter what is missing "
                  "from the wizard, or dismiss the prompt")
     raise HTTPException(400, f"'{kind}' rows are not retried from the queue")
+
+
+@router.post("/api/queue/clear")
+def queue_clear(req: QueueClearRequest):
+    """Take FINISHED rows off the queue — one row, or every finished one.
+
+    The queue accumulates history: a download that imported, a job that gave up,
+    a wish nothing was ever found for, a release whose wish the user is done
+    with. Clearing is about the LIST, not about the library — nothing is
+    un-imported, no download is deleted and no byte on disk is touched — and it
+    is only ever offered where the work is over:
+
+    * ``{"id": "wish:7"}`` — one row (``build_queue``'s ``clearable`` says
+      which; every row carries it). A wish leaves the wishlist, with the
+      framework album folder it created (``pending_albums.remove_for_wish``, the
+      same pair ``DELETE /api/wishes/{id}`` uses); a settled job is forgotten by
+      the registry (``soulseek_auto.forget``).
+    * ``{"scope": "finished"}`` — every finished row the QUEUE owns: imported
+      wishes, settled jobs, wishes nothing was found for, wishes that failed for
+      good.
+    * ``{"scope": "wishes"}`` — the same, narrowed to the wishlist (what the
+      Wishes tab's own "Clear finished" clears).
+    * ``{"scope": "<section>"}`` — one SECTION of the queue (one of
+      ``build_queue``'s SECTIONS names: "completed", "failed", …): the finished
+      rows THAT list shows, which is what a section header's own button means
+      (it says how many it counted). A section holding both finished and
+      still-standing rows (needs_attention: a wish nothing was found for beside
+      an import prompt) loses only the finished ones — the prompt stays until
+      it is dismissed or its family is supplied.
+
+    What it REFUSES is the point: a row that is still running, parked on a
+    question, or waiting (a bulk-queue release, a running import, a wish that is
+    still wanted or being searched) answers 409 naming its real alternative —
+    cancel is a different action with a different meaning, and "clear" must
+    never be the button that quietly does it. A finished download sitting in the
+    download folder is not clearable either: its row's action is the import, and
+    deleting those bytes is the staging card's job (which says so).
+
+    Answers how many rows went and which (``cleared``/``ids``), so the caller
+    can refetch and say what happened."""
+    from server import pending_albums, wishes
+
+    item_id = str(req.id or "").strip()
+    scope = str(req.scope or "").strip().lower()
+    if not item_id and scope not in ("finished", "wishes") and scope not in SECTIONS:
+        raise HTTPException(400, "id must be '<kind>:<ref>', or scope must be "
+                                 "'finished', 'wishes' or a section name")
+    sections = build_queue().get("sections", {})
+    if item_id:
+        rows = [r for section in sections.values() for r in section]
+        wanted = [r for r in rows if r["id"] == item_id]
+        if not wanted:
+            raise HTTPException(404, f"no queue row '{item_id}'")
+        if not wanted[0].get("clearable"):
+            raise HTTPException(409, _clear_refusal(wanted[0]))
+    elif scope in SECTIONS:
+        # One section: exactly the finished rows IT shows (its header counts
+        # them the same way — `clearable` off the same payload this reads).
+        wanted = [r for r in sections.get(scope, []) if r.get("clearable")]
+    else:
+        wanted = [r for section in sections.values() for r in section
+                  if r.get("clearable")
+                  and (scope != "wishes" or r["kind"] == "wish")]
+
+    cleared, ids = 0, []
+    for row in wanted:
+        if row["kind"] == "wish":
+            wid = int(row["wish_id"])
+            pending_albums.remove_for_wish(wid)     # a framework folder goes too
+            # The settled job this row was merged with is the same album's
+            # history: it was claimed by this row, so leaving it behind would
+            # make it pop up as a row of its own the moment the wish goes.
+            if row.get("job_id"):
+                soulseek_auto.forget(row["job_id"])
+            if wishes.delete_wish(wid):
+                cleared += 1
+                ids.append(row["id"])
+        elif row["kind"] == "job":
+            if soulseek_auto.forget(row["job_id"]):
+                cleared += 1
+                ids.append(row["id"])
+    return {"ok": True, "cleared": cleared, "ids": ids}
+
+
+def _clear_refusal(row):
+    """Why this row cannot be cleared, in the words of what it IS."""
+    if row["kind"] == "ready":
+        return ("this download is waiting to be imported — import it, or delete "
+                "its bytes from the staging card (the queue never deletes a "
+                "download)")
+    if row["kind"] == "prompt":
+        return ("this album is already in the library — dismiss the prompt "
+                "instead of clearing it")
+    if row["kind"] in ("pipeline", "import"):
+        return "this one has not run yet — cancel it instead of clearing it"
+    return ("this row is still in the pipeline — cancel it instead of clearing "
+            "it (clearing is for finished rows)")
 
 
 @router.post("/api/queue/cancel")

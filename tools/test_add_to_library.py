@@ -61,6 +61,7 @@ for _t in (MF,):
 from mlo import grader as grader_mod  # noqa: E402
 from mlo.config import load_config  # noqa: E402
 from server import artcache, imports, pending_albums, wishes  # noqa: E402
+from server import integrations as intg_mod  # noqa: E402
 from server import library as lib_mod  # noqa: E402
 from server import main as mlo_main  # noqa: E402  (organize + the DELETE route)
 
@@ -160,6 +161,38 @@ def fake_cover_step(album_dir, cfg=None):
 
 
 imports.run_cover_step = fake_cover_step
+
+# The ADD-time pre-fetch (`pending_albums.create` → `imports.prefetch_album`)
+# runs the import chain's own steps early — the metadata step and the cover
+# search. The artist image / description candidates are stubbed by
+# `imports.run_metadata_step` above; the two seams still left are the links
+# resolver and the cover finder, and neither may be reached for real here.
+intg_mod.rym_links = lambda artist="", album="", cfg=None, mbid=None: {
+    "album": "https://rateyourmusic.com/release/album/a/b/",
+    "artist": "https://rateyourmusic.com/artist/a", "note": "stub"}
+cover_searches = []
+
+
+def fake_cover_search(artist, album, limit=40, timeout=60.0, sources=None,
+                      country=None, cfg=None, release_group_mbid="",
+                      release_mbid=""):
+    """What the cover finder answers offline: one release-group stand-in, so the
+    add-time staging has a real candidate to rank and mark."""
+    cover_searches.append({"artist": artist, "album": album,
+                           "release_group_mbid": release_group_mbid,
+                           "release_mbid": release_mbid})
+    return {"provider": "coverartarchive", "sources": [
+        {"id": "coverartarchive", "status": "used", "count": 1}],
+        "results": [{
+            "source": "coverartarchive", "small": None,
+            "big": "https://coverartarchive.org/release-group/rg/front",
+            "title": "Test Album", "artist": "Test Artist", "tracks": 2,
+            "url": "https://coverartarchive.org/release-group/rg",
+            "width": 1200, "height": 1200, "format": "jpeg", "bytes": 200000,
+            "front": True, "kind": "front", "release_cover": False, "rank": 0}]}
+
+
+intg_mod.cover_search = fake_cover_search
 
 
 def add_audio(album_dir):
@@ -446,7 +479,7 @@ else:
     # Its own release: the albums above are in the library by now, and the
     # route is supposed to CREATE a framework album, not report one it found.
     route_release = release_variant(7, "Route Add")
-    intg.auto_import_targets = lambda mbid, kind=None, mode="best": (
+    intg.auto_import_targets = lambda mbid, kind=None, mode="best", types=None: (
         [{"mbid": route_release["id"], "title": route_release["title"]}], [])
     intg.resolve_release = lambda mbid: (route_release, route_release["id"])
     triggered = []
@@ -467,9 +500,32 @@ else:
     ok(albums[0]["created"] and os.path.isdir(route_folder),
        "the route created the framework folder on disk", route_folder)
     ok(bool(pathmod.load_pending(route_folder)), "and marked it pending")
-    eq(triggered, [albums[0]["wish_id"]], "the existing wishes worker was asked to search it")
+    # "Add to library" is the RECORD: the album and its wish are on the queue,
+    # and the configured automation (the wishes worker's own loop) searches it.
+    # Starting the search NOW is what `download` asks for, and the next call
+    # below is that.
+    eq(triggered, [], "a plain add does not kick the queue itself")
     eq(wishes.get_wish(albums[0]["wish_id"])["source"], "musicbrainz",
        "the wish is on the existing queue, labelled MusicBrainz")
+
+    down_release = release_variant(2, "Download Add")
+    intg.auto_import_targets = lambda mbid, kind=None, mode="best", types=None: (
+        [{"mbid": down_release["id"], "title": down_release["title"]}], [])
+    intg.resolve_release = lambda mbid: (down_release, down_release["id"])
+    down = client.post("/api/library/add", json={
+        "mbid": down_release["release_group_id"], "kind": "release_group",
+        "mode": "best", "download": True})
+    eq(down.status_code, 200, "the download ask answers 200")
+    down_albums = down.json().get("albums") or []
+    eq(len(down_albums), 1, "the download ask added its own album")
+    eq(triggered, [down_albums[0]["wish_id"]],
+       "download=True asked the wishes worker to search it")
+    eq(down.json().get("note"), "Soulseek is searching for them now.",
+       "and the reply says the search started")
+    triggered.clear()
+    intg.auto_import_targets = lambda mbid, kind=None, mode="best", types=None: (
+        [{"mbid": route_release["id"], "title": route_release["title"]}], [])
+    intg.resolve_release = lambda mbid: (route_release, route_release["id"])
 
     bad = client.post("/api/library/add", json={"mbid": "", "kind": "release"})
     eq(bad.status_code, 400, "a blank id is refused with 400")
@@ -521,6 +577,50 @@ else:
     eq(cancelled.status_code, 200, "the cancel route answers 200")
     ok(not os.path.isdir(route_folder), "the route's cancel removed the folder")
     ok(wishes.get_wish(albums[0]["wish_id"]) is None, "and deleted the wish")
+
+# --------------------------------------------------------------------------- #
+# 8. the album's PAGE: a framework album answers with a payload, not "not found"
+# --------------------------------------------------------------------------- #
+print("\nthe pending album's page")
+pending_album = another = pending_albums.create(release_variant(2, "Page Add"), cfg)
+page_folder = another["album_path"].replace("/", os.sep)
+payload_row = lib_mod.build_album(page_folder, cfg)
+ok(payload_row is not None, "build_album answers for a folder with no audio")
+eq(payload_row["pending"], True, "and says the album is pending")
+eq(payload_row["tracks"], [], "with no playable track")
+eq(payload_row["track_count"], 0, "and no phantom track counted")
+eq(payload_row["grade_pct"], None, "nothing was graded, so no grade is claimed")
+eq(payload_row["issues"], {}, "and the empty folder is not reported as a broken album")
+eq([t["title"] for t in payload_row["expected_tracks"]], ["One", "Two"],
+   "the page carries the release's own tracklist")
+ok(all(t["missing"] for t in payload_row["expected_tracks"]), "every track still missing")
+ok(bool(payload_row["cover_file"]), "the placeholder cover is the album's cover")
+eq(payload_row["path"], page_folder.replace(os.sep, "/"), "path is the folder the page asked for")
+# the wish filling it: what the page says instead of an empty tracklist
+wish_state = payload_row.get("wish") or {}
+eq(wish_state.get("id"), another["wish_id"], "the page carries the wish that fills it")
+ok(wish_state.get("status") in ("wanted", "searching"), wish_state)
+eq(wish_state.get("attempts"), 0, "with the attempts the queue has spent")
+ok("due_at" in wish_state and "reason" in wish_state,
+   "and when it is next searched, plus the queue's own reason", wish_state)
+# the content the ADD pre-fetched, recorded on the marker
+prefetched = payload_row.get("prefetched") or {}
+ok("cover_candidates" in prefetched and "links" in prefetched,
+   "the marker records what the add pre-fetched", prefetched)
+eq(cover_searches[-1]["release_mbid"], release_variant(2, "x")["id"],
+   "the pre-fetch asked the cover finder for THIS release's own cover")
+# ...and the page's route takes the pending branch rather than 404ing: the
+# not-found empty state is for a folder that is not there, never for one the
+# app itself created.
+served = mlo_main.get_album(path=page_folder)
+eq(served["pending"], True, "GET /api/album answers for the framework album")
+ok((served.get("wish") or {}).get("id") == another["wish_id"],
+   "and carries its wish, so the page can say what is happening to it")
+try:
+    mlo_main.get_album(path=os.path.join(MF, "no-such-album"))
+    ok(False, "an unknown folder still 404s")
+except Exception as e:
+    ok("404" in str(e), "an unknown folder still 404s", e)
 
 print()
 if FAILED:

@@ -128,7 +128,7 @@ AUDIO_TAG_FAMILIES = [
     "AUDIT",          # AUDIT (Audit Library)
     "LOG_GRADE",      # LOG_GRADE (disc rip log scores)
     "REPLAYGAIN",     # REPLAYGAIN_TRACK/ALBUM_GAIN/PEAK (4 tags via rsgain)
-    "DYNAMIC_RANGE",  # DYNAMIC RANGE + ALBUM DYNAMIC RANGE (simple-dr-meter)
+    "DYNAMIC_RANGE",  # DYNAMIC RANGE + ALBUM DYNAMIC RANGE (in-process, mlo/dr)
     "MEDIA_SOURCE",   # MEDIA + SOURCE (Digital Media normalization)
     "INSTRUMENTAL",   # INSTRUMENTAL (lyrics presence)
     "ADVISORY",       # ITUNESADVISORY + ALBUMITUNESADVISORY
@@ -648,7 +648,7 @@ DEFAULT_CONFIG = {
         "aac": {k: True for k in AUDIO_TAG_FAMILIES},
     },
 
-    # DR / ReplayGain (script 7): rsgain + simple-dr-meter.
+    # DR / ReplayGain (script 7): in-process DR + rsgain.
     "dr_replaygain_enabled": True,
     "replaygain_skip_existing": True,
     "force_dr_replaygain": False,

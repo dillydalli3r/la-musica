@@ -381,12 +381,15 @@ def remove_tracks(pid, paths, user=""):
 # the same payload — a saved smart playlist and an ad-hoc query may never
 # disagree about what matches. This module keeps only playlist storage.
 def _uses_rating(spec):
-    """Whether the spec compares the numeric `rating` field.
+    """Whether the spec compares one of the rating fields.
 
     `tags.RATING` is a TEXT tag comparison (Picard's 0-100 scale) and must not
-    drag the store in: only the field the store answers for does."""
+    drag the store in: only the fields the store answers for do — the track's
+    own `rating` and the two folder scopes (`album.rating`, `artist.rating`,
+    the user's verdict on that album or artist)."""
+    from mlo import query as query_mod
     for cond in (spec or {}).get("conditions") or ():
-        if str((cond or {}).get("field") or "") == "rating":
+        if str((cond or {}).get("field") or "") in query_mod.RATING_FIELDS:
             return True
     return False
 
@@ -396,7 +399,9 @@ def _rating_of(user, spec):
 
     Built lazily and only then: a spec with no rating condition must not pay
     for a store read (the engine calls this per row, and the first call pays
-    for the whole map)."""
+    for the whole map). It answers all three scopes — the callable for tracks
+    and its `folder` half for `album.rating`/`artist.rating` — so a saved rule
+    filters on the user's own verdict whichever entity it names."""
     if not _uses_rating(spec):
         return None
     from server.api_query import rating_source

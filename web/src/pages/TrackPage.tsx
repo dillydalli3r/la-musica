@@ -22,6 +22,9 @@ import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
 import TagActionsMenu from "../components/TagActionsMenu";
 import Modal from "../components/Modal";
 import MoreLikeThis from "../components/MoreLikeThis";
+import OnlineRecommendations from "../components/OnlineRecommendations";
+import LockedChip from "../components/LockedChip";
+import { useLockWhy } from "../lib/locks";
 import TrackDetails, { CreditsPanel, creditTagsFrom } from "../components/TrackDetails";
 import { failedChecksOf, invalidValueReason, isExcessTag, tagInfoOf, tagLabel, tagTooltip, useTagRegistry } from "../lib/tags";
 
@@ -32,6 +35,9 @@ export default function TrackPage() {
   const playNow = useStore((s) => s.playNow);
   const queue = useStore((s) => s.queue);
   const queueAdd = useStore((s) => s.queueAdd);
+  // Held by a job right now? Then there is no stream to play and the page says
+  // why up front, in the server's own words.
+  const lockWhy = useLockWhy(decoded);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["track-tags", decoded],
@@ -266,7 +272,12 @@ export default function TrackPage() {
 
       <PageHeader
         overline="Track"
-        title={tags.TITLE ?? fileName}
+        title={
+          <span className="inline-flex items-center gap-2 min-w-0">
+            <span className="truncate">{tags.TITLE ?? fileName}</span>
+            <LockedChip path={decoded} />
+          </span>
+        }
         subtitle={
           <>
         {/* the track's own star rating — large, with the numeric value
@@ -288,7 +299,11 @@ export default function TrackPage() {
         }
         actions={
           <>
-            <button className="btn-ghost" onClick={() => playNow([queueTrack])} title="Play this track">
+            <button
+              className={`btn-ghost${lockWhy ? " opacity-60" : ""}`}
+              onClick={() => playNow([queueTrack])}
+              title={lockWhy || "Play this track"}
+            >
               <Play className="h-4 w-4 fill-current" /> Play
             </button>
             <DownloadButton
@@ -528,9 +543,20 @@ export default function TrackPage() {
         </div>
       </div>
 
-      {/* Tracks the local scorer ranks closest to this one, from elsewhere in
-          the library — its own album is excluded. */}
-      <MoreLikeThis kind="track" id={decoded} />
+      {/* Two shelves, side by side: tracks the LOCAL scorer ranks closest to
+          this one from elsewhere in the library (its own album excluded), and
+          what the online providers suggest for this track. The online shelf
+          has its own loading state, so it never delays the page. */}
+      <div className="grid gap-4 lg:grid-cols-2 items-start">
+        <MoreLikeThis kind="track" id={decoded} />
+        <OnlineRecommendations
+          kind="tracks"
+          seedKind="track"
+          seedMbid={tags.MUSICBRAINZ_TRACKID ?? ""}
+          seedName={tags.TITLE ?? fileName}
+          seedArtist={tags.ARTIST ?? ""}
+        />
+      </div>
 
       {managerOpen && (
         <LyricsManagerModal

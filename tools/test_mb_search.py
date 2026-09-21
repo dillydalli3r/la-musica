@@ -532,10 +532,191 @@ mb.lookup[f"release/{MBID_RELEASE}"] = {
 release = _client.get("/api/mb/release", params={"mbid": MBID_RELEASE}).json()
 for key in ("id", "title", "date", "catalog_number", "label", "country", "status",
             "medium", "release_group_id", "primary_type", "secondary_types",
-            "artists", "genres", "media", "medium_count"):
+            "artists", "genres", "media", "medium_count", "countries"):
     assert key in release, f"the release payload lost {key}"
 assert release["media"][0]["recording_mbid"] == MBID_REC, release["media"][0]
 assert release["release_group_id"] == MBID_RG, release
+# A release MusicBrainz states no release event for carries an EMPTY country
+# list (never a made-up one) — the page then prints no country field at all.
+assert release["countries"] == [], release["countries"]
+
+
+# --------------------------------------------------------------------------- #
+# 7. a field-qualified query IS the query MusicBrainz is asked
+# --------------------------------------------------------------------------- #
+# The box holds a Lucene query, not a phrase: `artist:"…" AND releasegroup:"…"`
+# must reach the index as written (bar the trim), or the syntax the box's help
+# teaches would do nothing. Asserted on the REQUEST PARAMS below, not on the
+# returned rows, because the mangle this guards against never reaches a row.
+FIELDED = 'artist:"Radiohead" AND releasegroup:"OK Computer"'
+mb = _install(FakeMB())
+mb.search[("release", FIELDED)] = [_release_row(1)]
+page = intg.search_mb("release", f"  {FIELDED}  ")
+assert mb.calls[-1]["params"] == {"query": FIELDED, "limit": 100, "offset": 0,
+                                  "fmt": "json"}, mb.calls[-1]
+assert page["query"] == FIELDED, page
+
+# …and the same through the route, so the URL round-trip mangles nothing
+# either (a quote, a colon and a space all survive).
+mb = _install(FakeMB())
+mb.search[("release", FIELDED)] = [_release_row(1)]
+r = _client.get("/api/mb/search", params={"q": FIELDED, "type": "release"})
+assert r.status_code == 200, r.text
+assert mb.calls[-1]["params"]["query"] == FIELDED, mb.calls[-1]
+assert r.json()["query"] == FIELDED, r.json()
+# one field on its own, and a quoted phrase with no field at all
+for query in ('release:"OK Computer"', '"OK Computer"'):
+    mb = _install(FakeMB())
+    mb.search[("release", query)] = [_release_row(1)]
+    intg.search_mb("release", query)
+    assert mb.calls[-1]["params"]["query"] == query, mb.calls[-1]
+# a field query COMBINES with the constraint boxes: each is its own clause
+mb = _install(FakeMB())
+combined = f'{FIELDED} AND date:[1997 TO 1997] AND primarytype:"Album"'
+mb.search[("release", combined)] = [_release_row(1)]
+intg.search_mb("release", FIELDED, primary_type="Album", year="1997")
+assert mb.calls[-1]["params"]["query"] == combined, mb.calls[-1]
+
+
+# --------------------------------------------------------------------------- #
+# 8. the field catalogue the box's help and completion are built from
+# --------------------------------------------------------------------------- #
+# One source of truth: the route serves the same dict the server's query
+# builder was written against, so the UI cannot offer a field the index would
+# not answer. Field NAMES are MusicBrainz's documented index fields (the
+# "Search Fields" tables of its API docs) — a name that is not MusicBrainz's
+# is the one thing this list must never grow.
+help_res = _client.get("/api/mb/search/fields")
+assert help_res.status_code == 200, help_res.text
+help_body = help_res.json()
+assert set(help_body) == {"fields", "syntax"}, sorted(help_body)
+assert set(help_body["fields"]) == {"artist", "release-group", "release",
+                                    "recording", "work"}, sorted(help_body["fields"])
+
+DOCUMENTED = {
+    "artist": {"alias", "primary_alias", "area", "arid", "artist", "artistaccent",
+               "begin", "beginarea", "comment", "country", "end", "endarea", "ended",
+               "gender", "ipi", "isni", "sortname", "tag", "type"},
+    "release-group": {"alias", "arid", "artist", "artistname", "comment", "creditname",
+                      "firstreleasedate", "primarytype", "reid", "release",
+                      "releasegroup", "releasegroupaccent", "releases", "rgid",
+                      "secondarytype", "status", "tag", "type"},
+    "release": {"alias", "arid", "artist", "artistname", "asin", "barcode", "catno",
+                "comment", "country", "creditname", "date", "discids", "discidsmedium",
+                "format", "laid", "label", "lang", "mediumid", "mediums", "packaging",
+                "primarytype", "quality", "reid", "release", "releaseaccent", "rgid",
+                "script", "secondarytype", "status", "tag", "tracks", "tracksmedium",
+                "type"},
+    "recording": {"alias", "arid", "artist", "artistname", "comment", "country",
+                  "creditname", "date", "dur", "firstreleasedate", "format", "isrc",
+                  "number", "position", "primarytype", "qdur", "recording",
+                  "recordingaccent", "reid", "release", "rgid", "rid", "secondarytype",
+                  "status", "tag", "tid", "tnum", "tracks", "tracksrelease", "type",
+                  "video"},
+    "work": {"alias", "arid", "artist", "comment", "iswc", "lang", "recording",
+             "recording_count", "rid", "tag", "type", "wid", "work", "workaccent"},
+}
+KINDS = {"text", "enum", "date", "number", "boolean", "id", "code"}
+for kind, entries in help_body["fields"].items():
+    assert {e["field"] for e in entries} == DOCUMENTED[kind], \
+        (kind, sorted({e["field"] for e in entries} ^ DOCUMENTED[kind]))
+    assert len(entries) == len(DOCUMENTED[kind]), kind
+    for e in entries:
+        assert set(e) == {"field", "kind", "example", "quotes", "meaning"}, sorted(e)
+        assert e["kind"] in KINDS, e
+        # quotes is the rule, not a per-field opinion: a text/enum value may be
+        # quoted (and quoting is what keeps a multi-word value one phrase), and
+        # a date/id/code/number/boolean is compared as-is and never is.
+        assert e["quotes"] == (e["kind"] in ("text", "enum")), e
+        assert e["example"] and e["meaning"], e
+        assert e["example"].strip() == e["example"], e
+        # a quoted value's example carries its quotes, because it is inserted
+        # after `field:` as-is
+        if e["quotes"] and " " in e["example"]:
+            assert e["example"].startswith('"') and e["example"].endswith('"'), e
+
+by_name = {e["field"]: e for e in help_body["fields"]["release"]}
+assert by_name["country"]["kind"] == "code" and by_name["country"]["example"] == "GB"
+assert by_name["country"]["quotes"] is False
+# "Digital Media" (and "Not applicable", and "Audio drama") only match as ONE
+# phrase: MARKED quoted so the insertion is `format:""`, and verified live —
+# `format:Digital Media` answers 24,777 releases against 2,835,176 quoted.
+assert by_name["format"]["quotes"] is True and by_name["format"]["example"] == '"Digital Media"'
+assert by_name["date"]["kind"] == "date" and by_name["catno"]["quotes"] is True
+# a release group has no label and no catalog number, so neither is offered
+rg_names = {e["field"] for e in help_body["fields"]["release-group"]}
+assert not (rg_names & {"label", "catno", "laid", "barcode"}), sorted(rg_names)
+assert {e["field"] for e in help_body["fields"]["recording"]} >= {"dur", "isrc", "tnum"}
+
+# the syntax the help shows is data too, and each form is one of the shapes
+# verified against the live index
+forms = [s["form"] for s in help_body["syntax"]]
+assert 'artist:"Radiohead"' in forms and '"OK Computer"' in forms, forms
+assert "date:[1990 TO 1999]" in forms and "-format:*" in forms, forms
+assert 'artist:"Radiohead" AND releasegroup:"OK Computer"' in forms, forms
+for s in help_body["syntax"]:
+    assert set(s) == {"form", "meaning"} and s["form"] and s["meaning"], s
+
+# The catalogue and the query builder cannot drift: every field the builder
+# puts in a clause is a field the catalogue documents for that entity.
+for entity, built in (("release", intg.search_query(
+        "release", "x", "free", "Album", "Compilation", "Radiohead", "2000",
+        "Parlophone", "CDP 7 46001 2")),
+        ("release-group", intg.search_query(
+            "release-group", "x", "free", "Album", "Live", "Radiohead", "2001",
+            artist_id=MBID_ARTIST))):
+    names = {e["field"] for e in help_body["fields"][entity]}
+    for clause in built.split(" AND "):
+        if ":" not in clause:
+            continue                     # the free-text clause has no field
+        name = clause.split(":", 1)[0].lstrip("-")
+        assert name in names, (entity, name, built)
+# …and the reverse direction for the fields the constraints boxes send
+assert {"artist", "label", "catno", "date", "primarytype", "secondarytype", "arid"} \
+    <= {e["field"] for e in help_body["fields"]["release"]}
+assert "barcode" in {e["field"] for e in help_body["fields"]["release"]}
+
+
+# --------------------------------------------------------------------------- #
+# 9. MusicBrainz's own refusal reaches the box verbatim
+# --------------------------------------------------------------------------- #
+# A 4xx whose body names the reason is MusicBrainz TALKING about a query IT
+# rejected: it answers 400 carrying MusicBrainz's own sentence, not the
+# generic "MusicBrainz search failed". (Live: an unknown FIELD is not a
+# refusal — the index falls back to full text, `bogusfield:"x"` matching
+# 21,362 releases — so what the box has to show is whatever the index really
+# objects to, in its own words.)
+REFUSAL = ("You submitted a blank search query. You must include a non-blank "
+           "'query=' parameter with your search.")
+_real_get = intg.httpx.get
+intg.httpx.get = lambda *a, **kw: _Resp(400, {"error": REFUSAL})
+try:
+    refused = _client.get("/api/mb/search", params={"q": 'artist:"x"', "type": "release"})
+finally:
+    intg.httpx.get = _real_get
+assert refused.status_code == 400, refused.text
+assert refused.json()["detail"] == REFUSAL, refused.json()
+# a 4xx MusicBrainz did NOT explain keeps the typed busy/outage path…
+intg.httpx.get = lambda *a, **kw: _Resp(400, {})
+try:
+    plain_4xx = _client.get("/api/mb/search", params={"q": "x", "type": "release"})
+finally:
+    intg.httpx.get = _real_get
+assert plain_4xx.status_code == 502, plain_4xx.text
+# …and a 404 still means "no such entity": its body says only "Not Found", so
+# nothing is surfaced and the caller's own 404 handling stands.
+intg.httpx.get = lambda *a, **kw: _Resp(404, {"error": "Not Found"})
+try:
+    try:
+        intg.mb_get("release/" + MBID_RELEASE)
+        raise AssertionError("a 404 did not raise")
+    except intg.MusicBrainzError as e:
+        raise AssertionError(f"a 404 became a MusicBrainzError({e})")
+    except RuntimeError:
+        pass                                    # the harness's own 404 error
+finally:
+    intg.httpx.get = _real_get
 
 tagcache.read_track = _real_read_track
-print("musicbrainz search, paging, cache and the credit/details payloads: all asserts passed")
+print("musicbrainz search, paging, cache, field catalogue and the credit/details "
+      "payloads: all asserts passed")

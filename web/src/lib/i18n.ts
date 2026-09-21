@@ -137,9 +137,13 @@ function subscribe(fn: () => void) {
   };
 }
 
-/** The active locale code, re-rendering the caller when it changes. */
+/** The active locale code, re-rendering the caller when it changes. The third
+ *  argument is the snapshot a SERVER render uses: without it React refuses to
+ *  render the component at all, which is what the wizard's own render check
+ *  (tools/check_import_minimum.mjs) hit. The module's state is the same on both
+ *  sides, so the server reads `current` like the client does. */
 export function useLocale(): string {
-  return useSyncExternalStore(subscribe, () => current);
+  return useSyncExternalStore(subscribe, () => current, () => current);
 }
 
 /** The translator plus the current locale — what a component needs to render

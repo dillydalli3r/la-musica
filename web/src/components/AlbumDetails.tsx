@@ -6,6 +6,8 @@ import Modal from "./Modal";
 import TrackDetails, { DetailRows, DetailSection, type DetailItem } from "./TrackDetails";
 import { albumTech, fmtDuration, fmtTech } from "../lib/fmt";
 import { tagLabel, tagTooltip, useTagRegistry } from "../lib/tags";
+import { pendingSummary } from "./Badges";
+import { useI18n } from "../lib/i18n";
 
 /** The album-level tags the readout lists FIRST, in this order — the ones a
  *  reader looks for. Everything else the folder stores follows alphabetically,
@@ -30,16 +32,22 @@ const yesNo = (v: boolean | null | undefined) => (v ? "yes" : "no");
  *  same DetailRows/DetailSection, so a row looks the same in either. */
 export function AlbumDetails({ album, onClose }: { album: Album; onClose: () => void }) {
   const reg = useTagRegistry();
+  const { t } = useI18n();
   const meta = (album.meta ?? {}) as Record<string, string | null | undefined>;
   const extraKeys = Object.keys(meta)
     .filter((k) => meta[k] && !ALBUM_INFO_KEYS.includes(k))
     .sort();
   const tech = albumTech(album.tracks);
   const title = meta.ALBUM || album.path.split("/").pop() || "album";
+  const pending = pendingSummary(album, t);
   const issues = Object.entries(album.issues ?? {});
   const missing = album.expected_tracks?.filter((t) => t.missing).length ?? 0;
 
   const infoRows: DetailItem[] = [
+    // A framework album is added but its audio has not arrived: that is the
+    // first fact about it, so the empty track count below is never read as an
+    // album that is simply empty. Same marker, same sentence as every row.
+    ...(pending ? [{ label: "State", value: pending.full, title: pending.full }] : []),
     { label: "Album", value: title },
     { label: "Album artist", value: album.album_artist ?? meta.ALBUMARTIST ?? "—" },
     { label: "Year", value: (meta.ORIGINALDATE || meta.DATE || "").slice(0, 4) || "—" },

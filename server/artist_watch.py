@@ -176,17 +176,16 @@ def clean_types(values):
     Raises ValueError for a name outside MusicBrainz's vocabulary: a filter
     that could never match anything is a user error to report, not a silent
     no-op that quietly downloads nothing.
+
+    The rule itself — the vocabulary, the lowercasing, and the splitting of a
+    combined spelling like "Album + Compilation" — lives in
+    `mlo.release_choice.type_names`, which is also what an add's `types` filter
+    is normalized through: one watch selection and one add selection are read
+    the same way.
     """
-    out = []
-    for raw in values or []:
-        name = str(raw or "").strip().lower()
-        if not name:
-            continue
-        if name not in RELEASE_TYPES:
-            raise ValueError(f"unknown release-group type {raw!r}")
-        if name not in out:
-            out.append(name)
-    return out
+    from mlo import release_choice
+
+    return release_choice.type_names(values)
 
 
 def clean_mbids(values):
@@ -739,8 +738,15 @@ def queue_release(release, cfg, *, title="", artist="", year=""):
     """
     from server import pending_albums, wishes_worker
 
+    # `prefetch=False` + the background call below, exactly like a multi-album
+    # "Add to library": an unattended watch check must not sit on the cover,
+    # description and artist-artwork fetches for every release it queues, and
+    # those fetches reach the providers. The album's page still fills in on its
+    # own a moment later.
     row = pending_albums.create(release, cfg, queries=None, title=title,
-                                artist=artist, year=year)
+                                artist=artist, year=year, prefetch=False)
+    if row.get("album_path"):
+        pending_albums.prefetch_content(row["album_path"], cfg, background=True)
     if row.get("wish_id") and row.get("created"):
         # The existing worker searches it; nothing is searched here.
         wishes_worker.trigger(row["wish_id"])

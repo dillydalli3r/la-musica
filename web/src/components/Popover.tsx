@@ -1,4 +1,5 @@
-import { useEffect } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type { ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
 
@@ -15,6 +16,7 @@ export default function Popover({
   placement = "bottom",
   panelClass = "w-56 p-1.5",
   shield = true,
+  fixed = false,
 }: {
   open: boolean;
   onClose: () => void;
@@ -29,6 +31,13 @@ export default function Popover({
   /** Off for popovers that live inside a dialog which already has its own
    *  click shield (a second shield would swallow the dialog's clicks). */
   shield?: boolean;
+  /** Portal the panel to <body> and position it from the trigger's own rect.
+   *  Needed when the trigger sits in a narrow, `overflow-hidden` or low-z
+   *  column — the top bar is `z-10 overflow-hidden` inside a shell whose
+   *  sidebar is `z-20`, so a panel anchored there was clipped at the column's
+   *  edge AND painted under the sidebar: that is what made the notification
+   *  tray unreadable. */
+  fixed?: boolean;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -39,18 +48,80 @@ export default function Popover({
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
+  const anchorRef = useRef<HTMLSpanElement>(null);
+  const [at, setAt] = useState<{ top: number; bottom: number; right: number; left: number; center: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!open || !fixed) return;
+    const place = () => {
+      const box = anchorRef.current?.getBoundingClientRect();
+      if (!box) return;
+      setAt({
+        top: box.bottom + 4,
+        bottom: window.innerHeight - box.top + 4,
+        // Distances/offsets, not one anchor: the panel keeps its alignment to
+        // the trigger across a resize or a scroll, and every value is clamped
+        // so the panel stays inside the viewport on a narrow window.
+        right: Math.max(8, window.innerWidth - box.right),
+        left: Math.min(Math.max(8, box.left), window.innerWidth - 8),
+        center: Math.min(Math.max(box.width, box.left + box.width / 2), window.innerWidth - 8),
+      });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open, fixed]);
+
   if (!open) return null;
+  const portaled = fixed && at;
+  const panel = (
+    <div
+      role="menu"
+      style={
+        portaled
+          ? {
+              position: "fixed",
+              ...(placement === "top" ? { bottom: at!.bottom } : { top: at!.top }),
+              maxWidth: "calc(100vw - 1rem)",
+              ...(align === "right"
+                ? { right: at!.right }
+                : align === "left"
+                  ? { left: at!.left }
+                  : { left: at!.center, transform: "translateX(-50%)" }),
+            }
+          : undefined
+      }
+      className={`anim-fade ${fixed ? "z-[60]" : "absolute z-50"} ${
+        fixed ? "" : placement === "top" ? "bottom-full mb-1" : "mt-1"
+      } rounded-xl shadow-2xl bg-zinc-950 border border-white/10 ${
+        fixed
+          ? ""
+          : align === "right"
+            ? "right-0"
+            : align === "left"
+              ? "left-0"
+              : "left-1/2 -translate-x-1/2"
+      } ${panelClass}`}
+    >
+      {children}
+    </div>
+  );
   return (
     <>
       {shield && <div className="fixed inset-0 z-40" onClick={onClose} />}
-      <div
-        role="menu"
-        className={`anim-fade absolute z-50 ${placement === "top" ? "bottom-full mb-1" : "mt-1"} rounded-xl shadow-2xl bg-zinc-950 border border-white/10 ${
-          align === "right" ? "right-0" : align === "left" ? "left-0" : "left-1/2 -translate-x-1/2"
-        } ${panelClass}`}
-      >
-        {children}
-      </div>
+      {fixed ? (
+        <>
+          {/* The in-place marker the panel is positioned from: the caller's
+              own wrapper, measured instead of assumed. */}
+          <span ref={anchorRef} className="inline-block w-0 h-0" aria-hidden="true" />
+          {portaled && createPortal(panel, document.body)}
+        </>
+      ) : (
+        panel
+      )}
     </>
   );
 }

@@ -33,7 +33,12 @@ class HomePage extends StatelessWidget {
       ..sort((a, b) => (b.gradePct ?? -1).compareTo(a.gradePct ?? -1));
     final recent = [...albums]
       ..sort((a, b) => (b.date ?? '').compareTo(a.date ?? ''));
-    final random = [...albums]..shuffle(math.Random(7));
+    final waiting = albums.where((a) => a.pending).toList();
+    // "Rediscover" means the user owns it and forgot it; a folder whose audio
+    // is still being hunted is not that, so the framework albums sit on their
+    // own shelf instead.
+    final random = [...albums.where((a) => !a.pending)]
+      ..shuffle(math.Random(7));
     final passed = albums.where((a) => a.pass).length;
 
     return ListView(
@@ -66,6 +71,18 @@ class HomePage extends StatelessWidget {
         AlbumShelf(
           title: 'Recently added',
           albums: recent.take(12).toList(),
+          onOpen: (album) => openDetail(context, 'Album', album.path),
+          onPlay: (album) => playAlbum(context, album),
+        ),
+        // The one shelf that answers "what am I still waiting for". A pending
+        // album also rides along where it would otherwise be listed — Recent,
+        // because its folder is the newest thing in the library, and its
+        // artist's own page — but a framework folder only ever mixed in with
+        // complete albums is one the user has to hunt for (the React home
+        // draws the same shelf from the server's payload).
+        AlbumShelf(
+          title: 'Waiting for its audio',
+          albums: waiting.take(12).toList(),
           onOpen: (album) => openDetail(context, 'Album', album.path),
           onPlay: (album) => playAlbum(context, album),
         ),

@@ -1,9 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { useRef } from "react";
 import { Link } from "react-router-dom";
-import { AlertTriangle, ArrowDownUp, Clock, Disc3, Heart, RefreshCw, Sparkles, Star, Users } from "lucide-react";
+import { AlertTriangle, ArrowDownUp, Clock, Disc3, Heart, Loader2, RefreshCw, Sparkles, Star, Users } from "lucide-react";
 import { api } from "../api";
-import { EmptyState, PageLoading } from "../components/Badges";
+import { EmptyState, PageLoading, PendingMark } from "../components/Badges";
 import StorageCard from "../components/StorageCard";
 import PageHeader from "../components/PageHeader";
 import { useI18n } from "../lib/i18n";
@@ -111,6 +111,7 @@ function HomeCard({ a }: { a: HomeAlbum }) {
         )}
         <div className="text-[11px] text-zinc-500 truncate flex items-center gap-1.5">
           <span className="truncate" title={a.artist}>{a.artist}</span>
+          {a.pending && <PendingMark album={a} label />}
           {a.year && <span className="ml-auto shrink-0 tabular-nums">{a.year}</span>}
           {a.owned && a.grade_pct != null && (
             <span className="ml-auto shrink-0 tabular-nums" title="Checks passed">
@@ -295,6 +296,17 @@ export default function HomePage() {
       <StorageCard />
 
       <Shelf title={t("home.shelf.recent")} icon={Clock} items={data.recent} />
+      {/* The one shelf that answers "what am I still waiting for": a pending
+          album also rides along where it would otherwise be listed (recent —
+          its folder is the newest thing in the library — and its artist's own
+          page), but a skeleton that is only ever mixed in with complete albums
+          is a skeleton the user has to hunt for. */}
+      <Shelf
+        title={t("home.shelf.pending")}
+        icon={Loader2}
+        items={data.pending ?? []}
+        blurb={t("home.shelf.pending_blurb")}
+      />
       <Shelf
         title={t("home.shelf.wanted")}
         icon={ArrowDownUp}

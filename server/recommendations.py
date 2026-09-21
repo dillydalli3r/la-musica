@@ -25,7 +25,7 @@ def _artist_of(alb, fallback=""):
 
 def _owned_row(alb, fallback_artist="", reason="", owned=True):
     meta = alb.get("meta") or {}
-    return {
+    row = {
         "path": alb.get("path") or "",
         "album": str(meta.get("ALBUM") or "").strip(),
         "artist": _artist_of(alb, fallback_artist),
@@ -38,16 +38,44 @@ def _owned_row(alb, fallback_artist="", reason="", owned=True):
         "reason": reason,
         "owned": owned,
     }
+    # A FRAMEWORK album is in the library (and here) before its audio is: the
+    # row carries the SAME marker the library row does — the flag, what it is
+    # waiting for and the wish behind it — so a Home card says "not downloaded
+    # yet" from the payload rather than guessing from an empty track list.
+    # Complete albums carry none of it: the keys are absent, not false.
+    if alb.get("pending"):
+        row["pending"] = True
+        row["pending_reason"] = str(alb.get("pending_reason") or "")
+        row["wish_id"] = alb.get("wish_id")
+        row["wish"] = alb.get("wish")
+    return row
+
+
+def _added_at(alb):
+    """A row's addition time — the folder's own mtime, the one fact that says
+    "just added" for a framework album with no file to read it from."""
+    try:
+        return os.path.getmtime(alb.get("path") or "")
+    except OSError:
+        return 0.0
 
 
 def _recent(albums, limit):
-    def mtime(a):
-        try:
-            return os.path.getmtime(a.get("path") or "")
-        except OSError:
-            return 0.0
-    ordered = sorted(albums, key=mtime, reverse=True)
+    ordered = sorted(albums, key=_added_at, reverse=True)
     return [_owned_row(a, reason="Recently added") for a in ordered[:limit]]
+
+
+def _pending(albums, limit):
+    """The albums that are added but not downloaded yet, newest first.
+
+    This is the one place a user can see EVERYTHING still waiting: the shelf
+    above lists them where they would otherwise be (recent, their artist's
+    shelf), but a skeleton that only rides along with other shelves is a
+    skeleton a reader has to hunt for.
+    """
+    waiting = [a for a in albums if a.get("pending")]
+    waiting.sort(key=_added_at, reverse=True)
+    return [_owned_row(a, reason="Waiting for its audio") for a in waiting[:limit]]
 
 
 def _top_rated(albums, limit):
@@ -113,8 +141,14 @@ _WISH_REASON = {"wanted": "Wishlist", "searching": "Searching Soulseek",
                 "failed": "Search failed", "available": "Available now"}
 
 
-def _wanted(limit):
-    """Open Soulseek wishes — releases the background worker is hunting."""
+def _wanted(limit, skip_paths=()):
+    """Open Soulseek wishes — releases the background worker is hunting.
+
+    A wish whose album is ALREADY in the library as a framework album is left
+    out: that release is a library card of its own now (`_pending`, and the
+    shelf it would appear on), and listing its wish here as well would draw the
+    same album twice on one page — once with a link and once without.
+    """
     try:
         from server import wishes
         items = wishes.list_wishes() or []
@@ -123,6 +157,9 @@ def _wanted(limit):
     out = []
     for w in items:
         if str(w.get("status") or "") == "imported":
+            continue
+        path = str(w.get("album_path") or "")
+        if path and os.path.normcase(os.path.normpath(path)) in skip_paths:
             continue
         out.append({
             "path": "",
@@ -189,11 +226,15 @@ def build_home(cfg, user=""):
     recent = _recent(albums, recent_count)
     top = _top_rated(albums, max(4, recent_count // 2))
     favorites = _favorites(lib, max(4, recent_count // 2), user)
+    pending = _pending(albums, max(4, recent_count))
 
     # Discover: a random slice of the library that isn't already featured.
+    # "Rediscover" means "you own it and forgot it", so the albums whose audio
+    # has not arrived are left out — they have a shelf of their own below.
     featured = {os.path.normcase(os.path.normpath(r["path"])) for r in recent + top}
     pool = [a for a in albums
-            if os.path.normcase(os.path.normpath(a.get("path") or "")) not in featured]
+            if not a.get("pending")
+            and os.path.normcase(os.path.normpath(a.get("path") or "")) not in featured]
     random.shuffle(pool)
     discover = [_owned_row(a, reason="Rediscover") for a in pool[:recent_count]]
 
@@ -203,8 +244,11 @@ def build_home(cfg, user=""):
         "top_rated": top,
         "favorites": favorites,
         "discover": discover,
+        # Every album still waiting for its audio, in one place.
+        "pending": pending,
         "top_artists": _top_artists(artists, 6),
-        "wanted": _wanted(8),
+        "wanted": _wanted(8, {os.path.normcase(os.path.normpath(a.get("path") or ""))
+                              for a in albums if a.get("pending")}),
         "needs_attention": _needs_attention(albums, max(4, recent_count // 2)),
     }
     with _lock:

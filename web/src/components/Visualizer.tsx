@@ -2,19 +2,29 @@ import { useEffect, useRef } from "react";
 import { MAX_DB, MIN_DB, activeAnalyser } from "../lib/analyser";
 
 /** Height-mapping constants, all in dBFS. FLOOR_DB is the empty baseline,
- * CEIL_DB the full height (full scale), TILT_DB the lift of the top band
- * over the bottom one. Tuned against a real spectrum: with this material's
- * bands peaking between −29 dBFS (bass) and −67 dBFS (top octave), the old
- * tilt of +6 left the whole right half dead, and +30 (≈3 dB/octave, music's
- * roll-off) puts every band in the 0.4–0.6 range and still swings ~0.25 of
- * the strip per frame. */
+ *  CEIL_DB the full height (full scale), TILT_DB the lift of the top band
+ *  over the bottom one.
+ *
+ *  Tuned by MEASURING four candidate mappings over two seconds of a real
+ *  track, on the bytes this analyser actually produces (treble in music is
+ *  20-40 dB below the bass, so without a lift the right half is dead):
+ *
+ *    tilt 30, contrast 1.25, 2x per-band peak lift   right/left 0.99  spread 0.112  movement 0.0084
+ *    tilt 30, contrast 1.5,  no lift                 right/left 0.86  spread 0.306  movement 0.0098
+ *    tilt 24, contrast 1.6,  no lift                 right/left 0.72  spread 0.422  movement 0.0101  <-- this
+ *    tilt 30, contrast 1.5, 1.15x lift + envelope    right/left 0.95  spread 0.156  movement 0.0094
+ *
+ *  The first row is what the strip used to be, and it is the user's
+ *  "ascending triangle that gets stuck": the per-band peak lift pulled every
+ *  quiet (treble) band halfway to a common reference, so the right side
+ *  measured as loud as the left however the music moved, and the strip barely
+ *  changed shape. The lift is GONE (the shape is the spectrum's own), the
+ *  tilt keeps the top octave visible, and contrast 1.6 turns the real
+ *  variation into height. */
 const FLOOR_DB = -90;
 const CEIL_DB = 0;
-const TILT_DB = 30;
-/** Normaliser: the peak a band is expected to reach, and the fraction of a
- * band's rolling peak that survives one frame (~8 s half-life at 60 fps). */
-const PEAK_REF = 0.55;
-const PEAK_DECAY = 0.9985;
+const TILT_DB = 24;
+
 /** Idle redraw interval (ms) when no signal is live. The loop drops from the
  *  display clock to this timer while there is nothing to draw, and stops
  *  repainting altogether once the strip has eased onto its baseline — a
@@ -35,7 +45,7 @@ const RELEASE = 0.12;
 /** Expansion around mid-height: the raw dB ratio packs every band into a
  * narrow band of heights, so the strip reads as a silhouette only after a
  * mild contrast stretch. Clamped, so it can never push a bar over full. */
-const CONTRAST = 1.25;
+const CONTRAST = 1.6;
 /** Level above which a bar gets its halo — the decorative motion that is
  * skipped under prefers-reduced-motion. */
 const GLOW_AT = 0.55;
@@ -72,9 +82,12 @@ function atRest(levels: Float32Array, n: number): boolean {
  * octave needs the lift), NOT the old multiplier on the finished height,
  * which pushed everything up and pinned the highs hardest. No pow()
  * inflation either: the dB scale is already perceptual.
- * A per-band rolling peak (PEAK_DECAY per frame, ~8 s half-life) then lifts
- * quiet bands by up to 2× and never attenuates, so a quiet master still
- * shows its shape while a sustained fortissimo keeps its raw height.
+ * There is deliberately NO per-band peak normalisation any more. It used to
+ * lift quiet bands up to 2× toward a common reference, which measured as
+ * right/left = 0.99 on real material — a flat, slightly ascending strip that
+ * barely changed shape (the reported "ascending triangle that gets stuck"),
+ * because the lift cancelled the spectrum's own slope. What is drawn now is
+ * the spectrum: bass high, treble falling away, cymbals and snares spiking.
  * Heights then ease asymmetrically (ATTACK/RELEASE) and the loudest bars get
  * a faint halo — the one decorative touch, and the only thing dropped under
  * prefers-reduced-motion: the bars themselves are the meter and keep moving.
@@ -88,7 +101,6 @@ function atRest(levels: Float32Array, n: number): boolean {
 export default function Visualizer({ playing, className = "" }: { playing: boolean; className?: string }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const levels = useRef<Float32Array>(new Float32Array(BARS));
-  const norm = useRef<Float32Array>(new Float32Array(BARS));
   const playingRef = useRef(playing);
   useEffect(() => {
     playingRef.current = playing;
@@ -194,10 +206,6 @@ export default function Visualizer({ playing, className = "" }: { playing: boole
           const tilt = TILT_DB * (n > 1 ? i / (n - 1) : 0);
           target = Math.min(1, Math.max(0, (db + tilt - FLOOR_DB) / (CEIL_DB - FLOOR_DB)));
           target = Math.min(1, Math.max(0, (target - 0.5) * CONTRAST + 0.5));
-          // Per-band rolling peak → bounded lift (≤2×, never attenuation).
-          const roll = Math.max(target, (norm.current[i] ?? 0) * PEAK_DECAY);
-          norm.current[i] = roll;
-          target = Math.min(1, target * Math.min(2, Math.max(1, PEAK_REF / Math.max(roll, 0.06))));
         } else {
           // No real signal (paused, idle, or unobservable stream): hold a
           // flat near-zero baseline. The strip must only ever draw actual

@@ -1,9 +1,9 @@
 import { useCallback, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, replyFor, type RatingsPayload } from "../api";
+import { api, replyFor, type RatingsPayload, type RatingsScope } from "../api";
 import { toast } from "../store";
 
-/** Track ratings, web side.
+/** Ratings, web side — three SCOPES over one store.
  *
  *  THE CONVERSION LIVES HERE AND NOWHERE ELSE. Three scales describe the same
  *  half-star, and exactly one of them is the wire format:
@@ -17,15 +17,33 @@ import { toast } from "../store";
  *  (`Math.round(v * 2)`), `toUi` the read side (`/2`), and `ratingOf` is what
  *  a page uses after ONE map request.
  *
- *  A rated track is one row in the app's own SQLite table, keyed by the
+ *  A SCOPE names what a rating is about — a track (a file, keyed by its path),
+ *  an album (its folder) or an artist (their folder) — and the three are
+ *  INDEPENDENT rows in the store. An album or artist rating is the user's
+ *  verdict on that entity, NOT the average of its tracks: the album header
+ *  draws both, labelled. Every hook takes the scope (defaulting to `track`, so
+ *  a caller written before the folder scopes existed is unchanged) and caches
+ *  per scope, so one surface can never read another's value.
+ *
+ *  A rated TRACK is one row in the app's own SQLite table, keyed by the
  *  normalized track path per user and carrying the MUSICBRAINZ_TRACKID, so a
  *  moved file is healed by the same resolve as favourites (server/mbresolve.py).
  *  A file that only carries its own `RATING` tag (a Picard-tagged library, or
  *  this app before its table existed) reports that value from the server and
- *  never overwrites a stored one. */
+ *  never overwrites a stored one. Folder scopes carry no tag at all: they live
+ *  in the store alone, which the header control says in its tooltip. */
 
 /** Five stars, half-star steps. */
 export const MAX_RATING = 5;
+
+/** The one sentence every FOLDER-scope star control carries in its tooltip: an
+ *  album or artist rating is the user's verdict on that entity (NOT an average
+ *  of what it holds) and it lives in the app's own store, because a folder has
+ *  no file to carry a RATING tag. Defined once so the four surfaces that draw
+ *  the control — the album header, the artist header and the two library album
+ *  rows — can never describe it differently. */
+export const FOLDER_RATING_NOTE =
+  "Stored in the app's database — a folder has no file to carry a RATING tag, and the value is your own verdict on the entity, never an average of what it holds";
 
 /** UI (0-5, halves) → API (0-10, integer). Rounds to the nearest half-star
  *  so a computed value (an album average, a scaled card) still lands on the
@@ -41,12 +59,22 @@ export function toUi(rule: number | undefined | null): number {
   return Math.max(0, Math.min(10, Math.round(rule))) / 2;
 }
 
-export const RATINGS_KEY = ["ratings"] as const;
+/** The query key of one scope. The scope is PART of the key — three maps, three
+ *  cache entries — so a star drawn for an album can never come from the track
+ *  with the same path, and no surface pays for a scope it does not draw. Every
+ *  key starts with "ratings", so `invalidateQueries({ queryKey: ["ratings"] })`
+ *  still covers all three. */
+export const RATINGS_KEY = ["ratings", "track"] as const;
 
-/** The whole map (one request per page, shared by every row through the query
- *  cache) plus the per-value counts. Pages pass `data.ratings` to `ratingOf`. */
-export function useRatings() {
-  return useQuery({ queryKey: RATINGS_KEY, queryFn: () => api.ratings(), staleTime: 30_000 });
+/** One scope's map (one request per page and scope, shared by every row
+ *  through the query cache) plus the per-value counts. Pages pass
+ *  `data.ratings` to `ratingOf`. */
+export function useRatings(scope: RatingsScope = "track") {
+  return useQuery({
+    queryKey: ["ratings", scope] as const,
+    queryFn: () => api.ratings(undefined, scope),
+    staleTime: 30_000,
+  });
 }
 
 /** One track's rating in UI units (0-5). Tolerates the slash variants a path
@@ -83,15 +111,17 @@ export function applyRating(
   return { ratings, counts };
 }
 
-/** Rate one track. The map is updated BEFORE the request (the star answers
- *  the click immediately) and only THIS path is rolled back if the server
- *  refuses — another track may be rated while this one is in flight.
+/** Rate one entity of `scope`. The map is updated BEFORE the request (the
+ *  star answers the click immediately) and only THIS path is rolled back if
+ *  the server refuses — another entity may be rated while this one is in
+ *  flight.
  *
  *  Failures are reported here, with the server's own message (the API's
  *  `detail`), so the promise never rejects and a caller can fire-and-forget
- *  from an onClick. `pending(path)` is what <StarRating> needs to refuse a
- *  second write for the same element mid-flight. */
-export function useSetRating() {
+ *  from an onClick — a folder the library does not know answers with its own
+ *  sentence. `pending(path)` is what <StarRating> needs to refuse a second
+ *  write for the same element mid-flight. */
+export function useSetRating(scope: RatingsScope = "track") {
   const qc = useQueryClient();
   const flight = useRef(new Set<string>());
   const [, bump] = useState(0); // re-render so pending(path) reflects the flight set
@@ -99,29 +129,30 @@ export function useSetRating() {
   const setRating = useCallback(
     async (path: string, value: number): Promise<void> => {
       if (!path) return;
+      const key = ["ratings", scope] as const;
       const next = toApi(value);
-      const before = qc.getQueryData<RatingsPayload>(RATINGS_KEY);
+      const before = qc.getQueryData<RatingsPayload>(key);
       const had = before?.ratings?.[path] ?? 0;
       if (before && had === next) return; // already there: no request
       flight.current.add(path);
       bump((n) => n + 1);
-      qc.setQueryData<RatingsPayload>(RATINGS_KEY, (old) => applyRating(old, path, next));
+      qc.setQueryData<RatingsPayload>(key, (old) => applyRating(old, path, next));
       try {
-        const r = await api.setRating(path, next);
+        const r = await api.setRating(path, next, scope);
         // The rating is stored whatever the file did; a tag the file refused
         // is news about the FILE, so it warns without rolling anything back.
         // `skipped` (write_rating_tags off) stays silent — it is a setting,
-        // not a failure.
+        // not a failure — and a folder scope has no tag at all (`tag` null).
         if (r.tag?.error) toast(`Rated, but the RATING tag was not written: ${r.tag.error}`, "error");
       } catch (e) {
-        qc.setQueryData<RatingsPayload>(RATINGS_KEY, (old) => applyRating(old, path, had));
+        qc.setQueryData<RatingsPayload>(key, (old) => applyRating(old, path, had));
         toast(e instanceof Error ? e.message : String(e), "error");
       } finally {
         flight.current.delete(path);
         bump((n) => n + 1);
       }
     },
-    [qc]
+    [qc, scope]
   );
 
   /** True while a write for THIS path is in flight (per-path, so a page of
@@ -131,8 +162,11 @@ export function useSetRating() {
   return { setRating, pending };
 }
 
-/** Rate many tracks at once (a selection, a whole album, a playlist). Same
- *  optimistic map, rolled back per path; the reply's `failed` rows do not
+/** Rate many TRACKS at once (a selection, a whole album's tracks, a playlist)
+ *  — the many-FILES call, and the API's bulk route is tracks-only for exactly
+ *  that reason: a selection of files names no album or artist folder, whose
+ *  rating is one verdict made through `useSetRating("album" | "artist")`.
+ *  Same optimistic map, rolled back per path; the reply's `failed` rows do not
  *  fail the call, so a partly-written batch is reported as it stands. The
  *  map is re-read once afterwards: a bulk reply carries counts and failures,
  *  never the map itself. */

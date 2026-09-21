@@ -123,4 +123,28 @@ if ("serviceWorker" in navigator && window.isSecureContext
       /* offline cache stays unavailable — streaming still works */
     });
   });
+
+  // A NEW BUILD HAS TAKEN OVER (the container updated itself, or a deploy
+  // landed): the worker already called skipWaiting + clients.claim, so the
+  // caches are the new ones — but this document is still running the JS it
+  // was loaded with, and a bundle older than the server it talks to fails in
+  // exactly the way a stale tab does: pages that call nothing, empty result
+  // lists, silent 404s on routes the new API has. Reload once, and never
+  // during playback — a track keeps playing until it pauses or ends, then the
+  // page comes back on the new build.
+  let reloaded = false;
+  const reloadOnce = () => {
+    if (reloaded) return;
+    reloaded = true;
+    window.location.reload();
+  };
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    const playing = document.querySelector("audio, video") as HTMLMediaElement | null;
+    if (playing && !playing.paused && !playing.ended) {
+      playing.addEventListener("pause", reloadOnce, { once: true });
+      playing.addEventListener("ended", reloadOnce, { once: true });
+      return;
+    }
+    reloadOnce();
+  });
 }

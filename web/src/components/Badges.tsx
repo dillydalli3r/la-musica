@@ -1,6 +1,13 @@
 import { Link } from "react-router-dom";
 import { Check, X, Disc3, CircleAlert, CheckCircle2, Loader2 } from "lucide-react";
 import { useCachedPaths } from "../lib/mediaCache";
+import { useI18n, type MessageKey } from "../lib/i18n";
+import type { Album } from "../types";
+
+/** The translate function `useI18n` hands out — what the pending sentences
+ *  below are built with (they are shared by every surface, so the component
+ *  that draws a row does not have to know how to say them). */
+type Translate = (key: MessageKey, vars?: Record<string, string | number>) => string;
 
 /** The one condensed grade verdict: a small check (pass) or cross (fail)
  * and nothing else — grading stays out of the way; `score` (the old
@@ -203,11 +210,15 @@ export function IssueList({ issues }: { issues: string[] }) {
   );
 }
 
-export function EmptyState({ title, hint, action }: {
+export function EmptyState({ title, hint, action, onAction }: {
   title: string;
   hint?: string;
   /** Dead-end pages get a way back — same affordance the router 404 gives. */
   action?: { label: string; to: string };
+  /** The same affordance for a state that is fixed IN PLACE: retry a query
+   *  that failed, clear a builder that matched nothing. A page with one of
+   *  these must never leave a reader with a dead end and no way out. */
+  onAction?: { label: string; onClick: () => void; disabled?: boolean };
 }) {
   return (
     <div className="flex flex-col items-center justify-center gap-2 py-24 text-zinc-500">
@@ -218,6 +229,15 @@ export function EmptyState({ title, hint, action }: {
         <Link to={action.to} className="btn-ghost !py-1.5 text-xs mt-2 tap">
           {action.label}
         </Link>
+      )}
+      {onAction && (
+        <button
+          className="btn-ghost !py-1.5 text-xs mt-2 tap"
+          disabled={onAction.disabled}
+          onClick={onAction.onClick}
+        >
+          {onAction.label}
+        </button>
       )}
     </div>
   );
@@ -250,6 +270,86 @@ export function CachedMark({ path, size = "sm" }: { path: string; size?: "sm" | 
       className="shrink-0 inline-flex text-emerald-500"
     >
       <CheckCircle2 className={size === "sm" ? "h-3.5 w-3.5" : "h-4 w-4"} />
+    </span>
+  );
+}
+
+/** The pending marker's fields — a framework album's own block, exactly as the
+ *  server stamps it on every album-shaped row (`server/library.py`). */
+export type PendingFields = Pick<Album, "pending" | "pending_reason" | "wish" | "wish_id">;
+
+/** What a framework album's marker SAYS: the short label a row draws and the
+ *  full sentence its tooltip carries.
+ *
+ *  One function, so the grid, the artist page, the query rows, Home and the
+ *  album page can never describe the same album differently. Every part of it
+ *  is the server's own data: `pending_reason` is what the folder is waiting
+ *  for, and `wish` is the queue's state — how many attempts ran, the reason a
+ *  run left behind, and whether another search is even coming. None for a
+ *  complete album: there is no marker to draw and nothing to say.
+ */
+export function pendingSummary(album: PendingFields, t: Translate): { short: string; state: string; full: string } | null {
+  if (!album?.pending) return null;
+  const w = album.wish;
+  const state = !w
+    ? t("pending.no_search")
+    : w.status === "not_found"
+      ? t("pending.not_found")
+      : w.status === "failed"
+        ? (w.reason || t("pending.failed"))
+        : w.terminal || w.due_in == null
+          ? (w.reason || t("pending.no_search"))
+          : w.attempts === 0 && w.status === "wanted"
+            // Recorded and waiting its turn: nothing has searched it yet, so
+            // "attempt 1" would claim a run that has not happened.
+            ? t("pending.queued")
+            : t("pending.attempt", {
+                n: w.attempts + 1,
+                m: Math.max(1, Math.round((w.due_in ?? 0) / 60)),
+              });
+  return {
+    short: t("pending.short"),
+    state,
+    full: [t("pending.title"), album.pending_reason, state].filter(Boolean).join(" · "),
+  };
+}
+
+/** A framework album's mark: the same shape the grading verdict uses (a small
+ *  dot whose sentence is on hover and read out to a screen reader), amber
+ *  while a search is still coming and red once nothing will search the folder
+ *  again — "needs attention" in the app's own tokens, not a second palette.
+ *
+ *  It renders NOTHING for a complete album, so any row can mount it
+ *  unconditionally, and it is a different fact from the lock chip beside it: a
+ *  folder can be pending (no audio yet) and locked (a job holding what is
+ *  there) at once, and neither mark replaces the other. */
+export function PendingMark({ album, size = "sm", label = false }: {
+  album: PendingFields;
+  size?: "sm" | "md";
+  /** Draw the short state beside the dot, for a row with room to say it. */
+  label?: boolean;
+}) {
+  const { t } = useI18n();
+  const note = pendingSummary(album, t);
+  if (!note) return null;
+  const stuck = !album.wish || !!album.wish.terminal || album.wish.status === "failed";
+  return (
+    <span
+      className="inline-flex items-center gap-1 shrink-0"
+      role="img"
+      aria-label={note.full}
+      title={note.full}
+    >
+      <span
+        className={`${size === "sm" ? "h-1.5 w-1.5" : "h-2 w-2"} rounded-full shrink-0 ${
+          stuck ? "bg-red-500/80" : "bg-amber-400/90 animate-pulse"
+        }`}
+      />
+      {label && (
+        <span className={`text-[10px] ${stuck ? "text-red-300/80" : "text-amber-300/80"}`}>
+          {note.short}
+        </span>
+      )}
     </span>
   );
 }

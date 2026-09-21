@@ -437,6 +437,22 @@ def _probe_discover(pid, cfg):
         return "fail", _why("no Spotify genre album",
                             intg.spotify_last_error(started))
 
+    if pid == "rym":
+        # RateYourMusic is a CHARTS-only source here (its genre reading lives
+        # in the import chain), so its probe asks the thing this registry entry
+        # is FOR: its all-time song chart. The refusal is reported in RYM's own
+        # words — the whole point of the row.
+        try:
+            got = intg.rym_charts(kind="tracks", period="all", limit=1, cfg=cfg)
+        except Exception as e:
+            return "fail", str(e)
+        rows = got.get("rows") or []
+        if rows:
+            return "ok", "%s (the %s chart)" % (
+                _count_detail([r.get("title") for r in rows], "songs"),
+                got.get("chart") or "all-time")
+        return "fail", "the chart page stated no rows we could read"
+
     return "skipped", "unknown source"
 
 

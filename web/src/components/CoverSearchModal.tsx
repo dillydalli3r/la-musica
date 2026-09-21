@@ -1,6 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Image, Loader2, RefreshCw, ExternalLink, Check } from "lucide-react";
-import { api } from "../api";
+import { api, offlineFallback } from "../api";
+import { useI18n } from "../lib/i18n";
+import {
+  autoCoverSearch,
+  coverIdentity,
+  coverIdentityKey,
+  coverQuery,
+  coverSearchPath,
+  coverSearchPhase,
+  coverTerms,
+  type CoverAnswer,
+  type CoverQuery,
+} from "../lib/coverSearch";
 import { toast } from "../store";
 import type { CoverResult, CoverSourceCatalog } from "../types";
 import Modal from "./Modal";
@@ -48,6 +60,17 @@ function resultSize(
   return hint != null ? { w: hint, h: hint, real: false } : null;
 }
 
+/** The sentence that put a candidate where it is: the one the backend's policy
+ *  ended its reasons on — for the winner, why it won; for a loser, why it lost
+ *  (see mlo/cover_choice). A candidate the policy REJECTED says why it cannot
+ *  be the automatic pick instead. "" when the backend sent neither (an older
+ *  server, or a row that was never ranked). */
+function candidateReason(r: CoverResult): string {
+  if (r.rejected) return r.rejected;
+  const reasons = r.reasons ?? [];
+  return reasons.length ? reasons[reasons.length - 1]! : "";
+}
+
 interface Props {
   albumPath: string;
   artist: string;
@@ -58,28 +81,61 @@ interface Props {
    *  tracks (one file, many tracks) instead of the album cover. */
   tracks?: string[];
   /** The album's MusicBrainz release-group MBID, when the page knows it — the
-   *  identity the Cover Art Archive fallback is asked about. Without it that
-   *  fallback can only answer for artist/album. */
+   *  identity the Cover Art Archive is asked about for the group's stand-in.
+   *  Without it that fallback can only answer for artist/album. */
   releaseGroupMbid?: string;
+  /** The album's own MusicBrainz RELEASE id, when the page knows it: with it
+   *  the Cover Art Archive is asked for the release's own front cover, which
+   *  the policy prefers above every other candidate. */
+  releaseMbid?: string;
   /** Candidates the import already fetched and staged (`cover_review` on):
    *  the modal opens showing these instead of searching, which is what turns
    *  "review" into a single pick. Absent → search as before. */
   initialResults?: CoverResult[];
   /** Who answered that staged fetch (the badge next to the grid). */
   initialProvider?: string | null;
+  /** The staged fetch's own pick and its source notes (`covers.chosen` /
+   *  `covers.notes` in the review entry), so the pick the import already made
+   *  is shown as such without re-searching. */
+  initialChosen?: CoverResult | null;
+  initialNotes?: string[];
 }
 
-export default function CoverSearchModal({ albumPath, artist, album, onClose, onApplied, tracks, releaseGroupMbid, initialResults, initialProvider }: Props) {
-  const [qArtist, setQArtist] = useState(artist);
-  const [qAlbum, setQAlbum] = useState(album);
-  const [results, setResults] = useState<CoverResult[] | null>(initialResults ?? null);
-  // Who answered the last search: "cov" for the meta-search, a fallback id
-  // ("deezer", "itunes", "coverartarchive") when it had nothing, null when
-  // nobody did. Shown so a fallback answer is never silently passed off as
-  // the meta-search's.
-  const [provider, setProvider] = useState<string | null>(initialProvider ?? null);
+export default function CoverSearchModal({ albumPath, artist, album, onClose, onApplied, tracks, releaseGroupMbid, releaseMbid, initialResults, initialProvider, initialChosen, initialNotes }: Props) {
+  const { t } = useI18n();
+  // The album's identity as the page that opened the finder knows it: the
+  // artist and album tags it holds, plus whichever MusicBrainz ids it was
+  // given. A release id when there is one, its release group otherwise.
+  const identity = coverIdentity({ artist, album, releaseGroupMbid, releaseMbid });
+  const [qArtist, setQArtist] = useState(identity.artist);
+  const [qAlbum, setQAlbum] = useState(identity.album);
+  // The fields follow the album's own tags until the user edits them: a page
+  // whose data lands after the finder opens must not leave the finder
+  // searching for blanks, and an edit must never be overwritten.
+  const edited = useRef(false);
+  // The answer AND the query it is the answer to (`CoverAnswer`). The pick,
+  // the notes and the "what was searched" line all come from it, so a stored
+  // answer can never be shown as the answer to a different question. Seeded by
+  // the candidates the import already staged — those ARE the answer.
+  const [answer, setAnswer] = useState<CoverAnswer | null>(
+    initialResults?.length
+      ? {
+          query: coverQuery(identity),
+          results: initialResults,
+          provider: initialProvider ?? null,
+          chosen: initialChosen ?? null,
+          notes: initialNotes ?? [],
+          cached: null,
+        }
+      : null
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // What the last attempt asked (the in-flight one included). A spinner and an
+  // error are ABOUT a query — never about whatever the fields say now.
+  const [lastQuery, setLastQuery] = useState<CoverQuery | null>(null);
+  // The identity the automatic search has already asked (`coverIdentityKey`).
+  const asked = useRef<string | null>(null);
   const [selected, setSelected] = useState<CoverResult | null>(null);
   const [applying, setApplying] = useState(false);
   // The app's cover target (as graded by the backend) — read once.
@@ -95,6 +151,11 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
   const [cat, setCat] = useState<CoverSourceCatalog | null>(null);
   const [srcSel, setSrcSel] = useState<string[]>([]);
   const [country, setCountry] = useState("");
+  // False until `/api/cover/sources` has answered (or failed). The automatic
+  // search waits for it: a request sent before the source list is known
+  // carries no `sources` and no `country`, i.e. a DIFFERENT question from the
+  // one the Search button asks with the picker's own values.
+  const [sourcesReady, setSourcesReady] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   // A CAA reference URL that 404'd — kept as the URL, not a boolean, so a new
   // album's own 404 can never hide the next album's cover.
@@ -131,14 +192,45 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
         setSrcSel((cur) => (cur.length ? cur : c.default_sources));
         setCountry((cur) => cur || c.default_country);
       })
-      .catch(() => {});
+      .catch(() => {})
+      // Either way the automatic search may go: an unanswerable catalogue must
+      // not leave the finder waiting, and with no override the server resolves
+      // the same saved defaults itself.
+      .finally(() => setSourcesReady(true));
   }, []);
+
+  // The album's own tags reach the fields when they arrive after the finder
+  // opened (a page still loading its album), and stop the moment the user
+  // types: an edit is the user's, and it is what the Search button sends.
+  useEffect(() => {
+    if (edited.current) return;
+    setQArtist(identity.artist);
+    setQAlbum(identity.album);
+  }, [identity.artist, identity.album]);
+
+  // What the finder is showing, decided in ONE place (lib/coverSearch): the
+  // states are mutually exclusive, so "none found" can only ever be a real
+  // zero-candidate answer, and a spinner or an error is never dressed as one.
+  const queryNow = coverQuery(
+    coverIdentity({ artist: qArtist, album: qAlbum, releaseGroupMbid, releaseMbid }),
+    { sources: srcSel, country }
+  );
+  const phase = coverSearchPhase({ query: queryNow, loading, error, answer, lastQuery });
+  const outcome = phase.kind === "ready" ? phase.answer : null;
+  const rows = outcome ? outcome.results : null;
+  /** The terms a query asked for — the "what was searched" line. Built from
+   *  the ANSWER's own query, never from the fields as they stand now: after an
+   *  edit those describe a different question. */
+  const termsOf = (q: CoverQuery) =>
+    coverTerms(q)
+      .map((term) => t(`cover.term.${term.kind}`, { value: term.value }))
+      .join(" · ");
 
   /** Measure each result's big image (the one "apply" would download). */
   useEffect(() => {
-    if (!results?.length) return;
+    if (!rows?.length) return;
     let dead = false;
-    for (const r of results) {
+    for (const r of rows) {
       const url = r.big || r.small;
       if (!url || sizes[url]) continue;
       const img = new window.Image();
@@ -152,37 +244,66 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
       dead = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [results]);
+  }, [rows]);
 
-  const search = async (a = qArtist, al = qAlbum) => {
+  /** Ask ONE question and file the answer under the query it answers. The
+   *  automatic search and the Search button both come through here with a
+   *  query built by `coverQuery`, so the two paths cannot send different
+   *  parameters. A click always re-asks — the finder keeps no answers of its
+   *  own, so a re-search is never short-circuited by a stored one; the only
+   *  stored answer in the app is the offline copy, keyed by the query and
+   *  consulted only when a request gets no answer at all. */
+  const runQuery = async (q: CoverQuery) => {
     setLoading(true);
     setError(null);
     setSelected(null);
+    setLastQuery(q);
     try {
-      const r = await api.coverSearch(a.trim(), al.trim(), {
-        sources: srcSel.length ? srcSel : undefined,
-        country: country || undefined,
-        releaseGroupMbid,
+      const r = await api.coverSearch(q);
+      const cached = offlineFallback();
+      const key = coverSearchPath(q);
+      setAnswer({
+        query: q,
+        results: r.results ?? [],
+        provider: r.provider ?? null,
+        chosen: r.chosen ?? null,
+        notes: r.notes ?? [],
+        // An answer the offline copy supplied is recorded as such: a real
+        // answer, but not a fresh one, and the finder says which.
+        cached: cached && (cached.key === key || cached.key.endsWith(key)) ? { at: cached.at } : null,
       });
-      setResults(r.results ?? []);
-      setProvider(r.provider ?? null);
     } catch (e) {
+      // The server's or the provider's own words, verbatim. Nothing here may
+      // become "no covers found": a request that did not answer is not an
+      // answer.
       setError(String(e));
-      setResults(null);
-      setProvider(null);
+      setAnswer(null);
     } finally {
       setLoading(false);
     }
   };
 
+  // The finder's own search — fired as soon as it can ask exactly what the
+  // Search button would ask: the album's identity AND the source list. One
+  // search per identity (the ref makes a re-render, or StrictMode's doubled
+  // effect, a no-op), none when the caller brought staged candidates (they ARE
+  // the answer), and none when the album has no identity to ask about — the
+  // blocked state says what is missing instead.
+  const auto = autoCoverSearch({
+    identity,
+    sources: srcSel,
+    country,
+    sourcesReady,
+    staged: Boolean(initialResults?.length),
+    asked: asked.current,
+  });
   useEffect(() => {
-    // Staged candidates are already the answer to this query — searching again
-    // would throw the user's own fetched set away. Same condition as the state
-    // seed: no `initialResults` prop at all keeps the old auto-search.
-    if (initialResults) return;
-    search(artist, album);
+    if (!auto) return;
+    if (asked.current === coverIdentityKey(identity)) return;
+    asked.current = coverIdentityKey(identity);
+    void runQuery(auto);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [auto ? coverSearchPath(auto) : ""]);
 
   useEffect(() => {
     api
@@ -337,17 +458,23 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
           className="input !w-52"
           placeholder="Artist"
           value={qArtist}
-          onChange={(e) => setQArtist(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && search()}
+          onChange={(e) => {
+            edited.current = true;
+            setQArtist(e.target.value);
+          }}
+          onKeyDown={(e) => e.key === "Enter" && runQuery(queryNow)}
         />
         <input
           className="input !w-52"
           placeholder="Album"
           value={qAlbum}
-          onChange={(e) => setQAlbum(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && search()}
+          onChange={(e) => {
+            edited.current = true;
+            setQAlbum(e.target.value);
+          }}
+          onKeyDown={(e) => e.key === "Enter" && runQuery(queryNow)}
         />
-        <button className="btn-primary !py-1.5" onClick={() => search()} disabled={loading}>
+        <button className="btn-primary !py-1.5" onClick={() => runQuery(queryNow)} disabled={loading}>
           {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
           Search
         </button>
@@ -456,24 +583,146 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
       )}
 
       <div className="p-4">
-        {error && <div className="text-red-400 text-sm p-3 bg-red-950/40 rounded-lg border border-red-900">{error}</div>}
-        {loading && (
-          <div className="text-zinc-500 text-sm flex items-center gap-2 p-3">
-            <Loader2 className="h-4 w-4 animate-spin" /> Searching cover sources…
+        {/* ONE state at a time, decided by lib/coverSearch: what is missing,
+            what failed (in the server's or the provider's own words), what is
+            being asked, a REAL answer that held nothing, or a real answer with
+            candidates. "No covers found" is only ever the fourth. */}
+        {phase.kind === "blocked" && (
+          <div className="text-sm p-3 rounded-lg border border-amber-900/60 bg-amber-950/20 text-amber-200 space-y-1">
+            <div className="font-medium">{t("cover.blocked")}</div>
+            <div className="text-[11px] text-amber-200/80">{t("cover.blocked_missing")}</div>
+            <ul className="text-[11px] text-amber-200/80 list-disc pl-5 space-y-0.5">
+              {phase.gaps.map((gap) => (
+                <li key={gap}>{t(`cover.missing.${gap}`)}</li>
+              ))}
+            </ul>
+            <div className="text-[11px] text-amber-200/70">{t("cover.blocked_hint")}</div>
           </div>
         )}
-        {!loading && results && results.length === 0 && !error && (
-          <div className="text-zinc-500 text-sm p-3">No covers found for this query.</div>
+        {phase.kind === "error" && (
+          <div className="text-sm p-3 rounded-lg border border-red-900 bg-red-950/40 text-red-400 space-y-2">
+            <div className="font-medium">{t("cover.failed")}</div>
+            {/* The server's or the provider's own words — never paraphrased
+                into "none found". */}
+            <div className="text-[12px] break-words">{phase.message}</div>
+            {phase.query && (
+              <div className="text-[11px] text-red-300/70">
+                {t("cover.answered", { terms: termsOf(phase.query) })}
+              </div>
+            )}
+            <button className="btn-ghost !py-1 !px-2 text-xs" onClick={() => runQuery(phase.query ?? queryNow)}>
+              <RefreshCw className="h-3 w-3" /> {t("cover.retry")}
+            </button>
+          </div>
         )}
-        {results && results.length > 0 && provider && provider !== "cov" && (
+        {phase.kind === "searching" && (
+          <div className="text-sm p-3 space-y-1">
+            <div className="text-zinc-500 flex items-center gap-2">
+              <Loader2 className="h-4 w-4 animate-spin" /> {t("cover.searching")}
+            </div>
+            <div className="text-[11px] text-zinc-600">
+              {t("cover.answered", { terms: termsOf(phase.query) })}
+            </div>
+          </div>
+        )}
+        {phase.kind === "empty" && (
+          <div className="text-sm p-3 rounded-lg border border-border bg-raise/40 space-y-1">
+            <div className="text-zinc-300 font-medium">{t("cover.empty")}</div>
+            {/* WHAT was searched: the terms the answer's own query asked for,
+                not the fields as they stand now. */}
+            <div className="text-[11px] text-zinc-500">
+              {t("cover.answered", { terms: termsOf(phase.query) })}
+            </div>
+            <div className="text-[11px] text-zinc-500">{t("cover.empty_hint")}</div>
+            {/* An answer that came off disk is said to be one: a stale zero
+                must not read as a fresh "there is nothing". */}
+            {phase.cached && (
+              <div className="text-[11px] text-amber-400/90">
+                {t("cover.offline")}
+                {phase.cached.at ? ` · ${new Date(phase.cached.at).toLocaleString()}` : ""}
+              </div>
+            )}
+            {phase.notes.length > 0 && (
+              <details className="text-[11px] text-zinc-500">
+                <summary className="cursor-pointer select-none">{t("cover.source_notes")}</summary>
+                <ul className="mt-1 space-y-0.5">
+                  {phase.notes.map((n, i) => (
+                    <li key={i} className="truncate" title={n}>
+                      {n}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+          </div>
+        )}
+        {outcome && outcome.cached && (
+          <div className="text-[11px] text-amber-400/90 pb-2">
+            {t("cover.offline")}
+            {outcome.cached.at ? ` · ${new Date(outcome.cached.at).toLocaleString()}` : ""}
+          </div>
+        )}
+        {outcome && (
+          <div className="text-[11px] text-zinc-500 pb-2">
+            {t("cover.answered", { terms: termsOf(outcome.query) })}
+          </div>
+        )}
+        {outcome && outcome.provider && outcome.provider !== "cov" && (
           <div className="text-[11px] text-amber-400/90 pb-2">
             covers.musichoarders.xyz had nothing for this query — via{" "}
-            {SOURCE_NAMES[provider] ?? provider}
+            {SOURCE_NAMES[outcome.provider] ?? outcome.provider}
           </div>
         )}
-        {results && results.length > 0 && (
+        {outcome && (
+          <div className="mb-3 rounded-lg border border-border bg-raise/60 p-3 space-y-1">
+            <div className="flex items-center gap-2 flex-wrap text-sm">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-accent-soft bg-accent/10 border border-accent/25 rounded px-1.5 py-0.5">
+                {t("cover.best_pick")}
+              </span>
+              {outcome.chosen ? (
+                <>
+                  <span className="font-medium">
+                    {SOURCE_NAMES[outcome.chosen.source] ?? outcome.chosen.source}
+                  </span>
+                  <span className="text-zinc-400 tabular-nums">
+                    {outcome.chosen.width && outcome.chosen.height
+                      ? `${outcome.chosen.width}×${outcome.chosen.height}px`
+                      : ""}
+                  </span>
+                  <button
+                    className="btn-ghost !py-0.5 !px-2 text-[11px] tap ml-auto"
+                    onClick={() => setSelected(outcome.chosen)}
+                    title={candidateReason(outcome.chosen)}
+                  >
+                    <Check className="h-3 w-3" /> {t("cover.best_pick_use")}
+                  </button>
+                </>
+              ) : (
+                <span className="text-amber-400">{t("cover.no_pick")}</span>
+              )}
+            </div>
+            {outcome.chosen && (
+              <div className="text-[11px] text-zinc-400">
+                {t("cover.pick_reason")}: {candidateReason(outcome.chosen)}
+              </div>
+            )}
+            {outcome.notes.length > 0 && (
+              <details className="text-[11px] text-zinc-500">
+                <summary className="cursor-pointer select-none">{t("cover.source_notes")}</summary>
+                <ul className="mt-1 space-y-0.5">
+                  {outcome.notes.map((n, i) => (
+                    <li key={i} className="truncate" title={n}>
+                      {n}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+          </div>
+        )}
+        {outcome && (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-            {results.map((r, i) => {
+            {outcome.results.map((r, i) => {
               // The backend's own probe of the image wins; the image the
               // browser loaded is the fallback for the rows past its probe
               // limit, and the CDN URL's hint is the last resort (marked as an
@@ -481,16 +730,21 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
               const big = r.big || r.small;
               const size = resultSize(r, big ? sizes[big] : undefined);
               const low = size != null && size.w < target;
+              const isPick = !!outcome.chosen && !!(outcome.chosen.big || outcome.chosen.small) &&
+                (outcome.chosen.big || outcome.chosen.small) === big;
+              const why = candidateReason(r);
               return (
                 <button
                   key={`${r.source}-${i}`}
                   className={`group text-left rounded-lg overflow-hidden border transition-colors ${
                     selected === r
                       ? "border-accent ring-1 ring-accent"
-                      : "border-border hover:border-zinc-600"
-                  } bg-raise`}
+                      : isPick
+                        ? "border-accent/50"
+                        : "border-border hover:border-zinc-600"
+                  } ${r.rejected ? "opacity-70" : ""} bg-raise`}
                   onClick={() => setSelected(r)}
-                  title={r.title ?? undefined}
+                  title={why || r.title || undefined}
                 >
                   <div className="aspect-square bg-zinc-950 overflow-hidden">
                     {r.small && (
@@ -508,6 +762,11 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
                       <span className="text-[10px] font-semibold uppercase tracking-wider text-accent-soft bg-accent/10 border border-accent/25 rounded px-1 py-px">
                         {SOURCE_NAMES[r.source] ?? r.source}
                       </span>
+                      {isPick && (
+                        <span className="text-[9px] font-semibold uppercase tracking-wider text-accent-soft">
+                          {t("cover.best_pick")}
+                        </span>
+                      )}
                       <span
                         className={`text-[10px] tabular-nums ${low ? "text-amber-400" : "text-zinc-500"}`}
                         title={
@@ -527,6 +786,20 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
                       {r.artist ?? "—"}
                       {r.tracks ? ` · ${r.tracks} tracks` : ""}
                     </div>
+                    {/* WHY this row is where it is: the policy's own sentence —
+                        the deciding reason for the pick, the losing reason for
+                        the rest, the rejection for one that cannot be the
+                        automatic pick (it can still be applied by hand). */}
+                    {why && (
+                      <div
+                        className={`text-[10px] leading-snug line-clamp-2 ${
+                          r.rejected ? "text-amber-500/80" : "text-zinc-500"
+                        }`}
+                        title={why}
+                      >
+                        {why}
+                      </div>
+                    )}
                   </div>
                 </button>
               );

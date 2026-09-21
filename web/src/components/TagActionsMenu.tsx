@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Activity, BadgeInfo, Disc3, Flame, Gauge, ImagePlus, Info, ListMusic, Music2, Music4, RefreshCw,
-  ShieldCheck, Sparkles, Tags, Users,
+  Activity, BadgeInfo, Disc3, Flame, Gauge, ImagePlus, Info, Languages, ListMusic, Music2, Music4,
+  RefreshCw, ShieldCheck, Sparkles, Tags, UploadCloud, Users,
 } from "lucide-react";
 import { api } from "../api";
 import OverflowMenu from "./OverflowMenu";
@@ -11,7 +11,7 @@ import Modal from "./Modal";
 import { CreditsPanel } from "./TrackDetails";
 import { DetailsDialog } from "./AlbumDetails";
 import { toast } from "../store";
-import type { ScriptRunResult } from "../types";
+import type { LyricsPublishBatchResult, LyricsXlitResult, ScriptRunResult } from "../types";
 
 /** The subset of the API replies the menu reports back to the user. */
 type ActionCounts = { updated?: number; queued?: number };
@@ -70,6 +70,32 @@ export default function TagActionsMenu({
   };
   const json = (r: ActionCounts, unit: string) =>
     typeof r.updated === "number" ? `${r.updated} ${unit} updated` : `${r.queued ?? 0} queued`;
+  /** Script 17's own answer: the files it changed, what it left alone, its
+   *  per-file errors, and the reason it changed nothing when it had nothing to
+   *  work with (both switches off, no AI configured) — never a bare "done". */
+  const xlitDone = (r: LyricsXlitResult) =>
+    [
+      `${r.ok} file(s) updated`,
+      r.skipped ? `${r.skipped} unchanged` : "",
+      r.errors.length ? `${r.errors.length} failed — ${r.errors[0]}` : "",
+      r.note,
+    ].filter(Boolean).join(" · ");
+  /** Script 18's own answer per track: submissions, what LRCLIB said about the
+   *  rest, and the failures with the provider's own words. */
+  const publishDone = (r: LyricsPublishBatchResult) => {
+    const reasons = new Map<string, number>();
+    for (const res of r.results) {
+      if (res.status !== "skipped") continue;
+      const why = res.reason || "skipped";
+      reasons.set(why, (reasons.get(why) ?? 0) + 1);
+    }
+    const fails = r.results.filter((res) => res.status === "failed");
+    return [
+      `${r.ok} submitted`,
+      ...[...reasons].map(([why, n]) => `${n} × ${why}`),
+      fails.length ? `${fails.length} failed — ${fails[0].reason || fails[0].message || "no message"}` : "",
+    ].filter(Boolean).join(" · ");
+  };
   // A script run answers with per-script stats; the menu speaks in files.
   const ran = (r: { results?: ScriptRunResult[] }) => {
     const results = r.results ?? [];
@@ -152,12 +178,6 @@ export default function TagActionsMenu({
                   ),
               },
               {
-                label: "Fetch / refresh lyrics",
-                icon: ListMusic,
-                disabled: !paths.length,
-                onClick: () => run(() => api.lyricsAuto(paths, true), (r) => `${r?.ok ?? 0} lyrics fetched`),
-              },
-              {
                 // Opens the wizard for this album instead of firing the chain
                 // behind the user's back: the import screen is where the chain
                 // button, the script picker and "Run all scripts" live, so the
@@ -173,6 +193,38 @@ export default function TagActionsMenu({
                   albumPath
                     ? navigate(`/import?album=${encodeURIComponent(albumPath)}`)
                     : run(() => api.importFinish(paths), () => "Import chain re-run"),
+              },
+            ],
+          },
+          {
+            // The lyrics family in full: an import runs script 13 (fetch) →
+            // 17 (transliterate/translate) → 18 (publish), and each half is
+            // here by hand. Every entry calls the half's own entry point, so
+            // the tags and sidecars a click writes are the ones an import
+            // writes — and the publish, which owns no local tag, is the one
+            // step that only talks to LRCLIB.
+            title: "Lyrics",
+            items: [
+              {
+                label: "Fetch / refresh lyrics",
+                icon: ListMusic,
+                disabled: !paths.length,
+                title: "Script 13's engine over the selection: every configured provider in order, written per the lyrics format (tags and/or .lrc)",
+                onClick: () => run(() => api.lyricsAuto(paths, true), (r) => `${r?.ok ?? 0} lyrics fetched`),
+              },
+              {
+                label: "Transliterate / translate lyrics…",
+                icon: Languages,
+                disabled: !paths.length,
+                title: "Script 17 over the selection: the TRANSLITERATION-<lang> / TRANSLATION-<lang> tags the lyrics need, plus the .romaji.lrc / .<lang>.lrc sidecars the LRC formats write. Needs AI configured in Settings → AI.",
+                onClick: () => run(() => api.lyricsXlit(paths), xlitDone),
+              },
+              {
+                label: "Publish lyrics to LRCLIB…",
+                icon: UploadCloud,
+                disabled: !paths.length,
+                title: "Script 18 over the selection: submit only the lyrics LRCLIB does not have yet. Writes nothing to the files — this is the one outward lyrics step.",
+                onClick: () => run(() => api.lyricsPublishBatch(paths), publishDone),
               },
             ],
           },

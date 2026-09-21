@@ -1,8 +1,9 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Activity, ArrowDownUp, ArrowUpRight, ChevronLeft, ChevronRight, ClipboardCheck, Compass, Disc3, Download, Eye, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
+  Activity, ArrowDownUp, ArrowUpRight, BarChart3, ChevronLeft, ChevronRight, ClipboardCheck, Compass, Disc3, Download, Eye, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
   Keyboard, Library, ListChecks, ListMusic, Menu, Music2, Music4, PanelLeftClose, Search, SlidersHorizontal, Sparkles, Tags, Trash2, User, WifiOff, X,
   Settings as SettingsIcon, Wrench,
 } from "lucide-react";
@@ -44,6 +45,7 @@ const InProgressPage = lazy(() => import("./pages/InProgressPage"));
 const BrowsePage = lazy(() => import("./pages/BrowsePage"));
 const DiscoverPage = lazy(() => import("./pages/DiscoverPage"));
 const RecommendedPage = lazy(() => import("./pages/RecommendedPage"));
+const ChartsPage = lazy(() => import("./pages/ChartsPage"));
 const WatchedArtistsPage = lazy(() => import("./pages/WatchedArtistsPage"));
 const CheckStackPage = lazy(() => import("./pages/CheckStackPage"));
 const MBSearchPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBSearchPage })));
@@ -65,6 +67,7 @@ import type { OfflineInfo } from "./api";
 
 import PlayerBar from "./components/PlayerBar";
 import { ProgressInline } from "./components/ProgressBar";
+import { PendingMark } from "./components/Badges";
 
 // Sidebar sections: a long flat list of 14 entries is hard to scan, so the
 // rail groups them by what the user is doing (browse / acquire / maintain)
@@ -91,6 +94,9 @@ const NAV_GROUPS: { labelKey: MessageKey; items: { to: string; labelKey: Message
     items: [
       { to: "/discover", labelKey: "nav.discover", icon: Compass, end: false },
       { to: "/recommended", labelKey: "nav.recommended", icon: Sparkles, end: false },
+      // Charts sits with Discover: the same sources, ranked, over the windows
+      // the user picked — and beside them the library's own play history.
+      { to: "/charts", labelKey: "nav.charts", icon: BarChart3, end: false },
       // Watched artists are the same queue as Discover: a release group added
       // here is searched, downloaded and imported by the one pipeline.
       { to: "/watched", labelKey: "nav.watched", icon: Eye, end: false },
@@ -258,7 +264,7 @@ function PageLoading() {
  *  app's own browser (`/mb/…`) exactly like a local hit is a link into the
  *  library — `external` adds musicbrainz.org as a small secondary affordance,
  *  never the primary click. */
-function SearchHit({ to, icon: Icon, label, hint, onGo, external }: {
+function SearchHit({ to, icon: Icon, label, hint, onGo, external, marker }: {
   to: string;
   icon: LucideIcon;
   label: string;
@@ -266,11 +272,16 @@ function SearchHit({ to, icon: Icon, label, hint, onGo, external }: {
   onGo: () => void;
   /** musicbrainz.org URL of the same entity, for the escape-hatch icon */
   external?: string;
+  /** A state mark the hit carries beside its name — a pending album's dot
+   *  (`PendingMark`), so a search result reads as "not downloaded yet" the
+   *  same way the library row it opens does. */
+  marker?: ReactNode;
 }) {
   const body = (
     <>
       <Icon className="h-4 w-4 text-accent-soft shrink-0" />
       <span className="flex-1 min-w-0 truncate">{label}</span>
+      {marker}
       <span className="text-[10px] uppercase tracking-wider text-zinc-600 shrink-0">{hint}</span>
     </>
   );
@@ -1058,6 +1069,7 @@ export default function App() {
                         icon={Disc3}
                         label={al.meta?.ALBUM ?? al.path}
                         hint={t("page.album")}
+                        marker={<PendingMark album={al} />}
                         onGo={() => setSearchOpen(false)}
                       />
                     ))}
@@ -1150,6 +1162,9 @@ export default function App() {
             <Route path="/browse" element={<BrowsePage />} />
             <Route path="/discover" element={<DiscoverPage />} />
             <Route path="/recommended" element={<RecommendedPage />} />
+            {/* What is being played: the user's own play history beside the
+                providers' charts, one window at a time. */}
+            <Route path="/charts" element={<ChartsPage />} />
             <Route path="/watched" element={<WatchedArtistsPage />} />
             <Route path="/checks" element={<CheckStackPage />} />
             <Route path="/dependencies" element={<DependenciesPage />} />

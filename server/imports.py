@@ -690,10 +690,23 @@ def _album_mbids(album_dir):
 
     Lowercased for comparison; read off `_tag_candidate`, which caps its scan
     at five files for the same reason (album-level tags are uniform across the
-    tracks).
+    tracks). A FRAMEWORK album has no tags at all, so the ids its marker was
+    CREATED with stand in — otherwise the add-time pre-fetch could only search
+    the cover sources by name, and the release's own front cover (asked by id)
+    would never be one of the candidates.
     """
     cand = _tag_candidate(album_dir)
-    return (cand["release_id"].lower(), cand["release_group_id"].lower())
+    album = cand["release_id"].lower()
+    rg = cand["release_group_id"].lower()
+    if album or rg:
+        return album, rg
+    try:
+        from mlo.paths import load_pending
+        info = load_pending(album_dir) or {}
+    except Exception:
+        return album, rg
+    return (str(info.get("release_id") or "").lower(),
+            str(info.get("release_group_id") or "").lower())
 
 
 def staged_metadata(album_dir, cfg=None):
@@ -771,6 +784,29 @@ def _album_identity(album_dir):
     return "", os.path.basename(str(album_dir).rstrip("\\/"))
 
 
+def album_identity(album_dir, cfg=None):
+    """(artist, album) for an album folder, tags first, marker second.
+
+    A folder whose audio has arrived states its own identity; a FRAMEWORK album
+    (`server.pending_albums`, added to the library before any audio exists) has
+    no tags to read at all, and its marker carries the release's artist and
+    title. Without this the add path's pre-fetch would search every provider
+    for ""/"" — and the metadata and cover steps would report "nothing found"
+    for an album whose identity the app itself wrote down.
+    """
+    artist, album = _album_identity(album_dir)
+    if artist:
+        return artist, album
+    try:
+        from mlo.paths import load_pending
+        info = load_pending(album_dir) or {}
+    except Exception:
+        info = {}
+    artist = str(info.get("artist") or "").strip() or artist
+    album = str(info.get("title") or "").strip() or album
+    return artist, album
+
+
 def apply_metadata(album_dir, cfg=None):
     """Fetch and store the best artist image / descriptions for an album.
 
@@ -786,7 +822,7 @@ def apply_metadata(album_dir, cfg=None):
 
     cfg = cfg or load_config()
     out = {"artist_image": None, "artist_description": None, "album_description": None}
-    artist, album = _album_identity(album_dir)
+    artist, album = album_identity(album_dir, cfg)
     if not artist:
         return out
     folder = artistdata.artist_dir(cfg, artist)
@@ -843,7 +879,7 @@ def run_metadata_step(album_dir, cfg=None):
     if not cfg.get("metadata_auto_fetch", True):
         return {"staged": False, "applied": {}}
     if cfg.get("metadata_review", False):
-        artist, album = _album_identity(album_dir)
+        artist, album = album_identity(album_dir, cfg)
         try:
             candidates = discovery.metadata_candidates(artist, album, cfg=cfg)
         except Exception:
@@ -862,11 +898,16 @@ def run_metadata_step(album_dir, cfg=None):
 # Cover auto-fetch: which album this is decides who is asked. A release-group
 # id is an identity — the Cover Art Archive answers about it by id, with no
 # name guessing at all — while an album without one is found by its names.
+# Both are asked when both are known: the meta-search carries the big store
+# artwork, the identity carries the release's own front cover, and
+# `mlo.cover_choice` (the ONE cover policy) decides between them.
 COVER_FETCH_TIMEOUT = 30.0
 
-# How many candidates a review handout carries. The finder's own search deals
-# in dozens; a review is a pick-one screen, so a screenful is the whole point
-# — the long tail is one click away on the cover page.
+# How many candidates the finder is asked for. A review hands the user a
+# screenful to pick from; the unattended path ranks the SAME set and writes the
+# winner, so the cover that lands is the best of what exists rather than
+# whatever answered first. 20+ CDNs is what the finder deals in; a screenful
+# plus its ranked tail is the whole point of a pick-one screen.
 COVER_REVIEW_LIMIT = 12
 
 
@@ -891,88 +932,144 @@ def _album_cover_present(album_dir):
         return False
 
 
+def cover_candidates(album_dir, cfg=None, *, limit=None):
+    """The ranked cover candidates for one album, or None with nothing to ask.
+
+    The ONE place the cover finder is asked on an album's behalf: the import
+    chain's cover step, the add path's pre-fetch and the album page's cover
+    search all rank the same candidate set with the same policy
+    (`mlo.cover_choice`), so the image an unattended import lands and the image
+    the user is offered first cannot disagree.
+
+    The album's identity decides who is asked — the release's own id and its
+    release group go to the Cover Art Archive by identity, the names go to the
+    meta-search — and the result is `mlo.cover_choice.cover_payload`'s body
+    (chosen, ranked candidates, notes, policy) plus the identity used, so a
+    caller can record it (`stage_cover_candidates`) or show it as it is.
+    """
+    from mlo import cover_choice
+    from server import integrations as intg
+
+    cfg = cfg or load_config()
+    artist, album = album_identity(album_dir, cfg)
+    if not artist and not album:
+        return None
+    album_id, rg = _album_mbids(album_dir)
+    found = intg.cover_search(
+        artist, album, limit=limit or COVER_REVIEW_LIMIT,
+        timeout=COVER_FETCH_TIMEOUT, cfg=cfg,
+        release_group_mbid=rg, release_mbid=album_id)
+    payload = cover_choice.cover_payload(
+        found.get("results") or [], cfg,
+        sources=found.get("sources"), provider=found.get("provider"))
+    payload["artist"] = artist
+    payload["album"] = album
+    payload["album_id"] = album_id
+    payload["release_group"] = rg
+    return payload
+
+
+def stage_cover_candidates(album_dir, payload, cfg=None):
+    """Record a ranked candidate set as the album's staged cover review.
+
+    The pick screen's own order: the winner first with the reasons that put it
+    there, the winner recorded as ``chosen``, every alternative behind it with
+    the reason it lost, and the finder's notes — including any source that was
+    skipped (a source needing a key says so rather than being worked around).
+    Other keys of a staged entry (the metadata step's own candidates) are kept.
+    """
+    cfg = cfg or load_config()
+    ranked = payload.get("candidates") or []
+    chosen = payload.get("chosen")
+    notes = list(payload.get("notes") or [])
+    if not ranked:
+        # Nothing at all to pick from: a staged entry with no options is not a
+        # review, it is an empty screen. Say so instead.
+        return {"fetched": False, "applied": {}, "staged": False,
+                "source": payload.get("provider"), "candidates": 0,
+                "choice": None, "notes": notes,
+                "note": ("no cover found — " + (notes[-1] if notes else
+                                                "no source answered with a candidate"))}
+    entry = dict(staged_metadata(album_dir, cfg))
+    entry["covers"] = {
+        "artist": payload.get("artist"),
+        "album": payload.get("album"),
+        # The release id too: with it (or the release group) the entry is found
+        # again after the import chain relocates the album, so the review
+        # record is never orphaned by a rename.
+        "album_id": payload.get("album_id"),
+        "release_group": payload.get("release_group"),
+        "provider": payload.get("provider"),
+        "staged_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "results": ranked,
+        "chosen": chosen,
+        "notes": notes,
+        "policy": payload.get("policy") or {},
+    }
+    stage_metadata(album_dir, entry, cfg)
+    count = int(payload.get("candidate_count") or 0)
+    note = (f"{count} cover candidates to pick from — best: "
+            f"{chosen['source']} ({chosen['reasons'][-1]})" if chosen else
+            "no cover to pick — " + (notes[-1] if notes else ""))
+    return {"fetched": False, "applied": {}, "staged": True,
+            "source": payload.get("provider"), "candidates": count,
+            "choice": chosen, "notes": notes, "note": note}
+
+
 def run_cover_step(album_dir, cfg=None):
     """The import chain's cover step (cover_auto_fetch / cover_review).
 
     An album that arrived without cover art gets one, found the way the cover
     page finds them and stored by the same writer an upload goes through — so
     the file that lands is already at the library's own size and encoding.
-    The release-group id the import stamped asks the Cover Art Archive by
-    identity; an album without one is searched by artist/album name (COV, then
-    the Cover Art Archive / Deezer / iTunes fallbacks).
+    WHICH one lands is `mlo.cover_choice`'s answer and nothing else (see
+    `cover_candidates`): the release's own front cover first, then the size
+    against the configured target, then the configured source order, then
+    format and aspect, with the provider's own order as the last tiebreak.
+    Every source that refused, had nothing or was skipped says so in ``notes``.
 
-    With `cover_review` on (the default) the candidates are STAGED — under
-    ``entry["covers"]`` in the same review file the metadata step uses, other
-    keys of the album's entry kept — and NOTHING is written; the user picks one
-    and the UI writes it through the existing ``POST /api/cover/fromurl``. With
-    it off the best hit is applied here, exactly as before.
+    With `cover_review` on (the default) the ranked candidates are STAGED —
+    under ``entry["covers"]`` in the same review file the metadata step uses,
+    other keys of the album's entry kept — and NOTHING is written; the user
+    picks one and the UI writes it through ``POST /api/cover/fromurl``. With it
+    off the winner is applied here, exactly as before.
 
-    Never fatal, and never silent about a cover it could not get: the result
-    is ``{"fetched", "applied", "source", "note", "staged", "candidates"}`` —
-    the same shape `run_metadata_step` hands back to `finish_album`, note being
-    the line a caller can show ("cover fetched from <source>", "" when there
-    was nothing to do or nothing was wanted), and ``staged``/``candidates``
-    how many options the user was handed instead of a written file.
+    Never fatal, and never silent about a cover it could not get: the result is
+    ``{"fetched", "applied", "source", "note", "staged", "candidates",
+    "choice", "notes"}`` — the same shape `run_metadata_step` hands back to
+    `finish_album`, ``note`` the line a caller can show (it names the source
+    and why it won), ``staged``/``candidates`` how many options the user was
+    handed instead of a written file, ``choice`` the winning candidate with its
+    reasons, and ``notes`` every source's own outcome.
     """
     cfg = cfg or load_config()
     out = {"fetched": False, "applied": {}, "source": None, "note": "",
-           "staged": False, "candidates": 0}
+           "staged": False, "candidates": 0, "choice": None, "notes": []}
     if not cfg.get("cover_auto_fetch", True):
         return out
     try:
         if _album_cover_present(album_dir):
             return out
-        artist, album = _album_identity(album_dir)
-        if not artist and not album:
+        payload = cover_candidates(album_dir, cfg)
+        if payload is None:
             out["note"] = "no artist/album tags to search by"
             return out
-        # Review wants a choice, not one answer: ask the finder for a screenful
-        # of them. Not reviewing keeps the old shape — one hit, written here.
-        review = bool(cfg.get("cover_review", True))
-        album_id, rg = _album_mbids(album_dir)
-        from server import integrations as intg
-        if rg:
-            rows, provider = intg._cover_fallback(
-                artist, album, COVER_REVIEW_LIMIT if review else 1, cfg, rg,
-                COVER_FETCH_TIMEOUT)
-        else:
-            found = intg.cover_search(
-                artist, album, limit=COVER_REVIEW_LIMIT if review else 2,
-                cfg=cfg, timeout=COVER_FETCH_TIMEOUT)
-            rows, provider = found.get("results") or [], found.get("provider")
-        if review:
-            # Only rows the apply route can write at all: /api/cover/fromurl
-            # takes a URL, and a row without one is a dead option on the pick
-            # screen.
-            rows = [r for r in rows if r.get("big")][:COVER_REVIEW_LIMIT]
-            if not rows:
-                out["note"] = "no cover found"
-                return out
-            # The metadata step may have staged this very album already: read
-            # its entry first so the candidates it put there survive.
-            entry = dict(staged_metadata(album_dir, cfg))
-            entry["covers"] = {
-                "artist": artist,
-                "album": album,
-                # The release id too: with it (or the release group) the entry
-                # is found again after the import chain relocates the album, so
-                # the review record is never orphaned by a rename.
-                "album_id": album_id,
-                "release_group": rg,
-                "provider": provider,
-                "staged_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "results": rows,
-            }
-            stage_metadata(album_dir, entry, cfg)
-            out["source"] = provider
-            out["staged"] = True
-            out["candidates"] = len(rows)
-            out["note"] = f"{len(rows)} cover candidates to pick from"
+        if bool(cfg.get("cover_review", True)):
+            return stage_cover_candidates(album_dir, payload, cfg)
+        chosen = payload.get("chosen")
+        out["notes"] = list(payload.get("notes") or [])
+        out["candidates"] = int(payload.get("candidate_count") or 0)
+        out["source"] = payload.get("provider")
+        out["choice"] = chosen
+        if not chosen:
+            out["note"] = ("no cover found" if not payload.get("candidates") else
+                           "no candidate could be used — "
+                           + ((payload.get("notes") or [""])[-1]))
             return out
-        url = next((r.get("big") for r in rows if r.get("big")), "")
-        if not url:
-            out["note"] = "no cover found"
-            return out
+        url = str(chosen.get("big") or "")
+        artist = payload.get("artist") or ""
+        album = payload.get("album") or ""
+        rg = payload.get("release_group") or ""
         # main.py imports this module, so the cover writer is reached back into
         # lazily — exactly how server.api_discovery reaches `_in_music_folder`.
         from server.main import _cover_url_bytes, _write_cover_bytes, _sniff_image_ext
@@ -982,13 +1079,134 @@ def run_cover_step(album_dir, cfg=None):
             out["note"] = "the cover image came back empty"
             return out
         res = _write_cover_bytes(album_dir, "cover", _sniff_image_ext(data, ctype), data)
-        out["source"] = provider
         out["applied"] = {"cover": res.get("path")}
         out["fetched"] = True
-        out["note"] = f"cover fetched from {provider or 'the image url'}"
+        out["note"] = (f"cover fetched from {chosen['source'] or 'the image url'} "
+                       f"(best of {out['candidates']} candidate(s) — "
+                       f"{chosen['reasons'][-1]})")
     except Exception as e:
         traceback.print_exc()
         out["note"] = f"cover step failed: {e}"
+    return out
+
+
+def prefetch_links(album_dir, cfg=None):
+    """Resolve an album's / artist's RateYourMusic links onto its marker.
+
+    The tag half of the links step cannot run before the audio exists, but the
+    RESOLUTION can: the same resolver the stamp uses (`integrations.rym_links`,
+    MusicBrainz-relation first), the same switch (`rym_links_auto`), and a link
+    RYM itself confirmed is recorded in the framework marker so the album's
+    page shows it from the moment it is added. Nothing already recorded is ever
+    overwritten (a link the user pasted wins), and nothing is written when the
+    lookup resolves nothing. Returns ``{"album", "artist", "note", "saved"}``;
+    never raises.
+    """
+    cfg = cfg or load_config()
+    out = {"album": None, "artist": None, "note": "", "saved": False}
+    if not cfg.get("rym_links_auto", True):
+        out["note"] = "skipped: rym_links_auto is off"
+        return out
+    from mlo.paths import load_pending, save_pending
+    from server import integrations as intg
+
+    info = load_pending(album_dir) or {}
+    if not info:
+        out["note"] = "not a framework album — no marker to record a link in"
+        return out
+    have = dict(info.get("links") or {})
+    artist, album = album_identity(album_dir, cfg)
+    if not artist and not album:
+        out["note"] = "no artist/album to look a link up for"
+        return out
+    if not (have.get("album") and have.get("artist")):
+        links = {}
+        try:
+            links = intg.rym_links(
+                artist, album, cfg=cfg,
+                mbid=str(info.get("release_group_id")
+                         or info.get("release_id") or "")) or {}
+        except Exception:
+            traceback.print_exc()
+            out["note"] = "the link lookup failed"
+            return out
+        out["note"] = str(links.get("note") or "")
+        merged = {"album": have.get("album") or links.get("album"),
+                  "artist": have.get("artist") or links.get("artist")}
+        if any(merged.values()) and merged != have:
+            info["links"] = merged
+            out["saved"] = bool(save_pending(album_dir, info))
+            have = merged
+    out["album"], out["artist"] = have.get("album"), have.get("artist")
+    return out
+
+
+def prefetch_album(album_dir, cfg=None):
+    """What a freshly added album can have BEFORE its audio exists.
+
+    "Add to library" already creates the folder, its release manifest and a
+    placeholder cover; this is the rest of what the album's page shows, fetched
+    the moment the album is asked for rather than when the download lands: its
+    RateYourMusic links, its metadata (the ARTIST image, the artist and album
+    descriptions — `metadata_review` staging them instead when that is on) and
+    the ranked cover candidates with the policy's winner marked.
+
+    Every step is the import chain's own function and its own switch
+    (`rym_links_auto`, `metadata_auto_fetch`, `cover_auto_fetch`), so nothing
+    here is a second fetcher and nothing is fetched that the import would not
+    have fetched anyway. Never fatal: the folder is already a real library
+    album, and a provider that refuses must not fail the add. The album's
+    identity comes from the marker when there is no audio to read tags from
+    (`album_identity`).
+    """
+    cfg = cfg or load_config()
+    out = {"links": None, "metadata": None, "cover": None}
+    # The same effective config the import chain runs under, so a family the
+    # user kept for themselves is not decided here either.
+    try:
+        from mlo import import_policy
+        run_cfg = import_policy.effective_config(cfg)
+    except Exception:
+        traceback.print_exc()
+        run_cfg = cfg
+    try:
+        out["links"] = prefetch_links(album_dir, run_cfg)
+    except Exception:
+        traceback.print_exc()
+    try:
+        out["metadata"] = run_metadata_step(album_dir, run_cfg)
+    except Exception:
+        traceback.print_exc()
+    try:
+        if run_cfg.get("cover_auto_fetch", True):
+            payload = cover_candidates(album_dir, run_cfg)
+            if payload is not None:
+                out["cover"] = stage_cover_candidates(album_dir, payload, run_cfg)
+    except Exception:
+        traceback.print_exc()
+    # What the add pre-fetched is recorded in the framework marker: the page
+    # (and the proof that this ran at add time, not at import time) reads it
+    # from there, and the marker is cleared by the import anyway.
+    try:
+        from mlo.paths import load_pending, save_pending
+        info = load_pending(album_dir) or {}
+        if info:
+            applied = (out.get("metadata") or {}).get("applied") or {}
+            chosen = (out.get("cover") or {}).get("choice") or {}
+            info["prefetched"] = {
+                "at": time.time(),
+                "artist_image": applied.get("artist_image"),
+                "artist_description": applied.get("artist_description"),
+                "album_description": applied.get("album_description"),
+                "cover_candidates": int((out.get("cover") or {}).get("candidates") or 0),
+                "cover_pick": chosen.get("big"),
+                "cover_source": chosen.get("source"),
+                "links": {"album": (out.get("links") or {}).get("album"),
+                          "artist": (out.get("links") or {}).get("artist")},
+            }
+            save_pending(album_dir, info)
+    except Exception:
+        traceback.print_exc()
     return out
 
 

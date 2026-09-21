@@ -171,7 +171,7 @@ TAG_INFO = {
     "ENERGY": ("Energy", "0-100 arousal the MOOD verdict was scored from."),
     "BPM": ("BPM", "Tempo in beats per minute."),
     "INITIALKEY": ("Initial key", "The musical key the track sits in."),
-    "DYNAMIC RANGE": ("Dynamic range", "Per-track DR measured by simple-dr-meter."),
+    "DYNAMIC RANGE": ("Dynamic range", "Per-track DR measured in process (loudness-war convention)."),
     "ALBUM DYNAMIC RANGE": ("Album dynamic range", "One DR value for the whole release."),
     "REPLAYGAIN_TRACK_GAIN": ("ReplayGain track gain", "Track loudness gain in dB, from rsgain."),
     "REPLAYGAIN_TRACK_PEAK": ("ReplayGain track peak", "Peak sample of the track, for clipping-safe replay."),

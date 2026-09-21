@@ -38,11 +38,23 @@ class AddToLibraryRequest(BaseModel):
     or the EDITION the caller picked inside a release GROUP — the release
     page's own rows always know it, and passing it saves the lookup that would
     otherwise pick an edition by policy (a pick naming an edition of ANOTHER
-    group is reported as skipped, never added)."""
+    group is reported as skipped, never added).
+
+    `types` restricts an ARTIST (or release-group) add to MusicBrainz's own
+    release-group types — "album", "compilation", or a combined spelling like
+    "Album + Compilation" — matched by `mlo.release_choice.type_matches`. It
+    is empty by default, and empty means EVERY type: the behaviour every
+    caller had before the filter existed. `download` additionally starts the
+    wish queue's search for what this call queued, which is the whole
+    difference between "Add to library" (records it, the configured
+    automation takes over) and "Download all" (records it and searches now).
+    """
     mbid: str = ""
     kind: str = "auto"
     mode: str = "best"          # release_group: "best" edition | "all" editions
     release_mbid: Optional[str] = None
+    types: List[str] = []
+    download: bool = False
     title: str = ""
     artist: str = ""
     year: str = ""
@@ -134,8 +146,16 @@ def _group_edition_targets(group_mbid, release_mbid, mode, cfg=None):
     return [{"mbid": rid, "title": release.get("title") or ""}], []
 
 
-def _targets(mbid, kind, mode, release_mbid="", cfg=None):
-    """([{mbid,title}], skipped) — the releases to create albums for."""
+def _targets(mbid, kind, mode, release_mbid="", cfg=None, types=None):
+    """([{mbid,title}], skipped) — the releases to create albums for.
+
+    `types` (MusicBrainz's own release-group types, `mlo.release_choice`'s
+    vocabulary) is a filter on what may be queued, and it rides all the way
+    into the policy's own edition choice — an add for "album" is answered with
+    the album edition. A caller who picked an EDITION (`release_group` with
+    `release_mbid`) has already named the release, so the pick wins and no
+    type filter is applied to it.
+    """
     from server import integrations as intg
 
     if kind == "recording":
@@ -144,23 +164,36 @@ def _targets(mbid, kind, mode, release_mbid="", cfg=None):
         picked = _group_edition_targets(mbid, release_mbid, mode, cfg)
         if picked is not None:
             return picked
-    return intg.auto_import_targets(mbid, kind, mode)
+    return intg.auto_import_targets(mbid, kind, mode, types=types)
 
 
-def _create_all(targets, cfg, *, queries=None, title="", artist="", year=""):
+def _create_all(targets, cfg, *, queries=None, title="", artist="", year="",
+                download=False):
     """Create one framework album + wish per target release.
 
     The album and its wish are the RECORD of what the user asked for and are
-    created either way; the SEARCH is what `auto_acquisition_enabled` owns. Off,
-    no download is started and the wish sits in the queue until the user runs
-    it by hand (its own Search now), which is the whole difference between
-    "not recorded" and "not started".
+    created either way; the SEARCH is what `auto_acquisition_enabled` owns and
+    what `download` asks for. "Add to library" (`download` false) records and
+    lets the configured automation take over — the wish queue's own loop
+    searches a wish as soon as it is due, and a brand-new wish is due on its
+    next pass. "Download all" (`download` true) additionally kicks that queue
+    for exactly the wishes this call created (`server.wishes_worker.trigger`,
+    the one trigger this app has — no second queue is created here). With the
+    switch off NOTHING is started either way: the wish sits on the queue until
+    the user runs it by hand (its own Search now), which is the whole
+    difference between "not recorded" and "not started".
     """
     from mlo import import_policy
     from server import integrations as intg
     from server import pending_albums, wishes_worker
 
     auto = import_policy.auto_acquisition_enabled(cfg)
+    # One album is pre-created INLINE (the user is waiting for exactly that one
+    # and its page is a click away); a batch — a discography, mode="all" — has
+    # its page content fetched per album on a daemon thread instead, so one
+    # request does not become dozens of provider calls (see
+    # `pending_albums.create`'s own `prefetch` argument).
+    batch = len(targets) > 1
     albums, errors = [], []
     for t in targets:
         try:
@@ -170,9 +203,12 @@ def _create_all(targets, cfg, *, queries=None, title="", artist="", year=""):
                 continue
             row = pending_albums.create(
                 release, cfg, queries=queries,
-                title=t.get("title") or title, artist=artist, year=year)
+                title=t.get("title") or title, artist=artist, year=year,
+                prefetch=not batch)
             albums.append(row)
-            if auto and row.get("wish_id") and row.get("created"):
+            if batch and row.get("created") and row.get("album_path"):
+                pending_albums.prefetch_content(row["album_path"], cfg, background=True)
+            if download and auto and row.get("wish_id") and row.get("created"):
                 # The existing worker searches it; nothing is searched here.
                 wishes_worker.trigger(row["wish_id"])
         except Exception as e:
@@ -181,42 +217,51 @@ def _create_all(targets, cfg, *, queries=None, title="", artist="", year=""):
     return albums, errors
 
 
-def _prepare_artist(mbid, mode, cfg, req):
+def _prepare_artist(mbid, mode, cfg, req, types=None):
     """Resolve an artist's discography and create every framework album.
 
     Runs on a daemon thread: the artist path is one MusicBrainz browse per
     release group (MusicBrainz answers one request a second), so it cannot
-    finish inside a request. Each album appears — and its wish starts, unless
-    ``auto_acquisition_enabled`` is off — as it is prepared, and the batch
-    reports itself over the event channel.
+    finish inside a request. Each album appears — and its wish starts, when
+    the call asked for a download and `auto_acquisition_enabled` is on — as it
+    is prepared, and the batch reports itself over the event channel.
+
+    `types` is the call's own type filter (see `AddToLibraryRequest`): the
+    groups it leaves out are reported as skipped, by `auto_import_targets`.
     """
     from mlo import import_policy
     from server import events
 
     albums, errors = [], []
     try:
-        targets, skipped = _targets(mbid, "artist", mode, cfg=cfg)
+        targets, skipped = _targets(mbid, "artist", mode, cfg=cfg, types=types)
         for s in skipped:
             errors.append({"mbid": s.get("mbid"), "reason": s.get("reason")})
         albums, more = _create_all(targets, cfg, queries=req.queries,
-                                   title=req.title, artist=req.artist, year=req.year)
+                                   title=req.title, artist=req.artist, year=req.year,
+                                   download=req.download)
         errors.extend(more)
     except Exception as e:
         traceback.print_exc()
         errors.append({"mbid": mbid, "reason": str(e)})
     if not albums:
         body = "Nothing could be added."
-    elif import_policy.auto_acquisition_enabled(cfg):
-        body = "Soulseek is searching for them now."
-    else:
+    elif not import_policy.auto_acquisition_enabled(cfg):
         # The albums ARE in the library: saying nothing about the search would
         # leave the user waiting for a download nothing is doing.
         body = import_policy.AUTO_OFF_NOTE
+    elif req.download:
+        body = "Soulseek is searching for them now."
+    else:
+        body = "They are on the wish queue — its next search picks them up."
+    if errors:
+        body = f"{body} {len(errors)} release group(s) skipped."
     try:
         events.emit("library_add",
                     f"Added {len(albums)} album(s) to your library",
                     body,
-                    {"mbid": mbid, "albums": [a.get("album_path") for a in albums],
+                    {"mbid": mbid, "types": list(types or ()),
+                     "albums": [a.get("album_path") for a in albums],
                      "errors": errors[:20]}, config=cfg)
     except Exception:
         pass
@@ -232,17 +277,94 @@ def _pending_album_payload(row):
             "already_in_library": bool(row.get("existing"))}
 
 
+def _types_filter(types):
+    """The request's `types` as MusicBrainz's own type names, or 400.
+
+    `mlo.release_choice.type_names` is the ONE normalizer — it splits a
+    combined spelling ("Album + Compilation"), lowercases, and validates the
+    vocabulary — so a typo comes back as the name it did not recognize
+    instead of a filter that silently matches nothing.
+    """
+    from mlo import release_choice
+
+    try:
+        return release_choice.type_names(types)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+def _types_label(types):
+    """"Album + Compilation" — a type selection as MusicBrainz spells types."""
+    from mlo import naming
+
+    return naming.mb_style_release_type("+".join(types)).replace("; ", " + ")
+
+
+def _type_scope(mbid, types):
+    """What a type-filtered ARTIST add is about to queue, before it starts.
+
+    ONE browse of the artist's release groups — `mb_get_cached`, so the page
+    that sent this request has just paid for it — answers the two things the
+    handover owes the user: how many release groups the filter keeps (one
+    album is prepared for each) and every group it leaves out, with the type
+    that group actually is. Raises when MusicBrainz cannot answer, which the
+    route reports as an outage rather than as "no albums".
+    """
+    from server import integrations as intg
+
+    groups = intg.artist_release_groups(mbid, limit=300, offset=0).get("release_groups") or []
+    kept, skipped = intg.groups_of_types(groups, types)
+    return {"queued": len(kept), "skipped": skipped, "total": len(groups)}
+
+
+def _artist_note(queued, label, auto, download):
+    """What a handover says while the albums are still being prepared."""
+    from mlo import import_policy
+
+    scope = f"{queued} {label} release group(s)" if label else "the discography"
+    head = f"Preparing {scope} — each album appears in the library as it is added"
+    if not auto:
+        return head + ". " + import_policy.AUTO_OFF_NOTE
+    if download:
+        return head + ", and the search starts with it."
+    return head + ", and the automated search picks it up from the queue."
+
+
+def _added_note(auto, download):
+    """What an in-request add answers about the SEARCH it did or did not start.
+
+    Empty while the automation is on and no download was asked for: the album
+    and its wish are the record, and the queue's own loop searches it — which
+    is what a caller that only wanted the album (every caller before
+    `download` existed) already got.
+    """
+    from mlo import import_policy
+
+    if not auto:
+        # The switch's own sentence, which names it: off, the album and the
+        # wish are recorded and NOTHING is searching for them.
+        return import_policy.AUTO_OFF_NOTE
+    return "Soulseek is searching for them now." if download else ""
+
+
 @router.post("/api/library/add")
 def library_add(req: AddToLibraryRequest):
     """Add a MusicBrainz release / release group / artist / recording to the
-    library: framework album on disk, wish on the queue, search started.
+    library: framework album on disk, wish on the queue, and — with `download`
+    — the search started.
 
-    The album is there immediately and visibly pending and the search starts
-    with it — unless ``auto_acquisition_enabled`` is off, in which case the
-    album and its wish are recorded and `note` says why nothing is searching.
-    A batch too large for a request (an artist's discography is one MusicBrainz
-    browse per release group) is prepared on a background thread and reported
-    over ``/ws/events`` as ``library_add``.
+    The album is there immediately and visibly pending. `download` false
+    (the default, and "Add to library") records it and lets the configured
+    automation take over; `download` true ("Download all") additionally kicks
+    the wish queue for exactly the wishes this call created. Either way, with
+    `auto_acquisition_enabled` off nothing is started and `note` says so in
+    that switch's own words.
+
+    An artist's discography is prepared on a background thread and reported
+    over ``/ws/events`` as ``library_add`` (one MusicBrainz browse per release
+    group does not fit in a request); a `types`-filtered artist call answers
+    at once with what it is queueing and what the filter left out, because
+    that much is known from one browse the caller has already made.
     """
     from mlo import import_policy
     from server import integrations as intg
@@ -254,32 +376,46 @@ def library_add(req: AddToLibraryRequest):
     if mode not in ("best", "all"):
         raise HTTPException(400, "mode must be 'best' or 'all'")
     kind = _intended_kind(mbid, req.kind)
+    types = _types_filter(req.types)
     cfg = load_config()
     auto = import_policy.auto_acquisition_enabled(cfg)
 
     if kind == "artist":
-        threading.Thread(target=_prepare_artist, args=(mbid, mode, cfg, req),
+        scope = {"queued": None, "skipped": [], "total": None}
+        if types:
+            try:
+                scope = _type_scope(mbid, types)
+            except Exception as e:
+                raise HTTPException(503, f"MusicBrainz did not answer: {e}")
+        if scope["queued"] == 0:
+            # No group of this artist has the type that was asked for: nothing
+            # is prepared, and the skipped rows say which types there are.
+            return {"ok": True, "background": False, "queued": 0,
+                    "albums": [], "skipped": scope["skipped"], "errors": [],
+                    "note": ("No release group of this artist is one of the "
+                             "types you asked for." if scope["total"] else
+                             "This artist has no release groups on MusicBrainz.")}
+        threading.Thread(target=_prepare_artist, args=(mbid, mode, cfg, req, types),
                          daemon=True).start()
-        return {"ok": True, "background": True,
-                "albums": [], "skipped": [], "errors": [],
-                "note": ("Preparing the discography — each album appears in the "
-                         "library as it is added, and the search starts with it."
-                         if auto else
-                         "Preparing the discography — each album appears in the "
-                         "library as it is added. " + import_policy.AUTO_OFF_NOTE)}
+        return {"ok": True, "background": True, "queued": scope["queued"],
+                "albums": [], "skipped": scope["skipped"], "errors": [],
+                "note": _artist_note(scope["queued"], _types_label(types),
+                                     auto, req.download)}
 
     try:
-        targets, skipped = _targets(mbid, kind, mode, req.release_mbid or "", cfg=cfg)
+        targets, skipped = _targets(mbid, kind, mode, req.release_mbid or "",
+                                    cfg=cfg, types=types)
     except Exception as e:
         # A MusicBrainz outage is not "nothing matches".
         raise HTTPException(503, f"MusicBrainz did not answer: {e}")
 
     albums, errors = _create_all(targets, cfg, queries=req.queries,
-                                 title=req.title, artist=req.artist, year=req.year)
-    return {"ok": True, "background": False,
+                                 title=req.title, artist=req.artist, year=req.year,
+                                 download=req.download)
+    return {"ok": True, "background": False, "queued": len(targets),
             "albums": [_pending_album_payload(a) for a in albums],
             "skipped": skipped, "errors": errors,
-            "note": "" if auto else import_policy.AUTO_OFF_NOTE}
+            "note": _added_note(auto, req.download)}
 
 
 @router.post("/api/library/add/cancel")

@@ -15,8 +15,11 @@ Two things happen, and both are the point of the feature:
 
 The decided-ness of an album is never stored here: the entry is what
 `mlo.import_policy.gaps` said at the end of an import, refreshed by the next
-import of the same album (which clears it when there is nothing left to
-report), plus whatever the user dismissed by hand.
+import of the same album (which clears it when there is nothing left to report)
+AND re-derived when the prompts are READ (`missing_now`) — a family filled
+after the import (the wizard step the prompt links to, a cover search, a lyrics
+fetch) withdraws the prompt without another import ever running — plus whatever
+the user dismissed by hand.
 """
 
 import json
@@ -120,20 +123,141 @@ def body(entry):
 def prompts(cfg=None):
     """Every album waiting on the user, newest first.
 
-    An entry whose album no longer exists is dropped instead of listed: a link
-    to a folder that is gone is a dead end, and re-importing the album is what
-    raises the prompt again.
+    Two kinds of entry are dropped instead of listed, and both are the same
+    statement — the condition the prompt announced no longer holds:
+
+    * an album whose folder no longer exists: a link to a folder that is gone
+      is a dead end, and re-importing the album is what raises the prompt
+      again, and
+    * an album whose missing families have been supplied SINCE the import that
+      reported them (`missing_now`): the wizard's own step the prompt links to,
+      the album page's cover search, a lyrics fetch or another import can all
+      fill a family without going near this table, and a prompt for what is no
+      longer missing is exactly the stale row this view must not show. The
+      entry is dropped here rather than at the next import of the album, which
+      may never come.
+
+    A prompt whose gap cannot be re-derived (the folder is unreadable, the
+    grader raised) is KEPT: silence is not the same as answered.
     """
     path = _path(cfg)
     if not path or not os.path.isfile(path):
         return []
     data = _load(path)
-    live = {k: v for k, v in data.items()
-            if isinstance(v, dict) and os.path.isdir(str(v.get("album") or ""))}
+    live = {}
+    for k, v in data.items():
+        if not isinstance(v, dict) or not os.path.isdir(str(v.get("album") or "")):
+            continue
+        named = _ids(v)
+        now = missing_now(str(v.get("album") or ""), cfg) if named else None
+        if now is not None and not (set(named) & now):
+            continue                    # every family it named is supplied
+        live[k] = v
     if live != data:
         _save(path, live)
     return sorted((dict(v, id=k) for k, v in live.items()),
                   key=lambda e: float(e.get("at") or 0), reverse=True)
+
+
+# The re-derivation's memo. The caller is a route the UI POLLS (the queue view,
+# every few seconds while something is moving) and a re-derivation runs the
+# grader on a real album, so the answer is remembered — but a remembered answer
+# must never outlive its reason. `_signature` is that reason: the album's own
+# directory stamp. A cover written beside the tracks moves the directory's
+# mtime, a tag written into a track moves the file's, a sidecar added or
+# removed moves both the count and the directory — so the family the user just
+# supplied is re-derived on the very next poll. The TTL is the backstop for
+# everything OUTSIDE the album (a settings change that turns a check off): no
+# memo is trusted longer than this, however still the files are.
+_VERIFY_TTL_S = 60.0
+_verified = {}      # (album key, mode, review families) -> (signature, ids, at)
+
+# The checks the re-derivation switches OFF: none of them can produce a FAMILY
+# code (`mlo.import_policy.FAMILIES` is the family vocabulary, and `gaps` folds
+# nothing else into a family), so they cannot change the answer — and they are
+# the expensive half of a grade: decoding a CD to verify its rip-log CRCs, an
+# external audio audit, the library index an expected-track list needs. A route
+# the UI polls must not pay for them.
+_VERIFY_OFF = ("grade_check_crc", "grade_check_audit", "grade_check_log_checksum",
+               "grade_check_cd_log", "grade_check_cd_cue", "grade_check_cd_format",
+               "grade_check_log_grade", "grade_check_expected_tracks")
+
+
+def _signature(album_dir):
+    """What a CHANGE to the album looks like, without reading one byte of it:
+    the directory's own mtime, how many entries it holds, the newest entry's
+    mtime and their total size. One listdir and one stat per entry."""
+    try:
+        entries = []
+        with os.scandir(str(album_dir)) as it:
+            for e in it:
+                st = e.stat()
+                entries.append((st.st_mtime_ns, st.st_size))
+        dir_mtime = os.stat(str(album_dir)).st_mtime_ns
+    except OSError:
+        return None
+    return (dir_mtime, len(entries),
+            max((m for m, _ in entries), default=0),
+            sum(size for _, size in entries))
+
+
+def _forget_verified(album_dir):
+    """Drop this album's memo, whatever config it was derived under."""
+    key = _key(album_dir)
+    for k in [k for k in _verified if k[0] == key]:
+        _verified.pop(k, None)
+
+
+def _memo_key(album_dir, cfg):
+    """One album under ONE policy: the mode and the families the user keeps for
+    themselves are the two things `effective_config` reads, so they are what a
+    memoized answer is only valid for."""
+    from mlo import import_policy
+
+    return (_key(album_dir), str(import_policy.mode(cfg or {})),
+            tuple(import_policy.review_families(cfg or {})))
+
+
+def missing_now(album_dir, cfg=None):
+    """The family ids this album is missing RIGHT NOW (a set), or None when the
+    question cannot be answered.
+
+    `mlo.import_policy.gaps` is the ONE source of what "missing" means — the
+    same call `imports.finish_album` makes at the end of an import, so a prompt
+    withdrawn here and a gap that would be reported there are the same
+    statement — asked with the effective config an import runs under and the
+    checks in _VERIFY_OFF switched off. Memoised per album (see _signature).
+    """
+    from mlo import import_policy
+    from mlo.stats import is_audio_file
+
+    try:
+        if not any(is_audio_file(f) for f in os.listdir(str(album_dir))):
+            # A folder with no audio cannot be graded at all: `gaps` would
+            # answer with the advisory alone (the one family the grader does
+            # not read off the tracks) and every OTHER family would read as
+            # supplied — the opposite of the truth. Nothing was filled here,
+            # so nothing is withdrawn.
+            return None
+    except OSError:
+        return None
+
+    eff = dict(import_policy.effective_config(cfg or {}))
+    for name in _VERIFY_OFF:
+        eff[name] = False
+    key = _memo_key(album_dir, cfg)
+    sig = _signature(album_dir)
+    now = time.time()
+    hit = _verified.get(key)
+    if hit and hit[0] == sig and now - hit[2] < _VERIFY_TTL_S:
+        return set(hit[1])
+    try:
+        ids = set(import_policy.gaps(str(album_dir), eff))
+    except Exception:
+        traceback.print_exc()
+        return None
+    _verified[key] = (sig, tuple(sorted(ids)), now)
+    return ids
 
 
 def for_album(album_dir, cfg=None):
@@ -147,6 +271,7 @@ def for_album(album_dir, cfg=None):
 def clear(album_dir, cfg=None):
     """Drop this album's prompt (the album is complete, or the reader is done
     with it). Returns True when an entry was actually removed."""
+    _forget_verified(album_dir)
     path = _path(cfg)
     if not path or not os.path.isfile(path):
         return False
@@ -189,6 +314,11 @@ def raise_prompt(album_dir, cfg, missing, *, mode="automatic", reason="missing")
                 and str(before.get("mode") or "") == entry["mode"])
         data[_key(album_dir)] = entry
         _save(path, data)
+        # The next READ re-derives this album's gaps (see `prompts`): what the
+        # import reported a moment ago is not an answer worth caching, and a
+        # prompt whose families are already supplied must not sit listed for a
+        # memo window just because this call is what put it there.
+        _forget_verified(album_dir)
         if not same:
             events.emit("import_needs_data", title(entry), body(entry),
                         {"link": entry["link"], "album_path": entry["album"],

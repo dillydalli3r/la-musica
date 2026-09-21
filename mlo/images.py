@@ -89,6 +89,30 @@ def _exif_transposed(img):
     return img
 
 
+def _side_temp(src_path, tag, ext):
+    """A working file for one conversion pass: BESIDE *src_path*, and hidden.
+
+    Every pass here hands a tool or Pillow a file to write and then moves the
+    result onto the real one, so the working file must share the folder (the
+    tools' output has to land on the same volume as the file it replaces) and
+    it must be recognisable:
+
+    * it is dot-prefixed ``.mlo_tmp_``, so the library scan and the grader
+      ignore it — an older name like ``cover.jpg.no_meta.jpg`` was left in the
+      album as non-hidden junk by a killed run and was counted as a stray
+      image, and
+    * ``mlo.atomic`` knows the prefix, so the startup sweep
+      (``server.interrupt_recovery``) deletes whatever an interrupted run
+      abandoned and says so in the log.
+
+    The extension stays LAST (tools that pick a format from the file name —
+    cjxl, jpegtran, oxipng, ffmpeg — still see the extension they need).
+    """
+    folder = os.path.dirname(str(src_path)) or "."
+    base = os.path.basename(str(src_path))
+    return os.path.join(folder, f".mlo_tmp_{tag}_{base}")
+
+
 def _strip_jpeg_metadata(input_path, output_path):
     try:
         with open(input_path, "rb") as f:
@@ -200,7 +224,7 @@ def _upright_png(src_path):
             if not img.getexif().get(0x0112):
                 return None
             img.load()
-            out = src_path + ".upright.png"
+            out = _side_temp(src_path, "upright", ".png")
             _exif_transposed(img).convert("RGB").save(out, format="PNG")
             return out
     except Exception:
@@ -718,9 +742,9 @@ def _process_image_to_jxl(args):
     )
 
     if os.path.normpath(src_path) == os.path.normpath(final_out_path):
-        temp_out_path = os.path.join(out_dir, "cover.jxl.reencode.tmp")
+        temp_out_path = _side_temp(final_out_path, "reencode", ".tmp")
     else:
-        temp_out_path = final_out_path + ".tmp"
+        temp_out_path = _side_temp(final_out_path, "reencode", ".tmp")
 
     temp_files = []
     # JPEG XL distance from config (0.0 lossless)
@@ -805,7 +829,7 @@ def _process_image_to_jxl(args):
         jpeg_stripped = None
 
         if ext in (".jpg", ".jpeg"):
-            stripped_jpeg = src_path + ".no_meta.jpg"
+            stripped_jpeg = _side_temp(src_path, "no_meta", ".jpg")
             temp_files.append(stripped_jpeg)
 
             if _strip_jpeg_metadata(src_path, stripped_jpeg):
@@ -836,7 +860,7 @@ def _process_image_to_jxl(args):
                         except Exception:
                             cover_needed = True
                 if has_alpha or cover_needed:
-                    streamlined_tmp = src_path + ".streamlined.tmp.png"
+                    streamlined_tmp = _side_temp(src_path, "streamlined", ".png")
                     _safe_remove(streamlined_tmp)
                     temp_files.append(streamlined_tmp)
                     if _prepare_image_streamlined(src_path, streamlined_tmp, config, remove_alpha=has_alpha):
@@ -846,7 +870,7 @@ def _process_image_to_jxl(args):
                         temp_files.remove(streamlined_tmp)
                         # Fallback to old separate handling if streamlined fails
                         if has_alpha:
-                            stripped_png = src_path + ".no_alpha.png"
+                            stripped_png = _side_temp(src_path, "no_alpha", ".png")
                             temp_files.append(stripped_png)
                             if _flatten_png_alpha(src_path, stripped_png):
                                 input_for_cjxl = stripped_png
@@ -855,7 +879,7 @@ def _process_image_to_jxl(args):
                                 temp_files.remove(stripped_png)
 
         elif ext == ".jxl":
-            decoded_jpeg = src_path + ".decoded.jpg"
+            decoded_jpeg = _side_temp(src_path, "decoded", ".jpg")
             temp_files.append(decoded_jpeg)
 
             try:
@@ -872,7 +896,7 @@ def _process_image_to_jxl(args):
                 and os.path.exists(decoded_jpeg)
                 and os.path.getsize(decoded_jpeg) > 0
             ):
-                stripped_jpeg = src_path + ".no_meta.jpg"
+                stripped_jpeg = _side_temp(src_path, "no_meta", ".jpg")
                 temp_files.append(stripped_jpeg)
 
                 if _strip_jpeg_metadata(decoded_jpeg, stripped_jpeg):
@@ -885,7 +909,7 @@ def _process_image_to_jxl(args):
                 _safe_remove(decoded_jpeg)
                 temp_files.remove(decoded_jpeg)
 
-                decoded_png = src_path + ".decoded.png"
+                decoded_png = _side_temp(src_path, "decoded", ".png")
                 temp_files.append(decoded_png)
 
                 try:
@@ -910,7 +934,7 @@ def _process_image_to_jxl(args):
                         _tools = _detect()
                         _ffmpeg = (_tools.get("ffmpeg") or {}).get("ffmpeg_exe")
                         if _ffmpeg:
-                            fb_tmp = src_path + ".ffmpeg.png"
+                            fb_tmp = _side_temp(src_path, "ffmpeg", ".png")
                             temp_files.append(fb_tmp)
                             fb_res = run_tool([_ffmpeg, "-y", "-i", src_path, fb_tmp],
                                               stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -938,7 +962,7 @@ def _process_image_to_jxl(args):
                 if remove_alpha and HAS_PIL:
                     has_alpha = _png_has_alpha(decoded_png)
                     if has_alpha:
-                        flat_png = decoded_png + ".no_alpha.png"
+                        flat_png = _side_temp(decoded_png, "no_alpha", ".png")
                         temp_files.append(flat_png)
 
                         if _flatten_png_alpha(decoded_png, flat_png):
@@ -975,7 +999,7 @@ def _process_image_to_jxl(args):
                         # generation into a cover whose source is deleted right
                         # after — while the decoded pixels are still in hand.
                         tmp_ext = ".png" if ext_for_cover in (".jpg", ".jpeg") else ext_for_cover
-                        resized_cover_tmp = input_for_cjxl + ".cover_resized.tmp" + tmp_ext
+                        resized_cover_tmp = _side_temp(input_for_cjxl, "cover_resized", tmp_ext)
                         _safe_remove(resized_cover_tmp)
                         did_resize = _resize_and_crop_image(
                             input_for_cjxl, resized_cover_tmp,
@@ -1084,7 +1108,7 @@ def _process_jpeg_in_place(args):
     enabled = enc.get("jpeg") or {}
 
     filename = os.path.basename(filepath)
-    temp_path = filepath + ".opttmp.jpg"
+    temp_path = _side_temp(filepath, "opttmp", ".jpg")
     _cover_resized_tmp = None
     _input_for_jpegtran = filepath
 
@@ -1167,7 +1191,7 @@ def _process_jpeg_in_place(args):
                 thr_cov = float(config.get("cover_crop_threshold", DEFAULT_CONFIG["cover_crop_threshold"]) or 0.05)
                 tgt_cov = _get_cover_target_size(ext_cov, config) if re_en else 0
                 if (re_en and tgt_cov > 0) or cr_en:
-                    _cover_resized_tmp = filepath + ".cover_resized.tmp.jpg"
+                    _cover_resized_tmp = _side_temp(filepath, "cover_resized", ".jpg")
                     _safe_remove(_cover_resized_tmp)
                     did = _resize_and_crop_image(filepath, _cover_resized_tmp, tgt_cov if re_en else 0, cr_en, thr_cov, config)
                     if did and os.path.exists(_cover_resized_tmp) and os.path.getsize(_cover_resized_tmp) > 0:
@@ -1278,7 +1302,7 @@ def _process_png_in_place(args):
     enabled = enc.get("png") or {}
 
     filename = os.path.basename(filepath)
-    temp_path = filepath + ".opttmp.png"
+    temp_path = _side_temp(filepath, "opttmp", ".png")
     _cover_resized_tmp = None
     _flat_alpha_tmp = None
     _input_for_oxipng = filepath
@@ -1353,7 +1377,7 @@ def _process_png_in_place(args):
     _safe_remove(temp_path)
 
     if has_alpha:
-        flat_path = filepath + ".no_alpha.png"
+        flat_path = _side_temp(filepath, "no_alpha", ".png")
         _safe_remove(flat_path)
 
         try:
@@ -1385,7 +1409,7 @@ def _process_png_in_place(args):
                 thr_cov = float(config.get("cover_crop_threshold", DEFAULT_CONFIG["cover_crop_threshold"]) or 0.05)
                 tgt_cov = _get_cover_target_size(ext_cov, config) if re_en else 0
                 if (re_en and tgt_cov > 0) or cr_en:
-                    _cover_resized_tmp = filepath + ".cover_resized.tmp.png"
+                    _cover_resized_tmp = _side_temp(filepath, "cover_resized", ".png")
                     _safe_remove(_cover_resized_tmp)
                     did = _resize_and_crop_image(_input_for_oxipng, _cover_resized_tmp, tgt_cov if re_en else 0, cr_en, thr_cov, config)
                     if did and os.path.exists(_cover_resized_tmp) and os.path.getsize(_cover_resized_tmp) > 0:
@@ -1523,7 +1547,7 @@ def _process_jxl_in_place(args):
     enabled = enc.get("jxl") or {}
 
     filename = os.path.basename(src_path)
-    temp_out_path = src_path + ".opttmp.jxl"
+    temp_out_path = _side_temp(src_path, "opttmp", ".jxl")
     temp_files = []
     try:
         _dist2 = float(config.get("jpegxl_distance", 0.0)) if config else 0.0
@@ -1591,7 +1615,7 @@ def _process_jxl_in_place(args):
                 except (ValueError, TypeError):
                     pass
 
-        decoded_jpeg = src_path + ".decoded.jpg"
+        decoded_jpeg = _side_temp(src_path, "decoded", ".jpg")
         temp_files.append(decoded_jpeg)
 
         input_for_cjxl = None
@@ -1612,7 +1636,7 @@ def _process_jxl_in_place(args):
             and os.path.exists(decoded_jpeg)
             and os.path.getsize(decoded_jpeg) > 0
         ):
-            stripped_jpeg = src_path + ".no_meta.jpg"
+            stripped_jpeg = _side_temp(src_path, "no_meta", ".jpg")
             temp_files.append(stripped_jpeg)
 
             if _strip_jpeg_metadata(decoded_jpeg, stripped_jpeg):
@@ -1625,7 +1649,7 @@ def _process_jxl_in_place(args):
             _safe_remove(decoded_jpeg)
             temp_files.remove(decoded_jpeg)
 
-            decoded_png = src_path + ".decoded.png"
+            decoded_png = _side_temp(src_path, "decoded", ".png")
             temp_files.append(decoded_png)
 
             try:
@@ -1678,7 +1702,7 @@ def _process_jxl_in_place(args):
                         # fallback to src target
                         tgt_cov = _get_cover_target_size(src_ext, config)
                     if (re_en and tgt_cov > 0) or cr_en:
-                        resized_tmp = input_for_cjxl + ".cover_resized.tmp" + ext_for_cover
+                        resized_tmp = _side_temp(input_for_cjxl, "cover_resized", ext_for_cover)
                         _safe_remove(resized_tmp)
                         did = _resize_and_crop_image(input_for_cjxl, resized_tmp, tgt_cov if re_en else 0, cr_en, thr_cov, config)
                         if did and os.path.exists(resized_tmp) and os.path.getsize(resized_tmp) > 0:
@@ -1833,7 +1857,7 @@ def _process_jxl_back_to_original(args):
         except OSError as e:
             return (src_path, "failed", 0, 0, f"cannot stat: {e}")
 
-        decoded_jpeg = src_path + ".decoded.jpg"
+        decoded_jpeg = _side_temp(src_path, "decoded", ".jpg")
         temp_files.append(decoded_jpeg)
 
         try:
@@ -1866,7 +1890,7 @@ def _process_jxl_back_to_original(args):
 
             existing_dest_size = _existing_size(out_path, src_path)
 
-            stripped_jpeg = src_path + ".no_meta.jpg"
+            stripped_jpeg = _side_temp(src_path, "no_meta", ".jpg")
             temp_files.append(stripped_jpeg)
 
             if _strip_jpeg_metadata(decoded_jpeg, stripped_jpeg):
@@ -1909,7 +1933,7 @@ def _process_jxl_back_to_original(args):
                     log(f"[cover warn] {src_path}: {e}")
 
             if jpegtran_exe:
-                optimized = src_path + ".optimized.jpg"
+                optimized = _side_temp(src_path, "optimized", ".jpg")
                 temp_files.append(optimized)
 
                 try:
@@ -1978,7 +2002,7 @@ def _process_jxl_back_to_original(args):
         _safe_remove(decoded_jpeg)
         temp_files.remove(decoded_jpeg)
 
-        decoded_png = src_path + ".decoded.png"
+        decoded_png = _side_temp(src_path, "decoded", ".png")
         temp_files.append(decoded_png)
 
         try:
@@ -2019,7 +2043,7 @@ def _process_jxl_back_to_original(args):
         if remove_alpha and remove_alpha_pil:
             has_alpha = _png_has_alpha(decoded_png)
             if has_alpha:
-                flat_png = decoded_png + ".no_alpha.png"
+                flat_png = _side_temp(decoded_png, "no_alpha", ".png")
                 temp_files.append(flat_png)
 
                 if _flatten_png_alpha(decoded_png, flat_png):
@@ -2058,7 +2082,7 @@ def _process_jxl_back_to_original(args):
                 log(f"[cover warn] {src_path}: {e}")
 
         if oxipng_exe:
-            optimized = src_path + ".optimized.png"
+            optimized = _side_temp(src_path, "optimized", ".png")
             temp_files.append(optimized)
 
             try:
@@ -2197,7 +2221,7 @@ def _process_convert_image(args):
     # The temp keeps the target extension: _prepare_image_streamlined picks the
     # output format from the dst extension, so a bare ".tmp" would silently
     # write PNG bytes into a .jpg file.
-    temp_out = final_out + ".tmp" + target_ext
+    temp_out = _side_temp(final_out, "convert", target_ext)
     try:
         original_size = os.path.getsize(src_path)
     except OSError as e:

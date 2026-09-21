@@ -202,10 +202,18 @@ RELEASE_DICT = {
 GROUP_ROW = {"id": GROUP, "title": "Test Album", "primary_type": "album",
              "secondary_types": [], "first_release_date": "2026-03-01"}
 TARGETS = [{"mbid": RELEASE, "title": "Test Album"}]
+# A SECOND release for the "Download all" half of the two-button split: the
+# first Add leaves a framework folder behind (deleting the wish does not delete
+# the folder), and "Download all" starts only what THIS call created.
+RELEASE_B = "44444444-2222-2222-2222-222222222222"
+RELEASE_B_DICT = dict(RELEASE_DICT, id=RELEASE_B, title="Second Album")
+TARGETS_B = [{"mbid": RELEASE_B, "title": "Second Album"}]
 
 
 def fake_resolve_release(mbid):
     rid = str(mbid or "").lower()
+    if rid == RELEASE_B:
+        return dict(RELEASE_B_DICT), rid
     return (dict(RELEASE_DICT) if rid == RELEASE else None), rid
 
 
@@ -378,7 +386,23 @@ with PatchAll(wish_worker_env(OFF) + add_env(OFF)):
     r = CLIENT.post("/api/library/add", json={"mbid": RELEASE, "kind": "release"})
     eq(r.status_code, 200, "Add to library is not refused by the manual switch")
     eq(len(created), 1, "and it recorded the album")
-    eq(triggers, [1], "and started its download (the AUTO switch is still on)")
+    # The two buttons are two actions: "Add to library" records and lets the
+    # automation pick it up on its next pass, "Download all" (download=true)
+    # starts the search now. This assertion used to expect a trigger from the
+    # plain add — that was the older contract, and the split is deliberate.
+    eq(triggers, [], "Add to library records without starting a search")
+    # A second, NEW release for the Download-all half: "Download all" starts
+    # what THIS call created (no second queue, no duplicate wish).
+    reset()
+    created.clear()
+    with PatchAll([Patch(api_add, _targets=lambda *a, **k: (list(TARGETS_B), []))]):
+        r = CLIENT.post("/api/library/add",
+                        json={"mbid": RELEASE_B, "kind": "release", "download": True})
+        eq(r.status_code, 200, "Download all answers too")
+        eq(len(created), 1, "and it recorded the album as well")
+        # The trigger carries the wish THIS call created (whose id counts on
+        # across the test's own sections, so the id itself is not asserted).
+        eq(len(triggers), 1, "and it starts the download it recorded")
 
 print("\nmanual_import_enabled on (the no-regression half)")
 reset()
@@ -470,7 +494,12 @@ reset()
 with PatchAll(wish_worker_env(ON) + add_env(ON)):
     r = CLIENT.post("/api/library/add", json={"mbid": RELEASE, "kind": "release"})
     eq(r.status_code, 200, "Add to library works")
-    eq(triggers, [1], "and starts the download it recorded")
+    eq(triggers, [], "Add to library records; the worker's next pass takes it over")
+    with PatchAll([Patch(api_add, _targets=lambda *a, **k: (list(TARGETS_B), []))]):
+        r = CLIENT.post("/api/library/add",
+                        json={"mbid": RELEASE_B, "kind": "release", "download": True})
+        eq(r.status_code, 200, "Download all works")
+        eq(len(triggers), 1, "and starts the download it recorded")
 
 # --------------------------------------------------------------------------- #
 # 5. the wizard's own half: minimum entry and the switch, rendered for real

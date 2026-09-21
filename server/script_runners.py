@@ -523,7 +523,16 @@ def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
     *wait* rule: a delete, a tag write or an organize landing on a folder these
     scripts are rewriting is refused (409) instead of racing them. The claim
     ends with the run — including when it raises or is cancelled.
+
+    A chain is also refused outright while the app is shutting down for an
+    auto-update (see :mod:`server.interrupt_recovery`): every script and every
+    import chain funnels through here, so this one check is what stops the
+    shutdown from STARTING work it would then have to kill.
     """
+    from server import interrupt_recovery
+    if interrupt_recovery.is_shutting_down():
+        raise RunBusy("the app is shutting down for an update — nothing can "
+                      "start now; retry when it is back up")
     acquired = RUN_LOCK.acquire(blocking=False) if not wait else \
         RUN_LOCK.acquire(timeout=3600 if timeout is None else timeout)
     if not acquired:

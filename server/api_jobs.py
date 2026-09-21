@@ -36,5 +36,12 @@ def job_lock_list():
     current album) carries ``progress``; one that has not — a tag write, an
     organize — carries null, and the page shows it without a bar rather than
     inventing 0%.
+
+    Each held path also carries its matching key and the refusal sentence the
+    stream endpoint would answer with (see :func:`job_locks.locked_paths`), and
+    ``fold_case`` says whether those keys were case-folded — the client matches
+    its own track paths against them with the SAME rule, so a row can never say
+    "playable" while a job holds it. The app polls this every 2 s while it is
+    open (the player bar asks for it, and MAINTAIN → In progress shows it).
     """
-    return {"jobs": job_locks.jobs()}
+    return {"jobs": job_locks.jobs(), "fold_case": job_locks.FOLD_CASE}

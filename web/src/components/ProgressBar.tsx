@@ -20,7 +20,7 @@ export function ProgressInline({ progress }: { progress: { done: number; total: 
       </span>
       <div className="h-1 flex-1 min-w-[64px] rounded-sm bg-raise overflow-hidden">
         <div
-          className={`h-full bg-gradient-to-r from-accent to-indigo-500 transition-all duration-300 ${known ? "" : "w-1/3 animate-pulse"}`}
+          className={`h-full bg-gradient-to-r from-accent to-accent-soft transition-all duration-300 ${known ? "" : "w-1/3 animate-pulse"}`}
           style={known ? { width: `${pct}%` } : undefined}
         />
       </div>

@@ -28,6 +28,7 @@ const SOURCE_LABELS: Record<string, string> = {
   discogs: "Discogs",
   rateyourmusic: "RateYourMusic",
   bandcamp: "Bandcamp",
+  rym: "RateYourMusic",
 };
 
 /** The name to print for a source: what the server called it, else the table
@@ -40,11 +41,11 @@ export function sourceLabel(id: string, reported?: string | null): string {
   return SOURCE_LABELS[key.toLowerCase()] ?? key.charAt(0).toUpperCase() + key.slice(1);
 }
 
-/** The one notes key that is NOT a source id: the recommendation shelf's own
- *  verdict on the whole seed ("no recommendation source had anything to
- *  suggest for this seed"). It is printed as its own sentence, without a
- *  provider name in front of it. */
-const RECOMMENDED_NOTE = "recommended";
+/** The notes keys that are NOT source ids — the whole request's own verdict
+ *  ("no recommendation source had anything to suggest for this seed", "no
+ *  chart source had anything to rank for this week"). They are printed as
+ *  their own sentences, without a provider name in front of them. */
+const PLAIN_NOTES: Record<string, true> = { recommended: true, charts: true };
 
 /** The sources that said nothing, one chip each, carrying the server's own
  *  reason ("skipped: no lastfm_api_key"). A silence the server explained is
@@ -76,7 +77,7 @@ export function NotesChips({ notes, sources }: { notes?: DiscoverNotes | null; s
             }`}
             title={note}
           >
-            {id === RECOMMENDED_NOTE ? note : `${sourceLabel(id)} — ${note}`}
+            {PLAIN_NOTES[id] ? note : `${sourceLabel(id)} — ${note}`}
           </span>
         );
       })}
@@ -387,9 +388,16 @@ export default function DiscoverRow({ item }: { item: DiscoverItem }) {
       </div>
       <span
         className="chip bg-raise border border-border text-zinc-400 shrink-0 hidden sm:inline-flex"
-        title={alsoFrom.length
-          ? `This row came from ${label} (and from ${alsoFrom.map((id) => sourceLabel(id)).join(", ")})`
-          : `This row came from ${label}`}
+        title={
+          (alsoFrom.length
+            ? `This row came from ${label} (and from ${alsoFrom.map((id) => sourceLabel(id)).join(", ")})`
+            : `This row came from ${label}`)
+          // The provider's OWN number, when it stated one (Last.fm's match,
+          // Deezer's fans/rank, ListenBrainz's score). It is that provider's
+          // scale, so it is stated here as provenance and never printed as a
+          // percentage comparable across sources.
+          + (typeof item.score === "number" ? ` — the provider's own score: ${item.score}` : "")
+        }
       >
         {label}
         {alsoFrom.length > 0 && <span className="text-zinc-600">+{alsoFrom.length}</span>}

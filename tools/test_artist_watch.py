@@ -221,6 +221,20 @@ def fake_emit(kind, title, body="", data=None, config=None):
 import server.wishes_worker as wishes_worker  # noqa: E402
 
 wishes_worker.trigger = fake_trigger
+
+prefetched = []   # folders the watch asked to fill in AFTER queuing them
+
+
+def fake_prefetch(folder, cfg=None, **kw):
+    """The add-time page content (artist artwork, descriptions, ranked cover
+    candidates) reaches the providers, and this suite's contract is "no network
+    at all" — so it is recorded here and skipped. The exercise that matters is
+    that the watch ASKS for it in the background instead of blocking its own
+    cycle on it (see artist_watch._release_for)."""
+    prefetched.append(folder)
+
+
+pending_albums.prefetch_content = fake_prefetch
 events.emit = fake_emit
 
 
@@ -295,6 +309,8 @@ add_group(2, "New Album", "2026-02-14")
 watch = artist_watch.add_watch(ARTIST, ARTIST_NAME, added_at=EPOCH)
 out = artist_watch.run_watch(watch, CFG, force=True)
 eq([q["title"] for q in out["queued"]], ["New Album"], "only the newer group queued")
+ok(prefetched and prefetched[-1].endswith(("New Album", str(out["queued"][0].get("album_path") or "")[-12:])),
+   f"and its page content is fetched in the background, not inline ({prefetched[-1:]})")
 eq(len(browse_calls), 1, "ONE MusicBrainz browse for the artist, not one per group")
 eq(len(wishes.list_wishes()), 1, "one wish on the existing queue")
 eq(len(folders()), 1, "one framework album")

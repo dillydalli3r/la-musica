@@ -21,12 +21,13 @@ import { gradeSliver, statusFor, auditFails } from "../lib/status";
 import { invalidateLibrary } from "../lib/invalidate";
 import { albumRef, trackRef, artistRef, entityLinkClick } from "../lib/refs";
 import { fmtTech, fmtDuration, fmtDateCell, originalYear, GRID_SIZE_MIN } from "../lib/fmt";
-import { EmptyState, GradeBadge, MediaChip, AdvisoryMark, CachedMark, PageLoading } from "../components/Badges";
+import { EmptyState, GradeBadge, MediaChip, AdvisoryMark, CachedMark, PageLoading, PendingMark } from "../components/Badges";
+import LockedChip from "../components/LockedChip";
 import { forceDict, loadForceSel } from "../lib/force";
 import Segmented from "../components/Segmented";
 import PageHeader from "../components/PageHeader";
 import StarRating from "../components/StarRating";
-import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
+import { ratingOf, useRatings, useSetRating, FOLDER_RATING_NOTE } from "../lib/ratings";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import FavHeart from "../components/FavHeart";
 import AlbumCard from "../components/AlbumCard";
@@ -101,6 +102,8 @@ const ALBUM_COL_W: Record<string, string> = {
   artist: "w-[108px]",
   year: "w-16",
   tracks: "w-16",
+  // Five `sm` stars (14 px each) plus the hover room a click target needs.
+  rating: "w-[104px]",
   grade: "w-20",
   media: "w-[88px]",
   dr: "w-12",
@@ -114,6 +117,9 @@ const ALBUM_COLS: Col[] = [
   { id: "artist", label: "Artist", sortKey: "artist" },
   { id: "year", label: "Year", sortKey: "meta.DATE" },
   { id: "tracks", label: "Tracks", sortKey: "track_count" },
+  // The album's OWN rating (the store's album scope), which the caller adds to
+  // the row as `rating` — see `ratedAlbums` in LibraryPage.
+  { id: "rating", label: "Rating", sortKey: "rating" },
   { id: "grade", label: "Grade", sortKey: "grade_pct" },
   { id: "media", label: "Media", sortKey: "media" },
   { id: "dr", label: "DR", sortKey: "meta.ALBUM DYNAMIC RANGE" },
@@ -194,9 +200,9 @@ const TRACK_COLS: Col[] = [
  *  grid misaligns; `md` is where each column comes back. */
 const PHONE_HIDE = " hidden md:table-cell";
 const ALBUM_PHONE_CLS: Record<string, string> = {
-  artist: PHONE_HIDE, year: PHONE_HIDE, tracks: PHONE_HIDE, grade: PHONE_HIDE,
-  media: PHONE_HIDE, dr: PHONE_HIDE, source: PHONE_HIDE, videos: PHONE_HIDE,
-  inst: PHONE_HIDE,
+  artist: PHONE_HIDE, year: PHONE_HIDE, tracks: PHONE_HIDE, rating: PHONE_HIDE,
+  grade: PHONE_HIDE, media: PHONE_HIDE, dr: PHONE_HIDE, source: PHONE_HIDE,
+  videos: PHONE_HIDE, inst: PHONE_HIDE,
 };
 /** The artist table keeps its grade badge and drops the aggregate counters. */
 const ARTIST_PHONE_CLS: Record<string, string> = {
@@ -613,11 +619,16 @@ export default function LibraryPage() {
     }
   };
 
-  // One GET /api/ratings for the whole page (react-query dedupes it across
-  // every row) and the optimistic setter the star controls share.
+  // One GET /api/ratings per scope for the whole page (react-query dedupes it
+  // across every row) and the optimistic setters the star controls share. The
+  // album scope is what the album rows draw: each album's OWN rating, which is
+  // a different fact from the ratings of the tracks inside it.
   const { data: ratingsData } = useRatings();
   const { setRating, pending } = useSetRating();
+  const { data: albumRatingsData } = useRatings("album");
+  const { setRating: setAlbumRating, pending: albumPending } = useSetRating("album");
   const ratings = ratingsData?.ratings;
+  const albumRatings = albumRatingsData?.ratings;
 
   const playSelection = () => {
     const out: { path: string; file: string; albumPath: string; artist?: string; album?: string; title?: string; coverFile?: string | null; albumCover?: string | null; advisory?: string | null }[] = [];
@@ -666,9 +677,19 @@ export default function LibraryPage() {
       return next;
     });
 
+  // The album's own rating, in the row's own shape: the store keeps it (a
+  // folder has no RATING tag to read), and the album table sorts on what its
+  // columns show — `sortRows` resolves a dotted key against the row — so the
+  // albums the tables render carry it, like `video_count` above. Shallow
+  // copies: the track lists stay shared.
+  const ratedAlbums = useMemo(
+    () => filtered.albums.map((al) => ({ ...al, rating: ratingOf(albumRatings, al.path) })),
+    [filtered.albums, albumRatings]
+  );
+
   // Sorting is memoized so typing in the search box / toggling selection
   // doesn't re-sort the whole library on every keystroke.
-  const sortedAlbums = useMemo(() => sortRows(filtered.albums, albumSort), [filtered.albums, albumSort]);
+  const sortedAlbums = useMemo(() => sortRows(ratedAlbums, albumSort), [ratedAlbums, albumSort]);
   const sortedArtists = useMemo(() => sortRows(filtered.artists, artistSort), [filtered.artists, artistSort]);
   const sortedTracks = useMemo(() => sortRows(filtered.tracks, trackSort), [filtered.tracks, trackSort]);
 
@@ -1050,6 +1071,14 @@ export default function LibraryPage() {
                         {al.meta?.ALBUM ?? al.path.split("/").pop()}
                       </Link>
                       <AdvisoryMark value={al.meta?.ITUNESADVISORY ?? al.meta?.ALBUMITUNESADVISORY} />
+                      {/* The folder itself is held (a run, an import, an
+                          organize): its files are not playable right now. */}
+                      <LockedChip path={al.path} />
+                      {/* Added, not downloaded yet: the row says which state
+                          the album is in and why, beside its (empty) track
+                          count. `label` — the compact list has room to say
+                          it outright rather than only on hover. */}
+                      <PendingMark album={al} label />
                       <span className="text-[11px] text-zinc-500 truncate">
                         {al.artist}
                         {al.meta?.ORIGINALDATE || al.meta?.DATE ? ` · ${originalYear(al.meta)}` : ""}
@@ -1061,6 +1090,17 @@ export default function LibraryPage() {
                   <span className={`text-[9px] font-mono shrink-0 ${st.text}`} title={st.label}>
                     {st.key === "fail" ? gradeSliver(!!al.pass, al.audit_summary) : ""}
                   </span>
+                  {/* the album's OWN rating, like the star row a track holds one
+                      level down — a verdict on the album, not the average of its
+                      tracks (and never a tag: a folder has none) */}
+                  <StarRating
+                    size="sm"
+                    label="Album rating"
+                    hint={`Your rating for the album. ${FOLDER_RATING_NOTE}`}
+                    value={al.rating}
+                    onChange={(v) => setAlbumRating(al.path, v)}
+                    pending={albumPending(al.path)}
+                  />
                   <span className="text-[10px] text-zinc-600 shrink-0 w-8 text-right">{al.track_count}t</span>
                   <div className="opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100 flex gap-1 shrink-0 transition-opacity" onClick={(e) => e.stopPropagation()}>
                     <button
@@ -1108,6 +1148,7 @@ export default function LibraryPage() {
                           >
                             {t.tags.TITLE ?? t.file}
                           </Link>
+                          <LockedChip path={t.path} />
                           {!!t.issues?.length && (
                             <button
                               className="text-[9px] text-red-400/70 shrink-0 hover:text-red-300"
@@ -1338,6 +1379,7 @@ export default function LibraryPage() {
                             >
                               {tr.tags.TITLE ?? tr.file}
                             </Link>
+                            <LockedChip path={tr.path} />
                             {!!tr.issues?.length && (
                               <button
                                 className="text-[9px] text-red-400/70 shrink-0 hover:text-red-300"
@@ -1476,11 +1518,14 @@ function AlbumRowGroup({
   onTrackWidth: (id: string, px: number) => void;
   onResetTrackWidths: () => void;
 }) {
-  // The rows this component renders are their own tree: same two hooks as
-  // the page, and react-query serves them from one GET /api/ratings.
+  // The rows this component renders are their own tree: same hooks as the
+  // page, and react-query serves them from one GET /api/ratings per scope.
   const { data: ratingsData } = useRatings();
   const { setRating, pending } = useSetRating();
+  const { data: albumRatingsData } = useRatings("album");
+  const { setRating: setAlbumRating, pending: albumPending } = useSetRating("album");
   const ratings = ratingsData?.ratings;
+  const albumRatings = albumRatingsData?.ratings;
   const navigate = useNavigate();
   const tracks = useMemo(() => [...(album.tracks ?? [])].sort(byDiscThenTrack), [album.tracks]);
   // The album-name cell IS the row title (AlbumRow renders it, with the link
@@ -1497,6 +1542,21 @@ function AlbumRowGroup({
     });
   if (visibleCols.includes("tracks"))
     cells.push({ id: "tracks", cls: `td text-zinc-500${phoneHide(ALBUM_PHONE_CLS, "tracks")}`, node: album.track_count });
+  if (visibleCols.includes("rating"))
+    cells.push({
+      id: "rating",
+      cls: `td${phoneHide(ALBUM_PHONE_CLS, "rating")}`,
+      node: (
+        <StarRating
+          size="sm"
+          label="Album rating"
+          hint={`Your rating for the album. ${FOLDER_RATING_NOTE}`}
+          value={ratingOf(albumRatings, album.path)}
+          onChange={(v) => setAlbumRating(album.path, v)}
+          pending={albumPending(album.path)}
+        />
+      ),
+    });
   if (visibleCols.includes("grade"))
     cells.push({
       id: "grade",
@@ -1540,7 +1600,12 @@ function AlbumRowGroup({
         title={showAlbumCol ? (album.meta?.ALBUM ?? album.path.split("/").pop()) : null}
         titleHref={albumRef(album)}
         titleExtra={
-          showAlbumCol ? <AdvisoryMark value={album.meta?.ITUNESADVISORY ?? album.meta?.ALBUMITUNESADVISORY} /> : null
+          <>
+            {showAlbumCol ? <AdvisoryMark value={album.meta?.ITUNESADVISORY ?? album.meta?.ALBUMITUNESADVISORY} /> : null}
+            {/* the same marker the compact rows and the cards carry — the
+                albums table is one more album-shaped surface */}
+            <PendingMark album={album} />
+          </>
         }
         coverPath={album.path}
         coverFile={album.cover_file}
@@ -1641,6 +1706,7 @@ function AlbumRowGroup({
                                 >
                                   {t.tags.TITLE ?? t.file}
                                 </Link>
+                                <LockedChip path={t.path} />
                                 {!!t.issues?.length && (
                                   <button
                                     className="text-[9px] text-red-400/70 shrink-0 hover:text-red-300"

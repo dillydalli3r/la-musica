@@ -180,22 +180,61 @@ LIB = make_library()
 TRACKS = [tr for art in LIB["artists"] for alb in art["albums"] for tr in alb["tracks"]]
 ALBUMS = [alb for art in LIB["artists"] for alb in art["albums"]]
 
-# Rating store: test paths whose store row is 10 (5 stars), 9 (4.5) and 0.
+# Rating store: test paths whose store row is 10 (5 stars), 9 (4.5), 8 (4),
+# 6 (3), 5 (2.5), 1 (a half) and 0 (unrated). Inside "Album 1" the values run
+# 5/4.5/4/3 stars and inside "Album 2" unrated/a half/2.5/unrated, which is what
+# lets the scope tests below tell an album's own verdict from its tracks'
+# ratings.
 HALF = {TRACKS[0]["path"]: 10, TRACKS[1]["path"]: 9, TRACKS[2]["path"]: 8,
-        TRACKS[3]["path"]: 6, TRACKS[4]["path"]: 0, TRACKS[5]["path"]: 1}
+        TRACKS[3]["path"]: 6, TRACKS[4]["path"]: 0, TRACKS[5]["path"]: 1,
+        # 2.5 stars, on a track whose whole folder carries a 5-star verdict.
+        TRACKS[6]["path"]: 5}
 
 
 def rating_of(path, raw_tag):
     return HALF.get(path)
 
 
+# Folder-scope rows: the user's verdict on the ENTITY, keyed by that entity's
+# folder path and deliberately unrelated to the ratings of what it holds.
+#   Album 1: 5 stars (its tracks are 5/4.5/4/3)
+#   Album 2: 5 stars (its tracks are unrated/0.5/2.5/unrated — no average of
+#            them is anywhere near 5)
+#   Album 3: 1.5 stars, though one of its tracks carries a 4-star file tag
+#   Artist 1: 1.5 stars, though its tracks are the 5/4.5/4/3/2.5 ones
+#   Artist 2: 5 stars, though every row under it is unrated
+FOLDER = {
+    "album": {
+        ALBUMS[0]["path"]: 10,
+        ALBUMS[1]["path"]: 10,
+        ALBUMS[2]["path"]: 3,
+    },
+    "artist": {
+        LIB["artists"][0]["path"]: 3,
+        LIB["artists"][1]["path"]: 10,
+    },
+}
+
+
+def folder_of(scope, path):
+    return FOLDER.get(scope, {}).get(path)
+
+
+# The one injected source answers tracks through its call and the two folder
+# scopes through its `folder` half — mlo.query's documented plugin point.
+rating_of.folder = folder_of
+
+
 # The rating store is injected into the engine, so its boundary is exercised
 # with a stub standing in for server.ratings (another slice's file). The stub
-# follows the frozen interface: {path: half-stars} plus from_tag (0-100 -> half).
+# follows the frozen interface: {path: half-stars} FOR ONE SCOPE, plus from_tag
+# (0-100 -> half). Folder rows are keyed by the entity's folder path, exactly as
+# the real store keys them.
 import types                                                          # noqa: E402
 
 STUB = types.ModuleType("server.ratings")
-STUB.map_for = lambda paths=None, user="": dict(HALF)
+STUB.map_for = lambda paths=None, user="", scope="track": dict(
+    HALF if scope == "track" else FOLDER.get(scope) or {})
 STUB.from_tag = lambda value: {"80": 8}.get(str(value))
 sys.modules["server.ratings"] = STUB
 
@@ -290,6 +329,71 @@ check_eq(len(matched(conditions=[cond("rating", "is_rated")])),
 check("tags.RATING" in {f["field"] for g in aq.catalogue()["groups"]
                         for f in g["fields"]},
       "the file RATING tag is still a field of its own (never coerced to stars)")
+
+# ── rating: the album and artist scopes ─────────────────────────────────────
+# The two folder fields are the USER's verdict on that entity, from the same
+# store and in the same unit as `rating` — never an average or a rollup of the
+# tracks' own ratings, which is what the two halves of each pair below prove.
+def albums_matched(**req):
+    """The album paths a request selects (the `matched` helper, album target)."""
+    req.setdefault("limit", 5000)
+    req["target"] = "albums"
+    req["sort"] = {"key": "album.path", "dir": 1}
+    return [item["path"] for item in ask(**req)["items"]]
+
+
+five_albums = sorted(p for p, half in FOLDER["album"].items() if half >= 8)
+check_eq(albums_matched(conditions=[cond("album.rating", "gte", 4)]), five_albums,
+         "album.rating >= 4 answers with the albums the user rated 5 stars")
+check_eq(five_albums,
+         sorted([ALBUMS[0]["path"], ALBUMS[1]["path"]]),
+         "…which are the two the fixture gives 5 stars (one of them holds no "
+         "track anywhere near that value)")
+check_eq(albums_matched(conditions=[cond("album.rating", "is_unrated")]),
+         sorted(a["path"] for a in ALBUMS if a["path"] not in FOLDER["album"]),
+         "the other albums are unrated, not zero-star")
+check_eq(len(albums_matched(conditions=[cond("album.rating", "is_rated")]))
+         + len(albums_matched(conditions=[cond("album.rating", "is_unrated")])),
+         len(ALBUMS), "album.rating is_rated is the exact complement")
+
+# The album's verdict answers for every row under it, including the track whose
+# OWN rating is 2.5 stars — and that same track is NOT among the `rating >= 4`
+# rows, which is the difference between the two fields.
+low_track = TRACKS[6]["path"]
+check_eq(matched(conditions=[cond("album.rating", "gte", 4)]),
+         [tr["path"] for alb in ALBUMS if alb["path"] in five_albums
+          for tr in alb["tracks"]],
+         "a track row answers album.rating with its album's own verdict")
+check(low_track in matched(conditions=[cond("album.rating", "gte", 4)])
+      and low_track not in matched(conditions=[cond("rating", "gte", 4)]),
+      "the 2.5-star track rides its 5-star album's verdict but not its own")
+check_eq(matched(conditions=[cond("album.rating", "gte", 4),
+                             cond("rating", "gte", 4)]),
+         [tr["path"] for alb in ALBUMS if alb["path"] in five_albums
+          for tr in alb["tracks"] if (HALF.get(tr["path"]) or 0) >= 8],
+         "the two fields combine as two independent conditions")
+
+# The artist mirror: Artist 1's tracks are the 5/4.5/4/3-star ones while the
+# artist's own verdict is 1.5 stars, and Artist 2's rows are all unrated under a
+# 5-star verdict — so a rollup of the tracks would answer both of these the
+# other way round.
+artist2 = LIB["artists"][1]
+artist2_tracks = [tr["path"] for alb in artist2["albums"] for tr in alb["tracks"]]
+check_eq(matched(conditions=[cond("artist.rating", "gte", 4)]), artist2_tracks,
+         "artist.rating >= 4 answers with the artist the user rated 5 stars, "
+         "even though every row under it is unrated")
+check_eq(matched(conditions=[cond("artist.rating", "gte", 4),
+                             cond("rating", "gte", 4)]), [],
+         "and Artist 1's 4/4.5/5-star tracks are not what artist.rating reports")
+check_eq(matched(conditions=[cond("artist.rating", "is_unrated")]),
+         [tr["path"] for alb in LIB["artists"][2]["albums"] for tr in alb["tracks"]],
+         "the artist with no store row is unrated, and answers so from every row")
+
+check(("album.rating" in {f["field"] for g in aq.catalogue()["groups"]
+                          for f in g["fields"]})
+      and ("artist.rating" in {f["field"] for g in aq.catalogue()["groups"]
+                               for f in g["fields"]}),
+      "both folder rating fields are in the catalogue")
 
 # ── grade / audit ───────────────────────────────────────────────────────────
 check_eq(matched(conditions=[cond("grade_pass", "eq", True)]),
@@ -492,7 +596,8 @@ by_year = q.run(LIB, {"group": "year", "limit": 0}, rating_of=rating_of)
 check_eq(sum(g["count"] for g in by_year["group_counts"]), len(TRACKS),
          "group:year buckets every track")
 by_rating = q.run(LIB, {"group": "rating", "limit": 0}, rating_of=rating_of)
-check_eq({g["key"] for g in by_rating["group_counts"]}, {"Unrated", "5", "4.5", "4", "3", "0.5"},
+check_eq({g["key"] for g in by_rating["group_counts"]},
+         {"Unrated"} | {f"{h / 2:g}" for h in set(HALF.values()) if h},
          "group:rating buckets unrated apart from the stars")
 
 paged = q.run(LIB, {"limit": 2, "offset": 1}, rating_of=rating_of)
@@ -602,6 +707,18 @@ check_eq((rating_def["type"], rating_def["min"], rating_def["max"], rating_def["
 check_eq([o["op"] for o in rating_def["ops"]],
          ["eq", "ne", "lt", "gt", "lte", "gte", "between", "is_unrated", "is_rated"],
          "rating advertises is_unrated/is_rated instead of missing/present")
+# The folder-scope ratings sit in the album/artist groups and answer with the
+# SAME unit and the SAME ops as the track one — one family, three scopes, with
+# nothing for a builder to special-case.
+for group_id, field in (("album", "album.rating"), ("artist", "artist.rating")):
+    by_id = {f["field"]: f for f in groups[group_id]["fields"]}
+    check(field in by_id, f"{field} is a field of the {group_id} group")
+    entry = by_id.get(field, {})
+    check_eq((entry.get("type"), entry.get("min"), entry.get("max"), entry.get("step")),
+             ("number", 0, 5, 0.5), f"{field} is 0-5 stars in halves")
+    check_eq([o["op"] for o in entry.get("ops") or []],
+             [o["op"] for o in rating_def["ops"]],
+             f"{field} advertises exactly the ops rating does")
 BARE = {"rating", "grade_pct", "grade_pass", "issues", "audit"}
 SCOPES = {"tags", "tech", "analysis", "library", "album", "artist"}
 check(all(f["field"] in BARE or f["field"].split(".")[0] in SCOPES
@@ -712,15 +829,47 @@ check_eq(store_half(TRACKS[0]["path"], None), 10, "the store's half-stars are re
 check_eq(store_half("C:/music/nowhere.flac", "80"), 8,
          "a file RATING tag is adopted through from_tag, never compared raw")
 check_eq(store_half("C:/music/nowhere.flac", None), None, "nothing rated is None")
+check_eq(store_half.folder("album", ALBUMS[0]["path"]), 10,
+         "the same source answers the ALBUM scope in half-stars")
+check_eq(store_half.folder("artist", artist2["path"]), 10,
+         "and the ARTIST scope")
+check_eq(store_half.folder("album", ALBUMS[3]["path"]), None,
+         "an album the user never rated is None, not 0")
+check_eq(store_half.folder("artist", "C:/music/Nobody"), None,
+         "and a folder the store has no row for is None as well")
+
+folder_query = post({"target": "albums", "limit": 0,
+                     "conditions": [cond("album.rating", "gte", 4)]})
+check_eq(folder_query.status_code, 200, "album.rating is accepted by the endpoint")
+check_eq(folder_query.json()["total"], len(five_albums),
+         "the endpoint filters albums by the album rating")
+check_eq(post({"target": "albums", "limit": 0,
+               "conditions": [cond("album.rating", "is_unrated")]}).json()["total"],
+         len(ALBUMS) - len(FOLDER["album"]),
+         "…and counts the unrated albums through the same field")
+check_eq(post({"limit": 0, "conditions": [cond("artist.rating", "gte", 4)]}).json()["total"],
+         len(artist2_tracks),
+         "the endpoint filters tracks by their artist's rating")
+check_eq(post({"limit": 0, "conditions": [cond("album.rating", "matches", "x")]}).status_code,
+         400,
+         "an op outside the rating family's own set stays refused on those fields")
 
 
 check_eq(pl._rating_of("", {"conditions": []}), None,
          "a rule with no rating condition never touches the store")
+check(pl._rating_of("", {"conditions": [{"field": "album.rating"}]}) is not None,
+      "a rule on an entity rating does pull the store in")
 check_eq(q.match_paths(LIB, {"conditions": [{"field": "rating", "op": "gte",
                                              "value": 4}], "match": "all"},
                       rating_of=pl._rating_of("", {"conditions": [{"field": "rating"}]})),
          [tr["path"] for tr in TRACKS if (half_of(tr) or 0) >= 8],
          "the playlist path rates through the store")
+check_eq(q.match_paths(LIB, {"conditions": [{"field": "album.rating", "op": "gte",
+                                             "value": 4}], "match": "all"},
+                      rating_of=pl._rating_of("", {"conditions": [{"field": "album.rating"}]})),
+         [tr["path"] for alb in ALBUMS if FOLDER["album"].get(alb["path"], 0) >= 8
+          for tr in alb["tracks"]],
+         "and a smart playlist filters on the album rating the same way")
 
 # --------------------------------------------------------------------------- #
 section("performance (100k tracks)")

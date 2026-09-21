@@ -119,7 +119,7 @@ per-script results are returned (`server/script_runners.py`).
 | 4 | Grade | The full battery in §3 | nothing (read-only) | no | no |
 | 5 | Process images | Resize/crop covers to `cover_target_size`, per-format targets, JPEG/PNG/JXL optimization, `cover.*` rename | image files in place | re-encodes in place | no |
 | 6 | Audit library | AudioAuditor detectors (spectral/DSP) + CD `.log` CRC verification, log scoring | `AUDIT`, `LOG_GRADE`, `LOG_CRC`, `INTEGRITY` | no | no |
-| 7 | DR & ReplayGain | `simple-dr-meter` DR + `rsgain` ReplayGain 2.0 | `DYNAMIC RANGE`, `ALBUM DYNAMIC RANGE`, the four `REPLAYGAIN_*` | no | no |
+| 7 | DR & ReplayGain | in-process loudness-war DR (`mlo/dr.py`) + `rsgain` ReplayGain 2.0 | `DYNAMIC RANGE`, `ALBUM DYNAMIC RANGE`, the four `REPLAYGAIN_*` | no | no |
 | 8 | Auto tagging | `ITUNESADVISORY`, `ALBUMITUNESADVISORY`, `INSTRUMENTAL`, `MOOD`, `ENERGY`, `GENRE`, plus empty MusicBrainz identity/date completion | those tags | no | optional (advisory/genre providers) |
 | 9 | AccurateRip | CUETools `.accurip` generation and verification | writes `CD-N.accurip` | no | **yes** (AccurateRip DB) |
 | 10 | Format all | Final canonical pass: `.accurip`/`.cue`/`.lrc`/tag trim + embedded-cover policy | tags, sidecars, embedded art | **yes** (strips tags outside the allowlist) | no |

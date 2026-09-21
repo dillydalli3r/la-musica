@@ -1,5 +1,7 @@
 import { create } from "zustand";
 
+import { heldBy } from "./lib/locks";
+
 export interface QueueTrack {
   path: string;
   file: string;
@@ -142,8 +144,20 @@ export const useStore = create<Store>((set) => ({
   index: 0,
   setIndex: (index) => set({ index }),
   queueId: 0,
-  playNow: (queue, index = 0) =>
-    set((st) => ({ queue, index, queueId: st.queueId + 1, playing: queue[index]?.path ?? null })),
+  playNow: (queue, index = 0) => {
+    // A file a job is rewriting RIGHT NOW does not play: the server refuses the
+    // stream (409) and the element would just sit there silent. Say what the
+    // registry says — the same sentence the route answers with — and leave
+    // whatever is playing (and the queue) exactly as it was. Every play entry
+    // point in the app goes through here, so a locked row cannot start a
+    // silent no-op from any of them.
+    const held = heldBy(queue[index]?.path);
+    if (held) {
+      toast(held.held.why);
+      return;
+    }
+    set((st) => ({ queue, index, queueId: st.queueId + 1, playing: queue[index]?.path ?? null }));
+  },
   query: "",
   setQuery: (query) => set({ query }),
   sort: null,

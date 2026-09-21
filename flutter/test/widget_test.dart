@@ -4,6 +4,11 @@
 // shapes the server actually sends (a track's `tags` map and an album's
 // `meta`, where the advisory may sit on either key).
 //
+// The pending mark is the same kind of claim: a framework album's marker is
+// drawn from the album payload's own block — the flag, what the folder waits
+// for and the wish behind it — so a folder with no audio can never be drawn
+// as one that plays, and a complete album never carries a mark at all.
+//
 // Run:  flutter test
 
 import 'package:flutter/material.dart';
@@ -13,6 +18,7 @@ import 'package:la_musica/api.dart';
 import 'package:la_musica/models.dart';
 import 'package:la_musica/state.dart';
 import 'package:la_musica/widgets/player_bar.dart';
+import 'package:la_musica/widgets/shelves.dart';
 
 /// The smallest tree `TrackRow` needs: it draws a cover through
 /// `AppScope.of(context).api`, which is null until a server is configured —
@@ -92,6 +98,64 @@ void main() {
         'meta': {'ALBUM': 'D'},
       });
       expect(unknown.advisory, isNull);
+    });
+  });
+
+  group('PendingMark', () {
+    // The framework-album payload as the server stamps it: the flag, what the
+    // folder waits for, and the wish hunting its audio (`server/library.py`).
+    // `due_in` is seconds until the next search.
+    Map<String, dynamic> payload({required bool pending}) => {
+      'path': r'F:\music\Artists\A\Album',
+      'meta': {'ALBUM': 'Album', 'ALBUMARTIST': 'A'},
+      'pending': pending,
+      if (pending) ...{
+        'pending_reason': 'a verified Soulseek download',
+        'wish_id': 7,
+        'wish': {
+          'id': 7,
+          'status': 'searching',
+          'attempts': 1,
+          'due_in': 720,
+          'terminal': false,
+          'reason': '',
+        },
+      },
+    };
+
+    testWidgets('marks a framework album and leaves a complete one alone', (
+      tester,
+    ) async {
+      final waiting = Album.fromJson(payload(pending: true));
+      await tester.pumpWidget(harness(PendingMark(waiting, label: true)));
+      expect(find.text('not downloaded yet'), findsOneWidget);
+      expect(
+        find.byTooltip(
+          'Waiting for its audio · a verified Soulseek download · '
+          'searching — attempt 2, next try in 12 min',
+        ),
+        findsOneWidget,
+      );
+
+      // On the tile itself: the mark is drawn, and the play badge — the
+      // control that would start an empty queue — is off.
+      var played = 0;
+      await tester.pumpWidget(
+        harness(AlbumCard(album: waiting, onPlay: () => played++)),
+      );
+      expect(find.byIcon(Icons.schedule), findsOneWidget);
+      await tester.tap(find.byIcon(Icons.play_arrow));
+      expect(played, 0);
+
+      // A complete album carries none of it: no mark, and the badge plays.
+      final owned = Album.fromJson(payload(pending: false));
+      await tester.pumpWidget(
+        harness(AlbumCard(album: owned, onPlay: () => played++)),
+      );
+      expect(find.byIcon(Icons.schedule), findsNothing);
+      expect(find.byTooltip('Play album'), findsOneWidget);
+      await tester.tap(find.byIcon(Icons.play_arrow));
+      expect(played, 1);
     });
   });
 

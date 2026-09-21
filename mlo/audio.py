@@ -593,11 +593,16 @@ class AacHandle:
         self.info = info
         self.tags = tag
 
-    def save(self, v2_version=4, v1=1):
+    def save(self, filething=None, v2_version=4, v1=1):
         # Nothing loaded and nothing added: never prepend an empty chunk.
         if not self.tags and not self.tags.size:
             return
-        self.tags.save(self.path, v2_version=v2_version, v1=v1)
+        # *filething* is the temp file AudioFile._save_container writes
+        # through so the destination changes in one os.replace (see there):
+        # an interrupted ID3 prepend would otherwise eat the head of the
+        # stream, which is where an ADTS file's audio starts. First
+        # positional, like mutagen's own FileType.save.
+        self.tags.save(filething or self.path, v2_version=v2_version, v1=v1)
 
 
 def _load_aac(path):
@@ -683,12 +688,25 @@ class AudioFile:
                 self.id3_version = int(version[1])
 
     def _save_container(self):
-        """Write the container through its own format writer.
+        """Write the container through its own format writer — ATOMICALLY.
 
         ID3 containers honour ``id3_version`` / ``id3v1``: the v2.3
         conversion runs here, once, over the frames this file actually holds
         (mutagen's default is v2.4). Every other format saves unchanged.
+
+        NOT IN PLACE. mutagen's ``save()`` rewrites the file it was opened
+        from, and this app's updater restarts the container at any moment
+        (Docker SIGKILLs whatever the stop grace did not finish), so an
+        in-place rewrite was the one write in the whole engine that could
+        leave an UNREADABLE file — a half-rewritten header, a truncated
+        stream, and no second copy, for every tag edit, embedded cover,
+        embedded lyric and ReplayGain write. mutagen writes into a temp file
+        beside the original instead (``filething``), and that temp is renamed
+        over it: ``os.replace`` is a single directory operation, so the file
+        is either the old one or the new one, never a torn one. Same bytes,
+        same tags, same mtime semantics — only the failure mode changes.
         """
+        kwargs = {}
         if self.kind in _ID3_KINDS and (self.id3_version != 4 or self.id3v1):
             if self.id3_version != 4:
                 tags = getattr(self.audio, "tags", None)
@@ -697,11 +715,13 @@ class AudioFile:
                         tags.update_to_v23()
                     except Exception:
                         pass  # an unconvertible exotic frame: write it as-is
-            self.audio.save(v2_version=self.id3_version,
-                            v1=2 if self.id3v1 else 0)
-            self._invalidate_cache()
-            return True
-        self.audio.save()
+            kwargs = {"v2_version": self.id3_version, "v1": 2 if self.id3v1 else 0}
+        from .atomic import rewrite_via
+        # Positional: mutagen's save() is wrapped by @loadfile, which binds
+        # its first parameter itself, so a ``filething=`` keyword collides.
+        # The path handed to it is the COPY rewrite_via made.
+        rewrite_via(self.path, lambda tmp: self.audio.save(tmp, **kwargs))
+        self._invalidate_cache()
         return True
 
     def _invalidate_cache(self):
@@ -962,18 +982,23 @@ class AudioFile:
 
         src = self.path
         in_place = self.ext == ".mkv"
-        if in_place:
-            fd, tmp = tempfile.mkstemp(prefix=".videotag_", suffix=".mkv",
-                                       dir=os.path.dirname(src) or ".")
-            os.close(fd)
-            dest = tmp
-        else:
+        # ffmpeg always writes a TEMP beside the source, both for the in-place
+        # rewrite and for the remux that produces a new name: a kill during
+        # the encode then leaves the temp (and the source untouched) instead
+        # of a half-written .mkv at the name the library would read.
+        fd, tmp = tempfile.mkstemp(prefix=".videotag_", suffix=".mkv",
+                                   dir=os.path.dirname(src) or ".")
+        os.close(fd)
+        dest = tmp
+        if not in_place:
             stem = os.path.splitext(src)[0]
-            dest = stem + ".mkv"
+            final = stem + ".mkv"
             n = 2
-            while os.path.exists(dest) and os.path.normcase(dest) != os.path.normcase(src):
-                dest = f"{stem} ({n}).mkv"
+            while os.path.exists(final) and os.path.normcase(final) != os.path.normcase(src):
+                final = f"{stem} ({n}).mkv"
                 n += 1
+        else:
+            final = src
 
         meta_args = []
         for k, v in mkv_meta.items():
@@ -1028,14 +1053,17 @@ class AudioFile:
             return False
 
         if in_place:
+            # *dest* is the temp: one rename puts the tagged stream in place.
             os.replace(dest, src)
-            final = src
         else:
+            # The verified new container is placed FIRST and the source
+            # removed after, so a kill in between leaves both files (a
+            # duplicate the user can see) rather than neither.
+            os.replace(dest, final)
             try:
                 os.remove(src)
             except OSError:
                 pass
-            final = dest
 
         self.path = final
         self.ext = os.path.splitext(final)[1].lower()
@@ -1221,7 +1249,7 @@ class AudioFile:
         """Stored freeform keys matching mean/name, ignoring case.
 
         Freeform atom names are case-sensitive in the container but taggers
-        disagree on case (rsgain writes UPPER, simple-dr-meter lower), so
+        disagree on case (rsgain writes UPPER, some taggers lower), so
         reads, writes and deletes all match case-insensitively.
         """
         tags = self.audio.tags if self.audio is not None else None

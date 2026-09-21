@@ -45,6 +45,8 @@ from pydantic import BaseModel
 
 from mlo import load_config
 
+from server import job_locks
+
 router = APIRouter(tags=["media"])
 
 # The framing's content type: one JSON header line, then the files' bytes. The
@@ -379,6 +381,27 @@ def _resolve_and_guard(path: str) -> tuple[str, str | None]:
     return full, None
 
 
+def _download_guard(path: str) -> tuple[str, str | None]:
+    """`_resolve_and_guard` plus the library lock: the same content guard, with
+    a path a job is rewriting reported in this file's header entry.
+
+    Offline downloads are the other reader of the player's own bytes, and the
+    same collision applies from their side: caching a file a script is
+    rewriting stores a torn copy that plays as garbage later, offline, with no
+    server to re-fetch it from. Reported per file rather than as a 409 for the
+    whole batch — one locked album in a 100-track selection must not cost the
+    caller the other 99 — and the text is the registry's own refusal, which is
+    what /api/stream would say for that path.
+    """
+    full, err = _resolve_and_guard(path)
+    if err:
+        return full, err
+    holder = job_locks.holder(full)
+    if holder:
+        return full, job_locks.refusal(full, holder)
+    return full, None
+
+
 @router.post("/api/media/bulk")
 def media_bulk(req: BulkRequest):
     """Several tracks' bytes in one response (see the module docstring).
@@ -394,7 +417,7 @@ def media_bulk(req: BulkRequest):
     if len(req.paths) > MAX_BULK:
         raise HTTPException(413, f"at most {MAX_BULK} files per request "
                                  f"({len(req.paths)} given) — send the queue in chunks")
-    entries = plan_downloads(req.paths, check=_resolve_and_guard)
+    entries = plan_downloads(req.paths, check=_download_guard)
     window = clamp_window(load_config().get("download_concurrency"))
     return StreamingResponse(
         iter_bulk_body(entries, window=window),

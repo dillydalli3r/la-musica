@@ -380,6 +380,10 @@ class PlaybackController extends ChangeNotifier {
     }
     _loadError = null;
     await player.play();
+    // One play per start, reported to the same endpoint the web player uses.
+    // Fire and forget: the row is a statistic, so a server that is away costs
+    // the play and never the audio.
+    unawaited(client.recordPlay(path).catchError((Object _) {}));
     notifyListeners();
   }
 

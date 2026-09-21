@@ -33,9 +33,9 @@ perform is refused with that reason instead of downloading something that cannot
 run, and the Dependencies rows carry the same answer so the UI never shows an
 Install button for a tool that cannot be installed here.
 
-The vendored pip packages (librosa, beets, yt-dlp) and simple-dr-meter are
-platform-independent. Each archive's LICENSE/COPYING/README is copied next to
-the installed binaries (_copy_licence_files).
+The vendored pip packages (librosa, beets, yt-dlp) are platform-independent.
+Each archive's LICENSE/COPYING/README is copied next to the installed binaries
+(_copy_licence_files).
 
 Standard-library only - no requests.
 """
@@ -66,7 +66,6 @@ DISPLAY_NAMES = {
     "audioauditor": "AudioAuditor",
     "rsgain": "rsgain",
     "ffmpeg": "ffmpeg",
-    "simpledrmeter": "simple-dr-meter",
     "logchecker": "Logchecker",
     "php": "PHP",
     "cuetools": "CUETools",
@@ -206,9 +205,9 @@ LINUX_RUNNERS = {
 }
 
 # Tools whose install is the same download on every platform this app supports
-# (a pip package, a source archive, or a script a runtime elsewhere executes —
-# the Logchecker phar is PHP), so no platform table decides anything about them.
-PLATFORM_INDEPENDENT = {"simpledrmeter", "librosa", "beets", "yt-dlp", "logchecker"}
+# (a pip package, or a phar a runtime elsewhere executes — the Logchecker phar
+# is PHP), so no platform table decides anything about them.
+PLATFORM_INDEPENDENT = {"librosa", "beets", "yt-dlp", "logchecker"}
 
 # Tools with no build this app fetches, mapped to the distro package providing
 # the same tool (None = no packaged equivalent). MARKER_EXES can only check that
@@ -358,8 +357,7 @@ def install_kind(key, platform=None, machine=None):
     """How *key* installs on *platform*: `deps` | `system` | `unsupported`.
 
     `deps`        the installer fetches it into .dependencies (a pinned
-                  Windows binary, a native Linux build, a pip package or a
-                  source archive)
+                  Windows binary, a native Linux build or a pip package)
     `system`      the platform provides it as a distro package
     `unsupported` nothing to fetch: upstream ships no build for this platform,
                   or the interpreter its build needs is not here
@@ -532,11 +530,6 @@ PINNED = {
         "asset": "ffmpeg-N-126217-ge1e325235e-win64-gpl.zip",
         "version": "2026.8.19",
     },
-    "simpledrmeter": {
-        "tag": "v0.0.0",
-        "asset": "",
-        "version": "0.0.0",
-    },
     "logchecker": {
         "tag": "0.14.4",
         "asset": "logchecker.phar",
@@ -578,12 +571,6 @@ PINNED = {
         "version": "2026.8.19",
     },
 }
-
-# simple-dr-meter is a Python script (no Windows binary / no releases); it is
-# fetched from the repo's v0.0.0 tag archive instead of a GitHub release.
-SIMPLE_DR_METER_ZIP_URL = (
-    "https://github.com/magicgoose/simple-dr-meter/archive/refs/tags/v0.0.0.zip"
-)
 
 # PHP for Windows (needed for Logchecker phar) — not on GitHub, direct from windows.php.net
 PHP_ZIP_URL = (
@@ -782,9 +769,9 @@ def newer_version(candidate, current):
 def _upstream_keys():
     """Tools whose newest release a GitHub API call can answer.
 
-    Only repos in REPOS: php (windows.php.net), simple-dr-meter (a tag archive)
-    and the two PyPI packages publish elsewhere, so their rows keep the pinned
-    target and report no upstream version at all.
+    Only repos in REPOS: php (windows.php.net) and the two PyPI packages
+    publish elsewhere, so their rows keep the pinned target and report no
+    upstream version at all.
     """
     return [key for key in DISPLAY_NAMES if key in REPOS]
 
@@ -901,8 +888,8 @@ def dependency_rows(refresh=False, block=False):
 
     `state` is derived from the LIVE upstream value: `ok` (installed ==
     upstream), `update` (upstream known and different), `missing`, `error`
-    (that tool's check failed). Rows with no upstream at all (PyPI, php,
-    simple-dr-meter) fall back to the pinned pair, which is the only answer
+    (that tool's check failed). Rows with no upstream at all (the PyPI
+    packages, php) fall back to the pinned pair, which is the only answer
     available for them.
     """
     tools = detect_all_tools()
@@ -998,8 +985,6 @@ def installed_versions():
     """{tool key: installed version} for currently detected tools only."""
     tools = detect_all_tools()
     out = {key: info["version"] for key, info in tools.items()}
-    if tools_mod_simple_dr_meter():
-        out["simpledrmeter"] = PINNED["simpledrmeter"]["version"]
     for key in PIP_PACKAGES:
         if pip_package_path(key):
             out[key] = PINNED[key]["version"]
@@ -1010,11 +995,6 @@ def pip_package_path(key):
     """Folder of a vendored pip package (e.g. '.dependencies/librosa v0.11.0')
     when its top-level package dir is present, else None."""
     return python_pkg_path(key)
-
-
-def tools_mod_simple_dr_meter():
-    from .tools import simple_dr_meter_path
-    return simple_dr_meter_path() is not None
 
 
 def _require_installable(key):
@@ -1393,42 +1373,6 @@ def _remove_older_versions(prefix, keep_dir):
             shutil.rmtree(full, ignore_errors=True)
 
 
-def _install_simple_dr_meter(log=print, progress=None):
-    """Download the simple-dr-meter source archive (no binaries exist)."""
-    dest_dir = os.path.join(DEPS_DIR, "simple-dr-meter")
-    fd, tmp_zip = tempfile.mkstemp(suffix=".zip")
-    os.close(fd)
-    workdir = tempfile.mkdtemp(prefix="mlo_drmeter_")
-    try:
-        log("Downloading simple-dr-meter (source archive) …")
-        _download(SIMPLE_DR_METER_ZIP_URL, tmp_zip, progress)
-        log("Extracting simple-dr-meter …")
-        with zipfile.ZipFile(tmp_zip) as zf:
-            zf.extractall(workdir)
-        # The archive extracts to <workdir>/simple-dr-meter-main/
-        src_candidates = [
-            os.path.join(workdir, d)
-            for d in os.listdir(workdir)
-            if os.path.isdir(os.path.join(workdir, d))
-            and "simple-dr-meter" in d.lower()
-        ]
-        if not src_candidates or not os.path.isfile(
-                os.path.join(src_candidates[0], "main.py")):
-            raise RuntimeError("Could not find simple-dr-meter main.py in archive")
-        src = src_candidates[0]
-        shutil.rmtree(dest_dir, ignore_errors=True)
-        shutil.copytree(src, dest_dir)
-        log(f"Installed simple-dr-meter -> {dest_dir}")
-        return "main"
-    finally:
-        try:
-            if os.path.exists(tmp_zip):
-                os.remove(tmp_zip)
-        except OSError:
-            pass
-        shutil.rmtree(workdir, ignore_errors=True)
-
-
 def _pip_python():
     """Interpreter for `pip install --target`; sys.executable is the frozen
     exe (not a python) in PyInstaller builds."""
@@ -1527,44 +1471,12 @@ def _install_php(log=print, progress=None):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _patch_simple_dr_meter(root_dir):
-    """Apply known compatibility fixes to the installed simple-dr-meter:
-    empty-peaks (silent/very short tracks) crash the batch otherwise.
-    Idempotent — safe to run after every install/update."""
-    main_py = os.path.join(root_dir, "main.py")
-    metrics_py = os.path.join(root_dir, "audio_metrics", "audio_metrics.py")
-    for path, old, new in (
-        (metrics_py,
-         "    peak_index = block_count - 2\n    rms_percentile = 0.2",
-         "    if block_count < 2:\n        return None  # too few blocks (silent/very short track): no DR\n\n    peak_index = block_count - 2\n    rms_percentile = 0.2"),
-        (main_py,
-         "        for track_info, dr_metrics in analyzed_tracks:\n            dr = dr_metrics.dr",
-         "        for track_info, dr_metrics in analyzed_tracks:\n            if dr_metrics is None:\n                # silent/very short track produced no blocks - skip\n                continue\n            dr = dr_metrics.dr"),
-        (main_py,
-         "    if keep_precision:\n        dr_mean_rounded = numpy.mean(dr_items)\n    else:\n        dr_mean_rounded = int(numpy.round(numpy.mean(dr_items)))  # official\n    dr_median = numpy.median(dr_items)",
-         "    valid = [d for d in dr_items if d is not None and d == d]\n    if not valid:\n        valid = [0]\n    if keep_precision:\n        dr_mean_rounded = numpy.mean(valid)\n    else:\n        dr_mean_rounded = int(numpy.round(numpy.mean(valid)))  # official\n    dr_median = numpy.median(valid)"),
-    ):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                text = f.read()
-            if old not in text:
-                continue
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(text.replace(old, new))
-        except OSError:
-            pass
-
-
 def install_dependency(key, log=print, progress=None):
     """Download and install the latest release of a tool.
 
     Returns the installed version string. Raises on any failure.
     """
     _require_installable(key)
-    if key == "simpledrmeter":
-        version = _install_simple_dr_meter(log=log, progress=progress)
-        _patch_simple_dr_meter(os.path.join(DEPS_DIR, "simple-dr-meter"))
-        return version
     if key == "php":
         return _install_php(log=log, progress=progress)
     # Vendored pip packages — plus the tools whose Linux install IS the pip

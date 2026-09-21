@@ -205,7 +205,7 @@ assert queued_calls[0]["mode"] == "best", queued_calls[0]
 # --------------------------------------------------------------------------- #
 # 3. one unusable item is skipped with a reason; the rest still queue
 # --------------------------------------------------------------------------- #
-def _one_bad_group(gid, mode):
+def _one_bad_group(gid, mode, *, types=None):
     if gid == "aaaaaaaa-0000-0000-0000-000000000001":
         return [], "MusicBrainz release-group lookup failed: HTTP 503"
     return [{"mbid": MBID_RELEASE, "title": "Some Album"}], None

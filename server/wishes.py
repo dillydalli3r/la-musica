@@ -106,7 +106,12 @@ def _init():
                     -- Empty searches so far: the count `wishes_not_found_attempts`
                     -- is compared against, kept apart from `attempts` because a
                     -- transient failure must not spend a not-found attempt.
-                    not_found INTEGER NOT NULL DEFAULT 0
+                    not_found INTEGER NOT NULL DEFAULT 0,
+                    -- Which PRESSING this wish is about, as the identity block
+                    -- in RELEASE_KEYS — resolved from the release the pipeline
+                    -- looked up and kept here so the queue row can name the
+                    -- edition without a MusicBrainz request of its own.
+                    release_json TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS wish_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,6 +136,137 @@ def _init():
                 c.execute("ALTER TABLE wishes ADD COLUMN retry_at REAL NOT NULL DEFAULT 0")
             if "not_found" not in cols:
                 c.execute("ALTER TABLE wishes ADD COLUMN not_found INTEGER NOT NULL DEFAULT 0")
+            # Same for the identity block: an older database gets it empty, so
+            # its rows show what they know until a cycle resolves the release.
+            if "release_json" not in cols:
+                c.execute("ALTER TABLE wishes ADD COLUMN release_json TEXT NOT NULL DEFAULT ''")
+
+
+# --------------------------------------------------------------------------- #
+# The release identity — WHICH pressing a row is about
+# --------------------------------------------------------------------------- #
+# ONE block with the same keys wherever it appears (a job row, a wish row, a
+# notification), so no surface has to reconstruct a release's facts from
+# whatever spelling it happens to hold. The order is what identifies a
+# PRESSING: its catalog number and the medium it is on first, then where and
+# when it came out and how much it carries, then the edition's own
+# disambiguation and the status MusicBrainz states for it (Official /
+# Promotion / Bootleg / …).
+#
+# EVERY key is always present. A fact the pipeline could not resolve is empty
+# and renders as absent — a MusicBrainz outage, or a wish whose release was
+# never looked up, leaves a row that still says what it does know and never a
+# row that fails to render.
+RELEASE_KEYS = ("id", "title", "artist", "date", "country", "status",
+                "media", "track_count", "disambiguation", "catalog_number",
+                "label")
+
+
+def release_identity(release, release_mbid=""):
+    """The identity block of one MusicBrainz payload, in any of its spellings.
+
+    Read from `mlo.release_choice`, the ONE module that already normalizes
+    MusicBrainz's own field names for the rest of the app (medium formats,
+    track counts), plus the two keys this app's own compact job summary spells
+    differently (`tracks` for the count, `media` for the format). No key is
+    ever invented: what the payload does not state comes back empty.
+    """
+    from mlo import release_choice
+
+    rel = release or {}
+    artists = rel.get("artists") or []
+    artist = str(rel.get("artist") or "").strip()
+    if not artist and artists and isinstance(artists[0], dict):
+        artist = str(artists[0].get("name") or "").strip()
+    media = [m for m in release_choice.media_formats(rel) if m]
+    if not media and isinstance(rel.get("media"), str) and rel["media"].strip():
+        # The compact job summary states one medium as a plain string; only
+        # used when nothing richer is there.
+        media = [rel["media"].strip()]
+    count = release_choice.track_count(rel)
+    if not count:
+        try:
+            count = int(rel.get("tracks") or rel.get("track_count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+    catalog = str(rel.get("catalog_number") or "").strip()
+    if not catalog:
+        numbers = rel.get("catalog_numbers") or []
+        catalog = str(numbers[0] if numbers else "").strip()
+    return {
+        "id": release_choice.release_id(rel) or str(release_mbid or "").strip(),
+        "title": str(rel.get("title") or "").strip(),
+        "artist": artist,
+        "date": str(rel.get("date") or "").strip(),
+        "country": str(rel.get("country") or "").strip(),
+        "status": str(rel.get("status") or "").strip(),
+        "media": media,
+        "track_count": int(count or 0),
+        "disambiguation": str(rel.get("disambiguation") or "").strip(),
+        "catalog_number": catalog,
+        "label": str(rel.get("label") or "").strip(),
+    }
+
+
+def identity_of(release_mbid, cfg=None):
+    """Resolve *release_mbid* to an identity block, or None.
+
+    Through `integrations.resolve_release` — the same lookup the wish worker
+    and every "Add to library" route make, so a release the app has just
+    fetched costs no second request (that layer's cache is what makes this
+    cheap). A MusicBrainz outage, an unknown id or a group with no eligible
+    edition is None: a row says what it knows instead of failing.
+    """
+    rid = str(release_mbid or "").strip()
+    if not rid:
+        return None
+    from server import integrations as intg
+
+    try:
+        release, resolved = intg.resolve_release(rid)
+    except Exception:
+        return None
+    if not release:
+        return None
+    return release_identity(release, resolved or rid)
+
+
+def store_identity(wid, block):
+    """Record which pressing a wish is about (its row's own JSON column)."""
+    if not block:
+        return
+    _mark(wid, release_json=json.dumps(block))
+
+
+# How many wishes one worker cycle resolves an identity for: MusicBrainz
+# answers one request per second, so a long wish list must not turn a tick
+# into minutes of lookups (the rest are filled in by the following cycles).
+IDENTITY_PRIME_LIMIT = 25
+
+
+def prime_identities(cfg=None, limit=IDENTITY_PRIME_LIMIT):
+    """Fill in the identity of every wish that has none yet; returns the count.
+
+    The row's display data, not an acquisition: a wish nobody has searched yet
+    (or one the user must fill by hand) still has to say WHICH release it is
+    waiting for. Called from the worker's own cycle — never from a route the
+    UI polls — and bounded per call (see IDENTITY_PRIME_LIMIT). A wish whose
+    release cannot be resolved keeps an empty identity and is retried on a
+    later cycle.
+    """
+    filled = 0
+    for w in list_wishes():
+        if filled >= int(limit or 0):
+            break
+        if not str(w.get("release_mbid") or "").strip():
+            continue
+        if any(w["release"].get(k) for k in RELEASE_KEYS if k != "id"):
+            continue                    # already known — never re-fetched
+        block = identity_of(w["release_mbid"], cfg)
+        if block:
+            store_identity(w["id"], block)
+            filled += 1
+    return filled
 
 
 # --------------------------------------------------------------------------- #
@@ -169,6 +305,19 @@ def _row(r):
     else:
         d["queries"] = []
     d.pop("quotes", None)
+    # The identity block (RELEASE_KEYS), ALWAYS a block: a wish whose release
+    # has not been looked up yet (or could not be) renders its empty facts
+    # rather than a missing field every caller would have to guard.
+    stored = str(d.pop("release_json", "") or "")
+    block = release_identity({}, d.get("release_mbid") or "")
+    if stored:
+        try:
+            known = json.loads(stored)
+            if isinstance(known, dict):
+                block.update({k: known[k] for k in RELEASE_KEYS if k in known})
+        except Exception:
+            pass                        # a corrupt column is not a failed row
+    d["release"] = block
     # A wish whose album is a FRAMEWORK album: the folder exists (it is in the
     # library, listed as pending) but no audio has arrived yet. Derived from the
     # marker rather than stored, so the two can never disagree — the import
@@ -185,6 +334,17 @@ def _row(r):
     return d
 
 
+def _with_terminal(d, cfg=None):
+    """Mark a row with the store's own terminal verdict (one config read per
+    row BATCH, see list_wishes): a terminal wish is one the worker will never
+    search again on its own, which is what makes it safe to take off the list
+    (the Wishes tab's "Clear finished", the queue's clear)."""
+    from mlo.config import load_config
+
+    d["terminal"] = is_terminal(d, cfg if cfg is not None else load_config())
+    return d
+
+
 def list_wishes():
     with _conn() as c:
         rows = c.execute(
@@ -192,43 +352,61 @@ def list_wishes():
             "CASE status WHEN 'wanted' THEN 0 WHEN 'searching' THEN 1 "
             "WHEN 'failed' THEN 2 ELSE 3 END, added_at DESC"
         ).fetchall()
-    return [_row(r) for r in rows]
+    from mlo.config import load_config
+
+    cfg = load_config()                 # ONE read for the whole batch
+    return [_with_terminal(_row(r), cfg) for r in rows]
 
 
 def get_wish(wid):
     with _conn() as c:
         r = c.execute("SELECT * FROM wishes WHERE id=?", (int(wid),)).fetchone()
-    return _row(r) if r else None
+    return _with_terminal(_row(r)) if r else None
 
 
 def add_wish(release_mbid, title="", artist="", year="", note="",
-             target_dir="", queries=None, source=""):
+             target_dir="", queries=None, source="", release=None):
+    """Save a release to the wishlist. *release* is the MusicBrainz payload the
+    caller already holds (an interactive job's own release): its identity is
+    recorded with the wish, so the row can name the pressing immediately —
+    without a second lookup of a release that was just fetched."""
     release_mbid = str(release_mbid or "").strip()
     if not release_mbid:
         raise ValueError("release_mbid required")
     source = str(source or "").strip().lower()
     if source and source not in SOURCES:
         source = ""
+    block = release_identity(release, release_mbid) if release else None
     now = time.time()
     with _lock:
         with _conn() as c:
             row = c.execute("SELECT * FROM wishes WHERE release_mbid=?",
                             (release_mbid,)).fetchone()
             if row:
+                # Both updates run on THIS connection and the row is read back
+                # from it: a second connection would have to wait for this
+                # one's write transaction, which nothing releases until the
+                # block exits.
                 if source and not row["source"]:
                     # a wish saved before this was recorded: the caller that
                     # asked for it now (a framework album) says what it is
                     c.execute("UPDATE wishes SET source=? WHERE id=?",
                               (source, row["id"]))
-                    return get_wish(row["id"])
+                if block and not row["release_json"]:
+                    c.execute("UPDATE wishes SET release_json=? WHERE id=?",
+                              (json.dumps(block), row["id"]))
+                if (source and not row["source"]) or (block and not row["release_json"]):
+                    return _row(c.execute("SELECT * FROM wishes WHERE id=?",
+                                          (row["id"],)).fetchone())
                 return _row(row)  # already wished — idempotent
             cur = c.execute(
                 "INSERT INTO wishes (release_mbid, title, artist, year, status, note,"
-                " target_dir, quotes, added_at, updated_at, source)"
-                " VALUES (?,?,?,?,'wanted',?,?,?,?,?,?)",
+                " target_dir, quotes, added_at, updated_at, source, release_json)"
+                " VALUES (?,?,?,?,'wanted',?,?,?,?,?,?,?)",
                 (release_mbid, str(title or ""), str(artist or ""), str(year or ""),
                  str(note or ""), str(target_dir or ""),
-                 json.dumps(queries) if queries else "", now, now, source),
+                 json.dumps(queries) if queries else "", now, now, source,
+                 json.dumps(block) if block else ""),
             )
             wid = cur.lastrowid
     log("info", f"Wish added: {artist} — {title} ({release_mbid[:8]})")
@@ -332,6 +510,7 @@ def mark_failed(wid, error, attempts):
                     f"Gave up after {attempts} attempt(s): {err[:200]}",
                     {"link": "/soulseek", "wish_id": wid,
                      "release_mbid": str(before.get("release_mbid") or ""),
+                     "release": before.get("release") or {},
                      "error": err[:300]})
     except Exception:
         pass
@@ -378,22 +557,31 @@ def mark_not_found(wid, error, attempts=None):
                     {"link": "/soulseek", "wish_id": wid, "outcome": "not_found",
                      "attempts": int(fields.get("attempts") or 0),
                      "release_mbid": str(before.get("release_mbid") or ""),
+                     "release": before.get("release") or {},
                      "error": err[:300]})
     except Exception:
         pass
 
 
-def mark_wanted(wid, error="", attempts=None, retry_at=None):
+def mark_wanted(wid, error="", attempts=None, retry_at=None, not_found=None):
     """Back in the queue for another automatic attempt.
 
     *retry_at* is when the NEXT attempt may run: the worker passes the
     backoff's own end after a transient failure, and 0 (the default) means
-    "as soon as the interval allows"."""
+    "as soon as the interval allows".
+
+    *not_found* is the empty-search counter after THIS search (the worker
+    passes it for a search that found nothing): without it the count only ever
+    moved when the wish ended, so `wishes_not_found_attempts: 3` could never be
+    reached — every retry read the same stored 0, decided "1 of 3" and searched
+    the network again forever instead of ending `not_found` as the policy says."""
     fields = {"status": "wanted", "last_error": str(error or "")[:400]}
     if attempts is not None:
         fields["attempts"] = attempts
     if retry_at is not None:
         fields["retry_at"] = float(retry_at or 0)
+    if not_found is not None:
+        fields["not_found"] = int(not_found)
     _mark(wid, **fields)
 
 
@@ -559,7 +747,8 @@ def reconcile_with_library(cfg=None):
                 label = f"{artist} — {title}" if artist and title else (title or artist or "Wish")
                 events.emit("wish_found", f"Wish found: {label}",
                             "It is in your library now.",
-                            {"wish_id": w["id"], "release_mbid": mbid},
+                            {"wish_id": w["id"], "release_mbid": mbid,
+                             "release": w.get("release") or {}},
                             config=cfg)
             except Exception:
                 pass

@@ -43,7 +43,7 @@
 # otherwise, and this repo's folder has already been renamed once (la-musica ->
 # MusicLibraryOptimizer): that silently started a second project whose
 # `musiclibraryoptimizer_lamusica-dependencies` volume was empty, while the real
-# installs (beets, librosa, yt-dlp, simple-dr-meter) sat in
+# installs (beets, librosa, yt-dlp) sat in
 # `la-musica_lamusica-dependencies`. With the name pinned, the volumes and the
 # network follow the app, not the directory you happen to run compose from.
 name: la-musica
@@ -96,6 +96,27 @@ services:
       # Runtime-installed tools (Settings -> Dependencies: beets, librosa, ...).
       - lamusica-dependencies:/app/.dependencies
     restart: unless-stopped
+    # How long Docker waits after SIGTERM before it SIGKILLs the container.
+    # This is the number that decides whether a script mid-album, an import
+    # mid-move or a tag write gets to finish or to abort cleanly.
+    #
+    # 3 minutes, and the arithmetic is deliberate:
+    #   * the app's own shutdown wait is 120 s
+    #     (server/interrupt_recovery.GRACE_SECONDS): it stops taking new work,
+    #     waits that long for the jobs that are running while logging what it
+    #     is waiting for, then records whatever it could not finish in
+    #     .mlo/data/interrupted_jobs.json for the next start to reconcile;
+    #   * 180 s leaves 60 s of headroom above that for the journal write and
+    #     for uvicorn to close the server down, so this ordered abort ALWAYS
+    #     completes before Docker's SIGKILL — including on the update path,
+    #     where watchtower passes its own timeout (see WATCHTOWER_TIMEOUT).
+    #
+    # It is deliberately not longer: an update should not hang for a quarter of
+    # an hour behind a long "Format All" run, and nothing is lost by cutting
+    # one short — every write is atomic (mlo/atomic.py), so a killed run leaves
+    # the old file or the new one, and the next start sweeps its temp files and
+    # reports the interrupted job.
+    stop_grace_period: 3m
     # Opt in to watchtower's automatic updates (WATCHTOWER_LABEL_ENABLE=true).
     labels:
       - com.centurylinklabs.watchtower.enable=true
@@ -157,6 +178,16 @@ services:
       # pulled only when there is something new. Lower it for a faster pickup
       # (`WATCHTOWER_POLL_INTERVAL=60`), raise it on a metered link.
       - WATCHTOWER_POLL_INTERVAL=${WATCHTOWER_POLL_INTERVAL:-300}
+      # How long watchtower waits after SIGTERM before it force-kills the
+      # container it is replacing (its --stop-timeout; default 30s, which is
+      # far too short here: a 30-second window would SIGKILL the app in the
+      # middle of an album). It must be at least the app's own shutdown wait
+      # and it is set to the SAME number as the service's stop_grace_period
+      # above, so the update path and `docker compose stop` behave identically:
+      # the app stops taking new work, gets up to 120 s to finish or abort what
+      # is running (logging what it waits for), records the rest, and only then
+      # does Docker SIGKILL.
+      - WATCHTOWER_TIMEOUT=${WATCHTOWER_TIMEOUT:-3m}
       # A cron WINDOW instead of polling all day is the alternative — but
       # watchtower refuses to start when both are set, so uncomment this AND
       # comment the interval above, never both:

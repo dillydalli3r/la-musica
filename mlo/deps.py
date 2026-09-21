@@ -136,18 +136,16 @@ def can_spawn():
 def _has_tool(key, tools):
     """Whether tool *key* is usable here.
 
-    A detected binary is one source; the two pip-vendored tools (beets,
-    librosa) live in .dependencies as packages rather than programs, and
-    simple-dr-meter is a script, so each is asked in its own way.
+    A detected binary is one source; the pip-vendored tools (beets, librosa)
+    live in .dependencies as packages rather than as programs, and a Python
+    package is asked for its own way.
     """
     if key in tools:
         return True
     if key == "mutagen":
         return HAS_MUTAGEN
-    from .tools import python_pkg_path, simple_dr_meter_path
+    from .tools import python_pkg_path
 
-    if key == "simpledrmeter":
-        return simple_dr_meter_path() is not None
     return python_pkg_path(key) is not None
 
 

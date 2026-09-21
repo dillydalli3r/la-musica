@@ -530,15 +530,6 @@ def detect_all_tools():
     return _store_tools_cache(tools, sig)
 
 
-SIMPLE_DR_METER_DIRNAME = "simple-dr-meter"
-
-
-def simple_dr_meter_path():
-    """Path to simple-dr-meter's main.py, or None when not downloaded."""
-    candidate = os.path.join(DEPS_DIR, SIMPLE_DR_METER_DIRNAME, "main.py")
-    return candidate if os.path.isfile(candidate) else None
-
-
 def python_pkg_path(pkg):
     """Vendored pip-package dir for *pkg* ('librosa', 'beets', 'yt-dlp').
 

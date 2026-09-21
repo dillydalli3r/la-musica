@@ -508,6 +508,14 @@ class ApiClient {
     if (token != null && token!.isNotEmpty) 'token': token,
   }).toString();
 
+  /// Report ONE playback start (`POST /api/plays`) — the very same seam the
+  /// web player calls, so the server sees one definition of "a play" whatever
+  /// client started it. Called when a track actually starts, never on a seek
+  /// or a resume; a repeat is a play of its own.
+  Future<void> recordPlay(String path) async {
+    await postJson('/api/plays', body: {'path': path});
+  }
+
   // ---- discovery ----------------------------------------------------------
 
   /// The genres the discovery scopes can name, with the counts each source

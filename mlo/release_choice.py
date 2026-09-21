@@ -230,24 +230,41 @@ def first_release_date(node):
 
 
 def type_matches(primary_type, secondary_types, wanted):
-    """Whether a release group's type is one of the *wanted* names.
+    """Whether a release group's type is one of the *wanted* selections.
 
-    The SAME rule the artist watch applies to what it may queue
-    (`server.artist_watch.type_matches`): a group that states secondary types
-    is matched by those alone — a live album is selected as "live", not as
-    "album" — otherwise by its primary type. An EMPTY selection matches
-    nothing: "no type selected" is not a licence to match everything.
+    A selection naming ONE type is that type, by the SAME rule the artist
+    watch applies to what it may queue (`server.artist_watch.type_matches`): a
+    group that states secondary types is matched by those alone — a live album
+    is selected as "live", not as "album" — otherwise by its primary type.
+
+    A selection naming SEVERAL parts is a type as MusicBrainz (and the artist
+    page) spells a COMBINED one — "Album + Compilation", "album+compilation" —
+    and it is matched as the group's WHOLE type: the first part is the primary
+    type and the rest are exactly its secondary types (order-insensitive,
+    because MusicBrainz files them in its own order). The artist page's "Album
+    + Live" row therefore selects the live albums and not its plain albums,
+    and its "Album" row selects neither.
+
+    An EMPTY selection matches nothing: "no type selected" is not a licence to
+    match everything.
     """
-    want = {str(t).strip().lower() for t in (wanted or ()) if str(t).strip()}
-    if not want:
-        return False
-    secondary = [str(s).strip().lower() for s in (secondary_types or ()) if str(s).strip()]
-    if any(s in want for s in secondary):
-        return True
-    if secondary:
-        return False
+    secondary = [str(s).strip().lower() for s in (secondary_types or ())
+                 if str(s).strip()]
     primary = str(primary_type or "").strip().lower()
-    return bool(primary) and primary in want
+    for value in (wanted or ()):
+        parts = [p.strip().lower() for p in _split_types(value) if p.strip()]
+        if not parts:
+            continue
+        if len(parts) > 1:
+            if parts[0] == primary and set(parts[1:]) == set(secondary):
+                return True
+            continue
+        name = parts[0]
+        if any(s == name for s in secondary):
+            return True
+        if not secondary and primary and primary == name:
+            return True
+    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -397,6 +414,30 @@ def _wanted_types(wanted_types, primary_type, secondary_type):
 
 def _split_types(value):
     return [p for p in re.split(r"\s*[+;,]\s*", str(value or "")) if p.strip()]
+
+
+def type_names(values):
+    """*values* as MusicBrainz's own lowercase release-group type names.
+
+    THE one place a caller-supplied type selection is normalized: a combined
+    spelling ("Album + Compilation", "album+compilation") is split into its
+    parts — the same rule `type_matches` and `_wanted_types` apply — names are
+    de-duplicated in the caller's order, and a name outside `mlo.naming`'s
+    published vocabulary raises ValueError. A filter that could never match
+    anything is a user error to REPORT, never a silent no-op that quietly
+    downloads nothing; `server.artist_watch.clean_types` stores a watch's own
+    selection through this, so a watch and an add read one vocabulary.
+    """
+    out = []
+    for name in (n for value in (values or ()) for n in _split_types(value)):
+        lowered = str(name).strip().lower()
+        if not lowered:
+            continue
+        if lowered not in RELEASE_TYPES:
+            raise ValueError(f"unknown release-group type {name!r}")
+        if lowered not in out:
+            out.append(lowered)
+    return out
 
 
 def medium_rank(rel, order):

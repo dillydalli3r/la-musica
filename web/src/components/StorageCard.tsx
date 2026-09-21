@@ -159,7 +159,7 @@ export default function StorageCard() {
               ? "w-1/3 animate-pulse bg-zinc-600"
               : tight
                 ? "bg-gradient-to-r from-amber-500 to-red-500"
-                : "bg-gradient-to-r from-accent to-indigo-500"}`}
+                : "bg-gradient-to-r from-accent to-accent-soft"}`}
             style={pct === null ? undefined : { width: `${pct}%` }}
           />
         </div>

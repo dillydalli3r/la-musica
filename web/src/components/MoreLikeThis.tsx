@@ -244,10 +244,17 @@ export default function MoreLikeThis({
   const albumShelf = items[0].kind === "album";
   return (
     <section className="section">
-      <div className="flex items-center gap-1.5 mb-2">
+      <div className="flex items-center gap-1.5 mb-1">
         <Sparkles className="h-3.5 w-3.5 text-zinc-500" />
         <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-500">{title}</h2>
       </div>
+      {/* WHERE these rows come from, in one line: the library's OWN tags,
+          scored on the server, with nothing fetched. The online shelf rendered
+          beside this one says the opposite ("fetched from the providers"), so
+          the pair is never read as a single list. */}
+      <p className="text-[11px] text-zinc-600 mb-2">
+        Scored from this library's own tags — nothing is fetched from the internet.
+      </p>
       {albumShelf ? (
         <div className="flex gap-3 overflow-x-auto pb-1 -mx-1 px-1">
           {albums.map((item) => {

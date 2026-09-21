@@ -16,7 +16,17 @@ caller injects:
     The rating store (``server.ratings``). Half-stars are its unit (0-10,
     0/absent = unrated); stars are what the catalogue advertises, so the
     engine halves them. Without a source every track is unrated — which is
-    all the payload alone can prove.
+    all the payload alone can prove. ``raw_tag`` is the file's own RATING,
+    which only the track scope has: a folder carries no tag.
+
+    The same source answers the FOLDER scopes through an optional attribute,
+    ``rating_of.folder(scope, path) -> half-stars | None``, where scope is
+    "album" or "artist" and path is that entity's folder — the store's own
+    folder rows, keyed by the paths the app already uses for those entities.
+    The engine needs one fact there that a track lookup does not carry: which
+    KIND of entity the path names. A source without the attribute answers
+    every album/artist rating field as unrated, which is all such a store can
+    prove.
 
 ``bool_fields``
     The catalogue's boolean field names, so ``true``/``"1"``/``"yes"`` from a
@@ -32,6 +42,11 @@ names (``album``, ``artist``, ``title``, ``year``, ``genre``, ``rating``,
 evaluator did — tags first, then the track payload, then ``tech`` — so a
 saved smart playlist keeps its meaning; the aliases only add names that
 resolved to nothing before.
+
+``rating``, ``album.rating`` and ``artist.rating`` are one family: the same
+unit (stars, halves) and the same ops over the three scopes a rating can name
+— the track's own verdict, the album's, the artist's. An album's rating is the
+user's verdict on the ALBUM, never the average of its tracks' ratings.
 """
 from __future__ import annotations
 
@@ -497,6 +512,13 @@ ALIASES = {
 
 _RATING_HALF = 2.0
 
+# The three fields that ARE a rating — one unit (stars, halves), one op family,
+# three scopes. The album/artist two resolve through the store's folder half.
+# Public: `server.playlists` reads it to know whether a smart playlist's spec
+# needs the store at all.
+RATING_FIELDS = ("rating", "album.rating", "artist.rating")
+_ENTITY_RATING_FIELDS = RATING_FIELDS[1:]
+
 
 def _rating_getter(rating_of: Optional[Callable]):
     def get(row: Row):
@@ -504,6 +526,33 @@ def _rating_getter(rating_of: Optional[Callable]):
             return None
         raw = (row.track.get("tags") or _EMPTY).get("RATING")
         half = rating_of(_norm_path(row.track.get("path")), raw)
+        if not half:
+            return None
+        return float(half) / _RATING_HALF
+    return get
+
+
+def _entity_rating_getter(scope: str, rating_of: Optional[Callable]):
+    """``album.rating`` / ``artist.rating`` — the user's verdict on the ENTITY.
+
+    Deliberately NOT the average of the tracks' own ratings: that is a
+    different number, drawn beside this one and labelled, and the two must
+    never be confusable. Same unit and the same op semantics as ``rating``
+    (stars, halves; unrated is no value at all), read from the folder half of
+    the injected store — which is asked once per row and answers the rows
+    where the row has no such entity at all with None."""
+    folder_of = getattr(rating_of, "folder", None)
+    if folder_of is None:
+        # A source that predates the folder scopes (or a store with no folder
+        # rows): nothing is rated there, which is all it can prove.
+        return lambda row: None
+
+    def get(row: Row):
+        entity = row.album if scope == "album" else row.artist
+        path = _norm_path((entity or _EMPTY).get("path"))
+        if not path:
+            return None
+        half = folder_of(scope, path)
         if not half:
             return None
         return float(half) / _RATING_HALF
@@ -520,6 +569,8 @@ def field_getter(field: str, rating_of: Optional[Callable] = None
     name = ALIASES.get(field, field)
     if name == "rating":
         return _rating_getter(rating_of)
+    if name in _ENTITY_RATING_FIELDS:
+        return _entity_rating_getter(name.split(".", 1)[0], rating_of)
     scope, _, key = name.partition(".")
     if scope == "tags":
         if not key:
@@ -602,7 +653,7 @@ def compile_conditions(conditions: Sequence[dict], target: str = "tracks",
         op = str(cond.get("op") or "eq")
         value = cond.get("value")
         get = field_getter(field, rating_of)
-        if ALIASES.get(field, field) == "rating" and op in _RATING_STATE:
+        if ALIASES.get(field, field) in RATING_FIELDS and op in _RATING_STATE:
             state = _RATING_STATE[op]
             out.append(lambda row, get=get, state=state: state(get(row)))
             continue

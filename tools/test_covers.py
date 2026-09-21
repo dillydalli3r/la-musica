@@ -8,8 +8,11 @@ What this pins, with every HTTP seam stubbed (no network at all):
     and with a NON-EMPTY source list even when the saved list is empty —
     COV rejects an empty one with "At least one source must be selected";
   * the streamed JSON lines parse into results carrying the keys the finder
-    already reads plus `width`/`height` — taken from the line when the line
-    states them, otherwise read from the image's own header by a ranged GET;
+    already reads plus what the candidate was MEASURED from: `width`/`height`
+    (taken from the line when the line states them, otherwise read from the
+    image's own header by a ranged GET), the container those bytes really are
+    (`format`) and how many bytes the URL answered with (`bytes`), the
+    provider's own front/back labelling and its rank in that provider's order;
   * that probe really parses JPEG (SOFn), PNG (IHDR) and all three WebP
     headers, is memoized (a second call makes no request, even across a
     restart via the disk cache), and can NEVER fail the search: a bad host, an
@@ -18,15 +21,21 @@ What this pins, with every HTTP seam stubbed (no network at all):
   * the fallback chain (Cover Art Archive by release-group MBID → Deezer →
     iTunes) runs ONLY when the meta-search returns zero or fails, stops at the
     first provider that answers, and the response records which one it was;
+  * the response also carries `sources` — one row per source that was asked
+    (used / empty / error / skipped, with the reason), which is what the cover
+    policy turns into the pick's own notes;
   * `resolve_cov_search` lets a per-search `sources`/`country` override the
     saved defaults for that one search, validates ids against the catalogue,
     and never mutates the config;
   * the import cover step (`run_cover_step`) honours the shipped defaults:
-    `cover_review` ON (the default) STAGES the found candidates in the
-    metadata review file and writes no cover at all, asks the finder for the
-    review limit, goes by release-group id through the Cover Art Archive when
-    the tags carry one, and keeps the other keys of a pre-existing staged
-    entry; OFF writes the best hit through the cover page's own writer;
+    `cover_review` ON (the default) STAGES the RANKED candidates — best first
+    by `mlo.cover_choice`, each row with the reasons that put it there, the
+    winner recorded as `chosen`, the finder's own per-source report as `notes`
+    — in the metadata review file and writes no cover at all; OFF writes the
+    WINNER through the cover page's own writer, and writes nothing (with a
+    note saying why) when no candidate reaches the cover target; both modes
+    ask for the same candidate set, the meta-search AND the identity reads the
+    tags support, and the other keys of a pre-existing staged entry survive;
     `cover_auto_fetch` OFF fetches, stages and writes nothing; an album that
     already has art is the same no-op in all three modes;
   * the lyrics built-in chain is the documented ranking, `available_sources()`
@@ -141,8 +150,11 @@ def cover_lines(count, source="itunes", big="https://img.test/a{}.jpg",
             for i in range(count)]
 
 
+# Every row a provider answers with: the finder's own keys plus what the
+# candidate was measured from (`mlo.cover_choice` reads all of them).
 ROW_KEYS = {"source", "small", "big", "title", "artist", "tracks", "url",
-            "width", "height"}
+            "width", "height", "format", "bytes", "front", "kind",
+            "release_cover", "rank"}
 
 
 # --------------------------------------------------------------------------- #
@@ -206,21 +218,37 @@ assert intg._image_size(b"GIF89a" + b"\x00" * 32) is None
 IMG = "https://img.test/a.jpg"
 clear_caches()
 probes = stub_probe({IMG: png(1000, 1000)})
-assert intg.image_dimensions(IMG) == {"width": 1000, "height": 1000}
-assert intg.image_dimensions(IMG) == {"width": 1000, "height": 1000}   # memo
+SIZE_PNG = {"width": 1000, "height": 1000, "format": "png",
+            "bytes": len(png(1000, 1000))}
+assert intg.image_dimensions(IMG) == SIZE_PNG, intg.image_dimensions(IMG)
+assert intg.image_dimensions(IMG) == SIZE_PNG                        # memo
 assert len(probes) == 1, probes
 # A restart keeps the answer: the disk cache answers, no request is made.
 intg._GENRE_CACHE.clear()
-assert intg.image_dimensions(IMG) == {"width": 1000, "height": 1000}
+assert intg.image_dimensions(IMG) == SIZE_PNG
 assert len(probes) == 1, probes
+# The container is read from the bytes, never from the URL: a JPEG served from
+# a ".png" path says jpeg, and bytes that are not one of the three say "".
+assert intg._image_format(jpeg(10, 10)) == "jpeg"
+assert intg._image_format(webp_vp8x(10, 10)) == "webp"
+assert intg._image_format(b"GIF89a" + b"\x00" * 32) == ""
+clear_caches()
+stub_probe({IMG: jpeg(1200, 1200)})
+got = intg.image_dimensions(IMG)
+assert got["format"] == "jpeg" and got["bytes"] == len(jpeg(1200, 1200)), got
+from mlo import cover_choice as _cc  # noqa: E402
+assert _cc.url_size_hint("https://is1-ssl.mzstatic.com/image/thumb/Music/abc/3000x3000bb.jpg") == 3000
+assert _cc.url_size_hint("https://img.test/a.jpg") is None
 # ...and it really is on disk under the app's data dir.
 assert os.path.isdir(os.path.join(_TMP, "genre_cache")), os.listdir(_TMP)
 
-# Unknown stays unknown, and a failing transport is unknown too — never a
-# raise, and never a made-up number.
+# An EMPTY answer is a real answer (0 bytes, no container) — which the cover
+# policy rejects out loud, and the difference between that and a probe that
+# could not run at all (unknown: no answer either way, never a made-up number).
 clear_caches()
 probes = stub_probe({})
-assert intg.image_dimensions("https://img.test/mystery.png") is None
+assert intg.image_dimensions("https://img.test/mystery.png") == {
+    "format": "", "bytes": 0}, intg.image_dimensions("https://img.test/mystery.png")
 assert intg.image_dimensions("") is None
 assert intg.image_dimensions(None) is None
 assert probes == ["https://img.test/mystery.png"], probes
@@ -320,11 +348,23 @@ assert rows[0] == {"source": "deezer", "small": "https://img.test/b-500.jpg",
                    "big": "https://img.test/b.jpg", "title": "OK Computer",
                    "artist": "Radiohead", "tracks": 12,
                    "url": "https://www.deezer.com/album/1",
-                   "width": 1400, "height": 1400}, rows[0]
+                   "width": 1400, "height": 1400,
+                   # a metadata-only row: nothing probed it, so no container,
+                   # no byte count — and COV stated no type for it
+                   # the probe for its container answered nothing here (the
+                   # stub has no bytes for this URL), which does not reject a
+                   # row whose size the provider itself stated
+                   "format": "", "bytes": 0, "front": None, "kind": None,
+                   "release_cover": None, "rank": 0}, rows[0]
+# ...and its rank is the position COV listed it in (its own relevance order)
+assert [r["rank"] for r in rows] == [0, 1, 2], rows
 # probed from the file, not from the URL's own "500x0w" hint
 assert (rows[1]["width"], rows[1]["height"]) == (3000, 3000), rows[1]
 assert (rows[2]["width"], rows[2]["height"]) == (None, None), rows[2]
-assert probes == [IMG], probes
+# The row that STATED its own size is probed too — for the container the policy
+# judges it on (and the probe's own reading wins when it has one; this row's
+# probe answered nothing, so its own 1400 survives).
+assert sorted(probes) == sorted(["https://img.test/b.jpg", IMG]), probes
 
 # Only the first COVER_PROBE_LIMIT rows are probed; the rest carry null.
 clear_caches()
@@ -479,7 +519,14 @@ stub_cov([])
 stub_json({})
 stub_probe({})
 out = intg.cover_search("Nobody", "Nothing", cfg=CFG)
-assert out == {"results": [], "provider": None}, out
+assert out["results"] == [] and out["provider"] is None, out
+# ...and every source that was asked (or never asked) says so: the report the
+# cover policy turns into the pick's own notes.
+assert [(s["id"], s["status"]) for s in out["sources"]][:2] == [
+    ("covers.musichoarders.xyz", "empty"), ("coverartarchive", "skipped")], out["sources"]
+assert any("no release id" in (s.get("detail") or "") for s in out["sources"]), out["sources"]
+assert any(s["id"] == "deezer" and s["status"] == "empty" for s in out["sources"]), out["sources"]
+assert any(s["id"] == "itunes" and s["status"] == "empty" for s in out["sources"]), out["sources"]
 # ...and a provider that errors is skipped, not fatal
 clear_caches()
 stub_cov([])
@@ -491,7 +538,8 @@ def _boom(*_a, **_k):
 
 stub_json({"api.deezer.com": _boom})
 out = intg.cover_search("Nobody", "Nothing", cfg=CFG)
-assert out == {"results": [], "provider": None}, out
+assert out["results"] == [] and out["provider"] is None, out
+assert any(s["id"] == "deezer" and s["status"] == "error" for s in out["sources"]), out["sources"]
 
 # (g) a missing artist+album is still a 400 in the route's eyes
 try:
@@ -552,7 +600,7 @@ REVIEW_FILE = os.path.join(MUSIC, ".mlo", "data", "metadata_review.json")
 # The no-op shape: nothing wanted or nothing to do — the same answer for an
 # album that already has art and for a switch that is off.
 NOOP = {"fetched": False, "applied": {}, "source": None, "note": "",
-        "staged": False, "candidates": 0}
+        "staged": False, "candidates": 0, "choice": None, "notes": []}
 
 _TAGS = {}
 
@@ -623,8 +671,16 @@ out = imp.run_cover_step(staged_album, REVIEW_ON)
 # own default of 40, and not the single hit the auto-apply used to take.
 assert (out["staged"], out["fetched"], out["candidates"]) == (True, False, 12), out
 assert out["source"] == "cov" and "12 cover" in out["note"], out
+assert out["choice"] and out["choice"]["big"] == "https://img.test/a0.jpg", out["choice"]
+assert "best: itunes" in out["note"], out["note"]
 assert set(out) == set(NOOP), out
 assert asked[0]["limit"] == imp.COVER_REVIEW_LIMIT, asked
+# The album's own release id (rel-1, from its tags) is an IDENTITY: the Cover
+# Art Archive was asked for THIS release's own cover, found none, and said so —
+# and the name-based fallbacks were never asked, because the meta-search
+# answered. Every one of those facts is in the notes the picker shows.
+assert any(n.startswith("coverartarchive: answered with no covers") for n in out["notes"]), out["notes"]
+assert any(n.startswith("deezer: skipped") for n in out["notes"]), out["notes"]
 assert len(calls) == 1, calls
 assert calls[0]["body"]["artist"] == "Radiohead", calls[0]["body"]
 assert calls[0]["body"]["album"] == "OK Computer", calls[0]["body"]
@@ -636,7 +692,8 @@ assert os.listdir(staged_album) == ["01 - Airbag.flac"], os.listdir(staged_album
 review = json.load(open(REVIEW_FILE, encoding="utf-8"))
 covers = review[imp._review_key(staged_album)]["covers"]
 assert set(covers) == {"artist", "album", "album_id", "release_group",
-                       "provider", "staged_at", "results"}, covers
+                       "provider", "staged_at", "results", "chosen", "notes",
+                       "policy"}, covers
 assert covers["artist"] == "Radiohead" and covers["album"] == "OK Computer"
 assert covers["release_group"] == "" and covers["provider"] == "cov"
 # `album_id` is the release the album's tags name — the second identity the
@@ -644,12 +701,22 @@ assert covers["release_group"] == "" and covers["provider"] == "cov"
 assert covers["album_id"] == "rel-1", covers["album_id"]
 assert len(covers["staged_at"]) == 20 and covers["staged_at"].endswith("Z"), \
     covers["staged_at"]
-# the provider's rows, verbatim and in its own order
+# the provider's rows, ranked best first by the ONE cover policy: every row
+# carries what it was measured from plus the reasons that put it there, and the
+# winner is recorded separately so the picker opens ON the pick.
 assert len(covers["results"]) == 12, len(covers["results"])
-assert covers["results"][0] == {
+first = covers["results"][0]
+assert {k: first[k] for k in ("source", "small", "big", "title", "artist",
+                              "tracks", "url", "width", "height")} == {
     "source": "itunes", "small": "https://img.test/a0-500.jpg",
     "big": "https://img.test/a0.jpg", "title": "T", "artist": "A", "tracks": 12,
-    "url": "https://rel/", "width": 1200, "height": 1200}, covers["results"][0]
+    "url": "https://rel/", "width": 1200, "height": 1200}, first
+assert first["rejected"] is None and first["score"] > 0, first
+assert first["reasons"] and "1200px cover target" in " ".join(first["reasons"]), first
+assert covers["chosen"]["big"] == "https://img.test/a0.jpg", covers["chosen"]
+assert covers["policy"]["minimum"] == 1200, covers["policy"]
+# identical rows tie on every rule, so the provider's own order (the position
+# it listed them in) keeps them in the order it sent them
 assert [r["big"] for r in covers["results"]] == \
     [f"https://img.test/a{i}.jpg" for i in range(12)], covers["results"]
 
@@ -672,39 +739,53 @@ stub_json({})
 out = imp.run_cover_step(default_album, {"music_folder": MUSIC})
 assert (out["staged"], out["fetched"], out["candidates"]) == (True, False, 3), out
 
-# A row with no image URL is not an option the pick screen could apply at all
-# (`POST /api/cover/fromurl` takes a URL), so it is not staged — and a set
-# that would have been all-dead is the "nothing found" case above.
+# A row with no image URL cannot be applied at all (`POST /api/cover/fromurl`
+# takes a URL), so the policy REJECTS it — and it is still reported, with the
+# reason, rather than being dropped in silence. The usable rows are unaffected.
 nowrite_album = album("Muse/Origin of Symmetry", artist="Muse",
                       title="Origin of Symmetry")
 clear_caches()
-lines = cover_lines(3, width=1000, height=1000)
+lines = cover_lines(3, width=1400, height=1400)
 lines.append(json.dumps({"type": "cover", "source": "itunes",
-                         "smallCoverUrl": "https://img.test/x-500.jpg",
                          "releaseInfo": {"title": "T", "artist": "A"}}))
 stub_cov(lines)
 stub_json({})
 out = imp.run_cover_step(nowrite_album, REVIEW_ON)
-assert (out["staged"], out["candidates"]) == (True, 3), out
+assert (out["staged"], out["candidates"]) == (True, 4), out
 staged = imp.staged_metadata(nowrite_album, REVIEW_ON)["covers"]["results"]
-assert [r["big"] for r in staged] == [f"https://img.test/a{i}.jpg" for i in range(3)], staged
+assert [r["big"] for r in staged if not r["rejected"]] == \
+    [f"https://img.test/a{i}.jpg" for i in range(3)], staged
+assert staged[-1]["big"] is None and "no image URL" in staged[-1]["rejected"], staged[-1]
 
-# A release-group id in the tags asks the Cover Art Archive BY IDENTITY — the
-# name search is not asked at all — and gets the same review limit.
+# A release-group id in the tags asks the Cover Art Archive BY IDENTITY (the
+# stand-in, by id — no name guessing) AND the meta-search by name: both carry
+# candidates the other does not, and the policy ranks them together. The
+# identity read runs only when the name search had nothing, so here the CAA
+# answers and the fallback chain supplies the rows.
 rg_album = album("Radiohead/Amnesiac", title="Amnesiac", rg=CAA_RG)
 clear_caches()
 cov_calls = stub_cov([])
 jcalls = stub_json({"coverartarchive.org": {"images": [
-    {"front": i == 0, "image": f"https://coverartarchive.org/release/rg/{i}.png",
+    {"front": i == 0, "types": ["Front"] if i == 0 else ["Back"],
+     "image": f"https://coverartarchive.org/release/rg/{i}.png",
      "thumbnails": {"large": f"https://coverartarchive.org/release/rg/{i}-500.jpg"}}
     for i in range(15)]}})
+stub_probe({f"https://coverartarchive.org/release/rg/{i}.png": jpeg(1500, 1500)
+            for i in range(15)})
 out = imp.run_cover_step(rg_album, REVIEW_ON)
 assert (out["staged"], out["candidates"], out["source"]) == \
     (True, 12, "coverartarchive"), out
-assert cov_calls == [], cov_calls
+# the meta-search WAS asked (by name) and had nothing — which is why the
+# identity read ran at all: an empty answer is a fallback case, never a
+# silent one
+assert len(cov_calls) == 1 and cov_calls[0]["body"]["artist"] == "Radiohead", cov_calls
 assert [c[0] for c in jcalls] == [f"{intg.CAA_BASE}/release-group/{CAA_RG}"], jcalls
 entry = imp.staged_metadata(rg_album, REVIEW_ON)["covers"]
 assert entry["release_group"] == CAA_RG and len(entry["results"]) == 12, entry
+# the group's images are NOT the release's own cover, and the policy says so
+assert entry["results"][0]["release_cover"] is False, entry["results"][0]
+assert entry["results"][0]["kind"] == "front", entry["results"][0]
+assert "release-group stand-in" in " ".join(entry["results"][0]["reasons"]), entry["results"][0]
 
 # The metadata step may have staged this very album: its keys survive.
 imp.stage_metadata(staged_album, {"artist": "Radiohead",
@@ -749,16 +830,20 @@ srv_main._sniff_image_ext = lambda data, ctype=None: ".png"
 
 staged_before = copy.deepcopy(imp.staged_metadata(staged_album, REVIEW_ON))
 clear_caches()
-calls = stub_cov(cover_lines(5, width=1000, height=1000))
+calls = stub_cov(cover_lines(5, width=1400, height=1400))
 stub_json({})
 out = imp.run_cover_step(staged_album, {"music_folder": MUSIC,
                                         "cover_review": False})
-assert (out["fetched"], out["staged"], out["candidates"]) == (True, False, 0), out
+assert (out["fetched"], out["staged"], out["candidates"]) == (True, False, 5), out
 assert out["source"] == "cov" and out["note"].startswith("cover fetched"), out
-# no review: the step asks for the best hit (the old shape), takes it, writes it
-assert asked[-1]["limit"] == 2, asked
+# no review: the SAME candidate set is ranked (the pick must be the best of what
+# exists, not whatever answered first) and the winner is written — so both modes
+# ask for the same limit.
+assert asked[-1]["limit"] == imp.COVER_REVIEW_LIMIT, asked
 assert out["applied"] == {"cover": os.path.join(staged_album, "cover.png")}, out
-# the first (best) hit went through the writer, with the album's identity
+assert out["choice"]["big"] == "https://img.test/a0.jpg", out["choice"]
+assert "best of 5 candidate(s)" in out["note"], out["note"]
+# the winner went through the writer, with the album's identity
 assert fetched == [{"url": "https://img.test/a0.jpg", "artist": "Radiohead",
                     "album": "OK Computer", "rg": ""}], fetched
 assert [w["album_dir"] for w in written] == [staged_album], written
@@ -767,6 +852,22 @@ assert written[0]["stem"] == "cover" and written[0]["data"] == png(600, 600), wr
 assert not os.path.exists(os.path.join(staged_album, "cover.png"))
 assert imp.staged_metadata(staged_album, REVIEW_ON) == staged_before, \
     imp.staged_metadata(staged_album, REVIEW_ON)
+
+# Every candidate is below the cover target (the floor the write path and the
+# grader both call the minimum): the step writes NOTHING and says why, rather
+# than quietly taking the smallest image the internet had. The candidates are
+# still returned, so a user can pick one by hand.
+clear_caches()
+calls = stub_cov(cover_lines(3, width=800, height=800))
+stub_json({})
+fetched.clear()
+out = imp.run_cover_step(nowrite_album, {"music_folder": MUSIC,
+                                         "cover_review": False})
+assert (out["fetched"], out["applied"]) == (False, {}), out
+assert "no candidate could be used" in out["note"], out["note"]
+assert "below the minimum 1200×1200" in out["note"], out["note"]
+assert fetched == [], fetched
+assert out["candidates"] == 3 and out["choice"] is None, out
 
 # `cover_auto_fetch` off: nothing is fetched, staged or written, with either
 # value of cover_review — the finder is not even asked.

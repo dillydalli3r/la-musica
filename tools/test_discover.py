@@ -47,7 +47,7 @@ def ok(cond, label):
 
 ROW_KEYS = {"kind", "title", "artist", "year", "source", "source_label",
             "cover_url", "page_url", "mbid", "release_group_mbid", "path",
-            "owned", "in_library", "tracks", "reason", "also_from"}
+            "owned", "in_library", "tracks", "score", "reason", "also_from"}
 
 CALLS = []
 
@@ -194,8 +194,9 @@ ok(all(spec["id"] in discover.BY_ID for spec in discover.SOURCES)
    and len(discover.SOURCES) == len(discover.BY_ID),
    "every registry id is unique and resolvable")
 ok({r.path for r in api_discover.router.routes}
-   == {"/api/discover/genres", "/api/discover/genre", "/api/discover/recommended"},
-   "the router serves exactly the three documented paths")
+   == {"/api/discover/genres", "/api/discover/genre", "/api/discover/recommended",
+       "/api/discover/charts"},
+   "the router serves exactly the four documented paths")
 
 # --------------------------------------------------------------------------- #
 # 2) genres — the library's list merged with the online ones

@@ -14,6 +14,13 @@ config validator, the wizard and the notification all need the same answer:
   audio alone, in the wizard's own step order (Links, Covers, Genres, Lyrics,
   Advisory). ``import_review_families`` names the ones the user wants to decide
   by hand even in automatic mode; review mode keeps all of them.
+* **manual counterparts** — every family entry carries the options a person
+  uses instead (`manual_options`), one row per thing the step decides, each
+  naming the route it calls, the entry point both halves share and the tags and
+  sidecars it owns. The pipeline's own steps that no family owns (the artist's
+  image, the two descriptions, the instrumental pass) are in `OTHER_STEPS`, in
+  the same shape. The audit test reads that table: it is what keeps "an import
+  can do it" and "a person can do it" from drifting apart.
 * **gaps** — what an album is still missing once the pipeline has done all it
   can. Read off `mlo.grader`'s own checks — a gap here IS a grading failure,
   never a second opinion — plus the two families the grader deliberately does
@@ -39,8 +46,9 @@ MODES = ("automatic", "review")
 # is, and a release the import could not identify is reported by the family
 # steps that need its identity). `off` is what "do not decide this for me"
 # means to the step that reads it, `review_key` the switch a family may
-# already be under review by, and `chain` the script ids that would otherwise
-# decide it.
+# already be under review by, `chain` the script ids that would otherwise
+# decide it, and `manual` the options a person uses instead — one row per
+# thing the family carries, in the shape `manual_options` documents.
 FAMILIES = (
     {
         "id": "links",
@@ -49,6 +57,28 @@ FAMILIES = (
         "off": {"rym_links_auto": False},
         "codes": {"MB_LINK": "MusicBrainz release link",
                   "RYM_LINK": "RateYourMusic release link"},
+        "manual": (
+            {"id": "links-mb",
+             "surface": ("wizard", "album-page", "track-page", "tag-actions"),
+             "route": "/api/mb/assign",
+             "method": "POST",
+             "auto": "server.imports:_stamp_release",
+             "service": "server.main:mb_assign",
+             "tags": ("MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEGROUPID",
+                      "MUSICBRAINZ_ALBUMARTISTID", "MUSICBRAINZ_TRACKID",
+                      "MUSICBRAINZ_RELEASETRACKID", "LABEL", "CATALOGNUMBER",
+                      "BARCODE", "DATE", "ORIGINALDATE", "RELEASECOUNTRY",
+                      "RELEASESTATUS", "RELEASETYPE", "MEDIA", "SCRIPT"),
+             "files": ()},
+            {"id": "links-rym",
+             "surface": ("wizard", "links-editor"),
+             "route": "/api/rym/resolve",
+             "method": "GET",
+             "auto": "server.imports:stamp_rym_links",
+             "service": "server.main:rym_resolve",
+             "tags": ("RATEYOURMUSIC_ALBUM", "RATEYOURMUSIC_ARTIST"),
+             "files": ()},
+        ),
     },
     {
         "id": "cover",
@@ -59,6 +89,24 @@ FAMILIES = (
         "off": {"cover_review": True},
         "review_key": "cover_review",
         "codes": {"COVER": "cover art"},
+        "manual": (
+            {"id": "cover-file",
+             "surface": ("wizard", "album-page", "track-page"),
+             "route": "/api/cover",
+             "method": "POST",
+             "auto": "server.imports:run_cover_step",
+             "service": "server.main:upload_cover",
+             "tags": (),
+             "files": ("cover.jpg", "cover.png")},
+            {"id": "cover-online",
+             "surface": ("wizard", "album-page", "tag-actions"),
+             "route": "/api/cover/fromurl",
+             "method": "POST",
+             "auto": "server.imports:cover_candidates",
+             "service": "server.main:cover_from_url",
+             "tags": (),
+             "files": ("cover.jpg", "cover.png")},
+        ),
     },
     {
         "id": "genres",
@@ -70,16 +118,69 @@ FAMILIES = (
                   "GENRE_COUNT": "genre count",
                   "GENRE_ORDER": "genre order",
                   "GENRE_VOCAB": "genre vocabulary"},
+        "manual": (
+            {"id": "genres-all",
+             "surface": ("wizard", "tag-actions"),
+             "route": "/api/genres/import",
+             "method": "POST",
+             "auto": "server.imports:_stamp_release",
+             "service": "server.main:genres_import",
+             "tags": ("GENRE",),
+             "files": ()},
+            {"id": "genres-mb",
+             "surface": ("wizard", "album-page", "tag-actions"),
+             "route": "/api/mb/genres",
+             "method": "POST",
+             "auto": "server.imports:_stamp_release",
+             "service": "server.main:mb_genres_import",
+             "tags": ("GENRE",),
+             "files": ()},
+        ),
     },
     {
         "id": "lyrics",
         "label": "Lyrics",
         "step": "Lyrics",
-        # No switch makes script 13 write lyrics, so a lyrics review drops the
-        # fetch from the chain instead (see `dropped_chain_ids`).
-        "chain": (13,),
+        # The family is the whole lyrics chain (fetch → transliterate →
+        # publish), so a lyrics review drops all of it from the chain rather
+        # than letting a later script write what the user kept for themselves
+        # (see `dropped_chain_ids`). No switch makes script 13 fetch, and
+        # nothing gates 17 once lyrics exist.
+        "chain": (13, 17),
         "codes": {"LYRICS": "lyrics",
                   "XLIT_MISSING": "lyric transliteration/translation"},
+        # The three halves of the chain, each with the option that runs the
+        # SAME entry point by hand — the fetch and the transliteration pass are
+        # per-track cores the route and the script both call, and the publish
+        # is the one core the editor's own route shares. `tags`/`files` are
+        # what each half owns: the fetch and the transforms write local data,
+        # publishing writes NOTHING locally (it is the only outward step).
+        "manual": (
+            {"id": "lyrics-fetch",
+             "surface": ("wizard", "tag-actions", "album-page", "track-page"),
+             "route": "/api/lyrics/auto",
+             "method": "POST",
+             "auto": "mlo.lyrics_fetch:fetch_one",
+             "service": "mlo.lyrics_fetch:fetch_one",
+             "tags": ("LYRICS",),           # USLT / ©lyr / vorbis LYRICS
+             "files": (".lrc",)},
+            {"id": "lyrics-xlit",
+             "surface": ("wizard", "tag-actions"),
+             "route": "/api/lyrics/xlit",
+             "method": "POST",
+             "auto": "mlo.lyrics_xlit:run_lyrics_xlit",
+             "service": "mlo.lyrics_xlit:run_lyrics_xlit",
+             "tags": ("TRANSLITERATION-<lang>", "TRANSLATION-<lang>"),
+             "files": (".romaji.lrc", ".<lang>.lrc")},
+            {"id": "lyrics-publish",
+             "surface": ("wizard", "tag-actions", "track-page"),
+             "route": "/api/lyrics/publish-batch",
+             "method": "POST",
+             "auto": "mlo.lyrics_publish:publish_one",
+             "service": "mlo.lyrics_publish:publish_one",
+             "tags": (),
+             "files": ()},
+        ),
     },
     {
         "id": "advisory",
@@ -89,10 +190,117 @@ FAMILIES = (
         # ladder was told not to invent is one the user answers.
         "off": {"advisory_auto_fetch": False, "advisory_fallback": "none"},
         "codes": {"ITUNESADVISORY": "advisory"},
+        "manual": (
+            {"id": "advisory-fetch",
+             "surface": ("wizard", "tag-actions"),
+             "route": "/api/mb/advisory/fetch",
+             "method": "POST",
+             "auto": "server.imports:fetch_advisories",
+             "service": "server.main:mb_advisory_fetch",
+             "tags": ("ITUNESADVISORY",),
+             "files": ()},
+        ),
     },
 )
 
+
+# The import's own steps that NO family owns: they are not decisions (the
+# grader counts them, nothing hands them to the user as a gap), but they are
+# still features an import performs, so a person must be able to run each one
+# by hand — the same row shape as a family's `manual` tuple, and the same way of
+# saying which tags it owns.
+OTHER_STEPS = (
+    {"id": "artist-image",
+     "family": None,
+     "surface": ("wizard", "artist-page", "tag-actions"),
+     "route": "/api/artist/image",
+     "method": "POST",
+     "auto": "server.imports:apply_metadata",
+     "service": "server.api_discovery:artist_image_save",
+     "tags": (),
+     "files": ("artist.jpg", "artist.png")},
+    {"id": "artist-description",
+     "family": None,
+     "surface": ("wizard", "artist-page", "tag-actions"),
+     "route": "/api/artist/description",
+     "method": "POST",
+     "auto": "server.imports:apply_metadata",
+     "service": "server.api_discovery:artist_description_save",
+     "tags": (),
+     "files": ("description.txt",)},
+    {"id": "album-description",
+     "family": None,
+     "surface": ("wizard", "album-page", "tag-actions"),
+     "route": "/api/album/description",
+     "method": "POST",
+     "auto": "server.imports:apply_metadata",
+     "service": "server.api_discovery:album_description_save",
+     "tags": (),
+     "files": ("description.txt",)},
+    {"id": "instrumental",
+     "family": None,
+     "surface": ("wizard", "tag-actions"),
+     "route": "/api/instrumental/fetch",
+     "method": "POST",
+     "auto": "server.imports:fetch_instrumentals",
+     "service": "server.main:instrumental_fetch",
+     "tags": ("INSTRUMENTAL",),
+     "files": ()},
+)
+
 FAMILY_IDS = tuple(f["id"] for f in FAMILIES)
+
+# What a manual row says, field by field. The point of the table is that the
+# automatic path and the option a person clicks cannot drift apart silently, so
+# every row carries BOTH halves:
+#
+#   id       stable key, also the action id a surface is keyed by
+#   surface  where a user finds the option ("wizard", "tag-actions", the entity
+#            pages, the links editor)
+#   route    the HTTP route the option calls, and `method` the verb — the
+#            app must serve that exact pair
+#   service  `module:attr` the option calls (what the route's handler runs)
+#   auto     `module:attr` of the automatic counterpart's entry point. Equal to
+#            `service` where the button and the pipeline run ONE code path, which
+#            is the strongest form of "the two must not diverge"
+#   tags     the audio tags the step owns (a `<lang>` part is per-language)
+#   files    the sidecar files it owns ("" = none, e.g. publishing to LRCLIB
+#            writes nothing locally at all)
+#
+# `OTHER_STEPS` rows carry the same fields plus `family` (None there, since no
+# family names them).
+MANUAL_KEYS = ("id", "surface", "route", "method", "service", "auto", "tags", "files")
+
+
+def manual_options(family_id=None):
+    """The manual counterparts: every family's rows, or one family's.
+
+    Without an argument: every row of every family plus `OTHER_STEPS`, in the
+    wizard's step order — the whole "what an import does, and where a person
+    does it instead" table.
+    """
+    if family_id is None:
+        rows = []
+        for entry in FAMILIES:
+            for row in entry.get("manual") or ():
+                rows.append({"family": entry["id"], **row})
+        return tuple(rows) + tuple(OTHER_STEPS)
+    entry = family(family_id)
+    return tuple(entry.get("manual") or ()) if entry else ()
+
+
+def manual_option(option_id):
+    """One row by its id, across the families and `OTHER_STEPS`, or None."""
+    for row in manual_options():
+        if row["id"] == option_id:
+            return row
+    return None
+
+
+def option_ids(family_id):
+    """The manual option ids one family offers, in table order."""
+    return tuple(row["id"] for row in manual_options(family_id))
+
 
 _BY_ID = {f["id"]: f for f in FAMILIES}
 _ORDER = {f["id"]: i for i, f in enumerate(FAMILIES)}
@@ -215,8 +423,10 @@ def dropped_chain_ids(cfg):
     """Script ids the chain must not run because a family is under review.
 
     Script 13 fetches lyrics whatever any switch says, so keeping lyrics for
-    the user means dropping the fetch — `server.imports.chain_for` is the one
-    place that computes a chain, so the preview and the run agree.
+    the user means dropping the fetch — and with it script 17, which reads the
+    lyrics 13 would have written and decides the transliteration/translation
+    half of the same family. `server.imports.chain_for` is the one place that
+    computes a chain, so the preview and the run agree.
     """
     out = set()
     for fid in forced_families(cfg):

@@ -5,7 +5,7 @@ import { ChevronDown, ChevronRight, CircleAlert, Play, Wand2, Trash2, FolderSync
 import { api } from "../api";
 import { LinkChips, LinkEditorButton } from "../components/Links";
 import { SubtitledVideo } from "../components/SubtitledVideo";
-import { EmptyState, AdvisoryMark, CachedMark, GradeBadge, PageLoading } from "../components/Badges";
+import { EmptyState, AdvisoryMark, CachedMark, GradeBadge, PageLoading, PendingMark, pendingSummary } from "../components/Badges";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import CoverSearchModal from "../components/CoverSearchModal";
 import Description from "../components/Description";
@@ -19,16 +19,20 @@ import { isVideoFile } from "../lib/fmt";
 import BulkTagsDialog from "../components/BulkTagsDialog";
 import Modal from "../components/Modal";
 import MoreLikeThis from "../components/MoreLikeThis";
+import OnlineRecommendations from "../components/OnlineRecommendations";
+import LockedChip from "../components/LockedChip";
+import { useLockWhy } from "../lib/locks";
 import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
 import StarRating from "../components/StarRating";
-import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
+import { ratingOf, useRatings, useSetRating, FOLDER_RATING_NOTE } from "../lib/ratings";
 import TagActionsMenu from "../components/TagActionsMenu";
 import StatsPanel from "../components/StatsPanel";
 import TrackDetails, { CreditsPanel, creditTagsFrom } from "../components/TrackDetails";
 import { AlbumDetails } from "../components/AlbumDetails";
 import { SortHeader, sortRows, toggleSort, groupByDisc, type SortState } from "../lib/sort.tsx";
 import { ColumnsMenu, ColumnResizer, useColumnPrefs, useColumnWidths, useCustomColumns, customCols, customColValue, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, ALBUM_TRACK_MIN_W, TAG_COL_W, type Col } from "../lib/columns";
+import { useI18n } from "../lib/i18n";
 import { toast, useStore } from "../store";
 import { fmtTech, albumTech } from "../lib/fmt";
 import { fmtDuration } from "../lib/fmt";
@@ -72,10 +76,14 @@ export default function AlbumPage() {
       const c = await api.metadataCandidates(data?.meta?.ALBUMARTIST ?? data?.meta?.ARTIST ?? "", decoded);
       return c.staged?.covers ?? null;
     },
-    enabled: !!data && !data.cover_file,
+    enabled: !!data && (!data.cover_file || !!data.pending),
     retry: false,
   });
   const stagedCoverRows = stagedCovers.data?.results ?? null;
+  // A job holding this folder (a run, an import, an organize) means these files
+  // are not playable right now: the header and every row say so BEFORE the
+  // click, in the registry's own words.
+  const albumLockWhy = useLockWhy(data?.path ?? decoded);
   const playNow = useStore((s) => s.playNow);
   const queue = useStore((s) => s.queue);
   const queueAdd = useStore((s) => s.queueAdd);
@@ -128,6 +136,15 @@ export default function AlbumPage() {
   const [trackW, setTrackW, resetTrackW] = useColumnWidths("album-tracks");
   const coverInput = useRef<HTMLInputElement>(null);
   const qc = useQueryClient();
+  // The one cover policy's own words (mlo/cover_choice) and the pending state
+  // of a framework album are read by the panel and the picker below.
+  const { t } = useI18n();
+  // The marker's sentence — the same one the library row and the cards show —
+  // used by the header chip, the panel below and as the reason the play button
+  // is off. Null for a complete album (and until the payload arrives).
+  // Named apart from `albumPending` above, which is the RATING write's
+  // in-flight flag from useSetRating — a different fact entirely.
+  const pendingNote = data ? pendingSummary(data, t) : null;
 
   // Raw video files (VOB/MKV/...) in this album folder that the remuxer
   // could convert to MP4 — surfaced as a one-click action in the header.
@@ -141,10 +158,15 @@ export default function AlbumPage() {
   // Whether the album-description check grades this folder (Settings →
   // Grading). The config is already in the app-wide cache, so this is free.
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
-  // One GET /api/ratings for the whole page (react-query dedupes it across
-  // every row) and the optimistic setter the star controls share.
+  // One GET /api/ratings per scope for the whole page (react-query dedupes it
+  // across every row) and the optimistic setters the star controls share. The
+  // header needs the ALBUM scope beside the track one: the user's verdict on
+  // the album is a different fact from the average of its tracks' ratings, and
+  // only the average is derived from the track map.
   const { data: ratingsData } = useRatings();
   const { setRating, pending } = useSetRating();
+  const { data: albumRatingsData } = useRatings("album");
+  const { setRating: setAlbumRating, pending: albumPending } = useSetRating("album");
 
   const convertVideos = async () => {
     setRemuxing(true);
@@ -313,11 +335,15 @@ export default function AlbumPage() {
     setSelection({ tracks: selection.tracks.filter((p) => !data.tracks.some((t) => t.path === p)) });
 
   const ratings = ratingsData?.ratings;
-  // The album's own star read-out: the mean over the tracks that ARE rated
-  // (an unrated track must not drag it toward zero), snapped to a half star.
-  const albumRatings = (data?.tracks ?? []).map((t) => ratingOf(ratings, t.path)).filter((v) => v > 0);
-  const albumRating = albumRatings.length
-    ? Math.round((albumRatings.reduce((a, b) => a + b, 0) / albumRatings.length) * 2) / 2
+  // The album's OWN rating: the user's verdict on the album, out of the album
+  // scope. Deliberately NOT derived from the tracks below.
+  const albumVerdict = ratingOf(albumRatingsData?.ratings, data?.path);
+  // The track AVERAGE, for the labelled read-out beside it: the mean over the
+  // tracks that ARE rated (an unrated track must not drag it toward zero),
+  // snapped to a half star, plus how many tracks it is over.
+  const ratedTracks = (data?.tracks ?? []).map((t) => ratingOf(ratings, t.path)).filter((v) => v > 0);
+  const trackAverage = ratedTracks.length
+    ? Math.round((ratedTracks.reduce((a, b) => a + b, 0) / ratedTracks.length) * 2) / 2
     : 0;
 
   const queueTracks = data.tracks.map((t) => ({
@@ -569,26 +595,56 @@ export default function AlbumPage() {
                   on). The pick the silent auto-apply used to make is now one
                   click — shown only for a cover-less album that has a staged
                   set, so an album with art looks exactly as before. */}
-              {!data.cover_file && !!stagedCoverRows?.length && (
-                <button
-                  className="btn-primary mt-2 w-40 sm:w-56 !py-1.5 text-xs"
-                  onClick={() =>
-                    setCoverSearch({
-                      results: stagedCoverRows,
-                      provider: stagedCovers.data?.provider ?? null,
-                    })
-                  }
-                  title="Covers fetched during import, waiting for you to pick one"
-                >
-                  <ImageIcon className="h-3.5 w-3.5" />
-                  Choose a cover ({stagedCoverRows.length})
-                </button>
+              {(!data.cover_file || !!data.pending) && !!stagedCoverRows?.length && (
+                <>
+                  <button
+                    className="btn-primary mt-2 w-40 sm:w-56 !py-1.5 text-xs"
+                    onClick={() =>
+                      setCoverSearch({
+                        results: stagedCoverRows,
+                        provider: stagedCovers.data?.provider ?? null,
+                      })
+                    }
+                    title="Covers fetched during import, ranked by the cover policy, waiting for you to pick one"
+                  >
+                    <ImageIcon className="h-3.5 w-3.5" />
+                    Choose a cover ({stagedCoverRows.length})
+                  </button>
+                  {stagedCovers.data?.chosen && (
+                    <div className="mt-1 w-40 sm:w-56 text-[11px] text-zinc-500 leading-snug">
+                      <span className="text-zinc-400">{t("cover.best_pick")}: </span>
+                      <span className="text-accent-soft">
+                        {SOURCE_NAMES[stagedCovers.data.chosen.source] ?? stagedCovers.data.chosen.source}
+                        {stagedCovers.data.chosen.width && stagedCovers.data.chosen.height
+                          ? ` ${stagedCovers.data.chosen.width}×${stagedCovers.data.chosen.height}`
+                          : ""}
+                      </span>
+                      <span className="block text-zinc-600">
+                        {(stagedCovers.data.chosen.reasons ?? []).slice(-1)[0] ?? ""}
+                      </span>
+                    </div>
+                  )}
+                </>
               )}
             </div>
             <div className="flex-1 min-w-0 w-full">
               <PageHeader
                 overline="Album"
-                title={data.meta?.ALBUM ?? data.path.split("/").pop() ?? ""}
+                title={
+                  // The advisory (E / C) rides WITH the title — the badge row
+                  // below already carries grade/audit/cover state, and the one
+                  // mark that tells a reader "this release is explicit" belongs
+                  // on the name they are reading, not in a chip two lines down.
+                  <span className="inline-flex items-center gap-2 min-w-0">
+                    <span className="truncate">{data.meta?.ALBUM ?? data.path.split("/").pop() ?? ""}</span>
+                    <AdvisoryMark value={data.meta?.ITUNESADVISORY ?? data.meta?.ALBUMITUNESADVISORY} />
+                    {/* held right now (a run, an import, an organize) */}
+                    <LockedChip path={data.path} />
+                    {/* added, not downloaded yet — the same mark the library
+                        row and the cards carry, saying the same sentence */}
+                    <PendingMark album={data} size="md" label />
+                  </span>
+                }
                 subtitle={
                   /* the album's meta line: the artist (opens the artist page),
                      then both release dates and label · catalogue */
@@ -624,8 +680,9 @@ export default function AlbumPage() {
                   maxDisc > 1 ? `${maxDisc} disc${maxDisc === 1 ? "" : "s"}` : null,
                 ].filter((c): c is string => !!c)}
               >
-                {/* identity strip: the grade verdict, the advisory mark and the
-                    MB / RYM links — deliberately outside the truncating title */}
+                {/* identity strip: the grade verdict and the MB / RYM links —
+                    deliberately outside the truncating title. The advisory
+                    mark is NOT here any more: it sits with the title. */}
                 <div className="flex items-center gap-2 flex-wrap">
                   <button
                     className={`h-2 w-2 rounded-full shrink-0 transition-opacity ${verdictPass ? "bg-emerald-500/70" : "bg-red-500/80"}`}
@@ -633,11 +690,36 @@ export default function AlbumPage() {
                     onClick={() => setIssuesOpen(!issuesOpen)}
                     aria-label="Grading verdict"
                   />
-                  <AdvisoryMark value={data.meta?.ITUNESADVISORY ?? data.meta?.ALBUMITUNESADVISORY} size="md" />
-                  {/* the album's average over the RATED tracks only — an unrated
-                      track must not drag it toward zero */}
-                  {albumRating > 0 && (
-                    <StarRating readOnly size="lg" showValue label="Album rating" value={albumRating} />
+                  {/* the album's OWN rating — the user's verdict on the album,
+                      editable, and a different fact from the mean of its
+                      tracks drawn beside it. It lives in the app's store: a
+                      folder has no file to carry a RATING tag, which the
+                      tooltip says outright. */}
+                  <span className="inline-flex items-center gap-1.5" title="Your rating for the album — kept in the app's database; an album folder has no file tag">
+                    <StarRating
+                      size="lg"
+                      showValue
+                      label="Album rating"
+                      hint={`Your rating for the album: click a star's left half for a half star, click the value already set to clear it (← / → nudge, Delete clears). ${FOLDER_RATING_NOTE}`}
+                      value={albumVerdict}
+                      onChange={(v) => setAlbumRating(data.path, v)}
+                      pending={albumPending(data.path)}
+                    />
+                    <span className="text-[11px] text-zinc-500">Album rating</span>
+                  </span>
+                  {/* the mean over the RATED tracks only — an unrated track must
+                      not drag it toward zero — labelled as an average so it can
+                      never be read as the album's own rating */}
+                  {trackAverage > 0 && (
+                    <span
+                      className="inline-flex items-center gap-1.5"
+                      title="The mean of the ratings you gave this album's tracks — not the album rating beside it"
+                    >
+                      <StarRating readOnly size="sm" value={trackAverage} />
+                      <span className="text-[11px] text-zinc-500">
+                        avg {trackAverage} from {ratedTracks.length} rated track{ratedTracks.length === 1 ? "" : "s"}
+                      </span>
+                    </span>
                   )}
                   {/* MusicBrainz / RateYourMusic identity links: exactly one
                       of each — prefer the release over its group */}
@@ -650,6 +732,54 @@ export default function AlbumPage() {
                     ]}
                   />
                 </div>
+                {/* A FRAMEWORK album: "Add to library" created this folder
+                    before its audio existed, so the page must say what is
+                    happening to it rather than read as an empty album. The
+                    wish's own state (attempts, the reason a run left, when the
+                    next search is due) comes from the queue's policy, and the
+                    content the ADD already fetched is named with it. */}
+                {data.pending && (
+                  <div className="rounded-lg border border-amber-900/60 bg-amber-950/20 px-3 py-2 space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap text-xs text-amber-200">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+                      <span className="font-semibold">{t("pending.title")}</span>
+                      {data.pending_reason && (
+                        <span className="text-amber-200/70">{data.pending_reason}</span>
+                      )}
+                      {/* the state, in the marker's own words — one sentence
+                          for the dot, the panel and every row that carries it */}
+                      {pendingNote && (
+                        <span className="text-amber-200/70">{pendingNote.state}</span>
+                      )}
+                      {data.wish_id != null && (
+                        <Link
+                          to="/soulseek"
+                          className="text-amber-200/80 underline underline-offset-2 hover:text-amber-100"
+                        >
+                          queue
+                        </Link>
+                      )}
+                    </div>
+                    <div className="text-[11px] text-amber-200/60">{t("pending.note")}</div>
+                    {data.wish?.reason && data.wish.reason !== data.pending_reason && (
+                      <div className="text-[11px] text-amber-200/60">{data.wish.reason}</div>
+                    )}
+                    {data.prefetched && (
+                      <div className="text-[11px] text-zinc-500">
+                        {[
+                          data.prefetched.artist_image && "artist image",
+                          data.prefetched.artist_description && "artist description",
+                          data.prefetched.album_description && "album description",
+                          !!data.prefetched.cover_candidates &&
+                            `${data.prefetched.cover_candidates} cover candidates`,
+                          !!(data.prefetched.links?.album || data.prefetched.links?.artist) && "links",
+                        ]
+                          .filter((x): x is string => typeof x === "string" && !!x)
+                          .join(" · ")}
+                      </div>
+                    )}
+                  </div>
+                )}
                 {issueEntries.length > 0 && (
                   <div>
                     <button
@@ -682,14 +812,20 @@ export default function AlbumPage() {
                 )}
                 {/* the album's actions, directly under the problems line */}
                 <div className="flex items-center gap-2 flex-wrap pt-2">
-                    <button
-                      className="btn-icon-primary"
-                      onClick={() => playNow(queueTracks)}
-                      title="Play the album from the top"
-                      aria-label="Play album"
-                    >
-                      <Play className="h-4 w-4 fill-current" />
-                    </button>
+                    {/* A framework album has nothing to play yet, so its play
+                        button is OFF and says why (the lock reason first: a job
+                        holding the folder is the more immediate fact). */}
+                    <span title={pendingNote?.full}>
+                      <button
+                        className={`btn-icon-primary${albumLockWhy || pendingNote ? " opacity-60" : ""}`}
+                        onClick={() => playNow(queueTracks)}
+                        disabled={!!pendingNote}
+                        title={albumLockWhy || pendingNote?.full || "Play the album from the top"}
+                        aria-label={pendingNote?.full || "Play album"}
+                      >
+                        <Play className="h-4 w-4 fill-current" />
+                      </button>
+                    </span>
                     <FavHeart
                       kind="album"
                       id={data.path}
@@ -1224,6 +1360,7 @@ export default function AlbumPage() {
                       >
                         {tr.tags.TITLE ?? tr.file}
                       </Link>
+                      <LockedChip path={tr.path} />
                       {!!tr.issues?.length && (
                         <button
                           className="text-[9px] text-red-400/70 shrink-0 hover:text-red-300"
@@ -1275,17 +1412,20 @@ export default function AlbumPage() {
                       <span className="row-hover shrink-0" onClick={(e) => e.stopPropagation()}>
                         <FavHeart kind="track" id={tr.path} mbid={tr.tags.MUSICBRAINZ_TRACKID} iconClass="h-3.5 w-3.5" title={undefined} />
                       </span>
+                      {/* The rating lives HERE, in the title cell, next to the
+                          other per-track marks — the same place the library
+                          page puts it. It used to sit inside the Dur column,
+                          which is 80px wide: the control and the time fought
+                          for it and "2:32" wrapped one character per line. */}
+                      <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                        <StarRating size="sm" value={ratingOf(ratings, tr.path)} onChange={(v) => setRating(tr.path, v)} pending={pending(tr.path)} />
+                      </span>
                     </div>
                   </td>
                 )}
                 {trackCols.includes("genre") && <td className="td text-zinc-500 break-words">{tr.tags.GENRE ?? "—"}</td>}
                 {trackCols.includes("dur") && (
-                  <td className="td text-zinc-500">
-                    <div className="flex items-center gap-2">
-                      <StarRating size="sm" value={ratingOf(ratings, tr.path)} onChange={(v) => setRating(tr.path, v)} pending={pending(tr.path)} />
-                      <span>{fmtDuration(tr.tech.length)}</span>
-                    </div>
-                  </td>
+                  <td className="td text-zinc-500 cell-nowrap">{fmtDuration(tr.tech.length)}</td>
                 )}
                 {trackCols.includes("bitrate") && (
                   <td className="td text-zinc-500">
@@ -1333,8 +1473,11 @@ export default function AlbumPage() {
           artist={data.meta?.ALBUMARTIST ?? data.meta?.ARTIST ?? ""}
           album={data.meta?.ALBUM ?? ""}
           releaseGroupMbid={data.meta?.MUSICBRAINZ_RELEASEGROUPID ?? undefined}
+          releaseMbid={data.meta?.MUSICBRAINZ_ALBUMID ?? undefined}
           initialResults={coverSearch.results}
           initialProvider={coverSearch.provider}
+          initialChosen={stagedCovers.data?.chosen ?? null}
+          initialNotes={stagedCovers.data?.notes ?? []}
           onClose={() => setCoverSearch(null)}
           onApplied={() => {
             qc.invalidateQueries({ queryKey: ["library"] });
@@ -1344,8 +1487,20 @@ export default function AlbumPage() {
         />
       )}
 
-      {/* Records the local scorer ranks closest to this one. */}
-      <MoreLikeThis kind="album" id={decoded} />
+      {/* TWO shelves side by side, each saying where its rows came from: what
+          the LOCAL scorer ranks closest to this album (this library's own
+          tags), and what the online providers suggest for it. The online shelf
+          is its own request, so the page is usable before it lands. */}
+      <div className="grid gap-4 lg:grid-cols-2 items-start">
+        <MoreLikeThis kind="album" id={decoded} />
+        <OnlineRecommendations
+          kind="albums"
+          seedKind="album"
+          seedMbid={data.meta?.MUSICBRAINZ_RELEASEGROUPID ?? data.meta?.MUSICBRAINZ_ALBUMID ?? ""}
+          seedName={albumTitle}
+          seedArtist={albumArtist}
+        />
+      </div>
       </div>
 
     </>

@@ -45,7 +45,7 @@ SCRIPTS = (
     (4, "Grade", "per-album tag/lyrics/cover report"),
     (5, "Process images", "JXL / lossless / JXL-back"),
     (6, "Audit library", "AudioAuditor: fake lossless / upscaled / MQA"),
-    (7, "DR & ReplayGain", "rsgain + simple-dr-meter tags"),
+    (7, "DR & ReplayGain", "in-process DR + rsgain ReplayGain tags"),
     (8, "Auto tagging", "advisory / instrumental / mood / energy / genre"),
     (9, "AccurateRip", "CUETools .accurip files"),
     (10, "Format all", "final pass: .accurip / .cue / .lrc / tags"),

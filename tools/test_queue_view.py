@@ -541,7 +541,16 @@ STAGE_ROWS = [
 FIXTURE_JOBS = [
     {"id": 7, "state": "running", "stage": "Downloading 12 file(s) from peer…",
      "stage_key": "downloading",
-     "release": {"id": "aaaaaaaa", "artist": "Bicep", "title": "Isles"},
+     # The release facts a real job carries (server/soulseek_auto._run writes
+     # this block from the MusicBrainz release it resolved): the pressing's own
+     # catalogue number and medium first, then where/when it is from, its track
+     # count, the edition's disambiguation and MusicBrainz's status.
+     "release": {"id": "aaaaaaaa", "artist": "Bicep", "title": "Isles",
+                 "date": "2018-04-20", "country": "GB",
+                 "catalog_number": "ZEN-124", "media": "CD",
+                 "media_formats": ["CD"], "tracks": 12,
+                 "status": "Official", "disambiguation": "Deluxe Edition",
+                 "label": "Ninja Tune"},
      "log": [{"t": "00:00:01", "msg": "Target: Bicep — Isles"}], "attempts": [],
      "result": None, "confirm": None, "search": None,
      "progress": {"dir": "Music/Isles", "bytes": 41_000_000, "size": 82_000_000,
@@ -593,12 +602,19 @@ FIXTURE_WISHES = [
      "last_search": 11.0, "last_error": "no verified match yet",
      "album_path": "", "source": "soulseek"},
     # A wish the network had nothing for: terminal, so it needs the USER — the
-    # queue row must say so rather than pretend it is still being searched.
+    # queue row must say so rather than pretend it is still being searched. It
+    # carries the identity the store keeps for it (server/wishes.RELEASE_KEYS):
+    # the pressing this wish is actually waiting for.
     {"id": 5, "release_mbid": "55555555", "title": "Absent", "artist": "Void",
      "year": "1990", "status": "not_found", "note": "", "target_dir": "",
      "queries": [], "attempts": 3, "added_at": 13.5, "updated_at": 14.5,
      "last_search": 14.0, "last_error": "no results at all", "not_found": 3,
-     "album_path": "", "source": "musicbrainz"},
+     "album_path": "", "source": "musicbrainz",
+     "release": {"id": "55555555", "title": "Absent", "artist": "Void",
+                 "date": "1990-03", "country": "US", "status": "Promotion",
+                 "media": ["CD"], "track_count": 3,
+                 "disambiguation": "promo", "catalog_number": "PRO-CD-1",
+                 "label": "Void Recordings"}},
 ]
 FIXTURE_READY = os.path.join(REDIRECT, "downloads", "peer", "Some Album")
 os.makedirs(FIXTURE_READY, exist_ok=True)
@@ -632,12 +648,34 @@ with Patch(auto, jobs=lambda: [dict(j) for j in FIXTURE_JOBS],
     assert live["progress"]["percent"] == 50.0, live
     # its release is also a wish in this fixture, so ONE row carries both
     assert live["wish_id"] == 2 and live["kind"] == "job", live
-    # The release-facts line a job row can show. Emitting this field on job
-    # rows is api_queue._job_row's follow-up (the job itself already carries
-    # media_formats/tracks — see the assertion above); the UI half is proven
-    # here with the exact shape it will arrive in.
-    live["release"] = {"id": "aaaaaaaa", "date": "2018-04-20",
-                       "media": ["Digital Media"], "track_count": 12}
+    # EVERY row carries the release identity block, with the documented keys,
+    # built from what the row knows (a job's own release summary, a wish's
+    # stored identity, the payload a queued release was queued with) — and the
+    # rows that cannot know one carry it empty rather than missing.
+    KEYS = set(wishes.RELEASE_KEYS)
+    for rows in fixture["sections"].values():
+        for row in rows:
+            assert set(row["release"]) == KEYS, (row["id"], sorted(row["release"]))
+    facts = live["release"]
+    assert (facts["catalog_number"], facts["media"], facts["track_count"]) == \
+        ("ZEN-124", ["CD"], 12), facts
+    assert (facts["status"], facts["disambiguation"], facts["date"],
+            facts["country"]) == ("Official", "Deluxe Edition", "2018-04-20", "GB"), facts
+    absent = [r for r in fixture["sections"]["needs_attention"] if r["title"] == "Absent"][0]
+    assert absent["release"]["catalog_number"] == "PRO-CD-1", absent["release"]
+    assert absent["stage"] == "needs_attention", absent
+    # The rows that cannot name a release (a stalled album, a finished download
+    # in the folder) carry the same block with nothing in it.
+    empty = [r for rows in fixture["sections"].values() for r in rows
+             if r["kind"] in ("prompt", "ready", "import")]
+    assert empty and all(not any(r["release"].values()) for r in empty), empty
+    # The rows the page's "Clear finished" button counts and clears: the ones
+    # whose work is over (a settled job, a wish nothing was found for). The
+    # running job, the parked one, the wanted wish and the waiting release are
+    # not among them — clearing never touches a row that is still going.
+    clearable = sorted(r["id"] for rows in fixture["sections"].values() for r in rows
+                       if r["clearable"])
+    assert clearable == ["job:10", "job:11", "wish:5"], clearable
 
     # the payload the page is rendered with
     payload_path = os.path.join(REDIRECT, "queue-payload.json")

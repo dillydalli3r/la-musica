@@ -3,6 +3,7 @@ import type {
   ArtistArtwork,
   ArtistArtworkDescription,
   ArtistArtworkImage,
+  CoverChoicePolicy,
   CoverInfo,
   CoverSourceCatalog,
   CoverResult,
@@ -23,11 +24,15 @@ import type {
   LyricsAutoResult,
   LyricsHit,
   LyricsProviders,
+  LyricsPublishBatchResult,
+  LyricsXlitResult,
   MBArtistBrowse,
   MBRecordingBrowse,
   MBReleaseChoicePayload,
+  MBSearchFieldHelp,
   MBSearchRows,
   ScriptRunResult,
+  SlskReleaseIdentity,
   SourceHealth,
   SourceKind,
   SourcesHealth,
@@ -37,6 +42,7 @@ import type {
 import { toast } from "./store";
 import * as offline from "./lib/offlineCache";
 import { coverVersion, rememberCoverVersion } from "./lib/invalidate";
+import { coverSearchPath, type CoverQuery } from "./lib/coverSearch";
 
 // The Tauri shell (desktop, iOS, Android) serves the frontend from
 // tauri://localhost, so relative /api paths cannot reach any server: a shell
@@ -250,6 +256,14 @@ export function onOfflineFallback(fn: OfflineListener): () => void {
 /** True while the app is rendering cached answers. */
 export function isOffline(): boolean {
   return offlineInfo !== null;
+}
+
+/** The offline fallback in force, if any — which endpoint's request got no
+ *  answer, and when the copy that answered it was written. Read right after a
+ *  request by a caller that has to say WHICH answer came off disk (the cover
+ *  finder does): `null` means the server answered. */
+export function offlineFallback(): OfflineInfo | null {
+  return offlineInfo;
 }
 
 function setOffline(info: OfflineInfo | null) {
@@ -653,12 +667,13 @@ export interface SlskQueueItem {
   /** A finished download's folder in the download dir (kind "ready"): what
    *  the Import action on that row sends. Not a library album. */
   path?: string;
-  /** The release's own facts, on rows the server has them for (a pipeline job
-   *  knows its MusicBrainz release: date, the medium it is pressed on and its
-   *  track count). Absent on wish/ready/import rows, which have no such data —
-   *  the row then shows no line rather than a wrong one, and nothing here ever
-   *  costs a MusicBrainz request. */
-  release?: { id: string; date?: string; media?: string[]; track_count?: number };
+  /** The release's own identity — the row's `release` block: the catalogue
+   *  number and medium that identify the pressing, its country/date/track
+   *  count, the edition's disambiguation and MusicBrainz's status. Present on
+   *  every row the server builds (server/api_queue.py); empty on the rows that
+   *  cannot know one (a stalled album already in the library, a finished
+   *  download in the folder). Nothing here ever costs a MusicBrainz request. */
+  release?: SlskReleaseIdentity;
   progress: {
     text?: string;
     done?: number;
@@ -672,6 +687,12 @@ export interface SlskQueueItem {
   } | null;
   /** Why it failed (or what the job is waiting on). */
   reason: string;
+  /** Whether this row can be taken off the list (POST /api/queue/clear). True
+   *  only for rows whose work is OVER (a settled job, an imported wish, one
+   *  nothing was found for) — a row still in the pipeline is CANCELLED instead,
+   *  and a finished download waiting to be imported is not clearable at all
+   *  (its action is the import; its bytes are the staging card's). */
+  clearable: boolean;
   /** One line about what this row's state means right now. */
   note: string;
   attempts?: number;
@@ -733,6 +754,13 @@ export interface SlskQueuePayload {
   concurrency: number;
   download_slots: number;
 }
+
+/** What a clear may be scoped to (POST /api/queue/clear): every finished row
+ *  the queue owns ("finished"), the wishlist alone ("wishes"), or one SECTION
+ *  of the queue by name — what a section header's own Clear button sends, and
+ *  exactly the rows it counted. */
+export type SlskQueueScope = "finished" | "wishes"
+  | "queued" | "in_progress" | "needs_attention" | "completed" | "failed";
 
 /** One slskd transfer (download or upload). `state` is slskd's own enum:
  *  Queued / InProgress / Completed / Errored / Cancelled / Rejected / … */
@@ -835,10 +863,23 @@ export interface MetadataCandidates {
       artist: string;
       album: string;
       release_group: string;
+      /** The release id the staged fetch was made for, so the entry is found
+       *  again after the import chain relocates the album. */
+      album_id?: string;
       /** Who answered the staged fetch — the badge the picker shows. */
       provider: string | null;
       staged_at: string;
+      /** The candidates RANKED best-first by the one cover policy, each row
+       *  carrying the reasons that put it there. */
       results: CoverResult[];
+      /** The policy's own pick (mlo/cover_choice) and its reasons — what the
+       *  picker shows as the default before the user overrides it. */
+      chosen?: CoverResult | null;
+      /** What every source did, including any that was skipped and why. */
+      notes?: string[];
+      /** The policy the ranking was made under (the minimum, the source order
+       *  and the rules). */
+      policy?: CoverChoicePolicy;
     } | null;
   };
 }
@@ -1093,6 +1134,12 @@ export type DiscoverScope = "library" | "online" | "all";
 /** What a Discover row IS — the three shapes every view asks for. */
 export type DiscoverKind = "albums" | "artists" | "tracks";
 
+/** What an ENTITY shelf is seeded by: the page it sits on. An artist page
+ *  seeds by the artist's MusicBrainz id when its tags carry one (else by its
+ *  name), an album page by its release-group/release id (else artist+title),
+ *  a track page by its recording id (else artist+title). */
+export type DiscoverSeedKind = "artist" | "album" | "track";
+
 /** One row of the Discover genre / recommendation routes.
  *
  *  `owned` means the library holds THIS item (matched by MBID, then by
@@ -1127,6 +1174,11 @@ export interface DiscoverItem {
   also_from?: string[];
   /** Library album rows: the track titles the folder holds. */
   tracks?: string[];
+  /** The provider's OWN relevance for the row (Last.fm's match, Deezer's
+   *  fans/rank, ListenBrainz's score) — null when the provider states none.
+   *  The providers' scales are not comparable, so it orders rows within one
+   *  source and is not a cross-provider percentage. */
+  score?: number | null;
   /** Why this row is here ("genre: shoegaze"). */
   reason?: string;
 }
@@ -1178,19 +1230,115 @@ export interface DiscoverRecommended {
   basis: string;
 }
 
-/** `GET /api/ratings` — every rated track, or the requested subset.
+/** The four closed windows every chart can be asked for — the same vocabulary
+ *  on both sides of the line: the library's own history (`/api/top`) and the
+ *  providers' charts (`/api/discover/charts`). */
+export type ChartPeriod = "all" | "year" | "month" | "week";
+
+/** One provider's chart, as ONE row of `GET /api/discover/charts`: the shared
+ *  Discover row (so it renders and adds exactly like a genre row) plus the
+ *  provider's own rank and score. `rank` is its position in that provider's
+ *  chart and `score_label` its own words ("1.2M listens") — null for a
+ *  provider that states no number, never a made-up one. */
+export interface DiscoverChartItem extends DiscoverItem {
+  rank: number;
+  score: number | null;
+  score_label: string | null;
+}
+
+/** What one provider can chart HERE — the payload's own support matrix, so the
+ *  page can say "this source does not publish this week" from the answer it
+ *  already has instead of a second request. */
+export interface DiscoverChartSource {
+  id: string;
+  label: string;
+  /** The windows this source really publishes. */
+  periods: ChartPeriod[];
+  /** Whether THIS request's window is one of them. */
+  supports_period: boolean;
+  needs: string[];
+  missing: string[];
+  ready: boolean;
+}
+
+/** `GET /api/discover/charts` — what the online providers rank for one window
+ *  and one kind. Rows keep each provider's own order (they are never merged
+ *  across providers), `sources_asked` is who was asked in the order they were
+ *  asked — RateYourMusic first for tracks — and `notes` carries every outcome
+ *  that was not an answer: `skipped:` (no key), `unsupported:` (no such window)
+ *  or `failed:` (the provider's own words). The one non-source key, `charts`,
+ *  is the verdict when nobody had anything to rank. */
+export interface DiscoverCharts {
+  period: ChartPeriod;
+  kind: DiscoverKind;
+  source: string;
+  limit: number;
+  items: DiscoverChartItem[];
+  sources_asked: string[];
+  notes: DiscoverNotes;
+  sources: DiscoverChartSource[];
+}
+
+/** One row of `GET /api/top` — a track, an album or an artist from the USER'S
+ *  own play history, with how many times it was played in the requested
+ *  window. `path` is the library path and `in_library` whether the library
+ *  still holds it (a play outlives a deleted file, so a row can be both). */
+export interface TopRow {
+  kind: "track" | "album" | "artist";
+  /** Track and album rows: the library path. */
+  path?: string;
+  /** Track and album rows. */
+  title?: string;
+  artist?: string;
+  album?: string;
+  album_path?: string;
+  /** Artist rows: the name, and the artist folder when the library has one. */
+  name?: string;
+  plays: number;
+  in_library: boolean;
+}
+
+/** `GET /api/top` — the library's own most-played rows for one window, with
+ *  the window echoed back (`window.start`/`end` are epoch seconds, null when
+ *  unbounded) and a `note` that explains an empty list. */
+export interface TopCharts {
+  period: ChartPeriod;
+  kind: DiscoverKind;
+  limit: number;
+  window: {
+    period: string;
+    start: number | null;
+    end: number | null;
+    start_iso: string | null;
+    end_iso: string | null;
+  };
+  items: TopRow[];
+  note: string;
+}
+
+/** The three entities a star can name: a track (a file), an album (its folder)
+ *  and an artist (their folder). The scope is what makes one store hold three
+ *  INDEPENDENT verdicts — an album rating is the user's verdict on the album,
+ *  NOT the average of its tracks, and the album page draws both, labelled. */
+export type RatingsScope = "track" | "album" | "artist";
+
+/** `GET /api/ratings` — every rated entity of ONE scope, or the requested
+ *  subset.
  *
- *  `ratings` maps a normalized track path to the rating in HALF-STARS as an
- *  integer 0-10 (0 = unrated, 1 = half a star … 10 = five stars) — the unit
- *  the app-owned SQLite table, the API and the `RATING` file tag (0-100, one
- *  half-star = 10, Picard's convention) all agree on. The UI works in the
- *  familiar 0-5 scale and converts in exactly one place (lib/ratings.ts);
- *  nothing outside it should ever see these integers.
+ *  `ratings` maps a normalized path (a track's file, an album's or an artist's
+ *  folder) to the rating in HALF-STARS as an integer 0-10 (0 = unrated, 1 = a
+ *  half star … 10 = five stars) — the unit the app-owned SQLite table, the API
+ *  and (for tracks only) the `RATING` file tag (0-100, one half-star = 10,
+ *  Picard's convention) all agree on. The UI works in the familiar 0-5 scale
+ *  and converts in exactly one place (lib/ratings.ts); nothing outside it
+ *  should ever see these integers.
  *
- *  `counts` is how many tracks sit at each value, keyed "1"…"10" (a value
- *  with no tracks is absent) — it is what the library/genre surfaces show
- *  without walking the map. */
+ *  `counts` is how many rows of that scope sit at each value, keyed "1"…"10"
+ *  (a value with no rows is absent) — it is what the library/genre surfaces
+ *  show without walking the map. `scope` echoes what was asked for, so a
+ *  client can never decorate a row with the wrong scope's value. */
 export interface RatingsPayload {
+  scope?: RatingsScope;
   ratings: Record<string, number>;
   counts: Record<string, number>;
 }
@@ -1668,6 +1816,12 @@ export const api = {
     }
     return json<MBSearchRows>(`${API}/mb/search?${p}`);
   },
+  /** The search box's own help: MusicBrainz's index fields per entity kind
+   *  (name, kind, example, whether it takes quotes, what it means) and the
+   *  Lucene syntax they combine with — the server's own catalogue, so the
+   *  completion can never offer a field the index would not answer. */
+  mbSearchFields: () =>
+    json<MBSearchFieldHelp>(`${API}/mb/search/fields`, undefined, 30000),
   mbArtist: (id: string, offset = 0, limit = 300, primaryType = "", secondaryType = "") =>
     json<MBArtistBrowse>(
       `${API}/mb/artist/${id}?offset=${offset}&limit=${limit}` +
@@ -1956,20 +2110,17 @@ export const api = {
     ).then(noteCoverWrite(albumPath));
   },
 
-  /** Album covers for artist/album. `releaseGroupMbid`, when the caller knows
-   *  it, is the identity the Cover Art Archive fallback is asked about; the
-   *  reply's `provider` says who actually answered. */
-  coverSearch: (
-    artist: string,
-    album: string,
-    opts?: { sources?: string[]; country?: string; releaseGroupMbid?: string }
-  ) => {
-    const q = new URLSearchParams({ artist, album });
-    if (opts?.sources?.length) q.set("sources", opts.sources.join(","));
-    if (opts?.country) q.set("country", opts.country);
-    if (opts?.releaseGroupMbid) q.set("release_group_mbid", opts.releaseGroupMbid);
-    return json<CoverSearch>(`${API}/cover/search?${q}`, undefined, 90000);
-  },
+  /** Album covers, RANKED by the one cover policy (mlo/cover_choice).
+   *
+   *  The query object IS the request: `web/src/lib/coverSearch.ts` builds it
+   *  (and its path), so the finder's automatic search, its Search button and
+   *  this URL can never disagree about what was asked. `releaseMbid` /
+   *  `releaseGroupMbid` are the identities the Cover Art Archive is asked
+   *  about: the release's own front cover by the release id (which is what the
+   *  policy prefers above every other candidate) and its release group's
+   *  stand-in by the group id. */
+  coverSearch: (q: CoverQuery) =>
+    json<CoverSearch>(`${API}${coverSearchPath(q)}`, undefined, 90000),
   /** Selectable cover sources + regions, plus the saved defaults. */
   coverSources: () => json<CoverSourceCatalog>(`${API}/cover/sources`),
   /** Apply a cover image from a URL; same track/tracks targeting as `cover`.
@@ -2216,30 +2367,34 @@ export const api = {
       body: JSON.stringify({ kind, key, mbid: mbid ?? null }),
     }),
 
-  /** Track ratings. The `rating` argument is the half-star INTEGER 0-10 the
-   *  DB and the file tag speak — see lib/ratings.ts, the one place the 0-5
-   *  UI value is converted to it. */
-  ratings: (paths?: string[]) =>
+  /** Ratings of ONE scope (`track` by default, so every older caller is
+   *  unchanged). The `rating` argument on the write side is the half-star
+   *  INTEGER 0-10 the DB and (for tracks) the file tag speak — see
+   *  lib/ratings.ts, the one place the 0-5 UI value is converted to it. */
+  ratings: (paths?: string[], scope: RatingsScope = "track") =>
     json<RatingsPayload>(
-      `${API}/ratings${paths?.length ? `?${paths.map((p) => `paths=${encodeURIComponent(p)}`).join("&")}` : ""}`
+      `${API}/ratings?scope=${scope}${paths?.length ? `&${paths.map((p) => `paths=${encodeURIComponent(p)}`).join("&")}` : ""}`
     ),
-  /** Set one track's rating; 0 clears it (row removed, `RATING` tag removed).
-   *  `tag` reports the file write: `written`/`skipped` and, when the file
-   *  refused it, `error` — the rating is STORED either way, so a tag failure
-   *  is a warning, never a rollback. Writes the tag too unless the
-   *  `write_rating_tags` config key is off. */
-  setRating: (path: string, rating: number) =>
+  /** Set one entity's rating; 0 clears it (row removed, and for a track the
+   *  `RATING` tag removed too). An album or artist rating names that entity's
+   *  FOLDER and reports `tag: null` — a folder has no file to tag, and the
+   *  store says so rather than pretending. For a track, `tag` reports the file
+   *  write: `written`/`skipped` and, when the file refused it, `error` — the
+   *  rating is STORED either way, so a tag failure is a warning, never a
+   *  rollback. */
+  setRating: (path: string, rating: number, scope: RatingsScope = "track") =>
     json<{
       ok: boolean;
+      scope: RatingsScope;
       path: string;
       rating: number;
-      tag: { rating100: number; written: boolean; skipped: boolean; error: string | null };
+      tag: { rating100: number; written: boolean; skipped: boolean; error: string | null } | null;
     }>(
       `${API}/ratings`,
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, rating }),
+        body: JSON.stringify({ path, rating, scope }),
       },
       60000
     ),
@@ -2411,6 +2566,19 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id }),
     }, 60000),
+  /** Take FINISHED rows off the queue: one row (`item.id`), every finished one
+   *  (`scope: "finished"`), the wishlist alone (`"wishes"`), or ONE SECTION of
+   *  the queue (`"completed"` … — what a section header's own Clear button
+   *  sends, and exactly what it counted). Nothing in the library is touched
+   *  and no download is deleted; `cleared` is how many rows went, `ids`
+   *  which. 409 = the row is not finished (cancel is a different action, and
+   *  the message names it). */
+  queueClear: (body: { id?: string; scope?: SlskQueueScope }) =>
+    json<{ ok: boolean; cleared: number; ids: string[] }>(`${API}/queue/clear`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, 60000),
 
   // Home page (recommendations + highlights)
   // `refresh` is the "Your library" card's button: the payload is TTL-cached
@@ -2506,6 +2674,29 @@ export const api = {
     if (duration) p.set("duration", String(duration));
     return json<LyricsHit>(`${API}/lyrics/find?${p}`, undefined, 45000);
   },
+  /** Transliterate / translate the lyrics these tracks already carry — script
+   *  17's own runner over a selection, writing TRANSLITERATION-<lang> /
+   *  TRANSLATION-<lang> tags (and the .romaji.lrc / .<lang>.lrc sidecars for the
+   *  LRC formats). `ok`/`skipped` are files the pass modified / left alone,
+   *  `errors` its own per-file lines, and `note` says why nothing was written
+   *  when the switches are off or no AI is configured. */
+  lyricsXlit: (paths: string[], force = false, staged = false) =>
+    json<LyricsXlitResult>(`${API}/lyrics/xlit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths, force, staged }),
+    }, 600000),
+  /** Give LRCLIB the lyrics these tracks carry and the database lacks — script
+   *  18's per-track core over a selection, the album-level counterpart of the
+   *  editor's per-track publish. Each result carries LRCLIB's own answer in
+   *  `message` ("already has this track" is the database refusing a duplicate,
+   *  not a failure). Nothing is written locally: publishing owns no tag. */
+  lyricsPublishBatch: (paths: string[], force = false, staged = false) =>
+    json<LyricsPublishBatchResult>(`${API}/lyrics/publish-batch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths, force, staged }),
+    }, 600000),
 
   // ----------------------------------------------------------------- //
   // Import — AcoustID matching, script chain, bulk queue               //
@@ -2589,6 +2780,12 @@ export const api = {
     kind?: "release" | "release_group" | "artist" | "recording" | "auto";
     mode?: "best" | "all";
     release_mbid?: string;
+    /** MusicBrainz release-group types to restrict an artist / release-group
+     *  add to ("album", "album + compilation"); empty = every type. */
+    types?: string[];
+    /** Start the wish queue's search for what this call queued, instead of
+     *  leaving it to the configured automation. */
+    download?: boolean;
     title?: string;
     artist?: string;
     year?: string;
@@ -2726,12 +2923,62 @@ export const api = {
     if (p.offset != null) q.set("offset", String(p.offset));
     return json<DiscoverItems>(`${API}/discover/genre?${q}`, undefined, 60000);
   },
-  /** Online recommendations for the whole library, or for one genre. */
-  discoverRecommended: (p: { seed?: string; kind: DiscoverKind; limit?: number }) => {
+  /** Online recommendations for the whole library, for one genre, or — with
+   *  `seedKind` — for ONE ENTITY: the artist/album/track page the shelf sits
+   *  on, seeded by its MusicBrainz id when its tags carry one and by
+   *  artist+name when they do not. */
+  discoverRecommended: (p: {
+    seed?: string;
+    kind: DiscoverKind;
+    limit?: number;
+    seedKind?: DiscoverSeedKind;
+    seedMbid?: string;
+    seedName?: string;
+    seedArtist?: string;
+  }) => {
     const q = new URLSearchParams({ seed: p.seed || "library", kind: p.kind });
     if (p.limit != null) q.set("limit", String(p.limit));
+    if (p.seedKind) q.set("seed_kind", p.seedKind);
+    if (p.seedMbid) q.set("seed_mbid", p.seedMbid);
+    if (p.seedName) q.set("seed_name", p.seedName);
+    if (p.seedArtist) q.set("seed_artist", p.seedArtist);
     return json<DiscoverRecommended>(`${API}/discover/recommended?${q}`, undefined, 60000);
   },
+  /** What the online providers RANK for one window and one kind. Rows are not
+   *  merged across providers (a chart's rank is its data), so each row names
+   *  its provider, its rank and its own score — and `sources` says which
+   *  providers can answer THIS window at all. 90 s: a chart walks every source
+   *  (RateYourMusic's scrape included) and the answer is TTL-cached. */
+  discoverCharts: (p: { period: ChartPeriod; kind: DiscoverKind; source?: string; limit?: number }) => {
+    const q = new URLSearchParams({ period: p.period, kind: p.kind });
+    if (p.source) q.set("source", p.source);
+    if (p.limit != null) q.set("limit", String(p.limit));
+    return json<DiscoverCharts>(`${API}/discover/charts?${q}`, undefined, 90000);
+  },
+
+  /** The LIBRARY's own most-played rows for one window (`GET /api/top`) —
+   *  this user's play history, counted server-side, never a provider's chart.
+   *  An empty history answers with an empty list and the `note` that explains
+   *  when a play is recorded. */
+  topCharts: (p: { period: ChartPeriod; kind: DiscoverKind; limit?: number }) => {
+    const q = new URLSearchParams({ period: p.period, kind: p.kind });
+    if (p.limit != null) q.set("limit", String(p.limit));
+    return json<TopCharts>(`${API}/top?${q}`, undefined, 60000);
+  },
+  /** Record ONE playback start (`POST /api/plays`) — the one seam every client
+   *  reports a play to, called when a track actually starts (never on a seek
+   *  or a resume; a repeat is a play). Deliberately not awaited by the player:
+   *  the row is a statistic, and a slow server must not delay the audio. */
+  recordPlay: (path: string) =>
+    json<{ ok: boolean; path: string; album: string; started_at: number }>(
+      `${API}/plays`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      },
+      20000
+    ),
 
   /** Candidate artist images + descriptions for the metadata review modal. */
   metadataCandidates: (artist: string, albumPath?: string, staged = false) => {

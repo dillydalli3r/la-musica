@@ -1,28 +1,48 @@
-"""Track ratings — half-star precision, per user, in the app's own database.
+"""Star ratings — half-star precision, per user, in the app's own database.
+
+THREE SCOPES, one store. A rating names the entity it belongs to:
+
+  * ``track``  — one file, keyed by its path. The only scope that carries a
+    file tag, and the only one that adopts a value out of a file;
+  * ``album``  — the album FOLDER, keyed by that folder's path;
+  * ``artist`` — the artist FOLDER, keyed by that folder's path.
+
+An album or artist rating is the user's own verdict on that entity, NOT the
+average of its tracks: the album header draws both, labelled, so the two can
+never be read as one number. A folder has no file to tag, so those two scopes
+live here and nowhere else — the API says so in its reply and the UI in its
+tooltip, instead of pretending a tag was written.
 
 UNITS, the one place they are spelled out:
 
   * the database and the API speak half-stars as an INTEGER 0-10
     (0 = unrated, 1 = half a star, 10 = five stars) — the UI draws 0-5 stars
-    with halves, and every half-star it can draw is one integer here;
+    with halves, and every half-star it can draw is one integer here. All
+    three scopes share the unit;
   * the file tag is ``RATING`` in 0-100, the de-facto standard Picard writes
     (1 half-star = 10), so a library already tagged by Picard reads back as
     the stars its owner gave it, and what this app writes is what Picard
-    shows. Only ``to_tag``/``from_tag`` convert.
+    shows. Only ``to_tag``/``from_tag`` convert, and only track rows reach
+    them.
 
-Storage mirrors ``server.playlists``' likes: a row per (user, path) carrying
-the track's MusicBrainz recording id, and every read resolves the CURRENT path
+Storage mirrors ``server.playlists``' likes: a row per (user, scope, path)
+carrying the entity's MusicBrainz id, and every read resolves the CURRENT path
 through ``server.mbresolve.heal_row`` (path first, then MBID) and re-points the
-row, so a rating survives a rename or a reorganization. Ratings live in their
-own database beside the other app databases rather than in playlists.db:
-a rating is a first-class library fact with its own API, and mlo.format_all's
-excess-tag strip must never be able to lose one (see the RATING entry in
-mlo.audio.TAG_MAP — the allow-list the strip and the excess grade share).
+row, so a rating survives a rename or a reorganization — a folder rating heals
+on the album's release id or the artist's id exactly as a track's heals on its
+recording id. The three scopes never share a row: an album folder and an artist
+folder are different verdicts even in the unlikely case they name one path.
+Ratings live in their own database beside the other app databases rather than
+in playlists.db: a rating is a first-class library fact with its own API, and
+mlo.format_all's excess-tag strip must never be able to lose one (see the
+RATING entry in mlo.audio.TAG_MAP — the allow-list the strip and the excess
+grade share).
 
 The file tag is never the source of truth once a user has rated: a row WINS,
 always. A file whose own ``RATING`` exists and has no row supplies the initial
-value instead of showing unrated (``adopt``), which is what makes an imported
-Picard library read correctly on day one.
+value instead of showing unrated (``adopt`` — track scope only, a folder has no
+tag to adopt from), which is what makes an imported Picard library read
+correctly on day one.
 """
 import os
 import sqlite3
@@ -39,9 +59,23 @@ _lock = threading.RLock()
 HALF_MAX = 10
 TAG_STEP = 10
 
+# The three kinds of entity a rating may name: a track, the album folder that
+# holds it, the artist folder above that. The names are `mbresolve.heal_row`'s
+# own kinds, so one scope word drives the heal as well as the row key.
+SCOPES = ("track", "album", "artist")
+FOLDER_SCOPES = ("album", "artist")
+
 # Why a path cannot take a rating — the same words the endpoints report, from
-# one constant, so a PUT's 404 and a bulk row's error cannot drift apart.
-MISSING_FILE = "file not found"
+# one constant per scope, so a PUT's 404 and a bulk row's error cannot drift
+# apart. A track needs its FILE on disk; an album or artist needs its folder to
+# be one the library payload knows, because a star on a path no page will ever
+# draw is a rating nobody can see — or clear.
+MISSING = {
+    "track": "file not found",
+    "album": "album folder is not in the library",
+    "artist": "artist folder is not in the library",
+}
+MISSING_FILE = MISSING["track"]
 
 
 def db_path():
@@ -74,24 +108,58 @@ def _conn():
     return conn
 
 
+def _column_names(c, table):
+    """The columns a table actually has (empty when the table is not there)."""
+    return {str(r["name"]) for r in c.execute(f"PRAGMA table_info({table})")}
+
+
+def _table_exists(c, table):
+    return c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                     (table,)).fetchone() is not None
+
+
 def _init():
     with _lock:
         with _conn() as c:
             # The key starts with `user`, like playlists' likes: two people on
             # one server may rate the same track and neither may see the other
             # row. `""` is the default/admin scope written before users existed.
+            # `scope` completes the key rather than sitting beside it: one user
+            # holds three INDEPENDENT verdicts, and their paths can even
+            # coincide (an artist with exactly one album has an album folder
+            # that IS the artist folder), so a row keyed by path alone could
+            # not hold both.
+            #
+            # The one migration this store has ever needed: rows written
+            # before scopes existed are keyed (user, path) and carry no `scope`
+            # column. They are all TRACK ratings, so they are re-keyed as such.
+            # A leftover `ratings_legacy` is also picked up by name, so a
+            # migration interrupted after the rename is finished on the next
+            # start rather than stranded.
+            legacy = _table_exists(c, "ratings_legacy")
+            if _column_names(c, "ratings") and "scope" not in _column_names(c, "ratings"):
+                c.execute("ALTER TABLE ratings RENAME TO ratings_legacy")
+                legacy = True
             c.executescript("""
                 CREATE TABLE IF NOT EXISTS ratings (
                     user TEXT NOT NULL DEFAULT '',
+                    scope TEXT NOT NULL DEFAULT 'track',
                     path TEXT NOT NULL,
                     rating INTEGER NOT NULL,
                     mbid TEXT,
                     updated REAL NOT NULL,
-                    PRIMARY KEY (user, path)
+                    PRIMARY KEY (user, scope, path)
                 );
                 CREATE INDEX IF NOT EXISTS ratings_by_mbid
                     ON ratings (user, mbid);
                 """)
+            if legacy:
+                c.execute(
+                    "INSERT OR IGNORE INTO ratings"
+                    " (user, scope, path, rating, mbid, updated)"
+                    " SELECT user, 'track', path, rating, mbid, updated"
+                    " FROM ratings_legacy")
+                c.execute("DROP TABLE ratings_legacy")
 
 
 # --------------------------------------------------------------------------- #
@@ -145,6 +213,21 @@ def parse_half_stars(value):
     return max(0, min(HALF_MAX, num))
 
 
+def parse_scope(value):
+    """Client input as one of ``SCOPES``.
+
+    Absent/blank means "track" — the scope every caller meant before the other
+    two existed, so an old client's body keeps working. Anything else raises
+    ValueError, which the endpoints turn into a 400 naming what is allowed,
+    rather than silently rating the wrong entity."""
+    text = str(value).strip().lower() if value is not None else ""
+    if not text:
+        return "track"
+    if text not in SCOPES:
+        raise ValueError("scope must be track, album or artist")
+    return text
+
+
 def to_tag(half):
     """Half-stars (0-10) -> the file tag's value (0-100)."""
     return int(half) * TAG_STEP
@@ -171,14 +254,19 @@ def from_tag(value):
 # --------------------------------------------------------------------------- #
 # The store
 # --------------------------------------------------------------------------- #
-def set_rating(path, rating, mbid=None, user=""):
-    """Store `rating` (half-stars 0-10) for `path`; 0 clears the row.
+def set_rating(path, rating, mbid=None, user="", scope="track"):
+    """Store `rating` (half-stars 0-10) for `path` in `scope`; 0 clears the row.
 
     Clearing DELETES rather than keeping a zero: "unrated" is a row that is
     not there, which is what the map, the counts and the MBID heal all assume
-    — a kept zero would carry a stale recording id and count as a rating
-    forever. Returns the stored value (0 when cleared).
-    """
+    — a kept zero would carry a stale id and count as a rating forever.
+    Returns the stored value (0 when cleared).
+
+    What `path` names is the scope's business (a track's file, an album's or
+    an artist's folder) and nothing here checks: this is the plain writer the
+    endpoints have already validated against (``target_missing``), and the
+    scope only decides which row it lands on."""
+    scope = parse_scope(scope)
     path = str(path or "").strip()
     if not path:
         raise ValueError("path required")
@@ -187,23 +275,25 @@ def set_rating(path, rating, mbid=None, user=""):
     with _lock:
         with _conn() as c:
             if half == 0:
-                c.execute("DELETE FROM ratings WHERE user=? AND path=?", (user, key))
+                c.execute("DELETE FROM ratings WHERE user=? AND scope=? AND path=?",
+                          (user, scope, key))
                 return 0
             c.execute(
-                "INSERT INTO ratings (user, path, rating, mbid, updated)"
-                " VALUES (?,?,?,?,?)"
-                " ON CONFLICT(user, path) DO UPDATE SET"
+                "INSERT INTO ratings (user, scope, path, rating, mbid, updated)"
+                " VALUES (?,?,?,?,?,?)"
+                " ON CONFLICT(user, scope, path) DO UPDATE SET"
                 # A blank id must not erase the one already stored: the caller
                 # may only have had the file tag to read.
                 " rating=excluded.rating,"
                 " mbid=COALESCE(NULLIF(excluded.mbid,''), ratings.mbid),"
                 " updated=excluded.updated",
-                (user, key, half, str(mbid or "").strip() or None, time.time()))
+                (user, scope, key, half, str(mbid or "").strip() or None, time.time()))
             return half
 
 
-def value(path, user=""):
-    """One track's stored rating in half-stars (0 when unrated)."""
+def value(path, user="", scope="track"):
+    """One entity's stored rating in half-stars (0 when unrated)."""
+    scope = parse_scope(scope)
     path = str(path or "").strip()
     if not path:
         return 0
@@ -211,31 +301,37 @@ def value(path, user=""):
     with _conn() as c:
         # Exact hit first (the row is stored as os.path.normpath): the single
         # lookup most callers make never walks the table.
-        row = c.execute("SELECT rating FROM ratings WHERE user=? AND path=?",
-                        (user, os.path.normpath(path))).fetchone()
+        row = c.execute("SELECT rating FROM ratings WHERE user=? AND scope=? AND path=?",
+                        (user, scope, os.path.normpath(path))).fetchone()
         if row is not None:
             return int(row["rating"] or 0)
-        for r in c.execute("SELECT path, rating FROM ratings WHERE user=?", (user,)):
+        for r in c.execute("SELECT path, rating FROM ratings WHERE user=? AND scope=?",
+                           (user, scope)):
             if _pathkey(r["path"]) == want:
                 return int(r["rating"] or 0)
     return 0
 
 
-def map_for(paths=None, user="", adopt=True):
-    """{path: half-stars} for one user — the map a client decorates from.
+def map_for(paths=None, user="", adopt=True, scope="track"):
+    """{path: half-stars} for one user and one scope — the map a client
+    decorates from.
 
-    Keys are the forward-slashed form the library payload uses
-    (``track["path"]``), so a rating decorates a track without the client
-    normalizing anything. A row whose file has moved is re-pointed through its
-    MusicBrainz recording id and returned under its CURRENT path (the same
-    self-healing likes and favourites do), so a rename never orphans it.
+    Keys are the forward-slashed form the library payload uses (``track["path"]``
+    for tracks, ``album["path"]``/``artist["path"]`` for the folder scopes), so
+    a star decorates its row without the client normalizing anything. A row
+    whose entity has moved is re-pointed through its MusicBrainz id and
+    returned under its CURRENT path (the same self-healing likes and favourites
+    do), so a rename never orphans it.
 
-    `paths` narrows the answer to the tracks a page is about to draw. That
-    narrow read is also the only one that ADOPTS a file's own ``RATING``
-    (`adopt`) — the unfiltered read never opens a file, because doing it for
-    the whole library would mean reading every track on a rendering request.
+    `paths` narrows the answer to the entities a page is about to draw. In the
+    track scope that narrow read is also the only one that ADOPTS a file's own
+    ``RATING`` (`adopt`) — the unfiltered read never opens a file, because doing
+    it for the whole library would mean reading every track on a rendering
+    request. A folder scope has no file to read, so `adopt` does nothing there
+    and the row is the whole truth.
     """
     from server import mbresolve
+    scope = parse_scope(scope)
     want = None
     if paths is not None:
         want = {}
@@ -244,8 +340,8 @@ def map_for(paths=None, user="", adopt=True):
             if key:
                 want.setdefault(_pathkey(key), api_path(key))
     with _conn() as c:
-        rows = c.execute("SELECT path, mbid, rating FROM ratings WHERE user=?",
-                         (user,)).fetchall()
+        rows = c.execute("SELECT path, mbid, rating FROM ratings"
+                         " WHERE user=? AND scope=?", (user, scope)).fetchall()
     out, updates, have = {}, [], set()
     for r in rows:
         half = int(r["rating"] or 0)
@@ -253,7 +349,10 @@ def map_for(paths=None, user="", adopt=True):
             continue
         stored, mbid = r["path"], (r["mbid"] or "")
         was = _pathkey(stored)
-        cur = mbresolve.heal_row("track", stored, mbid)
+        # The scope word IS the mbresolve kind (track/album/artist): a track
+        # heals on its recording id, an album on its release id, an artist on
+        # its id — one lookup, three entities.
+        cur = mbresolve.heal_row(scope, stored, mbid)
         if cur and _pathkey(cur) != was:
             cur = os.path.normpath(cur)  # the form every writer stores
             updates.append((cur, stored))
@@ -279,8 +378,9 @@ def map_for(paths=None, user="", adopt=True):
                     # user made after the move, and a plain UPDATE would fail
                     # on the primary key instead of healing.
                     c.execute("UPDATE OR REPLACE ratings SET path=?"
-                              " WHERE user=? AND path=?", (new, user, old))
-    if want is not None and adopt:
+                              " WHERE user=? AND scope=? AND path=?",
+                              (new, user, scope, old))
+    if want is not None and adopt and scope == "track":
         for key in sorted(want):
             if key in have:
                 continue
@@ -290,22 +390,92 @@ def map_for(paths=None, user="", adopt=True):
     return out
 
 
-def counts(user=""):
-    """How many tracks sit at each rating, keyed by half-stars as a string.
+def counts(user="", scope="track"):
+    """How many rows of one scope sit at each rating, keyed by half-stars as a
+    string.
 
     Every bucket 1-10 is present, zero included, so a chart has its ten bars
-    whether or not a value is in use yet. The numbers are the STORED rows, so
-    the chart and the map agree after a heal. Nothing is read from files here
-    — a chart must not walk the library (``adopt`` is what fills the rows).
+    whether or not a value is in use yet. The numbers are the STORED rows of
+    the requested scope — a track count never mixes the album or artist rows
+    in — so the chart and the map agree after a heal. Nothing is read from
+    files here: a chart must not walk the library (``adopt`` is what fills the
+    rows).
     """
+    scope = parse_scope(scope)
     out = {str(i): 0 for i in range(1, HALF_MAX + 1)}
     with _conn() as c:
         for r in c.execute("SELECT rating, COUNT(*) AS n FROM ratings"
-                           " WHERE user=? GROUP BY rating", (user,)):
+                           " WHERE user=? AND scope=? GROUP BY rating", (user, scope)):
             key = str(int(r["rating"] or 0))
             if key in out:
                 out[key] = int(r["n"])
     return out
+
+
+# --------------------------------------------------------------------------- #
+# The folder scopes (album / artist)
+# --------------------------------------------------------------------------- #
+def folder_paths(scope, cfg=None):
+    """Every folder path the library payload knows for `scope`, path-keyed.
+
+    The payload IS the definition of an album folder and an artist folder in
+    this app (``server.library.build_library`` builds both levels: an artist's
+    path is the folder holding its albums), so a rating is refused for anything
+    else. That refusal is the point — a star stored against a path no page will
+    ever draw can never be seen, changed or cleared again.
+
+    Read from the cached payload (``build_library`` is TTL-cached and the page
+    that asked for the rating has already built it), so a browser session pays
+    for this at most once. An empty answer — no music folder configured — makes
+    every folder rating a 404 with a reason, which is the truth: there is no
+    album to rate.
+    """
+    scope = parse_scope(scope)
+    if scope == "track":
+        raise ValueError("track ratings are keyed by file path, not by folder")
+    from server.library import build_library
+    lib = build_library(cfg if cfg is not None else _config())
+    out = set()
+    for artist in lib.get("artists") or ():
+        if scope == "artist":
+            out.add(_pathkey(artist.get("path")))
+            continue
+        for album in artist.get("albums") or ():
+            out.add(_pathkey(album.get("path")))
+    return out
+
+
+def target_missing(scope, path, cfg=None):
+    """"" when `path` can take a rating in `scope`, else the reason why not.
+
+    One function for the sentence, so a PUT's 404 and a bulk row's error can
+    never describe the same refusal differently (the same reason `MISSING` is a
+    table). A blank path is `path required`."""
+    scope = parse_scope(scope)
+    text = str(path or "").strip()
+    if not text:
+        return "path required"
+    if scope == "track":
+        return "" if os.path.isfile(text) else MISSING["track"]
+    return "" if _pathkey(text) in folder_paths(scope, cfg) else MISSING[scope]
+
+
+def entity_mbid(scope, path, cfg=None):
+    """The MusicBrainz id the library payload carries for a folder, so a folder
+    rating heals across a move exactly as a track's does.
+
+    The payload only knows what the tags carry, so a library with no release id
+    (or no artist id) on a folder answers "" — the row is then keyed by its
+    path alone and the heal simply keeps the path it has."""
+    scope = parse_scope(scope)
+    if scope == "track":
+        raise ValueError("track ratings heal on a recording id, not a folder's")
+    try:
+        from server import mbresolve
+        idx = mbresolve.get_index(cfg)
+        return str((idx.get(f"{scope}s_bypath") or {}).get(api_path(path)) or "")
+    except Exception:
+        return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -430,19 +600,29 @@ def _invalidate(path):
 
 
 # --------------------------------------------------------------------------- #
-# Rating a track: store first, then the file
+# Rating an entity: store first, then (tracks only) the file
 # --------------------------------------------------------------------------- #
-def rate(path, rating, mbid=None, user="", cfg=None):
-    """Store one rating and mirror it into the file. Returns the reply body.
+def rate(path, rating, mbid=None, user="", cfg=None, scope="track"):
+    """Store one rating and, for a track, mirror it into the file. Returns the
+    reply body.
 
     The row is written FIRST: the database is the source of truth, so a file
     that cannot be tagged (read-only, a full disk, a container this app cannot
     write) still keeps the rating the user just gave it, with the tag failure
     reported beside it.
+
+    An album or artist rating writes NO tag — a folder has no file to carry one
+    — so its reply says ``"tag": None`` rather than inventing a write that
+    cannot happen. The caller has already checked the target exists
+    (``target_missing``); this stores what it was given.
     """
-    half = set_rating(path, rating, mbid=mbid or mbid_for(path), user=user)
-    tag = write_tag(path, half, cfg)
-    return {"path": api_path(path), "rating": half, "tag": tag}
+    scope = parse_scope(scope)
+    if scope == "track":
+        half = set_rating(path, rating, mbid=mbid or mbid_for(path), user=user)
+        return {"path": api_path(path), "rating": half, "tag": write_tag(path, half, cfg)}
+    half = set_rating(path, rating, user=user, scope=scope,
+                      mbid=mbid or entity_mbid(scope, path, cfg))
+    return {"path": api_path(path), "rating": half, "tag": None}
 
 
 def bulk_rate(paths, rating, user="", cfg=None):
@@ -453,16 +633,21 @@ def bulk_rate(paths, rating, user="", cfg=None):
     written counts as updated AND appears in `tags_failed` with the reason —
     the rating is the user's intent and it is never dropped for a container's
     sake, and the two lists never overlap.
+
+    Tracks only, deliberately: a bulk call is a multi-select of FILES (a
+    selection of rows, a whole playlist), and no surface multi-selects album or
+    artist folders — an album or artist rating is one verdict on one folder,
+    made through the one call (``rate``) that can also refuse an unknown
+    folder.
     """
     half = parse_half_stars(rating)
     updated, failed, tagged, tags_failed = 0, [], 0, []
     for raw in paths or []:
         p = str(raw or "").strip()
         try:
-            if not p:
-                raise ValueError("path required")
-            if not os.path.isfile(p):
-                raise ValueError(MISSING_FILE)
+            reason = target_missing("track", p)
+            if reason:
+                raise ValueError(reason)
             set_rating(p, half, mbid=mbid_for(p), user=user)
         except Exception as e:
             failed.append({"path": api_path(p), "error": str(e)})

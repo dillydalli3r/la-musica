@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """Ratings: half-star precision, rename healing, RATING-tag interop.
 
+Covers the three scopes — a track (which also carries the file's RATING tag),
+an album folder and an artist folder (which live in the store alone and store
+independently of each other and of the tracks), their per-scope counts, the
+refusal of a folder the library does not know, and the migration of a database
+written before scopes existed.
+
 Everything runs against a throwaway database and throwaway files under the
 system temp dir. The container writer AND the cached tag reader are stubbed
-through ONE in-memory tag store, and the library index and the config are
+through ONE in-memory tag store, and the library payload, index and config are
 stubbed too, so no audio file is read or written, no real state db is touched
 and nothing goes to the network.
 
@@ -111,10 +117,28 @@ mlo.audio.AudioFile = FakeAudio
 tagcache.read_track = fake_read_track
 mlo.load_config = lambda: {"write_rating_tags": True}
 
-INDEX = {"tracks": {}, "tracks_bypath": {}, "albums": {}, "artists": {}}
+INDEX = {"tracks": {}, "tracks_bypath": {}, "albums": {}, "albums_bypath": {},
+         "artists": {}, "artists_bypath": {}}
 mbresolve.get_index = lambda cfg=None, force=False: INDEX
 mbresolve.track_mbid_for = lambda path: INDEX["tracks_bypath"].get(
     str(path).replace("\\", "/"), "")
+
+# The folder scopes ask the library PAYLOAD which folders are albums/artists, so
+# the payload is stubbed to one artist holding one album — the same one real
+# files are made under below, so paths and payload agree.
+from server import library as library_mod              # noqa: E402
+
+ent_track = make_file("Artist/Album 1/01 - One.flac")
+ALBUM_DIR = os.path.dirname(ent_track)
+ARTIST_DIR = os.path.dirname(ALBUM_DIR)
+api_ent_track = ent_track.replace("\\", "/")
+api_album_dir = ALBUM_DIR.replace("\\", "/")
+api_artist_dir = ARTIST_DIR.replace("\\", "/")
+library_mod.build_library = lambda cfg=None: {
+    "folder": tmp.replace("\\", "/"),
+    "artists": [{"path": api_artist_dir, "name": "Artist",
+                 "albums": [{"path": api_album_dir, "tracks": []}]}],
+}
 
 from server import api_ratings                         # noqa: E402
 from fastapi import HTTPException                      # noqa: E402
@@ -333,6 +357,203 @@ check("VENDOR_JUNK" in deleted, "the strip pass still removes junk", deleted)
 check("RATING" not in deleted, "and leaves the rating alone", deleted)
 check("RATING" in TAGS.get(key(strip_path), {}), "the tag survives the pass",
       TAGS.get(key(strip_path)))
+ratings.set_rating(a, 0)          # sections 6 and 8 left track rows behind
+ratings.set_rating(b, 0)
+ratings.set_rating(new, 0)
+
+# ── 10. the track scope, unchanged: 4.5 stars is 9 and tags the file 90 ─────
+c = make_file("Album/04 - Four.flac")
+d = make_file("Album/05 - Five.flac")
+TAGS[key(c)] = {}
+CALLS.clear()
+out = ratings.rate(c, 9, cfg=CFG)
+check(out["rating"] == 9 and out["tag"]["written"] and out["tag"]["rating100"] == 90,
+      "a 4.5-star track write stores 9 and reports the tag value", out)
+check(TAGS[key(c)]["RATING"] == "90", "the file really carries 90", TAGS[key(c)])
+TAGS[key(d)] = {}
+out = ratings.rate(d, 9, cfg={"write_rating_tags": False})
+check(out["rating"] == 9 and out["tag"]["skipped"] and not out["tag"]["written"],
+      "with write_rating_tags off the store still takes it", out)
+check("RATING" not in TAGS[key(d)], "and the file is left alone", TAGS[key(d)])
+ratings.set_rating(c, 0)
+ratings.set_rating(d, 0)
+
+# ── 11. album and artist ratings: three independent scopes, one store ───────
+check(ratings.target_missing("track", a, CFG) == "",
+      "a file that is there can take a track rating")
+check(ratings.target_missing("album", ALBUM_DIR, CFG) == "",
+      "an album folder the payload knows can take an album rating")
+check(ratings.target_missing("artist", ARTIST_DIR, CFG) == "",
+      "and its artist folder an artist rating")
+check(ratings.target_missing("album", os.path.join(tmp, "Nope"), CFG)
+      == ratings.MISSING["album"],
+      "a folder no album row names is refused with that scope's reason",
+      ratings.target_missing("album", os.path.join(tmp, "Nope"), CFG))
+check(ratings.target_missing("artist", ALBUM_DIR, CFG) == ratings.MISSING["artist"],
+      "an ALBUM folder is not an artist folder")
+check(ratings.target_missing("track", ALBUM_DIR, CFG) == ratings.MISSING_FILE,
+      "and a folder is never a track")
+try:
+    ratings.parse_scope("playlist")
+    check(False, "a scope nobody has is refused")
+except ValueError as e:
+    check("scope" in str(e), "a scope nobody has is refused by name", e)
+check(ratings.parse_scope("") == "track" and ratings.parse_scope(None) == "track",
+      "an absent scope is the track scope (today's callers)")
+check(ratings.parse_scope("Album") == "album", "and the word is case-insensitive")
+
+ratings.set_rating(ALBUM_DIR, 10, scope="album")
+ratings.set_rating(ARTIST_DIR, 6, scope="artist")
+ratings.set_rating(ent_track, 5)
+check(ratings.value(ALBUM_DIR, scope="album") == 10, "the album keeps its 5 stars")
+check(ratings.value(ARTIST_DIR, scope="artist") == 6, "the artist keeps its 3")
+check(ratings.value(ent_track) == 5, "the track keeps its 2.5")
+check(ratings.map_for(scope="album") == {api_album_dir: 10},
+      "the album map carries the album's own verdict", ratings.map_for(scope="album"))
+check(ratings.map_for(scope="artist") == {api_artist_dir: 6},
+      "the artist map carries the artist's", ratings.map_for(scope="artist"))
+check(ratings.map_for() == {api_ent_track: 5},
+      "and neither leaks into the track map", ratings.map_for())
+check(ratings.value(ALBUM_DIR, scope="artist") == 0
+      and ratings.value(ARTIST_DIR, scope="album") == 0,
+      "an album row is not an artist row even for the same folder tree")
+check(ratings.counts()["10"] == 0 and ratings.counts(scope="album")["10"] == 1,
+      "the counts are per scope", (ratings.counts(), ratings.counts(scope="album")))
+check(ratings.counts(scope="artist")["6"] == 1, "the artist count is its own",
+      ratings.counts(scope="artist"))
+
+# A folder rating never touches a file: there is no tag for a folder.
+CALLS.clear()
+out = ratings.rate(ALBUM_DIR, 10, scope="album", cfg=CFG)
+check(out["tag"] is None, "an album rating reports no tag write", out)
+check(out["rating"] == 10 and not CALLS, "and nothing reached the filesystem", CALLS)
+CALLS.clear()
+out = ratings.rate(ARTIST_DIR, 0, scope="artist", cfg=CFG)
+check(out["tag"] is None and out["rating"] == 0 and not CALLS,
+      "clearing an artist rating writes nothing either", (out, CALLS))
+
+# Clearing is per scope: each verdict leaves the other two standing.
+check(ratings.map_for(scope="artist") == {}, "the artist is now unrated",
+      ratings.map_for(scope="artist"))
+check(ratings.value(ALBUM_DIR, scope="album") == 10
+      and ratings.value(ent_track) == 5,
+      "while the album and the track it holds are untouched")
+ratings.set_rating(ALBUM_DIR, 0, scope="album")
+check(ratings.map_for(scope="album") == {} and ratings.value(ent_track) == 5,
+      "clearing the album leaves the track alone", ratings.map_for(scope="album"))
+check(ratings.counts(scope="album")["10"] == 0, "and empties its bucket")
+
+# A folder rating heals across a move on the payload's own release id — the same
+# self-repair a track row gets from its recording id (section 6).
+MBID_ALBUM = "aaaaaaaa-1111-2222-3333-444444444444"
+INDEX["albums_bypath"][api_album_dir] = MBID_ALBUM
+check(ratings.entity_mbid("album", api_album_dir, CFG) == MBID_ALBUM,
+      "a folder's release id comes out of the library payload")
+check(ratings.entity_mbid("artist", api_artist_dir, CFG) == "",
+      "and is empty when the payload carries no id for it")
+heal_new = os.path.dirname(make_file("Other/New Album/01 - One.flac")).replace("\\", "/")
+heal_old = os.path.join(tmp, "Other", "Old Album")     # never on disk
+INDEX["albums"][MBID_ALBUM] = heal_new
+ratings.set_rating(heal_old, 8, mbid=MBID_ALBUM, scope="album")
+check(ratings.map_for(scope="album", paths=[heal_old])
+      == {heal_old.replace("\\", "/"): 8},
+      "a page still holding the stale folder path keeps its value",
+      ratings.map_for(scope="album", paths=[heal_old]))
+check(ratings.map_for(scope="album") == {heal_new: 8},
+      "an album row whose folder moved is answered under its current path",
+      ratings.map_for(scope="album"))
+check(ratings.value(heal_new, scope="album") == 8, "and the row was re-pointed")
+
+# ── 12. the endpoints, per scope ────────────────────────────────────────────
+put = api_ratings.ratings_put(api_ratings.RatingPut(path=ALBUM_DIR, rating=10, scope="album"))
+check(put["ok"] and put["scope"] == "album" and put["rating"] == 10 and put["tag"] is None,
+      "PUT takes a scope and answers which one it stored", put)
+check(put["path"] == api_album_dir, "echoing the forward-slashed folder path", put)
+put_artist = api_ratings.ratings_put(
+    api_ratings.RatingPut(path=ARTIST_DIR, rating=4, scope="artist"))
+check(put_artist["scope"] == "artist" and put_artist["rating"] == 4,
+      "the artist scope stores what it was given", put_artist)
+try:
+    api_ratings.ratings_put(api_ratings.RatingPut(path=ent_track, rating=4, scope="album"))
+    check(False, "a PUT for a file that is not an album folder is refused")
+except HTTPException as e:
+    check(e.status_code == 404 and e.detail == ratings.MISSING["album"],
+          "a non-album path is a 404 naming the reason", (e.status_code, e.detail))
+try:
+    api_ratings.ratings_put(api_ratings.RatingPut(path=ALBUM_DIR, rating=4, scope="genre"))
+    check(False, "a PUT with an unknown scope is refused")
+except HTTPException as e:
+    check(e.status_code == 400, "an unknown scope is a 400", e.status_code)
+put_track = api_ratings.ratings_put(api_ratings.RatingPut(path=ent_track, rating=9))
+check(put_track["scope"] == "track" and put_track["tag"]["rating100"] == 90,
+      "a PUT without a scope is still a track rating with its tag", put_track)
+
+got_album = api_ratings.ratings_get(paths=None, scope="album")
+check(got_album["scope"] == "album"
+      and got_album["ratings"] == {api_album_dir: 10, heal_new: 8},
+      "GET ?scope=album answers the album map, and only album rows", got_album)
+check(set(got_album["counts"]) == {str(i) for i in range(1, 11)},
+      "with the same ten buckets", got_album["counts"])
+check(got_album["counts"]["10"] == 1 and got_album["counts"]["8"] == 1,
+      "counting the album rows and nothing else", got_album["counts"])
+got_artist = api_ratings.ratings_get(scope="artist", paths=[ARTIST_DIR])
+check(got_artist["ratings"] == {api_artist_dir: 4},
+      "and ?scope=artist&paths= answers just that folder", got_artist)
+check(api_ratings.ratings_get(scope="album", paths=[a])["ratings"] == {},
+      "a track path in an album request answers nothing", a)
+bulk = api_ratings.ratings_bulk(api_ratings.RatingBulk(paths=[ent_track], rating=7))
+check(bulk["scope"] == "track" and bulk["updated"] == 1,
+      "bulk stays the track call", bulk)
+
+# ── 13. a database written before scopes existed ────────────────────────────
+import sqlite3                                         # noqa: E402
+
+legacy_dir = tempfile.mkdtemp(prefix="mlo_ratings_legacy_")
+legacy_db = os.path.join(legacy_dir, "ratings.db")
+con = sqlite3.connect(legacy_db)
+con.executescript("""
+    CREATE TABLE ratings (
+        user TEXT NOT NULL DEFAULT '',
+        path TEXT NOT NULL,
+        rating INTEGER NOT NULL,
+        mbid TEXT,
+        updated REAL NOT NULL,
+        PRIMARY KEY (user, path)
+    );
+    CREATE INDEX ratings_by_mbid ON ratings (user, mbid);
+    INSERT INTO ratings VALUES ('', 'C:/music/Old/01.flac', 7, 'rec-1', 1.0);
+    INSERT INTO ratings VALUES ('someone', 'C:/music/Old/02.flac', 4, NULL, 2.0);
+    """)
+con.commit()
+con.close()
+
+main_db = ratings.db_path
+ratings.db_path = lambda: legacy_db
+ratings._initialized = False      # force the schema pass on the next connection
+check(ratings.map_for() == {"C:/music/Old/01.flac": 7},
+      "a row written before scopes existed reads back as a track rating",
+      ratings.map_for())
+check(ratings.counts()["7"] == 1 and ratings.counts("someone")["4"] == 1,
+      "with its value and its user intact")
+check(ratings.map_for(scope="album") == {},
+      "and it is NOT an album rating", ratings.map_for(scope="album"))
+check(ratings.set_rating("C:/music/Old", 3, scope="album") == 3,
+      "a folder rating can now share a path with a migrated track row")
+con = sqlite3.connect(legacy_db)
+tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+info = list(con.execute("PRAGMA table_info(ratings)"))
+con.close()
+check("ratings_legacy" not in tables, "the pre-scope table is gone", tables)
+check([r[1] for r in info][:3] == ["user", "scope", "path"],
+      "the new table leads with the key", [r[1] for r in info])
+check({r[1] for r in info if r[5]} == {"user", "scope", "path"},
+      "keyed by (user, scope, path), so one path can be both", info)
+ratings.db_path = main_db
+ratings._initialized = False
+check(ratings.value(ent_track) == 7 and ratings.value(ALBUM_DIR, scope="album") == 10,
+      "the main database answers unchanged after that",
+      (ratings.value(ent_track), ratings.value(ALBUM_DIR, scope="album")))
+shutil.rmtree(legacy_dir, ignore_errors=True)
 
 # ── done ────────────────────────────────────────────────────────────────────
 shutil.rmtree(tmp, ignore_errors=True)

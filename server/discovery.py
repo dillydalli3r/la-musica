@@ -149,6 +149,35 @@ def _record_http_error(host, url, status, body):
                             "url": url, "at": time.time()}
 
 
+class ProviderRefused(RuntimeError):
+    """A provider call that FAILED — carrying the provider's own words.
+
+    Everything else here answers [] for "nothing matched", which is right for a
+    chain that must degrade quietly. A CHART is the opposite case: an empty list
+    and a refused request look identical on screen, and the difference is the
+    whole diagnosis ("Last.fm said Invalid API key", "RYM served Cloudflare").
+    The chart readers raise this instead, and the caller reports it verbatim."""
+
+
+def _refusal(host, since):
+    """Why *host* last refused, in its own words, or "" — a refusal older than
+    *since* belongs to an earlier call and is not reported as this one's."""
+    got = last_http_error(host)
+    if not got or float(got.get("at") or 0) < float(since):
+        return ""
+    if got.get("status"):
+        return "HTTP %s: %s" % (got["status"], str(got.get("body") or "").strip())
+    return str(got.get("body") or "").strip() or "no answer"
+
+
+def _rank_rows(rows):
+    """Stamp each row with its 1-based position in the provider's own order: a
+    chart's ranking IS its data, and the order the provider gave is kept."""
+    for i, row in enumerate(rows, 1):
+        row["rank"] = i
+    return rows
+
+
 TTL_META = 1800.0        # artist/album metadata, images, descriptions, MBIDs
 TTL_CHART = 900.0        # charts (they move)
 
@@ -526,9 +555,120 @@ def deezer_album_cover(dz_id, timeout=None):
     return (detail or {}).get("cover")
 
 
+# Deezer's chart is `/chart/0/<entity>` — one global chart per kind, no window
+# and no genre, so it appears for every period the app offers only as "what is
+# charting right now"; the registry says exactly that rather than pretending a
+# period was applied.
+_DEEZER_CHART_KINDS = ("albums", "artists", "tracks")
+
+
+def deezer_chart(kind, limit=50, timeout=None):
+    """Deezer's current sitewide chart for one kind (albums/artists/tracks).
+
+    Rows come back in Deezer's own chart order and carry that position as
+    `rank`; `popularity` is Deezer's stated number (fans for an album, rank for
+    a track) and is labelled the way the rest of this module labels it. Raises
+    `ProviderRefused` when Deezer does not answer — never an empty list that
+    would read as "nothing is charting"."""
+    kind = str(kind or "").strip().lower()
+    if kind not in _DEEZER_CHART_KINDS:
+        raise ProviderRefused("Deezer publishes no %s chart" % (kind or "such"))
+    started = time.time()
+    data = _json(f"{DEEZER_BASE}/chart/0/{kind}", {"limit": max(1, int(limit))},
+                 timeout=timeout, ttl=TTL_CHART, host="api.deezer.com")
+    if data is None:
+        raise ProviderRefused(_refusal("api.deezer.com", started)
+                              or "Deezer did not answer its chart route")
+    rows = []
+    for item in (data or {}).get("data") or []:
+        artist = item.get("artist") or {}
+        album = item.get("album") or {}
+        if kind == "albums":
+            rows.append({
+                "kind": "album",
+                "deezer_id": _int(item.get("id")),
+                "title": item.get("title") or "",
+                "artist": artist.get("name") or "",
+                "artist_id": _int(artist.get("id")),
+                "cover": item.get("cover_xl") or item.get("cover_big"),
+                "year": (item.get("release_date") or "")[:4],
+                "record_type": (item.get("record_type") or "").lower(),
+                "tracks": _int(item.get("nb_tracks")),
+                "popularity": _int(item.get("fans")) or 0,
+                "popularity_label": _fans_label(_int(item.get("fans"))),
+                "link": item.get("link"),
+                "source": "deezer",
+            })
+        elif kind == "artists":
+            rows.append({
+                "kind": "artist",
+                "deezer_id": _int(item.get("id")),
+                "title": item.get("name") or "",
+                "artist": item.get("name") or "",
+                "cover": item.get("picture_xl") or item.get("picture_big"),
+                "popularity": _int(item.get("nb_fan")) or 0,
+                "popularity_label": _fans_label(_int(item.get("nb_fan"))),
+                "link": item.get("link"),
+                "source": "deezer",
+            })
+        else:
+            rows.append({
+                "kind": "track",
+                "deezer_id": _int(item.get("id")),
+                "title": item.get("title") or "",
+                "artist": artist.get("name") or "",
+                "artist_id": _int(artist.get("id")),
+                "album": album.get("title") or "",
+                "album_id": _int(album.get("id")),
+                "cover": album.get("cover_xl") or album.get("cover_big"),
+                "duration": _int(item.get("duration")),
+                "popularity": _int(item.get("rank")) or 0,
+                "popularity_label": None,
+                "link": item.get("link"),
+                "source": "deezer",
+            })
+    return _rank_rows(rows)
+
+
 # --------------------------------------------------------------------------- #
 # ListenBrainz
 # --------------------------------------------------------------------------- #
+# Its sitewide stats take an explicit `range`, and its own
+# ALLOWED_STATISTICS_RANGE (verified in the API docs) covers every period the
+# app offers: `this_week`/`this_month`/`this_year` are the running windows and
+# `all_time` is the unbounded one. A period therefore maps to a REAL window
+# here — it is never dropped in favour of all-time.
+LB_CHART_RANGE = {"week": "this_week", "month": "this_month",
+                  "year": "this_year", "all": "all_time"}
+_LB_CHART_KINDS = ("albums", "artists", "tracks")
+
+
+def listenbrainz_chart(kind, period="all", limit=50, timeout=None):
+    """ListenBrainz' sitewide most-listened rows for one window.
+
+    Reuses the three `listenbrainz_top_*` readers (one per kind, MBID-native
+    rows with Cover Art Archive ids), which already take the range; this only
+    resolves the period into the range name their endpoint documents. Raises
+    `ProviderRefused` when the service does not answer."""
+    kind = str(kind or "").strip().lower()
+    period = str(period or "all").strip().lower()
+    if kind not in _LB_CHART_KINDS:
+        raise ProviderRefused("ListenBrainz publishes no %s stats" % (kind or "such"))
+    if period not in LB_CHART_RANGE:
+        raise ProviderRefused("ListenBrainz has no %s window" % (period or "such"))
+    range_ = LB_CHART_RANGE[period]
+    started = time.time()
+    if kind == "albums":
+        rows = listenbrainz_top_releases(range_, limit, timeout=timeout)
+    elif kind == "artists":
+        rows = listenbrainz_top_artists(range_, limit, timeout=timeout)
+    else:
+        rows = listenbrainz_top_recordings(range_, limit, timeout=timeout)
+    if not rows and _refusal("api.listenbrainz.org", started):
+        raise ProviderRefused(_refusal("api.listenbrainz.org", started))
+    return _rank_rows(rows)
+
+
 def _lb_stats(kind, range_="month", limit=25, offset=0, timeout=None):
     return _json(f"{LISTENBRAINZ_BASE}/stats/sitewide/{kind}",
                  {"range": range_, "count": limit, "offset": offset},
@@ -2132,6 +2272,49 @@ def itunes_genre_albums(genre, limit=25, offset=0, cfg=None, timeout=None):
     return {"rows": rows[offset:][:limit], "total": seen}
 
 
+# Apple's most-played feed (the marketing RSS, not the Search API): the one
+# Apple route that IS a chart. It is a ROLLING window refreshed daily — Apple
+# publishes no dated chart and no earlier one — so it answers `all` and the
+# registry says why the other periods are not offered here.
+ITUNES_CHART_BASE = "https://rss.applemarketingtools.com/api/v2"
+_ITUNES_CHART_HOST = "rss.applemarketingtools.com"
+
+
+def itunes_most_played(limit=50, cfg=None, timeout=None):
+    """Apple Music's most-played songs for one storefront, as a chart.
+
+    Rows keep Apple's own order (their `rank`), use the 600px artwork the rest
+    of this module rewrites to, and carry no popularity number: Apple states
+    none on this feed, and inventing one would be worse than the honest null.
+    Raises `ProviderRefused` when the feed does not answer."""
+    country = integrations._apple_country(cfg)
+    want = max(1, min(200, int(limit)))
+    started = time.time()
+    data = _json(f"{ITUNES_CHART_BASE}/{country}/music/most-played/{want}/songs.json",
+                 None, timeout=timeout, ttl=TTL_CHART, host=_ITUNES_CHART_HOST)
+    if data is None:
+        raise ProviderRefused(_refusal(_ITUNES_CHART_HOST, started)
+                              or "Apple did not answer its most-played feed")
+    rows = []
+    for item in ((data or {}).get("feed") or {}).get("results") or []:
+        art = item.get("artworkUrl100")
+        rows.append({
+            "kind": "track",
+            "itunes_id": _int(item.get("id")),
+            "title": item.get("name") or "",
+            "artist": item.get("artistName") or "",
+            "cover": itunes_artwork(art, 600) if art else None,
+            "year": (item.get("releaseDate") or "")[:4],
+            "genres": [g.get("name") for g in item.get("genres") or []
+                       if isinstance(g, dict) and g.get("name")],
+            "popularity": None,
+            "popularity_label": None,
+            "link": item.get("url"),
+            "source": "itunes",
+        })
+    return _rank_rows(rows)
+
+
 def discogs_style_search(style, limit=25, offset=0, cfg=None, timeout=None):
     """Discogs release browse by style ("Shoegaze") through `database/search`.
 
@@ -2292,6 +2475,61 @@ def lastfm_similar_tracks(artist, track, limit=25, cfg=None, timeout=None):
             "source": "lastfm",
         })
     return rows
+
+
+# Last.fm's sitewide charts — `chart.gettoptracks` / `chart.gettopartists` /
+# `chart.gettopalbums` — which are keyed and ALL-TIME: Last.fm publishes no
+# dated or per-period sitewide chart, so `all` is the only period the registry
+# offers for it.
+_LASTFM_CHART_METHOD = {"albums": "chart.gettopalbums",
+                        "artists": "chart.gettopartists",
+                        "tracks": "chart.gettoptracks"}
+_LASTFM_CHART_BLOCK = {"albums": ("albums", "album"),
+                       "artists": ("artists", "artist"),
+                       "tracks": ("tracks", "track")}
+
+
+def lastfm_chart(kind, limit=50, cfg=None, timeout=None):
+    """Last.fm's most-scrobbled rows sitewide, with its own `playcount`.
+
+    Rows keep Last.fm's order (their `rank`) and state `popularity` as the
+    playcount it is, labelled with the same humanised form the rest of this
+    module uses. Raises `ProviderRefused` — carrying Last.fm's own words — when
+    the key is rejected or the service does not answer; [] when the chart is
+    simply empty."""
+    kind = str(kind or "").strip().lower()
+    method = _LASTFM_CHART_METHOD.get(kind)
+    if not method:
+        raise ProviderRefused("Last.fm has no %s chart" % (kind or "such"))
+    block_key, row_key = _LASTFM_CHART_BLOCK[kind]
+    started = time.time()
+    data = _lastfm_json(method, {"limit": max(1, min(1000, int(limit)))}, cfg,
+                        timeout=timeout, ttl=TTL_CHART)
+    if data is None:
+        raise ProviderRefused(lastfm_last_error(started) or
+                              "Last.fm did not answer %s" % method)
+    items = ((data or {}).get(block_key) or {}).get(row_key) or []
+    if isinstance(items, dict):
+        items = [items]
+    rows = []
+    for item in items:
+        plays = _int(item.get("playcount")) or 0
+        artist = (item.get("artist") or {}).get("name") or ""
+        rows.append({
+            "kind": {"albums": "album", "artists": "artist",
+                     "tracks": "track"}[kind],
+            "title": item.get("name") or "",
+            "artist": artist or (item.get("name") or ""),
+            "mbid": item.get("mbid") or ((item.get("artist") or {}).get("mbid")
+                                         if kind == "track" else None),
+            "cover": _lastfm_image(item),
+            "duration": _int(item.get("duration")),
+            "popularity": plays,
+            "popularity_label": _listens_label(plays),
+            "link": item.get("url"),
+            "source": "lastfm",
+        })
+    return _rank_rows(rows)
 
 
 def listenbrainz_similar_artists(mbid, limit=25, timeout=None):

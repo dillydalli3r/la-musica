@@ -1,6 +1,6 @@
-"""Discover — genre browsing and online recommendations for the Library app.
+"""Discover — genre browsing, online recommendations and provider charts.
 
-The three `/api/discover/*` endpoints answer from the app's LIBRARY and from
+The four `/api/discover/*` endpoints answer from the app's LIBRARY and from
 every external source that can speak about genres:
 
 * **genres** — the genre list. The library's own genres are counted (tracks,
@@ -15,34 +15,53 @@ every external source that can speak about genres:
   in `also_from`.
 * **recommended** — online recommendations seeded by the library's own genre
   mix and top artists, or by one genre, with what the library already owns
-  dropped and the reason each row was suggested.
+  dropped and the reason each row was suggested. A `seed_kind` (artist / album
+  / track) switches the same endpoint to ONE ENTITY — the page the shelf sits
+  on — seeded by that entity's own MusicBrainz id when its tags carry one and
+  by artist+title when they do not; an entity shelf is what the page is LIKE,
+  so a row the library owns is KEPT and marked (`owned`, `path`) rather than
+  dropped, and every source that cannot answer about an entity says why.
+* **charts** — what the sources RANK, for one window (all-time / this year /
+  this month / this week) and one kind. Unlike the two browse endpoints the
+  rows are NOT merged: a chart's rank is its data, so each source's rows keep
+  their own order, their own `rank` and their own score, and the page lists
+  them source by source in `CHART_ORDER`. A source is asked only for the
+  periods its registry row declares — a window it does not publish is
+  `unsupported:` in `notes`, never its all-time chart passed off as this
+  week's. The library's OWN charts (the user's play history) are a different
+  surface: `GET /api/top` (server/api_plays.py), which never mixes a stored
+  play count with a provider's ranking.
 
 `SOURCES` below is the ONE place a source is described: its label, what it can
 answer for which kind, whether it publishes a genre list or a recommendation
-feed, and the credential it needs. The endpoints are driven from it, so a
-source added there cannot be half-wired — and `sources_health` reads it so the
-Sources panel probes exactly the same set.
+feed, which kinds it charts and for which windows, and the credential it needs.
+The endpoints are driven from it, so a source added there cannot be half-wired —
+and `sources_health` reads it so the Sources panel probes exactly the same set.
 
 Every call goes through `server.discovery`'s wrappers (which own the TTL cache
-and the per-host throttles) or `server.integrations`' cached MusicBrainz
-access; this module never opens a request of its own.
+and the per-host throttles), `server.integrations`' cached MusicBrainz access,
+or — for RateYourMusic, which has no API — that same module's RYM scrape, so
+this module never opens a request of its own.
 
 Honesty rules, which every answer here follows:
 
 * a source that cannot run (no key) is `skipped: no <key>` in `notes`; a call
-  that raised is `failed: <reason>`; a source that answered has no note;
+  that raised is `failed: <reason>` (the provider's own words); a source that
+  answered has no note;
 * a source that cannot answer a request at all (Deezer files music under 22
-  broad genres, TheAudioDB publishes no browse) says so in `notes` instead of
-  returning rows it cannot stand behind;
+  broad genres, TheAudioDB publishes no browse) says so in `notes`, as does a
+  chart source asked for a window it does not publish, instead of returning
+  rows it cannot stand behind;
 * an unknown genre or source is an EMPTY list, not an error — and never a
   guessed row;
 * counts only ever come from the library: a source that merely names a genre
   has no track count, so an online-only genre is all zeroes.
 
-Row shape (identical in `genre` and `recommended`, and what both UIs render):
+Row shape (identical in `genre` and `recommended`, and what every Discover UI
+renders; a chart row adds `rank`, `score` and `score_label`):
 
     kind, title, artist, year, source, source_label, cover_url, page_url,
-    mbid, release_group_mbid, path, owned, in_library, tracks, reason,
+    mbid, release_group_mbid, path, owned, in_library, tracks, score, reason,
     also_from
 
 `owned` means the library already holds this exact release/artist/track —
@@ -50,12 +69,17 @@ matched by MBID first, then by normalized artist+title — and `path` is set onl
 then, so a row can link into the library. `in_library` is the weaker signal:
 the library already holds something from this artist, so the row fills a gap
 rather than being a new discovery. `also_from` lists the further sources that
-named the same row, beyond its primary `source`.
+named the same row, beyond its primary `source`. `score` is the provider's OWN
+relevance for the row (Last.fm's `match`, Deezer's fans/rank, ListenBrainz's
+score) — never a number this module invented, and null when the provider states
+none. The providers' scales are not comparable, so it orders rows WITHIN one
+source and is not a cross-provider percentage.
 """
 from __future__ import annotations
 
 from mlo.genres import canonical, display_name, iter_names
 from server import discovery
+from server import integrations
 
 # The three row kinds every endpoint speaks; hidden API vocabulary, not a
 # config key. The QUERY speaks the plural (`kind=albums`); a ROW carries the
@@ -71,45 +95,69 @@ MAX_OFFSET = 200
 # of artists, so one loud genre cannot fill the whole shelf.
 SEED_GENRES = 3
 SEED_ARTISTS = 3
+# The ENTITY kinds a shelf can be seeded by instead of a genre list: the page
+# it sits on. The query speaks the singular (`seed_kind=artist`); the seeds a
+# source is asked about come from that entity's own identity — its MusicBrainz
+# id when its tags carry one, else its artist and name (see `entity_seed`).
+SEED_KINDS = ("artist", "album", "track")
+# How many related artists one source's bridge fans out over when an artist
+# similarity has to become rows of ANOTHER kind (Deezer's related list → their
+# albums / their top tracks), and how many rows each of them contributes. One
+# request per artist: an entity shelf is a starting point, not a crawl, and
+# every wrapper underneath is TTL-cached and throttled anyway.
+RELATED_FANOUT = 3
+RELATED_ROWS = 8
 
 
-def _source(sid, label, note, kinds=(), *, rec_kinds=(), genres=False, needs=()):
+def _source(sid, label, note, kinds=(), *, rec_kinds=(), genres=False, needs=(),
+            charts=(), chart_periods=()):
     return {"id": sid, "label": label, "note": note, "kinds": tuple(kinds),
             "rec_kinds": tuple(rec_kinds), "genres": bool(genres),
-            "needs": tuple(needs)}
+            "needs": tuple(needs), "charts": tuple(charts),
+            "chart_periods": tuple(chart_periods)}
 
 
 # Registry order IS the preference order: the first source that named a row
 # keeps it (`source`), the rest land in `also_from`, and the same order sorts
 # the page. `kinds` is what the source can LIST for a genre; `rec_kinds` is
 # what it can RECOMMEND (ListenBrainz has no genre filter at all, so it lists
-# nothing but still recommends through its similar-artists feed and charts).
+# nothing but still recommends through its similar-artists feed and charts);
+# `charts` is what it can RANK for the Charts page, with the windows it really
+# publishes in `chart_periods` — a source is asked for a period it does not
+# have ONLY to be reported as unsupported, never to be handed all-time instead.
 SOURCES = (
     _source("musicbrainz", "MusicBrainz",
             "Genre (tag) search over release groups, artists and recordings, "
             "and the genre vocabulary itself.",
             KINDS, rec_kinds=KINDS, genres=True),
     _source("deezer", "Deezer",
-            "Its own genre charts (albums, tracks) and artists-by-genre for "
-            "Deezer's 22 broad genres; related artists, an artist's albums and "
-            "its top tracks.",
-            KINDS, rec_kinds=KINDS, genres=True),
+            "Its own genre charts (albums, tracks), artists-by-genre for "
+            "Deezer's 22 broad genres, related artists, an artist's albums and "
+            "its top tracks — plus its current global chart.",
+            KINDS, rec_kinds=KINDS, genres=True,
+            charts=KINDS, chart_periods=("all",)),
     _source("itunes", "iTunes",
-            "Apple's genreIndex album search.",
-            ("albums",), rec_kinds=("albums",)),
+            "Apple's genreIndex album search, and its most-played songs feed — "
+            "a rolling chart Apple refreshes daily and dates nowhere.",
+            ("albums",), rec_kinds=("albums",),
+            charts=("tracks",), chart_periods=("all",)),
     _source("audiodb", "TheAudioDB",
             "States the genre and mood of a NAMED artist or album — it "
             "publishes no genre list and no genre browse (its /genres.php "
             "answers 404, verified)."),
     _source("lastfm", "Last.fm",
             "Tag charts: the most-listened albums, artists and tracks under a "
-            "tag, its top tag list, and similar artists/tracks.",
-            KINDS, rec_kinds=KINDS, genres=True, needs=("lastfm_api_key",)),
+            "tag, its top tag list, similar artists/tracks, and its sitewide "
+            "all-time charts.",
+            KINDS, rec_kinds=KINDS, genres=True, needs=("lastfm_api_key",),
+            charts=KINDS, chart_periods=("all",)),
     _source("listenbrainz", "ListenBrainz",
             "Similar artists (Labs, keyless) and the sitewide most-listened "
-            "charts. LB Radio itself needs a user token (verified 401), so it "
+            "charts, with this week / this month / this year / all-time "
+            "windows. LB Radio itself needs a user token (verified 401), so it "
             "is not wired, and there is no keyless genre filter.",
-            (), rec_kinds=KINDS),
+            (), rec_kinds=KINDS,
+            charts=KINDS, chart_periods=("all", "year", "month", "week")),
     _source("discogs", "Discogs",
             "Release browse by style/genre. Anonymous search answers it; a "
             "discogs_token only raises its rate limit.",
@@ -124,10 +172,36 @@ SOURCES = (
             "Album search filtered by Spotify's own genre names.",
             ("albums",), rec_kinds=("albums",),
             needs=("spotify_client_id", "spotify_client_secret")),
+    # RateYourMusic is here for its CHARTS only: it publishes no genre list and
+    # no recommendation feed, and its genre reading lives in the import chain
+    # (`server.integrations`). It is last in this list on purpose — the registry
+    # order is the genre/rec merge order — and first in `CHART_ORDER` below,
+    # where the user asked for it as the primary track source.
+    _source("rym", "RateYourMusic",
+            "Its own user-ranked song charts (all-time and per year), scraped "
+            "from the site — RYM has no API and refuses an automated client "
+            "without a rym_cookie, so archived snapshots answer behind the live "
+            "route. Tracks only; no month or week chart exists.",
+            charts=("tracks",), chart_periods=("all", "year")),
 )
 BY_ID = {spec["id"]: spec for spec in SOURCES}
 SOURCE_LABELS = {spec["id"]: spec["label"] for spec in SOURCES}
 _ORDER = {spec["id"]: i for i, spec in enumerate(SOURCES)}
+
+# The windows a chart can be asked for, and the order the CHART sources are
+# asked in — which is NOT the registry order, because the two list orders mean
+# different things. The registry's is the genre/rec merge preference; this one
+# is the user's own: RateYourMusic is the PRIMARY track-chart source, so its
+# rows lead the page for `kind=tracks` (and it is the only chart source for
+# tracks-only windows it publishes). The rest keep the registry's relative
+# order, so a source added there cannot fall out of the charts.
+CHART_PERIODS = ("all", "year", "month", "week")
+CHART_KINDS = KINDS
+CHART_FIRST = "rym"
+CHART_ORDER = tuple([CHART_FIRST]
+                    + [spec["id"] for spec in SOURCES
+                       if spec["charts"] and spec["id"] != CHART_FIRST])
+_CHART_RANK = {sid: i for i, sid in enumerate(CHART_ORDER)}
 
 
 class _Skip(Exception):
@@ -164,10 +238,13 @@ def catalogue(cfg=None):
     Sources panel without a second list to keep in step."""
     return {
         "kinds": list(KINDS),
+        "chart_periods": list(CHART_PERIODS),
         "sources": [{
             "id": spec["id"], "label": spec["label"], "note": spec["note"],
             "genres": spec["genres"], "kinds": list(spec["kinds"]),
             "rec_kinds": list(spec["rec_kinds"]), "needs": list(spec["needs"]),
+            "charts": list(spec["charts"]),
+            "chart_periods": list(spec["chart_periods"]),
             "missing": missing_keys(spec, cfg), "ready": can_run(spec, cfg),
         } for spec in SOURCES],
     }
@@ -189,6 +266,16 @@ def skip_note(spec, cfg):
     if not missing:
         return ""
     return "skipped: no " + ", no ".join(missing)
+
+
+def _safe_int(value, default):
+    """An int, or *default* for anything unusable (a query argument arriving
+    as None, "", a list — the route bounds its own, this only keeps a direct
+    caller honest)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _window(limit, offset):
@@ -395,9 +482,12 @@ def merge_rows(rows):
     Identity is the MBID when there is one and the normalized artist+title
     otherwise; a row with an MBID also registers its name key, so a name-only
     source naming the same album merges into it. The FIRST source in registry
-    order keeps the row and is its `source`/`source_label`; every further
-    source is listed in `also_from`, and a field the primary lacks (a cover, a
-    year, an MBID) is filled from the duplicate rather than lost."""
+    order keeps the row and is its `source`/`source_label` — registry order IS
+    the preference order, so that source's `_reason` is the one the shelf
+    shows — and every further source is listed in `also_from`, with a field the
+    primary lacks (a cover, a year, an MBID) filled from the duplicate rather
+    than lost. A duplicate's reason is taken only when the winner stated none,
+    so a row two sources agree on still explains itself."""
     merged, by_mbid, by_name = [], {}, {}
     for row in rows:
         mbid = str(row.get("mbid") or "").strip().lower()
@@ -417,6 +507,10 @@ def merge_rows(rows):
                     continue
                 if value and not hit.get(key):
                     hit[key] = value
+            if not hit.get("_reason") and row.get("_reason"):
+                # The winner never stated why; the duplicate's reason is better
+                # than an empty line, and it is that source's own words.
+                hit["_reason"] = row["_reason"]
             source = row.get("_source")
             if source and source != hit.get("_source") and source not in hit["_also"]:
                 hit["_also"].append(source)
@@ -456,9 +550,41 @@ def finalize_row(row, index, reason):
         "owned": bool(owned),
         "in_library": bool(in_library),
         "tracks": list(titles),
+        "score": _rank_of(row) or None,
         "reason": reason,
         "also_from": list(row.get("_also") or []),
     }
+
+
+def _shelf_items(rows, index, limit, reason, drop_owned):
+    """The merged shelf: registry order, ONE row per identity, each carrying
+    the provider that named it first and the reason it was suggested.
+
+    `drop_owned` is what separates the two shelves this endpoint serves. A
+    library-seeded shelf is a shopping list — what the user already has is not
+    a recommendation — while an ENTITY shelf (the artist/album/track page) is
+    "what this page is like", where an owned row IS an answer: it keeps its
+    `owned` flag and its library `path`, so the UI can open it rather than
+    offer to add it twice."""
+    items = []
+    for row in sort_rows(merge_rows(rows)):
+        out = finalize_row(row, index, row.get("_reason") or reason)
+        if drop_owned and out["owned"]:
+            continue
+        items.append(out)
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _nothing_note(cfg, kind, seed_label):
+    """The verdict for an empty shelf, as its own sentence in `notes`: a server
+    with no usable source for this kind is a different statement from sources
+    that answered nothing, and neither may read as a rendering bug."""
+    if any(can_run(spec, cfg) for spec in SOURCES if kind in spec["rec_kinds"]):
+        return ("no recommendation source had anything to suggest for %s"
+                % seed_label)
+    return "skipped: no recommendation source is configured for %s" % kind
 
 
 # --------------------------------------------------------------------------- #
@@ -689,7 +815,8 @@ def genre_payload(cfg=None, genre="", kind="albums", source="all", limit=25,
 
 
 # --------------------------------------------------------------------------- #
-# recommended — online suggestions seeded by the library or by one genre
+# recommended — online suggestions seeded by the library, by one genre, or by
+# ONE ENTITY (the artist/album/track page the shelf sits on)
 # --------------------------------------------------------------------------- #
 def _recommend_rows(sid, kind, cfg, genres, artists, limit, seed):
     """Rows ONE source recommends for these seeds, each carrying `_reason`.
@@ -769,8 +896,167 @@ def _recommend_rows(sid, kind, cfg, genres, artists, limit, seed):
     raise _Skip("no recommendations from this source")
 
 
-def recommended_payload(cfg=None, seed="library", kind="albums", limit=20, lib=None):
-    """Online recommendations, seeded by the library or by one genre.
+# What a source that CANNOT answer about an entity says instead: one honest
+# sentence each, kept beside the registry so a reader of `notes` learns the
+# provider's own limit instead of guessing from an empty list. A source that
+# declares no `rec_kinds` is never asked at all; anything not named here and
+# not handled below falls through to the generic sentence.
+_ENTITY_NOTES = {
+    "musicbrainz": ("MusicBrainz publishes no similar-entity feed — its "
+                    "recommendations are genre (tag) searches"),
+    "discogs": "Discogs browses by style, and publishes no similar-entity feed",
+    "spotify": ("Spotify publishes no similar-entity feed — its album search "
+                "filters by its own genre names"),
+}
+
+
+def entity_seed(seed_kind, mbid="", name="", artist=""):
+    """The entity a shelf is built around, as `(seed, why)`.
+
+    A page seeds by IDENTITY first: `mbid` when its tags carry one, else by
+    name — an artist by its own name, an album or a track by artist + title.
+    `why` is "" when the seed is usable and the honest reason it is not
+    otherwise: a page that named nothing cannot be recommended around, and that
+    is said rather than answered with somebody else's rows. An artist seed's
+    `artist` IS its name — the one name a similar-artist feed and a
+    related-artist bridge both need."""
+    seed = {"kind": str(seed_kind or "").strip().lower(),
+            "mbid": str(mbid or "").strip().lower(),
+            "name": str(name or "").strip(),
+            "artist": str(artist or "").strip()}
+    if seed["kind"] not in SEED_KINDS:
+        return seed, ("unknown seed kind %r — an entity shelf is seeded by one "
+                      "of: %s" % (seed_kind, ", ".join(SEED_KINDS)))
+    if seed["kind"] == "artist":
+        seed["artist"] = seed["name"]
+        if not seed["name"]:
+            return seed, "this page names no artist to seed from"
+        return seed, ""
+    if not seed["name"]:
+        return seed, "this page names no %s to seed from" % seed["kind"]
+    if not seed["artist"]:
+        return seed, ("this page names no artist for its %s, and every source "
+                      "asks for %s rows by that artist"
+                      % (seed["kind"], seed["kind"]))
+    return seed, ""
+
+
+def _entity_subject(seed):
+    """The entity as a reader says it ("Slowdive", "Slowdive — Souvlaki")."""
+    if seed["kind"] == "artist":
+        return seed["name"]
+    return "%s — %s" % (seed["artist"], seed["name"])
+
+
+def _entity_basis(seed):
+    """What the shelf was built from, in the payload's own words — and WHICH
+    form of identity it was built from, because "by name" is a real answer to
+    a real page and says the row's reach is only as good as that name."""
+    return "%s: %s (%s)" % (seed["kind"], _entity_subject(seed),
+                            seed["mbid"] or "by name")
+
+
+def _entity_rows(sid, kind, cfg, seed, limit):
+    """Rows ONE source recommends for ONE entity seed, each carrying `_reason`.
+
+    What a source can say about an entity is NOT what it can say about a genre:
+    a similar-artist feed answers an artist page directly, and a related-artist
+    list is the bridge to rows of another kind (their albums, their top
+    tracks) — never a genre chart or a sitewide chart passed off as "like this
+    page". Every row's reason names the provider and the relationship it
+    states, and a source with no entity feed at all raises `_Skip` with its own
+    sentence instead of returning nothing quietly."""
+    rows = []
+    by = seed["artist"] or seed["name"]
+
+    def take(found, why):
+        rows.extend(_taken(found, kind, why))
+
+    def bridge(names, why_of):
+        """One related artist at a time: their albums/tracks, each row saying
+        which relationship brought it here."""
+        for name in names:
+            if kind == "albums":
+                found = discovery.deezer_artist_albums(name, RELATED_ROWS,
+                                                       albums_only=True)
+            elif kind == "tracks":
+                found = discovery.deezer_artist_top(name, RELATED_ROWS)
+            else:
+                found = []
+            take(found, why_of(name))
+
+    if sid == "deezer":
+        if kind == "artists":
+            take(discovery.deezer_related_artists(by, limit),
+                 "sounds like %s (Deezer)" % by)
+        else:
+            related = [a["name"] for a in
+                       discovery.deezer_related_artists(by, RELATED_FANOUT)
+                       if a.get("name")]
+            bridge(related, lambda name: "more from %s — sounds like %s (Deezer)"
+                   % (name, by))
+            # The seed's OWN artist, beside the related ones: for an album or a
+            # track page the records of the artist being read are the closest
+            # answer Deezer states, and the rows the library does not hold are
+            # the ones it is actually missing.
+            bridge([by], lambda name: "more from %s (Deezer)" % name)
+        if not rows:
+            raise _Skip('Deezer knows no related artists for "%s"' % by)
+        return rows
+
+    if sid == "itunes":
+        if kind != "albums":
+            raise _Skip("Apple's search answers album rows about a NAMED "
+                        "artist — it publishes no similar-entity feed")
+        # Apple has no related feed, so the honest use of its search is the
+        # named artist's own records (`term=<artist>&entity=album`). Rows are
+        # kept only when Apple's OWN artist field matches the name asked for,
+        # so a same-named act cannot ride in on the search term.
+        want = discovery.norm(by)
+        found = [row for row in discovery.itunes_search_album(by, "", limit=limit + 5)
+                 if discovery.norm(row.get("artist")) == want]
+        if not found:
+            raise _Skip('Apple\'s search matched no album by "%s"' % by)
+        take(found, "more from %s (iTunes search)" % by)
+        return rows
+
+    if sid == "lastfm":
+        if kind == "artists" and seed["kind"] == "artist":
+            take(discovery.lastfm_similar_artists(seed["name"], limit, cfg=cfg),
+                 "sounds like %s (Last.fm)" % seed["name"])
+        elif kind == "tracks" and seed["kind"] == "track":
+            take(discovery.lastfm_similar_tracks(seed["artist"], seed["name"],
+                                                 limit, cfg=cfg),
+                 "sounds like %s (Last.fm)" % seed["name"])
+        else:
+            raise _Skip("Last.fm's entity feeds are similar ARTISTS and similar "
+                        "TRACKS — it has no similar-%s feed" % kind)
+        return rows
+
+    if sid == "listenbrainz":
+        if kind != "artists":
+            raise _Skip("ListenBrainz's Labs feed is similar ARTISTS — it "
+                        "publishes no similar-%s feed" % kind)
+        # Labs is MBID-native, and a page carrying no id is resolved by NAME
+        # through MusicBrainz first (the same resolve the library-seeded shelf
+        # uses). A name that resolves to nothing says so, rather than handing
+        # back another artist's neighbours.
+        mbid = seed["mbid"] if seed["kind"] == "artist" else ""
+        mbid = mbid or discovery.resolve_artist_mbid(by, cfg)
+        if not mbid:
+            raise _Skip('could not resolve "%s" on MusicBrainz, and '
+                        "ListenBrainz's feed is MBID-native" % by)
+        take(discovery.listenbrainz_similar_artists(mbid, limit),
+             "sounds like %s (ListenBrainz)" % by)
+        return rows
+
+    raise _Skip(_ENTITY_NOTES.get(sid) or "no entity recommendations from this source")
+
+
+def recommended_payload(cfg=None, seed="library", kind="albums", limit=20, lib=None,
+                        seed_kind="", seed_mbid="", seed_name="", seed_artist=""):
+    """Online recommendations, seeded by the library, by one genre, or by ONE
+    entity.
 
     `seed=library` reads the library's own genre mix and its most-collected
     artists and asks each source for what it is good at; `seed=<genre>` asks
@@ -778,12 +1064,60 @@ def recommended_payload(cfg=None, seed="library", kind="albums", limit=20, lib=N
     is DROPPED — a recommendation is something to add — every row records WHY
     it was suggested, and `basis` names the seed. When nothing can answer,
     `items` is empty and `notes` says which source was skipped or empty; no
-    row is ever invented."""
+    row is ever invented.
+
+    A `seed_kind` (`artist`/`album`/`track`) instead seeds the shelf with the
+    ENTITY the page it sits on is about, from `seed_mbid` when the page's tags
+    carry one and from `seed_artist`+`seed_name` when they do not (see
+    `entity_seed`). An entity shelf KEEPS the rows the library owns — it is a
+    statement of what this page is like, so "you already have this one" is an
+    answer, and the row carries its library `path` for it — and every source
+    that cannot speak about an entity is listed in `notes` with its own
+    reason."""
     seed = str(seed or "library").strip() or "library"
     kind = str(kind or "").strip().lower()
     limit = max(1, min(MAX_LIMIT, int(limit or 20)))
     index = library_view(_library(cfg, lib))
     asked = _Asked()
+
+    if str(seed_kind or "").strip():
+        entity, why = entity_seed(seed_kind, seed_mbid, seed_name, seed_artist)
+        basis = _entity_basis(entity)
+        if why:
+            # Nothing to seed from is SAID, never answered with somebody else's
+            # rows: an empty shelf that explains itself beats a shelf about
+            # another page.
+            return {"items": [], "sources_asked": [], "basis": basis,
+                    "notes": {"recommended": "skipped: %s" % why}}
+        rows = []
+        for spec in SOURCES:
+            if kind not in spec["rec_kinds"]:
+                continue
+            asked.ask(spec["id"])
+            if not can_run(spec, cfg):
+                asked.note(spec["id"], skip_note(spec, cfg))
+                continue
+            try:
+                found = _entity_rows(spec["id"], kind, cfg, entity, limit)
+            except _Skip as e:
+                asked.note(spec["id"], "skipped: %s" % e)
+                continue
+            except Exception as e:
+                # The provider's own words, verbatim: a refusal must never read
+                # as "this page has no neighbours".
+                asked.note(spec["id"], "failed: %s" % e)
+                continue
+            for row in found:
+                row["_source"] = spec["id"]
+                rows.append(row)
+        items = _shelf_items(rows, index, limit,
+                             "similar to %s" % _entity_subject(entity),
+                             drop_owned=False)
+        notes = asked.notes
+        if not items:
+            notes["recommended"] = _nothing_note(cfg, kind, "this %s" % entity["kind"])
+        return {"items": items, "sources_asked": asked.ids, "notes": notes,
+                "basis": basis}
 
     if seed.lower() == "library":
         genres = _top_genres(index, SEED_GENRES)
@@ -819,23 +1153,180 @@ def recommended_payload(cfg=None, seed="library", kind="albums", limit=20, lib=N
             row["_source"] = spec["id"]
             rows.append(row)
 
-    items = []
-    for row in sort_rows(merge_rows(rows)):
-        out = finalize_row(row, index, row.get("_reason") or "genre: %s" % seed)
-        if out["owned"]:
-            continue        # the user already has it: not a recommendation
-        items.append(out)
-        if len(items) >= limit:
-            break
-
+    items = _shelf_items(rows, index, limit, "genre: %s" % seed, drop_owned=True)
     notes = asked.notes
     if not items:
-        answers = [spec for spec in SOURCES if kind in spec["rec_kinds"]]
-        if not any(can_run(spec, cfg) for spec in answers):
-            notes["recommended"] = ("skipped: no recommendation source is "
-                                    "configured for %s" % kind)
-        else:
-            notes["recommended"] = ("no recommendation source had anything to "
-                                    "suggest for this seed")
+        notes["recommended"] = _nothing_note(cfg, kind, "this seed")
     return {"items": items, "sources_asked": asked.ids, "notes": notes,
             "basis": basis}
+
+
+# --------------------------------------------------------------------------- #
+# charts — what each provider RANKS, for one window and one kind
+# --------------------------------------------------------------------------- #
+# The window as a reader says it, for the "unsupported" note.
+_PERIOD_WORDS = {"all": "all-time", "year": "yearly", "month": "monthly",
+                 "week": "weekly"}
+
+# The non-source key of this payload's `notes`: the verdict on the whole
+# request, printed as its own sentence (the same convention `recommended` uses).
+NO_CHART_NOTE = "charts"
+
+
+def _unsupported_note(spec, period):
+    """Why a source cannot answer THIS period — said, never mapped to all-time.
+
+    A provider that publishes an all-time chart only must not quietly receive
+    "this week" and answer with its all-time list: the user would read a
+    week's chart that is not one. So the mismatch is reported with the windows
+    the source DOES publish."""
+    have = ", ".join(_PERIOD_WORDS.get(p, p) for p in spec["chart_periods"])
+    return ("unsupported: %s publishes no %s chart — it charts %s"
+            % (spec["label"], _PERIOD_WORDS.get(period, period), have))
+
+
+def _chart_skip(spec, cfg):
+    """WHY a chart source is not asked at all, or "" when it is asked.
+
+    The registry's own rule (`needs`) covers a source with an unset credential.
+    RYM's does not, because it has a second route: `integrations`'
+    `_genre_source_skip` states that rule once for the whole app (no cookie AND
+    no archive fallback is what actually skips it), so the charts reuse it here
+    instead of growing a second copy that could disagree."""
+    if spec["id"] == CHART_FIRST:
+        return integrations._genre_source_skip("rateyourmusic", cfg or {}) or ""
+    return skip_note(spec, cfg)
+
+
+def _chart_rows(sid, kind, period, limit, cfg):
+    """One source's chart for one window, through `server.discovery` (or, for
+    RYM, `server.integrations`' existing scrape — cookie, throttle, cache and
+    archive fallback included). Answers `(rows, note)`: the note is what the
+    SOURCE said about its own answer (an archived snapshot), "" otherwise.
+    Every provider that FAILED raises, so the caller reports its own words; a
+    provider with an empty chart returns []."""
+    if sid == "deezer":
+        return discovery.deezer_chart(kind, limit=limit), ""
+    if sid == "itunes":
+        return discovery.itunes_most_played(limit=limit, cfg=cfg), ""
+    if sid == "lastfm":
+        return discovery.lastfm_chart(kind, limit=limit, cfg=cfg), ""
+    if sid == "listenbrainz":
+        return discovery.listenbrainz_chart(kind, period, limit=limit), ""
+    if sid == CHART_FIRST:
+        got = integrations.rym_charts(kind=kind, period=period, limit=limit,
+                                      cfg=cfg)
+        name = str(got.get("chart") or "")
+        rows = got["rows"]
+        for row in rows:
+            # RYM's OWN ranking is the row's reason: it states no play count,
+            # so the chart position is the only score it has, and the chart's
+            # name (from the page's own title) says which window it is.
+            row["_reason"] = "chart #%s%s" % (
+                row.get("rank") or "?",
+                (" · %s" % name) if name else " (RateYourMusic)")
+        note = ""
+        snapshot = got.get("archive") or {}
+        if snapshot:
+            # RYM answered from the Wayback Machine: the rows are real, but a
+            # snapshot can predate the window that was asked for, and that
+            # belongs on the chip rather than in a tooltip nobody opens.
+            when = integrations._rym_archive_when(snapshot.get("snapshot") or "")
+            note = ("answered from an archived snapshot%s on web.archive.org — "
+                    "the live site refused" % ((" captured %s" % when) if when else ""))
+        return rows, note
+    raise _Skip("no charts from this source")
+
+
+def charts_payload(cfg=None, period="all", kind="tracks", source="all",
+                   limit=50, lib=None):
+    """What the online sources RANK for one window and one kind.
+
+    The registry drives it: only the sources that declare this `kind` in
+    `charts` are asked, in `CHART_ORDER` (RateYourMusic first for tracks), and
+    only for the periods they declare in `chart_periods` — a different period is
+    `unsupported:` in `notes`, never their all-time chart.
+
+    Rows are NOT merged across sources, deliberately: a chart's RANK is its
+    data, and folding two providers' rankings into one row would have to drop
+    one of them. So each source's rows appear in its own order, every row
+    naming its provider, its rank and its own score, and — through the shared
+    row shape — whether the library already holds it (which is what turns a row
+    into a link or an Add action). `sources` lists what each source can do here,
+    and `notes` says, per source, exactly how it answered: nothing for one that
+    answered, `skipped: …` for one that could not run, `unsupported: …` for a
+    window it does not publish, `failed: <its own words>` for one that refused.
+    """
+    period = str(period or "all").strip().lower() or "all"
+    kind = str(kind or "tracks").strip().lower() or "tracks"
+    source = str(source or "all").strip().lower() or "all"
+    limit = max(1, min(MAX_LIMIT, _safe_int(limit, 50)))
+    specs = sorted((spec for spec in SOURCES if kind in spec["charts"]),
+                   key=lambda spec: _CHART_RANK.get(spec["id"], len(CHART_ORDER)))
+    base = {"period": period, "kind": kind, "source": source, "limit": limit,
+            "items": [], "sources_asked": [], "notes": {},
+            "sources": [{"id": spec["id"], "label": spec["label"],
+                         "periods": list(spec["chart_periods"]),
+                         "supports_period": period in spec["chart_periods"],
+                         "needs": list(spec["needs"]),
+                         "missing": missing_keys(spec, cfg),
+                         "ready": can_run(spec, cfg)}
+                        for spec in specs]}
+    if source != "all" and source not in BY_ID:
+        # An id we do not know is an empty answer that SAYS so, not an error
+        # and not somebody else's rows.
+        base["notes"] = {source: "unknown source"}
+        return base
+    if source != "all":
+        wanted = BY_ID[source]
+        specs = [spec for spec in specs if spec["id"] == source]
+        if not specs:
+            base["notes"] = {source: "cannot chart %s: %s" % (kind, wanted["note"])}
+            return base
+
+    asked = _Asked()
+    index = library_view(_library(cfg, lib))
+    items = []
+    for spec in specs:
+        sid = spec["id"]
+        asked.ask(sid)
+        if period not in spec["chart_periods"]:
+            asked.note(sid, _unsupported_note(spec, period))
+            continue
+        skip = _chart_skip(spec, cfg)
+        if skip:
+            asked.note(sid, skip)
+            continue
+        try:
+            found, own_note = _chart_rows(sid, kind, period, limit, cfg)
+        except _Skip as e:
+            asked.note(sid, "skipped: %s" % e)
+            continue
+        except Exception as e:
+            # The provider's own words, verbatim: a refusal must never read as
+            # "nothing is charting".
+            asked.note(sid, "failed: %s" % e)
+            continue
+        if own_note:
+            asked.note(sid, own_note)
+        for row in found:
+            row["_source"] = sid
+            out = finalize_row(row, index, str(row.get("_reason")
+                                               or ("chart #%s on %s"
+                                                   % (row.get("rank") or "?",
+                                                      spec["label"]))))
+            # The provider's own rank and score, on top of the shared row shape
+            # (which every Discover surface renders): "chart #3, 12.4M
+            # listeners" is the row's provenance, and it does not fit in a
+            # field the shared shape already spends on something else.
+            out["rank"] = _safe_int(row.get("rank"), 0)
+            out["score"] = row.get("popularity")
+            out["score_label"] = str(row.get("popularity_label") or "") or None
+            items.append(out)
+    notes = asked.notes
+    if not items and not notes:
+        notes[NO_CHART_NOTE] = ("no chart source had anything to rank for %s"
+                                % _PERIOD_WORDS.get(period, period))
+    return {"period": period, "kind": kind, "source": source, "limit": limit,
+            "items": items, "sources_asked": asked.ids, "notes": notes,
+            "sources": base["sources"]}

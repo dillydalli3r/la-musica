@@ -20,6 +20,7 @@ import uuid
 
 import httpx
 
+from mlo import cover_choice as _cover_choice
 from mlo import release_choice
 
 MB_BASE = "https://musicbrainz.org/ws/2"
@@ -31,7 +32,12 @@ _mb_lock = threading.Lock()
 
 
 class MusicBrainzError(RuntimeError):
-    """MusicBrainz did not answer, after its retries (429/5xx/connection).
+    """MusicBrainz did not answer, or refused the request and said why.
+
+    Raised after the retries are exhausted (429/5xx/connection) with a "busy,
+    try again" reason, and also when MusicBrainz rejects a request with a 4xx
+    whose body names its own reason (a query its search index refused) — that
+    message is MusicBrainz's, verbatim, so a caller can show it to the user.
 
     Typed so a caller can report it as a PER-ITEM reason — "MusicBrainz is
     busy, try again" — instead of a request or a job that sits on an outage.
@@ -52,14 +58,39 @@ _MB_BACKOFF_MAX = 8.0
 MB_RETRY_DEADLINE = 45.0
 
 
+def _raise_mb_refusal(r):
+    """MusicBrainz's OWN reason for refusing a request, when it gave one.
+
+    A refused WS/2 request answers 4xx with a JSON body naming the reason —
+    {"error": "You submitted a blank search query. You must include a
+    non-blank 'query=' parameter with your search."} — which httpx's own
+    message ("Client error '400 Bad Request' for url ...") throws away. The
+    in-app search box shows MusicBrainz's words for a query MusicBrainz
+    rejected, so the body wins whenever it carries one. A 404 is left alone:
+    callers branch on it to mean "no such entity", and its body only ever
+    says "Not Found".
+    """
+    if r.status_code == 404:
+        return
+    try:
+        body = r.json()
+    except Exception:
+        return
+    message = str((body or {}).get("error") or "").strip()
+    if message:
+        raise MusicBrainzError(message, status=r.status_code)
+
+
 def mb_get(endpoint, params=None, timeout=30.0, retries=3, deadline=MB_RETRY_DEADLINE):
     """Rate-limited MusicBrainz WS/2 GET returning parsed JSON.
 
     Retries 429/5xx and connection errors with exponential backoff + jitter,
     keeping MusicBrainz's 1 request/second etiquette and a hard overall
     `deadline`; when the retry budget or the deadline runs out it raises
-    MusicBrainzError — a typed, reportable reason. Any other status still
-    raises httpx's own error, so a 404 keeps meaning "no such entity".
+    MusicBrainzError — a typed, reportable reason. Any other status raises
+    httpx's own error, except that a 4xx whose body names MusicBrainz's own
+    reason raises MusicBrainzError carrying THAT text (`_raise_mb_refusal`) —
+    and a 404 keeps meaning "no such entity".
     """
     global _last_request
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
@@ -87,6 +118,7 @@ def mb_get(endpoint, params=None, timeout=30.0, retries=3, deadline=MB_RETRY_DEA
                 status, reason = None, f"connection error ({e.__class__.__name__})"
             else:
                 if r.status_code not in _MB_RETRY_STATUS:
+                    _raise_mb_refusal(r)
                     r.raise_for_status()
                     return r.json()
                 status, reason = r.status_code, f"HTTP {r.status_code}"
@@ -287,6 +319,81 @@ def _genres(node):
 # --------------------------------------------------------------------------- #
 # Release lookups
 # --------------------------------------------------------------------------- #
+def release_countries(node, preferred="", release_id=""):
+    """Every country a release was released in, with its date.
+
+    MusicBrainz keeps a release's events ON the release entity — no `inc` asks
+    for them — as one {area, date} per country the pressing appeared in, while
+    the entity's own singular `country`/`date` are only the FIRST of them. A
+    release group is released in as many countries as its editions cover, so
+    the pages show the whole list rather than that first event.
+
+    Returns [{country, code, date, preferred}] ordered by date, then name:
+    `country` is MusicBrainz's own area name, `code` its ISO 3166-1 code ("" for
+    an area that carries none, which happens for a historic area), `date` the
+    event's date, and `preferred` whether the code is the configured
+    `prefer_release_country`. An event without an area carries no country at
+    all and is dropped — missing data is absent, never invented. `release_id`
+    stamps the release that carries the event, for a list that is a release
+    group's union over its editions.
+    """
+    preferred = str(preferred or "").strip().upper()
+    out, seen = [], set()
+    for event in (node.get("release-events") or []):
+        area = event.get("area") or {}
+        name = str(area.get("name") or "").strip()
+        codes = [str(c).strip().upper() for c in (area.get("iso-3166-1-codes") or []) if str(c).strip()]
+        code = codes[0] if codes else ""
+        if not name and not code:
+            continue                    # a placeless event states no country
+        key = (code or name.lower(), str(event.get("date") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        entry = {
+            "country": name or code,
+            "code": code,
+            "date": str(event.get("date") or ""),
+            "preferred": bool(preferred) and code == preferred,
+        }
+        if release_id:
+            entry["release_id"] = release_id
+        out.append(entry)
+    out.sort(key=lambda e: (e["date"] or "9999", e["country"]))
+    return out
+
+
+def release_group_countries(releases, preferred=""):
+    """The union of a release group's editions' events, newest editions
+    included.
+
+    `releases` are raw browse rows (they carry `release-events` themselves), in
+    the order the caller ranks them, so an event shared by several editions is
+    credited to the first-ranked edition that carries it — the same edition
+    "Add to library" would take. The union covers the editions of the pages
+    loaded so far; a group with more editions than one page is paged, and its
+    countries grow as its editions do.
+    """
+    out, seen = [], set()
+    for r in releases or []:
+        for event in release_countries(r, preferred, str(r.get("id") or "")):
+            key = (event["code"] or event["country"], event["date"])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(event)
+    out.sort(key=lambda e: (e["date"] or "9999", e["country"]))
+    return out
+
+
+def preferred_release_country(cfg=None):
+    """`prefer_release_country` — the country the release/release-group country
+    chips mark as the user's preference ("" when they set none). Read through
+    the same ONE config load the release-choice policy uses, so the marking and
+    the policy can never disagree about what the user prefers."""
+    return str(_release_cfg(cfg).get("prefer_release_country") or "")
+
+
 def release_lookup(mbid):
     """Full release: media/discs, recordings, artist credits, genres and
     labels (catalog numbers). Country comes from the release entity.
@@ -352,16 +459,26 @@ def release_lookup(mbid):
             catalog_numbers.append(cn)
     catalog_number = catalog_numbers[0] if catalog_numbers else ""
     country = data.get("country") or ""
+    # Every country this pressing was released in (the singular `country` above
+    # is MusicBrainz's first event, not the whole story — a worldwide digital
+    # reissue of a CD carries both).
+    countries = release_countries(data, preferred_release_country())
 
     return {
         "id": data.get("id"),
         "title": data.get("title"),
+        # MusicBrainz's own pressing comment ("Deluxe Edition", "2011
+        # remaster") — empty when it states none, which is what every reader
+        # treats as "no disambiguation".
+        "disambiguation": data.get("disambiguation") or "",
         "date": (data.get("date") or ""),
         # the release-group's first-release-date — the "original" release
         # date shown next to this specific release's own date
         "originaldate": (rg_obj.get("first-release-date") or ""),
         "barcode": (data.get("barcode") or ""),
         "country": country,
+        # every country of this pressing, with its date and the preference mark
+        "countries": countries,
         # Status (Official/Promotion/Bootleg/…) + the medium of the first
         # medium — the release page meta line shows both, and the auto-import
         # policy keys on them.
@@ -2570,6 +2687,182 @@ def rym_artist_genres(artist, cfg=None, archive=False):
 
 
 # --------------------------------------------------------------------------- #
+# RateYourMusic charts (scraped — no API, see RYM_BASE)
+# --------------------------------------------------------------------------- #
+# RYM's charts live at `/charts/top/<entity>/<period>/`, where the period is
+# `all-time` or a single YEAR (`/charts/top/song/2025`, VERIFIED: the page
+# titles itself "Best songs of 2025"). RYM publishes no month and no week
+# chart, so those two windows are REFUSED BY NAME — `RYM_CHART_PERIODS` below
+# is what the registry reads, so nothing can quietly fold "this week" into
+# all-time.
+#
+# Everything else is the same scrape as the genre readers: the live page with a
+# `rym_cookie`, the archived snapshot behind it (still gated by
+# `rym_archive_fallback`), the same 1 req/s throttle and the same 30-day disk
+# cache, so a chart costs one request and is then free for a month. A refusal
+# is recorded verbatim (status, challenge marker, the reason sentence) and the
+# caller reports those words — a blocked RYM must never read as "no results".
+RYM_CHART_KINDS = ("tracks",)
+RYM_CHART_PERIODS = ("all", "year")
+_RYM_CHART_ENTITY = {"tracks": "song", "albums": "album", "artists": "artist"}
+_RYM_CHART_ROOT = "/charts/top/"
+# One chart page's items: RYM wraps every entry in `<div id="posN" …>` and
+# links its subject with a kind-specific anchor class.
+_RYM_CHART_ITEM_RE = re.compile(r'<div id="pos(\d+)"', re.I)
+_RYM_CHART_LINK_RE = re.compile(
+    r'<a class="page_charts_section_charts_item_link [^"]*"\s*'
+    r'href="(/song/[^"]+)"', re.I)
+_RYM_CHART_ARTIST_LINK_RE = re.compile(
+    r'<a class="artist" href="(/artist/[^"]*)"[^>]*>(.*?)</a>', re.I | re.S)
+_RYM_CHART_TITLE_RE = re.compile(
+    r'<span class="ui_name_locale_original">(.*?)</span>', re.I | re.S)
+_RYM_CHART_FALLBACK_TITLE_RE = re.compile(
+    r'<span class="ui_name_locale[^"]*">(.*?)</span>', re.I | re.S)
+_RYM_CHART_NAME_RE = re.compile(r"<title>(.*?)\s*-\s*Rate Your Music\s*</title>",
+                                re.I | re.S)
+_RYM_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _rym_text(fragment):
+    """The words inside an HTML fragment, entities resolved. RYM renders a
+    name as nested locale spans, so tags are stripped rather than parsed."""
+    return _html.unescape(_RYM_TAG_RE.sub("", fragment or "")).strip()
+
+
+def _rym_chart_slug(path):
+    """The subject of a chart row's own URL: `/song/<artist>/<title>/`."""
+    parts = [p for p in str(path or "").split("/") if p]
+    return parts[-1] if parts else ""
+
+
+def rym_chart_name(html):
+    """The chart's own name from the page title ("Best songs of all time"), or
+    "" — it is what the row's reason line quotes, so it is never guessed."""
+    hit = _RYM_CHART_NAME_RE.search(html or "")
+    return _rym_text(hit.group(1)) if hit else ""
+
+
+def rym_chart_rows(html, limit=None):
+    """One RYM chart page as rows, in the chart's own order.
+
+    Each row is the subject's page (a `/song/…` URL), its title and its artist,
+    with `rank` = RYM's own position from the wrapper's `id="posN"`. A row whose
+    title cannot be read falls back to its URL slug (the title RYM put in the
+    link) — never to a made-up name — and nothing is invented for an entry the
+    page did not state."""
+    text = str(html or "")
+    marks = [(m.start(), int(m.group(1))) for m in _RYM_CHART_ITEM_RE.finditer(text)]
+    rows = []
+    for i, (at, pos) in enumerate(marks):
+        end = marks[i + 1][0] if i + 1 < len(marks) else len(text)
+        chunk = text[at:end]
+        hit = _RYM_CHART_LINK_RE.search(chunk)
+        if not hit:
+            continue
+        link = hit.group(1)
+        title_hit = (_RYM_CHART_TITLE_RE.search(chunk)
+                     or _RYM_CHART_FALLBACK_TITLE_RE.search(chunk))
+        title = _rym_text(title_hit.group(1)) if title_hit else ""
+        if not title:
+            # The link's own slug is the title RYM put in the URL — a fallback
+            # that is still RYM's word, never a guessed name.
+            title = _rym_chart_slug(link).replace("-", " ").replace("_", " ").strip()
+        artist_hit = _RYM_CHART_ARTIST_LINK_RE.search(chunk)
+        rows.append({
+            "kind": "track",
+            "title": title,
+            "artist": _rym_text(artist_hit.group(2)) if artist_hit else "",
+            "link": f"{RYM_BASE}{link}",
+            "rym_path": link,
+            "rank": pos or (len(rows) + 1),
+            "popularity": None,
+            "popularity_label": None,
+            "source": "rym",
+        })
+        if limit and len(rows) >= limit:
+            break
+    return rows
+
+
+def rym_charts(kind="tracks", period="all", limit=50, cfg=None, now=None):
+    """RYM's own chart for one kind and one window, or a raise that says why.
+
+    `all` is `/charts/top/song/all-time` and `year` is the current year's
+    chart; every other period is refused (`ValueError`) because RYM publishes
+    no such chart — the caller reports that as unsupported, never as an
+    all-time answer. A refusal from RYM itself raises `RuntimeError` carrying
+    its own words (`rym_last_response`: the status, whether a Cloudflare
+    challenge came back instead of a page, and the reason sentence), so the
+    endpoint's note chip shows exactly what RYM said.
+
+    An answer may come from the archived snapshot (same cookie gate, throttle
+    and cache as the live route); when it does, the row's `page_url` is the
+    live page either way and `archive` names the capture the data came from.
+    """
+    kind = str(kind or "").strip().lower()
+    if kind not in RYM_CHART_KINDS:
+        raise ValueError("RateYourMusic charts only: " + ", ".join(RYM_CHART_KINDS))
+    period = str(period or "all").strip().lower()
+    if period not in RYM_CHART_PERIODS:
+        raise ValueError("RateYourMusic publishes no %s chart" % period)
+    year = datetime.fromtimestamp(now if now is not None else time.time()).year
+    slug = "all-time" if period == "all" else str(year)
+    path = "%s%s/%s" % (_RYM_CHART_ROOT, _RYM_CHART_ENTITY[kind], slug)
+    limit = max(1, int(limit or 50))
+
+    archive = _rym_archive_on(cfg)
+    html, snapshot = None, {}
+    fresh_route = False
+    if bool(_rym_cookie(cfg)) or not archive:
+        _rym_route.clear()
+        html = _rym_get(path, cfg=cfg, expect=_RYM_CHART_ROOT)
+        fresh_route = True
+    if not html and archive:
+        _rym_route.clear()
+        html, snapshot = _rym_archive_get(path, cfg)
+    if not html:
+        raise RuntimeError(rym_refusal_text(cfg, path))
+    rows = rym_chart_rows(html, limit)
+    if not rows:
+        raise RuntimeError(
+            "RateYourMusic answered %s but it stated no chart rows we could "
+            "read (the page's own bytes are cached under the app's rym_cache "
+            "folder)" % path)
+    name = rym_chart_name(html)
+    out = {"rows": rows, "total": None,
+           "chart": name or ("RateYourMusic %s chart" % period),
+           "url": f"{RYM_BASE}{path}"}
+    if snapshot:
+        out["archive"] = dict(snapshot)
+    return out
+
+
+def rym_refusal_text(cfg=None, path="", now=None):
+    """WHY RYM last refused, in its own words — status, challenge, reason.
+
+    The one sentence the chart endpoint's note chip prints, built from
+    `rym_last_response()` (which `_rym_get`/the archive route write on every
+    answer): "HTTP 403 refused …". A refusal that never reached a status (a
+    timeout, no connection) says so. It is never "no results"."""
+    info = _rym_last_info or {}
+    status = info.get("status")
+    parts = []
+    if status is not None:
+        parts.append("HTTP %s" % status)
+    if info.get("challenge"):
+        parts.append("Cloudflare challenge instead of a page")
+    reason = str(info.get("reason") or "").strip()
+    if reason:
+        parts.append(reason)
+    elif status is None:
+        parts.append("no connection")
+    where = str(info.get("url") or (f"{RYM_BASE}{path}" if path else ""))
+    text = "RateYourMusic refused: " + "; ".join(parts) if parts \
+        else "RateYourMusic did not answer"
+    return text + (f" ({where})" if where else "")
+
+
+# --------------------------------------------------------------------------- #
 # RYM link resolution (album + artist)
 # --------------------------------------------------------------------------- #
 # MusicBrainz is the FIRST source: it holds the rateyourmusic.com page as a
@@ -4286,6 +4579,326 @@ def search_artists(query, limit=5):
 # --------------------------------------------------------------------------- #
 MB_ENTITIES = ("artist", "release-group", "release", "recording")
 
+# --------------------------------------------------------------------------- #
+# The search field catalogue — what the search box may put in a query
+# --------------------------------------------------------------------------- #
+# MusicBrainz's own index fields, transcribed from the "Search Fields" tables of
+# its API documentation (https://musicbrainz.org/doc/MusicBrainz_API/Search, one
+# table per index). NOT invented: every name below is a field that index really
+# answers, and every `example` is a value that works against the live index.
+# This dict is the ONE source of truth: `search_help()` serves it to the client,
+# so the box's completion list and its syntax help cannot drift from what the
+# server sends to the index.
+#
+#   field    the index field, spelled as MusicBrainz spells it in a query
+#   kind     text    — free text (a name, a title, a comment)
+#            enum    — a closed vocabulary ("Album", "Official", …)
+#            date    — a date ("1997-05-21", "1997", "1997-05")
+#            number  — a count, a position, milliseconds
+#            boolean — "true" / "false"
+#            id      — a MusicBrainz ID (a UUID)
+#            code    — a fixed-format code (ISO 3166-1 country, 639-3 language,
+#                      15924 script, IPI, ISNI, barcode, ASIN, ISRC, ISWC)
+#   quotes   whether the value may be quoted: true for `text` and `enum` values,
+#            where quoting is what keeps a multi-word value ("Digital Media",
+#            "Not applicable") ONE phrase — verified live, `format:Digital Media`
+#            drops from 2.8M hits to 25k without quotes — and harmless on a
+#            single word. Fixed-format values (dates, ids, codes, numbers,
+#            booleans) are compared as-is and are never quoted. Attached below
+#            from `_QUOTED_KINDS` rather than spelled out per field: the payload
+#            carries the flag, and the rule itself lives in ONE line.
+#   meaning  one line: what MusicBrainz matches, in MusicBrainz's own words
+#   example  a value to insert after `field:`
+MB_SEARCH_FIELDS = {
+    "artist": [
+        {"field": "alias", "kind": "text", "example": '"Thom Yorke"',
+         "meaning": "(part of) any alias attached to the artist (diacritics are ignored)"},
+        {"field": "primary_alias", "kind": "text", "example": '"Thom Yorke"',
+         "meaning": "(part of) any primary alias attached to the artist (diacritics are ignored)"},
+        {"field": "area", "kind": "text", "example": '"United Kingdom"',
+         "meaning": "(part of) the name of the artist's main associated area"},
+        {"field": "arid", "kind": "id", "example": "9a1bb5ba-1f1e-4f23-a1a4-9ef0e5d39c6c",
+         "meaning": "the artist's MBID"},
+        {"field": "artist", "kind": "text", "example": '"Radiohead"',
+         "meaning": "(part of) the artist's name (diacritics are ignored)"},
+        {"field": "artistaccent", "kind": "text", "example": '"Sigur Rós"',
+         "meaning": "(part of) the artist's name, diacritics included"},
+        {"field": "begin", "kind": "date", "example": "1985-10-01",
+         "meaning": "the artist's begin date"},
+        {"field": "beginarea", "kind": "text", "example": '"Oxford"',
+         "meaning": "(part of) the name of the artist's begin area"},
+        {"field": "comment", "kind": "text", "example": '"US progressive rock band"',
+         "meaning": "(part of) the artist's disambiguation comment"},
+        {"field": "country", "kind": "code", "example": "GB",
+         "meaning": "the 2-letter code (ISO 3166-1 alpha-2) for the artist's main associated country"},
+        {"field": "end", "kind": "date", "example": "1980-12-08",
+         "meaning": "the artist's end date"},
+        {"field": "endarea", "kind": "text", "example": '"London"',
+         "meaning": "(part of) the name of the artist's end area"},
+        {"field": "ended", "kind": "boolean", "example": "true",
+         "meaning": "whether the artist has ended (is dissolved or deceased)"},
+        {"field": "gender", "kind": "enum", "example": "female",
+         "meaning": "the artist's gender (male, female, other or not applicable)"},
+        {"field": "ipi", "kind": "code", "example": "00016388225",
+         "meaning": "an IPI code associated with the artist"},
+        {"field": "isni", "kind": "code", "example": "0000000122809875",
+         "meaning": "an ISNI code associated with the artist"},
+        {"field": "sortname", "kind": "text", "example": '"Yorke, Thom"',
+         "meaning": "(part of) the artist's sort name"},
+        {"field": "tag", "kind": "text", "example": '"art rock"',
+         "meaning": "(part of) a tag attached to the artist"},
+        {"field": "type", "kind": "enum", "example": "Group",
+         "meaning": "the artist's type (person, group, orchestra, choir, character, other)"},
+    ],
+    "release-group": [
+        {"field": "alias", "kind": "text", "example": '"OK Computer"',
+         "meaning": "(part of) any alias attached to the release group (diacritics are ignored)"},
+        {"field": "arid", "kind": "id", "example": "9a1bb5ba-1f1e-4f23-a1a4-9ef0e5d39c6c",
+         "meaning": "the MBID of any of the release group artists"},
+        {"field": "artist", "kind": "text", "example": '"Radiohead"',
+         "meaning": "(part of) the combined credited artist name, join phrases included"},
+        {"field": "artistname", "kind": "text", "example": '"Radiohead"',
+         "meaning": "(part of) the name of any of the release group artists"},
+        {"field": "comment", "kind": "text", "example": '"UK pressing"',
+         "meaning": "(part of) the release group's disambiguation comment"},
+        {"field": "creditname", "kind": "text", "example": '"Radiohead"',
+         "meaning": "(part of) the credited name of any of the release group artists here"},
+        {"field": "firstreleasedate", "kind": "date", "example": "1997-05-21",
+         "meaning": "the release date of the earliest release in this release group"},
+        {"field": "primarytype", "kind": "enum", "example": "Album",
+         "meaning": "the release group's primary type (Album, Single, EP, Broadcast, Other)"},
+        {"field": "reid", "kind": "id", "example": "1834eae1-741b-3c03-9ca5-0df3decb43ea",
+         "meaning": "the MBID of any of the releases in the release group"},
+        {"field": "release", "kind": "text", "example": '"OK Computer"',
+         "meaning": "(part of) the title of any of the releases in the release group"},
+        {"field": "releasegroup", "kind": "text", "example": '"OK Computer"',
+         "meaning": "(part of) the release group's title (diacritics are ignored)"},
+        {"field": "releasegroupaccent", "kind": "text", "example": '"Ágætis byrjun"',
+         "meaning": "(part of) the release group's title, diacritics included"},
+        {"field": "releases", "kind": "number", "example": "12",
+         "meaning": "the number of releases in the release group"},
+        {"field": "rgid", "kind": "id", "example": "b1392450-e666-3926-a536-22c65f834433",
+         "meaning": "the release group's MBID"},
+        {"field": "secondarytype", "kind": "enum", "example": "Compilation",
+         "meaning": "any of the release group's secondary types (Soundtrack, Live, Compilation, "
+                    "Remix, Demo, DJ-mix, Mixtape/Street, Field recording, Audio drama, …)"},
+        {"field": "status", "kind": "enum", "example": "Official",
+         "meaning": "the status of any of the releases in the release group (Official, Promotion, "
+                    "Bootleg, Pseudo-Release, Withdrawn, Cancelled)"},
+        {"field": "tag", "kind": "text", "example": '"art rock"',
+         "meaning": "(part of) a tag attached to the release group"},
+        {"field": "type", "kind": "enum", "example": "Album",
+         "meaning": "the legacy single release-group type that predates multiple types"},
+    ],
+    "release": [
+        {"field": "alias", "kind": "text", "example": '"OK Computer"',
+         "meaning": "(part of) any alias attached to the release (diacritics are ignored)"},
+        {"field": "arid", "kind": "id", "example": "9a1bb5ba-1f1e-4f23-a1a4-9ef0e5d39c6c",
+         "meaning": "the MBID of any of the release artists"},
+        {"field": "artist", "kind": "text", "example": '"Radiohead"',
+         "meaning": "(part of) the combined credited artist name, join phrases included"},
+        {"field": "artistname", "kind": "text", "example": '"Radiohead"',
+         "meaning": "(part of) the name of any of the release artists"},
+        {"field": "asin", "kind": "code", "example": "B000002U82",
+         "meaning": "an Amazon ASIN for the release"},
+        {"field": "barcode", "kind": "code", "example": "724385522925",
+         "meaning": "the barcode for the release"},
+        {"field": "catno", "kind": "text", "example": '"CDP 7 46001 2"',
+         "meaning": "any catalog number for this release (insensitive to case, spaces and separators)"},
+        {"field": "comment", "kind": "text", "example": '"UK pressing"',
+         "meaning": "(part of) the release's disambiguation comment"},
+        {"field": "country", "kind": "code", "example": "GB",
+         "meaning": "the 2-letter code (ISO 3166-1 alpha-2) for any country the release was "
+                    "released in"},
+        {"field": "creditname", "kind": "text", "example": '"Radiohead"',
+         "meaning": "(part of) the credited name of any of the release artists on this release"},
+        {"field": "date", "kind": "date", "example": "1997-05-21",
+         "meaning": "a release date for the release"},
+        {"field": "discids", "kind": "number", "example": "2",
+         "meaning": "the total number of disc IDs attached to all mediums of the release"},
+        {"field": "discidsmedium", "kind": "number", "example": "1",
+         "meaning": "the number of disc IDs attached to any one medium of the release"},
+        {"field": "format", "kind": "text", "example": '"Digital Media"',
+         "meaning": "the format of any medium in the release (insensitive to case, spaces and "
+                    "separators)"},
+        {"field": "laid", "kind": "id", "example": "df7d1c7f-ef95-425f-8eef-445b3d7bcbd9",
+         "meaning": "the MBID of any of the release labels"},
+        {"field": "label", "kind": "text", "example": '"Parlophone"',
+         "meaning": "(part of) the name of any of the release labels"},
+        {"field": "lang", "kind": "code", "example": "eng",
+         "meaning": "the ISO 639-3 code for the release language"},
+        {"field": "mediumid", "kind": "id", "example": "060959f3-0d81-38b3-be26-c32f80ca68e9",
+         "meaning": "the MBID of any of the mediums in the release"},
+        {"field": "mediums", "kind": "number", "example": "2",
+         "meaning": "the number of mediums in the release"},
+        {"field": "packaging", "kind": "text", "example": '"Jewel Case"',
+         "meaning": "the packaging of the release (insensitive to case, spaces and separators)"},
+        {"field": "primarytype", "kind": "enum", "example": "Album",
+         "meaning": "the primary type of the release group for this release"},
+        {"field": "quality", "kind": "number", "example": "2",
+         "meaning": "the listed data quality of the release (2 for high, 1 for normal)"},
+        {"field": "reid", "kind": "id", "example": "1834eae1-741b-3c03-9ca5-0df3decb43ea",
+         "meaning": "the release's MBID"},
+        {"field": "release", "kind": "text", "example": '"OK Computer"',
+         "meaning": "(part of) the release's title (diacritics are ignored)"},
+        {"field": "releaseaccent", "kind": "text", "example": '"Ágætis byrjun"',
+         "meaning": "(part of) the release's title, diacritics included"},
+        {"field": "rgid", "kind": "id", "example": "b1392450-e666-3926-a536-22c65f834433",
+         "meaning": "the MBID of the release group for this release"},
+        {"field": "script", "kind": "code", "example": "Latn",
+         "meaning": "the ISO 15924 code for the release script"},
+        {"field": "secondarytype", "kind": "enum", "example": "Compilation",
+         "meaning": "any of the release group's secondary types for this release"},
+        {"field": "status", "kind": "enum", "example": "Official",
+         "meaning": "the status of the release (Official, Promotion, Bootleg, Pseudo-Release, "
+                    "Withdrawn, Cancelled)"},
+        {"field": "tag", "kind": "text", "example": '"art rock"',
+         "meaning": "(part of) a tag attached to the release"},
+        {"field": "tracks", "kind": "number", "example": "12",
+         "meaning": "the total number of tracks on the release"},
+        {"field": "tracksmedium", "kind": "number", "example": "11",
+         "meaning": "the number of tracks on any one medium of the release"},
+        {"field": "type", "kind": "enum", "example": "Album",
+         "meaning": "the legacy single release-group type that predates multiple types"},
+    ],
+    "recording": [
+        {"field": "alias", "kind": "text", "example": '"Airbag"',
+         "meaning": "(part of) any alias attached to the recording (diacritics are ignored)"},
+        {"field": "arid", "kind": "id", "example": "9a1bb5ba-1f1e-4f23-a1a4-9ef0e5d39c6c",
+         "meaning": "the MBID of any of the recording artists"},
+        {"field": "artist", "kind": "text", "example": '"Radiohead"',
+         "meaning": "(part of) the combined credited artist name, join phrases included"},
+        {"field": "artistname", "kind": "text", "example": '"Radiohead"',
+         "meaning": "(part of) the name of any of the recording artists"},
+        {"field": "comment", "kind": "text", "example": '"live, 1997-08-22: Les Eurockéennes, France"',
+         "meaning": "(part of) the recording's disambiguation comment"},
+        {"field": "country", "kind": "code", "example": "GB",
+         "meaning": "the 2-letter code (ISO 3166-1 alpha-2) for a country any release of this "
+                    "recording was released in"},
+        {"field": "creditname", "kind": "text", "example": '"Radiohead"',
+         "meaning": "(part of) the credited name of any of the recording artists on this recording"},
+        {"field": "date", "kind": "date", "example": "1997-05-21",
+         "meaning": "the release date of any release including this recording"},
+        {"field": "dur", "kind": "number", "example": "284400",
+         "meaning": "the recording duration in milliseconds"},
+        {"field": "firstreleasedate", "kind": "date", "example": "1997-05-21",
+         "meaning": "the release date of the earliest release including this recording"},
+        {"field": "format", "kind": "text", "example": '"CD"',
+         "meaning": "the format of any medium including this recording (insensitive to case, "
+                    "spaces and separators)"},
+        {"field": "isrc", "kind": "code", "example": "GBAYE9701274",
+         "meaning": "any ISRC associated with the recording"},
+        {"field": "number", "kind": "text", "example": '"A4"',
+         "meaning": "the free-text number of the track on any medium including this recording"},
+        {"field": "position", "kind": "number", "example": "4",
+         "meaning": "the position inside its release of any medium including this recording (from 1)"},
+        {"field": "primarytype", "kind": "enum", "example": "Album",
+         "meaning": "the primary type of any release group including this recording"},
+        {"field": "qdur", "kind": "number", "example": "142",
+         "meaning": "the recording duration, quantized (duration in milliseconds / 2000)"},
+        {"field": "recording", "kind": "text", "example": '"Airbag"',
+         "meaning": "(part of) the recording's name, or the name of a track connected to it "
+                    "(diacritics are ignored)"},
+        {"field": "recordingaccent", "kind": "text", "example": '"Hoppípolla"',
+         "meaning": "(part of) the recording's name, diacritics included"},
+        {"field": "reid", "kind": "id", "example": "1834eae1-741b-3c03-9ca5-0df3decb43ea",
+         "meaning": "the MBID of any release including this recording"},
+        {"field": "release", "kind": "text", "example": '"OK Computer"',
+         "meaning": "(part of) the name of any release including this recording"},
+        {"field": "rgid", "kind": "id", "example": "b1392450-e666-3926-a536-22c65f834433",
+         "meaning": "the MBID of any release group including this recording"},
+        {"field": "rid", "kind": "id", "example": "4a7fea2e-545b-4c63-bc9a-9943cc3a29d7",
+         "meaning": "the recording's MBID"},
+        {"field": "secondarytype", "kind": "enum", "example": "Compilation",
+         "meaning": "any of the secondary types of any release group including this recording"},
+        {"field": "status", "kind": "enum", "example": "Official",
+         "meaning": "the status of any release including this recording"},
+        {"field": "tag", "kind": "text", "example": '"art rock"',
+         "meaning": "(part of) a tag attached to the recording"},
+        {"field": "tid", "kind": "id", "example": "ff7733a6-6903-3e2e-b683-6dbbb0f59ec6",
+         "meaning": "the MBID of a track connected to this recording"},
+        {"field": "tnum", "kind": "number", "example": "4",
+         "meaning": "the position of the track on any medium including this recording (from 1, "
+                    "pre-gaps at 0)"},
+        {"field": "tracks", "kind": "number", "example": "12",
+         "meaning": "the number of tracks on any medium including this recording"},
+        {"field": "tracksrelease", "kind": "number", "example": "12",
+         "meaning": "the number of tracks on any release as a whole including this recording"},
+        {"field": "type", "kind": "enum", "example": "Album",
+         "meaning": "the legacy single release-group type that predates multiple types"},
+        {"field": "video", "kind": "boolean", "example": "false",
+         "meaning": "whether the recording is a video recording"},
+    ],
+    # MusicBrainz documents this index too, so the catalogue covers it; the
+    # browser's own search tabs are the four entities above.
+    "work": [
+        {"field": "alias", "kind": "text", "example": '"Airbag"',
+         "meaning": "(part of) any alias attached to the work (diacritics are ignored)"},
+        {"field": "arid", "kind": "id", "example": "9a1bb5ba-1f1e-4f23-a1a4-9ef0e5d39c6c",
+         "meaning": "the MBID of an artist related to the work (a composer or lyricist)"},
+        {"field": "artist", "kind": "text", "example": '"Radiohead"',
+         "meaning": "(part of) the name of an artist related to the work (a composer or lyricist)"},
+        {"field": "comment", "kind": "text", "example": '"orchestral version"',
+         "meaning": "(part of) the work's disambiguation comment"},
+        {"field": "iswc", "kind": "code", "example": "T-010.257.770-7",
+         "meaning": "any ISWC associated with the work"},
+        {"field": "lang", "kind": "code", "example": "eng",
+         "meaning": "the ISO 639-3 code for any of the languages of the work's lyrics"},
+        {"field": "recording", "kind": "text", "example": '"Airbag"',
+         "meaning": "(part of) the title of a recording related to the work"},
+        {"field": "recording_count", "kind": "number", "example": "12",
+         "meaning": "the number of recordings related to the work"},
+        {"field": "rid", "kind": "id", "example": "4a7fea2e-545b-4c63-bc9a-9943cc3a29d7",
+         "meaning": "the MBID of a recording related to the work"},
+        {"field": "tag", "kind": "text", "example": '"art rock"',
+         "meaning": "(part of) a tag attached to the work"},
+        {"field": "type", "kind": "enum", "example": "Song",
+         "meaning": "the work's type (Song, Opera, Symphony, …)"},
+        {"field": "wid", "kind": "id", "example": "6bba3dc1-acc7-3319-84fd-c93883b1049c",
+         "meaning": "the work's MBID"},
+        {"field": "work", "kind": "text", "example": '"Airbag"',
+         "meaning": "(part of) the work's title (diacritics are ignored)"},
+        {"field": "workaccent", "kind": "text", "example": '"Hoppípolla"',
+         "meaning": "(part of) the work's title, diacritics included"},
+    ],
+}
+
+_QUOTED_KINDS = ("text", "enum")     # the kinds whose value may be quoted
+
+for _fields in MB_SEARCH_FIELDS.values():
+    for _entry in _fields:
+        _entry["quotes"] = _entry["kind"] in _QUOTED_KINDS
+
+# Lucene syntax MusicBrainz's search index accepts, as the box's help shows it.
+# Each one verified against the live index (tools/test_mb_search.py replays
+# them against a stub; the counts below are what the live index answers):
+# `artist:"Radiohead" OR artist:"Portishead"` 1,347 releases, `-format:*`
+# 240,613, `date:[1990 TO 1999] AND artist:"Radiohead"` 214, `ac\/dc` 1,310
+# artists, `"OK Computer"` 54. `form` is what a click inserts into the box.
+MB_SEARCH_SYNTAX = [
+    {"form": 'artist:"Radiohead"',
+     "meaning": "a field and its value — quote a value with spaces so it stays one phrase"},
+    {"form": 'artist:"Radiohead" AND releasegroup:"OK Computer"',
+     "meaning": "AND narrows (OR widens; NOT or a leading - excludes)"},
+    {"form": '"OK Computer"',
+     "meaning": "a quoted phrase with no field searches the index's default fields"},
+    {"form": "date:[1990 TO 1999]",
+     "meaning": "a range, on a date or a number field (release groups: firstreleasedate)"},
+    {"form": "-format:*",
+     "meaning": "entities with nothing in that field at all"},
+    {"form": "ac\\/dc",
+     "meaning": "escape a special character with a backslash"},
+]
+
+
+def search_help():
+    """The search box's own help: the fields it may use and the syntax to use
+    them. Served to the client (`GET /api/mb/search/fields`) from this dict, so
+    the completion list and the syntax hint are the same data the server sends
+    to the index — a field can never be offered that MusicBrainz would not
+    answer."""
+    return {"fields": MB_SEARCH_FIELDS, "syntax": MB_SEARCH_SYNTAX}
+
 
 def _credit(node):
     return "".join(
@@ -4379,7 +4992,25 @@ def search_query(entity, query="", mode="free", primary_type="", secondary_type=
     so the browser can show the user the query behind a result list.
     Field names and value spellings are MusicBrainz's own (release:
     artist/label/catno/date/primarytype/secondarytype/arid; release-group:
-    firstreleasedate and no label/catno — a release group has neither)."""
+    firstreleasedate and no label/catno — a release group has neither).
+
+    WHAT THE APP DOES TO `query`, exhaustively:
+
+      * trims leading/trailing whitespace (a query MusicBrainz would see as
+        blank is not one), and
+      * ANDs the constraint boxes (and the mode's catno/barcode clause) onto
+        it as separate clauses.
+
+    Nothing else: the query is NOT escaped, re-quoted, tokenised or wrapped in
+    parentheses, because it is not a phrase to search for but a query the
+    index parses — `artist:"Radiohead" AND releasegroup:"OK Computer"` typed
+    in the box reaches MusicBrainz byte for byte (bar the trim), quoting and
+    operators intact, which is the only way the field syntax the box's help
+    teaches can work. Plain text behaves as before: a bare `kid a` is the
+    same free-text clause it always was. The constraint values the APP wraps
+    are quoted here and nowhere else, and a query that already holds the same
+    catno clause does not get a second, identical one.
+    """
     clauses = []
     q = str(query or "").strip()
     if entity == "release" and mode == "catno":
@@ -4768,6 +5399,14 @@ def group_targets(rg_mbid, mode, *, types=None, primary_type="", secondary_type=
         return [], f"MusicBrainz release-group lookup failed: {e}"
     if not rg.get("id"):
         return [], "not a MusicBrainz release group"
+    # The caller's type filter gates the GROUP itself, by the ONE rule the
+    # choice then applies to its editions: a group of another type is reported
+    # with the type it actually is, never answered with an edition of a group
+    # that was not asked for.
+    if types and not release_choice.type_matches(
+            rg.get("primary_type"), rg.get("secondary_types"), types):
+        return [], type_skip_reason(rg.get("primary_type"),
+                                    rg.get("secondary_types"))
     ranked = ranked_releases(rg, rg.get("releases") or [], strict=True,
                              wanted_types=types, primary_type=primary_type,
                              secondary_type=secondary_type)
@@ -4780,13 +5419,53 @@ def group_targets(rg_mbid, mode, *, types=None, primary_type="", secondary_type=
              "reasons": list(c.reasons)} for c in rows], None
 
 
+def type_skip_reason(primary_type, secondary_types):
+    """Why a release group is NOT one of the types a caller asked for.
+
+    The group's own type is named the way MusicBrainz spells it ("Album +
+    Compilation"), so a skipped row says what the group IS, not only that it
+    was left out.
+    """
+    label = " + ".join([str(primary_type or "").strip()]
+                       + [str(s).strip() for s in (secondary_types or [])
+                          if str(s).strip()])
+    return ("release-group type not requested ("
+            + (label or "MusicBrainz states no type") + ")")
+
+
+def groups_of_types(groups, types):
+    """(kept, skipped) — the release-group rows a `types` filter keeps.
+
+    `types` is MusicBrainz's own vocabulary (a combined form like "Album +
+    Compilation" included) and every row is judged by the ONE rule in
+    `mlo.release_choice.type_matches` — the filter the artist watch and the
+    release choice already apply. An EMPTY selection keeps every group: no
+    filter means no filter, which is what every caller did before the filter
+    existed. Each dropped row comes back as `{mbid, reason}`
+    (`type_skip_reason`), so a filtered-out group is REPORTED and never
+    silently dropped.
+    """
+    if not types:
+        return list(groups or []), []
+    kept, skipped = [], []
+    for g in groups or []:
+        if release_choice.type_matches(g.get("primary_type"),
+                                       g.get("secondary_types"), types):
+            kept.append(g)
+        else:
+            skipped.append({"mbid": str(g.get("id") or ""),
+                            "reason": type_skip_reason(g.get("primary_type"),
+                                                       g.get("secondary_types"))})
+    return kept, skipped
+
+
 def _kind_for(mbid):
     """release / release_group / artist for an ID that did not say which."""
     t = (detect_mbid(mbid) or {}).get("type") or ""
     return {"release-group": "release_group"}.get(t, t) or None
 
 
-def auto_import_targets(mbid, kind=None, mode="best"):
+def auto_import_targets(mbid, kind=None, mode="best", types=None):
     """([{mbid,title}], [{mbid,reason}]) — what a bulk auto-import should queue.
 
     ONE resolution path, shared by the HTTP route's bounded quick attempt and
@@ -4795,6 +5474,14 @@ def auto_import_targets(mbid, kind=None, mode="best"):
     group to its best (or every eligible) edition, an artist to one best
     release per release group it does not already own. A MusicBrainz outage
     raises MusicBrainzError — reported per item, never as "does not exist".
+
+    `types` restricts an ARTIST or release-group request to MusicBrainz's own
+    release-group types, matched by `mlo.release_choice.type_matches` — the
+    same rule (and the same vocabulary) the artist watch's type filter and
+    the release choice use, so "Album + Compilation" selects those groups and
+    not the Singles. An EMPTY selection is every type, exactly the behaviour
+    every caller had before the filter existed; a group the filter leaves out
+    is reported in the second list WITH its reason, never silently dropped.
 
     A user's own edition choice does NOT come through here: the route resolves
     it (`server.api_add._group_edition_targets`) so the group-membership check
@@ -4824,7 +5511,7 @@ def auto_import_targets(mbid, kind=None, mode="best"):
     if kind == "release_group":
         if str(_mbid(mbid) or "").lower() in owned:
             return [], [{"mbid": mbid, "reason": "already in the library"}]
-        rows, err = group_targets(mbid, mode)
+        rows, err = group_targets(mbid, mode, types=types)
         return rows, ([{"mbid": mbid, "reason": err}] if err else [])
     if kind != "artist":
         return [], [{"mbid": mbid, "reason": f"unknown MusicBrainz kind {kind!r}"}]
@@ -4834,7 +5521,11 @@ def auto_import_targets(mbid, kind=None, mode="best"):
     if not groups:
         return [], [{"mbid": mbid,
                      "reason": "this artist has no release groups on MusicBrainz"}]
-    rows, skipped, done = [], [], 0
+    # The type filter is applied to the GROUP LIST first: a group the caller
+    # did not ask for is never even browsed (each one costs a MusicBrainz
+    # request), and it leaves a skip row naming the type it actually is.
+    groups, skipped = groups_of_types(groups, types)
+    rows, done = [], 0
     for g in groups:
         gid = str(g.get("id") or "")
         if not gid:
@@ -4847,7 +5538,7 @@ def auto_import_targets(mbid, kind=None, mode="best"):
                             "reason": f"per-call limit of {BULK_MAX_GROUPS} "
                                       "release groups reached — call again"})
             continue
-        sub, err = group_targets(gid, "best")
+        sub, err = group_targets(gid, "best", types=types)
         done += 1
         if err:
             skipped.append({"mbid": gid, "reason": err})
@@ -4861,7 +5552,13 @@ def release_group_browse(mbid, limit=300, offset=0):
     media so every row carries format, disc count and its '10 + 11' track
     breakdown. Releases come from the browse endpoint (collected across
     pages) because the lookup's release subquery both truncates and omits
-    media."""
+    media.
+
+    The payload also carries `countries`: every (country, date) the group's
+    editions were released in, each stamped with the edition that carries it
+    (a release carries its own events, so the union costs no extra request).
+    The editions of the pages loaded so far are what it covers.
+    """
     data = mb_get_cached(
         f"release-group/{mbid}",
         {"inc": "artist-credits+genres", "fmt": "json"},
@@ -4870,7 +5567,10 @@ def release_group_browse(mbid, limit=300, offset=0):
         "release", {"release-group": mbid, "inc": "media"}, "releases", "release-count",
         limit=limit, offset=offset,
     )
-    releases = []
+    # One config load for both readers of it (the ranking and the country
+    # chips' preference mark).
+    cfg = _release_cfg()
+    releases, ranked_rows = [], []
     # The editions are listed in the policy's own order (mlo.release_choice),
     # so the first row is the edition auto-import would take — and the sort is
     # deliberately NOT strict: a promo or a country-less edition still belongs
@@ -4880,8 +5580,9 @@ def release_group_browse(mbid, limit=300, offset=0):
              "first_release_date": data.get("first-release-date"),
              "primary_type": data.get("primary-type"),
              "secondary_types": data.get("secondary-types")},
-            rel_rows):
+            rel_rows, cfg):
         r = rel_rows[cand.index]
+        ranked_rows.append(r)
         track_count, track_breakdown = _release_counts(r)
         releases.append({
             "id": r.get("id"),
@@ -4911,6 +5612,8 @@ def release_group_browse(mbid, limit=300, offset=0):
         "secondary_types": data.get("secondary-types") or [],
         "genres": _genre_names(_genres(data)),
         "first_release_date": data.get("first-release-date") or "",
+        "countries": release_group_countries(
+            ranked_rows, cfg.get("prefer_release_country")),
         "total": total,
         "offset": offset,
         "next": (offset + served) if 0 < total and offset + served < total else None,
@@ -5173,15 +5876,9 @@ COV_BASE = "https://covers.musichoarders.xyz"
 COV_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 # The API allows at most 9 active sources per search; prefer high-quality
 # art sources first and fill up with whatever else is enabled.
-COV_SOURCE_PRIORITY = [
-    "qobuz", "applemusic", "tidal", "bandcamp", "deezer", "spotify",
-    "itunes", "discogs", "musicbrainz",
-]
+COV_SOURCE_PRIORITY = list(_cover_choice.DEFAULT_SOURCE_ORDER)
 COV_MAX_SOURCES = 9
-COV_FALLBACK_SOURCES = [
-    "qobuz", "applemusic", "tidal", "bandcamp", "deezer", "spotify",
-    "itunes", "discogs", "musicbrainz",
-]
+COV_FALLBACK_SOURCES = list(_cover_choice.DEFAULT_SOURCE_ORDER)
 
 _cov_info_cache = {"at": 0.0, "info": {}}
 _cov_sources_cache = {"at": 0.0, "ids": []}
@@ -5284,14 +5981,29 @@ def resolve_cov_search(sources=None, country=None, cfg=None):
 
 
 def _cover_row(source, small, big, title=None, artist=None, tracks=None,
-               url=None, width=None, height=None):
+               url=None, width=None, height=None, front=None, kind=None,
+               release_cover=None, rank=None, format=None, nbytes=None):
     """One search result. Every provider (COV and each fallback) answers this
     exact shape, so the finder never has to know which one answered: the keys
     it already reads (`source`, `small`, `big`, `title`, `artist`, `tracks`,
-    `url`) plus the REAL pixel size — `None` means unknown, never a guess."""
+    `url`) plus what the candidate was MEASURED from rather than what its URL
+    suggests.
+
+    `width`/`height` are the REAL pixel size read from the image's own header
+    bytes (``None`` means unknown, never a guess) and `format`/`nbytes` are
+    what that same probe found — the container the bytes really are and how
+    many bytes the URL answered with (0 = an empty answer). `front`/`kind` are
+    the provider's own labelling ("front" / "back" / "other"), and
+    `release_cover` says whether this is the RELEASE's own front cover (True),
+    a release-group stand-in (False: the Cover Art Archive asked about the
+    group answers with some release's image) or neither stated (``None``).
+    `rank` is the provider's own order (0 = its first answer), which
+    `mlo.cover_choice` reads as its last tiebreak."""
     return {"source": source, "small": small or None, "big": big or None,
             "title": title or None, "artist": artist or None, "tracks": tracks,
-            "url": url or None, "width": width, "height": height}
+            "url": url or None, "width": width, "height": height,
+            "format": format, "bytes": nbytes, "front": front,
+            "kind": kind, "release_cover": release_cover, "rank": rank}
 
 
 def _cov_headers():
@@ -5316,8 +6028,46 @@ def _cov_stream(body, headers, timeout=60.0):
             yield r.iter_lines()
 
 
+_CAA_GROUP_URL_RE = re.compile(r"coverartarchive\.org/release-group/", re.I)
+_CAA_RELEASE_URL_RE = re.compile(r"coverartarchive\.org/release/([0-9a-f-]{36})/", re.I)
+_CAA_BACK_URL_RE = re.compile(r"/back(?:-\d+)?(?:\.\w+)?(?:$|[?#])", re.I)
+_CAA_FRONT_URL_RE = re.compile(r"/front(?:-\d+)?(?:\.\w+)?(?:$|[?#])", re.I)
+
+
+def cover_url_labels(url):
+    """(kind, release_cover) a URL itself states, or (None, None).
+
+    Only the Cover Art Archive's URLs say this much for free, and they are the
+    only ones the app can read without the provider's own metadata:
+    `/release-group/<rg>/…` is a STAND-IN for the group (some release's image —
+    whichever one CAA picked), `/release/<mbid>/front…` is that release's own
+    front cover, and a `/back` names the back. A store's CDN path states
+    nothing, which the cover policy treats as unknown rather than guessing
+    (`mlo.cover_choice`: a name-searched row sits between the two).
+    """
+    text = str(url or "")
+    if "coverartarchive.org" not in text.lower():
+        return None, None
+    if _CAA_BACK_URL_RE.search(text):
+        return "back", False
+    if _CAA_FRONT_URL_RE.search(text):
+        return "front", False if _CAA_GROUP_URL_RE.search(text) else True
+    if _CAA_GROUP_URL_RE.search(text):
+        return None, False               # a group image with no type stated
+    if _CAA_RELEASE_URL_RE.search(text):
+        return None, True                # one release's own image
+    return None, None
+
+
 def _cov_results(artist, album, limit, timeout, src_ids, ctry):
-    """COV's own covers for one query, in the site's relevance order."""
+    """COV's own covers for one query, in the site's relevance order.
+
+    COV states no dimensions and no type: `width`/`height`/`format` are filled
+    afterwards by the probe (`_attach_dimensions`), `rank` is the position in
+    this very order (COV's own relevance is the last tiebreak the cover policy
+    reads), and the front/stand-in labels are read from the URL's own shape
+    where CAA URLs state it.
+    """
     body = {"country": ctry, "sources": src_ids}
     if artist:
         body["artist"] = artist
@@ -5336,10 +6086,14 @@ def _cov_results(artist, album, limit, timeout, src_ids, ctry):
             if ev.get("type") != "cover":
                 continue
             rel = ev.get("releaseInfo") or {}
+            big = ev.get("bigCoverUrl")
+            kind, release_cover = cover_url_labels(big)
             rows.append(_cover_row(
-                ev.get("source"), ev.get("smallCoverUrl"), ev.get("bigCoverUrl"),
+                ev.get("source"), ev.get("smallCoverUrl"), big,
                 rel.get("title"), rel.get("artist"), rel.get("tracks"),
-                rel.get("url"), ev.get("width"), ev.get("height")))
+                rel.get("url"), ev.get("width"), ev.get("height"),
+                front=True if kind == "front" else (False if kind == "back" else None),
+                kind=kind, release_cover=release_cover, rank=len(rows)))
             if len(rows) >= limit:
                 break
     return rows
@@ -5408,13 +6162,36 @@ def _image_size(data):
     return None
 
 
+def _image_format(data):
+    """"jpeg"/"png"/"webp" for bytes whose container is one of those, else "".
+
+    The same magic numbers `_image_size` reads, and the answer the cover policy
+    judges the format tier on — a PNG photo is re-encoded when it is written,
+    a JPEG is already the shape the library stores. Bytes that are not one of
+    the three (an HTML error page, a GIF, something exotic) say "" instead of
+    being called a cover.
+    """
+    if data[:2] == b"\xff\xd8":
+        return "jpeg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "webp"
+    return ""
+
+
 def _probe_get(url, nbytes=COVER_PROBE_BYTES, timeout=10.0):
-    """The first *nbytes* of an image URL (a Range request), or b"".
+    """The first *nbytes* of an image URL (a Range request).
+
+    b"" when the URL ANSWERED with nothing (an empty body, a 404 body-less
+    reply) and None when the request itself failed (a dead host, a refused
+    connection, a timeout) — the difference between "this URL has no image" and
+    "this URL could not be asked", which the cover policy needs: an empty
+    answer is a candidate it rejects out loud, an unasked one is merely
+    unknown. Never raises: a probe that cannot answer is a valid answer.
 
     Range is a request, not a promise: a server may answer 200 with the whole
     file, so the body is read in chunks and dropped once *nbytes* are in hand.
-    Never raises — a fetch that cannot answer is "unknown", not a failed
-    search.
     """
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout, read=timeout),
@@ -5430,11 +6207,17 @@ def _probe_get(url, nbytes=COVER_PROBE_BYTES, timeout=10.0):
                         break
                 return bytes(out[:nbytes])
     except Exception:
-        return b""
+        return None
 
 
 def _probe_dimensions(url, timeout=10.0):
     """One probe of one URL: header bytes only, public hosts only, no raise.
+
+    Answers ``{"width", "height", "format", "bytes"}`` — what the image's own
+    bytes say it is (a dimension pair, a container) plus how many bytes the URL
+    answered with, which is how an empty answer (0 bytes) is told apart from
+    bytes that are not an image at all. A URL that cannot be probed at all
+    answers None (unknown), never a guess.
 
     Nothing here may raise — `_genre_cached` requires its producer to be total,
     and an unknown size is a valid answer while a dead search is not.
@@ -5445,15 +6228,23 @@ def _probe_dimensions(url, timeout=10.0):
         if (parsed.scheme not in ("http", "https")
                 or not _public_host(parsed.hostname)):
             return None                 # the same trust boundary as the download
-        size = _image_size(_probe_get(url, timeout=timeout))
-        return {"width": size[0], "height": size[1]} if size else None
+        data = _probe_get(url, timeout=timeout)
+        if data is None:
+            return None                 # the URL could not be asked at all
+        size = _image_size(data)
+        out = {"format": _image_format(data), "bytes": len(data)}
+        if size:
+            out["width"], out["height"] = size[0], size[1]
+        return out
     except Exception:
         return None
 
 
 def image_dimensions(url, timeout=10.0):
-    """`{"width", "height"}` of the image at *url*, or None when unknown.
+    """The image at *url* as the probe found it, or None when unknown.
 
+    ``{"width", "height", "format", "bytes"}`` — the real pixel size, the real
+    container and how many bytes the URL answered with (0 = an empty answer).
     Memoized 30 days (memory + <music>/.mlo/data, the app's shared value
     cache) — a probe that found nothing is cached too, so a rerun never re-asks
     a host that already said no.
@@ -5467,12 +6258,18 @@ def image_dimensions(url, timeout=10.0):
 
 
 def _attach_dimensions(rows, limit=COVER_PROBE_LIMIT, timeout=10.0):
-    """Fill `width`/`height` on the first *limit* rows from their own image.
+    """Fill what each row's own image says: size, container, byte count.
 
-    Probed in a small pool: these are 20+ different CDNs, and a search that
-    waits on them one at a time is a search that hangs on one slow host.
+    The first *limit* rows, probed in a small pool — these are 20+ different
+    CDNs, and a search that waits on them one at a time is a search that hangs
+    on one slow host. A row COV already sized is probed only when its CONTAINER
+    is still unknown (the format tier of the cover policy reads it, and a row
+    whose size came from COV's own line has no format yet); a row that answers
+    nothing at all keeps `bytes: 0`, which is the one thing the policy must be
+    able to tell apart from "never asked".
     """
-    todo = [r for r in rows[:limit] if r.get("width") is None]
+    todo = [r for r in rows[:limit]
+            if r.get("width") is None or r.get("format") is None]
     if not todo:
         return
     from concurrent.futures import ThreadPoolExecutor
@@ -5481,17 +6278,34 @@ def _attach_dimensions(rows, limit=COVER_PROBE_LIMIT, timeout=10.0):
             lambda r: image_dimensions(r.get("big") or r.get("small"), timeout),
             todo))
     for row, size in zip(todo, sizes):
-        if size:
+        if not size:
+            continue
+        if size.get("width"):
+            # The probe's OWN reading wins over anything the provider stated:
+            # that number describes the file the provider holds, while this one
+            # describes the bytes this URL answers with. ``None`` (unknown) stays
+            # unknown either way.
             row["width"], row["height"] = size["width"], size["height"]
+        if "format" in size:
+            # "" is an answer too: the bytes are not a JPEG/PNG/WebP image.
+            row["format"] = size["format"]
+        if size.get("bytes") is not None:
+            row["bytes"] = size["bytes"]
 
 
 # --------------------------------------------------------------------------- #
-# Fallbacks — asked ONLY when the meta-search returns nothing
+# The identity providers — asked by ID, not by name
 # --------------------------------------------------------------------------- #
-# Each is a single album lookup (not a meta-search) and each answers the same
-# row shape, with its own id as `source` and the dimensions probed the same
-# way. Order: the caller's release-group MBID first (an identity — no name
-# guessing at all), then the two keyless catalogues the app already talks to.
+# The meta-search (COV) is a NAME search: it is fast, it carries the big store
+# artwork, and it can also answer with another artist's album. The Cover Art
+# Archive is an IDENTITY read: asked about the release the import stamped, it
+# answers with that release's OWN front cover, and asked about the release
+# GROUP it answers with a stand-in (some release's image, whichever CAA
+# picked). Both are asked when both are known, and `mlo.cover_choice` ranks
+# them — the release's own front cover first, the stand-in last.
+#
+# The fallbacks below are reached only when neither has anything; each is a
+# single lookup, and each states in the search's `sources` report what it did.
 CAA_BASE = "https://coverartarchive.org"
 DEEZER_API = "https://api.deezer.com"
 COVER_FALLBACKS = ("coverartarchive", "deezer", "itunes")
@@ -5511,31 +6325,54 @@ def _name_rank(name, want):
     return 0 if (want and _norm_compare(name) == want) else 1
 
 
-def _caa_covers(rg_mbid, limit, artist="", album="", timeout=30.0):
-    """Cover Art Archive images for a RELEASE GROUP, front cover first.
+def _caa_rows(mbid, scope, limit, artist, album, timeout, release_cover):
+    """CAA images for one id, front cover first, labelled with what they are.
 
-    Asked about the release-group MBID the caller already has (the import
-    wizard holds one): CAA is browsed BY IDENTITY — its search is per release,
-    and matching it by name is the name-guessing this app does not do. The big
-    URL is the original upload; CAA publishes no dimensions, which is exactly
-    why the probe exists.
+    `scope` is "release" or "release-group" — the endpoint, and therefore the
+    answer's meaning: a release's images are that release's own front/back/other
+    images (`release_cover` True), while a group's are a stand-in for the group
+    (`release_cover` False, which the cover policy ranks below the release's
+    own). CAA publishes no dimensions, which is exactly why the probe exists.
     """
-    rg = str(rg_mbid or "").strip()
-    if not rg:
+    ident = str(mbid or "").strip()
+    if not ident:
         return []
-    data = _advisory_json(f"{CAA_BASE}/release-group/{rg}",
+    data = _advisory_json(f"{CAA_BASE}/{scope}/{ident}",
                           headers={"User-Agent": USER_AGENT},
                           timeout=timeout, host="coverartarchive.org")
     images = [i for i in ((data or {}).get("images") or []) if i.get("image")]
     images.sort(key=lambda i: not i.get("front"))
-    page = f"{CAA_BASE}/release-group/{rg}"
+    page = f"{CAA_BASE}/{scope}/{ident}"
     rows = []
-    for img in images[:limit]:
+    for i, img in enumerate(images[:limit]):
         th = img.get("thumbnails") or {}
-        rows.append(_cover_row("coverartarchive",
-                               th.get("large") or th.get("small") or img["image"],
-                               img["image"], album, artist, None, page))
+        types = [str(t).strip().lower() for t in (img.get("types") or [])]
+        front = bool(img.get("front"))
+        kind = ("front" if front else
+                "back" if "back" in types else
+                types[0] if types else "")
+        rows.append(_cover_row(
+            "coverartarchive",
+            th.get("large") or th.get("small") or img["image"],
+            img["image"], album, artist, None, page,
+            front=front, kind=kind, release_cover=release_cover, rank=i))
     return rows
+
+
+def _caa_release_covers(release_mbid, limit, artist="", album="", timeout=30.0):
+    """The RELEASE's own images (its front cover first) — the identity read."""
+    return _caa_rows(release_mbid, "release", limit, artist, album, timeout, True)
+
+
+def _caa_covers(rg_mbid, limit, artist="", album="", timeout=30.0):
+    """Cover Art Archive images for a RELEASE GROUP, front cover first.
+
+    Asked about the release-group MBID the caller has (the import wizard holds
+    one): CAA is browsed BY IDENTITY — its search is per release, and matching
+    it by name is the name-guessing this app does not do. These are stand-ins
+    for the group, not the release's own cover, and the policy says so.
+    """
+    return _caa_rows(rg_mbid, "release-group", limit, artist, album, timeout, False)
 
 
 def _deezer_covers(artist, album, limit, timeout=30.0):
@@ -5543,7 +6380,9 @@ def _deezer_covers(artist, album, limit, timeout=30.0):
     (1000×1000), so nothing here is expected to be larger than that.
 
     Rows are ORDERED, never dropped: a tribute/karaoke album that carries the
-    same title is a bad first hit, not a reason to hide the real covers.
+    same title is a bad first hit, not a reason to hide the real covers. The
+    matched album's own artwork is a front cover of THAT album (not a group
+    stand-in), which is what `release_cover` says.
     """
     term = " ".join(x for x in (f'artist:"{artist}"' if artist else "",
                                 f'album:"{album}"' if album else "") if x)
@@ -5561,8 +6400,9 @@ def _deezer_covers(artist, album, limit, timeout=30.0):
     return [_cover_row("deezer", a.get("cover_big") or a.get("cover_medium"),
                        a.get("cover_xl") or a.get("cover_big"),
                        a.get("title"), (a.get("artist") or {}).get("name"),
-                       a.get("nb_tracks"), a.get("link"))
-            for a in rows[:limit]]
+                       a.get("nb_tracks"), a.get("link"),
+                       front=True, kind="front", release_cover=True, rank=i)
+            for i, a in enumerate(rows[:limit])]
 
 
 def _itunes_covers(artist, album, limit, cfg=None, timeout=30.0):
@@ -5586,18 +6426,43 @@ def _itunes_covers(artist, album, limit, cfg=None, timeout=30.0):
     return [_cover_row("itunes", a["artworkUrl100"],
                        _artwork_big(a["artworkUrl100"]),
                        a.get("collectionName"), a.get("artistName"),
-                       a.get("trackCount"), a.get("collectionViewUrl"))
-            for a in rows[:limit]]
+                       a.get("trackCount"), a.get("collectionViewUrl"),
+                       front=True, kind="front", release_cover=True, rank=i)
+            for i, a in enumerate(rows[:limit])]
+
+
+def _source_row(pid, status, *, count=None, detail=""):
+    """One line of the search's own report: who was asked, and what happened.
+
+    `status` is "used" (it answered with candidates), "empty" (it answered with
+    nothing), "error" (it refused or failed) or "skipped" (it was not asked at
+    all — and `detail` says why: no id to ask about, no key configured, the
+    source switched off). A source that contributed nothing is never left
+    silent: the covers policy turns these into the pick's own notes.
+    """
+    row = {"id": pid, "status": status}
+    if count is not None:
+        row["count"] = int(count)
+    if detail:
+        row["detail"] = str(detail)[:300]
+    return row
 
 
 def _cover_fallback(artist, album, limit, cfg, rg_mbid, timeout):
-    """(results, provider) from the FIRST fallback that answers, else ([], None).
+    """(rows, provider, report) from the FIRST fallback that answers.
 
-    Only ever reached when the meta-search came back empty or failed; one
-    lookup per provider in COVER_FALLBACKS order, stopping at the first
-    non-empty list. A provider that errors is skipped, not fatal.
+    Only ever reached when the meta-search and the release's own cover came
+    back empty: one lookup per provider in COVER_FALLBACKS order, stopping at
+    the first non-empty list. A provider that errors, or that has no identity
+    to be asked about at all, says so in the report instead of being skipped in
+    silence — and none of them is fatal.
     """
+    report = []
     for pid in COVER_FALLBACKS:
+        if pid == "coverartarchive" and not str(rg_mbid or "").strip():
+            report.append(_source_row(pid, "skipped",
+                                      detail="no release-group id to ask about"))
+            continue
         try:
             if pid == "coverartarchive":
                 rows = _caa_covers(rg_mbid, limit, artist, album, timeout)
@@ -5605,46 +6470,114 @@ def _cover_fallback(artist, album, limit, cfg, rg_mbid, timeout):
                 rows = _deezer_covers(artist, album, limit, timeout)
             else:
                 rows = _itunes_covers(artist, album, limit, cfg, timeout)
-        except Exception:
-            rows = []
+        except Exception as e:
+            report.append(_source_row(pid, "error", detail=f"{type(e).__name__}: {e}"))
+            continue
+        report.append(_source_row(pid, "used" if rows else "empty", count=len(rows)))
         if rows:
-            return rows, pid
-    return [], None
+            return rows, pid, report
+    return [], None, report
 
 
 def cover_search(artist, album, limit=40, timeout=60.0, sources=None,
-                 country=None, cfg=None, release_group_mbid=""):
-    """Album covers for artist/album → ``{"results": [...], "provider": id}``.
+                 country=None, cfg=None, release_group_mbid="", release_mbid=""):
+    """Album covers for artist/album → ``{"results", "provider", "sources"}``.
 
     Every row is ``{source, small, big, title, artist, tracks, url, width,
-    height}``: the keys the finder already reads, plus the image's REAL pixel
-    size, read from the file itself for the first ``COVER_PROBE_LIMIT`` rows
-    (``None`` means unknown — a dimension probe can never fail the search).
+    height, format, bytes, front, kind, release_cover, rank}``: the keys the
+    finder already reads, plus what the candidate was MEASURED from — the
+    image's real pixel size, container and byte count, read from the file
+    itself for the first ``COVER_PROBE_LIMIT`` rows (``None`` means unknown — a
+    probe can never fail the search), whether the provider labels it the front
+    cover of the release it belongs to, and its own rank in that provider's
+    order.
 
-    ``provider`` names who actually answered: ``"cov"`` for the meta-search, a
-    fallback id otherwise, and ``None`` when nobody had anything at all — an
-    empty answer is STATED, never left as a silent zero-result. The fallbacks
-    run only when COV returns nothing (or refuses/errors: a dead meta-search
-    is a fallback case, not an error the user has to understand).
+    ``sources`` is the report `mlo.cover_choice.source_notes` turns into the
+    pick's notes: one row per source that was asked — used / empty / error /
+    skipped, with the reason — so a query that found nothing says what was
+    tried and which source was never asked (no id, no key, switched off).
+
+    ``provider`` names who answered first: ``"cov"`` for the meta-search, the
+    fallback id that filled in (``coverartarchive``/``deezer``/``itunes``), and
+    ``None`` when nobody had anything at all — an empty answer is STATED, never
+    left as a silent zero-result.
 
     ``sources``/``country`` override the SAVED defaults (`cover_sources`,
     `cover_country`) for this one search only — nothing here writes config.
-    ``release_group_mbid``, when the caller has one, is the identity the Cover
-    Art Archive fallback is asked about.
+    ``release_group_mbid``/``release_mbid``, when the caller has them, are the
+    identities the Cover Art Archive is asked about: the release's own front
+    cover is asked by the release id, its release group's stand-in by the group
+    id. The name-based fallbacks (Deezer, iTunes) run only when the meta-search
+    and the identity read both came back empty (or refused) — a dead
+    meta-search is a fallback case, not an error the user has to understand.
     """
     if not artist and not album:
         raise ValueError("artist or album is required")
     src_ids, ctry = resolve_cov_search(sources, country, cfg)
+    report = []
+    # A source the catalogue reports as switched off is never asked, and that
+    # is stated rather than looked like "it had nothing" (several of these
+    # sources need a key the catalogue's operator holds, not the user).
     try:
-        results = _cov_results(artist, album, limit, timeout, src_ids, ctry)
+        enabled = {str(s.get("id") or ""): bool(s.get("enabled", True))
+                   for s in (cov_catalog(timeout).get("sources") or [])}
+        for sid in src_ids:
+            if enabled.get(sid) is False:
+                report.append(_source_row(
+                    sid, "skipped",
+                    detail="switched off in the source catalogue — not asked"))
     except Exception:
-        results = []
-    provider = "cov"
+        pass
+    results = []
+    try:
+        cov = _cov_results(artist, album, limit, timeout, src_ids, ctry)
+    except Exception as e:
+        cov = []
+        report.append(_source_row("covers.musichoarders.xyz", "error",
+                                  detail=f"{type(e).__name__}: {e}"))
+    else:
+        counts = {}
+        for r in cov:
+            counts[str(r.get("source") or "?")] = counts.get(str(r.get("source") or "?"), 0) + 1
+        report.append(_source_row(
+            "covers.musichoarders.xyz", "used" if cov else "empty", count=len(cov),
+            detail=", ".join(f"{k} {v}" for k, v in sorted(counts.items()))))
+    results.extend(cov)
+    provider = "cov" if cov else None
+
+    if str(release_mbid or "").strip():
+        try:
+            own = _caa_release_covers(release_mbid, limit, artist, album, timeout)
+        except Exception as e:
+            own = []
+            report.append(_source_row("coverartarchive", "error",
+                                      detail=f"{type(e).__name__}: {e}"))
+        else:
+            report.append(_source_row("coverartarchive",
+                                      "used" if own else "empty", count=len(own),
+                                      detail="the release's own images, by release id"))
+        results.extend(own)
+        if own and not provider:
+            provider = "coverartarchive"
+    else:
+        report.append(_source_row(
+            "coverartarchive", "skipped",
+            detail="no release id to ask about — only the release group"))
+
     if not results:
-        results, provider = _cover_fallback(artist, album, limit, cfg,
-                                            release_group_mbid, timeout)
+        rows, pid, more = _cover_fallback(artist, album, limit, cfg,
+                                          release_group_mbid, timeout)
+        report.extend(more)
+        results = rows
+        provider = pid
+    else:
+        for pid in COVER_FALLBACKS:
+            report.append(_source_row(pid, "skipped",
+                                      detail="not asked — the sources above answered"))
     _attach_dimensions(results)
-    return {"results": results, "provider": provider}
+    return {"results": results, "provider": provider, "sources": report}
+
+
 
 
 # Image downloads are the one place a caller supplies a URL the server then

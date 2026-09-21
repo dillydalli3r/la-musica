@@ -234,6 +234,10 @@ discovery.discogs_style_search = stub("discogs_style", {"rows": [], "total": Non
 discovery.lastfm_tag_top = stub("lastfm_tag_top", {"rows": [], "total": None})
 discovery.listenbrainz_similar_artists = stub("lb_similar", [])
 discovery.spotify_genre_albums = stub("spotify_genre", {"rows": [], "total": None})
+# The Discover registry's RateYourMusic row is a CHARTS source, probed through
+# the scrape in `server.integrations` — the seam below keeps this file's
+# "probe=False is free" and "no call leaves the machine" guarantees.
+intg.rym_charts = stub("rym_charts", {"rows": [], "total": None, "chart": ""})
 # The credentials rows have their own probe seam; the login row has nothing to
 # paste, so it is always asked and would otherwise read this machine's own
 # auth database on every probe=True call in this file.

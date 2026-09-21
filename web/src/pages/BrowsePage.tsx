@@ -30,7 +30,7 @@ import QueryBuilder, {
 import FacetRail from "../components/FacetRail";
 import Segmented from "../components/Segmented";
 import Modal from "../components/Modal";
-import { AdvisoryMark, CachedMark, EmptyState, GradeBadge, MediaChip, PageLoading } from "../components/Badges";
+import { AdvisoryMark, CachedMark, EmptyState, GradeBadge, MediaChip, PageLoading, PendingMark, pendingSummary } from "../components/Badges";
 import { TrackCover } from "../components/CoverImg";
 import FavHeart from "../components/FavHeart";
 import { ExportButton } from "../components/ExportDialog";
@@ -38,6 +38,7 @@ import { SortHeader, toggleSort } from "../lib/sort.tsx";
 import type { SortState } from "../lib/sort.tsx";
 import { TABLE_FIT } from "../lib/columns";
 import { fmtDateCell, fmtDuration, fmtTech } from "../lib/fmt";
+import { useI18n } from "../lib/i18n";
 import { albumRef, entityLinkClick, trackRef } from "../lib/refs";
 
 type Target = "tracks" | "albums";
@@ -177,6 +178,7 @@ function ratingText(v: unknown): string {
 }
 
 export default function BrowsePage() {
+  const { t } = useI18n();
   const qc = useQueryClient();
   const navigate = useNavigate();
   const { playNow } = useStore();
@@ -233,7 +235,7 @@ export default function BrowsePage() {
   // debounce the count uses, on the whole request.
   const settledKey = useDebounced(JSON.stringify(request));
   const settled = useMemo(() => JSON.parse(settledKey) as typeof request, [settledKey]);
-  const { data, isFetching, error } = useQuery({
+  const { data, isFetching, error, refetch } = useQuery({
     queryKey: ["libraryQuery", "page", settledKey],
     // The target rides WITH the rows rather than beside them: while a switch
     // between tracks and albums is in flight the previous page is still on
@@ -430,8 +432,16 @@ export default function BrowsePage() {
   const renderAlbumRow = (al: Album) => {
     const artist = al.album_artist ?? "";
     const albumName = al.meta?.ALBUM ?? al.path.split("/").pop() ?? al.path;
+    // A framework album has no audio: the row is not a play button, and it
+    // says why instead of starting whatever else the page holds.
+    const pending = pendingSummary(al, t);
     return (
-      <tr key={al.path} className="table-row group cursor-pointer" title="Click to play the album" onClick={() => play(al.tracks?.[0]?.path ?? "")}>
+      <tr
+        key={al.path}
+        className={`table-row group${pending ? "" : " cursor-pointer"}`}
+        title={pending ? pending.full : "Click to play the album"}
+        onClick={pending ? undefined : () => play(al.tracks?.[0]?.path ?? "")}
+      >
         <td className="td">
           <div className="flex items-center gap-1.5 min-w-0">
             <Link
@@ -442,6 +452,8 @@ export default function BrowsePage() {
               {albumName}
             </Link>
             <FavHeart kind="album" id={al.path} iconClass="h-3.5 w-3.5" />
+            {/* the same marker every other album-shaped surface carries */}
+            <PendingMark album={al} />
           </div>
         </td>
         <td className="td text-zinc-400 break-words">{artist || "—"}</td>
@@ -544,22 +556,41 @@ export default function BrowsePage() {
             {sortControl}
             {groupControl}
             <span className="text-xs text-zinc-500 ml-auto" title={data ? `the engine answered in ${data.took_ms} ms` : undefined}>
-              {total.toLocaleString()} {rowsTarget}
-              {isFetching ? " · counting…" : ""}
+              {/* "Not asked yet" and "0 results" are different facts: before the
+                  engine has answered there IS no count, and printing "0 tracks"
+                  made a page that had not run look like a page that found
+                  nothing. */}
+              {data
+                ? `${total.toLocaleString()} ${rowsTarget}${isFetching ? " · counting…" : ""}`
+                : t("browse.not_asked")}
             </span>
           </div>
 
           {errorText ? (
-            <EmptyState title="The query was refused" hint={errorText} />
+            <EmptyState
+              title={t("browse.error_title")}
+              hint={errorText}
+              onAction={{ label: t("action.retry"), onClick: () => void refetch(), disabled: isFetching }}
+            />
           ) : !data && !items.length ? (
             <PageLoading label="Running the query…" />
           ) : !items.length ? (
             <EmptyState
-              title={spec.conditions.length ? "Nothing matches" : "The library is empty"}
+              title={spec.conditions.length ? t("browse.zero_title") : t("browse.empty_title")}
               hint={
                 spec.conditions.length
-                  ? "Loosen a condition, or clear the builder to see the whole library."
-                  : "No track in the library matches this target yet."
+                  ? t("browse.zero_hint", {
+                      n: runnableConditions(conditions).length,
+                      target: rowsTarget === "tracks" ? t("charts.kind.tracks") : t("charts.kind.albums"),
+                    })
+                  : t("browse.empty_hint", {
+                      target: rowsTarget === "tracks" ? t("charts.kind.tracks") : t("charts.kind.albums"),
+                    })
+              }
+              onAction={
+                spec.conditions.length
+                  ? { label: t("browse.clear"), onClick: () => setConditions([]) }
+                  : undefined
               }
             />
           ) : (

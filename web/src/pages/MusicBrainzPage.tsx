@@ -3,20 +3,22 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import {
   keepPreviousData, useInfiniteQuery, useQuery, useQueryClient,
 } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, ArrowUpDown, ArrowUpRight, Check, Library, Loader2, Search, Zap } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, ArrowUpRight, Check, HelpCircle, Library, Loader2, Search, Zap } from "lucide-react";
 import { api } from "../api";
 import type {
-  Library as LibraryData, MBArtistBrowse, MBReleaseGroupBrowse, MBReleaseGroupRow,
-  MBReleaseRow, MBRecordingBrowse, MBSearchRow as MBSearchRowData, MBSearchRows,
+  Library as LibraryData, MBArtistBrowse, MBCountryEvent, MBReleaseGroupBrowse, MBReleaseGroupRow,
+  MBReleaseRow, MBRecordingBrowse, MBSearchField, MBSearchRow as MBSearchRowData, MBSearchRows,
 } from "../types";
 import { albumRef } from "../lib/refs";
 import { TABLE_FIT } from "../lib/columns";
 import { EmptyState, PageLoading } from "../components/Badges";
 import { MbIcon } from "../components/Links";
 import PageHeader from "../components/PageHeader";
+import Popover from "../components/Popover";
 import ReleaseChoice from "../components/ReleaseChoice";
 import Segmented from "../components/Segmented";
 import { WatchArtistButton } from "../components/WatchDialog";
+import { useI18n } from "../lib/i18n";
 import { toast } from "../store";
 
 /* In-app MusicBrainz browser: search across the four browsable entities and
@@ -36,6 +38,12 @@ const TYPES = [
   { id: "recording", label: "Recordings" },
 ] as const;
 type MBType = (typeof TYPES)[number]["id"];
+
+/** The tab's own label for an entity kind, lower-cased for a sentence
+ *  ("release groups") — the help panel's heading and the unknown-field warning
+ *  must name the kind exactly as the tab does. */
+const kindLabelOf = (kind: MBType) =>
+  (TYPES.find((t) => t.id === kind)?.label ?? kind).toLowerCase();
 
 /** MusicBrainz release types, split the way MusicBrainz splits them: a
  *  release group has ONE primary type (Album / Single / EP / Broadcast /
@@ -421,6 +429,167 @@ function useMbPrefetch() {
 }
 
 /* ------------------------------------------------------------------ */
+/* The search box's own help                                           */
+/* ------------------------------------------------------------------ */
+
+/** MusicBrainz's search-field catalogue, cached for the session: it only
+ *  changes when the server's own catalogue does (the same idea as the library
+ *  query builder's `useLibraryFields`). */
+function useMbSearchFields() {
+  return useQuery({
+    queryKey: ["mbSearchFields"],
+    queryFn: api.mbSearchFields,
+    staleTime: 30 * 60_000,
+  });
+}
+
+/** Every field of the entity kind being searched, plus the syntax they combine
+ *  with, and a one-click insert: the snippet goes into the search box and the
+ *  caret is left where the value goes (`artist:""` → between the quotes),
+ *  because the box's query IS the Lucene query.
+ *
+ *  Nothing here hardcodes a field: the list is the server's own catalogue, so
+ *  the help can never teach a field the index would not answer. */
+function SearchFieldHelp({ kind, onInsert }: {
+  kind: MBType;
+  onInsert: (snippet: string, caretAt: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const { data, isError } = useMbSearchFields();
+  const syntax = data?.syntax ?? [];
+  const fields = data?.fields?.[kind] ?? [];
+  // Filtered here rather than server-side: the catalogue is a few dozen rows
+  // that never change while the page is open.
+  const needle = q.trim().toLowerCase();
+  const shown = needle
+    ? fields.filter((f) => f.field.includes(needle) || f.meaning.toLowerCase().includes(needle))
+    : fields;
+  const kindLabel = kindLabelOf(kind);
+  const pick = (snippet: string, caretAt: number) => {
+    setOpen(false);
+    setQ("");
+    onInsert(snippet, caretAt);
+  };
+  /** `artist:""` for a quoted value (the caret lands between the quotes),
+   *  `country:` for a code/date/id one, which is never quoted. */
+  const insert = (f: MBSearchField) =>
+    pick(`${f.field}:${f.quotes ? '""' : ""}`, f.field.length + (f.quotes ? 2 : 1));
+
+  return (
+    <div className="relative shrink-0">
+      <button
+        className="btn-ghost !py-1 text-[11px] flex items-center gap-1"
+        onClick={() => setOpen(!open)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={`MusicBrainz search syntax, and every field its index answers for this search — click one to insert it into the box`}
+      >
+        <HelpCircle className="h-3.5 w-3.5" /> Fields &amp; syntax
+      </button>
+      <Popover open={open} onClose={() => setOpen(false)} align="left"
+               panelClass="w-[min(30rem,calc(100vw-1rem))] max-h-[70vh] overflow-y-auto p-1.5">
+        <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2.5 pt-1.5 pb-1">Syntax</div>
+        {syntax.map((s) => (
+          <button
+            key={s.form}
+            role="menuitem"
+            onClick={() => pick(s.form, s.form.length)}
+            title={s.meaning}
+            className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-white/10 transition-colors tap"
+          >
+            <div className="font-mono text-[11px] text-zinc-200 truncate">{s.form}</div>
+            <div className="text-[11px] text-zinc-500">{s.meaning}</div>
+          </button>
+        ))}
+        <div className="text-[10px] uppercase tracking-wider text-zinc-500 px-2.5 pt-3 pb-1">
+          Fields · {kindLabel}
+        </div>
+        <div className="sticky top-0 -mt-1.5 pt-1.5 pb-1 bg-zinc-950 z-10">
+          <div className="relative">
+            <Search className="h-3.5 w-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-600" />
+            <input
+              className="input !py-1 text-xs pl-8"
+              placeholder="Find a field…"
+              autoFocus
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+          </div>
+        </div>
+        {!data && !isError && (
+          <div className="text-xs text-zinc-500 px-2.5 py-2">Loading the field catalogue…</div>
+        )}
+        {isError && (
+          <div className="text-xs text-amber-300/80 px-2.5 py-2">
+            The field catalogue could not be loaded. The box still takes any MusicBrainz field
+            you type — the syntax above is the whole of it.
+          </div>
+        )}
+        {data && !shown.length && (
+          <div className="text-xs text-zinc-500 px-2.5 py-2">No field of this search matches.</div>
+        )}
+        {shown.map((f) => (
+          <button
+            key={f.field}
+            role="menuitem"
+            onClick={() => insert(f)}
+            title={`${f.meaning}${f.quotes ? " — quoted, so a multi-word value stays one phrase" : " — never quoted"} — e.g. ${f.field}:${f.example}`}
+            className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-white/10 transition-colors tap"
+          >
+            <div className="flex items-baseline gap-2 text-[11px] min-w-0">
+              <span className="font-mono text-zinc-200 shrink-0">{f.field}:</span>
+              <span className="font-mono text-zinc-500 truncate">{f.example}</span>
+            </div>
+            <div className="text-[11px] text-zinc-500">{f.meaning}</div>
+          </button>
+        ))}
+      </Popover>
+    </div>
+  );
+}
+
+/** Field names a query uses that MusicBrainz's index does not have for this
+ *  entity kind.
+ *
+ *  MusicBrainz does NOT reject an unknown field — its index falls back to a
+ *  full-text search of the value (verified live: `bogusfield:"paranoid
+ *  android"` answers 20 releases, not an error), so a typo would otherwise
+ *  answer with unrelated rows and say nothing. The catalogue is the only thing
+ *  that can tell the user which field was wrong.
+ *
+ *  A field is a bare word followed by `:` OUTSIDE quotes (the value of
+ *  `artist:"a:b"` is a phrase, not a field); a leading `-`/`+` is the Lucene
+ *  exclusion/inclusion prefix, and `\x` is an escaped literal. */
+function unknownSearchFields(query: string, fields?: MBSearchField[]): string[] {
+  if (!fields?.length) return [];      // catalogue not loaded: claim nothing
+  const known = new Set(fields.map((f) => f.field));
+  const out: string[] = [];
+  let quoted = false;
+  for (let i = 0; i < query.length; i++) {
+    const ch = query[i];
+    if (ch === "\\") {
+      i++;                             // the escaped character is a literal
+      continue;
+    }
+    if (ch === '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (quoted || !/[A-Za-z_]/.test(ch)) continue;
+    let end = i;
+    while (end < query.length && /[A-Za-z_0-9]/.test(query[end])) end++;
+    const word = query.slice(i, end);
+    const start = i;
+    i = end - 1;
+    if (query[end] !== ":") continue;                       // not a field
+    if (start > 0 && !/[\s(+-]/.test(query[start - 1])) continue;  // a value
+    if (!known.has(word) && !out.includes(word)) out.push(word);
+  }
+  return out;
+}
+
+/* ------------------------------------------------------------------ */
 /* Search                                                              */
 /* ------------------------------------------------------------------ */
 
@@ -485,6 +654,7 @@ export function MBSearchPage() {
   const [text, setText] = useState(q);
   const nav = useNavigate();
   const { warm: prefetch, cool: unprefetch } = useMbPrefetch();
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => setText(q), [q]); // stay in sync with back/forward
 
@@ -496,6 +666,36 @@ export function MBSearchPage() {
     else next.delete("q");
     next.set("type", type);
     setParams(next, { replace: true });
+  };
+
+  /** Put a snippet into the box at the caret and leave the caret where its
+   *  value goes (`artist:""` → between the quotes), then search at once: a
+   *  click is an explicit action, so it skips the typing debounce exactly like
+   *  Enter does.
+   *
+   *  Clauses that are merely space-separated are ORed by MusicBrainz's index
+   *  (verified live: `artist:"Radiohead" tag:"art rock"` answers 10,624 release
+   *  groups against 26 with AND), so a snippet appended to an existing clause
+   *  gets an explicit ` AND ` instead of a space — otherwise a one-click insert
+   *  would silently WIDEN the search. Inside an open quote, after a bracket, or
+   *  on empty/whitespace-before text, nothing is added. */
+  const insertIntoQuery = (snippet: string, caretAt: number) => {
+    const el = inputRef.current;
+    const from = el?.selectionStart ?? text.length;
+    const to = el?.selectionEnd ?? from;
+    const before = text.slice(0, from);
+    const inQuote = ((before.match(/(^|[^\\])"/g) || []).length % 2) === 1;
+    const glue = before && !/\s$/.test(before) && !inQuote && !/[([{]$/.test(before) ? " AND " : "";
+    const next = text.slice(0, from) + glue + snippet + text.slice(to);
+    const caret = from + glue.length + caretAt;
+    setText(next);
+    pushParams(next);
+    // After the re-render that carries the new value: the caret cannot be put
+    // inside text the input does not hold yet.
+    requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.setSelectionRange(caret, caret);
+    });
   };
 
   const setTypeFilter = (key: "ptype" | "stype", value: string) => {
@@ -604,6 +804,16 @@ export function MBSearchPage() {
   // The Lucene query MusicBrainz actually answered — shown above the table so
   // a surprising result list can be read (and re-run on musicbrainz.org).
   const shownQuery = search.data?.pages[0]?.query ?? "";
+  // A field MusicBrainz's index does not have is NOT an error there — it
+  // searches the value as plain text — so the only honest warning is which
+  // field was not its own.
+  const catalogue = useMbSearchFields();
+  const unknownFields = unknownSearchFields(q, catalogue.data?.fields?.[type]);
+  const kindLabel = kindLabelOf(type);
+  const unknownNote = unknownFields.length
+    ? ` MusicBrainz has no ${unknownFields.map((f) => `${f}:`).join(", ")} field for`
+      + ` ${kindLabel} — its index searched the value as plain text.`
+    : "";
 
   // Flatten entity-specific shapes into sortable flat rows for the columns.
   const shaped = useMemo(
@@ -734,8 +944,10 @@ export function MBSearchPage() {
         <div className="relative">
           <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-500" />
           <input
+            ref={inputRef}
             className="input !pl-10"
-            placeholder="Search artists, releases, recordings… — or paste an MB ID / link"
+            placeholder={'Search artists, releases, recordings… — or paste an MB ID / link. Field queries work too: artist:"Radiohead"'}
+            title={'MusicBrainz answers the box as a query, not a phrase: field:"value" narrows by one field, AND/OR/NOT combine them (the “Fields & syntax” button lists every field).'}
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
@@ -751,6 +963,9 @@ export function MBSearchPage() {
             next.set("type", t);
             setParams(next, { replace: true });
           }} options={TYPES} />
+          {/* The box's own help: the entity kind being searched decides which
+              fields are offered, so a release tab can never suggest `tnum`. */}
+          <SearchFieldHelp kind={type} onInsert={insertIntoQuery} />
         </div>
 
         {/* Release types are two axes in MusicBrainz: a primary type (Album /
@@ -848,7 +1063,7 @@ export function MBSearchPage() {
         ) : !(q.trim().length >= 2 || hasConstraints) ? (
           <EmptyState
             title="Type at least two characters, or set a constraint"
-            hint="Results come straight from musicbrainz.org (rate-limited to 1 request/second — repeated searches are cached and pages prefetch when the pointer rests on a row)."
+            hint={'Results come straight from musicbrainz.org (rate-limited to 1 request/second — repeated searches are cached and pages prefetch when the pointer rests on a row). The box is a MusicBrainz query, so artist:"Radiohead" AND releasegroup:"OK Computer" narrows it by field — “Fields & syntax” lists every field the index answers.'}
           />
         ) : search.isLoading || (search.isPlaceholderData && !rows.length) ? (
           <PageLoading label="Asking MusicBrainz…" />
@@ -857,10 +1072,17 @@ export function MBSearchPage() {
         ) : rows.length === 0 ? (
           <EmptyState
             title="No results"
-            hint={shownQuery ? `MusicBrainz matched nothing for ${shownQuery}.` : "Nothing on MusicBrainz for this search."}
+            hint={(shownQuery ? `MusicBrainz matched nothing for ${shownQuery}.` : "Nothing on MusicBrainz for this search.") + unknownNote}
           />
         ) : (
           <>
+            {unknownFields.length > 0 && (
+              <div className="mb-3 rounded-lg border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-[11px] text-amber-200/90">
+                MusicBrainz's index has no {unknownFields.map((f) => `${f}:`).join(", ")} field
+                for {kindLabel} — it searched that value as plain text, so these rows may be
+                unrelated. “Fields &amp; syntax” above lists the fields it does have.
+              </div>
+            )}
             <div className="mb-3 flex items-center justify-between gap-3 text-[11px] text-zinc-500 flex-wrap">
               <span>
                 {rows.length} of {total} result{total === 1 ? "" : "s"} loaded
@@ -996,6 +1218,157 @@ export function MBSearchPage() {
 /* Artist                                                              */
 /* ------------------------------------------------------------------ */
 
+/** The artist's release groups grouped by TYPE, in the order MusicBrainz served
+ *  them ("Album + Compilation" — primary type first, then every secondary
+ *  type) — the page's sections and its action rows are one and the same
+ *  categorisation, so a row can never offer a type the sections do not show. */
+function byReleaseGroupType(groups: RGRow[]): { label: string; list: RGRow[] }[] {
+  const order: string[] = [];
+  const byLabel = new Map<string, RGRow[]>();
+  for (const rg of groups) {
+    const label = [rg.primary_type || "Other", ...(rg.secondary_types ?? [])].join(" + ");
+    const list = byLabel.get(label);
+    if (list) list.push(rg);
+    else {
+      byLabel.set(label, [rg]);
+      order.push(label);
+    }
+  }
+  return order.map((label) => ({ label, list: byLabel.get(label) as RGRow[] }));
+}
+
+/** One action row: the type it acts on (as MusicBrainz spells it), the type
+ *  names the server is asked for, and how many of the artist's release groups
+ *  it covers. `count` is null while the discography is still loading. */
+interface TypeActionRow { label: string; types: string[]; count: number | null }
+
+/** The artist's whole action block: one Add to library / Download all pair for
+ *  the discography and one for EVERY release-group type it actually has.
+ *
+ *  Both buttons send the same request — an artist add scoped by `types`, the
+ *  filter `mlo.release_choice.type_matches` applies server-side — and differ
+ *  only in `download`: "Add to library" records the framework albums and lets
+ *  the wish queue's own search pick them up, "Download all" records them and
+ *  starts that search now. Each row owns its own busy state (a running add
+ *  disables that row, never the page), and the server's own answer — what it
+ *  queued, what it skipped and why, or the switch that stopped it — lands
+ *  directly under the row that asked for it. The queue's own view is refetched
+ *  on success, so the wishes these buttons created show up there. */
+function ArtistTypeActions({ artistId, mode, groups, total, loading }: {
+  artistId: string; mode: ImportMode; groups: RGRow[]; total: number; loading: boolean;
+}) {
+  const { t } = useI18n();
+  const qc = useQueryClient();
+  const [busy, setBusy] = useState("");
+  const [said, setSaid] = useState<Record<string, { text: string; ok: boolean }>>({});
+  // The whole-artist row first, then one per type the artist actually has,
+  // most-populated first (the type a user is most likely after on top).
+  const rows: TypeActionRow[] = useMemo(() => {
+    const whole: TypeActionRow = {
+      label: t("mb.actions_whole"), types: [], count: loading ? null : total,
+    };
+    const perType = byReleaseGroupType(groups).map(({ label, list }) => ({
+      label, types: [label.toLowerCase()], count: list.length,
+    }));
+    return [whole, ...perType.sort((a, b) => b.count - a.count
+                                    || a.label.localeCompare(b.label))];
+  }, [groups, total, loading, t]);
+
+  const run = async (row: TypeActionRow, download: boolean) => {
+    setBusy(row.label);
+    try {
+      const res = await api.libraryAdd({
+        mbid: artistId, kind: "artist", mode, types: row.types, download,
+      });
+      // The server's own words: the counts it answered with, its note (which
+      // is the AUTO_OFF sentence when the switch is off), and WHY it skipped —
+      // one reason per kind of skip, so "87 skipped" of four different types
+      // does not read as one reason repeated.
+      const counts = [
+        typeof res.queued === "number" ? t("mb.actions_queued", { n: res.queued }) : "",
+        res.skipped?.length ? t("mb.actions_skipped", { n: res.skipped.length }) : "",
+        res.errors?.length ? t("mb.actions_failed", { n: res.errors.length }) : "",
+      ].filter(Boolean).join(" · ");
+      const why = [...new Set([...(res.errors ?? []), ...(res.skipped ?? [])]
+        .map((row) => row.reason)
+        .filter((r): r is string => !!r))]
+        .slice(0, 3)
+        .join(" · ");
+      setSaid((prev) => ({
+        ...prev,
+        [row.label]: { ok: res.ok,
+                       text: [counts, res.note, why].filter(Boolean).join(" — ")
+                             || t("mb.actions_nothing") },
+      }));
+      // Those albums exist now, so the queue (and the library that lists a
+      // pending album) is stale — that is the "refetch after a successful
+      // action" the rows are judged by.
+      qc.invalidateQueries({ queryKey: ["wishes"] });
+      qc.invalidateQueries({ queryKey: ["library"] });
+    } catch (e) {
+      const text = e instanceof Error ? e.message : String(e);
+      setSaid((prev) => ({ ...prev, [row.label]: { text, ok: false } }));
+      toast.error(text);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const spinner = <Loader2 className="h-3.5 w-3.5 animate-spin" />;
+  return (
+    <div className="rounded-lg border border-border mb-4">
+      <div className="px-3 py-2 border-b border-border text-[11px] uppercase tracking-widest text-zinc-500">
+        {t("mb.actions_title")}
+      </div>
+      <div className="p-1.5">
+        {rows.map((row) => {
+          const mine = busy === row.label;
+          const answer = said[row.label];
+          return (
+            <div key={row.label} className="rounded-md px-1.5 py-1 hover:bg-raise/60">
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-zinc-300 truncate flex-1 min-w-0">
+                  {row.label}
+                  {row.count !== null ? (
+                    <span className="text-zinc-500 text-xs">
+                      {" · "}{t("mb.actions_groups", { n: row.count })}
+                    </span>
+                  ) : null}
+                </span>
+                <button
+                  className="btn-ghost !py-1 text-xs shrink-0"
+                  disabled={mine}
+                  title={t("mb.actions_add_hint")}
+                  onClick={() => run(row, false)}
+                >
+                  {mine ? spinner : <Library className="h-3.5 w-3.5" />}
+                  {t("mb.add_to_library")}
+                </button>
+                <button
+                  className="btn-ghost !py-1 text-xs shrink-0"
+                  disabled={mine}
+                  title={t("mb.actions_download_hint")}
+                  onClick={() => run(row, true)}
+                >
+                  {mine ? spinner : <Zap className="h-3.5 w-3.5" />}
+                  {t("mb.download_all")}
+                </button>
+              </div>
+              {mine ? (
+                <div className="text-[11px] text-zinc-500 pb-1">{t("mb.actions_working")}</div>
+              ) : answer ? (
+                <div className={`text-[11px] pb-1 ${answer.ok ? "text-zinc-500" : "text-amber-500"}`}>
+                  {answer.text}
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function MBArtistPage() {
   const { id = "" } = useParams();
   const nav = useNavigate();
@@ -1018,6 +1391,16 @@ export function MBArtistPage() {
   const { isLoading, error } = discography;
   const [mode, setMode] = useState<ImportMode>("best");
   const { busy, run } = useAddToLibrary();
+  // The action rows are about the WHOLE discography, whichever type chip is
+  // selected below, so they read their own browse of it (the server caches a
+  // MusicBrainz browse for 30 minutes, so this is one request per artist page,
+  // not one per artist). A chip filters the LIST; it never re-scopes a row.
+  const allGroups = useQuery<MBArtistBrowse>({
+    queryKey: ["mbArtistTypes", id],
+    queryFn: () => api.mbArtist(id, 0, 300),
+    enabled: !!id,
+    staleTime: 300000,
+  });
   // No reset-on-id effect: the artist id is a PATH param, and App keys the
   // route subtree by `location.pathname`, so another artist is a fresh mount
   // with the filter already back at "All".
@@ -1025,21 +1408,14 @@ export function MBArtistPage() {
   const groups: RGRow[] = (discography.data?.pages ?? []).flatMap((p) => p.release_groups ?? []);
   const rgTotal: number = discography.data?.pages.at(-1)?.total ?? groups.length;
 
-  // Release TYPE grouping: primary type splits the sections (Album / EP /
-  // Single / …); secondary types (Compilation, Live, …) keep an edition in
-  // its own combined category instead of vanishing into "Album".
-  const catOf = (rg: RGRow) =>
-    [rg.primary_type || "Other", ...(rg.secondary_types ?? [])].join(" + ");
-
   // The filter is the SERVER's (see artist_release_groups): browse cannot
   // filter by type at all, and filtering the loaded window is what made this
   // page report an artist's albums as missing when they sat past the first
   // page. So every loaded group already belongs to the selected type, and
   // "All" is the unfiltered discography.
   const shown = groups;
-
-  const byCat: Record<string, RGRow[]> = {};
-  for (const rg of shown) (byCat[catOf(rg)] ??= []).push(rg);
+  const sections = byReleaseGroupType(shown);
+  const typeGroups = allGroups.data?.release_groups ?? [];
 
   if (!id) return null;
   if (isLoading) return <PageLoading label="Asking MusicBrainz…" />;
@@ -1063,7 +1439,11 @@ export function MBArtistPage() {
                 which the server prepares off-request (one MusicBrainz browse
                 per release group — `mode` rides along for the API's shared
                 shape, and still means one release per group here); with a type
-                selected it is exactly the groups on screen. */}
+                selected it is exactly the groups on screen. The type rows
+                below are the per-TYPE version of the same thing, and the two
+                differ in what they hand over: this button records the albums
+                and the wish queue's own search picks them up, while a row's
+                Download all starts that search now. */}
             <Segmented
               value={mode}
               onChange={setMode}
@@ -1075,8 +1455,8 @@ export function MBArtistPage() {
               disabled={busy || shown.length === 0}
               title={
                 typeFilter === "All"
-                  ? "Add one album per release group of this artist to your library and start searching for them"
-                  : `Add one album per release group shown (${shown.length}) to your library and start searching for them`
+                  ? "Add one album per release group of this artist to your library — the wish queue searches for them"
+                  : `Add one album per release group shown (${shown.length}) to your library — the wish queue searches for them`
               }
               onClick={() =>
                 typeFilter === "All"
@@ -1098,6 +1478,15 @@ export function MBArtistPage() {
         }
       />
       <div>
+        {typeGroups.length > 0 ? (
+          <ArtistTypeActions
+            artistId={String(a.id)}
+            mode={mode}
+            groups={typeGroups}
+            total={allGroups.data?.total ?? rgTotal}
+            loading={allGroups.isLoading}
+          />
+        ) : null}
         {groups.length === 0 ? (
           <EmptyState
             title={typeFilter === "All"
@@ -1135,10 +1524,10 @@ export function MBArtistPage() {
                 Showing {groups.length} of {rgTotal}{typeFilter === "All" ? "" : ` ${typeFilter}`} release groups
               </div>
             )}
-            {Object.entries(byCat).map(([cat, list]) => (
-              <div key={cat} className="mb-5">
+            {sections.map(({ label, list }) => (
+              <div key={label} className="mb-5">
                 <div className="text-[11px] uppercase tracking-widest text-zinc-500 mb-1.5">
-                  {cat} · {list.length}
+                  {label} · {list.length}
                 </div>
                 <div className="rounded-lg border border-border overflow-hidden table-scroll">
                   <div className="stagger">
@@ -1194,6 +1583,91 @@ export function MBArtistPage() {
 }
 
 /* ------------------------------------------------------------------ */
+/* Countries                                                           */
+/* ------------------------------------------------------------------ */
+
+/** Every country a release or release group was released in, with its date —
+ *  one chip each, in MusicBrainz's own area names.
+ *
+ *  A release group is released in as many countries as its editions cover, so
+ *  the list is the union the server built for it (each chip naming the edition
+ *  that carries that event, which is where a click goes). The user's own
+ *  `prefer_release_country` is MARKED, never filtered out: the point of the
+ *  list is seeing the whole story, not the policy's pick.
+ *
+ *  Nothing at all renders without events — a group with no country data has no
+ *  field, not an empty label. */
+function CountryChips({ events, units }: {
+  events?: MBCountryEvent[];
+  /** what the header counts — "release"/"edition" of the group being shown */
+  units?: string;
+}) {
+  const nav = useNavigate();
+  // A few dozen entries at most: the union is rebuilt per render rather than
+  // memoized against an array the caller rebuilds every time anyway.
+  const shown = mergeCountries(events ?? []);
+  if (!shown.length) return null;
+  const preferred = shown.filter((e) => e.preferred).length;
+  return (
+    <div>
+      <div className="text-[11px] uppercase tracking-widest text-zinc-500 mb-1.5">
+        Countries · {shown.length}
+        {preferred > 0 ? ` · ${preferred} preferred` : ""}
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {shown.map((e) => {
+          const where = [e.country, e.date].filter(Boolean).join(" · ");
+          const title = [
+            `${e.country}${e.code ? ` (${e.code})` : ""}`,
+            e.date ? `released ${e.date}` : "",
+            e.preferred ? "your preferred release country" : "",
+            e.release_id && units ? `carried by this ${units} — open it` : "",
+          ].filter(Boolean).join(" — ");
+          const chip = (
+            <span className={`chip border ${e.preferred
+              ? "bg-accent/15 border-accent/40 text-accent-soft"
+              : "bg-raise border-border text-zinc-300"}`}>
+              {e.preferred && <Check className="h-3 w-3 shrink-0" />}
+              {where}
+            </span>
+          );
+          return e.release_id ? (
+            <button
+              key={`${e.release_id}|${e.code}|${e.country}|${e.date}`}
+              title={title}
+              onClick={() => nav(`/mb/release/${e.release_id}`)}
+              className="tap"
+            >
+              {chip}
+            </button>
+          ) : (
+            <span key={`${e.code}|${e.country}|${e.date}`} title={title}>{chip}</span>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** The union of the country lists of the pages loaded so far: a release group
+ *  pages its editions, and each page's list covers its own window, so the
+ *  chips have to add up or they would disagree with the table underneath.
+ *  Same rule as the server's own union — one entry per (country, date), the
+ *  first edition that carries it wins — so the two cannot drift. */
+function mergeCountries(events: MBCountryEvent[]): MBCountryEvent[] {
+  const seen = new Set<string>();
+  const out: MBCountryEvent[] = [];
+  for (const e of events) {
+    const key = `${e.code || e.country}|${e.date}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(e);
+  }
+  return out.sort((a, b) =>
+    (a.date || "9999").localeCompare(b.date || "9999") || a.country.localeCompare(b.country));
+}
+
+/* ------------------------------------------------------------------ */
 /* Release group                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -1211,6 +1685,10 @@ export function MBReleaseGroupPage() {
   });
   const { isLoading, error } = editions;
   const releasesAll: RelRow[] = (editions.data?.pages ?? []).flatMap((p) => p.releases ?? []);
+  // Each page's country list covers its own window of editions, so the chips
+  // read the union of the pages loaded here — the same list the table below
+  // sums up to.
+  const countries = (editions.data?.pages ?? []).flatMap((p) => p.countries ?? []);
   const relTotal: number = editions.data?.pages.at(-1)?.total ?? releasesAll.length;
   const { sort, onSort, sorted } = useSort(releasesAll, "date");
   // Bulk auto-import is the whole point of this page, so its editions table
@@ -1316,6 +1794,7 @@ export function MBReleaseGroupPage() {
           onOverride={(mbid) => setEdition(mbid)}
         />
       </PageHeader>
+      <CountryChips events={countries} units="edition" />
       <div>
         <div className="text-[11px] uppercase tracking-widest text-zinc-500 mb-1.5">
           Releases{releasesAll.length < relTotal ? ` · ${releasesAll.length} of ${relTotal}` : ` · ${relTotal}`}
@@ -1458,7 +1937,6 @@ export function MBReleasePage() {
     typeLabel(r.primary_type, r.secondary_types) || r.release_type,
     r.date,
     [r.label, r.catalog_number].filter(Boolean).join(" · "),
-    r.country,
     r.barcode,
   ]
     .filter(Boolean)
@@ -1549,6 +2027,10 @@ export function MBReleasePage() {
           </>
         }
       />
+
+      {/* Every country this pressing was released in, with its date — the
+          header's single country code was only MusicBrainz's first event. */}
+      <CountryChips events={r.countries} />
 
       <div className="grid grid-cols-1 lg:grid-cols-[240px_1fr] gap-6">
         <div>

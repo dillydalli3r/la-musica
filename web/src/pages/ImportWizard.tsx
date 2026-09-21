@@ -5,6 +5,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   UploadCloud, ExternalLink, Check, ChevronLeft, ChevronRight, ChevronDown, Wand2,
   Plus, Trash2, Disc3, FolderOpen, X, Search, Loader2, Image as ImageIcon, AlertTriangle,
+  Languages,
 } from "lucide-react";
 import { api, answerSources, replyFor, IN_MOBILE_SHELL } from "../api";
 import type { AdvisoryFetchResult, MetadataFetchItem, MetadataItemKind } from "../api";
@@ -15,6 +16,7 @@ import LyricsViewer, { parseLrc } from "../components/LyricsViewer";
 import CoverSearchModal from "../components/CoverSearchModal";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import PageHeader from "../components/PageHeader";
+import { useI18n } from "../lib/i18n";
 import MetadataReviewModal from "../components/MetadataReviewModal";
 import type {
   AcoustidAlbumMatch, AcoustidMatch, CoverResult, ImportBulkJob, ImportPrompt,
@@ -310,6 +312,7 @@ function detectAlbums(imports: ImportFile[], fallbackName: string): AlbumGroup[]
 }
 
 export default function ImportWizard() {
+  const { t } = useI18n();
   const [params, setParams] = useSearchParams();
   const albumParam = params.get("album");
   const initialAlbum = albumParam ?? null;
@@ -437,6 +440,12 @@ export default function ImportWizard() {
   const [matchAllBusy, setMatchAllBusy] = useState(false);
   // Per-track results of the last lyrics auto-import (provider per track).
   const [lyrResults, setLyrResults] = useState<Record<string, LyricsAutoResult>>({});
+  // Outcome of the lyrics chain's other two halves — the transliteration pass
+  // (script 17) and the LRCLIB publish (script 18) — as the pass itself
+  // reported it. `failed` is what colours the line, not what decided it.
+  const [lyrPass, setLyrPass] = useState<
+    { kind: "xlit" | "publish"; text: string; failed: boolean } | null
+  >(null);
 
   // Exactly which scripts the import chain runs (Settings → Import).
   const { data: scriptChain } = useQuery({
@@ -1948,6 +1957,82 @@ export default function ImportWizard() {
     }
   };
 
+  /** The lyrics chain's other two halves, by hand, over this album's own
+   *  tracks. Both call the entry point the chain calls, so nothing here can
+   *  write something an import would not:
+   *
+   *  * `xlit` — script 17's runner: `TRANSLITERATION-<lang>` /
+   *    `TRANSLATION-<lang>` tags for the lyrics that need them, plus the
+   *    `.romaji.lrc` / `.<lang>.lrc` sidecars the LRC formats write (and the
+   *    same stale-transform cleanup a re-run does);
+   *  * `publish` — script 18's per-track core: submit what LRCLIB does not
+   *    have yet. It writes NOTHING locally, so the counts and LRCLIB's own
+   *    answer are all there is to report.
+   *
+   *  A pass that changed files is re-read so the step's "Lyrics" marks come
+   *  from what it wrote, and a pass that wrote nothing says why (both
+   *  switches off, no AI configured) instead of looking like it did. */
+  const runLyricsPass = async (kind: "xlit" | "publish") => {
+    // Neither pass has anything to do with an instrumental — the runner skips
+    // them too, so they are not even sent.
+    const targets = stepTracks
+      .filter((t) => (instrumental[t.path] ?? t.tags.INSTRUMENTAL) !== "1")
+      .map((t) => t.path);
+    if (!targets.length) {
+      toast("Nothing to work on — every track is marked INSTRUMENTAL");
+      return;
+    }
+    setBusy(true);
+    setLyrPass(null);
+    setAct({
+      label:
+        kind === "xlit"
+          ? `Transliterating / translating lyrics for ${targets.length} track(s)…`
+          : `Publishing lyrics to LRCLIB for ${targets.length} track(s)…`,
+    });
+    try {
+      if (kind === "xlit") {
+        const res = await api.lyricsXlit(targets, false, staged);
+        const detail = [
+          `${res.ok} file(s) updated`,
+          res.skipped ? `${res.skipped} unchanged` : "",
+          res.errors.length ? `${res.errors.length} failed — ${res.errors[0]}` : "",
+          res.note,
+        ].filter(Boolean).join(" · ");
+        setLyrPass({ kind, text: detail, failed: res.errors.length > 0 });
+        if (res.errors.length) toast.error(`Transliteration — ${res.errors[0]}`);
+        else toast(detail);
+        // The tags changed on disk: re-read them so the step shows what the
+        // pass actually wrote (an unchanged run costs nothing).
+        await rescanTracks();
+      } else {
+        const res = await api.lyricsPublishBatch(targets, false, staged);
+        const reasons = new Map<string, number>();
+        for (const r of res.results) {
+          if (r.status === "skipped") {
+            const why = r.reason || "skipped";
+            reasons.set(why, (reasons.get(why) ?? 0) + 1);
+          }
+        }
+        const fails = res.results.filter((r) => r.status === "failed");
+        const detail = [
+          `${res.ok} submitted`,
+          ...[...reasons].map(([why, n]) => `${n} × ${why}`),
+          fails.length ? `${fails.length} failed — ${fails[0].reason || fails[0].message || "no message"}` : "",
+        ].filter(Boolean).join(" · ");
+        setLyrPass({ kind, text: detail, failed: fails.length > 0 });
+        if (fails.length) toast.error(`LRCLIB publish — ${fails[0].reason || fails[0].message || "failed"}`);
+        else toast(detail);
+      }
+    } catch (e) {
+      setLyrPass({ kind, text: String(e), failed: true });
+      toast.error(String(e));
+    } finally {
+      setAct(null);
+      setBusy(false);
+    }
+  };
+
   const saveLyricsStep = async () => {
     setBusy(true);
     setAct({ label: `Saving lyrics & INSTRUMENTAL for ${stepTracks.length} track(s)…` });
@@ -2276,6 +2361,7 @@ const finish = async () => {
     setCoverNotice(null);
     setLyricsNotice(null);
     setLyrResults({});
+    setLyrPass(null);
     setCoverSel(new Set());
     setCoverUrl("");
     setTrackCoverUrl("");
@@ -3139,15 +3225,34 @@ const finish = async () => {
                 {/* The import staged covers for this album but the pick is the
                     user's — same one-click affordance as the album page. */}
                 {!coverInfo?.file && !!stagedCoverRows?.length && (
-                  <button
-                    className="btn-primary !py-1.5 text-xs tap"
-                    onClick={() =>
-                      setCoverSearch({ results: stagedCoverRows, provider: stagedCovers.data?.provider ?? null })
-                    }
-                    title="Covers fetched during import, waiting for you to pick one"
-                  >
-                    <ImageIcon className="h-3.5 w-3.5" /> Choose a cover ({stagedCoverRows.length})
-                  </button>
+                  <>
+                    <button
+                      className="btn-primary !py-1.5 text-xs tap"
+                      onClick={() =>
+                        setCoverSearch({ results: stagedCoverRows, provider: stagedCovers.data?.provider ?? null })
+                      }
+                      title="Covers fetched during import, ranked by the cover policy, waiting for you to pick one"
+                    >
+                      <ImageIcon className="h-3.5 w-3.5" /> Choose a cover ({stagedCoverRows.length})
+                    </button>
+                    {/* the policy's own pick, said before the picker opens:
+                        what it is, and the reason that put it first */}
+                    {stagedCovers.data?.chosen && (
+                      <div className="text-[11px] text-zinc-500">
+                        {t("cover.best_pick")}:{" "}
+                        <span className="text-zinc-300">
+                          {stagedCovers.data.chosen.source}
+                          {stagedCovers.data.chosen.width && stagedCovers.data.chosen.height
+                            ? ` · ${stagedCovers.data.chosen.width}×${stagedCovers.data.chosen.height}px`
+                            : ""}
+                        </span>
+                        <span className="block text-zinc-600">
+                          {t("cover.pick_reason")}:{" "}
+                          {(stagedCovers.data.chosen.reasons ?? []).slice(-1)[0] ?? ""}
+                        </span>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
 
@@ -3365,9 +3470,12 @@ const finish = async () => {
                 artist={release?.artists.map((a) => a.name).join(", ") || trackArtist(stepTracks[0]?.path ?? "")}
                 album={trackAlbum || currentAlbumName}
                 releaseGroupMbid={release?.release_group_id ?? undefined}
+                releaseMbid={releaseId || undefined}
                 tracks={coverSel.size ? selectedCoverFiles() : undefined}
                 initialResults={coverSearch.results}
                 initialProvider={coverSearch.provider}
+                initialChosen={stagedCovers.data?.chosen ?? null}
+                initialNotes={stagedCovers.data?.notes ?? []}
                 onClose={() => setCoverSearch(null)}
                 onApplied={() => {
                   refreshCovers();
@@ -3645,14 +3753,52 @@ const finish = async () => {
             )}
           </MinBlock>
           <MinBlock min={minMode} here={missingHere} mine="">
-            <div className="flex flex-wrap items-center gap-2">
-              <button className="btn-primary text-xs tap" onClick={() => autoImportLyrics()} disabled={busy}>
-                <CloudDownloadIcon /> Auto-import lyrics
-              </button>
-              <span className="text-xs text-zinc-500">
-                Tries every provider in the saved order (Settings → Lyrics) and writes them straight to the
-                files. Review below — Space stamps time while previewing; INSTRUMENTAL=1 skips lyrics.
-              </span>
+            {/* The lyrics family's option group: one option per half of the
+                chain an import runs (script 13 → 17 → 18), so nothing the
+                chain decides is unreachable by hand. Each button calls the
+                half's own entry point — the fetch is script 13's engine, the
+                transliteration pass is script 17's runner, the publish is
+                script 18's per-track core — and reports what that pass did. */}
+            <div className="panel px-3 py-2 space-y-1.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <button className="btn-primary text-xs tap" onClick={() => autoImportLyrics()} disabled={busy}>
+                  <CloudDownloadIcon /> Auto-import lyrics
+                </button>
+                <span className="text-xs text-zinc-500">
+                  Tries every provider in the saved order (Settings → Lyrics) and writes them straight to the
+                  files. Review below — Space stamps time while previewing; INSTRUMENTAL=1 skips lyrics.
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  className="btn-ghost !py-1 text-xs tap"
+                  onClick={() => runLyricsPass("xlit")}
+                  disabled={busy || !stepTracks.length}
+                  title="Script 17 on this album's tracks: write the TRANSLITERATION-<lang> / TRANSLATION-<lang> tags the lyrics need (and the .romaji.lrc / .<lang>.lrc sidecars for the LRC formats). Needs AI configured in Settings → AI."
+                >
+                  <Languages className="h-3.5 w-3.5" /> Transliterate / translate lyrics
+                </button>
+                <button
+                  className="btn-ghost !py-1 text-xs tap"
+                  onClick={() => runLyricsPass("publish")}
+                  disabled={busy || !stepTracks.length}
+                  title="Script 18 on this album's tracks: submit the lyrics LRCLIB does not have yet. Nothing is written to the files — this is the one outward lyrics step."
+                >
+                  <UploadCloud className="h-3.5 w-3.5" /> Publish lyrics to LRCLIB
+                </button>
+                <span className="text-[11px] text-zinc-500">
+                  The chain's other two lyrics steps, by hand: what LRCLIB lacks in the database is what
+                  publishing gives it, and both run over the same {stepTracks.length} track(s).
+                </span>
+              </div>
+              {lyrPass && (
+                <div
+                  className={`text-[11px] ${lyrPass.failed ? "text-red-300" : "text-zinc-400"}`}
+                  role={lyrPass.failed ? "alert" : undefined}
+                >
+                  {lyrPass.kind === "xlit" ? "Transliteration" : "LRCLIB publish"} — {lyrPass.text}
+                </div>
+              )}
             </div>
             {Object.keys(lyrResults).length > 0 && (
               <div className="panel px-3 py-2 text-xs space-y-0.5">

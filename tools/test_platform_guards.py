@@ -65,7 +65,7 @@ RUNNER_KEYS = dict(fetchdeps.LINUX_RUNNERS)
 # Tools upstream publishes a native Linux build for: the *fetchable* half of a
 # Linux install, and the reason a container is no longer stuck without them.
 LINUX_NATIVE = tuple(fetchdeps.LINUX_BINARIES)
-PLATFORM_FREE = ("librosa", "beets", "simpledrmeter", "yt-dlp", "logchecker")
+PLATFORM_FREE = ("librosa", "beets", "yt-dlp", "logchecker")
 
 
 class simulated_platform:

@@ -41,11 +41,6 @@ exactly that).
   authenticity auditing. **GPL-3.0**.
 - **rsgain** — <https://github.com/complexlogic/rsgain> — ReplayGain 2.0
   tagging. **BSD-2-Clause**.
-- **simple-dr-meter** — <https://github.com/magicgoose/simple-dr-meter> —
-  dynamic range analysis. **GPL-3.0** (the bundled `LICENSE`). la musica runs
-  it unmodified in intent — only three crash fixes for silent/very short tracks
-  (`mlo/fetchdeps.py:_patch_simple_dr_meter`), which stay under the same
-  licence.
 - **PHP** — <https://www.php.net> — runs the Logchecker phar. **PHP License
   v3.01**.
 - **libjxl (JPEG XL)** — <https://github.com/libjxl/libjxl> — JPEG XL cover

@@ -40,7 +40,6 @@
         { "name": "PHP", "license": "PHP-3.01", "url": "https://www.php.net", "use": "runs the Logchecker phar" },
         { "name": "AudioAuditor", "license": "GPL-3.0", "url": "https://github.com/Angel2mp3/AudioAuditor", "use": "audio authenticity auditing" },
         { "name": "rsgain", "license": "BSD-2-Clause", "url": "https://github.com/complexlogic/rsgain", "use": "ReplayGain 2.0 tagging" },
-        { "name": "simple-dr-meter", "license": "GPL-3.0", "url": "https://github.com/magicgoose/simple-dr-meter", "use": "dynamic range analysis" },
         { "name": "libjxl", "license": "BSD-3-Clause", "url": "https://github.com/libjxl/libjxl", "use": "JPEG XL cover art" },
         { "name": "libjpeg-turbo", "license": "BSD-3 / IJG / zlib", "url": "https://github.com/libjpeg-turbo/libjpeg-turbo", "use": "JPEG processing" },
         { "name": "oxipng", "license": "MIT", "url": "https://github.com/oxipng/oxipng", "use": "lossless PNG optimization" },

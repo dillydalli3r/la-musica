@@ -113,6 +113,13 @@ export default function NotificationBell() {
         open={open}
         onClose={() => setOpen(false)}
         align="right"
+        // The tray is the widest panel in the app and lives in the top bar,
+        // whose column is `overflow-hidden` and `z-10` while the sidebar is
+        // `z-20` — anchored in place it was clipped at the column's edge and
+        // painted under the sidebar (the "unviewable tray": the text started
+        // mid-word). Portaled to <body> and positioned from this button's own
+        // rect it stays above everything and inside the viewport.
+        fixed
         panelClass="w-80 max-h-[70vh] overflow-y-auto p-1.5"
       >
         <div className="flex items-center justify-between gap-2 px-2.5 pt-1 pb-0.5">

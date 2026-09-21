@@ -9,6 +9,9 @@ import { fmtDuration } from "../lib/fmt";
 import { fmtPair, fmtTech, isVideoFile } from "../lib/fmt";
 import { nextSpeed, fmtSpeed } from "../lib/playback";
 import { offlineMediaUrl } from "../lib/mediaCache";
+import { heldBy, useJobLocks, useLockLabel, useLockWhy } from "../lib/locks";
+import { useI18n } from "../lib/i18n";
+import LockedChip from "./LockedChip";
 import { AdvisoryMark } from "./Badges";
 import StarRating from "./StarRating";
 import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
@@ -96,8 +99,20 @@ function ScrollingText({ text, className }: {
   );
 }
 
+/** How close to the start of its own track a `play` event must be to count as
+ *  the track STARTING rather than the user resuming or seeking: anything past
+ *  the first second of the element's audio is a resume, and counting it would
+ *  turn every pause/play into another play. See PlayerBar's `countPlay`. */
+const PLAY_START_SECONDS = 1;
+
+
 export default function PlayerBar() {
   const queue = useStore((s) => s.queue);
+  // The app's ONE lock poll (lib/locks): the player bar is always mounted, so
+  // this is what keeps "which files a job holds right now" fresh everywhere —
+  // the queue marks, the play guard and MAINTAIN → In progress all read it,
+  // and the shared query key means they still cost one request per tick.
+  useJobLocks();
   const index = useStore((s) => s.index);
   const setIndex = useStore((s) => s.setIndex);
   const setQueue = useStore((s) => s.setQueue);
@@ -108,6 +123,7 @@ export default function PlayerBar() {
   const queueId = useStore((s) => s.queueId);
   const vol = useStore((s) => s.vol);
   const setVol = useStore((s) => s.setVol);
+  const { t } = useI18n();
   // Gapless playback: two audio elements. The idle one preloads the next
   // sequential track while the current one plays; at `ended` the elements
   // swap roles, so the next track starts without a load gap.
@@ -137,6 +153,7 @@ export default function PlayerBar() {
     return prim;
   };
   const swapped = useRef(false); // set when the swap already advanced the queue
+
   const preloaded = useRef(-1); // queue index preloaded into the idle element
   const preloadedPath = useRef<string | null>(null); // what that preload holds
   const loadedPath = useRef<string | null>(null); // track the active element plays
@@ -175,6 +192,34 @@ export default function PlayerBar() {
   const isVideo = !!current && (isVideoFile(current.file) || isVideoFile(current.path));
   const videoRef = useRef<HTMLVideoElement>(null);
   const media = () => (isVideo ? videoRef.current : audio()) as HTMLMediaElement | null;
+
+  /** Report ONE play to the server (`POST /api/plays`) — the app's single play
+   *  seam, for both the audio pair and the music-video popout.
+   *
+   *  `<audio>`/`<video>` fire `play` for a RESUME and for a SEEK as well as for
+   *  a real start, so the element's own position is what tells them apart: a
+   *  start is `currentTime` at (or within the first second of) the track that
+   *  element holds, while resuming or seeking mid-track is nowhere near it. The
+   *  last count is remembered per element+path and cleared when a new track is
+   *  loaded or a repeat restarts one — so a repeat play counts, a pause/resume
+   *  and a seek do not, and the gapless handover (which starts the next track
+   *  on the idle element, with no load step of its own) counts once like any
+   *  other start. */
+  const counted = useRef<{ el: HTMLMediaElement | null; path: string | null }>({
+    el: null, path: null,
+  });
+  const countPlay = (el: HTMLMediaElement) => {
+    const path = el === videoRef.current
+      ? current?.path ?? null
+      : (el === aRef.current ? pathOnA.current : pathOnB.current);
+    if (!path || el.currentTime > PLAY_START_SECONDS) return;
+    if (counted.current.el === el && counted.current.path === path) return;
+    counted.current = { el, path };
+    // Fire and forget: a play is a statistic, and playback never waits on one.
+    // A server that is away — or older than this build, with no route at all —
+    // costs the play and nothing else.
+    void api.recordPlay(path).catch(() => {});
+  };
   // Music-video presentation, owned here because this is where the single
   // <video> decoder lives: how the fullscreen picture fills the screen, and
   // which caption track is showing (null = as tagged). The fullscreen overlay
@@ -242,6 +287,23 @@ export default function PlayerBar() {
   });
   const displayTitle =
     current?.title || currentTags?.tags?.TITLE || (current ? current.file.replace(/\.[^.]+$/, "") : "");
+  // A job claiming the file that is PLAYING never stops it: the stream already
+  // has its handle, and cutting the listener off mid-track would be a worse bug
+  // than the lock. The state is said out loud instead — once per track — so
+  // that seeking or restarting it later is not a surprise. (The track was
+  // unlocked when it started: a locked one cannot be started at all.)
+  const currentLockWhy = useLockWhy(current?.path);
+  const currentLockLabel = useLockLabel(current?.path);
+  const noticedLock = useRef<string | null>(null);
+  useEffect(() => {
+    if (!current || !playing || !currentLockWhy) {
+      noticedLock.current = null;
+      return;
+    }
+    if (noticedLock.current === current.path) return;
+    noticedLock.current = current.path;
+    toast(t("player.locked_playing", { name: displayTitle, label: currentLockLabel }));
+  }, [current, playing, currentLockWhy, currentLockLabel, displayTitle, t]);
   // The media element's duration cannot be trusted for videos: live
   // transcodes report Infinity or a FINITE-but-tiny length that creeps up
   // as MP4 fragments stream in. The ffprobe container length (tags tech /
@@ -389,7 +451,22 @@ export default function PlayerBar() {
     // A pure reorder (queueMove / remove around the playing row) resolves
     // to the SAME track — reloading it would restart the song from zero.
     if (track.path === loadedPath.current) return;
+    // A job is rewriting this file right now, so there is no stream to load:
+    // the server answers 409 with the sentence below, and handing that to an
+    // <audio> element would only be silence. `loadedPath` is deliberately NOT
+    // advanced — the moment the job finishes, the same track loads normally.
+    const held = heldBy(track.path);
+    if (held) {
+      media()?.pause();
+      setPlaying(null);
+      toast(held.held.why);
+      return;
+    }
     loadedPath.current = track.path;
+    // Nothing has been counted for this track yet — the play is recorded by
+    // the element's own `play` event (countPlay), so loading must not count
+    // anything, only forget the previous track's count.
+    counted.current = { el: null, path: null };
     const video = isVideoFile(track.file) || isVideoFile(track.path);
     setTime(0);
     setDuration(0);
@@ -503,6 +580,11 @@ export default function PlayerBar() {
     const idle = activeIsA.current ? bRef.current : aRef.current;
     if (!idle) return;
     const nextPath = queue[next].path;
+    // A locked next track is never preloaded: the gapless handover would start
+    // it and the element would sit on a 409 as silence. Leaving the idle
+    // element empty sends the end of THIS track down the normal load path,
+    // which says why instead.
+    if (heldBy(nextPath)) return;
     preloaded.current = next;
     preloadedPath.current = nextPath;
     // Same cache-first resolution as the audible load, or a downloaded next
@@ -813,6 +895,9 @@ export default function PlayerBar() {
     if (loop) {
       const m = media();
       if (m) {
+        // A repeat is a NEW play: forget the count so the element's own `play`
+        // event (currentTime back at 0) records this one too.
+        counted.current = { el: null, path: null };
         m.currentTime = 0;
         m.play().catch(() => {});
       }
@@ -901,9 +986,9 @@ export default function PlayerBar() {
             can read them; attachAnalyser resumes the context it opens, so the
             very first play is not read from a suspended (all-zero) graph */}
         <audio ref={aRef} hidden crossOrigin="anonymous" onTimeUpdate={onTime} onLoadedMetadata={onMeta} onEnded={handleEnded}
-          onPlay={(e) => { attachAnalyser(e.currentTarget); applyElGain(e.currentTarget); }} />
+          onPlay={(e) => { attachAnalyser(e.currentTarget); applyElGain(e.currentTarget); countPlay(e.currentTarget); }} />
         <audio ref={bRef} hidden crossOrigin="anonymous" onTimeUpdate={onTime} onLoadedMetadata={onMeta} onEnded={handleEnded}
-          onPlay={(e) => { attachAnalyser(e.currentTarget); applyElGain(e.currentTarget); }} />
+          onPlay={(e) => { attachAnalyser(e.currentTarget); applyElGain(e.currentTarget); countPlay(e.currentTarget); }} />
 
         {/* full layout from tablet width up: cover+title / centered seek /
             actions+volume, balanced 1fr-auto-1fr so the seek bar sits dead
@@ -1175,13 +1260,25 @@ export default function PlayerBar() {
                             <button
                               className="min-w-0 flex-1 text-left"
                               onClick={() => {
+                                // A locked row says why instead of jumping to a
+                                // track the server would refuse to stream.
+                                const held = heldBy(t.path);
+                                if (held) {
+                                  toast(held.held.why);
+                                  return;
+                                }
                                 setIndex(i);
                                 setPlaying(t.path);
                                 setQueueOpen(false);
                               }}
                               title="Play this track now"
                             >
-                              <div className="text-xs text-zinc-300 truncate">{t.title || t.file.replace(/\.[^.]+$/, "")}</div>
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <span className="text-xs text-zinc-300 truncate">
+                                  {t.title || t.file.replace(/\.[^.]+$/, "")}
+                                </span>
+                                <LockedChip path={t.path} />
+                              </div>
                               <div className="text-[10px] text-zinc-600 truncate">
                                 {[t.artist, t.album].filter(Boolean).join(" · ")}
                               </div>
@@ -1453,6 +1550,7 @@ export default function PlayerBar() {
                 onVideoMeta(e);
               }}
               onEnded={handleEnded}
+              onPlay={(e) => countPlay(e.currentTarget)}
             />
           </div>,
           document.body
@@ -1544,6 +1642,7 @@ function VideoPopout({
   onTime,
   onMeta,
   onEnded,
+  onPlay,
 }: {
   path: string;
   videoRef: React.RefObject<HTMLVideoElement | null>;
@@ -1560,6 +1659,8 @@ function VideoPopout({
   onTime: (e: SyntheticEvent<HTMLVideoElement>) => void;
   onMeta: (e: SyntheticEvent<HTMLVideoElement>) => void;
   onEnded: (e?: SyntheticEvent<HTMLVideoElement>) => void;
+  /** One playback start, for the play history — see PlayerBar's `countPlay`. */
+  onPlay: (e: SyntheticEvent<HTMLMediaElement>) => void;
 }) {
   const tracks = useSubtitleTracks(path);
   const trackKey = tracks.map((t) => t.key).join("|");
@@ -1631,6 +1732,7 @@ function VideoPopout({
       onTimeUpdate={onTime}
       onLoadedMetadata={onMeta}
       onEnded={onEnded}
+      onPlay={onPlay}
       onError={() => {
         // Direct bytes failed (MPEG-2/VC-1/etc.) — retry via live transcode.
         if (!live) setErrorFallback(true);

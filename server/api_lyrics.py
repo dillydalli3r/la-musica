@@ -18,7 +18,10 @@ from server import tagcache
 router = APIRouter(tags=["lyrics"])
 
 
-class LyricsAutoRequest(BaseModel):
+class LyricsPathsRequest(BaseModel):
+    """A batch of tracks for the lyrics routes: the fetch, the
+    transliteration/translation pass and the LRCLIB publish all take the same
+    shape, so one button and one script cannot mean different things."""
     paths: list[str] = []
     force: bool = False
     staged: bool = False  # the import wizard's not-yet-imported album
@@ -29,6 +32,36 @@ class LyricsAutoRequest(BaseModel):
 # thread. Cap the batch: a whole-album or whole-library fetch belongs to
 # script 13 (`POST /api/run`), which reports progress and can be cancelled.
 MAX_PATHS = 100
+
+
+def _batch_paths(paths, cfg, staged):
+    """Split a batch into the tracks it may touch and the ones it may not.
+
+    ONE guard for all three lyrics routes, because they write to the same
+    files: inside the music folder, or the wizard's explicit staged allowance
+    for an album the library does not list yet. A path that fails either is
+    reported as that path's own failure, so one bad entry never costs the rest
+    of the batch its work.
+
+    Returns ``(resolved, rejected)`` — `resolved` as ``(as_sent, full)`` pairs
+    in request order (a reply quotes the path the caller sent, so a client can
+    key its own rows by it), `rejected` as ``(path, error)`` pairs carrying the
+    words the fetch has always used.
+    """
+    from server.main import _allow_staged, _in_music_folder, _music_folder
+
+    folder = _music_folder(cfg)
+    resolved, rejected = [], []
+    for path in paths:
+        full = os.path.normpath(path)
+        if not folder or not (_in_music_folder(full, folder)
+                              or _allow_staged(full, staged)):
+            rejected.append((path, "path outside music folder"))
+        elif not os.path.isfile(full):
+            rejected.append((path, "file not found"))
+        else:
+            resolved.append((path, full))
+    return resolved, rejected
 
 
 @router.get("/api/lyrics/providers")
@@ -62,7 +95,7 @@ def lyrics_provider_probe(source: str = Query(...)):
 
 
 @router.post("/api/lyrics/auto")
-def lyrics_auto(req: LyricsAutoRequest):
+def lyrics_auto(req: LyricsPathsRequest):
     """Auto-import lyrics for one or more tracks through the provider chain.
 
     Falls back provider by provider (LRCLIB → NetEase → Kugou → QQ Music →
@@ -70,25 +103,21 @@ def lyrics_auto(req: LyricsAutoRequest):
     per `lyrics_format` exactly like script 13. A track
     that already has lyrics is left alone unless *force* is set, and an
     INSTRUMENTAL track is never touched.
+
+    The manual counterpart of the chain's own script 13 — `fetch_one` is what
+    both call — so the tags and the sidecar a click writes are the ones an
+    import writes.
     """
-    from server.main import _allow_staged, _in_music_folder, _music_folder
     cfg = load_config()
-    folder = _music_folder(cfg)
     if len(req.paths) > MAX_PATHS:
         raise HTTPException(
             413, f"too many paths in one request ({len(req.paths)} > {MAX_PATHS}) — "
                  f"run script 13 (Fetch lyrics) for a whole album or library")
     results = []
-    for path in req.paths:
-        full = os.path.normpath(path)
-        if not folder or not (_in_music_folder(full, folder)
-                              or _allow_staged(full, req.staged)):
-            results.append({"path": path, "status": "failed",
-                            "error": "path outside music folder"})
-            continue
-        if not os.path.isfile(full):
-            results.append({"path": path, "status": "failed", "error": "file not found"})
-            continue
+    resolved, rejected = _batch_paths(req.paths, cfg, req.staged)
+    for path, error in rejected:
+        results.append({"path": path, "status": "failed", "error": error})
+    for path, full in resolved:
         res = fetch_one(full, cfg, force=bool(req.force))
         res["path"] = path
         results.append(res)
@@ -97,6 +126,98 @@ def lyrics_auto(req: LyricsAutoRequest):
     return {
         "results": results,
         "order": provider_order(cfg),
+        "ok": sum(1 for r in results if r.get("status") == "ok"),
+        "skipped": sum(1 for r in results if r.get("status") == "skipped"),
+        "failed": sum(1 for r in results if r.get("status") == "failed"),
+    }
+
+
+@router.post("/api/lyrics/xlit")
+def lyrics_xlit(req: LyricsPathsRequest):
+    """Transliterate and translate the lyrics these tracks already carry.
+
+    Script 17's own runner (`run_lyrics_xlit`), aimed at a selection: the same
+    entry point the post-import chain calls, so a click here and an import
+    there write the same `TRANSLITERATION-<lang>` / `TRANSLATION-<lang>` tags
+    and the same `.romaji.lrc` / `.<lang>.lrc` sidecars — the tags always, the
+    sidecars only for the LRC/BOTH lyrics formats (`lyrics_format`,
+    `lyrics_xlit_sidecars`), which is the rule the runner and the grader share.
+
+    The runner's own numbers come back unchanged (files modified, its error
+    lines), plus `note` when it had nothing to work with — both switches off in
+    Settings, or no AI configured — so a button that wrote nothing says why
+    instead of looking like it did.
+    """
+    from mlo.lyrics_xlit import ai_ready, run_lyrics_xlit
+
+    cfg = load_config()
+    if len(req.paths) > MAX_PATHS:
+        raise HTTPException(
+            413, f"too many paths in one request ({len(req.paths)} > {MAX_PATHS}) — "
+                 f"run script 17 (Lyrics transliterate) for a whole album or library")
+    resolved, rejected = _batch_paths(req.paths, cfg, req.staged)
+    errors = [f"{os.path.basename(p)}: {e}" for p, e in rejected]
+    note = ""
+    if not (cfg.get("lyrics_xlit_enabled", True) or cfg.get("lyrics_translate_enabled", True)):
+        note = ("Transliteration and translation are both off in "
+                "Settings → Lyrics")
+    elif not ai_ready(cfg):
+        note = ("AI is not configured — set the base URL and model in "
+                "Settings → AI (script 17 has the same requirement)")
+    stats = None
+    if resolved:
+        run_cfg = dict(cfg)
+        run_cfg["targets"] = [full for _, full in resolved]
+        if req.force:
+            run_cfg["force_xlit"] = True
+        stats = run_lyrics_xlit(run_cfg)
+        errors += [str(e) for e in (stats.get("errors") or [])]
+        if stats.get("modified_count"):
+            tagcache.invalidate_all()
+    return {
+        "stats": stats,
+        "paths": [path for path, _ in resolved],
+        "ok": int((stats or {}).get("modified_count") or 0),
+        "skipped": int((stats or {}).get("unchanged_count") or 0),
+        "failed": len(errors),
+        "errors": errors,
+        "note": note,
+    }
+
+
+@router.post("/api/lyrics/publish-batch")
+def lyrics_publish_batch(req: LyricsPathsRequest):
+    """Give LRCLIB the lyrics these tracks carry and the database lacks.
+
+    Script 18's own per-track core (`publish_one`) over a selection — the
+    album-level counterpart of the editor's per-track "Publish to LRCLIB",
+    which submits through the same LRCLIB client with the same
+    exact-then-search existence check. Nothing is written locally: this is the
+    lyrics chain's only outward step, so publishing owns no tag and no file.
+
+    `lrclib_auto_publish` gates the AUTOMATIC submission (script 18 and every
+    chain that includes it); a person asking here is not the automation, so
+    this route runs whatever the switch says. Each track reports LRCLIB's own
+    answer ("LRCLIB already has this track" is the database refusing a
+    duplicate, not a failure of this app) and `force` re-submits anyway.
+    """
+    from mlo.lyrics_publish import publish_one
+
+    cfg = load_config()
+    if len(req.paths) > MAX_PATHS:
+        raise HTTPException(
+            413, f"too many paths in one request ({len(req.paths)} > {MAX_PATHS}) — "
+                 f"run script 18 (Publish lyrics) for a whole album or library")
+    resolved, rejected = _batch_paths(req.paths, cfg, req.staged)
+    results = []
+    for path, error in rejected:
+        results.append({"path": path, "status": "failed", "reason": error,
+                        "message": "", "synced": False})
+    for path, full in resolved:
+        res = publish_one(full, cfg, force=bool(req.force))
+        results.append({**res, "path": path})
+    return {
+        "results": results,
         "ok": sum(1 for r in results if r.get("status") == "ok"),
         "skipped": sum(1 for r in results if r.get("status") == "skipped"),
         "failed": sum(1 for r in results if r.get("status") == "failed"),

@@ -145,9 +145,55 @@ export interface Album {
   pending_reason?: string;
   /** The wish searching for its audio (the queue row it belongs to). */
   wish_id?: number | null;
+  /** The wish's own state, for a framework album: `status`/`attempts`/the
+   *  reason a run left behind, plus when it is next searched (`due_at` /
+   *  `due_in` seconds, `terminal` once the queue will not try again) — decided
+   *  by the worker's own policy, so the page states it rather than guessing. */
+  wish?: AlbumWish | null;
+  /** What "Add to library" already fetched for this folder before its audio
+   *  existed: the artist image / descriptions and the album description it
+   *  wrote (their paths), the links it resolved and the cover candidates it
+   *  ranked, with the winner it picked. */
+  prefetched?: AlbumPrefetch | null;
   /** The album folder's stored description (see mlo/artistdata). The library
    *  payload only reports whether one exists; the album page carries the text. */
   artwork?: AlbumArtwork;
+}
+
+/** The wish filling a framework album, as the album page reads it
+ *  (`server/library.py::_wish_state`). */
+export interface AlbumWish {
+  id: number;
+  /** "wanted" | "searching" | "imported" | "failed" | "not_found". */
+  status: string;
+  attempts: number;
+  retry_at: number;
+  last_search: number;
+  /** Epoch seconds of the next search the worker will run, null once it will
+   *  not run one again. */
+  due_at: number | null;
+  /** Seconds until that search, null when `due_at` is null. */
+  due_in: number | null;
+  /** No further automatic search is coming (see server.wishes.is_terminal). */
+  terminal: boolean;
+  /** The last error the queue recorded, or the note the wish was added with. */
+  reason: string;
+  note: string;
+  source: string;
+  queries: string[];
+}
+
+/** What "Add to library" pre-fetched for a folder whose audio has not arrived
+ *  (`server/imports.prefetch_album`, recorded in the framework marker). */
+export interface AlbumPrefetch {
+  at: number;
+  artist_image: string | null;
+  artist_description: string | null;
+  album_description: string | null;
+  cover_candidates: number;
+  cover_pick: string | null;
+  cover_source: string | null;
+  links: { album: string | null; artist: string | null };
 }
 
 /** One track of the MusicBrainz release an album was matched to. */
@@ -261,14 +307,57 @@ export interface CoverResult {
    *  not the size the URL answers with). */
   width?: number | null;
   height?: number | null;
+  /** The container those same bytes really are ("jpeg"/"png"/"webp"), or null
+   *  when the image was never probed. */
+  format?: string | null;
+  /** How many bytes the URL answered with (0 = an empty answer). */
+  bytes?: number | null;
+  /** The provider's own labelling: `front` is true for a labelled front cover,
+   *  false for anything it labels otherwise, null when it labels nothing. */
+  front?: boolean | null;
+  kind?: string | null;
+  /** True for the RELEASE's own front cover, false for a release-group
+   *  stand-in, null when the source states neither. */
+  release_cover?: boolean | null;
+  /** The provider's own order for this row (0 = its first answer). */
+  rank?: number | null;
+  /** 0..1, higher = better; rows arrive sorted by it (see mlo/cover_choice). */
+  score?: number;
+  /** The sentences that put this candidate where it is — for the winner, the
+   *  one that says why it won; for a loser, why it lost. */
+  reasons?: string[];
+  /** Set when the candidate cannot be the AUTOMATIC pick (below the cover
+   *  target, undecodable, an empty answer): the sentence naming why. It is
+   *  still listed, and can still be applied by hand. */
+  rejected?: string | null;
 }
 
-/** `/api/cover/search` — `provider` names who actually answered: `"cov"` for
- *  the covers.musichoarders.xyz meta-search, the fallback id that filled in
- *  (`coverartarchive`/`deezer`/`itunes`), or null when nobody had anything. */
+/** The cover policy as configured — what the pick was judged by, and the
+ *  rules in prose (mlo/cover_choice.py). */
+export interface CoverChoicePolicy {
+  target: number;
+  /** The floor a candidate must reach: `cover_target_size` while the write
+   *  path resizes to it, 0 when nothing is enforced. */
+  minimum: number;
+  sources: string[];
+  square_threshold: number;
+  enforce_square: boolean;
+  jpeg_quality: number;
+  rules: string[];
+}
+
+/** `/api/cover/search` — `results` are the policy's RANKED candidates (best
+ *  first, each carrying its reasons), `chosen` is the winner (null when none
+ *  could be one) and `notes` states what every source did — including a source
+ *  that was skipped, and why nothing was chosen when nothing could be. */
 export interface CoverSearch {
   provider: string | null;
   results: CoverResult[];
+  chosen?: CoverResult | null;
+  notes?: string[];
+  policy?: CoverChoicePolicy;
+  candidate_count?: number;
+  rejected_count?: number;
 }
 
 /** Response of the cover write endpoints (`/api/cover`, `/api/cover/fromurl`):
@@ -383,7 +472,12 @@ export interface MBRelease {
   primary_type?: string;
   secondary_types?: string[];
   barcode?: string;
+  /** MusicBrainz's own release-level country CODE — the FIRST release event,
+   *  and the value the release-choice policy keys on. `countries` below is the
+   *  whole list. */
   country?: string;
+  /** every country this pressing was released in, with its date */
+  countries?: MBCountryEvent[];
   catalog_number?: string;
   label?: string;
   /** MusicBrainz release status ("Official", "Promotion", "Bootleg", …) — the
@@ -504,11 +598,61 @@ export interface MBReleaseGroupBrowse {
   secondary_types?: string[];
   genres?: string[];
   first_release_date?: string;
+  /** every (country, date) the group's loaded editions were released in, each
+   *  naming the edition that carries it */
+  countries?: MBCountryEvent[];
   total?: number;
   offset?: number;
   /** Offset of the next page, or null at the end. */
   next?: number | null;
   releases: MBReleaseRow[];
+}
+
+/** One country a release was released in, with that release event's date — a
+ *  release group is usually released in several at once, and the release and
+ *  release-group pages show them all rather than MusicBrainz's first one.
+ *
+ *  `country` is MusicBrainz's own area name ("United States"), `code` its ISO
+ *  3166-1 code ("US", "" for an area that carries none), `preferred` marks the
+ *  configured `prefer_release_country`, and `release_id` names the edition the
+ *  event came from (release-group pages: the group's own releases; a release
+ *  carries its own events, so it has none). */
+export interface MBCountryEvent {
+  country: string;
+  code: string;
+  date: string;
+  preferred?: boolean;
+  release_id?: string;
+}
+
+/** One field of MusicBrainz's search index (`GET /api/mb/search/fields`) —
+ *  the catalogue the search box's completion and its help are built from, so
+ *  neither can offer a field the server would not send to the index. */
+export interface MBSearchField {
+  field: string;
+  /** text | enum | date | number | boolean | id | code */
+  kind: string;
+  /** whether a value may be quoted: true for text/enum values, where quoting
+   *  is what keeps a multi-word value one phrase. A quoted field is inserted
+   *  as `field:""` with the caret between the quotes. */
+  quotes: boolean;
+  /** a value to insert after `field:` — the shape the index expects */
+  example: string;
+  /** one line: what MusicBrainz matches, in MusicBrainz's own words */
+  meaning: string;
+}
+
+/** One Lucene form MusicBrainz's index accepts, as the box's help lists it. */
+export interface MBSearchSyntax {
+  form: string;
+  meaning: string;
+}
+
+/** The search box's whole help: the fields of every entity kind MusicBrainz
+ *  documents, plus the syntax to combine them. */
+export interface MBSearchFieldHelp {
+  fields: Record<string, MBSearchField[]>;
+  syntax: MBSearchSyntax[];
 }
 
 /** One edition in the release-choice policy's ranking (server/release_choice.py).
@@ -596,6 +740,31 @@ export interface GenreCascade {
   levels: { track: boolean; release: boolean; release_group: boolean; artist: boolean };
 }
 
+/** A release's own identity — the ONE block every surface that knows a
+ *  release carries (server/wishes.py RELEASE_KEYS): the two facts that
+ *  identify a PRESSING first (its catalog number, the medium it is on), then
+ *  where and when it came out and how much it carries, then the edition's own
+ *  disambiguation and the status MusicBrainz gives it (Official / Promotion /
+ *  Bootleg / …).
+ *
+ *  Every key is present on the server's rows; a fact nobody could resolve is
+ *  empty (or 0) and renders as absent — never invented, never a placeholder
+ *  that looks like data. Optional here only because a client may be reading a
+ *  payload from an older server. */
+export interface SlskReleaseIdentity {
+  id: string;
+  title: string;
+  artist: string;
+  date: string;
+  country: string;
+  status: string;
+  media: string[];
+  track_count: number;
+  disambiguation: string;
+  catalog_number: string;
+  label: string;
+}
+
 export interface Wish {
   id: number;
   release_mbid: string;
@@ -619,6 +788,16 @@ export interface Wish {
   last_search: number;
   last_error: string;
   album_path: string;
+  /** The store's own verdict: the worker will never search this wish again on
+   *  its own (imported, nothing was found, or failed for good — see
+   *  server/wishes' retry policy). This is what makes it safe to take off the
+   *  list; a wish that is still wanted or being searched is not terminal, and
+   *  clearing it is refused. */
+  terminal?: boolean;
+  /** WHICH pressing this wish is waiting for (server/wishes' release
+   *  identity). Present on every row the server builds; empty facts mean the
+   *  release was never looked up (or MusicBrainz could not answer). */
+  release?: SlskReleaseIdentity;
 }
 
 export interface WishesPayload {
@@ -651,6 +830,9 @@ export interface HomeData {
   top_artists: HomeArtist[];
   wanted: HomeAlbum[];
   needs_attention: HomeAlbum[];
+  /** Every album added but not downloaded yet, newest first — the one shelf a
+   *  user can read to see everything still waiting. */
+  pending?: HomeAlbum[];
 }
 
 export interface HomeArtist {
@@ -671,6 +853,15 @@ export interface HomeAlbum {
   year?: string | null;
   cover: string | null;
   reason?: string;
+  /** A FRAMEWORK album on a shelf: added to the library before its audio
+   *  arrived. Present (true) only while it waits — a complete album carries
+   *  none of these keys, so `pending` is the whole test a card needs. The
+   *  block is the library row's own (`server/recommendations._owned_row`),
+   *  so a Home card says exactly what the album's library row says. */
+  pending?: boolean;
+  pending_reason?: string;
+  wish_id?: number | null;
+  wish?: AlbumWish | null;
   mbid?: string | null;
   /** MusicBrainz entity type behind `mbid` — "rg" (release group) or "release". */
   mb_kind?: string;
@@ -837,6 +1028,41 @@ export interface LyricsAutoResult {
   wrote: { embedded: boolean; lrc: string | null };
   reason?: string;
   error?: string;
+}
+
+/** The transliteration/translation pass over a selection (POST
+ *  /api/lyrics/xlit) — script 17's own runner, reporting its own numbers:
+ *  `ok` files it modified, `skipped` it left alone, `failed` its error lines.
+ *  `note` is why nothing was written when it had nothing to work with (both
+ *  switches off in Settings → Lyrics, or no AI configured). */
+export interface LyricsXlitResult {
+  stats: Record<string, number> | null;
+  paths: string[];
+  ok: number;
+  skipped: number;
+  failed: number;
+  errors: string[];
+  note: string;
+}
+
+/** One track of the LRCLIB publish (POST /api/lyrics/publish-batch) — script
+ *  18's per-track core. Nothing is written locally: `status` is "ok" for a
+ *  submission LRCLIB accepted, "skipped" for a no-op (`reason` says which:
+ *  "LRCLIB already has it", "no lyrics stored", "instrumental", …) and
+ *  "failed" for a refusal or an error, `message` carrying LRCLIB's own words. */
+export interface LyricsPublishResult {
+  path: string;
+  status: "ok" | "skipped" | "failed";
+  reason: string;
+  message: string;
+  synced: boolean;
+}
+
+export interface LyricsPublishBatchResult {
+  results: LyricsPublishResult[];
+  ok: number;
+  skipped: number;
+  failed: number;
 }
 
 /** A lyrics lookup that wrote nothing (`/api/lyrics/find`). */
@@ -1013,10 +1239,14 @@ export interface LibraryAddAlbum {
 
 /** The "Add to library" answer. `background` is true for an artist's
  *  discography, which is prepared off-request (the albums appear as they are
- *  created and are announced on the event channel). */
+ *  created and are announced on the event channel). `queued` is how many
+ *  release groups the call is queueing — stated by a type-filtered artist
+ *  handover, which knows it from the group list it just read, and null when
+ *  the call did not have to browse. */
 export interface LibraryAddResult {
   ok: boolean;
   background?: boolean;
+  queued?: number | null;
   note?: string;
   albums: LibraryAddAlbum[];
   skipped: { mbid?: string; reason?: string }[];

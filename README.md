@@ -1,6 +1,6 @@
 # la musica
 
-**v3.3.0** — a self-hosted app that *manages, optimizes, audits, grades and
+**v3.4.0** — a self-hosted app that *manages, optimizes, audits, grades and
 plays* your music library, from the browser, a desktop window or a phone.
 
 **la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a
@@ -12,7 +12,7 @@ client whose auto-importer verifies what it downloaded. All app state — config
 playlists, favourites, the beets library, the Soulseek config, measured loudness,
 caches — lives in one hidden `.mlo` folder inside your music directory.
 
-Release notes for this version are in `local/release-notes-3.3.0.md` (older ones
+Release notes for this version are in `local/release-notes-3.4.0.md` (older ones
 follow `local/release-notes-<version>.md`); the grading and optimization contract
 is in [`docs/OPTIMIZATION-GRADING-SPEC.md`](docs/OPTIMIZATION-GRADING-SPEC.md).
 
@@ -84,8 +84,8 @@ already hold audio); choosing one *moves* the app state (`<music>/.mlo`) into it
 and never moves music files, and `MLO_MUSIC_FOLDER` pins the choice instead.
 
 Install the external toolchain from **Settings → Dependencies**. It knows
-sixteen tools — `ffmpeg`, `flac`, `libjxl`, `libjpeg-turbo` (`jpegtran`),
-`oxipng`, `rsgain`, `simple-dr-meter`, `AudioAuditor`, `Logchecker`, `php`,
+fifteen tools — `ffmpeg`, `flac`, `libjxl`, `libjpeg-turbo` (`jpegtran`),
+`oxipng`, `rsgain`, `AudioAuditor`, `Logchecker`, `php`,
 `CUETools`, `chromaprint` (`fpcalc`, optional — AcoustID), `librosa`, `beets`,
 `slskd`, `yt-dlp` — and shows each one's installed, pinned and upstream version.
 Per platform a row is `deps` (the installer fetches it), `system` (a distro
@@ -242,7 +242,7 @@ its own, on a selection, or with its force flag from the *Re-run & overwrite* me
 | 4 | Grade | The full grading battery (see the spec) |
 | 5 | Process images | Covers resized/cropped (`cover_target_size`, default 1200; per-format targets), JPEG/PNG/JXL optimization |
 | 6 | Audit library | AudioAuditor detectors + CD `.log` CRC verification → `AUDIT` |
-| 7 | DR & ReplayGain | rsgain + simple-dr-meter tags (album gain, FLAC and MP4 alike) |
+| 7 | DR & ReplayGain | in-process loudness-war DR tags + rsgain ReplayGain (album gain, FLAC and MP4 alike) |
 | 8 | Auto tagging | `ITUNESADVISORY`, `INSTRUMENTAL`, `MOOD`, `ENERGY`, `GENRE` |
 | 9 | AccurateRip | CUETools `.accurip` generation and verification |
 | 10 | Format all | Final canonical pass: `.accurip`/`.cue`/`.lrc`/tag trim + the embedded-cover policy |

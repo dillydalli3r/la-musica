@@ -559,7 +559,10 @@ def save_track_covers(album_dir, mapping):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump({"version": 1, "tracks": mapping}, fh, indent=1, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, dest)
+        fsync_dir(album_dir)
         return True
     except Exception:
         try:
@@ -639,7 +642,10 @@ def save_expected_tracks(album_dir, release_id, tracks):
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump({"version": 1, "release_id": str(release_id or "") or None,
                        "tracks": rows}, fh, indent=1)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, dest)
+        fsync_dir(album_dir)
         return True
     except Exception:
         try:
@@ -684,7 +690,10 @@ def save_pending(album_dir, info):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(dict(info, version=1), fh, indent=1)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, _pending_path(album_dir))
+        fsync_dir(album_dir)
         return True
     except Exception:
         try:

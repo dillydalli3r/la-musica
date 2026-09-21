@@ -426,7 +426,7 @@ try:
     intg.release_lookup = lambda mbid: dict(RELEASES.get(mbid, SINGLE_RAW[0]),
                                             release_group_id=MBID["rg-single"])
     rows, err = intg.group_targets(MBID["rg-single"], "best", types=["album"])
-    assert rows == [] and "not the type asked for" in err, (rows, err)
+    assert rows == [] and err == "release-group type not requested (Single)", (rows, err)
     rows, err = intg.group_targets(MBID["rg-single"], "best", types=["single"])
     assert err is None and names([r["mbid"] for r in rows]) == ["s1"], (rows, err)
     _transport(RG_PAYLOAD, RAW)
@@ -473,8 +473,8 @@ try:
                                                release_group_id=MBID["rg-single"])
         release, err, chosen = artist_watch._release_for(MBID["rg-single"], cfg(),
                                                          types=["album"])
-        assert release is None and chosen is None and "not the type asked for" in err, \
-            (release, err)
+        assert release is None and chosen is None and \
+            err == "release-group type not requested (Single)", (release, err)
         assert queued == ["cd"], queued
     finally:
         pending_albums.create = real_create
@@ -553,6 +553,109 @@ try:
 finally:
     (intg.mb_get_cached, intg._browse_collect, intg.release_lookup,
      intg.artist_browse, wishes.owned_mbids, mloconfig.load_config) = _real
+
+# --------------------------------------------------------------------------- #
+# Country lists: a release group is released in MANY countries at once
+# --------------------------------------------------------------------------- #
+# A release group's editions are scattered across countries and each carries
+# its own release events, while MusicBrainz's singular `country` states only
+# the FIRST of them. Both pages therefore show the whole list — country, the
+# event's date, the edition that carries it, and whether it is the user's own
+# `prefer_release_country` — and never invent an event MusicBrainz does not
+# state. Stubbed at the transport, so these payloads come from the real
+# builders.
+def _event(name, code, date):
+    """One MusicBrainz release event: `area` + the event's date. An area with
+    no ISO code (a historic area) carries none."""
+    area = {"name": name}
+    if code:
+        area["iso-3166-1-codes"] = [code]
+    return {"area": area, "date": date}
+
+
+MULTI_RAW = [
+    {**rel(MBID["cd"], date="1997-01-20", country="US"), "title": "Album",
+     "release-events": [_event("United States", "US", "1997-01-20")]},
+    {**rel(MBID["later"], date="2011-05-01", country="GB"), "title": "Album",
+     "release-events": [_event("United Kingdom", "GB", "2011-05-01"),
+                        _event("Europe", "XE", "2011-05-01")]},
+    {**rel(MBID["vinyl"], date="1997-01-20", country="JP", fmt="Vinyl"), "title": "Album",
+     "release-events": [_event("Japan", "JP", "1997-01-20"),
+                        # the same (country, date) the CD carries: one entry,
+                        # credited to the first-ranked edition that has it
+                        _event("United States", "US", "1997-01-20")]},
+    {**rel(MBID["bootleg"], status="Bootleg", date="1999-01-01", country="US"),
+     "title": "Album", "release-events": []},
+]
+
+_real_cfg = mloconfig.load_config
+try:
+    mloconfig.load_config = lambda *a, **kw: cfg(prefer_release_country="GB")
+    _transport(RG_PAYLOAD, MULTI_RAW)
+    page = intg.release_group_browse(MBID["rg-1"])
+    assert [(c["country"], c["code"], c["date"], c["preferred"]) for c in page["countries"]] == [
+        ("Japan", "JP", "1997-01-20", False),
+        ("United States", "US", "1997-01-20", False),      # deduped across editions
+        ("Europe", "XE", "2011-05-01", False),
+        ("United Kingdom", "GB", "2011-05-01", True),      # the preference, MARKED
+    ], page["countries"]
+    # every entry says which edition carries the event, and the first-ranked
+    # edition carrying it wins (the CD, not the same-day vinyl)
+    assert {c["release_id"] for c in page["countries"]} == {
+        MBID["cd"], MBID["later"], MBID["vinyl"]}, page["countries"]
+    assert next(c for c in page["countries"] if c["code"] == "US")["release_id"] == MBID["cd"]
+    # …and no release was dropped from the page by the country work
+    assert len(page["releases"]) == 4, page["releases"]
+
+    # One country: one entry, still naming its edition, still no invented one.
+    _transport(RG_PAYLOAD, [{**rel(MBID["cd"], date="1997-01-20"), "title": "Album",
+                             "release-events": [_event("United States", "US", "1997-01-20")]}])
+    one = intg.release_group_browse(MBID["rg-1"])
+    assert one["countries"] == [{"country": "United States", "code": "US",
+                                 "date": "1997-01-20", "preferred": False,
+                                 "release_id": MBID["cd"]}], one["countries"]
+    assert len(one["releases"]) == 1, one["releases"]
+
+    # No events at all: an EMPTY list — MusicBrainz stated nothing, so nothing
+    # is invented and the page prints no country field (its own guard is
+    # `events.length`); the edition itself still lists.
+    _transport(RG_PAYLOAD, [{**rel(MBID["cd"], date="1997-01-20"), "title": "Album",
+                             "release-events": []}])
+    none = intg.release_group_browse(MBID["rg-1"])
+    assert none["countries"] == [], none["countries"]
+    assert len(none["releases"]) == 1, none["releases"]
+
+    # A release shows its OWN events; its singular `country` (the value the
+    # auto-import policy keys on) is left exactly as MusicBrainz stated it, and
+    # a placeless event states no country, so it is not one.
+    _transport({
+        "id": MBID["cd"], "title": "Album", "date": "1997-01-20", "country": "US",
+        "barcode": "", "status": "Official",
+        "release-group": {"id": MBID["rg-1"], "primary-type": "Album",
+                          "secondary-types": [], "first-release-date": "1997-01-20"},
+        "label-info": [], "media": [],
+        "release-events": [_event("United States", "US", "1997-01-20"),
+                           {"area": None, "date": "1997"},
+                           _event("Europe", "XE", "1997-04-01")],
+    }, [])
+    mloconfig.load_config = lambda *a, **kw: cfg(prefer_release_country="US")
+    lookup = intg.release_lookup(MBID["cd"])
+    assert lookup["country"] == "US", lookup["country"]
+    assert lookup["countries"] == [
+        {"country": "United States", "code": "US", "date": "1997-01-20", "preferred": True},
+        {"country": "Europe", "code": "XE", "date": "1997-04-01", "preferred": False},
+    ], lookup["countries"]
+    # no preference configured: every entry is unmarked, never a wrong mark
+    mloconfig.load_config = lambda *a, **kw: cfg()
+    assert [c["preferred"] for c in intg.release_lookup(MBID["cd"])["countries"]] == \
+        [False, False]
+finally:
+    mloconfig.load_config = _real_cfg
+    _transport(RG_PAYLOAD, RAW)
+
+print("ok  release/release-group country lists: every release event with its "
+      "date, its carrying edition and the preferred-country mark — multi, "
+      "single and none")
 
 # --------------------------------------------------------------------------- #
 # The UI renders THESE payloads

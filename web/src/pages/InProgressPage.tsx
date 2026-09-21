@@ -1,26 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
 import { Activity, Lock } from "lucide-react";
-import { api } from "../api";
 import type { JobLock } from "../api";
 import PageHeader from "../components/PageHeader";
 import { EmptyState, PageLoading } from "../components/Badges";
 import { fmtCounts } from "../lib/fmt";
-
-/** What each `kind` the backend registers is called on screen (the registry's
- *  own names: server.job_locks callers). A kind this build does not know is
- *  shown as the raw id rather than hidden — a job the page cannot name is
- *  still locking files. */
-const KIND_LABEL: Record<string, string> = {
-  scripts: "Script run",
-  import: "Import",
-  organize: "Organize",
-  tags: "Tag write",
-  cover: "Cover write",
-  lyrics: "Lyrics write",
-  beets: "Beets tagging",
-  export: "Export",
-  remove: "Remove from library",
-};
+import { kindLabel, useJobLocks } from "../lib/locks";
 
 /** Elapsed seconds -> "42s" / "3m 07s" / "1h 12m". The server measures this,
  *  so a client whose clock is off still shows the true run time. */
@@ -40,7 +23,7 @@ function JobRow({ job }: { job: JobLock }) {
     <li className="panel space-y-2">
       <div className="flex items-center gap-2 flex-wrap">
         <span className="chip bg-accent/15 border border-accent/30 text-accent">
-          {KIND_LABEL[job.kind] ?? job.kind ?? "Job"}
+          {kindLabel(job.kind)}
         </span>
         <span className="text-sm font-medium text-zinc-200 min-w-0 truncate">{job.label}</span>
         <span className="ml-auto text-[11px] text-zinc-500 tabular-nums" title={started ? `started ${started}` : job.job}>
@@ -58,7 +41,7 @@ function JobRow({ job }: { job: JobLock }) {
           </div>
           <div className="h-1 rounded-sm bg-raise overflow-hidden">
             <div
-              className={`h-full bg-gradient-to-r from-accent to-indigo-500 transition-all duration-300 ${
+              className={`h-full bg-gradient-to-r from-accent to-accent-soft transition-all duration-300 ${
                 progress.total ? "" : "w-1/3 animate-pulse"
               }`}
               style={progress.total ? { width: `${Math.min(100, (progress.done / progress.total) * 100)}%` } : undefined}
@@ -101,13 +84,10 @@ function JobRow({ job }: { job: JobLock }) {
  *  would only mean the files are unprotected while the job is still writing
  *  to them — a job that must stop is stopped where it started. */
 export default function InProgressPage() {
-  const { data, isLoading } = useQuery({
-    queryKey: ["jobLocks"],
-    queryFn: () => api.jobLocks(),
-    // A poll, not a subscription: work starts and finishes in seconds, and a
-    // row left on screen from the last fetch would read as a job that hung.
-    refetchInterval: 2000,
-  });
+  // The app's one lock poll (lib/locks): the same payload the player bar and
+  // every marked row read, so this page can never show a different answer than
+  // the player got — and it costs no extra request.
+  const { data, isLoading } = useJobLocks();
   const jobs = data?.jobs ?? [];
   return (
     <div className="p-6 space-y-5 mx-auto max-w-5xl">

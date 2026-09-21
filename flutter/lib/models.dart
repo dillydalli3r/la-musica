@@ -128,6 +128,49 @@ class Track {
   };
 }
 
+/// The wish filling a framework album — `server/library.py::_wish_state_of`.
+///
+/// The queue row's own state travels in the album payload, so a surface can
+/// say "searching — attempt 2, next try in 12 min" from the album it is
+/// looking at instead of asking the queue again per row. Absent for a
+/// complete album, and for a framework album whose wish the queue no longer
+/// has: the marker then says nothing is searching for it, which is the truth.
+class AlbumWish {
+  AlbumWish({
+    this.id,
+    this.status = '',
+    this.attempts = 0,
+    this.dueIn,
+    this.terminal = false,
+    this.reason = '',
+    this.note = '',
+  });
+
+  final int? id;
+  /// The queue's own state name ("wanted", "searching", "not_found", …).
+  final String status;
+  /// Searches that have run; 0 means the queue recorded it but nothing has
+  /// looked yet.
+  final int attempts;
+  /// Seconds until the next search, or null when none is coming.
+  final int? dueIn;
+  /// True once the queue will not try again — a failure it has given up on.
+  final bool terminal;
+  /// Why the last run left it, in the queue's own words.
+  final String reason;
+  final String note;
+
+  factory AlbumWish.fromJson(Map<String, dynamic> json) => AlbumWish(
+    id: _int(json['id']),
+    status: _str(json['status']) ?? '',
+    attempts: _int(json['attempts']) ?? 0,
+    dueIn: _int(json['due_in']),
+    terminal: json['terminal'] == true,
+    reason: _str(json['reason']) ?? '',
+    note: _str(json['note']) ?? '',
+  );
+}
+
 /// One album folder: what the shelf shows (cover, year, grade) plus its
 /// tracks, which the album page and the queue read.
 class Album {
@@ -147,6 +190,10 @@ class Album {
     this.advisory,
     this.tracks = const [],
     this.meta = const {},
+    this.pending = false,
+    this.pendingReason,
+    this.wishId,
+    this.wish,
     this.error,
   });
 
@@ -165,6 +212,18 @@ class Album {
   final String? advisory;
   final List<Track> tracks;
   final Map<String, String> meta;
+
+  /// True for a FRAMEWORK album: added to the library, its audio not
+  /// downloaded yet (`server.pending_albums`). Its folder is on disk before
+  /// anything is in it, so every surface that lists albums has to say so
+  /// instead of drawing an empty album.
+  final bool pending;
+  /// What it is waiting for ("a verified Soulseek download").
+  final String? pendingReason;
+  /// The wish searching for its audio — the queue row it belongs to.
+  final int? wishId;
+  /// That wish's own state; null when the queue has none for this album.
+  final AlbumWish? wish;
   final String? error;
 
   String get folderName => path.split(RegExp(r'[\\/]')).last;
@@ -196,6 +255,15 @@ class Album {
                 .toList()
           : const [],
       meta: meta,
+      // The framework block, exactly as the server stamps it on every
+      // album-shaped row: a complete album carries `pending: false` and
+      // nothing else, and anything absent reads as "not pending".
+      pending: json['pending'] == true,
+      pendingReason: _str(json['pending_reason']),
+      wishId: _int(json['wish_id']),
+      wish: json['wish'] is Map
+          ? AlbumWish.fromJson(Map<String, dynamic>.from(json['wish'] as Map))
+          : null,
       error: _str(json['error']),
     );
   }

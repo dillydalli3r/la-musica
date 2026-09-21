@@ -31,10 +31,11 @@ Lifecycle, in one place:
 import hashlib
 import os
 import shutil
-import tempfile
+import threading
 import time
 import traceback
 
+from mlo import atomic
 from mlo import paths as pathmod
 from mlo.config import load_config
 from mlo.paths import library_root
@@ -157,21 +158,17 @@ def _manifest_tracks(release):
 
 
 def _write_file(dest, data):
-    """Atomically write *data* to *dest*; True on success."""
+    """Atomically write *data* to *dest*; True on success.
+
+    Through :mod:`mlo.atomic`, so the temp is named ``.mlo_tmp_*`` (hidden,
+    swept at startup if a kill leaves it) and the bytes are fsynced before the
+    rename — ``mkstemp``'s default name was a non-hidden ``tmpXXXX.part``
+    sitting in the album folder, which the grader counted as a stray file.
+    """
     try:
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(dest), suffix=".part")
-    except OSError:
-        return False
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-        os.replace(tmp, dest)
+        atomic.write_bytes(dest, data)
         return True
-    except Exception:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
+    except OSError:
         return False
 
 
@@ -224,8 +221,39 @@ def _drop_placeholder_cover(folder, info):
         return False
 
 
+def prefetch_content(folder, cfg=None, *, background=False):
+    """Pre-fetch what the album's page shows, for a folder that has no audio.
+
+    "Add to library" puts the album in the library the moment it is asked for,
+    so the page it links to must have something real on it before the download
+    lands: the artist image and descriptions, the album description, the
+    RateYourMusic links and the ranked cover candidates (with the policy's
+    winner marked) — see ``server.imports.prefetch_album``, which is the import
+    chain's own steps run early, gated by their own switches.
+
+    Inline by default (the user is waiting for THIS album and the page is one
+    click away). `background=True` puts it on a daemon thread instead: a
+    discography is dozens of albums, and one add must not become dozens of
+    provider calls inside one request. Never raises, either way.
+    """
+    from server import imports
+
+    def _run():
+        try:
+            imports.prefetch_album(folder, cfg)
+        except Exception:
+            traceback.print_exc()
+
+    if background:
+        threading.Thread(target=_run, daemon=True,
+                         name="mlo-prefetch-album").start()
+        return None
+    _run()
+    return True
+
+
 def create(release, cfg=None, *, source=SOURCE, queries=None, title="",
-           artist="", year="", cover=True):
+           artist="", year="", cover=True, prefetch=True):
     """Create the framework album for *release* and queue its wish.
 
     Idempotent: a folder that already holds audio is left exactly as it is
@@ -233,6 +261,13 @@ def create(release, cfg=None, *, source=SOURCE, queries=None, title="",
     refreshed rather than duplicated, and the wish is keyed by release id so a
     second call returns the same one. Returns a row the route reports; raises
     ValueError when the release cannot name a library folder at all.
+
+    `prefetch` is the add-time page content (`prefetch_content`): on, the
+    folder's description, artist artwork, links and ranked cover candidates are
+    fetched the moment the album is added, so the album's page renders real
+    content while the search runs. A batch caller (`mode="all"`, a discography)
+    passes False and runs `prefetch_content(..., background=True)` per album
+    afterwards instead — one request must not become dozens of provider calls.
     """
     from server import wishes
 
@@ -303,6 +338,11 @@ def create(release, cfg=None, *, source=SOURCE, queries=None, title="",
                      "release_id": rid}, config=cfg)
     except Exception:
         traceback.print_exc()
+    # The page content, fetched NOW rather than when the download lands: the
+    # folder is already an album the user can open, so it should not read as an
+    # empty one. Never fatal (the folder and the wish are already recorded).
+    if prefetch:
+        prefetch_content(folder, cfg)
     return row
 
 

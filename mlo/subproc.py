@@ -24,7 +24,7 @@ _ACTIVE_LOCK = threading.Lock()
 # --------------------------------------------------------------------------- #
 # Windows long paths (MAX_PATH) — the bundled tools are not long-path aware
 # --------------------------------------------------------------------------- #
-# Every console tool the engine drives (flac, ffmpeg, rsgain, simple-dr-meter,
+# Every console tool the engine drives (flac, ffmpeg, rsgain,
 # AudioAuditor, oxipng, cjxl, CUETools) opens its file through the MSVC CRT,
 # which stops at 260 characters. A library whose album folders carry the ids,
 # the dates and the media type reaches that on its own: measured on a real
@@ -250,3 +250,141 @@ def run_tool(*args, **kwargs):
             proc.returncode, proc.args, output=stdout, stderr=stderr
         )
     return result
+
+
+# Default read size for run_tool_stream: big enough that the syscall overhead
+# disappears, small enough that the data a caller is waiting for is never
+# queued behind a large read.
+STREAM_READ_SIZE = 1 << 20
+# stderr is drained into memory by a thread; only the tail is ever reported, so
+# only the tail is kept.
+_STREAM_STDERR_CHUNKS = 8
+
+
+def run_tool_stream(argv, *, timeout=None, read_size=STREAM_READ_SIZE, **kwargs):
+    """Run a tool and yield its stdout in chunks, then report how it exited.
+
+    run_tool() hands back a CompletedProcess, so its output has to fit in
+    memory: fine for a version string or a summary, wrong for a caller reading
+    raw audio, where one decoded track is ~100 MB and the caller measuring it
+    only ever needs the block in its hands (see mlo.dr). This is the same seam
+    - the same CREATE_NO_WINDOW, the same long-path mapping, the same _ACTIVE
+    accounting, the same kill-the-tree - with the process handed over while it
+    still runs.
+
+    A generator: the tool writes into a pipe that the caller drains one chunk
+    at a time, so the tool is throttled to the reader instead of being buffered
+    whole. Closing the generator early kills the process tree, which is the
+    cancellation run_tool only gets from its timeout.
+
+    stderr goes to a reader thread and is kept to its tail. The tool must not
+    be able to fill that pipe and block on it while the caller waits for
+    stdout, and the failure reason has to survive for the error below.
+
+    A non-zero exit raises subprocess.CalledProcessError - the shape run_tool
+    raises for check=True - carrying the stderr tail as ``.stderr``; exceeding
+    *timeout* raises subprocess.TimeoutExpired, exactly as run_tool does.
+    ``timeout=None`` (the default) means no deadline: a streamed tool is
+    usually a decode that legitimately runs for minutes, so the caller that
+    knows its input sets the bound (mlo.dr gives ffmpeg half an hour).
+
+    stdin defaults to DEVNULL: a tool spawned to be read from must never
+    consume the caller's console (ffmpeg would eat keystrokes).
+    """
+    # A generator body does not run until the first next(), so the spawn
+    # belongs in a plain function the generator's own frame starts with.
+    if kwargs.pop("capture_output", False) or kwargs.get("text") \
+            or kwargs.get("universal_newlines"):
+        # The chunks are bytes by design (mlo.dr de-interleaves float32 out of
+        # them), so run_tool's text/capture modes cannot be honoured here —
+        # refuse them now rather than surprising the caller on the first read.
+        raise ValueError("run_tool_stream yields raw bytes: capture_output, "
+                         "text and universal_newlines are not supported")
+    return _stream_tool(tuple(argv), timeout, read_size, kwargs)
+
+
+def _stream_tool(argv, timeout, read_size, kwargs):
+    if "creationflags" in kwargs:
+        kwargs["creationflags"] |= CREATE_NO_WINDOW
+    else:
+        kwargs["creationflags"] = CREATE_NO_WINDOW
+    kwargs.setdefault("stdin", subprocess.DEVNULL)
+    kwargs.setdefault("stderr", subprocess.PIPE)
+    kwargs["stdout"] = subprocess.PIPE
+    if os.name != "nt":
+        # Own process group, so a deadline can kill the whole tree (Windows
+        # uses taskkill /T in _kill_tree instead).
+        kwargs.setdefault("start_new_session", True)
+    else:
+        # Same long-path mapping run_tool applies: the bundled tools cannot
+        # open past MAX_PATH.
+        argv = _argv_with_tool_paths((argv,))[0]
+        if kwargs.get("cwd"):
+            kwargs["cwd"] = tool_path(kwargs["cwd"])
+
+    proc = subprocess.Popen(argv, **kwargs)
+    with _ACTIVE_LOCK:
+        _ACTIVE[proc.pid] = proc
+
+    tail = []
+
+    def drain_stderr():
+        try:
+            while True:
+                chunk = proc.stderr.read(4096)
+                if not chunk:
+                    return
+                tail.append(chunk)
+                del tail[:-_STREAM_STDERR_CHUNKS]
+        except Exception:
+            return
+
+    reader = None
+    if proc.stderr is not None:
+        reader = threading.Thread(target=drain_stderr, name="mlo-tool-stderr",
+                                  daemon=True)
+        reader.start()
+
+    expired = threading.Event()
+    killer = None
+    if timeout:
+        def on_deadline():
+            expired.set()
+            _kill_tree(proc)
+
+        killer = threading.Timer(timeout, on_deadline)
+        killer.daemon = True
+        killer.start()
+
+    finished = False
+    try:
+        while True:
+            chunk = proc.stdout.read(read_size)
+            if not chunk:
+                break
+            yield chunk
+        finished = True
+    finally:
+        if not finished:
+            _kill_tree(proc)
+        try:
+            proc.stdout.close()
+        except Exception:
+            pass
+        try:
+            proc.wait()
+        except Exception:
+            pass
+        with _ACTIVE_LOCK:
+            _ACTIVE.pop(proc.pid, None)
+        if killer is not None:
+            killer.cancel()
+        if reader is not None:
+            reader.join(timeout=5)
+
+    if expired.is_set():
+        raise subprocess.TimeoutExpired(argv, timeout)
+    if proc.returncode:
+        raise subprocess.CalledProcessError(
+            proc.returncode, argv,
+            stderr=b"".join(tail).decode("utf-8", "replace"))

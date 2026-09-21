@@ -161,17 +161,35 @@ def _tag_fields() -> List[dict]:
     return out
 
 
+# The one op set every rating field shares: the comparisons, the range, and the
+# two emptiness tests that ARE a rating's own (is_unrated/is_rated) — so the
+# generic number ops (missing/present) are not offered on top. Shared by the
+# track field and the two entity fields: they are one family in three scopes
+# and must never advertise different answers.
+_RATING_OPS = ("eq", "ne", "lt", "gt", "lte", "gte", "between",
+               "is_unrated", "is_rated")
+
+
 def _rating_field() -> dict:
-    """The one rating field. Stars (halves), from the rating store the server
+    """The track rating field. Stars (halves), from the rating store the server
     layer injects — never from the file's RATING tag, which is Picard's 0-100
     scale."""
-    # Explicit ops: is_unrated/is_rated ARE this field's emptiness test, so
-    # the generic number ops (missing/present) are not offered on top.
+    # Explicit ops: is_unrated/is_rated ARE this field's emptiness test.
     return _field("rating", "Rating", "number", targets=("tracks",),
-                  vmin=0, vmax=5, step=0.5, facetable=True,
-                  ops=("eq", "ne", "lt", "gt", "lte", "gte", "between",
-                       "is_unrated", "is_rated"),
+                  vmin=0, vmax=5, step=0.5, facetable=True, ops=_RATING_OPS,
                   hint="Stars (halves), 0-5. Unrated tracks carry no value.")
+
+
+def _entity_rating_field(scope: str, label: str, hint: str) -> dict:
+    """One folder-scope rating field (``album.rating`` / ``artist.rating``).
+
+    The USER's verdict on that entity, out of the same store and in the same
+    unit and ops as ``rating`` — the average of the tracks' ratings is a
+    different number and is NOT what this field holds. Answerable from a track
+    row too (as ``album.audit`` is): a track row reports the verdict on the
+    album or artist it sits under."""
+    return _field(f"{scope}.rating", label, "number", vmin=0, vmax=5, step=0.5,
+                  facetable=True, ops=_RATING_OPS, hint=hint)
 
 
 def _grade_fields() -> List[dict]:
@@ -259,6 +277,10 @@ def _album_fields() -> List[dict]:
         _field("album.media", "Media", "enum", facetable=True,
                values=_enum_of("MEDIA")),
         _field("album.track_count", "Track count", "number"),
+        _entity_rating_field(
+            "album", "Album rating",
+            "Stars (halves), 0-5: your own verdict on the album, not the "
+            "average of its tracks' ratings."),
         _field("album.audit", "Album audit", "enum", facetable=True,
                values=("REAL", "FAKE", "Mix"),
                hint="The album's verdict, readable from a track row too."),
@@ -273,6 +295,10 @@ def _artist_fields() -> List[dict]:
         _field("artist.track_count", "Track count", "number"),
         _field("artist.grade_pct", "Artist grade %", "number", vmin=0, vmax=100,
                hint="Rollup of the artist's albums."),
+        _entity_rating_field(
+            "artist", "Artist rating",
+            "Stars (halves), 0-5: your own verdict on the artist, not an "
+            "average of their albums or tracks."),
         _field("artist.audit", "Artist audit", "enum", facetable=True,
                values=("REAL", "FAKE", "Mix"),
                hint="Rollup of the artist's albums."),
@@ -473,12 +499,19 @@ def _validated(body: dict) -> dict:
 # Rating store
 # --------------------------------------------------------------------------- #
 def rating_source(user: str):
-    """``rating_of(path, raw_tag) -> half-stars`` for the engine.
+    """``rating_of(path, raw_tag) -> half-stars`` for the engine, with the
+    folder scopes attached as ``rating_of.folder(scope, path)``.
 
-    The store is read ONCE per request and only when a condition actually
-    names ``rating`` (the engine calls this per row, the first call pays).
-    Truth order is the store's own: a DB row wins, else the file's RATING tag
-    converted out of Picard's 0-100 scale, else unrated."""
+    The store is read ONCE per scope and only when a condition actually names a
+    rating field (the engine calls this per row, the first call pays). Truth
+    order is the store's own: a DB row wins, else the file's RATING tag
+    converted out of Picard's 0-100 scale, else unrated. A folder has no tag,
+    so a folder row is the whole truth there.
+
+    The folder half is an attribute of the same callable because the engine
+    needs one fact a track lookup does not carry: which KIND of entity the path
+    names (``mlo.query``'s module docstring states the contract). A source
+    without it makes every album/artist rating field read unrated."""
     state: Dict[str, Any] = {}
 
     def store():
@@ -492,16 +525,21 @@ def rating_source(user: str):
             state["mod"] = ratings_mod
         return state["mod"]
 
+    def map_of(scope: str) -> Dict[str, int]:
+        key = f"map:{scope}"
+        if key not in state:
+            mod = store()
+            try:
+                state[key] = (mod.map_for(user=user, scope=scope) if mod else {}) or {}
+            except Exception:
+                state[key] = {}
+        return state[key]
+
     def rating_of(path: str, raw_tag):
         mod = store()
         if mod is None:
             return None
-        if "map" not in state:
-            try:
-                state["map"] = mod.map_for(user=user) or {}
-            except Exception:
-                state["map"] = {}
-        half = state["map"].get(path)
+        half = map_of("track").get(path)
         if half is None and raw_tag not in (None, ""):
             try:
                 half = mod.from_tag(raw_tag)
@@ -509,6 +547,15 @@ def rating_source(user: str):
                 half = None
         return half
 
+    def folder(scope: str, path: str):
+        """The user's stored verdict on an album/artist folder (None when
+        unrated). No tag fallback exists for a folder, and the map carries
+        half-stars already — which is the unit the engine asked for."""
+        if store() is None:
+            return None
+        return map_of(scope).get(path)
+
+    rating_of.folder = folder
     return rating_of
 
 

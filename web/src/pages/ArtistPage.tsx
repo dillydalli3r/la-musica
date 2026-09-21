@@ -9,6 +9,8 @@ import { api } from "../api";
 import { LinkChips, LinkEditorButton } from "../components/Links";
 import { EmptyState, GradeBadge, PageLoading } from "../components/Badges";
 import AlbumCard from "../components/AlbumCard";
+import StarRating from "../components/StarRating";
+import { ratingOf, useRatings, useSetRating, FOLDER_RATING_NOTE } from "../lib/ratings";
 import Description from "../components/Description";
 import DownloadButton from "../components/DownloadButton";
 import { ExportButton } from "../components/ExportDialog";
@@ -16,6 +18,7 @@ import FavHeart from "../components/FavHeart";
 import ArtistImageModal from "../components/ArtistImageModal";
 import MetadataReviewModal from "../components/MetadataReviewModal";
 import MoreLikeThis from "../components/MoreLikeThis";
+import OnlineRecommendations from "../components/OnlineRecommendations";
 import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
 import TagActionsMenu from "../components/TagActionsMenu";
@@ -83,6 +86,10 @@ export default function ArtistPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [reviewOpen, setReviewOpen] = useState(false);
   const navigate = useNavigate();
+  // The artist's OWN rating: one request for the artist scope, deduped by the
+  // query cache, and the optimistic setter its header control writes through.
+  const { data: artistRatingsData } = useRatings("artist");
+  const { setRating: setArtistRating, pending: artistPending } = useSetRating("artist");
 
   if (error)
     return (
@@ -112,6 +119,12 @@ export default function ArtistPage() {
     (s, a) => s + a.tracks.reduce((n, t) => n + (t.tech?.length ?? 0), 0),
     0
   );
+  // The artist's OWN rating — the user's verdict on the artist, out of the
+  // artist scope and deliberately not a rollup of anything below it. (The album
+  // page draws the mean of its tracks' ratings BESIDE its own rating; this page
+  // draws no track stars at all, so there is no average here to be confused
+  // with — and no whole-library track map is fetched for one number.)
+  const artistVerdict = ratingOf(artistRatingsData?.ratings, data.path);
   // Identity links for this artist: MBID from any album's album-artist tag,
   // RYM artist URL from any track that carries one.
   const artistTags = {
@@ -372,6 +385,25 @@ export default function ArtistPage() {
               }
             >
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                {/* The artist's OWN rating, first in the identity row: a verdict
+                    on the artist, kept in the app's database (an artist folder
+                    has no file to carry a RATING tag — the tooltip says so), and
+                    never a rollup of the albums or tracks below. */}
+                <span
+                  className="inline-flex items-center gap-1.5"
+                  title="Your rating for the artist — kept in the app's database; an artist folder has no file tag"
+                >
+                  <StarRating
+                    size="lg"
+                    showValue
+                    label="Artist rating"
+                    hint={`Your rating for the artist: click a star's left half for a half star, click the value already set to clear it (← / → nudge, Delete clears). ${FOLDER_RATING_NOTE}`}
+                    value={artistVerdict}
+                    onChange={(v) => setArtistRating(data.path, v)}
+                    pending={artistPending(data.path)}
+                  />
+                  <span className="text-[11px] text-zinc-500">Artist rating</span>
+                </span>
                 <LinkChips tags={artistTags} />
                 {!imageUrl && (
                   <span className="text-xs text-zinc-500">
@@ -703,9 +735,20 @@ export default function ArtistPage() {
         )}
       </section>
 
-      {/* Albums the local scorer ranks closest to this artist's catalogue —
-          from OTHER artists, since this page already lists its own. */}
-      <MoreLikeThis kind="artist" id={decoded} />
+      {/* Two shelves side by side, each labelled with where its rows come
+          from: artists the LOCAL scorer ranks closest to this catalogue (the
+          library's own tags — from OTHER artists, since this page already
+          lists its own), and what the online providers suggest for this
+          artist. The online shelf loads on its own, after the page is usable. */}
+      <div className="grid gap-4 lg:grid-cols-2 items-start">
+        <MoreLikeThis kind="artist" id={decoded} />
+        <OnlineRecommendations
+          kind="artists"
+          seedKind="artist"
+          seedMbid={artistMbid(data) ?? ""}
+          seedName={name}
+        />
+      </div>
 
       {imageOpen && (
         <ArtistImageModal

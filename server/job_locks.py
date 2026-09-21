@@ -14,6 +14,13 @@ edit block each other in both directions. Paths are compared under the same
 ``normcase(normpath(abspath(...)))`` normalization the rest of the app uses for
 path identity — on Windows that also folds case and the separator.
 
+The registry is read as well as written: :func:`holder` answers for one path
+and :func:`jobs` lists what every job holds (each path with its wire identity
+and the refusal sentence, see :func:`locked_paths`), so a route that would read
+a busy file — a stream, a download — refuses with exactly the words a client
+was already shown, and the UI cannot promise playback the server would not
+deliver.
+
 A job never conflicts with itself. The paths it already holds are its own, and
 a nested call in the same CONTEXT (one thread, or one async task) joins the
 job running there through :func:`current` instead of claiming a second one.
@@ -101,6 +108,37 @@ def normalize(path):
     (see server.playlists._norm, mlo.loudness._cache_key).
     """
     return os.path.normcase(os.path.normpath(os.path.abspath(str(path))))
+
+
+# Whether this platform's path identity folds case (Windows). A client that
+# matches its own display paths against a held path has to fold exactly the way
+# the server did, so the answer travels with the keys (see :func:`wire_key`).
+FOLD_CASE = os.path.normcase("A") == "a"
+
+
+def wire_key(path):
+    """The identity a client matches its own paths against: :func:`normalize`
+    with forward slashes, so the page and the refusal agree on what "the same
+    path" means.
+
+    Deliberately the SAME function the registry locks under — a second matcher
+    written for the UI is how a row ends up marked playable while the stream
+    refuses it. A client compares its track against a held key with the
+    separator boundary (``key + "/"``), which is :func:`_within`.
+    """
+    return normalize(path).replace(os.sep, "/")
+
+
+def locked_paths(rec):
+    """``[{path, key, why}]`` for the paths *rec* holds right now.
+
+    ``path`` is the path as claimed (what MAINTAIN → In progress prints),
+    ``key`` is :func:`wire_key`, and ``why`` is the very sentence a refusal
+    carries — so a client can tell the user what the server would tell it
+    instead of inventing wording that then drifts from the 409.
+    """
+    return [{"path": shown, "key": wire_key(shown), "why": refusal(shown, rec)}
+            for shown in rec["paths"]]
 
 
 def _within(parent, child):
@@ -435,7 +473,8 @@ def jobs():
 
     ``elapsed`` is measured here so every client reads the same figure off the
     server's clock — a phone whose clock is off would otherwise print a run
-    that started "in 3 minutes".
+    that started "in 3 minutes". ``locked`` is what a client answers "may I
+    play this file?" with (see :func:`locked_paths`).
     """
     with _lock:
         now = time.time()
@@ -446,5 +485,6 @@ def jobs():
             "started_at": rec["started_at"],
             "elapsed": max(0.0, now - rec["started_at"]),
             "paths": list(rec["paths"]),
+            "locked": locked_paths(rec),
             "progress": dict(rec["progress"]) if rec["progress"] else None,
         } for rec in sorted(_jobs.values(), key=lambda r: r["started_at"])]

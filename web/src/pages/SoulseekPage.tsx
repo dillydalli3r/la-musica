@@ -8,14 +8,14 @@ import {
   MessageSquare, SearchX, X, Wand2, CheckCheck, MessageCircleQuestion,
 } from "lucide-react";
 import { api } from "../api";
-import type { ImportRunStatus, ReadyAlbum, SlskAutoFile, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskQueueItem, SlskSearchProgress, SlskTransfer, StagingEntry, StagingRoot, StagingRootId } from "../api";
+import type { ImportRunStatus, ReadyAlbum, SlskAutoFile, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskQueueItem, SlskQueueScope, SlskSearchProgress, SlskTransfer, StagingEntry, StagingRoot, StagingRootId } from "../api";
 import { toast } from "../store";
 import { EmptyState, PageLoading } from "../components/Badges";
 import CachedTracksView from "../components/CachedTracksView";
 import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
 import Segmented from "../components/Segmented";
-import type { DownloadEntry, ImportBulkJob, Wish } from "../types";
+import type { DownloadEntry, ImportBulkJob, SlskReleaseIdentity, Wish } from "../types";
 import { fmtCount, fmtCounts, fmtPercent } from "../lib/fmt";
 
 interface SlskFile {
@@ -1462,8 +1462,8 @@ const QUEUE_STAGE: Record<string, { label: string; cls: string; icon: typeof Sta
   queued: { label: "Queued", cls: "bg-zinc-800/70 text-zinc-300 border-zinc-700", icon: CircleDashed },
   searching: { label: "Searching", cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: Search },
   downloading: { label: "Downloading", cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: Download },
-  verifying: { label: "Verifying", cls: "bg-violet-900/40 text-violet-300 border-violet-800", icon: FileCheck2 },
-  importing: { label: "Importing", cls: "bg-indigo-900/40 text-indigo-300 border-indigo-800", icon: FolderInput },
+  verifying: { label: "Verifying", cls: "bg-cyan-900/40 text-cyan-300 border-cyan-800", icon: FileCheck2 },
+  importing: { label: "Importing", cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: FolderInput },
   completed: { label: "Completed", cls: "bg-emerald-900/40 text-emerald-300 border-emerald-800", icon: CheckCircle2 },
   failed: { label: "Failed", cls: "bg-red-950/60 text-red-300 border-red-900", icon: AlertTriangle },
   needs_attention: { label: "Needs you", cls: "bg-amber-900/40 text-amber-300 border-amber-800", icon: AlertTriangle },
@@ -1492,15 +1492,71 @@ function QueueProgress({ p, stage }: { p: NonNullable<SlskQueueItem["progress"]>
   );
 }
 
+/** The exact release a row is about, as one compact chip line.
+ *
+ *  In the order that identifies a PRESSING: the catalogue number and the
+ *  medium(s) it is on first — those two are what tell two pressings of the
+ *  same album apart — then the country and date and how much it carries, then
+ *  the edition's own disambiguation and the status MusicBrainz states for it
+ *  (Official / Promotion / Bootleg). The tooltip carries the same facts as one
+ *  line.
+ *
+ *  Only what the server resolved is drawn. An identity with nothing in it (a
+ *  release nobody has looked up yet, or a MusicBrainz outage) renders nothing
+ *  at all, exactly like a row that never had one — never a dash pretending to
+ *  be a value. */
+function ReleaseChips({ r }: { r?: SlskReleaseIdentity }) {
+  if (!r) return null;
+  const catalog = (r.catalog_number ?? "").trim();
+  const media = (r.media ?? []).filter((m) => m && m.trim());
+  const when = [r.country, r.date].filter(Boolean).join(" ");
+  const status = (r.status ?? "").trim();
+  const paragraph = [
+    catalog,
+    media.join(" + "),
+    when,
+    r.track_count ? `${r.track_count} track(s)` : "",
+    r.disambiguation ? `(${r.disambiguation})` : "",
+    status,
+    r.label ?? "",
+  ].filter(Boolean).join(" · ");
+  if (!paragraph) return null;
+  // The status is a FACT about this pressing, not a judgement: an official
+  // edition reads calm, a promotional/bootleg/withdrawn one is worth noticing.
+  const statusCls = /official/i.test(status)
+    ? "bg-emerald-900/40 text-emerald-300 border-emerald-800"
+    : /promotion|bootleg|pseudo|withdraw|expire|cancel/i.test(status)
+      ? "bg-amber-900/40 text-amber-300 border-amber-800"
+      : "bg-zinc-800 text-zinc-400 border-zinc-700";
+  return (
+    <div className="text-[10px] text-zinc-500 truncate mt-0.5" title={paragraph}>
+      <span className="inline-flex items-center gap-1 flex-wrap align-middle">
+        {catalog && (
+          <span className="chip text-[9px] border border-border bg-raise text-zinc-300">{catalog}</span>
+        )}
+        {media.map((m) => (
+          <span key={m} className="chip text-[9px] border border-zinc-700 bg-zinc-800 text-zinc-300">{m}</span>
+        ))}
+        {when && <span>{when}</span>}
+        {r.track_count ? <span>{r.track_count} track(s)</span> : null}
+        {r.disambiguation ? <span className="text-zinc-600">({r.disambiguation})</span> : null}
+        {status && <span className={`chip text-[9px] border ${statusCls}`}>{status}</span>}
+        {r.label ? <span className="text-zinc-600">{r.label}</span> : null}
+      </span>
+    </div>
+  );
+}
+
 /** One row of the queue: where it came from, what it is doing, how far along,
  *  and the one action that makes sense for it right now. */
-function QueueRow({ item, busy, onCancel, onRetry, onImport, onDismiss }: {
+function QueueRow({ item, busy, onCancel, onRetry, onImport, onDismiss, onClear }: {
   item: SlskQueueItem;
   busy: boolean;
   onCancel: () => void;
   onRetry: () => void;
   onImport: () => void;
   onDismiss: () => void;
+  onClear: () => void;
 }) {
   const navigate = useNavigate();
   const st = QUEUE_STAGE[item.stage] ?? QUEUE_STAGE.queued;
@@ -1542,16 +1598,13 @@ function QueueRow({ item, busy, onCancel, onRetry, onImport, onDismiss }: {
           <div className="text-[11px] text-zinc-500 truncate">
             {item.artist}{item.artist && item.title ? " · " : ""}{item.artist ? item.title : ""}
           </div>
-          {/* Which release this row is for. Facts only — no verb: the same
-              facts sit on queued, downloading and finished rows, and "fetching"
-              would be a lie on two of those three. Only a pipeline job knows
-              them, so every other row simply shows nothing here. */}
-          {item.release?.track_count ? (
-            <div className="text-[10px] text-zinc-500 truncate">
-              {[item.release.date, (item.release.media || []).join(" + "),
-                `${item.release.track_count} tracks`].filter(Boolean).join(" · ")}
-            </div>
-          ) : null}
+          {/* Which release this row is for — the exact pressing, on every row
+              whose release is known (a wish's own block, a job's, a queued
+              bulk release's). Facts only, no verb: the same ones sit on
+              queued, downloading and finished rows, and "fetching" would be a
+              lie on two of those three. A row that knows nothing shows
+              nothing. */}
+          <ReleaseChips r={item.release} />
           {item.note && <div className="text-[10px] text-zinc-500 truncate" title={item.note}>{item.note}</div>}
           {/* What the album is still missing (kind "prompt"): the wizard
               steps that have no answer yet, in the wizard's own order. */}
@@ -1633,13 +1686,29 @@ function QueueRow({ item, busy, onCancel, onRetry, onImport, onDismiss }: {
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
             </button>
           )}
+          {/* Take a FINISHED row off the list — never a second Cancel: the
+              server says which rows may be cleared (`clearable`), and the
+              wording below says what clearing that row means, because it is
+              not the same thing for a wish (the standing request goes, with the
+              framework folder it created) as for a finished job (only the
+              history row goes — the album is already in the library). */}
+          {item.clearable && (
+            <button className="btn-ghost !py-1 text-xs text-red-300 tap" onClick={onClear} disabled={busy}
+              title={item.kind === "wish"
+                ? (item.pending
+                  ? "Remove this wish and its empty album folder — nothing is searched for it again"
+                  : "Remove this wish from the list — nothing is searched for it again")
+                : "Take this finished row off the queue — nothing in your library is deleted"}>
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+            </button>
+          )}
         </div>
       </div>
     </div>
   );
 }
 
-function QueueSection({ title, hint, rows, tone, empty, busyId, onCancel, onRetry, onImport, onDismiss }: {
+function QueueSection({ title, hint, rows, tone, empty, busyId, onCancel, onRetry, onImport, onDismiss, onClear, onClearSection }: {
   title: string;
   hint: string;
   rows: SlskQueueItem[];
@@ -1650,12 +1719,26 @@ function QueueSection({ title, hint, rows, tone, empty, busyId, onCancel, onRetr
   onRetry: (item: SlskQueueItem) => void;
   onImport: (item: SlskQueueItem) => void;
   onDismiss: (item: SlskQueueItem) => void;
+  onClear: (item: SlskQueueItem) => void;
+  /** Clear THIS section's finished rows (POST /api/queue/clear, scope = the
+   *  section). Absent for a section nothing may be cleared from. */
+  onClearSection?: () => void;
 }) {
+  // The rows the section can lose, counted off the rows it shows — never off a
+  // separate tally, so the button can never claim more than the list holds.
+  const finished = rows.filter((r) => r.clearable).length;
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-2 flex-wrap">
         <span className={`chip text-[10px] border ${tone}`}>{title} · {rows.length}</span>
         <span className="text-[11px] text-zinc-500">{hint}</span>
+        {finished > 0 && onClearSection && (
+          <button className="btn-ghost !py-0.5 !px-2 text-[10px] text-red-300 tap ml-auto"
+            onClick={onClearSection} disabled={busyId !== null}
+            title={`Take the finished rows off this list — the ${finished} the server marked clearable here. Nothing in your library is touched and nothing still running, waiting or parked goes; those are cancelled on their own row.`}>
+            <Trash2 className="h-3 w-3" /> Clear finished ({finished})
+          </button>
+        )}
       </div>
       {rows.length === 0
         ? <div className="text-[11px] text-zinc-600 px-1">{empty}</div>
@@ -1668,6 +1751,7 @@ function QueueSection({ title, hint, rows, tone, empty, busyId, onCancel, onRetr
               onRetry={() => onRetry(item)}
               onImport={() => onImport(item)}
               onDismiss={() => onDismiss(item)}
+              onClear={() => onClear(item)}
             />
           ))}
     </div>
@@ -1682,16 +1766,23 @@ function QueueSection({ title, hint, rows, tone, empty, busyId, onCancel, onRetr
  *  them, so this panel never invents a state the backend does not have. */
 function QueuePanel({ running }: { running: boolean }) {
   const qc = useQueryClient();
-  const { data, refetch, isFetching } = useQuery({
+  // The queue follows the server's payload on this interval: fast while
+  // something is moving (progress bars, stage changes, a prompt being answered
+  // elsewhere), slow while the queue is only sitting there. Every mutation
+  // below refetches at once, so an action never waits for the next tick.
+  const { data, refetch, isFetching, dataUpdatedAt } = useQuery({
     queryKey: QUEUE_KEY,
     queryFn: api.queue,
-    // Fast while something is moving (progress bars, stage changes), slow
-    // while the queue is only sitting there.
     refetchInterval: running ? 3000 : 10000,
   });
   const [busyId, setBusyId] = useState<string | null>(null);
   const sections = data?.sections;
-  const counts = data?.counts;
+  // What the header says: the rows it is actually rendering, added up. The
+  // server's own `counts` come off the same rows, so the two can never
+  // disagree — and if a payload ever arrived without them, the list is still
+  // the thing the numbers describe.
+  const rows = Object.values(sections ?? {}).flat();
+  const total = rows.length;
 
   const cancel = async (item: SlskQueueItem) => {
     setBusyId(item.id);
@@ -1768,6 +1859,28 @@ function QueuePanel({ running }: { running: boolean }) {
       setBusyId(null);
     }
   };
+  /** Take a finished row off the list (POST /api/queue/clear). Nothing in the
+   *  library changes and no download is deleted — the row was history. The
+   *  server refuses anything still in the pipeline, and its message names the
+   *  action that IS meant for it (cancel), so the toast says what it said. */
+  const clear = async (body: { id?: string; scope?: SlskQueueScope }, item?: SlskQueueItem) => {
+    setBusyId(item?.id ?? "*");
+    try {
+      const r = await api.queueClear(body);
+      toast(r.cleared === 1 && item
+        ? `${item.title} — off the queue`
+        : r.cleared ? `${r.cleared} finished row(s) cleared` : "Nothing finished to clear");
+      refetch();
+      qc.invalidateQueries({ queryKey: ["wishes"] });
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
+  // Rows whose work is over — the count the header's "Clear finished" reports,
+  // and the only rows that button will touch.
+  const finished = rows.filter((r) => r.clearable).length;
 
   return (
     <div className="space-y-4">
@@ -1776,17 +1889,31 @@ function QueuePanel({ running }: { running: boolean }) {
           <ArrowDownUp className="h-3.5 w-3.5" /> Pipeline
         </span>
         <span className="text-[11px] text-zinc-500">
-          {counts ? `${counts.total} item(s)` : "…"}
+          {sections ? `${total} item(s)` : "…"}
           {data ? ` · ${data.running}/${data.concurrency} running` : ""}
           {data?.download_slots ? ` · ${data.download_slots} slskd transfer slot(s)` : ""}
+          {/* When these numbers were fetched — the poll is not a live feed, and
+              saying so is the difference between "0 items" and "0 items a
+              while ago". The Refresh button beside it refetches now. */}
+          {dataUpdatedAt ? ` · fetched ${new Date(dataUpdatedAt).toLocaleTimeString()}` : ""}
         </span>
         <span className="text-[10px] text-zinc-600 hidden sm:inline">
           the same queue for MusicBrainz wishes, bulk auto-imports and manual grabs
         </span>
-        <button className="btn-ghost !py-0.5 !px-2 text-[11px] ml-auto tap"
-          onClick={() => refetch()} disabled={isFetching} title="Reload the queue">
-          <RefreshCw className={`h-3 w-3 ${isFetching ? "animate-spin" : ""}`} /> Refresh
-        </button>
+        <div className="ml-auto flex items-center gap-1 flex-wrap justify-end">
+          {finished > 0 && (
+            <button className="btn-ghost !py-0.5 !px-2 text-[11px] tap"
+              onClick={() => clear({ scope: "finished" })} disabled={busyId !== null}
+              title="Take every finished row off this list — imported albums, jobs that gave up, wishes nothing was found for. Nothing in your library is touched, no download is deleted, and anything still running, waiting or parked stays (clear it per section, or cancel it on its own row).">
+              <Trash2 className="h-3 w-3" /> Clear finished ({finished})
+            </button>
+          )}
+          <button className="btn-ghost !py-0.5 !px-2 text-[11px] tap"
+            onClick={() => refetch()} disabled={isFetching}
+            title="Reload the queue from the server now — the list also follows it on its own: every 3 s while something is moving, every 10 s when nothing is.">
+            <RefreshCw className={`h-3 w-3 ${isFetching ? "animate-spin" : ""}`} /> Refresh
+          </button>
+        </div>
       </div>
 
       {!sections ? (
@@ -1798,18 +1925,22 @@ function QueuePanel({ running }: { running: boolean }) {
             rows={sections.queued} tone="border-amber-800 text-amber-300"
             empty="nothing is waiting — add a release to the wish list or start an auto-import"
             busyId={busyId} onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+            onClear={(item) => clear({ id: item.id }, item)}
           />
           <QueueSection
             title="In progress" hint="downloading, verifying or moving into the library"
             rows={sections.in_progress} tone="border-sky-800 text-sky-300"
             empty="nothing is downloading right now"
             busyId={busyId} onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+            onClear={(item) => clear({ id: item.id }, item)}
           />
           {sections.needs_attention.length > 0 && (
             <QueueSection
               title="Needs you" hint="parked on a question, or waiting for a manual import"
               rows={sections.needs_attention} tone="border-amber-800 text-amber-300"
               empty="" busyId={busyId} onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+              onClear={(item) => clear({ id: item.id }, item)}
+              onClearSection={() => clear({ scope: "needs_attention" })}
             />
           )}
           <QueueSection
@@ -1817,12 +1948,16 @@ function QueuePanel({ running }: { running: boolean }) {
             rows={sections.completed} tone="border-emerald-800 text-emerald-300"
             empty="nothing has finished yet"
             busyId={busyId} onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+            onClear={(item) => clear({ id: item.id }, item)}
+            onClearSection={() => clear({ scope: "completed" })}
           />
           <QueueSection
             title="Failed" hint="gave up, with the reason"
             rows={sections.failed} tone="border-red-900 text-red-300"
             empty="nothing failed"
             busyId={busyId} onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+            onClear={(item) => clear({ id: item.id }, item)}
+            onClearSection={() => clear({ scope: "failed" })}
           />
         </>
       )}
@@ -2361,7 +2496,7 @@ const WISH_STATUS: Record<Wish["status"], { label: string; cls: string; icon: ty
   searching: { label: "Searching", cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: RotateCw },
   imported: { label: "Imported", cls: "bg-emerald-900/40 text-emerald-300 border-emerald-800", icon: CheckCircle2 },
   failed: { label: "Failed", cls: "bg-red-950/60 text-red-300 border-red-900", icon: AlertTriangle },
-  available: { label: "Available", cls: "bg-violet-900/40 text-violet-300 border-violet-800", icon: Star },
+  available: { label: "Available", cls: "bg-cyan-900/40 text-cyan-300 border-cyan-800", icon: Star },
   // The network answered "nothing there" (`wishes_not_found_attempts` empty
   // searches): distinct from `failed` — nothing was rejected, there was simply
   // nothing to try — and terminal, so only the row's own Search button starts
@@ -2454,8 +2589,15 @@ function WishRow({ w, run, importing, pageBusy, onImport, onChanged }: {
           <div className="text-sm text-zinc-100 truncate mt-0.5" title={w.title}>{w.title || "(unknown title)"}</div>
           <div className="text-[11px] text-zinc-500 truncate">
             {w.artist}{w.year ? ` · ${w.year}` : ""}
-            {w.last_error ? <span className="text-zinc-600"> — {w.last_error}</span> : null}
           </div>
+          {/* WHICH pressing this wish is waiting for — the same block the queue
+              rows carry (server/wishes' release identity). A wish whose release
+              has not been looked up yet shows nothing here until the worker's
+              next pass resolves it. */}
+          <ReleaseChips r={w.release} />
+          {w.last_error ? (
+            <div className="text-[10px] text-zinc-600 truncate" title={w.last_error}>{w.last_error}</div>
+          ) : null}
         </div>
         <div className="flex flex-wrap items-center gap-1 shrink-0 w-full justify-end sm:w-auto">
           {canImport && (
@@ -2530,6 +2672,10 @@ function WishesPanel() {
   const importingId = runBusy ? importingWish : null;
   const worker = data?.worker;
   const wishes = data?.wishes ?? [];
+  // The rows the "Clear finished" button reports and the only ones it will
+  // touch: the store's own terminal verdict (server/wishes), never the page's
+  // guess at what a status means.
+  const finishedWishes = wishes.filter((w) => w.terminal).length;
 
   // Announce a wish that gets filled (or fails) while the app is open — the
   // worker runs on its own schedule, so nothing else would tell the user. The
@@ -2638,6 +2784,24 @@ function WishesPanel() {
     }
   };
 
+  /** Take the FINISHED wishes off the list (imported, nothing found, failed
+   *  for good). The rows that are still wanted or being searched are not
+   *  finished things — the server refuses them by name, and its message is
+   *  what the toast shows, so nothing disappears without a word. */
+  const clearFinished = async () => {
+    setBusy(true);
+    try {
+      const r = await api.queueClear({ scope: "wishes" });
+      toast(r.cleared ? `${r.cleared} finished wish(es) cleared` : "Nothing finished to clear");
+      refetch();
+      qc.invalidateQueries({ queryKey: QUEUE_KEY });
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="space-y-3">
       <div className="panel text-xs">
@@ -2658,6 +2822,12 @@ function WishesPanel() {
             <button className="btn-ghost !py-1 text-xs tap" onClick={reconcile} disabled={busy} title="Flip wishes already present in the library">
               <CheckCircle2 className="h-3.5 w-3.5" /> Sync library
             </button>
+            {finishedWishes > 0 && (
+              <button className="btn-ghost !py-1 text-xs text-red-300 tap" onClick={clearFinished} disabled={busy}
+                title="Remove the finished wishes from this list — the ones that made it into the library and the ones nothing was ever found for. A wish that is still wanting or being searched is not finished: clearing never touches it (cancel it on its own row if you want it gone).">
+                <Trash2 className="h-3.5 w-3.5" /> Clear finished ({finishedWishes})
+              </button>
+            )}
             <button className="btn-primary !py-1 text-xs tap" onClick={searchAll} disabled={busy}>
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />} Search all now
             </button>
@@ -4404,7 +4574,7 @@ function StagingImportPanel() {
             </div>
             <div className="h-1.5 rounded-sm bg-raise overflow-hidden">
               <div
-                className="h-full bg-gradient-to-r from-accent to-indigo-500 transition-all duration-300"
+                className="h-full bg-gradient-to-r from-accent to-accent-soft transition-all duration-300"
                 style={{
                   width: `${bulkJob.total ? Math.min(100, ((bulkJob.done ?? 0) / bulkJob.total) * 100) : 0}%`,
                 }}

@@ -22,7 +22,7 @@ const snap = (v: number) => {
 /** The one way a grid value is written out: "4", "4.5". */
 const half = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
 
-/** The one track-rating control: five stars, halves included.
+/** The one rating control: five stars, halves included.
  *
  *  `value` is the UI rating, 0-5 in steps of 0.5 (0 = unrated) — the same
  *  scale lib/ratings.ts hands out. It is NOT the API's 0-10 integer: the
@@ -38,7 +38,7 @@ const half = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
  *  `readOnly` (or simply no `onChange`) is the display-only mode used on
  *  cards: no focus stop, no click targets, one accessible name for the row.
  *
- *  `pending` is `useSetRating().pending(path)` for this track. While it is
+ *  `pending` is `useSetRating().pending(path)` for this element. While it is
  *  true the control refuses further changes — a second write for the same
  *  element mid-flight would race the first — and shows itself busy. The
  *  optimistic value and the rollback live in lib/ratings.ts; the value this
@@ -47,7 +47,13 @@ const half = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
  *  `max` is how many stars are DRAWN, and it exists for the compact card
  *  read-out: a 3-star row shows the same 0-5 rating on a 3-star scale (a
  *  proportional read-out, snapped to the nearest half star). Leave it at 5
- *  for every editing surface. */
+ *  for every editing surface.
+ *
+ *  `hint` replaces the control's own "how to click this" tooltip where the
+ *  CALLER knows something the control does not — an album or artist rating is
+ *  the user's verdict on that entity (never the average of its tracks) and
+ *  lives in the app's store alone, because a folder has no file to tag. The
+ *  widget itself stays scope-blind: it draws stars and reports a number. */
 export default function StarRating({
   value: rawValue,
   onChange,
@@ -56,6 +62,7 @@ export default function StarRating({
   readOnly,
   pending = false,
   label = "Rating",
+  hint,
   showValue = false,
   className = "",
 }: {
@@ -67,10 +74,12 @@ export default function StarRating({
   /** How many stars to draw; 5 unless a compact card asks for fewer. */
   max?: number;
   readOnly?: boolean;
-  /** A write for this track is in flight — refuse further changes. */
+  /** A write for this element is in flight — refuse further changes. */
   pending?: boolean;
   /** Accessible name of the group ("Rating", "Album rating"). */
   label?: string;
+  /** Tooltip for an editing control, in place of the built-in click hint. */
+  hint?: string;
   /** Print the numeric value beside the stars (page headers). */
   showValue?: boolean;
   className?: string;
@@ -110,7 +119,8 @@ export default function StarRating({
       title={
         readOnlyFinal
           ? undefined
-          : "Click a star's left half for a half star — click the value already set to clear it (← / → nudge, Delete clears)"
+          : hint ??
+            "Click a star's left half for a half star — click the value already set to clear it (← / → nudge, Delete clears)"
       }
       onPointerLeave={() => setHover(null)}
       onBlur={() => setHover(null)}

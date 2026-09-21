@@ -166,10 +166,15 @@ class _AlbumRowState extends State<_AlbumRow> {
     final muted = Theme.of(
       context,
     ).colorScheme.onSurface.withValues(alpha: 0.55);
+    // A framework album has nothing to play, so the row's play button is off
+    // and the reason is the button's own tooltip.
+    final note = pendingNote(album);
     final subtitle = [
       album.artist,
       album.year,
-      '${album.tracks.length} tracks',
+      // A framework album has no files yet, so "0 tracks" would say what the
+      // marker already says worse: the state of the search is the readout.
+      if (note != null) note.state else '${album.tracks.length} tracks',
       if (album.gradePct != null) '${album.gradePct!.round()}%',
       if (album.auditSummary != null) album.auditSummary!,
     ].whereType<String>().where((s) => s.isNotEmpty).join(' · ');
@@ -213,6 +218,8 @@ class _AlbumRowState extends State<_AlbumRow> {
                           ),
                           const SizedBox(width: 6),
                           AdvisoryMark(value: album.advisory),
+                          const SizedBox(width: 6),
+                          PendingMark(album, label: true),
                         ],
                       ),
                       Text(
@@ -225,8 +232,8 @@ class _AlbumRowState extends State<_AlbumRow> {
                   ),
                 ),
                 IconButton(
-                  tooltip: 'Play album',
-                  onPressed: widget.onPlay,
+                  tooltip: note?.full ?? 'Play album',
+                  onPressed: note == null ? widget.onPlay : null,
                   icon: const Icon(Icons.play_arrow, size: 20),
                 ),
                 IconButton(
