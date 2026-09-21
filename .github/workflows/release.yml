@@ -152,7 +152,10 @@ jobs:
           build-args: |
             MLO_VERSION=${{ steps.version.outputs.value }}
             MLO_REVISION=${{ github.sha }}
-            MLO_BUILT=${{ github.run_started_at }}
+            # `github.run_started_at` evaluates to empty in a build-arg
+            # expression (the image's MLO_BUILT arrived blank); the commit's
+            # own timestamp is always there on a tag push.
+            MLO_BUILT=${{ github.event.head_commit.timestamp }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
