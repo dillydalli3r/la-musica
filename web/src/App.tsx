@@ -970,31 +970,6 @@ export default function App() {
             >
               <ChevronRight className="h-4 w-4" />
             </button>
-            <button
-              className="tap-hit h-9 w-9 rounded-full border border-border bg-panel/60 backdrop-blur hidden sm:flex items-center justify-center text-zinc-300 hover:text-white hover:border-accent/50 transition-colors"
-              onClick={() => setShortcutsOpen(true)}
-              title={t("topbar.shortcuts") + " (?)"}
-              aria-label={t("topbar.shortcuts")}
-            >
-              <Keyboard className="h-4 w-4" />
-            </button>
-            {/* Notifications sit with the shell's own controls: the bell is
-                also what opens the /ws/events socket (lib/notify.ts). */}
-            <NotificationBell />
-            {/* Offline: the app is answering from its own cache, so it stays
-                usable with the server gone — but the user must be able to tell
-                "nothing changed" from "nothing can reach me". WifiOff is a
-                lucide icon; the pill is deliberately quiet (this is a state,
-                not an error). */}
-            {offline && (
-              <span
-                className="h-9 px-2.5 rounded-full border border-amber-900/60 bg-amber-950/40 backdrop-blur hidden sm:flex items-center gap-1.5 text-[11px] text-amber-200/90"
-                title={t("offline.help")}
-              >
-                <WifiOff className="h-3.5 w-3.5" />
-                {t("offline.label")}
-              </span>
-            )}
           </div>
           {/* Which search the box runs. A native <select>: it is keyboard
               reachable and screen-reader labelled for free, and it is the
@@ -1127,6 +1102,37 @@ export default function App() {
                 )}
               </div>
             )}
+          </div>
+          {/* The session's own controls sit at the bar's top RIGHT: the left
+              is navigation (menu, back, forward) and the middle is the search,
+              so this is where a user looks for status and help. The bell is
+              also what opens the /ws/events socket (lib/notify.ts); the pill
+              and the shortcuts button hide on a phone, where the bar shares
+              its width with the input. */}
+          <div className="flex items-center gap-1.5 sm:gap-3 shrink-0 pointer-events-auto">
+            {/* Offline: the app is answering from its own cache, so it stays
+                usable with the server gone — but the user must be able to tell
+                "nothing changed" from "nothing can reach me". WifiOff is a
+                lucide icon; the pill is deliberately quiet (this is a state,
+                not an error). */}
+            {offline && (
+              <span
+                className="h-9 px-2.5 rounded-full border border-amber-900/60 bg-amber-950/40 backdrop-blur hidden sm:flex items-center gap-1.5 text-[11px] text-amber-200/90"
+                title={t("offline.help")}
+              >
+                <WifiOff className="h-3.5 w-3.5" />
+                {t("offline.label")}
+              </span>
+            )}
+            <button
+              className="tap-hit h-9 w-9 rounded-full border border-border bg-panel/60 backdrop-blur hidden sm:flex items-center justify-center text-zinc-300 hover:text-white hover:border-accent/50 transition-colors"
+              onClick={() => setShortcutsOpen(true)}
+              title={t("topbar.shortcuts") + " (?)"}
+              aria-label={t("topbar.shortcuts")}
+            >
+              <Keyboard className="h-4 w-4" />
+            </button>
+            <NotificationBell />
           </div>
           {/* live script progress floats below the bar so the search keeps
               the full width — its own component, so a progress frame does not
