@@ -154,9 +154,9 @@ else:
         ok(stats["already_known"] == 1 and stats["no_lyrics"] == 1,
            f"the known track and the lyric-less one are counted apart "
            f"({stats['already_known']} known, {stats['no_lyrics']} no lyrics)")
-        ok([f[1] for f in fetched] == ["Song", "Known"],
+        ok(sorted(f[1] for f in fetched) == ["Known", "Song"],
            f"only tracks WITH lyrics are looked up — the instrumental and the "
-           f"lyric-less file never reach LRCLIB ({[f[1] for f in fetched]})")
+           f"lyric-less file never reach LRCLIB ({sorted(f[1] for f in fetched)})")
 
         # a synced text travels WITH its plain form
         published.clear()

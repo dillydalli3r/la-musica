@@ -67,6 +67,12 @@ export default function TrackPage() {
   // This track's own details modal — TrackDetails renders the stored readout.
   const [detailsOpen, setDetailsOpen] = useState(false);
   const coverInput = useRef<HTMLInputElement>(null);
+  // One GET /api/ratings for the page (react-query dedupes it across rows) and
+  // the optimistic setter — declared with the other hooks, ABOVE the early
+  // returns below: a hook after a conditional return is a crash on the second
+  // render, which is exactly how this page broke once already.
+  const { data: ratingsData } = useRatings();
+  const { setRating, pending } = useSetRating();
 
   const tags: Record<string, string> = {};
   for (const [k, v] of Object.entries(data?.tags ?? {})) {
@@ -87,8 +93,6 @@ export default function TrackPage() {
         action={{ label: "Back to the library", to: "/library" }}
       />
     );
-  const { data: ratingsData } = useRatings();
-  const { setRating, pending } = useSetRating();
 
   if (isLoading || !data) return <PageLoading label="Loading track…" />;
 
