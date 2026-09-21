@@ -140,6 +140,7 @@ export default function TrackPage() {
   const queueTrack = {
     path: realPath, file: fileName, albumPath: albumDir,
     artist: tags.ALBUMARTIST ?? tags.ARTIST, album: tags.ALBUM, title: tags.TITLE || undefined,
+    advisory: tags.ITUNESADVISORY ?? null,
   };
   const enqueue = (position: "next" | "end") => {
     if (!queue.length) {

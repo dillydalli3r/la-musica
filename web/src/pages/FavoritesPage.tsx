@@ -191,6 +191,7 @@ function LikedTracks() {
             title: track.tags.TITLE || undefined,
             coverFile: track.cover_file ?? null,
             albumCover: album.cover_file ?? null,
+            advisory: track.tags.ITUNESADVISORY ?? null,
           },
         };
       }

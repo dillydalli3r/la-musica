@@ -11,6 +11,11 @@ export interface QueueTrack {
   coverFile?: string | null;
   /** Album cover filename fallback when the track has no own cover. */
   albumCover?: string | null;
+  /** ITUNESADVISORY as the row that queued the track knew it ("1" explicit,
+   *  "2" clean edition). Carried in the entry so the E/C mark paints on the
+   *  same frame as the title — the per-track tags fetch lands later, and the
+   *  mark must not wait for it. Refreshed by that fetch when it has a value. */
+  advisory?: string | null;
 }
 
 /** Severity drives the toast's colours and its screen-reader role: errors

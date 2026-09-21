@@ -124,6 +124,7 @@ export default function PlaylistDetailPage() {
         title: trackMeta.get(path)?.title,
         coverFile: trackMeta.get(path)?.coverFile ?? null,
         albumCover: trackMeta.get(path)?.albumCover ?? null,
+        advisory: trackMeta.get(path)?.advisory ?? null,
       })),
     [tracks, trackMeta]
   );

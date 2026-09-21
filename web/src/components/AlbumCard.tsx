@@ -117,6 +117,7 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
                 (al.tracks ?? []).map((t) => ({
                   path: t.path, file: t.file, albumPath: al.path,
                   artist, album: al.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined,
+                  advisory: t.tags.ITUNESADVISORY ?? null,
                 }))
               );
             }}

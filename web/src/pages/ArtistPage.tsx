@@ -102,6 +102,7 @@ export default function ArtistPage() {
       artist: a.album_artist || data.display_name || data.name,
       album: a.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined,
       coverFile: t.cover_file ?? null, albumCover: a.cover_file ?? null,
+      advisory: t.tags.ITUNESADVISORY ?? null,
     }))
   );
   // Identity links for this artist: MBID from any album's album-artist tag,

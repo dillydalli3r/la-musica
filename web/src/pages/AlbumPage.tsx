@@ -307,6 +307,7 @@ export default function AlbumPage() {
     artist: data.meta?.ALBUMARTIST ?? data.meta?.ARTIST ?? undefined,
     album: data.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined,
     coverFile: t.cover_file ?? null, albumCover: data.cover_file ?? null,
+    advisory: t.tags.ITUNESADVISORY ?? null,
   }));
 
   /** Append the album to the queue; an empty queue just starts playing. */
@@ -327,6 +328,7 @@ export default function AlbumPage() {
         artist: data.meta?.ALBUMARTIST ?? data.meta?.ARTIST ?? undefined,
         album: data.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined,
         coverFile: t.cover_file ?? null, albumCover: data.cover_file ?? null,
+        advisory: t.tags.ITUNESADVISORY ?? null,
       }))
     );
   };
@@ -1140,6 +1142,7 @@ export default function AlbumPage() {
                       artist: data.meta?.ALBUMARTIST ?? data.meta?.ARTIST ?? undefined,
                       album: data.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined,
                       coverFile: t.cover_file ?? null, albumCover: data.cover_file ?? null,
+                      advisory: t.tags.ITUNESADVISORY ?? null,
                     })),
                     tracks.findIndex((t) => t.path === tr.path)
                   )

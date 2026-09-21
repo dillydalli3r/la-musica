@@ -862,7 +862,7 @@ export default function PlayerBar() {
                 >
                   <ScrollingText text={displayTitle} />
                 </Link>
-                <AdvisoryMark value={currentTags?.tags?.ITUNESADVISORY} />
+                <AdvisoryMark value={currentTags?.tags?.ITUNESADVISORY ?? current.advisory} />
                 {techStr && (
                   <span className="text-[10px] font-mono text-zinc-500 shrink-0" title={techTip || "Bit depth/sample rate"}>
                     {techStr}
@@ -1268,7 +1268,7 @@ export default function PlayerBar() {
                   >
                     <ScrollingText text={displayTitle} />
                   </Link>
-                  <AdvisoryMark value={currentTags?.tags?.ITUNESADVISORY} />
+                  <AdvisoryMark value={currentTags?.tags?.ITUNESADVISORY ?? current.advisory} />
                 </div>
                 <div className="text-[11px] text-zinc-500 truncate">
                   {[current.artist ?? current.albumPath.split("/").pop(), current.album].filter(Boolean).join(" · ") || "—"}

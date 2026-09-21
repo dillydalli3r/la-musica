@@ -64,7 +64,7 @@ const AMB_WRITE_EPS = 0.002;
 type RgMode = "track" | "album" | "off";
 
 interface Props {
-  current: { path: string; file: string; albumPath: string; artist?: string; album?: string; title?: string; coverFile?: string | null; albumCover?: string | null };
+  current: { path: string; file: string; albumPath: string; artist?: string; album?: string; title?: string; coverFile?: string | null; albumCover?: string | null; advisory?: string | null };
   queuePos: string;
   playing: boolean;
   time: number;
@@ -764,7 +764,7 @@ export default function NowPlayingView(p: Props) {
     <div className="text-center w-[26rem] max-w-full min-w-0">
       <div className="h-8 flex items-center justify-center gap-2" title={title}>
         <div className="text-2xl font-bold text-white truncate">{title}</div>
-        <AdvisoryMark value={freshTags?.ITUNESADVISORY} />
+        <AdvisoryMark value={freshTags?.ITUNESADVISORY ?? p.current.advisory} />
         {/* bit depth/sample rate rides beside the title, same as the
             player bar; tooltip carries the full codec/bitrate detail */}
         {techStr && (

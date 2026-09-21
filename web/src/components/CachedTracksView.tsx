@@ -97,6 +97,7 @@ function queueFor(row: CachedAlbum): QueueTrack[] {
     title: t.tags.TITLE || undefined,
     coverFile: t.cover_file ?? null,
     albumCover: row.album.cover_file ?? null,
+    advisory: t.tags.ITUNESADVISORY ?? null,
   }));
 }
 

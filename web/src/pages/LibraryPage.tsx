@@ -612,17 +612,17 @@ export default function LibraryPage() {
   };
 
   const playSelection = () => {
-    const out: { path: string; file: string; albumPath: string; artist?: string; album?: string; title?: string; coverFile?: string | null; albumCover?: string | null }[] = [];
+    const out: { path: string; file: string; albumPath: string; artist?: string; album?: string; title?: string; coverFile?: string | null; albumCover?: string | null; advisory?: string | null }[] = [];
     for (const al of sortedAlbums)
       if (selection.albums.includes(al.path))
-        for (const t of al.tracks) out.push({ path: t.path, file: t.file, albumPath: al.path, artist: al.artist, album: al.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined, coverFile: t.cover_file ?? null, albumCover: al.cover_file ?? null });
+        for (const t of al.tracks) out.push({ path: t.path, file: t.file, albumPath: al.path, artist: al.artist, album: al.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined, coverFile: t.cover_file ?? null, albumCover: al.cover_file ?? null, advisory: t.tags.ITUNESADVISORY ?? null });
     for (const a of sortedArtists)
       if (selection.artists.includes(a.path))
         for (const al of a.albums)
-          for (const t of al.tracks) out.push({ path: t.path, file: t.file, albumPath: al.path, artist: al.album_artist || a.name, album: al.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined, coverFile: t.cover_file ?? null, albumCover: al.cover_file ?? null });
+          for (const t of al.tracks) out.push({ path: t.path, file: t.file, albumPath: al.path, artist: al.album_artist || a.name, album: al.meta?.ALBUM ?? undefined, title: t.tags.TITLE || undefined, coverFile: t.cover_file ?? null, albumCover: al.cover_file ?? null, advisory: t.tags.ITUNESADVISORY ?? null });
     for (const tr of sortedTracks)
       if (selection.tracks.includes(tr.path))
-        out.push({ path: tr.path, file: tr.file, albumPath: tr.path.split("/").slice(0, -1).join("/"), artist: tr.artist, album: tr.album, title: tr.tags.TITLE || undefined, coverFile: tr.cover_file ?? null, albumCover: tr.albumCover ?? null });
+        out.push({ path: tr.path, file: tr.file, albumPath: tr.path.split("/").slice(0, -1).join("/"), artist: tr.artist, album: tr.album, title: tr.tags.TITLE || undefined, coverFile: tr.cover_file ?? null, albumCover: tr.albumCover ?? null, advisory: tr.tags.ITUNESADVISORY ?? null });
     if (out.length) playNow(out);
   };
 
@@ -1075,7 +1075,7 @@ export default function LibraryPage() {
                           className={`group flex items-center gap-2 text-xs py-0.5 rounded cursor-pointer ${tSel ? "bg-accent/10" : "hover:bg-white/[0.06]"}`}
                           onClick={selectMode ? () => toggleTrack(t.path) : () =>
                             playNow(
-                              tracks.map((x) => ({ path: x.path, file: x.file, albumPath: al.path, artist: al.artist, album: al.meta?.ALBUM ?? undefined, title: x.tags.TITLE || undefined, coverFile: x.cover_file ?? null, albumCover: al.cover_file ?? null })),
+                              tracks.map((x) => ({ path: x.path, file: x.file, albumPath: al.path, artist: al.artist, album: al.meta?.ALBUM ?? undefined, title: x.tags.TITLE || undefined, coverFile: x.cover_file ?? null, albumCover: al.cover_file ?? null, advisory: x.tags.ITUNESADVISORY ?? null })),
                               tracks.findIndex((x) => x.path === t.path)
                             )
                           }
@@ -1297,7 +1297,7 @@ export default function LibraryPage() {
                       title={selectMode ? "Click to select" : "Click to play"}
                       onClick={selectMode ? () => toggleTrack(tr.path) : () =>
                         playNow(
-                          sortedTracks.map((t) => ({ path: t.path, file: t.file, albumPath: t.path.split("/").slice(0, -1).join("/"), artist: t.artist, album: t.album, title: t.tags.TITLE || undefined, coverFile: t.cover_file ?? null, albumCover: t.albumCover ?? null })),
+                          sortedTracks.map((t) => ({ path: t.path, file: t.file, albumPath: t.path.split("/").slice(0, -1).join("/"), artist: t.artist, album: t.album, title: t.tags.TITLE || undefined, coverFile: t.cover_file ?? null, albumCover: t.albumCover ?? null, advisory: t.tags.ITUNESADVISORY ?? null })),
                           sortedTracks.findIndex((t) => t.path === tr.path)
                         )
                       }
@@ -1584,6 +1584,7 @@ function AlbumRowGroup({
                                 path: x.path, file: x.file, albumPath: album.path,
                                 artist: album.artist, album: album.meta?.ALBUM ?? undefined, title: x.tags.TITLE || undefined,
                                 coverFile: x.cover_file ?? null, albumCover: album.cover_file ?? null,
+                                advisory: x.tags.ITUNESADVISORY ?? null,
                               })),
                               tracks.findIndex((x) => x.path === t.path)
                             )
