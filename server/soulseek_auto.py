@@ -50,6 +50,10 @@ import unicodedata
 from urllib.parse import quote
 
 from mlo.config import DEFAULT_CONFIG, load_config
+# The shared worker-count policy every multi-file runner obeys (the
+# `worker_limit` setting), so the per-track tag writes below fan out like the
+# rest of the app instead of inventing their own lane count.
+from mlo.stats import worker_count
 # The medium accessor of the ONE release-choice policy: a release dict from any
 # payload (browse row, normalized row, full lookup) answers with its formats,
 # which is what decides whether a release is digital or a pressing.
@@ -1310,11 +1314,73 @@ def _parse_trackno(path):
 
 
 def _rank(c):
-    """Candidate order: lossless folders first, then best score, then queue.
+    """Candidate order: lossless first, then the score, then the FASTEST peer,
+    its queue, and finally the peer+folder names so the order is total.
 
-    A lossy folder that scores perfectly is still worse than a lossless one
-    that only just matched — the download is the irreversible part."""
-    return (not c["lossless"], -c["score"], c["queue"])
+    Lossless outranks everything: a lossy folder that scores perfectly is still
+    worse than a lossless one that only just matched — the download is the
+    irreversible part. The score is next, and it already carries the peer's
+    speed (find_candidates adds up to 4.5 points for it, deliberately under one
+    matched track), so a fast wrong folder can never buy its way past a slower
+    complete one.
+
+    The speed key is the user's "download from the fastest good source first":
+    it decides between folders the score rates equal (a verdict that has to come
+    from the search response, because two equally scored folders are otherwise
+    indistinguishable). `speed` is the folder's SLOWEST file — a folder is only
+    as fast as its worst peer (see find_candidates) — and a peer that reported
+    none ranks last among equals rather than first. The peer's own queue
+    position only breaks a speed tie: _est_timeout/_queue_budget already budget
+    that wait from the candidate's own numbers, and a folder that is still the
+    best copy tomorrow is worth waiting in line for today.
+
+    The names are the last key so the order is TOTAL and reproducible run to
+    run: two candidates the search reports identically (same user, same figures)
+    still come back in one fixed order, which is what makes a job's attempts —
+    and the tests that pin them — deterministic."""
+    return (not c["lossless"], -c["score"], -float(c.get("speed") or 0),
+            int(c.get("queue") or 0), str(c.get("username") or ""),
+            str(c.get("dir") or ""))
+
+
+def _dedupe_candidates(candidates):
+    """One entry per peer+folder, best-ranked first.
+
+    ONE job scores its candidates from two SEPARATE searches — the configured
+    templates and the broader second pass (`_run`) — and find_candidates groups
+    within one response set only, so a folder that answered both is scored
+    twice. A job that walked both copies would download that folder twice from
+    the same peer, and when the first attempt failed it spent a batch slot on
+    the very bytes that just failed instead of on a peer that has not been
+    tried. The first entry in rank order wins, so the better of the two scores
+    is the one that stands."""
+    out, seen = [], set()
+    for c in candidates:
+        key = (str(c.get("username") or "").lower(),
+               str(c.get("dir") or "").replace("\\", "/").rstrip("/").lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out
+
+
+def _take_batch(pool, width):
+    """The next batch: up to `width` candidates, never two from one peer.
+
+    Two folders of one peer are two copies of the same album on one machine, so
+    asking for both at once buys nothing but bandwidth and one more transfer to
+    cancel. The second keeps its place and comes back in a later batch, which is
+    where it belongs if the first one fails."""
+    batch, rest, seen = [], [], set()
+    for c in pool:
+        who = str(c.get("username") or "")
+        if len(batch) < width and who not in seen:
+            seen.add(who)
+            batch.append(c)
+        else:
+            rest.append(c)
+    return batch, rest
 
 
 def _same_folder(a, b):
@@ -2621,7 +2687,11 @@ def _stamp_mb_tags(album_dir, release):
     carrying another pressing's IDs would otherwise keep them and drive beets
     matching, the naming script and grading off the wrong release. Per-track
     number/title/artist tags are corrected only when they contradict the
-    chosen release, so a matching uploader's spelling survives."""
+    chosen release, so a matching uploader's spelling survives.
+
+    Every track is ONE container rewrite, and the tracks are stamped side by
+    side — see `_stamp_one`."""
+    from concurrent.futures import ThreadPoolExecutor
     from mlo.audio import AudioFile
 
     tracks_meta = release.get("media") or []
@@ -2692,34 +2762,424 @@ def _stamp_mb_tags(album_dir, release):
             return
         af.set_tag(key, value)
 
-    n = 0
-    for p in audio:
+    def _stamp_one(path):
+        """Stamp ONE track's tags and land them in a SINGLE rewrite.
+
+        Each of these tags used to be its own write, and every write was a
+        whole-file copy: mutagen saves beside the original and that temp is
+        renamed over it (mlo.atomic.rewrite_via), so ~18 tags meant ~18 copies
+        of the track, per track, one after another. The deferral holds them
+        for the one flush at the end instead. It is turned off even when a
+        write raised, so a file is never left holding changes nobody saved.
+
+        True = this file carries the release identity now. The flush's own
+        verdict IS that answer: deferred, a write that cannot land (a full
+        disk, a read-only file) no longer raises out of set_tag, so calling it
+        stamped would report a tag the file does not have."""
         try:
-            af = AudioFile(p)
+            af = AudioFile(path)
             if af.audio is None:
-                continue
-            for k, v in identity.items():
-                _write(af, k, v)
-            # Album-level spelling of the chosen release (corrected when the
-            # uploader's tags say something else).
-            _write(af, "ALBUM", album_title)
-            _write(af, "ALBUMARTIST", artist_name)
-            t = assign.get(p)
-            if t:
-                _write(af, "MUSICBRAINZ_TRACKID", t.get("recording_mbid"))
-                _write(af, "TRACKNUMBER", t.get("position"))
-                _write(af, "DISCNUMBER", t.get("disc"))
-                _write(af, "TITLE", t.get("title"))
-                _write(af, "ARTIST", t.get("artist_credit"))
-            n += 1
+                return False
+            # A stand-in for AudioFile (a test double) cannot defer: it writes
+            # per tag, exactly as it did before. Same guard mlo.autotag,
+            # mlo.audiometa and mlo.moods keep.
+            defer = hasattr(af, "defer_save")
+            if defer:
+                af.defer_save(True)
+            stamped = False
+            try:
+                for k, v in identity.items():
+                    _write(af, k, v)
+                # Album-level spelling of the chosen release (corrected when
+                # the uploader's tags say something else).
+                _write(af, "ALBUM", album_title)
+                _write(af, "ALBUMARTIST", artist_name)
+                t = assign.get(path)
+                if t:
+                    _write(af, "MUSICBRAINZ_TRACKID", t.get("recording_mbid"))
+                    _write(af, "TRACKNUMBER", t.get("position"))
+                    _write(af, "DISCNUMBER", t.get("disc"))
+                    _write(af, "TITLE", t.get("title"))
+                    _write(af, "ARTIST", t.get("artist_credit"))
+                stamped = True
+            finally:
+                if defer and af.defer_save(False) is False:
+                    stamped = False
+            return stamped
         except Exception:
-            continue
-    return n
+            return False
+
+    # Distinct FILES are independent — each rewrite_via works on a temp of its
+    # own beside its target and swaps it in with os.replace — so an album's
+    # tracks stamp side by side instead of one after another; nothing here is
+    # shared but the read-only identity above. Inside one file the writes stay
+    # strictly ordered.
+    workers = worker_count(load_config(), default=8, maximum=8,
+                           items=len(audio))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        return sum(1 for ok in ex.map(_stamp_one, audio) if ok)
 
 
 # --------------------------------------------------------------------------- #
 # The orchestrator
 # --------------------------------------------------------------------------- #
+# How many candidates of ONE release are attempted at once. The user asked for
+# exactly this: "batch downloads at most 3 results for an album, and if one is
+# good that it just deletes the others and imports the good download" — up to
+# three peers transfer in parallel, the first that verifies good becomes the
+# import, and every other candidate's bytes stop and are swept rather than left
+# to keep arriving. The cap is ALSO bounded by the app's own release width
+# (`soulseek_search_concurrency`), see _batch_width.
+_BATCH_MAX = 3
+
+
+def _batch_width(cfg=None):
+    """Candidates of ONE release attempted at once: _BATCH_MAX, and never wider
+    than the app's release width (`soulseek_search_concurrency`).
+
+    The two budgets bound different things — `concurrency()` is how many ALBUMS
+    the pipeline works on at once, this is how many peers one of those albums
+    talks to — so they MULTIPLY: with the default 3 the worst case is three
+    releases × three candidates = nine concurrent peer transfers, each of them
+    one album. Deriving the batch from the release width instead of fixing it at
+    three is what keeps that product from growing behind the user's back: a
+    machine configured to run ONE release at a time (the setting that exists to
+    serialize the pipeline) then runs one candidate at a time too, instead of
+    tripling its network load on the strength of a constant in here."""
+    return max(1, min(_BATCH_MAX, concurrency(cfg)))
+
+
+def _batch_hint(ddir, attempt):
+    """Whether every file of `attempt` already sits on disk at the size the peer
+    reported, inside THAT candidate's own album trees — the CHEAP half of the
+    batch's readiness test, asking slskd nothing.
+
+    Cheap on purpose: it is what keeps a tick of a batch wait from making a
+    transfer-tree request per candidate. It is not the verdict — a file can be
+    on disk and unclaimed (a leftover of an earlier attempt, a peer slskd still
+    reports as Queued) — so _batch_arrived asks slskd on top of it."""
+    index = _index_download_tree(ddir, attempt["username"], attempt["leaves"])
+    for w in attempt["wanted"]:
+        if w["filename"] in attempt["got"]:
+            continue
+        if not _local_download_candidates(ddir, attempt["username"], w["filename"],
+                                          int(w.get("size") or 0), index=index):
+            return False
+    return True
+
+
+def _batch_arrived(slsk, ddir, attempt):
+    """Whether every file of `attempt` has really arrived: on disk (see
+    _batch_hint) AND vouched for by slskd's transfer record.
+
+    The vouch is what makes this usable as a batch's readiness test: a peer
+    whose transfers are still Queued has files on disk only if somebody else
+    put them there (leftovers), and handing the batch over to such a candidate
+    would move the job from a peer that HAS the album to one that merely looks
+    like it does. It is not the full acceptance test of _wait_for_files — a file
+    with no live record at all is left to that function's own fenced rule (b) —
+    only the "this peer is really done" signal the batch needs to pick a
+    winner."""
+    if not _batch_hint(ddir, attempt):
+        return False
+    from server.soulseek import _user_transfers
+    left = {w["filename"] for w in attempt["wanted"]
+            if w["filename"] not in attempt["got"]}
+    ok = {t["filename"] for t in _user_transfers(slsk, attempt["username"], left)
+          if _transfer_ok(t["state"])}
+    return left <= ok
+
+
+def _batch_cancel_check(slsk, ddir, current, others):
+    """The cancel_check that lets the FIRST good copy win inside a batch.
+
+    `_wait_for_files` calls this on every tick, so it answers the two questions
+    that can end a candidate's wait early: the user's cancel button, and "is
+    another candidate of this batch already holding the whole album?". The
+    second is what makes a batch worth having — without it the job sat out the
+    slowest peer in rank order while a faster one had the album on disk a minute
+    in.
+
+    `current`'s own files are tested first, and a peer that has really arrived
+    keeps the wait going (returns False): _wait_for_files resolves it on this
+    very tick and returns normally, so a candidate that is itself complete can
+    never be handed to the "another peer won" path — which would sweep the album
+    it just downloaded. Its test is the same authoritative one (disk AND slskd's
+    vouch), so a slower peer whose files merely lie on disk cannot hold the batch
+    either."""
+    def check():
+        if _cancelled():
+            return True
+        if _batch_arrived(slsk, ddir, current):
+            return False
+        for o in others:
+            if o["state"] in ("downloading", "ready") and _batch_arrived(slsk, ddir, o):
+                o["state"] = "ready"     # its album is really here: take it next
+                return True
+        return False
+    return check
+
+
+def _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score):
+    """Work up to `len(batch)` candidates of ONE release at once.
+
+    EVERY candidate of the batch is queued before any of them is waited for —
+    the .log gate alone on a CD, its album once that log passed — so the peers
+    transfer in parallel instead of one after the other. The batch is then
+    waited candidate by candidate in rank order (`_rank`: lossless, score,
+    fastest peer), and each wait ends early the moment ANOTHER candidate's album
+    is already on disk, so the first good copy wins rather than the first in
+    rank order that happens to finish (see _batch_cancel_check).
+
+    "Good" is exactly what it always was: every file arrived with slskd
+    vouching for it (_wait_for_files), the album root resolves under the
+    download dir, MEDIA stamps and _verify_album passes — the CD .log/CRC gate
+    included, which is the step a CD rip most often fails, so a candidate that
+    cannot produce its evidence is rejected and the NEXT candidate is the one
+    that imports. Nothing here weakens a check to declare a win.
+
+    A candidate that fails at any step is rejected with its own reason (the
+    attempt names the peer, the reason the cause) and swept by _drop_candidate —
+    cancel, then delete, verified — and the rest of the batch carries on. The
+    candidates the winning one ends are swept the same way: "if one is good that
+    it just deletes the others".
+
+    The .log gate itself is graded one candidate at a time and NOT probed (its
+    wait is over a few kB and bounded by _LOG_TIMEOUT_S): the logs of the whole
+    batch are queued at once, so they arrive in parallel, and the few seconds one
+    peer is slower than another cost nothing next to the album transfer the
+    probe exists for.
+
+    Returns {"candidate", "username", "dir", "wanted", "got", "root"} for the
+    winner, the string "cancelled" when the job was cancelled mid-flight, or
+    None when every candidate in the batch was tried and rejected."""
+    attempts = []
+    for cand in batch:
+        uname, folder = cand["username"], cand["dir"]
+        _log(f"Candidate: {uname} · …{folder[-60:]} ({cand['matched']}/"
+             f"{cand['expected']} tracks matched)")
+        wanted, seen = [], set()
+        for f in cand["files"]:
+            if f["file"] in seen:
+                continue
+            seen.add(f["file"])
+            wanted.append({"filename": f["file"], "size": f["size"]})
+        if not wanted:
+            _reject(uname, folder, "no files listed for this folder")
+            continue
+        logs = ([{"filename": f["file"], "size": f["size"]} for f in cand["logs"]]
+                if is_cd and cand["logs"] else [])
+        log_names = {w["filename"] for w in logs}
+        attempts.append({
+            "cand": cand, "username": uname, "dir": folder,
+            "wanted": wanted, "logs": logs,
+            "album_wanted": [w for w in wanted if w["filename"] not in log_names],
+            "got": {}, "state": "queued",
+            "leaves": {_leaf_of(w["filename"]) for w in wanted} - {""},
+            # One "download started" frame per CANDIDATE, however many waits it
+            # takes to fetch it (see _start_once).
+            "announce": _start_once(len(wanted)),
+        })
+    if not attempts:
+        return None
+
+    # --- queue the whole batch --------------------------------------------
+    # The gate's own files go out ALONE on a CD — queueing the album in the same
+    # call sent a peer whose log graded below the bar the album's bytes — and the
+    # album follows per candidate once ITS log passed. But all of the batch is
+    # asked at once: that is the parallelism the batching buys.
+    for a in attempts:
+        first = a["logs"] or a["wanted"]
+        try:
+            slsk.enqueue_download(a["username"], first)
+        except Exception as e:
+            _reject(a["username"], a["dir"], f"download failed to queue: {e}")
+            # slskd refuses a folder one file at a time: the peers that DID
+            # accept are already queued, so the attempt is dropped the same way a
+            # rejected one is instead of leaving those bytes behind.
+            _drop_candidate(slsk, ddir, a["username"], a["wanted"])
+            a["state"] = "dropped"
+            continue
+        # The job is DOWNLOADING from this point, so say so immediately: the
+        # search bar is cleared and a transfer block is published before the
+        # first poll, so the UI switches to "downloading" the moment the peer
+        # has the files. On a CD only the log is in flight yet, so the block
+        # shows the log alone.
+        _job_search_done()
+        _job_progress(_progress_snapshot(a["username"], first, set(), [], "queued"))
+        a["state"] = "logging" if a["logs"] else "downloading"
+
+    # --- the .log gate (CD): each candidate's own log decides for itself ---
+    for a in attempts:
+        if a["state"] != "logging":
+            continue
+        # exactly one log per disc (candidate selection), so this wait is over
+        # the wanted logs alone: it returns the moment they are all local
+        # instead of waiting out a junk extra log's timeout. They are also the
+        # ONLY transfers this candidate has queued so far, so the block shows
+        # them and nothing else.
+        _stage("downloading", "Downloading the rip log(s) first…")
+        _log("Downloading .log file(s) first for a quality check…")
+        got_logs = _wait_for_files(slsk, ddir, a["username"], a["logs"],
+                                   timeout_s=_LOG_TIMEOUT_S,
+                                   cancel_check=_cancelled, phase="logging",
+                                   on_start=a["announce"])
+        if len(got_logs) < len(a["logs"]):
+            _reject(a["username"], a["dir"],
+                    f"{len(got_logs)} of {len(a['logs'])} log(s) arrived within "
+                    f"{int(_LOG_TIMEOUT_S)}s — trying the next candidate")
+            # The log is the only thing this candidate queued, but the WHOLE
+            # wanted set is dropped: a partial log, a transfer record or a temp
+            # file the peer is still flushing all live under this candidate's own
+            # album tree, and the next candidate downloaded them again.
+            _drop_candidate(slsk, ddir, a["username"], a["wanted"])
+            a["state"] = "dropped"
+            continue
+        if _cancelled():
+            return "cancelled"
+        _log("Grading rip log(s) with Logchecker…")
+        scores = _score_logs(list(got_logs.values()), cfg)
+        good, bad = [], []
+        for p, score, state, detail in scores:
+            _log(f"  {os.path.basename(p)}: score "
+                 f"{score if score is not None else '?'}, checksum {state or '?'}")
+            if _log_passes(score, state, min_score):
+                good.append(os.path.basename(p))
+            else:
+                bad.append((os.path.basename(p), score, state))
+        # A folder can hold a second, junk log for the same disc (and a
+        # manual/browse pick can hold several): the album rides on the log that
+        # grades well, the rest are reported and ignored. A checksum MISMATCH
+        # still costs the album its evidence — with no good log left, the
+        # candidate is rejected and the log that just landed is dropped again.
+        if not good:
+            _reject(a["username"], a["dir"],
+                    "log rejected: " + "; ".join(
+                        _log_fail_reason(n, s, st, min_score)
+                        for n, s, st in bad)
+                    + " (Settings → Auto-import); trying the next candidate")
+            _drop_candidate(slsk, ddir, a["username"], a["wanted"])
+            a["state"] = "dropped"
+            continue
+        for n, s, st in bad:
+            _log(f"  ignoring {_log_fail_reason(n, s, st, min_score)}")
+        _log(f"{len(good)} log(s) pass — downloading the full album…")
+        # The log cleared the bar, so the album has earned its bytes: it is
+        # requested NOW, in a second call, and only its own files — the logs are
+        # already local. A queue failure here is a rejected candidate like any
+        # other, reason named as such.
+        try:
+            slsk.enqueue_download(a["username"], a["album_wanted"])
+        except Exception as e:
+            _reject(a["username"], a["dir"], f"album failed to queue: {e}")
+            _drop_candidate(slsk, ddir, a["username"], a["wanted"])
+            a["state"] = "dropped"
+            continue
+        a["got"] = dict(got_logs)          # the logs are already on disk
+        a["state"] = "downloading"
+
+    # --- the album: every peer's bytes are in flight, the first good one wins --
+    order = [a for a in attempts if a["state"] == "downloading"]
+    while order:
+        a = order[0]
+        est_timeout = _est_timeout(a["cand"])
+        _stage("downloading",
+               f"Downloading {len(a['wanted'])} file(s) from {a['username']}…")
+        _log(f"Downloading {len(a['wanted'])} file(s) "
+             f"({a['cand']['total_size'] / (1024 * 1024):.0f} MB, up to {est_timeout}s)…")
+        got = _wait_for_files(slsk, ddir, a["username"],
+                              a["album_wanted"] or a["wanted"],
+                              timeout_s=est_timeout, cancel_check=_batch_cancel_check(
+                                  slsk, ddir, a,
+                                  [o for o in order if o is not a]),
+                              queue_budget_s=_queue_budget(a["cand"]),
+                              on_start=a["announce"])
+        # The CD gate's logs are already on disk with terminal transfers, and the
+        # album wait above did not cover them (they went out in the first call,
+        # not the second): they are folded back in so the album root,
+        # verification and import still see the whole candidate.
+        got = {**got, **a["got"]}
+        if _cancelled():
+            return "cancelled"
+        if len(got) < len(a["wanted"]):
+            missing = [w["filename"] for w in a["wanted"] if w["filename"] not in got]
+            # A peer that already has the whole album is reason enough to stop
+            # WAITING for this one — and to stop downloading from it: its
+            # partials have no import to serve, so they go with it. The reason
+            # keeps the old taxonomy (this candidate's own download did not
+            # deliver) and adds WHY the job stopped waiting on it.
+            mate = next((o for o in order
+                         if o is not a and o["state"] == "ready"), None)
+            _reject(a["username"], a["dir"],
+                    f"download incomplete: {len(missing)} file(s) missing/timed out"
+                    + (f" — cancelled because {mate['username']} delivered the "
+                       f"album first" if mate is not None else ""))
+            if mate is not None:
+                _log(f"  {mate['username']} already has the album — dropping "
+                     f"{a['username']} and removing its partial files")
+            # the files that DID arrive are this candidate's, and the rest of
+            # its transfers are still queued: both are dropped together
+            _drop_candidate(slsk, ddir, a["username"], a["wanted"])
+            order.remove(a)
+            continue
+
+        # --- stage 3: audit ---------------------------------------------------
+        # The album root on disk is the highest directory below the download dir
+        # holding EVERY file of this candidate: the pinned
+        # `<ddir>/<user>/<batch id>/<remote path>/…` layout lands there, and so
+        # do the older shapes; a multi-disc tree split over one parent verifies
+        # as the union instead of half-importing.
+        resolved = list(got.values())
+        local_root = _local_album_root(ddir, resolved)
+        if not local_root:
+            _reject(a["username"], a["dir"],
+                    "downloaded files did not land in one album folder under the "
+                    "download dir")
+            _drop_candidate(slsk, ddir, a["username"], a["wanted"])
+            order.remove(a)
+            continue
+        _stage("verifying", "Verifying downloads against the rip log / decoders…")
+        _log("Verifying downloads against the rip log / decoders…")
+        media = "CD" if is_cd else "Digital Media"
+        _stamped, tag_problems = _stamp_media(local_root, media, cfg)
+        ok, problems = _verify_album(local_root, cfg, is_cd)
+        # A MEDIA tag that could not be written makes verify_album_checksums
+        # skip every file, so it is a verification problem, never a warning.
+        problems = list(tag_problems) + list(problems)
+        ok = ok and not tag_problems
+        if not ok:
+            for pr in problems[:6]:
+                _log("  ✕ " + pr)
+            # The reason names the cause, not just the count: a CD rip is judged
+            # on its log/CRC evidence, so "which candidate failed and why" is
+            # the difference between a peer worth retrying and one that never
+            # had the pressing.
+            _reject(a["username"], a["dir"],
+                    f"verification failed ({len(problems)} problem(s))"
+                    + (f": {problems[0]}" if problems else "")
+                    + " — trying the next candidate")
+            # the album root is this candidate's own (resolved from its own files
+            # below the download dir) — a junk file it also dropped there goes
+            # with it, and the sweep still runs afterwards
+            _drop_candidate(slsk, ddir, a["username"], a["wanted"],
+                            remove_root=local_root)
+            order.remove(a)
+            continue
+
+        # --- the batch is decided: this album is the import --------------------
+        for o in order:
+            if o is a:
+                continue
+            _log(f"  dropping {o['username']} — {a['username']} verified first")
+            _reject(o["username"], o["dir"],
+                    f"{a['username']} delivered the album first — this candidate "
+                    f"was cancelled and its partial files removed")
+            _drop_candidate(slsk, ddir, o["username"], o["wanted"])
+        return {"candidate": a["cand"], "username": a["username"], "dir": a["dir"],
+                "wanted": a["wanted"], "got": got, "root": local_root}
+    return None
+
+
 def job_active():
     """True while ANY job holds the pipeline (running or parked on a prompt).
 
@@ -2802,6 +3262,19 @@ def start_job(release_mbid=None, release=None, queries=None, username=None,
     key = _release_key(release_mbid, release)
     if key and key in _queued_keys():
         return {"ok": False, "error": "this release is already queued for import",
+                "job": job_state()}
+    # …or already RUNNING right now. `enqueue` has always asked this and
+    # `start_job` never did, so a second request for a release that was mid
+    # download/import got its own job: the album-folder claim only made it
+    # WAIT, and when the wait ended it searched, downloaded and imported the
+    # same album again — the duplicate the claim was supposed to prevent.
+    # `transient` is the honest classification: the pipeline is busy, not the
+    # release failed, so the wishes worker waits rather than spending an
+    # attempt. `_running_keys()` counts ACTIVE jobs only, so a settled job
+    # never blocks a legitimate retry.
+    if key and key in _running_keys():
+        return {"ok": False, "transient": True,
+                "error": "this release is already being imported",
                 "job": job_state()}
     # Already in the library: nothing to import, and re-downloading it is what
     # left a second copy of the same album beside the first (observed live —
@@ -2908,13 +3381,61 @@ def _reject(username, folder, reason):
         _job["attempts"].append({"username": username, "dir": folder, "reason": str(reason)[:200]})
 
 
-def _ask_to_wish(release, queries, waited, cfg, confirm_lossy):
+def _record_wish_attempt(wid, error, cfg):
+    """Record one finished attempt on the wish a failed job just offered.
+
+    The retry policy lives in ONE place (server/wishes: classified outcomes,
+    empty-search budget, doubling backoff, attempt caps) and this is the same
+    answer its own worker gives a job that ended the same way: a search that
+    found nothing spends an empty-search count, anything else spends an attempt,
+    and both get `retry_at` set to the backoff's own end. `wishes.due_at`
+    compares against exactly that, which is what makes the next pass wait
+    instead of searching — and downloading — the release that just failed on
+    every candidate.
+
+    Counts are RAISED, never reset: a wish that already failed twice keeps the
+    two behind it, so its own budget (and its cap) still means something. A wish
+    that is somehow already `imported` is left alone — the library has the album
+    and reviving the row would only ask for it again.
+
+    Returns the seconds the next attempt waits (0.0 when it may run at the next
+    pass); never raises, because a wish store that cannot be written must not
+    undo the download that already succeeded.
+    """
+    delay = 0.0
+    try:
+        from server import wishes
+        cur = wishes.get_wish(wid) or {}
+        if str(cur.get("status") or "") == "imported":
+            return 0.0
+        attempts = max(1, int(cur.get("attempts") or 0))
+        delay = wishes.retry_delay(cfg, attempts)
+        not_found = (int(cur.get("not_found") or 0) + 1
+                     if wishes.outcome_of(error) == "not_found" else None)
+        wishes.mark_wanted(wid, error=str(error or "")[:300], attempts=attempts,
+                           retry_at=time.time() + delay, not_found=not_found)
+        if delay:
+            _log(f"  it is not searched again immediately: one failed attempt is "
+                 f"recorded on the wish and the next pass waits "
+                 f"{int(delay / 60) or 1} minute(s) (wishes_retry_backoff_minutes).")
+    except Exception:
+        traceback.print_exc()
+    return delay
+
+
+def _ask_to_wish(release, queries, waited, cfg, confirm_lossy, error=""):
     """Park the job on the "add to wishes?" prompt; add the wish if accepted.
 
     `waited` is the seconds the job's searches REALLY took (`_search_seconds`,
     every window summed), never the configured ceiling they were allowed: the
     prompt used to report `soulseek_auto_search_wait + _SEARCH_GRACE_S` as if
     the search had spent it.
+
+    `error` is why the job got here — the same message its failure ends on. The
+    wish the user accepts RECORDS it as a finished attempt (see
+    _record_wish_attempt), which is what stops the worker's next pass from
+    re-running this very search, and re-downloading from this very set of peers,
+    minutes after they all failed.
 
     A job that ends with nothing imported used to leave the user a bare error
     and nothing else, even though the background wishes worker keeps searching
@@ -2969,6 +3490,14 @@ def _ask_to_wish(release, queries, waited, cfg, confirm_lossy):
         wishes.update_wish(wish["id"], {"queries": list(queries)})
     except Exception:
         pass
+    # The attempt that got here is recorded ON the wish before anything else can
+    # read it: an accepted offer used to add a wish that was born due
+    # (`last_search` 0, `retry_at` 0), so the worker's next pass — at most two
+    # minutes later — re-ran the same search against the same peers that had
+    # just failed. The retry policy's own answer (server/wishes: attempts,
+    # empty searches, backoff) now applies to a job the USER ran exactly as it
+    # does to one the worker ran itself.
+    _record_wish_attempt(wish["id"], error, cfg)
     _log(f"Added to wishes (#{wish['id']}) — the worker keeps searching for this "
          f"release in the background with the same queries, so nothing is lost "
          f"by parking this job.")
@@ -3176,6 +3705,30 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 return
             with _lock:
                 _job["_claim"] = claim
+            # The job we queued behind may have IMPORTED the album while we
+            # waited: the claim serialises two jobs, it never says the folder is
+            # now full. Re-asking here is what stops this job from searching
+            # for — and downloading — an album the library just received.
+            # `imported` is true because the LIBRARY holds the album (the note
+            # says who put it there), which is the signal the wish worker reads
+            # to settle its own row; nothing is cleared here, because this job
+            # downloaded nothing.
+            try:
+                from server import wishes
+                _key = _release_key(None, release)
+                if _key and _key in wishes.owned_mbids(cfg):
+                    _log("The album landed while this job waited for its folder "
+                         "— another job imported it, so there is nothing left to "
+                         "download.")
+                    return _finish("done", {
+                        "album_path": claim_path, "imported": True,
+                        "staging_path": None, "organized": True,
+                        "organize_error": None,
+                        "note": "already imported by another job while this one "
+                                "waited for the album folder",
+                    })
+            except Exception:
+                pass      # a library that cannot be read must not block the job
 
         # ---- candidates ------------------------------------------------------
         # The queries this job searched with and the window it waited out are
@@ -3220,6 +3773,7 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 "cues": [f for f in files if f["file"].lower().endswith(".cue")],
                 "matched": 0, "expected": len(release.get("media") or []),
                 "complete": False, "lossless": True, "slot": False, "queue": 0,
+                "speed": 0,
                 "total_size": sum(f["size"] for f in plan), "score": 0,
             }]
         else:
@@ -3410,14 +3964,16 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 # took (`_search_seconds`, both passes summed), never the cap:
                 # the prompt used to announce 55s about searches that had ended
                 # in two, which is a duration nobody waited.
-                wished = _ask_to_wish(release, queries_built, searched_s, cfg, confirm_lossy)
+                no_folder_msg = ("No candidate folder contained every track "
+                                 "(and cue/log per disc for CD). Try the "
+                                 "manual entry or different search terms.")
+                wished = _ask_to_wish(release, queries_built, searched_s, cfg,
+                                      confirm_lossy, error=no_folder_msg)
                 if _cancelled():
                     return _finish("cancelled")
                 if wished:
                     return _finish("done", wished)
-                raise RuntimeError("No candidate folder contained every track "
-                                   "(and cue/log per disc for CD). Try the "
-                                   "manual entry or different search terms.")
+                raise RuntimeError(no_folder_msg)
             # ---- lossless preference ----------------------------------------
             # `_rank` already puts lossless folders first, so a lossless match
             # wins whenever one exists. When every candidate is lossy the
@@ -3463,193 +4019,42 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                                        "was downloaded.")
                 _log("Lossy download approved — continuing with the lossy copy.")
 
-        # ---- try candidates in order -----------------------------------------
-        # EVERY candidate the search scored is tried, best first: each rejected
-        # peer costs only its own attempt (its partials are cleaned up), while
-        # stopping early throws away copies that would have verified. The job
-        # ends when a candidate imports, or when the list runs out.
-        for cand in candidates:
+        # ---- try candidates in batches ---------------------------------------
+        # Up to `_batch_width` candidates of THIS release are attempted at once
+        # (see _try_batch): three peers transferring in parallel, the first that
+        # verifies good ends the batch — the losers are cancelled AND swept, not
+        # left to keep arriving — and the next batch of up to three runs only
+        # when every peer in it was rejected. One entry per peer+folder
+        # (_dedupe_candidates), one attempt per entry: a folder this job already
+        # tried is never tried again.
+        pool = _dedupe_candidates(candidates)
+        width = _batch_width(cfg)
+        while pool:
             if _cancelled():
                 return _finish("cancelled")
-            uname, folder = cand["username"], cand["dir"]
-            _log(f"Candidate: {uname} · …{folder[-60:]} ({cand['matched']}/{cand['expected']} tracks matched)")
-
-            # --- CD: the .log is queued FIRST, the album only after it passes --
-            # Queueing the album in the same call as the log meant a peer whose
-            # log grades below the bar still sent (and was paid for) album
-            # bytes, which then had to be swept as orphans. So the gate's own
-            # files go out alone, and the rest of `wanted` is requested only
-            # once the log has passed (see the gate below). A non-CD candidate
-            # has no gate: everything goes out in this one call.
-            wanted, seen = [], set()
-            for f in cand["files"]:
-                if f["file"] in seen:
-                    continue
-                seen.add(f["file"])
-                wanted.append({"filename": f["file"], "size": f["size"]})
-            if not wanted:
-                _reject(uname, folder, "no files listed for this folder")
-                continue
-            if _cancelled():
+            batch, pool = _take_batch(pool, width)
+            _log(f"Batch of {len(batch)} candidate(s), downloading together: "
+                 + " · ".join(f"{c['username']} (…{c['dir'][-40:]})" for c in batch))
+            found = _try_batch(slsk, ddir, batch, release, cfg, is_cd, min_score)
+            if found == "cancelled":
                 return _finish("cancelled")
-            # One "download started" frame per CANDIDATE, however many waits it
-            # takes to fetch it (see _start_once).
-            announce = _start_once(len(wanted))
-            wanted_logs = ([{"filename": f["file"], "size": f["size"]}
-                            for f in cand["logs"]]
-                           if is_cd and cand["logs"] else [])
-            log_names = {w["filename"] for w in wanted_logs}
-            album_wanted = [w for w in wanted if w["filename"] not in log_names]
-            try:
-                slsk.enqueue_download(uname, wanted_logs or wanted)
-            except Exception as e:
-                _reject(uname, folder, f"download failed to queue: {e}")
-                # slskd refuses a folder one file at a time: the peers that DID
-                # accept are already queued, so the attempt is dropped the same
-                # way a rejected one is instead of leaving those bytes behind.
-                _drop_candidate(slsk, ddir, uname, wanted)
+            if not found:
                 continue
-
-            # The job is DOWNLOADING from this point, so say so immediately:
-            # the search bar is cleared and a transfer block is published
-            # before the first poll, so the UI switches to "downloading" the
-            # moment the peer has the files instead of sitting on the finished
-            # search until a byte count shows up. On a CD only the log is in
-            # flight yet, so the block shows the log alone.
-            _job_search_done()
-            _job_progress(_progress_snapshot(uname, wanted_logs or wanted,
-                                             set(), [], "queued"))
-
-            # --- the log is the cheap gate (CD) --------------------------------
-            if wanted_logs:
-                # exactly one log per disc (candidate selection), so this wait
-                # is over the wanted logs alone: it returns the moment they are
-                # all local instead of waiting out a junk extra log's timeout.
-                # They are also the ONLY transfers queued so far, so the block
-                # shows them and nothing else.
-                _stage("downloading", "Downloading the rip log(s) first…")
-                _log("Downloading .log file(s) first for a quality check…")
-                got_logs = _wait_for_files(slsk, ddir, uname, wanted_logs,
-                                           timeout_s=_LOG_TIMEOUT_S,
-                                           cancel_check=_cancelled, phase="logging",
-                                           on_start=announce)
-                if len(got_logs) < len(wanted_logs):
-                    _reject(uname, folder,
-                            f"{len(got_logs)} of {len(wanted_logs)} log(s) arrived "
-                            f"within {int(_LOG_TIMEOUT_S)}s — trying the next candidate")
-                    # The log is the only thing this candidate queued, but the
-                    # WHOLE wanted set is dropped: a partial log, a transfer
-                    # record or a temp file the peer is still flushing all live
-                    # under this candidate's own album tree, and the next
-                    # candidate downloaded them again.
-                    _drop_candidate(slsk, ddir, uname, wanted)
-                    continue
-                if _cancelled():
-                    return _finish("cancelled")
-                _log("Grading rip log(s) with Logchecker…")
-                scores = _score_logs(list(got_logs.values()), cfg)
-                good, bad = [], []
-                for p, score, state, detail in scores:
-                    _log(f"  {os.path.basename(p)}: score "
-                         f"{score if score is not None else '?'}, checksum {state or '?'}")
-                    if _log_passes(score, state, min_score):
-                        good.append(os.path.basename(p))
-                    else:
-                        bad.append((os.path.basename(p), score, state))
-                # A folder can hold a second, junk log for the same disc (and a
-                # manual/browse pick can hold several): the album rides on the
-                # log that grades well, the rest are reported and ignored. A
-                # checksum MISMATCH still costs the album its evidence — with
-                # no good log left, the candidate is rejected and the log that
-                # just landed is dropped again.
-                if not good:
-                    _reject(uname, folder,
-                            "log rejected: " + "; ".join(
-                                _log_fail_reason(n, s, st, min_score)
-                                for n, s, st in bad)
-                            + " (Settings → Auto-import); trying the next candidate")
-                    _drop_candidate(slsk, ddir, uname, wanted)
-                    continue
-                for n, s, st in bad:
-                    _log(f"  ignoring {_log_fail_reason(n, s, st, min_score)}")
-                _log(f"{len(good)} log(s) pass — downloading the full album…")
-
-                # The log cleared the bar, so the album has earned its bytes:
-                # it is requested NOW, in a second call, and only its own files
-                # — the logs are already local. A queue failure here is a
-                # rejected candidate like any other, reason named as such.
-                try:
-                    slsk.enqueue_download(uname, album_wanted)
-                except Exception as e:
-                    _reject(uname, folder, f"album failed to queue: {e}")
-                    _drop_candidate(slsk, ddir, uname, wanted)
-                    continue
-
-            # --- the album (queued above: the log first, the album after it) ----
-            est_timeout = _est_timeout(cand)
-            _stage("downloading",
-                   f"Downloading {len(wanted)} file(s) from {uname}…")
-            _log(f"Downloading {len(wanted)} file(s) "
-                 f"({cand['total_size'] / (1024 * 1024):.0f} MB, up to {est_timeout}s)…")
-            got = _wait_for_files(slsk, ddir, uname, album_wanted or wanted,
-                                  timeout_s=est_timeout, cancel_check=_cancelled,
-                                  queue_budget_s=_queue_budget(cand),
-                                  on_start=announce)
-            if wanted_logs:
-                # The logs are already on disk with terminal transfers, and the
-                # album wait above did not cover them (they went out in the
-                # first call, not the second): they are folded back in so the
-                # album root, verification and import still see the whole
-                # candidate.
-                got = {**got, **got_logs}
-            if _cancelled():
-                return _finish("cancelled")
-            if len(got) < len(wanted):
-                missing = [w["filename"] for w in wanted if w["filename"] not in got]
-                _reject(uname, folder, f"download incomplete: {len(missing)} file(s) missing/timed out")
-                # the files that DID arrive are this candidate's, and the rest of
-                # its transfers are still queued: both are dropped together
-                _drop_candidate(slsk, ddir, uname, wanted)
-                continue
-
-            # --- stage 3: audit -------------------------------------------------
-            # The album root on disk is the highest directory below the
-            # download dir holding EVERY file of this candidate: the pinned
-            # `<ddir>/<user>/<batch id>/<remote path>/…` layout lands there,
-            # and so do the older `<ddir>/<leaf>/…` /
-            # `<ddir>/<user>/<leaf>/…` ones; a multi-disc tree split over one
-            # parent (…/CD1 + …/CD2) verifies as the union instead of
-            # half-importing.
-            resolved = list(got.values())
-            local_root = _local_album_root(ddir, resolved)
-            if not local_root:
-                _reject(uname, folder, "downloaded files did not land in one album "
-                                       "folder under the download dir")
-                _drop_candidate(slsk, ddir, uname, wanted)
-                continue
-            _stage("verifying", "Verifying downloads against the rip log / decoders…")
-            _log("Verifying downloads against the rip log / decoders…")
-            media = "CD" if is_cd else "Digital Media"
-            _stamped, tag_problems = _stamp_media(local_root, media, cfg)
-            ok, problems = _verify_album(local_root, cfg, is_cd)
-            # A MEDIA tag that could not be written makes verify_album_checksums
-            # skip every file, so it is a verification problem, never a warning.
-            problems = list(tag_problems) + list(problems)
-            ok = ok and not tag_problems
-            if not ok:
-                for pr in problems[:6]:
-                    _log("  ✕ " + pr)
-                _reject(uname, folder, f"verification failed ({len(problems)} problem(s))")
-                # the album root is this candidate's own (resolved from its own
-                # files below the download dir) — a junk file it also dropped
-                # there goes with it, and the sweep still runs afterwards
-                _drop_candidate(slsk, ddir, uname, wanted, remove_root=local_root)
-                continue
+            if pool:
+                _log(f"  {len(pool)} candidate(s) were never started — a good copy "
+                     f"is in hand.")
             _stage("importing", "Importing into the library…")
             _log("Verification passed — importing into the library…")
 
             # --- stage 4: import -------------------------------------------------
-            result = _import(local_root, release, cfg, is_cd)
+            result = _import(found["root"], release, cfg, is_cd)
+            # The library holds the album now, so the download dir is only
+            # staging: `soulseek_clear_downloads` decides whether what THIS job
+            # downloaded there goes with it (see _clear_downloads). Only for an
+            # import that really landed — a failed one keeps its files, and they
+            # are what its retry downloads from.
+            if result.get("imported"):
+                result.update(_clear_downloads(slsk, ddir, found, cfg))
             _finish("done", result)
             return
 
@@ -3660,14 +4065,16 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
         # the wish list — with the queries this job already searched with — and
         # the background worker keeps looking for it. The offer carries the
         # seconds the searches REALLY took, like the other dead end.
-        wished = _ask_to_wish(release, queries_built, searched_s, cfg, confirm_lossy)
+        rejected_msg = ("Every candidate was rejected "
+                        f"({len(_job['attempts'])} attempt(s) — see the log).")
+        wished = _ask_to_wish(release, queries_built, searched_s, cfg, confirm_lossy,
+                              error=rejected_msg)
         if _cancelled():
             return _finish("cancelled")
         if wished:
             _finish("done", wished)
             return
-        raise RuntimeError("Every candidate was rejected "
-                           f"({len(_job['attempts'])} attempt(s) — see the log).")
+        raise RuntimeError(rejected_msg)
 
     except intg.MusicBrainzError as e:
         # MusicBrainz itself is down or rate-limiting — a per-item failure with
@@ -3749,6 +4156,157 @@ def _cleanup_partial(ddir, local_files, remove_root=None):
     from server.soulseek import prune_download_dirs
     prune_download_dirs(ddir)
     return removed
+
+
+def _file_stats(path):
+    """(size, exists) of one local file — 0/False for anything unreadable."""
+    try:
+        return os.path.getsize(path), True
+    except OSError:
+        return 0, False
+
+
+def _tree_stats(root):
+    """(files, bytes) under a directory — what removing it is about to free.
+
+    Dot-dirs are skipped, like every other walk here: `.incomplete` is slskd's
+    staging tree, staged bytes are counted by the sweep that owns them."""
+    n = b = 0
+    for dp, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for f in files:
+            size, ok = _file_stats(os.path.join(dp, f))
+            if ok:
+                n += 1
+                b += size
+    return n, b
+
+
+def _foreign_files(root, wanted):
+    """Files under `root` that are NOT this candidate's own download.
+
+    Everything under the download dir belongs to somebody, and a delete scoped
+    to ONE download may only take that download's bytes: a folder that also
+    holds a file of another download is left standing (the caller still deletes
+    this candidate's own files out of it, one by one — the honest half)."""
+    out = []
+    for dp, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for f in files:
+            p = os.path.join(dp, f)
+            if _slskd_partial(f, wanted):
+                continue                     # this candidate's own temp write
+            if any(_in_candidate_folder(p, w["filename"]) for w in wanted):
+                continue
+            out.append(p)
+    return out
+
+
+def _clear_downloads(slsk, ddir, found, cfg):
+    """Delete what the album that just imported left in the download dir.
+
+    `soulseek_clear_downloads` (Settings → Soulseek, ON by default) is the
+    user's switch: the import MOVES the album into the library
+    (mlo.paths.move_path — a real move, never a silent copy), so the download
+    dir is only staging, and everything this job put there is residue — a copy
+    an interrupted move left behind, slskd's temp-suffixed partials, the staged
+    halves of its transfers, and the `<user>/<batch id>/<album>` shells a
+    finished job used to leave to `_prune_downloads`, which stands down while
+    other jobs are running.
+
+    Scoped three ways, because this is the one destructive step of a SUCCESSFUL
+    job: only the directories THIS candidate's own remote paths put the download
+    in (see _candidate_dirs), only inside the configured download dir
+    (`soulseek_download_dir` may be a path the user picked, and nothing above
+    the download dir is ever touched), and only after an import that really
+    landed — the caller checks `imported`, so a failed import keeps its files
+    for the retry that must not download them again.
+
+    The result says what happened rather than passing in silence: how many files
+    and bytes went, and what was kept with the reason (the setting off, a path
+    outside the download dir, a folder that also holds another download, a file
+    a peer still holds open). Nothing here raises — a cleanup that fails is
+    reported, never turned into a failed import."""
+    out = {"download_cleared": False,
+           "download_removed": {"files": 0, "bytes": 0, "dirs": 0},
+           "download_kept": []}
+    if not cfg.get("soulseek_clear_downloads", True):
+        _log("Keeping the downloaded copy: Settings → Soulseek → \"Delete the "
+             "downloaded copy after a successful import\" is off.")
+        out["download_kept"] = ["the download is kept: the setting is off"]
+        return out
+    try:
+        username, wanted = found["username"], found["wanted"]
+        # The candidate's own leftovers first (a truncated partial, a copy the
+        # move left behind), then slskd's temp writes and the staged halves —
+        # each of them matched against THIS candidate's own file set.
+        on_disk = _local_wanted_files(ddir, username, wanted)
+        before = {p: _file_stats(p) for p in on_disk}
+        # _candidate_dirs can name ONE folder twice — its normcased remote tail
+        # and the parent of a resolved file are the same directory on a
+        # case-insensitive filesystem — and counting it twice would overstate
+        # what the step removed.
+        dirs, _seen = [], set()
+        for d in _candidate_dirs(ddir, username, wanted, on_disk):
+            if os.path.normcase(d) not in _seen:
+                _seen.add(os.path.normcase(d))
+                dirs.append(d)
+        _cleanup_partial(ddir, on_disk)
+        gone = [p for p, (_s, ok) in before.items() if ok and not os.path.exists(p)]
+        files, freed = len(gone), sum(before[p][0] for p in gone)
+        files += _drop_temp_partials(ddir, username, wanted, on_disk)
+        for w in wanted:
+            try:
+                files += int(slsk.clear_transfer_files(
+                    ddir, username, w["filename"], 0)["files_deleted"])
+            except Exception:
+                pass
+        # …then the folder(s) the download lived in, deepest first. Each one is
+        # removed WHOLE only when everything in it is this candidate's own.
+        for root in sorted(dirs, key=len, reverse=True):
+            if not os.path.isdir(root):
+                continue
+            if not _inside(root, ddir):
+                out["download_kept"].append(f"{root} (outside the download dir)")
+                continue
+            foreign = _foreign_files(root, wanted)
+            if foreign:
+                out["download_kept"].append(
+                    f"{root} ({len(foreign)} file(s) of another download)")
+                continue
+            n, b = _tree_stats(root)
+            shutil.rmtree(root, ignore_errors=True)
+            if os.path.isdir(root):
+                out["download_kept"].append(f"{root} (a file is still open)")
+                continue
+            files += n
+            freed += b
+        # the shells the deletions left behind, now that nothing holds them
+        from server.soulseek import prune_download_dirs
+        prune_download_dirs(ddir)
+        # Counted AFTER the prune: a folder that was already empty goes with the
+        # shells, and it is still a folder this job's download lived in — the
+        # number the result reports is "how many of them are gone", however the
+        # bytes that freed them went.
+        out["download_removed"]["dirs"] = sum(
+            1 for d in dirs if not os.path.isdir(d))
+        out["download_cleared"] = True
+        out["download_removed"]["files"] = files
+        out["download_removed"]["bytes"] = freed
+        if files or out["download_removed"]["dirs"]:
+            _log(f"Cleared the download: {files} file(s), "
+                 f"{freed / (1024 * 1024):.1f} MB removed from the download dir "
+                 f"({out['download_removed']['dirs']} folder(s)).")
+        else:
+            _log("The download directory was already clear — the import moved the "
+                 "whole album into the library.")
+        for why in out["download_kept"]:
+            _log(f"  kept {why}")
+    except Exception:
+        traceback.print_exc()
+        out["download_cleared"] = False
+        out["download_kept"].append("the cleanup itself failed — see the log")
+    return out
 
 
 def _start_import_chain(album_dir, cfg):

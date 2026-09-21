@@ -1242,18 +1242,20 @@ function byReleaseGroupType(groups: RGRow[]): { label: string; list: RGRow[] }[]
  *  it covers. `count` is null while the discography is still loading. */
 interface TypeActionRow { label: string; types: string[]; count: number | null }
 
-/** The artist's whole action block: one Add to library / Download all pair for
- *  the discography and one for EVERY release-group type it actually has.
+/** The artist's whole action block: one Add to library button for the
+ *  discography and one for EVERY release-group type it actually has.
  *
- *  Both buttons send the same request — an artist add scoped by `types`, the
- *  filter `mlo.release_choice.type_matches` applies server-side — and differ
- *  only in `download`: "Add to library" records the framework albums and lets
- *  the wish queue's own search pick them up, "Download all" records them and
- *  starts that search now. Each row owns its own busy state (a running add
- *  disables that row, never the page), and the server's own answer — what it
- *  queued, what it skipped and why, or the switch that stopped it — lands
- *  directly under the row that asked for it. The queue's own view is refetched
- *  on success, so the wishes these buttons created show up there. */
+ *  Each button sends the same request — an artist add scoped by `types`, the
+ *  filter `mlo.release_choice.type_matches` applies server-side — and the
+ *  server starts the search for each album as it records it, so one button is
+ *  the whole action: the album is in the library and Soulseek is already
+ *  looking for its audio. (There used to be a second "Download all" button;
+ *  it differed only in a flag that asked for exactly this, so it said the same
+ *  thing twice.) Each row owns its own busy state (a running add disables that
+ *  row, never the page), and the server's own answer — what it queued, what it
+ *  skipped and why, or the switch that stopped it — lands directly under the
+ *  row that asked for it. The queue's own view is refetched on success, so the
+ *  albums these buttons created show up there. */
 function ArtistTypeActions({ artistId, mode, groups, total, loading }: {
   artistId: string; mode: ImportMode; groups: RGRow[]; total: number; loading: boolean;
 }) {
@@ -1274,11 +1276,11 @@ function ArtistTypeActions({ artistId, mode, groups, total, loading }: {
                                     || a.label.localeCompare(b.label))];
   }, [groups, total, loading, t]);
 
-  const run = async (row: TypeActionRow, download: boolean) => {
+  const run = async (row: TypeActionRow) => {
     setBusy(row.label);
     try {
       const res = await api.libraryAdd({
-        mbid: artistId, kind: "artist", mode, types: row.types, download,
+        mbid: artistId, kind: "artist", mode, types: row.types,
       });
       // The server's own words: the counts it answered with, its note (which
       // is the AUTO_OFF sentence when the switch is off), and WHY it skipped —
@@ -1339,19 +1341,10 @@ function ArtistTypeActions({ artistId, mode, groups, total, loading }: {
                   className="btn-ghost !py-1 text-xs shrink-0"
                   disabled={mine}
                   title={t("mb.actions_add_hint")}
-                  onClick={() => run(row, false)}
+                  onClick={() => run(row)}
                 >
                   {mine ? spinner : <Library className="h-3.5 w-3.5" />}
                   {t("mb.add_to_library")}
-                </button>
-                <button
-                  className="btn-ghost !py-1 text-xs shrink-0"
-                  disabled={mine}
-                  title={t("mb.actions_download_hint")}
-                  onClick={() => run(row, true)}
-                >
-                  {mine ? spinner : <Zap className="h-3.5 w-3.5" />}
-                  {t("mb.download_all")}
                 </button>
               </div>
               {mine ? (
@@ -1440,10 +1433,9 @@ export function MBArtistPage() {
                 per release group — `mode` rides along for the API's shared
                 shape, and still means one release per group here); with a type
                 selected it is exactly the groups on screen. The type rows
-                below are the per-TYPE version of the same thing, and the two
-                differ in what they hand over: this button records the albums
-                and the wish queue's own search picks them up, while a row's
-                Download all starts that search now. */}
+                below are the per-TYPE version of the same thing, and both hand
+                over the same list: every album is recorded and the search for
+                its audio starts as it is added. */}
             <Segmented
               value={mode}
               onChange={setMode}
@@ -1455,8 +1447,8 @@ export function MBArtistPage() {
               disabled={busy || shown.length === 0}
               title={
                 typeFilter === "All"
-                  ? "Add one album per release group of this artist to your library — the wish queue searches for them"
-                  : `Add one album per release group shown (${shown.length}) to your library — the wish queue searches for them`
+                  ? "Add one album per release group of this artist to your library — the search for each one starts as it is added"
+                  : `Add one album per release group shown (${shown.length}) to your library — the search for each one starts as it is added`
               }
               onClick={() =>
                 typeFilter === "All"

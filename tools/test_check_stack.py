@@ -275,7 +275,11 @@ check("the returned stack reflects it",
 check("the toggle survives a re-read", row(put({}).json(), "grade_check_mood")
       ["enabled"] is False)
 
-order_new = [4, 1, 11, 3, 14, 15, 2, 13, 18, 17, 8, 5, 19, 6, 7, 9, 12, 16, 10]
+# The list is what a client PUTs as a whole chain, so it has to be a complete,
+# anchor-consistent order: normalize_config re-inserts every registry id the
+# saved order does not name (20 and 21 among them, at their anchors), and the
+# check below is that a full order survives verbatim.
+order_new = [4, 1, 11, 3, 14, 15, 2, 13, 18, 17, 8, 5, 19, 6, 7, 9, 12, 16, 10, 20, 21]
 r = put({"order": order_new})
 check("a new chain order is accepted", r.status_code == 200, r.text[:200])
 check("run_all_order now holds exactly that order",

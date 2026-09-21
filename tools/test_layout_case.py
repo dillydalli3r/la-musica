@@ -227,7 +227,16 @@ ok("wrong_case" not in {i["kind"] for i in issues
    "the untouched issue kinds did not gain rows of their own")
 
 print("== read-only ==")
-ok(before == after, f"the scan moved nothing ({sorted(before ^ after)})")
+# Read-only means the LIBRARY is untouched: the scan renames, moves and
+# rewrites nothing it reports on. It writes exactly one thing of its own — the
+# report the Library page warns from, under the app's state folder (.mlo/data)
+# — so the delta may contain that and nothing else.
+created = after - before
+ok(not (before - after), f"the scan deleted nothing ({sorted(before - after)})")
+ok(all(p == ".mlo" or p.startswith(".mlo/") for p in created),
+   f"the only thing the scan writes is its own state ({sorted(created)})")
+ok(".mlo/data/layout_report.json" in created,
+   "the report lands where the Library page reads it")
 for p in ("Artists/lower", "Artists/Caps/bad album",
           "Artists/Files/My Album/1-01 song.flac"):
     ok(os.path.exists(os.path.join(MF, *p.split("/"))),

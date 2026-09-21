@@ -299,8 +299,12 @@ triggered.clear()
 status, body = add(mbid=rg_id(3), kind="release_group", types=["single"])
 eq(status, 200, "a type-filtered release-group add answers 200")
 eq([a["release_id"] for a in body["albums"]], [rel_id(3)], "its album was created")
-eq(triggered, [], "Add (download false) does not kick the queue itself")
-eq(body["note"], "", "and says nothing about a search — the automation owns it")
+# Every add starts the search it recorded, on the worker's OWN pass (no wish
+# id: the pass reads the store and searches what is due). Waiting for the
+# loop's next tick was up to two minutes of nothing happening.
+eq(triggered, [None], "Add starts the search it recorded, on the worker's own pass")
+eq(body["note"], "Soulseek is searching for them now.",
+   "and says so, exactly as Download all does")
 wish_id = body["albums"][0]["wish_id"]
 ok(bool(wish_id) and wishes.get_wish(wish_id) is not None,
    "the album's wish is on the existing queue")
@@ -310,8 +314,7 @@ status, body = add(mbid=rg_id(4), kind="release_group", types=["ep"], download=T
 eq(status, 200, "a download ask answers 200")
 eq(body["note"], "Soulseek is searching for them now.",
    "Download all says the search started")
-eq(triggered, [body["albums"][0]["wish_id"]],
-   "Download all asked the wishes worker for exactly the wish it created")
+eq(triggered, [None], "Download all starts the same one pass")
 
 status, body = add(mbid=rg_id(0), kind="release_group", types=["nope"])
 eq(status, 400, "a type outside MusicBrainz's vocabulary is refused")
@@ -379,26 +382,28 @@ class _Req:
     download = False
 
 
-def prepare(types=None, download=False, cfg=None):
+def prepare(types=None, cfg=None):
     emitted.clear()
     triggered.clear()
-    req = _Req()
-    req.download = download
-    api_add._prepare_artist(ARTIST, "best", cfg or set_cfg(), req, types)
+    api_add._prepare_artist(ARTIST, "best", cfg or set_cfg(), _Req(), types)
     return emitted[-1]
 
 
-event = prepare(types=["album"], download=True)
+event = prepare(types=["album"])
 album_paths = event["data"]["albums"]
 eq(len(album_paths), 1, "the one Album group's album was created")
-eq(len(triggered), 1, "download=True started the search for it")
-started_wish = wishes.get_wish(triggered[0]) if triggered else None
-ok(bool(started_wish) and started_wish["release_mbid"] == rel_id(0),
-   "and the worker was handed the wish for THAT release",
-   started_wish)
+eq(len(triggered), 1, "which started ONE pass for the whole batch")
+# The kick names no wish (the pass reads the store and searches what is due),
+# so what matters is that the wish for THIS release is on the queue, is due
+# now, and owns the framework album the event reported.
+found = [w for w in wishes.list_wishes() if w["release_mbid"] == rel_id(0)]
+eq(len(found), 1, "and the album has exactly one wish on the existing queue")
+started_wish = found[0] if found else None
+ok(bool(started_wish) and wishes_worker._due(started_wish, set_cfg()),
+   "which is due for its own next search, so that pass picks it up", started_wish)
 ok(bool(started_wish) and os.path.normcase(started_wish["album_path"])
    == os.path.normcase(album_paths[0]),
-   "which owns the framework album the event reported")
+   "and it owns the framework album the event reported")
 eq(event["body"], "Soulseek is searching for them now. 4 release group(s) skipped.",
    "the event says the search started, and how many groups were left out")
 eq(sorted(r["reason"] for r in event["data"]["errors"]),
@@ -409,11 +414,10 @@ eq(sorted(r["reason"] for r in event["data"]["errors"]),
    "and those four are reported, by the type they actually are")
 eq(event["data"]["types"], ["album"], "the event names the type filter it ran with")
 
-event = prepare(types=["album"], download=False)
-eq(triggered, [], "download=False leaves the queue's own loop to search it")
-eq(event["body"], "They are on the wish queue — its next search picks them up. "
-                  "4 release group(s) skipped.",
-   "and the event says where the albums went")
+event = prepare(types=["album"])
+eq(len(triggered), 1, "a second call starts its own pass too (one kick each)")
+eq(event["body"], "Soulseek is searching for them now. 4 release group(s) skipped.",
+   "and the event says the search started, and what the filter left out")
 
 # --------------------------------------------------------------------------- #
 # 5. auto_acquisition_enabled off: both buttons say the same thing
@@ -442,7 +446,7 @@ eq(triggered, [], "Add starts nothing either")
 eq(body["note"], import_policy.AUTO_OFF_NOTE,
    "and reports the same switch")
 
-event = prepare(types=["single"], download=True, cfg=off)
+event = prepare(types=["single"], cfg=off)
 eq(triggered, [], "the background prepare starts nothing with the switch off")
 eq(event["body"], import_policy.AUTO_OFF_NOTE + " 4 release group(s) skipped.",
    "and its event is that same wording")

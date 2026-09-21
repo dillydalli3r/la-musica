@@ -744,12 +744,16 @@ export default function SettingsPage() {
     },
     {
       title: "Soulseek (managed slskd)",
-      blurb: "Shares = your music folder. Downloads land in the download dir below; use the Soulseek page to search and download. Install slskd from the Dependencies tab.",
+      blurb: "Shares = the library folder (<music folder>/Artists). Downloads land in the download dir below; use the Soulseek page to search and download. Install slskd from the Dependencies tab.",
       fields: [
         { k: "soulseek_username", label: "Soulseek username", type: "text" },
         { k: "soulseek_password", label: "Soulseek password", type: "password" },
         { k: "soulseek_description", label: "Profile description (shown to other users)", type: "text" },
         { k: "soulseek_listen_port", label: "Listen port", type: "number", min: 1024, max: 65535 },
+        {
+          k: "soulseek_upnp", label: "Open the listen port on the router automatically", type: "bool",
+          help: "Asks the router to forward the listen port to this machine whenever slskd starts, replaces the mapping when the port changes, and removes it when this is turned off. Without a router that answers UPnP or NAT-PMP it does nothing at all — the Soulseek page's port state names which it was: mapped, refused (with the router's own reason), or no gateway answered. Turn it off when you forward the port yourself.",
+        },
         { k: "soulseek_web_port", label: "Web/API port", type: "number", min: 1024, max: 65535 },
         { k: "soulseek_up_limit", label: "Upload speed limit (kB/s, 0 = unlimited)", type: "number", min: 0, max: 100000 },
         { k: "soulseek_down_limit", label: "Download speed limit (kB/s, 0 = unlimited)", type: "number", min: 0, max: 100000 },
@@ -761,9 +765,13 @@ export default function SettingsPage() {
           k: "soulseek_web_https", label: "Serve the slskd web UI over HTTPS (extra listener, self-signed)", type: "bool",
         },
         { k: "soulseek_download_dir", label: "Download dir (blank = <music folder>/.mlo/downloads)", type: "text" },
+        {
+          k: "soulseek_clear_downloads", label: "Delete the downloaded copy after a successful import", type: "bool",
+          help: "The album is moved into the library first, so the downloaded folder is only staging — deleting it avoids a second full copy of everything you acquire. Only ever the folder the job itself downloaded into, and only after the import reported success: a FAILED import keeps its files so it can be retried without downloading them again.",
+        },
         { k: "soulseek_autostart", label: "Start slskd with the app backend", type: "bool" },
-        { k: "soulseek_share_library", label: "Share the music folder on the network", type: "bool" },
-        { k: "soulseek_share_dirs", label: "Extra shared folders (; separated, blank = whole music folder)", type: "text" },
+        { k: "soulseek_share_library", label: "Share the library folder on the network", type: "bool" },
+        { k: "soulseek_share_dirs", label: "Extra shared folders (; separated, blank = the library folder <music>/Artists)", type: "text" },
         { k: "soulseek_share_exclude", label: "Never share these paths (; separated)", type: "text" },
       ],
     },
@@ -1047,8 +1055,8 @@ export default function SettingsPage() {
       help: "A track may hold at most the 'Genres per track' value — only an overflow fails (issue code GENRE_COUNT). There is no lower bound and no quota; keep the two in step.",
     },
     {
-      k: "grade_check_genre_order", label: "Genre order (the family, if present, is last)", type: "bool",
-      help: "The family must be the LAST genre, e.g. shoegaze / dream pop / rock (issue code GENRE_ORDER). A family in an earlier slot, or a genre repeated, fails. The names themselves are graded by the vocabulary check below.",
+      k: "grade_check_genre_order", label: "Genre order (the family, if present, comes first)", type: "bool",
+      help: "The family must be the FIRST genre, e.g. Rock / Shoegaze (issue code GENRE_ORDER). A family in a later slot, or a genre repeated, fails. The names themselves are graded by the vocabulary check below.",
     },
     {
       k: "grade_check_genre_vocab", label: "Genre vocabulary (MusicBrainz)", type: "bool",

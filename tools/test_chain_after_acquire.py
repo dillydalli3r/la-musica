@@ -114,6 +114,26 @@ def fwd(p):
 
 
 # --------------------------------------------------------------------------- #
+# the chain every path below runs: the Run All order, minus the ONE script it
+# declares library-wide. The point of the suite is that an album gets the same
+# scripts however it arrived, so the scripts Run All runs are asserted HERE, in
+# the import's own terms: 16 Mood & Energy, 17 Lyrics transliterate (AI) and 19
+# Optimize artist images used to run only from the menu, and a fourth script
+# joining the run order must not go missing the same way.
+# --------------------------------------------------------------------------- #
+print("\n(0) the chain an import runs")
+eq(imports.DEFAULT_CHAIN,
+   [sid for sid in cfgmod.DEFAULT_RUN_ALL_ORDER
+    if sid not in imports.LIBRARY_WIDE_SCRIPTS],
+   "an import runs the Run All order, minus the library-wide scripts it declares")
+eq([sid for sid in cfgmod.DEFAULT_RUN_ALL_ORDER if sid not in imports.DEFAULT_CHAIN],
+   list(imports.LIBRARY_WIDE_SCRIPTS),
+   "and the only script it leaves out is a declared one")
+eq(imports.DEFAULT_CHAIN, imports.chain_for({}),
+   "which is what an import with nothing configured runs")
+
+
+# --------------------------------------------------------------------------- #
 # fixtures
 # --------------------------------------------------------------------------- #
 def make_wav(path, seconds=0.05):

@@ -23,6 +23,7 @@ const Map<String, String> discoverSourceLabels = {
   'wikipedia': 'Wikipedia',
   'spotify': 'Spotify',
   'rateyourmusic': 'RateYourMusic',
+  'rym': 'RateYourMusic',
   'bandcamp': 'Bandcamp',
 };
 

@@ -113,6 +113,98 @@ function hexToRgbTriplet(hex?: string | null): [number, number, number] | null {
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
+/** WCAG relative luminance of an sRGB triplet — the "how bright is this"
+ *  the pane's ink decision is taken on. The channels are linearized before
+ *  being weighted: weighing the raw 0-255 values rates #ffff00 and #0000ff
+ *  almost equally bright, and blue is the one saturated cover colour that
+ *  would then be handed black lyrics over a near-black field. */
+function relLuminance([r, g, b]: [number, number, number]): number {
+  const lin = (v: number) => {
+    const s = v / 255;
+    return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+}
+
+/** The lyric pane's ink, one table per polarity. Every lyric surface reads
+ *  its colour from here, so "the lyrics are white on this cover" is decided
+ *  once instead of separately for the active line, the faded ones, the
+ *  karaoke syllables and the plain-text fallback. Both sides are the same
+ *  zinc ladder mirrored — the palette's near-white and near-black steps, so
+ *  a saturated cover still gets black-or-white lyrics and never a tint of
+ *  its own colour. */
+interface LyricInk {
+  /** The line being sung — full-strength ink. */
+  active: string;
+  /** A synced line that is not the current one: the same ink faded toward
+   *  the backdrop, so the active line still reads as the one playing. */
+  dim: string;
+  /** Unsynced lyrics have no active line to stand out against, so every
+   *  line keeps full ink instead of two tones of grey. */
+  plain: string;
+  /** The glyph shadow for this ink. text-shadow inherits, so the pane sets
+   *  it once for the whole reading surface. */
+  shade: string;
+  /** Karaoke syllables: under the playhead, already sung, still to come. The
+   *  emphasis is the scale + glow, which works on either polarity; the
+   *  colour has to follow the ink, because the default theme's `--accent` IS
+   *  white and would put one white word back on a light cover. */
+  wordNow: string;
+  wordSung: string;
+  wordNext: string;
+}
+
+const INK_ON_DARK: LyricInk = {
+  active: "text-white",
+  dim: "text-zinc-300",
+  plain: "text-zinc-100",
+  shade: "np-shade-dark",
+  wordNow: "text-accent scale-110 [text-shadow:0_0_16px_rgba(255,255,255,0.4)]",
+  wordSung: "text-white",
+  wordNext: "text-white/75",
+};
+
+const INK_ON_LIGHT: LyricInk = {
+  active: "text-zinc-950",
+  // Not the mirror of the dark side's zinc-300 (zinc-500): an inactive line is
+  // ALSO drawn at 80 % opacity behind a 1px blur (LINE_BLUR), and over a light
+  // field that wash pulls the glyphs back toward the backdrop — zinc-500 lands
+  // barely above 2:1 there, which is what made the faded lines disappear on a
+  // white cover. One step nearer the ink keeps them readable while the blur,
+  // the smaller scale and the active line's near-black still say which line is
+  // playing.
+  dim: "text-zinc-700",
+  plain: "text-zinc-900",
+  shade: "np-shade-light",
+  wordNow: "text-zinc-950 scale-110 [text-shadow:0_0_16px_rgba(0,0,0,0.4)]",
+  wordSung: "text-zinc-950",
+  wordNext: "text-zinc-950/75",
+};
+
+/** The two ends the decision chooses between, as the luminances it is
+ *  measured against: the white and the zinc-950 (#09090b) ink tokens. */
+const INK_LUM = { light: relLuminance([255, 255, 255]), dark: relLuminance([9, 9, 11]) };
+
+/** Where the pane flips polarity, as the luminance of the DOMINANT COVER
+ *  COLOUR. The rule is luminance distance — whichever ink sits farther from
+ *  the field's own brightness is the readable one — so the flip belongs
+ *  where the two are equally far away: the mid-point of the two ink tokens.
+ *  That is also why a mid-grey cover is the hard case rather than a special
+ *  one. It lands within a hair of the flip, where both inks are equally far
+ *  from the field, instead of being handed grey-on-grey the way a plain
+ *  "was the cover dark?" test would.
+ *
+ *  The cover's luminance is the right input even though the field is not the
+ *  cover: the ambience paints that colour back over the near-black page (the
+ *  blurred cover layer is only 34 % opaque, but the orbs, glow and bloom add
+ *  the same colour back screen-blended at the cover's own hue), so the field
+ *  tracks the cover's brightness. Every ambience toggle can move it, and the
+ *  ink must not flip when someone turns the color drift off — the cover
+ *  colour is the only stable input.
+ *
+ *  White is 1.0 and zinc-950 is 0.003, so this is 0.501. */
+const INK_FLIP_LUM = (INK_LUM.light + INK_LUM.dark) / 2;
+
 // Size steps are deliberately close together: the active line reads slightly
 // larger than the rest, and the translation/transliteration sub-lines sit
 // just under the main line instead of shrinking into fine print.
@@ -319,7 +411,17 @@ export default function NowPlayingView(p: Props) {
     retry: false,
     staleTime: 10 * 60 * 1000,
   });
-  const rgb = hexToRgbTriplet(colorData?.color) ?? [113, 113, 122];
+  const coverHex = colorData?.color ?? null;
+  const rgb = useMemo<[number, number, number]>(
+    () => hexToRgbTriplet(coverHex) ?? [113, 113, 122],
+    [coverHex]
+  );
+  // The lyric pane's single ink decision, taken here because this is where the
+  // cover colour lives and no CSS in this stack can compare a colour against a
+  // luminance. Both memos are keyed to the colour rather than rebuilt per
+  // render: this component re-renders on every playback tick while lyrics are
+  // on screen.
+  const ink = useMemo(() => (relLuminance(rgb) > INK_FLIP_LUM ? INK_ON_LIGHT : INK_ON_DARK), [rgb]);
 
   // ---- background ambience (Apple Music-style, layered) --------------------
   // One value comes from the audio — the shared WebAudio analyser's bass-
@@ -702,8 +804,8 @@ export default function NowPlayingView(p: Props) {
           ref={(el) => {
             primaryRefs.current[i] = el;
           }}
-          className={`${size.active} leading-snug np-shade ${synced ? `${LINE_EASE} font-semibold` : ""} ${
-            isActive ? "text-white" : synced ? "text-zinc-300" : "text-zinc-100"
+          className={`${size.active} leading-snug ${synced ? `${LINE_EASE} font-semibold` : ""} ${
+            isActive ? ink.active : synced ? ink.dim : ink.plain
           }`}
           style={
             synced
@@ -712,7 +814,13 @@ export default function NowPlayingView(p: Props) {
           }
         >
           {!replaced && isActive && karaoke && l.words?.length ? (
-            <KaraokeWords words={l.words} time={dispTime} upcomingClass="text-white/75" />
+            <KaraokeWords
+              words={l.words}
+              time={dispTime}
+              currentClass={ink.wordNow}
+              sungClass={ink.wordSung}
+              upcomingClass={ink.wordNext}
+            />
           ) : primary}
           {trans && !transDup && (
             <div className={`${size.xlit} font-normal text-accent-soft/70 mt-0.5 leading-snug`}>{trans}</div>
@@ -1347,15 +1455,15 @@ export default function NowPlayingView(p: Props) {
             <div className="flex-1 min-h-[45vh] lg:min-h-0 w-full lg:h-full flex flex-col max-w-3xl lg:max-w-none lg:flex-none lg:w-[56%] lg:ml-auto">
               <div
                 ref={lyricsScrollRef}
-                /* The pane carries its OWN scrim. The fullscreen backdrop is a
-                   light additive color field (cover blur + screen-blended
-                   orbs), where the only darkening was a 10 % wash in the
-                   vertical middle — so lyrics contrast depended on the cover,
-                   and a white one left them hard to read. bg-zinc-950/45 +
-                   backdrop blur is the same panel convention the sidebar
-                   lyrics already use (LyricsSidebar), scoped to the reading
-                   surface so the ambience still shows around it. */
-                className={`relative flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-5 no-scrollbar rounded-2xl bg-zinc-950/45 backdrop-blur-md transition-opacity duration-300 ${
+                /* No panel: the lyrics sit straight on the ambience so the
+                   pane blends into the backdrop — the old scrim (45 %
+                   zinc-950 behind a backdrop blur) is what read as a border
+                   around the lyrics. Legibility is the ink's job instead:
+                   the pane carries the glyph shadow for this cover's
+                   polarity once (text-shadow inherits), and every line takes
+                   its colour from the same decision, so the ink is always
+                   the near-opposite of the field behind it. */
+                className={`relative flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-5 no-scrollbar ${ink.shade} transition-opacity duration-300 ${
                   staleLyrics ? "opacity-50" : "opacity-100"
                 }`}
                 style={{ zoom: lyricZoom }}
@@ -1374,7 +1482,7 @@ export default function NowPlayingView(p: Props) {
                     <div style={{ height: LYRICS_PAD_BOTTOM }} />
                   </>
                 ) : (
-                  <div className="text-zinc-200 text-sm whitespace-pre-wrap leading-relaxed np-shade">
+                  <div className={`text-sm whitespace-pre-wrap leading-relaxed ${ink.plain}`}>
                     {lyricsText}
                   </div>
                 )}

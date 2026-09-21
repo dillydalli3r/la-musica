@@ -24,30 +24,26 @@ def _artist_of(alb, fallback=""):
 
 
 def _owned_row(alb, fallback_artist="", reason="", owned=True):
+    """One Home shelf row: the LIBRARY's own album row, plus the shelf's reason.
+
+    The shelves draw the shared album card (web/src/components/AlbumCard) — the
+    same card the Library grid draws — so the row has to BE the library's row:
+    its tracks (the format chip and the play button), `meta` (release country,
+    original year, dynamic range), media, grade and audit all come off it, as
+    does the framework album's marker. A reduced row would be a second album
+    shape for one card to understand, and a Home card that showed less than the
+    same album shows in the Library.
+    """
     meta = alb.get("meta") or {}
-    row = {
-        "path": alb.get("path") or "",
-        "album": str(meta.get("ALBUM") or "").strip(),
-        "artist": _artist_of(alb, fallback_artist),
-        "year": str(meta.get("DATE") or "")[:4] or None,
-        "cover": alb.get("cover_file"),
-        "grade_pct": alb.get("grade_pct"),
-        "mbid": (str(meta.get("MUSICBRAINZ_ALBUMID") or "").strip()
-                 or str(meta.get("MUSICBRAINZ_RELEASEGROUPID") or "").strip() or None),
-        "mb_kind": "rg",
-        "reason": reason,
-        "owned": owned,
-    }
-    # A FRAMEWORK album is in the library (and here) before its audio is: the
-    # row carries the SAME marker the library row does — the flag, what it is
-    # waiting for and the wish behind it — so a Home card says "not downloaded
-    # yet" from the payload rather than guessing from an empty track list.
-    # Complete albums carry none of it: the keys are absent, not false.
-    if alb.get("pending"):
-        row["pending"] = True
-        row["pending_reason"] = str(alb.get("pending_reason") or "")
-        row["wish_id"] = alb.get("wish_id")
-        row["wish"] = alb.get("wish")
+    row = dict(alb)
+    row["reason"] = reason
+    row["owned"] = owned
+    # The card's own artist field (the library grid builds the same one when it
+    # flattens the payload): ALBUMARTIST → album_artist → ARTIST.
+    row["artist"] = _artist_of(alb, fallback_artist)
+    row["mbid"] = (str(meta.get("MUSICBRAINZ_ALBUMID") or "").strip()
+                   or str(meta.get("MUSICBRAINZ_RELEASEGROUPID") or "").strip() or None)
+    row["mb_kind"] = "rg"
     return row
 
 
@@ -108,9 +104,22 @@ def _favorites(lib, limit, user=""):
             out.append(_owned_row(alb, reason="Favorite"))
         else:
             name = os.path.basename(str(p).replace("\\", "/"))
-            out.append({"path": str(p).replace("\\", "/"), "album": name, "artist": "",
-                        "year": None, "cover": None, "grade_pct": None,
-                        "mbid": None, "mb_kind": "rg", "reason": "Favorite", "owned": True})
+            # The library no longer holds this path (the folder was removed or
+            # moved): there is no album row to read tags, tracks or a grade
+            # from. The row keeps the path the user favourited — and `owned`
+            # is what tells the card not to draw a grade, a play button or a
+            # link the library cannot answer.
+            out.append({
+                "path": str(p).replace("\\", "/"),
+                "owned": False,
+                "artist": "",
+                "reason": "Favorite",
+                "mbid": None,
+                "mb_kind": "rg",
+                "tracks": [],
+                "cover_file": None,
+                "meta": {"ALBUM": name},
+            })
     return out
 
 
@@ -162,16 +171,24 @@ def _wanted(limit, skip_paths=()):
         if path and os.path.normcase(os.path.normpath(path)) in skip_paths:
             continue
         out.append({
+            # A wish is NOT a library album: no folder, no tags, nothing
+            # graded. The row carries the identity the card draws — title,
+            # artist and year in the album-tag shape the card already reads —
+            # and nothing that reads as a library fact: no tracks to play, no
+            # pass / audit for a status dot. `owned` false is what the card
+            # keys that on.
             "path": "",
-            "album": str(w.get("title") or "").strip() or "Untitled release",
-            "artist": str(w.get("artist") or "").strip(),
-            "year": str(w.get("year") or "")[:4] or None,
-            "cover": None,
-            "grade_pct": None,
+            "owned": False,
+            "reason": _WISH_REASON.get(str(w.get("status") or ""), "Wishlist"),
             "mbid": str(w.get("release_mbid") or "").strip() or None,
             "mb_kind": "release",
-            "reason": _WISH_REASON.get(str(w.get("status") or ""), "Wishlist"),
-            "owned": False,
+            "tracks": [],
+            "cover_file": None,
+            "meta": {
+                "ALBUM": str(w.get("title") or "").strip() or "Untitled release",
+                "ARTIST": str(w.get("artist") or "").strip(),
+                "DATE": str(w.get("year") or "")[:4] or None,
+            },
         })
         if len(out) >= limit:
             break

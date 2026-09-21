@@ -5,17 +5,17 @@ import {
   ArrowDownUp, Download, Disc3, Eye, EyeOff, FolderInput, FolderOpen, Loader2, Play, Power, RefreshCw, Search,
   User, Zap, Square, FileCheck2, FileVideo, Music2, Save, Tag, Trash2, PackageOpen,
   Star, Plus, CheckCircle2, CircleDashed, AlertTriangle, ExternalLink, RotateCw, ChevronDown, ChevronRight, Link2,
-  MessageSquare, SearchX, X, Wand2, CheckCheck, MessageCircleQuestion,
+  MessageSquare, X, Wand2, CheckCheck, MessageCircleQuestion,
 } from "lucide-react";
 import { api } from "../api";
-import type { ImportRunStatus, ReadyAlbum, SlskAutoFile, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskQueueItem, SlskQueueScope, SlskSearchProgress, SlskTransfer, StagingEntry, StagingRoot, StagingRootId } from "../api";
+import type { ImportRunStatus, ReadyAlbum, SlskAutoFile, SlskStatus, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskQueueItem, SlskQueueScope, SlskSearchProgress, SlskTransfer, StagingEntry, StagingRoot, StagingRootId } from "../api";
 import { toast } from "../store";
 import { EmptyState, PageLoading } from "../components/Badges";
 import CachedTracksView from "../components/CachedTracksView";
 import PageHeader from "../components/PageHeader";
 import Modal from "../components/Modal";
 import Segmented from "../components/Segmented";
-import type { DownloadEntry, ImportBulkJob, SlskReleaseIdentity, Wish } from "../types";
+import type { DownloadEntry, ImportBulkJob, SlskReleaseIdentity } from "../types";
 import { fmtCount, fmtCounts, fmtPercent } from "../lib/fmt";
 
 interface SlskFile {
@@ -296,6 +296,110 @@ function PortConflictCard({ message, otherUser }: {
   );
 }
 
+/** The LISTEN port held by a FOREIGN program — the same treatment the web
+ *  port's own conflict gets above, because it is the same kind of fact: another
+ *  program has the port, so slskd cannot use it. Without it the only symptom is
+ *  peers quietly failing to reach this app. */
+function ListenPortConflict({ message, port }: { message: string; port: number }) {
+  return (
+    <div className="panel border-red-900/50">
+      <div className="text-xs font-semibold uppercase tracking-wider text-red-300 mb-1.5 flex items-center gap-1.5">
+        <AlertTriangle className="h-3.5 w-3.5" /> Soulseek listen port already in use
+      </div>
+      <p className="text-[11px] text-zinc-400 mb-2.5">{message}.</p>
+      <p className="text-[11px] text-zinc-500">
+        Port {port || "…"} is the one peers connect to, so while that program holds it nobody can
+        reach your shares (transfers still work from here, because this app starts them itself).
+        Quit that program, or set another listen port in Settings → Soulseek and save it. This app
+        never stops another program for you.
+      </p>
+    </div>
+  );
+}
+
+/** The LISTEN port's real state, as the server measured it (mlo.portmap): who
+ *  accepts on it, what the ROUTER was actually told, and — when it is not open
+ *  — the endpoint's or the daemon's own words for why.
+ *
+ *  Nothing here is rounded up. A mapping reads "opened" only when a router
+ *  confirmed it; one the router merely accepted without letting us read the
+ *  entry back says exactly that; a refusal carries the router's own message
+ *  instead of a guess at its cause. That honesty is the whole point — peers
+ *  failing to connect is otherwise the only symptom this state has. */
+function ListenPortState({ state }: { state: SlskStatus["listen_port_state"] }) {
+  if (!state) return null;
+  const m = state.mapping;
+  const port = state.listen_port || m?.mapped_port || 0;
+  const mapped = m?.mapped_port || port;
+  const method = m?.method === "natpmp" ? "NAT-PMP" : m?.method === "upnp" ? "UPnP" : "";
+  // Both outcomes of the probe, when both were tried (UPnP answered nothing,
+  // NAT-PMP mapped it): the message the user has to act on is the pair.
+  const tried = (m?.tried ?? [])
+    .map((t) => `${(t.method || "").toUpperCase()}: ${t.state}${t.detail ? ` — ${t.detail}` : ""}`)
+    .join(" · ");
+  const detail = [m?.detail, tried].filter(Boolean).join(" · ");
+  let label = "";
+  let cls = "bg-zinc-800/70 text-zinc-400 border-zinc-700";
+  switch (m?.state) {
+    case "mapped":
+      if (m.verified) {
+        label = `opened · external ${mapped}${m.external_ip ? ` · ${m.external_ip}` : ""}${method ? ` (${method})` : ""}`;
+        cls = "bg-emerald-900/40 text-emerald-300 border-emerald-800";
+      } else {
+        // The router took the request and cannot read the entry back: an
+        // acceptance, never "open".
+        label = `accepted by the router (not confirmed) · external ${mapped}${method ? ` (${method})` : ""}`;
+        cls = "bg-amber-900/40 text-amber-300 border-amber-800";
+      }
+      break;
+    case "refused":
+      label = `the router refused: ${m.detail || "no reason given"}`;
+      cls = "bg-amber-900/40 text-amber-300 border-amber-800";
+      break;
+    case "no_gateway":
+      label = `no UPnP or NAT-PMP gateway answered — forward port ${mapped} on the router yourself`;
+      break;
+    case "unsupported":
+      label = `the gateway offers no port mapping — forward port ${mapped} on the router yourself`;
+      break;
+    case "off":
+      label = `automatic port opening is off — forward port ${port} on the router yourself`;
+      break;
+    case "pending":
+      label = "port opening: not asked yet";
+      break;
+    case "checking":
+      label = "asking the router…";
+      break;
+    case "client_down":
+      label = "slskd is not running, so nothing is mapped";
+      break;
+    case "error":
+      label = m.detail || "the port mapping check failed";
+      cls = "bg-amber-900/40 text-amber-300 border-amber-800";
+      break;
+    default:
+      label = "";
+  }
+  // What the mapping cannot say: the port is unbound while slskd runs, or it
+  // cannot be held here at all (the server's own sentences), plus slskd's own
+  // last word about a listen port when it said one.
+  const fact = [state.error, state.slskd_error].filter(Boolean).join(" · ");
+  if (!label && !fact) return null;
+  return (
+    <span className="inline-flex items-center gap-1.5 flex-wrap min-w-0">
+      {label && (
+        <span className={`chip text-[9px] border ${cls}`} title={detail || label}>{label}</span>
+      )}
+      {fact && (
+        <span className="text-[10px] text-amber-300" title={[fact, detail].filter(Boolean).join(" · ")}>
+          {fact}
+        </span>
+      )}
+    </span>
+  );
+}
+
 function LoginCard({ onDone, initialUsername, initialPassword, initialError }: {
   onDone: () => void;
   initialUsername?: string;
@@ -537,7 +641,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
       await api.soulseekAutoConfirm(accept);
       toast(
         reason === "no_results"
-          ? (accept ? "Moving it to wishes — the search keeps running" : "Stopping — nothing was downloaded")
+          ? (accept ? "Moving it to the queue — the search keeps looking" : "Stopping — nothing was downloaded")
           : reason === "no_logs"
             ? (accept ? "Downloading without rip logs — it imports unverified" : "Stopped — waiting for a CD rip with logs")
             : (accept ? "Downloading the lossy copy" : "Stopped — waiting for a lossless copy")
@@ -566,7 +670,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
     if (st === "running" || st === "confirm") return;
     if (st === "done") {
       if (job?.result?.wished) {
-        toast.success("Added to wishes — the background search keeps looking for it");
+        toast.success("On the queue — the search keeps looking for it");
         return;
       }
       const album = fileName(job?.result?.album_path ?? job?.result?.staging_path ?? "");
@@ -688,16 +792,16 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
           )}
           {job?.state === "confirm" && job?.confirm && (job.confirm.reason === "no_results" ? (
             // A search that came back empty: the release is not on the network
-            // right now, so the useful answer is "keep looking". Accept parks it
-            // in the wish list, where the same search runs on the worker's own
+            // right now, so the useful answer is "keep looking". Accept leaves it
+            // on the queue, where the same search runs on the worker's own
             // schedule with no further input. Decline is the only way to stop.
             <div className="mt-2 rounded-lg border border-amber-700/60 bg-amber-950/30 p-2.5">
               <div className="text-xs font-semibold text-amber-300 mb-1">
                 Nothing usable found{searched ? ` in ${waitedTxt}` : " — this job never searched a query"}
               </div>
               <div className="text-[11px] text-zinc-400 mb-2">
-                Every candidate this search turned up was rejected or incomplete. Moving the
-                release to wishes keeps the same search running in the background — nothing else
+                Every candidate this search turned up was rejected or incomplete. Leaving the
+                release on the queue keeps the same search running in the background — nothing else
                 to answer, and it is imported automatically once a verified copy shows up.
                 Stopping instead abandons this release until you ask for it again.
               </div>
@@ -710,7 +814,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
               )}
               <div className="flex flex-wrap items-center gap-2">
                 <button className="btn-primary !py-1 text-xs tap" onClick={() => answer(true)} disabled={answering}>
-                  <Star className="h-3.5 w-3.5" /> Move to wishes
+                  <Star className="h-3.5 w-3.5" /> Keep looking
                 </button>
                 <button className="btn-ghost !py-1 text-xs tap" onClick={() => answer(false)} disabled={answering}>
                   No, stop
@@ -799,10 +903,11 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
             </details>
           )}
           {job?.state === "done" && (job.result?.wished ? (
-            // A wish handoff ends the job done but with no album on disk — the
-            // import row would otherwise show an empty name and a dead button.
+            // A keep-looking handoff ends the job done but with no album on
+            // disk — the import row would otherwise show an empty name and a
+            // dead button.
             <div className="mt-2 text-[11px] text-amber-300">
-              Moved to wishes — the background search keeps looking for it.
+              Left on the queue — the search keeps looking for it.
             </div>
           ) : (
             <div className="mt-2 flex items-center gap-2 flex-wrap">
@@ -1387,7 +1492,7 @@ function ImportRunCard({ run }: { run: ImportRunStatus | undefined }) {
     }
     if (!wasRunning.current) return;
     wasRunning.current = false;
-    for (const queryKey of [["library"], ["soulseekReview"], ["wishes"], READY_ALBUMS_KEY]) {
+    for (const queryKey of [["library"], ["soulseekReview"], READY_ALBUMS_KEY]) {
       qc.invalidateQueries({ queryKey });
     }
   }, [state, qc]);
@@ -1595,9 +1700,9 @@ function QueueRow({ item, busy, onCancel, onRetry, onImport, onDismiss, onClear 
             </span>
             <span className="chip text-[9px] border border-border bg-raise text-zinc-400" title={
               item.source_key === "musicbrainz"
-                ? "Saved from MusicBrainz — the wish queue searches it for you"
+                ? "Saved from MusicBrainz — this queue searches it for you"
                 : item.source_key === "auto"
-                  ? "The auto-importer offered this one for the wish list"
+                  ? "The auto-importer asked to keep looking for this one"
                   : item.source_key === "import"
                     ? "An import that could not finish the album by itself"
                     : "Started from a Soulseek search or browse"
@@ -1675,7 +1780,7 @@ function QueueRow({ item, busy, onCancel, onRetry, onImport, onDismiss, onClear 
             <button className="btn-ghost !py-1 text-xs tap" onClick={onRetry} disabled={busy}
               title={item.retryable
                 ? "Retry this terminal item — it is not retried automatically"
-                : "Search Soulseek for this wish right now"}>
+                : "Search Soulseek for it right now"}>
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
             </button>
           )}
@@ -1709,8 +1814,8 @@ function QueueRow({ item, busy, onCancel, onRetry, onImport, onDismiss, onClear 
             <button className="btn-ghost !py-1 text-xs text-red-300 tap" onClick={onClear} disabled={busy}
               title={item.kind === "wish"
                 ? (item.pending
-                  ? "Remove this wish and its empty album folder — nothing is searched for it again"
-                  : "Remove this wish from the list — nothing is searched for it again")
+                  ? "Remove this row and its empty album folder — nothing is searched for it again"
+                  : "Remove this row from the queue — nothing is searched for it again")
                 : "Take this finished row off the queue — nothing in your library is deleted"}>
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
             </button>
@@ -1771,12 +1876,21 @@ function QueueSection({ title, hint, rows, tone, empty, busyId, onCancel, onRetr
   );
 }
 
-/** THE queue: queued/searching, in-progress, needs-attention, completed and
+/**
+ *  THE queue: queued/searching, in-progress, needs-attention, completed and
  *  failed, in one list, for everything that is getting itself into the
- *  library — a MusicBrainz wish, a "download everything by this artist" run, a
- *  folder grabbed off the Soulseek page, an import run. The rows come from
- *  `/api/queue` (server/api_queue.py), which reads the registries that own
- *  them, so this panel never invents a state the backend does not have. */
+ *  library — a MusicBrainz release waiting for a copy, a "download everything
+ *  by this artist" run, a folder grabbed off the Soulseek page, an import run.
+ *  The rows come from `/api/queue` (server/api_queue.py), which reads the
+ *  registries that own them, so this panel never invents a state the backend
+ *  does not have.
+ *
+ *  This list IS the wanted list: a release with no copy on the network is a
+ *  row here that says it is still looking (with its own Search and Retry), and
+ *  the panel's own box adds one. There is no second list to check — the store
+ *  underneath (server.wishes) is the durable request, and the queue is where
+ *  it is read, waited on and acted on.
+ */
 function QueuePanel({ running }: { running: boolean }) {
   const qc = useQueryClient();
   // The queue follows the server's payload on this interval: fast while
@@ -1797,6 +1911,59 @@ function QueuePanel({ running }: { running: boolean }) {
   const rows = Object.values(sections ?? {}).flat();
   const total = rows.length;
 
+  // The store's own worker state and log (GET /api/wishes): WHEN the app looks
+  // for a release on its own, and what the last pass did. Read here rather
+  // than kept as its own panel — it is the schedule behind these rows.
+  const { data: store } = useQuery({
+    queryKey: ["wishes"],
+    queryFn: api.wishes,
+    refetchInterval: 15000,
+  });
+  const worker = store?.worker;
+  const [wanted, setWanted] = useState("");
+  const [wantBusy, setWantBusy] = useState(false);
+
+  /** Want a release the network does not have yet: the row this creates is the
+   *  standing request, with no album folder behind it (the album appears when
+   *  something is found). The interval and the backoff decide when it is
+   *  searched — this only records what to look for. */
+  const addWanted = async () => {
+    const id = (wanted.match(MBID_RE)?.[0] ?? "").toLowerCase();
+    if (!id) {
+      toast("Paste a MusicBrainz release ID or URL");
+      return;
+    }
+    setWantBusy(true);
+    try {
+      const r = await api.wishAdd({ release_mbid: id });
+      setWanted("");
+      toast.success(
+        `${r.wish?.artist ? `${r.wish.artist} — ` : ""}${r.wish?.title || "it"} is queued — it is searched for automatically`
+      );
+      refetch();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setWantBusy(false);
+    }
+  };
+
+  /** Search everything that is DUE, now, instead of at the next pass. A row
+   *  waiting out its retry backoff keeps that wait: what is due is the store's
+   *  own answer (`wishes.due_at`), never this button's. */
+  const searchDue = async () => {
+    setWantBusy(true);
+    try {
+      const r = await api.wishesSearchAll();
+      toast(r.ok ? "Searching for everything due…" : r.error || "Already searching");
+      refetch();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setWantBusy(false);
+    }
+  };
+
   const cancel = async (item: SlskQueueItem) => {
     setBusyId(item.id);
     try {
@@ -1810,7 +1977,6 @@ function QueuePanel({ running }: { running: boolean }) {
       }
       toast(item.stage === "queued" ? "Removed from the queue" : "Cancelled");
       refetch();
-      qc.invalidateQueries({ queryKey: ["wishes"] });
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -1834,7 +2000,6 @@ function QueuePanel({ running }: { running: boolean }) {
         else toast("Searching…");
       }
       refetch();
-      qc.invalidateQueries({ queryKey: ["wishes"] });
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -1884,7 +2049,6 @@ function QueuePanel({ running }: { running: boolean }) {
         ? `${item.title} — off the queue`
         : r.cleared ? `${r.cleared} finished row(s) cleared` : "Nothing finished to clear");
       refetch();
-      qc.invalidateQueries({ queryKey: ["wishes"] });
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -1911,13 +2075,13 @@ function QueuePanel({ running }: { running: boolean }) {
           {dataUpdatedAt ? ` · fetched ${new Date(dataUpdatedAt).toLocaleTimeString()}` : ""}
         </span>
         <span className="text-[10px] text-zinc-600 hidden sm:inline">
-          the same queue for MusicBrainz wishes, bulk auto-imports and manual grabs
+          the same queue for MusicBrainz releases, bulk auto-imports and manual grabs
         </span>
         <div className="ml-auto flex items-center gap-1 flex-wrap justify-end">
           {finished > 0 && (
             <button className="btn-ghost !py-0.5 !px-2 text-[11px] tap"
               onClick={() => clear({ scope: "finished" })} disabled={busyId !== null}
-              title="Take every finished row off this list — imported albums, jobs that gave up, wishes nothing was found for. Nothing in your library is touched, no download is deleted, and anything still running, waiting or parked stays (clear it per section, or cancel it on its own row).">
+              title="Take every finished row off this list — imported albums, jobs that gave up, rows nothing was found for. Nothing in your library is touched, no download is deleted, and anything still running, waiting or parked stays (clear it per section, or cancel it on its own row).">
               <Trash2 className="h-3 w-3" /> Clear finished ({finished})
             </button>
           )}
@@ -1929,6 +2093,50 @@ function QueuePanel({ running }: { running: boolean }) {
         </div>
       </div>
 
+      {/* What the app is looking FOR, and the two controls the whole queue
+          shares. A release that is not on the network yet belongs here rather
+          than in a list of its own: the durable request is the row, and this
+          panel is where rows are read and acted on. */}
+      <div className="rounded-md border border-border bg-panel/60 p-2.5 space-y-2 text-xs">
+        <div className="flex flex-wrap gap-2">
+          <Link2 className="h-4 w-4 text-zinc-600 self-center shrink-0" />
+          <input
+            className="input flex-1 min-w-[220px] tap"
+            placeholder="Paste a MusicBrainz release ID or URL — the queue keeps looking for it"
+            value={wanted}
+            onChange={(e) => setWanted(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && !wantBusy && addWanted()}
+          />
+          <button
+            className="btn-primary tap"
+            onClick={addWanted}
+            disabled={wantBusy || !wanted.trim()}
+            title="Put it on the queue — Soulseek is searched for it on the interval below, and it is imported the moment a verified copy appears"
+          >
+            <Plus className="h-4 w-4" /> Add to queue
+          </button>
+          <button
+            className="btn-ghost tap"
+            onClick={searchDue}
+            disabled={wantBusy}
+            title="Search Soulseek for every row that is due right now, rather than at the next pass. A row still waiting out its retry backoff keeps that wait."
+          >
+            <Search className="h-3.5 w-3.5" /> Search due now
+          </button>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-[10px] text-zinc-600">
+          <span className={worker?.enabled ? "text-emerald-400" : "text-amber-400"}>
+            {worker?.enabled ? "looking for these on its own" : "automatic search off"}
+          </span>
+          <span>· every {worker?.interval_hours ?? 6}h</span>
+          <span>· next {worker?.next_run ? timeAgo(worker.next_run).replace("ago", "from now") : "—"}</span>
+          {worker?.running && worker.current && (
+            <span className="text-sky-300">· searching {worker.current}</span>
+          )}
+          {worker && !worker.running && worker.last_result && <span>· last: {worker.last_result}</span>}
+        </div>
+      </div>
+
       {!sections ? (
         <PageLoading />
       ) : (
@@ -1936,7 +2144,7 @@ function QueuePanel({ running }: { running: boolean }) {
           <QueueSection
             title="Queued / searching" hint="waiting for a slot, or looking right now"
             rows={sections.queued} tone="border-amber-800 text-amber-300"
-            empty="nothing is waiting — add a release to the wish list or start an auto-import"
+            empty="nothing is waiting — paste a release above, or start an auto-import"
             busyId={busyId} onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
             onClear={(item) => clear({ id: item.id }, item)}
           />
@@ -1973,6 +2181,24 @@ function QueuePanel({ running }: { running: boolean }) {
             onClearSection={() => clear({ scope: "failed" })}
           />
         </>
+      )}
+
+      {store?.log && store.log.length > 0 && (
+        <details className="panel">
+          <summary className="text-[10px] uppercase tracking-widest text-zinc-500 cursor-pointer">
+            Search log
+          </summary>
+          <div className="mt-2 space-y-0.5 max-h-48 overflow-auto font-mono text-[10px]">
+            {store.log.slice(-40).reverse().map((l) => (
+              // The window slides as the worker appends: an index key remounts
+              // every line on each poll, the line's own stamp + text does not.
+              <div key={`${l.t}-${l.msg}`}
+                className={l.level === "warn" ? "text-amber-400/80" : l.level === "ok" ? "text-emerald-400/80" : "text-zinc-500"}>
+                {new Date(l.t * 1000).toLocaleTimeString()} — {l.msg}
+              </div>
+            ))}
+          </div>
+        </details>
       )}
     </div>
   );
@@ -2504,434 +2730,6 @@ function timeAgo(t: number | null | undefined): string {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
-const WISH_STATUS: Record<Wish["status"], { label: string; cls: string; icon: typeof Star }> = {
-  wanted: { label: "Wanted", cls: "bg-amber-900/40 text-amber-300 border-amber-800", icon: CircleDashed },
-  searching: { label: "Searching", cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: RotateCw },
-  imported: { label: "Imported", cls: "bg-emerald-900/40 text-emerald-300 border-emerald-800", icon: CheckCircle2 },
-  failed: { label: "Failed", cls: "bg-red-950/60 text-red-300 border-red-900", icon: AlertTriangle },
-  available: { label: "Available", cls: "bg-cyan-900/40 text-cyan-300 border-cyan-800", icon: Star },
-  // The network answered "nothing there" (`wishes_not_found_attempts` empty
-  // searches): distinct from `failed` — nothing was rejected, there was simply
-  // nothing to try — and terminal, so only the row's own Search button starts
-  // it again (server.wishes.mark_not_found).
-  not_found: { label: "Not found", cls: "bg-zinc-800/70 text-zinc-400 border-zinc-700", icon: SearchX },
-};
-
-function WishRow({ w, run, importing, pageBusy, onImport, onChanged }: {
-  w: Wish;
-  /** the page's single import run — a per-wish import reports through it */
-  run: ImportRunStatus | undefined;
-  importing: boolean;
-  pageBusy: boolean;
-  onImport: () => void;
-  onChanged: () => void;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [open, setOpen] = useState(false);
-  const [note, setNote] = useState(w.note);
-  const [failed, setFailed] = useState(false);
-  const st = WISH_STATUS[w.status] ?? WISH_STATUS.wanted;
-  const Icon = st.icon;
-  // Something to import: the album already landed, or a download found for
-  // this wish is sitting in the download dir. Anything else gets a 409, which
-  // the server answers with the next step, so the button says nothing here.
-  const canImport = w.status === "available" || !!w.album_path;
-  const runBusy = run?.state === "running";
-
-  const search = async () => {
-    setBusy(true);
-    try {
-      const r = await api.wishSearch(w.id);
-      if (!r.ok) toast(r.error || "Already searching");
-      else toast(`Searching for “${w.title}”…`);
-      onChanged();
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-  const saveNote = async () => {
-    try {
-      await api.wishUpdate(w.id, { note });
-      toast("Wish updated");
-      onChanged();
-    } catch (e) {
-      toast.error(String(e));
-    }
-  };
-  const remove = async () => {
-    try {
-      await api.wishDelete(w.id);
-      toast("Wish removed");
-      onChanged();
-    } catch (e) {
-      toast.error(String(e));
-    }
-  };
-
-  return (
-    <div className="rounded-lg border border-border bg-card overflow-hidden">
-      <div className="flex flex-wrap items-center gap-3 p-2.5">
-        {!failed && w.release_mbid ? (
-          <img
-            src={api.artUrl(`https://coverartarchive.org/release/${w.release_mbid}/front-250`)}
-            alt=""
-            loading="lazy"
-            onError={() => setFailed(true)}
-            className="h-12 w-12 rounded-md object-cover ring-1 ring-border shrink-0"
-          />
-        ) : (
-          <div className="h-12 w-12 rounded-md bg-raise ring-1 ring-border shrink-0 flex items-center justify-center text-zinc-700">
-            <Music2 className="h-5 w-5" />
-          </div>
-        )}
-        <div className="flex-1 min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className={`chip text-[9px] border ${importing ? "bg-sky-900/40 text-sky-300 border-sky-800" : st.cls}`}>
-              {importing ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : (
-                <Icon className={`h-3 w-3 ${w.status === "searching" ? "animate-spin" : ""}`} />
-              )}{" "}
-              {importing ? `importing… (${run ? `${Math.min(run.done + 1, run.total)}/${run.total}` : "1/1"})` : st.label}
-            </span>
-            {w.attempts > 0 && <span className="text-[10px] text-zinc-600">{w.attempts} attempt(s)</span>}
-            <span className="text-[10px] text-zinc-600">added {timeAgo(w.added_at)}</span>
-          </div>
-          <div className="text-sm text-zinc-100 truncate mt-0.5" title={w.title}>{w.title || "(unknown title)"}</div>
-          <div className="text-[11px] text-zinc-500 truncate">
-            {w.artist}{w.year ? ` · ${w.year}` : ""}
-          </div>
-          {/* WHICH pressing this wish is waiting for — the same block the queue
-              rows carry (server/wishes' release identity). A wish whose release
-              has not been looked up yet shows nothing here until the worker's
-              next pass resolves it. */}
-          <ReleaseChips r={w.release} />
-          {w.last_error ? (
-            <div className="text-[10px] text-zinc-600 truncate" title={w.last_error}>{w.last_error}</div>
-          ) : null}
-        </div>
-        <div className="flex flex-wrap items-center gap-1 shrink-0 w-full justify-end sm:w-auto">
-          {canImport && (
-            <button
-              className="btn-ghost !py-1 text-xs tap"
-              onClick={onImport}
-              disabled={importing || pageBusy || runBusy}
-              title="Import the download this wish is waiting on — the album goes through the whole pipeline in the background"
-            >
-              {importing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />} Import
-            </button>
-          )}
-          {w.status !== "imported" && (
-            <button className="btn-ghost !py-1 text-xs tap" onClick={search} disabled={busy} title="Search Soulseek now">
-              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
-            </button>
-          )}
-          {w.album_path && (
-            <a className="btn-ghost !py-1 text-xs tap" href={`/album/${encodeURIComponent(w.album_path)}`} title="Open the imported album">
-              <PackageOpen className="h-3.5 w-3.5" />
-            </a>
-          )}
-          <a
-            className="btn-ghost !py-1 text-xs tap"
-            href={`https://musicbrainz.org/release/${w.release_mbid}`}
-            target="_blank"
-            rel="noreferrer"
-            title="Open on MusicBrainz"
-          >
-            <ExternalLink className="h-3.5 w-3.5" />
-          </a>
-          <button className="btn-ghost !py-1 text-xs tap" onClick={() => setOpen(!open)} title="Notes">
-            {open ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-          </button>
-          <button className="btn-ghost !py-1 text-xs text-red-300 tap" onClick={remove} title="Remove wish">
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      </div>
-      {open && (
-        <div className="border-t border-border/60 p-2.5 flex items-center gap-2 anim-fade">
-          <input
-            className="input !py-1 text-xs flex-1 tap"
-            placeholder="Note — pressings to prefer, source hints…"
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-          />
-          <button className="btn-ghost !py-1 text-xs tap" onClick={saveNote} disabled={note === w.note}>
-            <Save className="h-3.5 w-3.5" /> Save
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function WishesPanel() {
-  const qc = useQueryClient();
-  const { data, refetch, isLoading } = useQuery({
-    queryKey: ["wishes"],
-    queryFn: api.wishes,
-    refetchInterval: 5000,
-  });
-  const [mbid, setMbid] = useState("");
-  const [busy, setBusy] = useState(false);
-  const { data: run } = useImportRun();
-  const [importingWish, setImportingWish] = useState<number | null>(null);
-  // Which wish a per-wish import belongs to. A per-wish click reports through
-  // the shared run, so the row's progress is derived from the run being
-  // alive — no second timer, and nothing to clear when it stops.
-  const runBusy = run?.state === "running";
-  const importingId = runBusy ? importingWish : null;
-  const worker = data?.worker;
-  const wishes = data?.wishes ?? [];
-  // The rows the "Clear finished" button reports and the only ones it will
-  // touch: the store's own terminal verdict (server/wishes), never the page's
-  // guess at what a status means.
-  const finishedWishes = wishes.filter((w) => w.terminal).length;
-
-  // Announce a wish that gets filled (or fails) while the app is open — the
-  // worker runs on its own schedule, so nothing else would tell the user. The
-  // map is seeded from the first snapshot and unseen ids are skipped, so a page
-  // load neither replays history as a toast burst nor announces a wish that
-  // arrived already failed.
-  const prevWishStatus = useRef<Map<number, string> | null>(null);
-  useEffect(() => {
-    if (!data) return;
-    const prev = prevWishStatus.current;
-    prevWishStatus.current = new Map(data.wishes.map((w) => [w.id, w.status] as const));
-    if (!prev) return;
-    for (const w of data.wishes) {
-      const was = prev.get(w.id);
-      if (!was || was === w.status) continue;
-      if (w.status === "imported") {
-        toast(`Wish filled — ${w.artist ? `${w.artist} — ` : ""}${w.title || "release"}`);
-      } else if (w.status === "failed") {
-        toast(`Wish search failed — ${w.title || "release"}${w.last_error ? `: ${w.last_error}` : ""}`);
-      }
-    }
-  }, [data]);
-
-  const add = async () => {
-    const id = (mbid.match(MBID_RE)?.[0] ?? "").toLowerCase();
-    if (!id) {
-      toast("Paste a MusicBrainz release ID or URL");
-      return;
-    }
-    setBusy(true);
-    try {
-      await api.wishAdd({ release_mbid: id });
-      setMbid("");
-      toast.success("Added to wishes — it will be found automatically");
-      refetch();
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const searchAll = async () => {
-    setBusy(true);
-    try {
-      const r = await api.wishesSearchAll();
-      if (!r.ok) toast(r.error || "A cycle is already running");
-      else toast("Searching for all due wishes…");
-      refetch();
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const importWish = async (w: Wish) => {
-    try {
-      const r = await api.wishImport(w.id);
-      qc.setQueryData(IMPORT_RUN_KEY, r.status);
-      setImportingWish(w.id);
-      toast(`Importing “${w.title || "wish"}”…`);
-    } catch (e) {
-      // The 409 names the next step ("nothing downloaded for this wish yet"),
-      // so show the server's own words instead of a generic failure.
-      toast.error(String(e));
-    }
-  };
-
-  /** Start the sequential run over everything that finished downloading. The
-   *  ready list is checked first so "nothing to import" is one toast here
-   *  rather than a 409 the user has to read. */
-  const importAll = async () => {
-    setBusy(true);
-    try {
-      const ready = await api.soulseekReady();
-      qc.setQueryData(READY_ALBUMS_KEY, ready);
-      if (ready.albums.length === 0) {
-        toast("Nothing ready to import — no finished download is waiting in the download folder");
-        return;
-      }
-      const r = await api.soulseekImportAll();
-      // A full run is not the wish the row last started, so that row's
-      // progress has to stop claiming it.
-      setImportingWish(null);
-      qc.setQueryData(IMPORT_RUN_KEY, r.status);
-      toast(`Importing ${ready.albums.length} album(s), one at a time…`);
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const reconcile = async () => {
-    setBusy(true);
-    try {
-      const r = await api.wishesReconcile();
-      toast(r.resolved ? `${r.resolved} wish(es) resolved from the library` : "No new matches in the library");
-      qc.invalidateQueries({ queryKey: ["library"] });
-      refetch();
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  /** Take the FINISHED wishes off the list (imported, nothing found, failed
-   *  for good). The rows that are still wanted or being searched are not
-   *  finished things — the server refuses them by name, and its message is
-   *  what the toast shows, so nothing disappears without a word. */
-  const clearFinished = async () => {
-    setBusy(true);
-    try {
-      const r = await api.queueClear({ scope: "wishes" });
-      toast(r.cleared ? `${r.cleared} finished wish(es) cleared` : "Nothing finished to clear");
-      refetch();
-      qc.invalidateQueries({ queryKey: QUEUE_KEY });
-    } catch (e) {
-      toast.error(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="space-y-3">
-      <div className="panel text-xs">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-[10px] uppercase tracking-widest text-zinc-500">Wishes</span>
-          <span className="text-zinc-500">
-            Save releases now; the app re-searches Soulseek on an interval and imports them when a verified copy appears.
-          </span>
-          <div className="ml-auto flex flex-wrap items-center gap-2 justify-end">
-            <button
-              className="btn-primary !py-1 text-xs tap"
-              onClick={importAll}
-              disabled={busy || runBusy}
-              title="Import every finished download into the library, one album at a time"
-            >
-              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />} Import all completed
-            </button>
-            <button className="btn-ghost !py-1 text-xs tap" onClick={reconcile} disabled={busy} title="Flip wishes already present in the library">
-              <CheckCircle2 className="h-3.5 w-3.5" /> Sync library
-            </button>
-            {finishedWishes > 0 && (
-              <button className="btn-ghost !py-1 text-xs text-red-300 tap" onClick={clearFinished} disabled={busy}
-                title="Remove the finished wishes from this list — the ones that made it into the library and the ones nothing was ever found for. A wish that is still wanting or being searched is not finished: clearing never touches it (cancel it on its own row if you want it gone).">
-                <Trash2 className="h-3.5 w-3.5" /> Clear finished ({finishedWishes})
-              </button>
-            )}
-            <button className="btn-primary !py-1 text-xs tap" onClick={searchAll} disabled={busy}>
-              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />} Search all now
-            </button>
-          </div>
-        </div>
-        <div className="flex items-center gap-2 mt-2 flex-wrap text-[10px] text-zinc-600">
-          <span className={worker?.enabled ? "text-emerald-400" : "text-amber-400"}>
-            {worker?.enabled ? "worker on" : "worker off"}
-          </span>
-          <span>· every {worker?.interval_hours ?? 6}h</span>
-          <span>· next {worker?.next_run ? timeAgo(worker.next_run).replace("ago", "from now") : "—"}</span>
-          {worker?.running && worker.current && (
-            <span className="text-sky-300">· searching {worker.current}</span>
-          )}
-          {worker && !worker.running && worker.last_result && <span>· last: {worker.last_result}</span>}
-          <span>· {openWishCount(wishes)} open</span>
-        </div>
-      </div>
-
-      <ImportRunCard run={run} />
-
-      <div className="panel">
-        <div className="flex gap-2">
-          <Link2 className="h-4 w-4 text-zinc-600 self-center shrink-0" />
-          <input
-            className="input flex-1 tap"
-            placeholder="Paste a MusicBrainz release ID or URL to wish for it"
-            value={mbid}
-            onChange={(e) => setMbid(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && !busy && add()}
-          />
-          <button className="btn-primary tap" onClick={add} disabled={busy || !mbid.trim()}>
-            <Plus className="h-4 w-4" /> Add wish
-          </button>
-        </div>
-        <div className="text-[11px] text-zinc-600 mt-1.5">
-          Tip: paste a musicbrainz.org release URL (or its MBID) — the release is resolved from MusicBrainz when it is hunted.
-        </div>
-      </div>
-
-      {isLoading ? (
-        <PageLoading label="Loading wishes…" />
-      ) : wishes.length === 0 ? (
-        <EmptyState
-          title="No wishes yet"
-          hint="Wish for a release that isn't available on Soulseek right now — it will be imported automatically once a verified copy is found."
-        />
-      ) : (
-        <div className="space-y-2 stagger">
-          {wishes.map((w) => (
-            <WishRow
-              key={w.id}
-              w={w}
-              run={run}
-              importing={importingId === w.id}
-              pageBusy={busy}
-              onImport={() => importWish(w)}
-              onChanged={() => refetch()}
-            />
-          ))}
-        </div>
-      )}
-
-      {data?.log && data.log.length > 0 && (
-        <details className="panel">
-          <summary className="text-[10px] uppercase tracking-widest text-zinc-500 cursor-pointer">Wish log</summary>
-          <div className="mt-2 space-y-0.5 max-h-48 overflow-auto font-mono text-[10px]">
-            {data.log.slice(-40).reverse().map((l) => (
-              // The window slides as the worker appends: an index key remounts
-              // every line on each poll, the line's own stamp + text does not.
-              <div
-                key={`${l.t}-${l.msg}`}
-                className={l.level === "warn" ? "text-amber-400/80" : l.level === "ok" ? "text-emerald-400/80" : "text-zinc-500"}
-              >
-                {new Date(l.t * 1000).toLocaleTimeString()} — {l.msg}
-              </div>
-            ))}
-          </div>
-        </details>
-      )}
-    </div>
-  );
-}
-
-function openWishCount(wishes: Wish[]) {
-  // `not_found` is terminal (the searches came back empty, the worker stopped
-  // looking): counting it as "open" would keep a badge lit for a wish nothing
-  // is doing anything about.
-  return wishes.filter((w) => w.status === "wanted" || w.status === "searching" || w.status === "failed").length;
-}
-
 export default function SoulseekPage() {
   const [params] = useSearchParams();
   const { data: status, refetch: refetchStatus } = useQuery({
@@ -3042,12 +2840,11 @@ export default function SoulseekPage() {
   // EVERYTHING on its way into the library (wishes, bulk auto-imports, manual
   // grabs, imports). The badge on Downloads counts active transfers so
   // progress is visible from any tab.
-  type TabId = "queue" | "search" | "auto" | "wishes" | "downloads" | "cached" | "messages" | "sharing" | "settings";
+  type TabId = "queue" | "search" | "auto" | "downloads" | "cached" | "messages" | "sharing" | "settings";
   const TAB_LIST: { id: TabId; label: string }[] = [
     { id: "queue", label: "Queue" },
     { id: "search", label: "Search" },
     { id: "auto", label: "Auto-import" },
-    { id: "wishes", label: "Wishes" },
     { id: "downloads", label: "Downloads" },
     { id: "cached", label: "Cached tracks" },
     { id: "messages", label: "Messages" },
@@ -3369,6 +3166,12 @@ export default function SoulseekPage() {
           <span className="text-[10px] text-zinc-600">
             saved in settings · {running ? "saving restarts slskd to apply" : "applied at the next start"}
           </span>
+          {/* What the LISTEN port is really doing, on its own line: whether
+              anything accepts on it here and what the router was told. */}
+          <span className="w-full flex flex-wrap items-center gap-2 text-[10px] text-zinc-600">
+            <span className="uppercase tracking-widest">Listen port</span>
+            <ListenPortState state={status.listen_port_state} />
+          </span>
         </div>
       )}
 
@@ -3383,6 +3186,13 @@ export default function SoulseekPage() {
         <PortConflictCard
           message={String(status.conflict)}
           otherUser={status.conflict_username as string | null}
+        />
+      )}
+
+      {status?.listen_port_state?.conflict && (
+        <ListenPortConflict
+          message={String(status.listen_port_state.conflict)}
+          port={Number(status.listen_port_state.listen_port) || 0}
         />
       )}
 
@@ -3410,8 +3220,6 @@ export default function SoulseekPage() {
       {tab === "auto" && <AutoPanel initialMbid={releaseParam} />}
 
       {tab === "queue" && <QueuePanel running={running} />}
-
-      {tab === "wishes" && <WishesPanel />}
 
       {tab === "search" && (
       <div className="panel-hero">

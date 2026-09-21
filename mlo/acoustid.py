@@ -82,8 +82,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .paths import DEPS_DIR
+from .paths import DEPS_DIR, LIB_AUDIO_EXTS
+from .stats import (is_audio_file, new_stats, _collect_targets, _find_albums,
+                    _make_pbar, _pbar_skip, _pbar_update, worker_count)
 from .subproc import run_tool
+from .ui import Color, c, log, print_header
 
 API_URL = "https://api.acoustid.org/v2/lookup"
 # Submission is a SEPARATE endpoint and a separate credential: `client` is the
@@ -1138,3 +1141,182 @@ def available(cfg=None):
 def acoustid_enabled_note(cfg=None):
     """Why AcoustID is unavailable, or "" when it is available."""
     return check(cfg)["reason"]
+
+
+# --------------------------------------------------------------------------- #
+# Completing an incomplete tag pair (script runner)
+# --------------------------------------------------------------------------- #
+def _pair_state(af):
+    """(recording id, fingerprint) as the file states them, "" when absent.
+
+    Read through the same semantic names `write_tags` writes and the grader's
+    pair check reads, so "incomplete" can never mean one thing to the fixer
+    and another to the check that reported it.
+    """
+    return (str(af.get_tag("ACOUSTID_ID") or "").strip(),
+            str(af.get_tag("ACOUSTID_FINGERPRINT") or "").strip())
+
+
+def fix_pair(path, cfg=None):
+    """Complete one file's ACOUSTID_ID / ACOUSTID_FINGERPRINT pair.
+
+    -> {"path", "status": "modified"|"unchanged"|"skipped"|"failed",
+        "reason"} — never raises, so one bad file cannot stop a library run.
+
+    What each half can be completed FROM decides how it is completed:
+
+    * id present, fingerprint missing: the fingerprint is a property of the
+      audio, so fpcalc takes it locally — no network, nothing guessed — and
+      the id the file already states is kept.
+    * fingerprint present, id missing: nothing on the file says which
+      recording this is, so only the service can answer (`lookup`, the
+      configured key and the shared rate limit). The pair written is the one
+      the returned identity was matched FROM, so both halves describe the
+      same fingerprint by construction — and with no key, no match or no
+      answer, nothing is written at all.
+
+    A file carrying BOTH halves is left alone, and one carrying NEITHER is
+    not this pass's business: the wizard's `write_tags` is what creates a
+    pair, and it never creates half of one.
+    """
+    out = {"path": path, "status": "skipped", "reason": ""}
+    try:
+        from .audio import AudioFile
+
+        af = AudioFile(path)
+        if af.audio is None:
+            # No reader (or an unreadable file): whether a half pair is on it
+            # cannot even be asked, and "it carries none" would be a guess.
+            out.update(status="failed",
+                       reason=(f"cannot read {os.path.basename(str(path))}: "
+                               f"{af.error or 'no tag reader for this file'}"))
+            return out
+        rid, fp = _pair_state(af)
+        if not rid and not fp:
+            out["reason"] = "carries no AcoustID tags"
+            return out
+        if rid and fp:
+            out["status"] = "unchanged"
+            return out
+        if rid:
+            got = fingerprint(path, cfg)
+            if not got["ok"]:
+                out.update(status="failed", reason=got["reason"])
+                return out
+            wrote = write_tags(path, rid, got["fingerprint"], cfg)
+        else:
+            got = lookup(cfg, path)
+            if not got["ok"]:
+                out.update(status="failed", reason=got["reason"])
+                return out
+            wrote = write_tags(path, got["rows"][0]["recording_id"],
+                               got["fingerprint"], cfg)
+        if not wrote.get("ok"):
+            out.update(status="failed",
+                       reason=wrote.get("reason") or "the pair was not written")
+            return out
+        out.update(status="modified", reason="")
+        return out
+    except Exception as e:
+        out.update(status="failed", reason=str(e))
+        return out
+
+
+def run_fix_pairs(cfg=None):
+    """Script: complete the half AcoustID pairs a library already carries.
+
+    `write_tags` writes ACOUSTID_ID and ACOUSTID_FINGERPRINT in one save and
+    refuses a lone id, so nothing in this app can leave half a pair behind —
+    but a library tagged elsewhere (hand-tagged, an older Picard pass, a
+    restored backup) can carry one, and the grader fails every such track
+    ("incomplete AcoustID pair", `mlo.grader`). This pass walks the configured
+    targets, and for each track with exactly one half writes the missing one
+    (see `fix_pair` for what each half is completed from).
+
+    Stats, in the runner shape: `total_scanned` is every audio file examined,
+    `modified_count` the pairs completed, `unchanged_count` the files that
+    already carried both halves, `skipped_count` those carrying neither, and
+    `error_count`/`errors` the files whose incomplete pair could NOT be
+    completed — each named with its own reason (a container this app cannot
+    tag, a track too short for fpcalc, a missing fpcalc, no API key, no
+    lookup answer). Nothing is written for those, and the run never raises.
+    """
+    cfg = cfg or {}
+    stats = new_stats()
+    print_header("AcoustID pairs")
+    folder = str(cfg.get("music_folder") or "")
+
+    if cfg.get("targets") is not None:
+        files = sorted(_collect_targets(cfg["targets"], LIB_AUDIO_EXTS))
+    else:
+        if not os.path.isdir(folder):
+            log(c(f"ERROR: folder does not exist: {folder}", Color.RED))
+            return stats
+        files = []
+        for album_dir in _find_albums(folder):
+            files.extend(sorted(
+                os.path.join(album_dir, f)
+                for f in os.listdir(album_dir) if is_audio_file(f)))
+    if not files:
+        log("No audio files found.")
+        return stats
+
+    counts = {"ok": 0, "skip": 0, "fail": 0}
+    pbar = _make_pbar(total=len(files), desc="AcoustID pairs")
+
+    def _finish(path, got):
+        """Book one track's result on the runner thread (the workers share no
+        state but the throttle inside the service layer)."""
+        stats["total_scanned"] += 1
+        status = got["status"]
+        if status == "modified":
+            stats["modified_count"] += 1
+            _pbar_update(pbar, counts, "ok")
+            return
+        if status == "unchanged":
+            stats["unchanged_count"] += 1
+            _pbar_update(pbar, counts)
+            return
+        if status == "skipped":
+            stats["skipped_count"] += 1
+            _pbar_skip(pbar, counts)
+            return
+        stats["error_count"] += 1
+        if len(stats["errors"]) < 25:
+            stats["errors"].append(
+                f"{os.path.basename(path)}: {got['reason']}")
+        _pbar_update(pbar, counts, "fail")
+
+    # Bounded parallelism: every track is its own tag read plus its own
+    # fpcalc/lookup, and both layers serialise what must be serialised
+    # (fpcalc runs as its own process, the service calls through the shared
+    # throttle), so lanes overlap the wait instead of paying it once per file.
+    workers = worker_count(cfg, default=4, maximum=8, items=len(files))
+    try:
+        if len(files) == 1 or workers == 1:
+            for path in files:
+                _finish(path, fix_pair(path, cfg))
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futures = {ex.submit(fix_pair, p, cfg): p for p in files}
+                for fut in as_completed(futures):
+                    path = futures[fut]
+                    try:
+                        got = fut.result()
+                    except Exception as e:  # a worker must never kill the run
+                        got = {"status": "failed", "reason": str(e)}
+                    _finish(path, got)
+    finally:
+        try:
+            pbar.close()
+        except Exception:
+            pass
+
+    log(c(f"AcoustID pairs completed {stats['modified_count']}"
+          f" · already complete {stats['unchanged_count']}"
+          f" · no pair {stats['skipped_count']}"
+          f" · failed {stats['error_count']}",
+          Color.GREEN if not stats["error_count"] else Color.YELLOW))
+    return stats

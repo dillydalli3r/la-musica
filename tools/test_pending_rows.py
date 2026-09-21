@@ -258,7 +258,7 @@ home_payload = home(CFG)
 shelf = home_rows(home_payload, "pending")
 shelf_row = find(shelf, folder)
 ok(shelf_row is not None, "home: the 'waiting for its audio' shelf lists it",
-   [r.get("album") for r in shelf])
+   [(r.get("meta") or {}).get("ALBUM") for r in shelf])
 if shelf_row:
     eq(shelf_row.get("pending"), True, "home shelf: pending")
     eq(shelf_row.get("pending_reason"), "a verified Soulseek download",
@@ -358,6 +358,42 @@ eq(naming.track_variables(multi_tags).get("releasecountry"), "GB",
 eq(pending_albums.folder_for_release(MULTI, CFG),
    pending_albums.folder_for_release(RELEASE, CFG),
    "…so the folder preview does not move when a release gains countries")
+
+# --------------------------------------------------------------------------- #
+# 5. a framework album whose acquisition ENDED: the placeholder goes, its audio
+#    never does
+# --------------------------------------------------------------------------- #
+print("\na framework album whose acquisition ended")
+ended = pending_albums.create(dict(RELEASE, id="99999999-1111-1111-1111-111111111111",
+                                   release_group_id="99999999-2222-2222-2222-222222222222",
+                                   title="Ended Album"), CFG, prefetch=False)
+ended_folder = ended["album_path"].replace("/", os.sep)
+ok(os.path.isdir(ended_folder) and bool(pathmod.load_pending(ended_folder)),
+   "the framework album and its marker are on disk")
+# What a TERMINAL wish runs: server.wishes_worker._drop_framework_album calls
+# exactly this. Nothing searches that wish again by itself, so the folder the
+# ADD created is the add's to take back — while the wish row that says what
+# happened stays in the queue with its retry.
+ok(pending_albums.remove_for_wish(ended["wish_id"], CFG),
+   "the terminal cleanup removes the folder the add created")
+ok(not os.path.isdir(ended_folder), "the folder is gone")
+ok(pathmod.load_pending(ended_folder) is None, "and its marker went with it")
+ok(wishes.get_wish(ended["wish_id"]) is not None,
+   "the wish row stays — it is the queue's own row, with the retry")
+
+# A folder that HOLDS audio is a real album by then (a download landed in it):
+# no outcome may delete it.
+kept = pending_albums.create(dict(RELEASE, id="99999999-3333-3333-3333-333333333333",
+                                  release_group_id="99999999-4444-4444-4444-444444444444",
+                                  title="Landed Album"), CFG, prefetch=False)
+kept_folder = kept["album_path"].replace("/", os.sep)
+write_audio(kept_folder)
+ok(not pending_albums.remove_for_wish(kept["wish_id"], CFG),
+   "a folder holding audio is never removed by the terminal cleanup")
+ok(os.path.isfile(os.path.join(kept_folder, "1-01 One.flac")),
+   "and its audio is still there")
+wishes.delete_wish(ended["wish_id"])          # the rows are this test's, in the
+wishes.delete_wish(kept["wish_id"])           # developer's own wish store
 
 print()
 if FAILED:

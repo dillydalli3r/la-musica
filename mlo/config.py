@@ -106,14 +106,21 @@ LEGACY_DEFAULT_DIGITAL_QUERIES = (
 # then content: 13 fetch lyrics → 18 publish → 17 AI transforms, 8 auto
 # tagging (mood/genre/advisory), 5 images → 19 artist images (the two image
 # passes together: covers then the artwork stored beside them), 6 audit, 7 DR
-# & ReplayGain, 9 AccurateRip, 12 key & BPM, 16 mood & energy, and finally 10
-# Format all (the canonical trim) then 4 Grade last.
+# & ReplayGain, 9 AccurateRip, 12 key & BPM, 16 mood & energy, then 10
+# Format all (the canonical trim), 20 the layout report on the resulting
+# tree, 21 the AcoustID pair fix whose tag writes grading reads, and 4 Grade
+# last.
 # The order this replaced ran CUEs before the converters — a cue could name
 # "….wav" for an album that had become FLAC — and beets fourth-from-last, so
 # the album was moved after images/audit/DR had been computed for paths that
 # no longer existed. 15 stays right after 14: it reads the release id beets
-# matched. Keep in step with web/src/lib/scripts.ts (tests/test_script_menus).
-DEFAULT_RUN_ALL_ORDER = [11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 19, 6, 7, 9, 12, 16, 10, 4]
+# matched. 20 sits next to 4 because both are read-outs of the finished
+# library: 10 has just made its final passes, so a layout report that ran
+# earlier would describe names the run itself was about to change — and 21
+# belongs there for the same reason, since a pair it completes is one of the
+# things 4 grades.
+# Keep in step with web/src/lib/scripts.ts (tests/test_script_menus).
+DEFAULT_RUN_ALL_ORDER = [11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 19, 6, 7, 9, 12, 16, 10, 20, 21, 4]
 
 # The genre-source order that shipped before the two-source default: recognizing
 # it lets normalize_config treat it as "never customized" (see below).
@@ -935,7 +942,7 @@ DEFAULT_CONFIG = {
     "acoustid_fpcalc_path": "",
     "acoustid_min_score": 0.75,
 
-    # Soulseek via managed slskd (shares = music folder).
+    # Soulseek via managed slskd (shares = the library folder <music>/Artists).
     "soulseek_username": "",
     "soulseek_password": "",
     "soulseek_description": "",
@@ -955,6 +962,21 @@ DEFAULT_CONFIG = {
     # cert by default. The app talks plain HTTP to the loopback port, so the
     # second listener is disabled unless explicitly wanted.
     "soulseek_web_https": False,
+    # Ask the router to open the listen port (UPnP IGD, then NAT-PMP) so peers
+    # can reach this client without a manual port-forward. slskd has no such
+    # option — upstream closed the request unimplemented — so the mapping is
+    # made by the app itself (mlo/portmap.py). On by default because an
+    # unreachable listen port is what makes a client look offline to the
+    # network; it is a no-op when no gateway answers, and the status says so.
+    "soulseek_upnp": True,
+    # After a downloaded release imports successfully, delete the copy that was
+    # downloaded — the library now holds the album and the download folder is
+    # only a staging area. ON by default: the alternative is a second full copy
+    # of everything you acquire. It is only ever the folder the job itself
+    # downloaded into, only inside the configured download dir, and only after
+    # the import reported success — a failed import keeps its files so it can
+    # be retried without downloading them again.
+    "soulseek_clear_downloads": True,
     "soulseek_download_dir": "",
     # ON by default: the Soulseek client should be up whenever the app is.
     "soulseek_autostart": True,
@@ -1057,7 +1079,7 @@ DEFAULT_CONFIG = {
     # library are stuck with. Off = the old behaviour, the best candidate is
     # saved during the import with no question asked.
     "cover_review": True,
-    # Explicit shared folders (empty = share the whole music folder).
+    # Explicit shared folders (empty = the library folder <music>/Artists).
     "soulseek_share_dirs": [],
     # Extra share filters — substrings/paths slskd must NOT share.
     "soulseek_share_exclude": [],
@@ -1074,10 +1096,16 @@ DEFAULT_CONFIG = {
     # A search that found NOTHING is not a failure to try harder: it spends a
     # not-found attempt instead, and after `wishes_not_found_attempts` empty
     # searches (0 = never give up) the wish ends 'not_found' — terminal and
-    # announced once, with the queue's retry button as the way back. Both
-    # ends record why, and neither is retried by the timer again.
+    # announced once, with the queue's retry button as the way back.
+    # Both ends record why, and neither is retried by the timer again.
+    # SHIPPED AS "KEEP LOOKING": a release the user asked for keeps being
+    # searched on its interval until it is found or the user cancels it. The
+    # network is not a fixed catalogue — a share that is offline today is
+    # online next week, and stopping after three quiet searches threw away
+    # requests the user had already made. A finite cap is still there for
+    # anyone who wants one.
     "wishes_max_attempts": 0,       # 0 = retry forever
-    "wishes_not_found_attempts": 3,  # empty searches before 'not_found' (0 = never)
+    "wishes_not_found_attempts": 0,  # empty searches before 'not_found' (0 = never)
     "wishes_retry_backoff_minutes": 30,  # extra wait per retry, doubled (0 = off)
     "wishes_auto_import": True,
 
@@ -1808,7 +1836,15 @@ def normalize_config(user=None) -> dict:
             # "15" predates the tracklist script (it was the lyrics
             # xlit/translate script when the id last moved), and the anchor
             # rule puts every later id where the pipeline wants it.
-            if 1 <= script_id <= 14 and script_id not in clean_order:
+            #
+            # 20 (layout scan) and 21 (AcoustID pairs) are KEPT instead: they
+            # are the newest ids and have never meant anything else, so a saved
+            # order that holds one holds the user's own position for it, and
+            # shedding it would silently undo that. An order written before
+            # they existed simply has neither and gets them from the same
+            # anchor rule below.
+            if ((1 <= script_id <= 14 or script_id in (20, 21))
+                    and script_id not in clean_order):
                 clean_order.append(script_id)
     # Migrate legacy sequential default [1..8] to systematic pipeline
     if clean_order == [1, 2, 3, 4, 5, 6, 7, 8] and clean_order != list(DEFAULT_RUN_ALL_ORDER):
@@ -1852,6 +1888,13 @@ def normalize_config(user=None) -> dict:
         _insert_script(clean_order, 17, [18, 13, 12, 16])
         # 19 artist images — with script 5's image pass, whose policy it shares
         _insert_script(clean_order, 19, [5, 8, 16])
+        # 20 layout scan — right before grading, so the report describes the
+        # names 10 (Format all, the canonical trim) has just settled instead
+        # of the ones a saved order was still about to rewrite
+        _insert_script(clean_order, 20, [10, 16, 12])
+        # 21 AcoustID pairs — after 20 and so also before the grader, which is
+        # the script that reports the incomplete pair it completes
+        _insert_script(clean_order, 21, [20, 10, 16, 12])
     cfg["run_all_order"] = clean_order or list(DEFAULT_RUN_ALL_ORDER)
     return cfg
 

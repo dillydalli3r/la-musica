@@ -204,16 +204,24 @@ SOURCES = (
             ("albums",), rec_kinds=("albums",),
             entity_kinds=("albums", "tracks"),
             needs=("spotify_client_id", "spotify_client_secret")),
-    # RateYourMusic is here for its CHARTS only: it publishes no genre list and
-    # no recommendation feed, and its genre reading lives in the import chain
-    # (`server.integrations`). It is last in this list on purpose — the registry
-    # order is the genre/rec merge order — and first in `CHART_ORDER` below,
-    # where the user asked for it as the primary track source.
+    # RateYourMusic answers with its OWN ranked songs — its charts, narrowed by
+    # the genre or the artist it is asked about — and nothing else: it publishes
+    # no genre list, no text search and no similar-entity feed, and its genre
+    # READING lives in the import chain (`server.integrations`). It is last in
+    # this list on purpose — the registry order is the genre/rec merge order,
+    # and a RYM row carries no MusicBrainz id, so it must never win a row that a
+    # source holding an id also named (that id is what makes the row addable) —
+    # and first in `CHART_ORDER` below, where the user asked for it as the
+    # primary track source.
     _source("rym", "RateYourMusic",
             "Its own user-ranked song charts (all-time and per year), scraped "
-            "from the site — RYM has no API and refuses an automated client "
-            "without a rym_cookie, so archived snapshots answer behind the live "
-            "route. Tracks only; no month or week chart exists.",
+            "from the site and narrowed by GENRE or by ARTIST — the same chart "
+            "URL carries the filter, verified against the chart pages RYM has "
+            "served. RYM has no API and refuses an automated client without a "
+            "rym_cookie, so an archived snapshot answers behind the live route, "
+            "and a chart the archive never captured says so. Tracks only; no "
+            "month or week chart exists.",
+            rec_kinds=("tracks",),
             charts=("tracks",), chart_periods=("all", "year")),
 )
 BY_ID = {spec["id"]: spec for spec in SOURCES}
@@ -624,6 +632,26 @@ def _nothing_note(cfg, kind, seed_label):
 # --------------------------------------------------------------------------- #
 # genres — the library's list and the sources' lists, merged
 # --------------------------------------------------------------------------- #
+def _mb_cover(kind, row):
+    """The Cover Art Archive URL for a row that states no provider image, or
+    None.
+
+    EVERY arm's answer is folded in here, so a MusicBrainz-only row — the tag
+    search's tracks and release groups, an entity shelf's own records, anything
+    a later arm adds — reaches the release's real cover through the SAME URL
+    and the same `/api/art` proxy the rest of the app renders provider art
+    with, instead of collapsing to the placeholder icon. The release GROUP is
+    the identity Cover Art Archive prefers (an album row's `mbid` IS one); a
+    release id only answers when the row states one. A recording MBID is never
+    turned into a URL: Cover Art Archive publishes no recording endpoint, so
+    that would be a 404 dressed up as a cover."""
+    group = str(row.get("release_group_mbid") or "").strip()
+    if not group and kind == "album":
+        group = str(row.get("mbid") or "").strip()
+    return (discovery.caa_front_url("release-group", group)
+            or discovery.caa_front_url("release", row.get("release_mbid")))
+
+
 def _adapt(kind, row):
     """A `server.discovery` row as the Discover row shape.
 
@@ -645,7 +673,8 @@ def _adapt(kind, row):
         # An artist row's subject IS its name; every other kind needs one.
         out["artist"] = artist or (row.get("name") if row_kind == "artist" else "") or ""
     if not out.get("cover"):
-        out["cover"] = row.get("cover") or row.get("image") or row.get("thumbnail")
+        out["cover"] = (row.get("cover") or row.get("image")
+                        or row.get("thumbnail") or _mb_cover(row_kind, row))
     if not out.get("link"):
         out["link"] = row.get("link") or row.get("url")
     return out
@@ -858,8 +887,10 @@ def _recommend_rows(sid, kind, cfg, genres, artists, limit, seed):
     What the reason says is the source's own concept of a recommendation: a tag
     chart is "genre: shoegaze (Last.fm tag)", a similar-artist feed is
     "sounds like Slowdive (ListenBrainz)", a discography is "more from Slowdive
-    (Deezer)". Raises `_Skip` when the source needs a seed this request does
-    not have (a genre it cannot filter by, an artist it cannot resolve)."""
+    (Deezer)", and RateYourMusic's own chart for a genre is "genre: shoegaze
+    (RateYourMusic chart)". Raises `_Skip` when the source needs a seed this
+    request does not have (a genre it cannot filter by, an artist it cannot
+    resolve)."""
     rows = []
 
     def take(found, why):
@@ -925,6 +956,29 @@ def _recommend_rows(sid, kind, cfg, genres, artists, limit, seed):
         take(discovery.listenbrainz_top_releases(limit=limit) if kind == "albums"
              else discovery.listenbrainz_top_recordings(limit=limit),
              "most listened this month (ListenBrainz)")
+        return rows
+
+    if sid == CHART_FIRST:
+        # RYM's recommendation IS its own ranking: the chart it publishes for
+        # the genre asked about (`/charts/top/song/all-time/g:<genre>/`), never
+        # a text search dressed up as one. The chart's own name is checked
+        # before its rows are believed — RYM answers a genre it does not have
+        # by dropping the filter, and presenting its ALL-TIME chart as the
+        # genre's would be a lie the row's reason line would repeat. Its
+        # refusal (no cookie, no capture) raises out of `rym_charts` and is
+        # reported in RYM's own words by the caller.
+        if kind not in integrations.RYM_CHART_KINDS:
+            raise _Skip("RateYourMusic charts only: "
+                        + ", ".join(integrations.RYM_CHART_KINDS))
+        if not genres:
+            raise _Skip("needs a genre seed and this request has none")
+        for genre in genres:
+            got = integrations.rym_charts(kind=kind, period="all", limit=limit,
+                                         cfg=cfg, genre=genre)
+            if not integrations.rym_chart_states(got.get("chart"), genre):
+                raise _Skip('RateYourMusic has no genre called "%s" — its own '
+                            "chart filter matched no such chart" % genre)
+            take(got["rows"], "genre: %s (RateYourMusic chart)" % genre)
         return rows
 
     raise _Skip("no recommendations from this source")
@@ -1174,6 +1228,35 @@ def _entity_rows(sid, kind, cfg, seed, limit):
                         "an artist's own albums and top tracks")
         return rows
 
+    if sid == CHART_FIRST:
+        # RYM's chart filters are a genre and an ARTIST, so what it can say
+        # about ONE page is that artist's own ranked songs — the same chart
+        # narrowed to `/a:<artist>/`. There is no similar-track feed and no
+        # similar-album feed to ask about an album or a track page, and RYM's
+        # album charts are a different page shape this scraper does not read,
+        # so an artist page is the one entity it answers for (see the registry's
+        # `entity_kinds`, which is what keeps the rest from asking at all).
+        if kind not in integrations.RYM_CHART_KINDS:
+            raise _Skip("RateYourMusic charts only: "
+                        + ", ".join(integrations.RYM_CHART_KINDS))
+        if seed["kind"] != "artist":
+            raise _Skip("RateYourMusic charts filter by GENRE and by ARTIST — "
+                        "it states no similar-%s feed" % kind)
+        got = integrations.rym_charts(kind=kind, period="all", limit=limit,
+                                     cfg=cfg, artist=by)
+        # Rows are kept only when RYM's OWN artist field is the name asked for:
+        # a chart that came back withOUT the artist filter (how RYM answers a
+        # name it does not know) names other artists, and handing that over as
+        # "more from this page" is the one thing this must never do.
+        want = discovery.norm(by)
+        found = [row for row in got["rows"]
+                 if discovery.norm(row.get("artist")) == want]
+        if not found:
+            raise _Skip('RateYourMusic knows no artist called "%s" — its own '
+                        "chart filter matched no chart" % by)
+        take(found, "more from %s (RateYourMusic chart)" % by)
+        return rows
+
     raise _Skip(_ENTITY_NOTES.get(sid) or "no entity recommendations from this source")
 
 
@@ -1218,8 +1301,9 @@ def recommended_payload(cfg=None, seed="library", kind="albums", limit=20, lib=N
             if kind not in spec["entity_kinds"]:
                 continue
             asked.ask(spec["id"])
-            if not can_run(spec, cfg):
-                asked.note(spec["id"], skip_note(spec, cfg))
+            skip = _source_skip(spec, cfg)
+            if skip:
+                asked.note(spec["id"], skip)
                 continue
             try:
                 found = _entity_rows(spec["id"], kind, cfg, entity, limit)
@@ -1234,6 +1318,7 @@ def recommended_payload(cfg=None, seed="library", kind="albums", limit=20, lib=N
             for row in found:
                 row["_source"] = spec["id"]
                 rows.append(row)
+        _rym_archive_note(cfg, asked)
         items = _shelf_items(rows, index, limit,
                              "similar to %s" % _entity_subject(entity),
                              drop_owned=False)
@@ -1261,8 +1346,9 @@ def recommended_payload(cfg=None, seed="library", kind="albums", limit=20, lib=N
         if kind not in spec["rec_kinds"]:
             continue
         asked.ask(spec["id"])
-        if not can_run(spec, cfg):
-            asked.note(spec["id"], skip_note(spec, cfg))
+        skip = _source_skip(spec, cfg)
+        if skip:
+            asked.note(spec["id"], skip)
             continue
         try:
             found = _recommend_rows(spec["id"], kind, cfg, genres, artists,
@@ -1277,12 +1363,46 @@ def recommended_payload(cfg=None, seed="library", kind="albums", limit=20, lib=N
             row["_source"] = spec["id"]
             rows.append(row)
 
+    _rym_archive_note(cfg, asked)
     items = _shelf_items(rows, index, limit, "genre: %s" % seed, drop_owned=True)
     notes = asked.notes
     if not items:
         notes["recommended"] = _nothing_note(cfg, kind, "this seed")
     return {"items": items, "sources_asked": asked.ids, "notes": notes,
             "basis": basis}
+
+
+# --------------------------------------------------------------------------- #
+# Asking a source at all — the gate, and RYM's second route
+# --------------------------------------------------------------------------- #
+def _source_skip(spec, cfg):
+    """WHY a source is not asked at all, or "" when it is asked.
+
+    The registry's own rule (`needs`) covers a source with an unset credential.
+    RateYourMusic's does not, because it has a second route: `integrations`'
+    `_genre_source_skip` states that rule once for the whole app (no cookie AND
+    no archive fallback is what actually skips it), so the chart and the
+    recommendation arms reuse it here instead of growing a second copy that
+    could disagree."""
+    if spec["id"] == CHART_FIRST:
+        return integrations._genre_source_skip("rateyourmusic", cfg or {}) or ""
+    return skip_note(spec, cfg)
+
+
+def _rym_archive_note(cfg, asked):
+    """RYM's line when the shelf's RateYourMusic rows came from the archive.
+
+    The charts page says so per source (`_chart_rows`), and a recommendation
+    shelf owes the reader the same fact: the rows are real, but a snapshot can
+    predate them, and the reason line beside them says none of it. Read off
+    `integrations`' own route record — the module knows which route answered the
+    request it just made (see `_rym_note`), so this does not guess, and it says
+    nothing at all for a source that answered nothing or was never asked."""
+    if "rym" not in asked.ids or asked.notes.get("rym"):
+        return
+    note = integrations._rym_note(cfg, answered=True)
+    if note:
+        asked.note("rym", note)
 
 
 # --------------------------------------------------------------------------- #
@@ -1307,19 +1427,6 @@ def _unsupported_note(spec, period):
     have = ", ".join(_PERIOD_WORDS.get(p, p) for p in spec["chart_periods"])
     return ("unsupported: %s publishes no %s chart — it charts %s"
             % (spec["label"], _PERIOD_WORDS.get(period, period), have))
-
-
-def _chart_skip(spec, cfg):
-    """WHY a chart source is not asked at all, or "" when it is asked.
-
-    The registry's own rule (`needs`) covers a source with an unset credential.
-    RYM's does not, because it has a second route: `integrations`'
-    `_genre_source_skip` states that rule once for the whole app (no cookie AND
-    no archive fallback is what actually skips it), so the charts reuse it here
-    instead of growing a second copy that could disagree."""
-    if spec["id"] == CHART_FIRST:
-        return integrations._genre_source_skip("rateyourmusic", cfg or {}) or ""
-    return skip_note(spec, cfg)
 
 
 def _chart_rows(sid, kind, period, limit, cfg):
@@ -1417,7 +1524,7 @@ def charts_payload(cfg=None, period="all", kind="tracks", source="all",
         if period not in spec["chart_periods"]:
             asked.note(sid, _unsupported_note(spec, period))
             continue
-        skip = _chart_skip(spec, cfg)
+        skip = _source_skip(spec, cfg)
         if skip:
             asked.note(sid, skip)
             continue

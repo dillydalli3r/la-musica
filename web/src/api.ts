@@ -22,6 +22,7 @@ import type {
   ImportPrompt,
   ImportScriptsPreview,
   LayoutReport,
+  LayoutSnapshot,
   LibraryAddResult,
   LyricsAutoResult,
   LyricsHit,
@@ -556,6 +557,47 @@ export interface SlskStatus {
   has_credentials: boolean;
   autostart: boolean;
   share_dirs: string[];
+  /** The LISTEN port's real state: whether anything accepts on it here, who
+   *  holds it, and what the router was actually told (mlo.portmap). A mapping
+   *  is only `mapped` when a router confirmed it, so the tab may say "opened"
+   *  only then — `refused` carries the router's own words in `detail`. */
+  listen_port_state: {
+    listen_port: number;
+    listening: boolean;
+    /** "slskd" when our daemon accepts on it, "another program" when a
+     *  foreign process does — the conflict the WEB port already reports. */
+    holder: "" | "slskd" | "another program";
+    bindable: boolean;
+    /** Set only when another program holds the port. */
+    conflict: string | null;
+    /** What is true here: the port unbound while slskd runs, or unholdable. */
+    error: string;
+    /** slskd's OWN last log line about a listen port ("" when it said none). */
+    slskd_error: string;
+    mapping: {
+      enabled: boolean;
+      listen_port: number;
+      /** The port the last verdict was about. It can differ from
+       *  `listen_port_state.listen_port`, which is the SAVED port, so a bar
+       *  that describes a mapping must name this one. */
+      mapped_port: number;
+      state: "off" | "mapped" | "refused" | "no_gateway" | "unsupported"
+        | "error" | "pending" | "checking" | "client_down";
+      detail: string;
+      method: "" | "upnp" | "natpmp";
+      verified: boolean;
+      external_ip: string;
+      internal_ip: string;
+      gateway: string;
+      tried: { method: string; state: string; detail: string }[];
+      /** The raw protocol record behind `tried`: whether each method's
+       *  request was answered at all, and the endpoint's own words (a SOAP
+       *  fault code, a NAT-PMP result code) when it was. */
+      attempts: { method: string; answered: boolean; ok: boolean; detail: string }[];
+      checked_at: number;
+      in_flight: boolean;
+    };
+  };
 }
 
 /** One file of the running auto-import download, as slskd reports it. */
@@ -2045,6 +2087,10 @@ export const api = {
    *  folders, and anything that breaks the Artists/<Artist>/<Album> shape. */
   libraryLayout: () => json<LayoutReport>(`${API}/library/layout`),
 
+  /** The report the LAST layout scan stored (script 20, or the panel's Scan) —
+   *  walk-free, which is why the Library page can afford to ask on load. */
+  libraryLayoutReport: () => json<LayoutSnapshot>(`${API}/library/layout/report`),
+
   namingPreview: (script: string, shortFolderNames: boolean, sample?: Record<string, string>) =>
     json<{ path: string | null; ok: boolean; error?: string }>(`${API}/naming/preview`, {
       method: "POST",
@@ -2822,11 +2868,13 @@ export const api = {
   // ----------------------------------------------------------------- //
   /** Add a MusicBrainz entity to the LIBRARY: the framework album (the folder
    *  the naming script names, with the release tracklist and the
-   *  release-group cover) is created on disk and shown as pending while the
-   *  wish queue searches Soulseek for its audio. `kind: "artist"` prepares the
-   *  discography in the background (`background: true`) and reports itself on
-   *  the event channel — one MusicBrainz browse per release group does not fit
-   *  in a request. 60 s: a release group's editions are a handful of lookups. */
+   *  release-group cover) is created on disk, shown as pending, and the search
+   *  for its audio starts immediately — the release is then looked for until
+   *  it is found or the user cancels it, not just until the next quiet search.
+   *  `kind: "artist"` prepares the discography in the background
+   *  (`background: true`) and reports itself on the event channel — one
+   *  MusicBrainz browse per release group does not fit in a request. 60 s: a
+   *  release group's editions are a handful of lookups. */
   libraryAdd: (body: {
     mbid: string;
     kind?: "release" | "release_group" | "artist" | "recording" | "auto";
@@ -2835,9 +2883,6 @@ export const api = {
     /** MusicBrainz release-group types to restrict an artist / release-group
      *  add to ("album", "album + compilation"); empty = every type. */
     types?: string[];
-    /** Start the wish queue's search for what this call queued, instead of
-     *  leaving it to the configured automation. */
-    download?: boolean;
     title?: string;
     artist?: string;
     year?: string;

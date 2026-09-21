@@ -114,9 +114,10 @@ def library_root(music_folder=None):
     This is THE base every library path is built on: the naming script only
     names the path *inside* this folder, so organize/tagging, the grader's
     naming check and the beets ``directory:`` all join their relative path
-    onto it. The music folder ROOT stays free for the app state dirs (and
-    for the Soulseek share), so a library path must never be built from the
-    music folder itself."""
+    onto it. The music folder ROOT holds only the app state dirs and whatever
+    the organizer has not filed yet — the Soulseek share is THIS folder, not
+    the root (server.soulseek.share_dirs) — so a library path must never be
+    built from the music folder itself."""
     mf = _scope(music_folder)
     return os.path.join(mf, ARTISTS_DIR_NAME) if mf else None
 

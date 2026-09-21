@@ -282,9 +282,12 @@ def create(release, cfg=None, *, source=SOURCE, queries=None, title="",
 
     Idempotent: a folder that already holds audio is left exactly as it is
     (the album arrived), a folder that is already a framework album is
-    refreshed rather than duplicated, and the wish is keyed by release id so a
-    second call returns the same one. Returns a row the route reports; raises
-    ValueError when the release cannot name a library folder at all.
+    refreshed rather than duplicated, and the wish is the one already standing
+    for this release — whichever id keys it (see `wishes.find_for_release`) —
+    so a second call, and a call that names the same pressing by its release
+    GROUP instead of its release, both return the one wish and cost one search.
+    Returns a row the route reports; raises ValueError when the release cannot
+    name a library folder at all.
 
     `prefetch` is the add-time page content (`prefetch_content`): on, the
     folder's description, artist artwork, links and ranked cover candidates are
@@ -317,9 +320,17 @@ def create(release, cfg=None, *, source=SOURCE, queries=None, title="",
         row["existing"] = True
         return row
 
-    wish = wishes.add_wish(rid or rgid, title=title, artist=artist, year=year,
-                           note="Added to the library from MusicBrainz.",
-                           target_dir=folder, queries=queries, source=source)
+    # The release may already be a wish under the OTHER id its caller holds:
+    # "Add to library" resolves an edition and keys the wish by its release id,
+    # while a wish saved from an album link carries the release GROUP id. Two
+    # rows for one pressing are two searches, each with its own job, both
+    # downloading the same album — so the row already standing for this release
+    # IS this add's wish.
+    wish = wishes.find_for_release(rid, rgid)
+    if not wish:
+        wish = wishes.add_wish(rid or rgid, title=title, artist=artist, year=year,
+                               note="Added to the library from MusicBrainz.",
+                               target_dir=folder, queries=queries, source=source)
     row["wish_id"] = wish["id"] if wish else None
 
     os.makedirs(folder, exist_ok=True)

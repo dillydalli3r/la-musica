@@ -78,7 +78,7 @@ export default function GenrePage() {
   };
 
   const chip = (name: string, count?: number) => {
-    // A family is the DERIVED last slot of a track's genre list
+    // A family is the DERIVED first slot of a track's genre list
     // (mlo.genre_vocab.parent_of). The library holds it as a genre of its own,
     // so it is labelled here instead of left looking like one more specific
     // genre sitting under this card's head — the hierarchy the old
@@ -90,7 +90,7 @@ export default function GenrePage() {
         className={`chip border ${family ? "bg-panel border-dashed border-border text-zinc-400" : "bg-raise border-border text-zinc-300"} hover:text-white hover:border-accent transition-colors`}
         onClick={() => open(name)}
         title={family
-          ? `${name} is a family — the app derives it from a track's specific genre and writes it last. Open the library filtered to ${name}`
+          ? `${name} is a family — the app derives it from a track's specific genre and writes it first. Open the library filtered to ${name}`
           : `Open the library filtered to ${name}`}
       >
         {family && <span className="text-[9px] uppercase tracking-wider text-zinc-600">family</span>}

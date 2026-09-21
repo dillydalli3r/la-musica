@@ -34,6 +34,29 @@ att = r._needs_attention(albums, 5)
 assert [a["path"] for a in att] == ["C:/M/A/Y"], att
 assert att[0]["owned"] is True and att[0]["mb_kind"] == "rg"
 
+# --------------------------------------------------------------------------- #
+# A shelf row IS the library's own album row plus the shelf's reason, not a
+# reduced copy of it: the shared card (web/src/components/AlbumCard) reads the
+# row's tracks, meta, cover, grade and audit, so a Home card that carried less
+# would say less about an album than the Library does about the same one.
+# --------------------------------------------------------------------------- #
+lib_row = {
+    "path": "C:/M/A/X", "cover_file": "cover.jpg", "media": "CD",
+    "pass": True, "audit_summary": "REAL", "grade_pct": 100.0, "track_count": 1,
+    "meta": {"ALBUM": "X", "ALBUMARTIST": "Alpha", "DATE": "1999"},
+    "tracks": [{"path": "C:/M/A/X/1.flac", "file": "1.flac"}],
+}
+row = r._owned_row(lib_row, reason="Recently added")
+assert row["reason"] == "Recently added" and row["owned"] is True, row
+assert row["artist"] == "Alpha", row
+assert row["meta"]["ALBUM"] == "X" and row["tracks"] == lib_row["tracks"], row
+assert row["cover_file"] == "cover.jpg" and row["pass"] is True, row
+assert row["audit_summary"] == "REAL" and row["grade_pct"] == 100.0, row
+assert row["mbid"] is None and row["mb_kind"] == "rg", row
+# …and nothing of the old reduced row: a second album shape is what let the
+# two pages draw the same album differently.
+assert {"album", "year", "cover"}.isdisjoint(row), sorted(row)
+
 from server import wishes as wishes_mod
 
 wishes_mod.list_wishes = lambda: [
@@ -45,6 +68,12 @@ wanted = r._wanted(5)
 assert len(wanted) == 1, wanted
 assert wanted[0]["mbid"] == "abc-123" and wanted[0]["mb_kind"] == "release"
 assert wanted[0]["reason"] == "Searching Soulseek" and wanted[0]["owned"] is False
+# A wish is NOT a library album: the row carries the identity a card draws and
+# nothing that reads as a library fact, so no surface can claim the release was
+# graded or has audio to play (the card keys that on `owned`).
+assert wanted[0]["tracks"] == [], wanted[0]
+assert wanted[0]["meta"] == {"ALBUM": "T", "ARTIST": "Ar", "DATE": "1999"}, wanted[0]
+assert {"pass", "audit_summary", "grade_pct", "media"}.isdisjoint(wanted[0]), sorted(wanted[0])
 # ------------------------------------------------------------------------- #
 # The recommendation shelves are GONE: the Home payload carries library-derived
 # data only, and no provider chain is consulted for it any more.

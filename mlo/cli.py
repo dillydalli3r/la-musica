@@ -13,10 +13,12 @@ import importlib
 import os
 import traceback
 
+from .artistdata import run_optimize_artist_images
 from .audit import run_audit_library
 from .autotag import run_auto_tagging
 from .cue import run_format_cues
 from .deps import HAS_MUTAGEN
+from .layout import run_scan_layout
 from .paths import DEFAULT_DIGITAL_SOURCE
 from .flac import run_optimize_flacs
 from .grader import run_grade_library
@@ -58,6 +60,8 @@ SCRIPTS = (
     (17, "Lyrics transliterate (AI)", "TRANSLITERATION/TRANSLATION tags + sidecars"),
     (18, "Publish lyrics (LRCLIB)", "submit missing lyrics to the community DB"),
     (19, "Optimize artist images", "crop/resize artist artwork to the configured aspect and size"),
+    (20, "Scan library layout", "read-only layout report (nothing is moved)"),
+    (21, "Fix AcoustID pairs", "complete ACOUSTID_ID / ACOUSTID_FINGERPRINT pairs"),
 )
 SCRIPT_LABELS = {sid: name for sid, name, _ in SCRIPTS}
 
@@ -66,7 +70,7 @@ SCRIPT_LABELS = {sid: name for sid, name, _ in SCRIPTS}
 # skips the script instead of reporting an empty run.
 SCRIPT_GATES = {7: "dr_replaygain_enabled", 12: "audiometa_enabled",
                 16: "mood_enabled", 17: ("lyrics_xlit_enabled", "lyrics_translate_enabled"),
-                18: "lrclib_auto_publish"}
+                18: "lrclib_auto_publish", 21: "acoustid_enabled"}
 
 
 def _print_script_list(with_desc=True):
@@ -541,9 +545,18 @@ def build_script_runners():
     """Map script id -> (label, runner) for every pipeline script.
 
     Labels come from SCRIPTS, so the terminal and the API name every script the
-    same way; scripts 9-14 resolve their module on first use.
+    same way. A runner that has to be resolved on first use is named by its
+    module here instead of being imported at startup (a module this install may
+    not have, and mlo.cli is on the import path of the whole CLI).
+
+    EVERY id SCRIPTS declares is wired: the menu and the runner map are two
+    halves of one promise, and 15 and 19 both spent time missing from this map
+    — the CLI could list them, and Run All answered "Skipping unknown script
+    id" while the menu kept advertising them. A script with no runner here is
+    therefore an error, not a skipped step, and tools/test_script_menus.py
+    asserts the coverage so the next id cannot be added to the menu alone.
     """
-    runners = {
+    sources = {
         1: run_format_lyrics,
         2: run_format_cues,
         3: run_optimize_flacs,
@@ -552,19 +565,31 @@ def build_script_runners():
         6: run_audit_library,
         7: run_calc_dr_replaygain,
         8: run_auto_tagging,
-        9: _optional_runner("mlo.accurip", "run_generate_accurip"),
-        10: _optional_runner("mlo.format_all", "run_format_all"),
-        11: _optional_runner("mlo.remux", "run_remux_videos"),
-        12: _optional_runner("mlo.audiometa", "run_analyze_audiometa"),
-        13: _optional_runner("mlo.lyrics_fetch", "run_fetch_lyrics"),
-        14: _optional_runner("server.beetscfg", "run_beets_tagging"),
-        # 15 was missing from this map (the CLI could list it and not run it):
-        # labels come from SCRIPTS, so every id the menu shows has a runner.
-        15: _optional_runner("server.script_runners", "run_release_tracklist"),
-        16: _optional_runner("mlo.moods", "run_detect_mood_energy"),
-        17: _optional_runner("mlo.lyrics_xlit", "run_lyrics_xlit"),
-        18: _optional_runner("mlo.lyrics_publish", "run_publish_lyrics"),
+        9: ("mlo.accurip", "run_generate_accurip"),
+        10: ("mlo.format_all", "run_format_all"),
+        11: ("mlo.remux", "run_remux_videos"),
+        12: ("mlo.audiometa", "run_analyze_audiometa"),
+        13: ("mlo.lyrics_fetch", "run_fetch_lyrics"),
+        14: ("server.beetscfg", "run_beets_tagging"),
+        15: ("server.script_runners", "run_release_tracklist"),
+        16: ("mlo.moods", "run_detect_mood_energy"),
+        17: ("mlo.lyrics_xlit", "run_lyrics_xlit"),
+        18: ("mlo.lyrics_publish", "run_publish_lyrics"),
+        19: run_optimize_artist_images,
+        20: run_scan_layout,
+        # 21 writes ACOUSTID_* tags, so it is resolved on first use like the
+        # other tag-writing scripts (and it is not re-exported by mlo itself).
+        21: ("mlo.acoustid", "run_fix_pairs"),
     }
+    runners = {}
+    for sid, name, _desc in SCRIPTS:
+        source = sources.get(sid)
+        if source is None:
+            raise RuntimeError(
+                f"script {sid} ({name}) has no runner in mlo.cli — add it to "
+                f"build_script_runners or drop it from SCRIPTS")
+        runners[sid] = (_optional_runner(*source) if isinstance(source, tuple)
+                        else source)
     return {sid: (SCRIPT_LABELS[sid], runner) for sid, runner in runners.items()}
 
 

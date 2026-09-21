@@ -28,7 +28,7 @@ import wave
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mlo import import_policy
-from mlo.config import DEFAULT_CONFIG, normalize_config
+from mlo.config import DEFAULT_CONFIG, DEFAULT_RUN_ALL_ORDER, normalize_config
 from server import events, import_autonomy, imports, script_runners
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -385,6 +385,13 @@ ok(res["autonomy"]["stopped"] is None, "nothing stops an album that needs no dec
 ok(res["autonomy"]["missing"] == {} and res["autonomy"]["prompt"] is None, "and no prompt is raised")
 ok(chain_of("Complete Album") == imports.chain_for(rev_cfg),
    "the chain runs as usual, minus what a reviewed family would decide")
+# ... and the chain itself is the Run All order minus the scripts it declares
+# library-wide (`imports.LIBRARY_WIDE_SCRIPTS`), so an album imported here gets
+# every script the Optimize menu runs — 16/17/19 used to run only from there.
+ok(imports.DEFAULT_CHAIN == [sid for sid in DEFAULT_RUN_ALL_ORDER
+                             if sid not in imports.LIBRARY_WIDE_SCRIPTS],
+   "an import with nothing configured runs the Run All order, minus the "
+   "library-wide scripts it declares")
 ok(13 not in (chain_of("Complete Album") or []),
    "reviewing lyrics takes the lyrics script out of the chain")
 

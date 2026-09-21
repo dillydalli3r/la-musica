@@ -286,31 +286,61 @@ function libraryRef(item: DiscoverItem): string | null {
   return `/album/${enc}`;
 }
 
-/** The row's cover: the library's own image when the item is owned (the file
- *  on disk is the authority), otherwise the provider's — proxied through
- *  `/api/art`, because several cover CDNs refuse a browser outright. A URL
- *  that fails collapses to the same placeholder as a row that has none. */
+/** The row's cover.
+ *
+ *  The library's own image comes first when the item is owned — the file on
+ *  disk is the authority — and the provider's cover is the FALLBACK, not a
+ *  different path for unowned rows: an owned row whose art cannot be served
+ *  (a folder with no cover, a track with no sidecar art) still has a cover the
+ *  app can fetch, and the provider URL is already on the row. Both go through
+ *  the app: `/api/cover` reads the file, `/api/art` proxies the provider (see
+ *  `api.artUrl`) and walks Cover Art Archive → Apple → Deezer by the row's own
+ *  identity when that CDN refuses us. Only a row with no candidate at all, or
+ *  one where every candidate failed, keeps the placeholder.
+ *
+ *  A track row asks for the ALBUM FOLDER's cover: its `path` is the audio file,
+ *  and `/api/cover?file=` serves a FILE by name, so passing the track's own
+ *  name back fetched the audio bytes under an image content type — an image the
+ *  browser cannot decode, which is how an owned track row ended up empty while
+ *  its album's cover sat on disk. */
 function RowCover({ item }: { item: DiscoverItem }) {
-  const [failed, setFailed] = useState(false);
+  // Remembered per URL, not as a bare flag: a row recycled onto another item
+  // must not inherit the previous cover's failure (the same rule CoverImg
+  // keeps), and it is what lets the provider's cover be tried after the
+  // library's own URL has already failed.
+  const [failed, setFailed] = useState<string[]>([]);
   // `owned`, NOT `in_library`: that flag only says the library holds something
   // from this artist, so this exact item has no library art to show.
   const owned = !!item.owned;
   const path = owned ? (item.path ?? "").trim() : "";
-  let src: string | null = null;
+  let local: string | null = null;
   if (path) {
-    if (item.kind === "artist") src = api.artistImageUrl(item.artist || path);
-    else if (item.kind === "track") {
+    if (item.kind === "artist") local = api.artistImageUrl(item.artist || path);
+    else {
       const cut = path.lastIndexOf("/");
-      src = api.coverUrl(cut > 0 ? path.slice(0, cut) : path, cut > 0 ? path.slice(cut + 1) : undefined);
-    } else src = api.coverUrl(path);
+      local = api.coverUrl(cut > 0 ? path.slice(0, cut) : path);
+    }
   }
-  if (!src && item.cover_url) {
-    src = api.artUrl(item.cover_url, { artist: item.artist, album: item.title, rg: item.release_group_mbid });
-  }
+  const provider = item.cover_url
+    ? api.artUrl(item.cover_url, {
+        artist: item.artist,
+        album: item.title,
+        rg: item.release_group_mbid,
+      })
+    : null;
+  const candidates = [local, provider].filter((url): url is string => !!url);
+  const src = candidates.find((url) => !failed.includes(url)) ?? null;
   const box = "h-10 w-10 rounded bg-raise border border-border overflow-hidden shrink-0";
-  if (!src || failed) {
+  if (!src) {
     return (
-      <div className={`${box} flex items-center justify-center text-zinc-700`} title={item.cover_url ? "The provider image could not be shown" : "No cover"}>
+      <div
+        className={`${box} flex items-center justify-center text-zinc-700`}
+        title={
+          candidates.length
+            ? "The cover could not be shown — neither the library's own art nor the provider's image loaded"
+            : "No cover"
+        }
+      >
         <Disc3 className="h-5 w-5" />
       </div>
     );
@@ -323,7 +353,7 @@ function RowCover({ item }: { item: DiscoverItem }) {
         loading="lazy"
         decoding="async"
         referrerPolicy="no-referrer"
-        onError={() => setFailed(true)}
+        onError={() => setFailed((seen) => (seen.includes(src) ? seen : [...seen, src]))}
         className="h-full w-full object-cover"
       />
     </div>

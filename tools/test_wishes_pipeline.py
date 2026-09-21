@@ -336,6 +336,64 @@ with pipeline_patches(), SLSK, \
     check("...and it is terminal, exactly as wishes_not_found_attempts (1) says",
           wishes.is_terminal(stored, CFG) and wishes.due_at(stored, CFG) == float("inf"))
 
+    # The framework album the add created goes with that outcome. Nothing
+    # searches this wish again by itself, so the folder the ADD made — its
+    # marker, the placeholder cover, the release's own tracklist — would sit in
+    # the library for good, looking like an album nobody has.
+    wait_until(lambda: not os.path.isdir(album["album_path"]),
+               what="the framework album to be taken down")
+    wait_until(lambda: not (wishes.get_wish(wid) or {}).get("album_path"),
+               what="the row to stop linking to the folder that went")
+    ended = wishes.get_wish(wid)
+    check("the framework album the terminal outcome leaves behind is taken back",
+          not os.path.isdir(album["album_path"])
+          and pathmod.load_pending(album["album_path"]) is None,
+          json.dumps({"album_path": album["album_path"],
+                      "marker": pathmod.load_pending(album["album_path"])}))
+    check("...and the WISH row stays: it is the queue's own row, with the retry",
+          ended is not None and not ended["album_path"]
+          and row_for("wish", wid)[0] == "needs_attention",
+          json.dumps({"row": ended, "section": row_for("wish", wid)[0]}))
+
+    # The same pressing saved under the OTHER id. A wish from an album link
+    # carries the release GROUP id (that is what the link holds) while an add
+    # resolves the edition and keys its own row by the RELEASE id: two rows
+    # would be two jobs, each downloading the same album.
+    cross = dict(REL, id="0b1a2c3d-0000-0000-0000-00000000c0de",
+                 release_group_id="0b1a2c3d-0000-0000-0000-00000000c0df",
+                 title="Cross Wished", catalog_number="CROSS-1",
+                 catalog_numbers=["CROSS-1"])
+    saved = wishes.add_wish(cross["release_group_id"], title="Cross Wished",
+                            artist="An Artist", source="soulseek")
+    # The search count starts BEFORE the add: the add itself starts the
+    # worker's pass, and that pass is what searches this row.
+    before = PIPE.searches
+    # The resolver stays patched over the wait below: the search the add starts
+    # is the WORKER's, and it resolves the wish's own id.
+    with Patch(intg, resolve_release=lambda mbid: (dict(cross), cross["id"]),
+               auto_import_targets=lambda mbid, kind=None, mode="best", **kw: (
+                   [{"mbid": cross["id"], "title": cross["title"]}], [])), \
+         Patch(api_add, load_config=lambda: dict(CFG)):
+        r2 = client.post("/api/library/add",
+                         json={"mbid": cross["id"], "kind": "release"})
+        added = (r2.json().get("albums") or [{}])[0]
+        check("an add of the same pressing reuses the wish its release group saved",
+              added.get("wish_id") == saved["id"],
+              json.dumps({"added": added, "saved": saved["id"]}))
+        check("...so the store holds ONE row for that release, not two",
+              len([w for w in wishes.list_wishes()
+                   if cross["id"] in (w["release_mbid"], (w.get("release") or {}).get("id"))
+                   or w["release_mbid"] == cross["release_group_id"]]) == 1,
+              json.dumps([w["id"] for w in wishes.list_wishes()]))
+        wait_until(lambda: wishes.get_wish(saved["id"])["status"] == "not_found",
+                   what="the cross-pressing search to settle")
+        check("...and that one row costs exactly ONE search (not one per id)",
+              PIPE.searches == before + 1, f"{before} -> {PIPE.searches}")
+        # Hand the queue back quiet: the pass the add started is what searched
+        # it, and the checks below run passes of their own.
+        wait_until(lambda: not worker.status()["running"],
+                   what="the pass the add started to end")
+
     # The queue, which is what the user reads.
     section, row = row_for("wish", wid)
     check("the queue lists it in the needs-you section, not as a failure",
@@ -379,6 +437,11 @@ with pipeline_patches(), SLSK, \
                             source="soulseek")
     PIPE.found = True
     worker.run_cycle()
+    # The queue may already be running a pass (an add starts one), in which case
+    # this call hands its request to that pass instead of starting a second one:
+    # what is asserted is that the wish IS processed, not which call did it.
+    wait_until(lambda: wishes.get_wish(other["id"])["status"] == "imported",
+               what="the unrelated wish to be imported")
     other_now = wishes.get_wish(other["id"])
     check("an unrelated wish still processes in the same session",
           other_now["status"] == "imported" and other_now["album_path"],
@@ -439,6 +502,51 @@ with pipeline_patches(cfg=CFG2), SLSK, \
           json.dumps(after2))
     check("...and it was never deleted at any point",
           wishes.get_wish(w2["id"]) is not None)
+
+# --------------------------------------------------------------------------- #
+# 3b. the SHIPPED policy: an empty search does not end anything
+# --------------------------------------------------------------------------- #
+print("\n== the shipped policy keeps looking ==")
+
+SHIPPED = dict(cfgmod.DEFAULT_CONFIG)
+SHIPPED["music_folder"] = MUSIC
+check("the shipped not-found budget is 0 — a request is never given up on",
+      wishes.not_found_attempts(SHIPPED) == 0,
+      json.dumps({"wishes_not_found_attempts": SHIPPED.get("wishes_not_found_attempts")}))
+
+STILL_ID = "66666666-1111-1111-1111-111111111111"
+still = dict(REL, id=STILL_ID, release_group_id=STILL_ID, title="Still Looking")
+w3 = wishes.add_wish(STILL_ID, title="Still Looking", artist="An Artist",
+                     source="soulseek")
+PIPE.found = False
+with pipeline_patches(cfg=SHIPPED), SLSK, \
+     Patch(intg, resolve_release=lambda mbid: (dict(still), STILL_ID)), \
+     Patch(worker, load_config=lambda: dict(SHIPPED)):
+    worker.run_cycle(w3["id"])
+    after3 = wishes.get_wish(w3["id"])
+    check("an empty search leaves the wish WANTED, not terminal",
+          after3["status"] == "wanted" and not wishes.is_terminal(after3, SHIPPED),
+          json.dumps(after3))
+    check("...with the empty search recorded as a reason and a count, not an outcome",
+          after3["not_found"] == 1 and "No candidate folder" in after3["last_error"],
+          json.dumps({"not_found": after3["not_found"], "err": after3["last_error"]}))
+    due3 = wishes.due_at(after3, SHIPPED)
+    check("...and it is due again on its own interval — a real time, not never",
+          due3 > time.time() and due3 != float("inf"),
+          json.dumps({"due_at": due3, "now": time.time()}))
+    section3, row3 = row_for("wish", w3["id"])
+    check("...and its queue row is still QUEUED, saying it keeps looking",
+          section3 == "queued" and "still looking" in (row3 or {}).get("note", "")
+          and row3.get("retryable") is False,
+          json.dumps({"section": section3, "note": (row3 or {}).get("note")}))
+    check("...and a candidate folder that failed the CD check is the same, never gave up",
+          wishes.outcome_of("No candidate folder contained every track (and cue/log "
+                            "per disc for CD)") == "not_found"
+          and not wishes.is_terminal(after3, SHIPPED))
+    # The escape hatches stay: the user's own cancel ends it, their retry
+    # restarts it, and a release that turns up in the library reconciles.
+    check("...while the user can still end it by hand",
+          row3.get("cancelable") is True, json.dumps(row3 or {}))
 
 # --------------------------------------------------------------------------- #
 # 4. a wish whose release cannot be resolved still renders

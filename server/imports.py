@@ -35,8 +35,11 @@ import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from mlo.config import load_config
+from mlo.config import DEFAULT_RUN_ALL_ORDER, load_config
 from mlo.paths import library_root, move_path
+# The shared worker-count policy (`worker_limit`): the per-track tag writes
+# below fan out to the same lane count every other multi-file runner uses.
+from mlo.stats import worker_count
 from mlo import advisory
 from mlo import import_policy
 
@@ -44,23 +47,32 @@ from server import import_autonomy
 from server import script_runners
 from server import tagcache
 
-# PATH-CHANGING SCRIPTS FIRST, then content, then the library-wide grader.
-# 11 videos → 3 FLACs (a lossless conversion changes the extension) → 14 beets
-# (its config sets `move: yes`, so it renames and moves the album) → 2 CUEs
-# (canonical sidecar names AND the cue's FILE lines, now pointed at the names
-# the album actually has) → 1 lyrics format (writes .lrc named after the
-# track). Everything after that reads or writes FINAL paths.
-# The old order had CUEs before the converters and beets fourth-from-last, so
-# a cue could name "…file.wav" for an album that had become FLAC, and beets
-# moved the folder after images/audit/DR had all been computed for the paths
-# that no longer existed.
-# Later constraints that still hold: 15 (the .mlo_expected.json manifest) must
-# run AFTER 14 (beets), because it reads the release id off the album's own
-# MUSICBRAINZ_ALBUMID tags and a tagger that has not matched the release would
-# leave it nothing to fetch — and grading (4) requires the manifest. 18
-# (publish to LRCLIB) sits right after the fetch (13) whose result it gives
-# back, 10 (Format all) is the final formatting pass, and 4 (grade) is last.
-DEFAULT_CHAIN = [11, 3, 14, 15, 2, 1, 13, 18, 8, 5, 6, 7, 9, 12, 10, 4]
+# The import chain IS the Run All order, taken from the one place that keeps it
+# (`mlo.config.DEFAULT_RUN_ALL_ORDER`) — one order, one list, so a script added
+# to Run All can never go missing from the import path. This used to be a
+# hand-kept second list that had already drifted: 16 (Mood & Energy), 17
+# (Lyrics transliterate (AI)) and 19 (Optimize artist images) ran everywhere
+# Run All ran and never on an import, so the same album got them through
+# Optimize → Run All and never when it was simply imported. The order's own
+# reasons (path-changing scripts first — beets moves the folder — then the
+# sidecar namers, 10 Format all, 4 Grade last) are documented beside the list
+# in mlo/config.py; `import_scripts` still replaces this chain outright.
+#
+# The scripts an import does NOT run are DATA, each with its reason, so leaving
+# one out is a declaration someone can read rather than a second list someone
+# has to diff. Nothing else may be dropped: a script added to the run order
+# lands in this chain unless it is named here.
+LIBRARY_WIDE_SCRIPTS = (
+    # 20 Scan library layout: its runner walks the ENTIRE music folder and
+    # writes ONE report describing the whole library (the Library page warns
+    # from that stored report), ignoring `targets` on purpose. Run All runs it
+    # once; an import chain would re-walk the library once per imported album —
+    # the opposite of what an import should cost — for a report about the
+    # library rather than the album being imported.
+    20,
+)
+DEFAULT_CHAIN = [sid for sid in DEFAULT_RUN_ALL_ORDER
+                 if sid not in LIBRARY_WIDE_SCRIPTS]
 
 # The ids a configured chain may name, kept in step with the registry itself
 # (a bound that still advertised a removed id let a saved one come back as an
@@ -523,6 +535,12 @@ def fetch_advisories(paths, cfg=None, force=False):
     (when one is set up and `advisory_ai_classify` is on), then the
     multilingual lyrics word scan, and finally `advisory_fallback` decides
     what an unstated advisory becomes (0 by default, 2, or nothing at all).
+    The AI is a SOURCE now, not a last resort: it is asked once per track
+    whether or not a provider stated a value, and its answer is ranked with
+    theirs by the app's one rule (1 beats 0 beats 2) — see
+    `mlo.advisory.decide_advisory`. Every answer it gives is recorded in that
+    track's `answers` beside the providers', while `sources` keeps naming the
+    one source that decided the value.
     A file that already carries a valid 0/1/2 is ECHOED, not re-asked — a
     rating the user or an earlier run settled is not overruled behind their
     back — and the echo carries its provenance: `sources[path]` reads
@@ -555,9 +573,10 @@ def fetch_advisories(paths, cfg=None, force=False):
     — `updated`/`values`/`sources`/`answers`/`hits` are the per-track writes
     (`sources` is who stated each value — "instrumental", "ai-lyrics",
     "lyrics-scan" and "fallback" included, so a value NOBODY stated is
-    distinguishable from one a provider stated: the ladder's stage is named,
-    `answers` stays empty — and "existing-tag" when the reported value is the
-    file's own), `hits` is the words the scan matched, `albums`/
+    distinguishable from one a provider stated: the ladder's stage is named —
+    and "existing-tag" when the reported value is the file's own), `answers`
+    names every source that answered the track, the AI included, `hits` is the
+    words the scan matched, `albums`/
     `album_updated` are the album tag derived from them, and `gated` counts
     the files the ADVISORY write gate refused. `status` says what happened to
     each reported value THIS run — `written` (the tag now holds what this run
@@ -631,16 +650,21 @@ def fetch_advisories(paths, cfg=None, force=False):
                 track_count=per_folder.get(os.path.dirname(path)),
                 cfg=cfg,
             )
-            # No provider stated anything? Then the ladder decides — an
-            # instrumental is 0, the AI judges the lyrics when one is
-            # configured, the word scan is the fallback, and
-            # `advisory_fallback` is the last resort. None means "write
-            # nothing", which is a legitimate answer ("none"). A provider's
-            # own 0 is not final either: the ladder escalates it to 1 when the
-            # words say explicit (mlo.advisory).
+            # The provider route stated something, or nobody did — the ladder
+            # settles the second case (an instrumental is 0, the AI judges the
+            # lyrics when one is configured, the word scan is the fallback, and
+            # `advisory_fallback` is the last resort; None means "write
+            # nothing", which is a legitimate answer). The AI is asked once
+            # either way (issue #28: it is a source now), and it is told to
+            # record its answer into the route's own map, so the reply names
+            # every source behind the value — the AI included — while `sources`
+            # keeps naming the one that decided it. A provider's own 0 is not
+            # final either: the ladder escalates it to 1 when the words say
+            # explicit (mlo.advisory).
+            track_answers = dict(route.get("answers") or {})
             decision = advisory.decide_advisory(
                 cfg, value=route.get("value"), source=route.get("source") or "",
-                path=path, af=af)
+                answers=track_answers, path=path, af=af)
             value = decision.get("value")
             if value is None:
                 continue
@@ -657,8 +681,8 @@ def fetch_advisories(paths, cfg=None, force=False):
             values[path] = int(value)
             if decision.get("source"):
                 sources[path] = decision["source"]
-            if route.get("answers"):
-                answers[path] = route["answers"]
+            if track_answers:
+                answers[path] = track_answers
             if decision.get("hits"):
                 hits[path] = decision["hits"]
             if str(value) == current:
@@ -1836,7 +1860,9 @@ def _stamp_release(album_dir, release, cfg):
     Returns ``(written, failed)`` — a file whose tags cannot be written is
     counted rather than silently skipped: a release-driven import that stamped
     nothing would otherwise surface much later as bare grading failures with
-    nothing pointing at the stamp step.
+    nothing pointing at the stamp step. ``written`` counts the files whose
+    GENRE actually landed ("skipped" files — nothing to say about them — are
+    in neither number, as before).
 
     The MusicBrainz ids (+ per-track recording ids) come from
     ``server.soulseek_auto._stamp_mb_tags`` — the same stamper the Soulseek
@@ -1848,8 +1874,6 @@ def _stamp_release(album_dir, release, cfg):
     ``finish_album`` resolves it from the ISRCs (``fetch_advisories``) before
     the chain runs, which is the only path that can state a real rating
     instead of echoing one.
-
-    Returns the number of files written; a tag failure never fails an import.
     """
     from mlo.audio import AudioFile
     from mlo.autotag import genre_count, trim_genres
@@ -1858,7 +1882,6 @@ def _stamp_release(album_dir, release, cfg):
     from server import soulseek_auto
 
     rel = _release_for_stamping(release)
-    written = 0
     try:
         soulseek_auto._stamp_mb_tags(album_dir, rel)
     except Exception:
@@ -1887,39 +1910,73 @@ def _stamp_release(album_dir, release, cfg):
         except Exception:
             traceback.print_exc()
 
-    failed = 0
-    for path in files:
+    def _stamp_one(path):
+        """One track: its GENRE, the cap, and a SINGLE container rewrite.
+
+        "written" is the flush's own verdict, because a deferred write that
+        cannot land (a full disk, a read-only file) no longer raises out of
+        set_tag — counting the file anyway would report tags it does not have.
+        A file that cannot be read, or whose write failed, is "failed" and is
+        never also counted as written; "skipped" is a file this step had
+        nothing to say about. Those are the same two outcomes the row reports
+        it always did, so the caller's readout does not change."""
         try:
             af = AudioFile(path)
             if af.audio is None:
-                failed += 1
-                continue
-            tags = {}
-            disc, pos = soulseek_auto._parse_trackno(path)
-            names = genres.get((disc, pos)) or []
-            if names and not str(af.get_tag("GENRE") or "").strip():
-                # Canonical, and a LIST: `normalize_genres` resolves each name
-                # to MusicBrainz's own spelling, derives the family and puts it
-                # last, and set_tag writes one repeated GENRE field per name —
-                # the grader counts every genre this step wrote instead of
-                # reading one value literally named "A; B".
-                tags["GENRE"] = normalize_genres(names, cap)
-            for key, value in tags.items():
-                af.set_tag(key, value)
-            if tags:
-                written += 1
+                return "failed"
+            # A stand-in for AudioFile (a test double) cannot defer: it writes
+            # per tag, exactly as it did before.
+            defer = hasattr(af, "defer_save")
+            if defer:
+                af.defer_save(True)
+            wrote = False
+            ok = True
             try:
-                # Cap on EVERY track, not just the ones written above: an
-                # album that arrived carrying more genres than the setting
-                # allows comes down to `mb_genre_count` here (the trimmer
-                # script 8/10 also use).
-                trim_genres(af, cap)
+                tags = {}
+                disc, pos = soulseek_auto._parse_trackno(path)
+                names = genres.get((disc, pos)) or []
+                if names and not str(af.get_tag("GENRE") or "").strip():
+                    # Canonical, and a LIST: `normalize_genres` resolves each
+                    # name to MusicBrainz's own spelling, derives the family
+                    # and puts it last, and set_tag writes one repeated GENRE
+                    # field per name — the grader counts every genre this step
+                    # wrote instead of reading one value literally named
+                    # "A; B".
+                    tags["GENRE"] = normalize_genres(names, cap)
+                for key, value in tags.items():
+                    af.set_tag(key, value)
+                wrote = bool(tags)
+                try:
+                    # Cap on EVERY track, not just the ones written above: an
+                    # album that arrived carrying more genres than the setting
+                    # allows comes down to `mb_genre_count` here (the trimmer
+                    # script 8/10 also use).
+                    trim_genres(af, cap)
+                except Exception:
+                    pass
             except Exception:
-                pass
+                ok = False
+            finally:
+                # Everything above lands in ONE rewrite (each tag write used to
+                # be a whole-file copy of its own — mlo.atomic.rewrite_via),
+                # and the deferral is turned off even on the error path so a
+                # file is never left holding changes nobody saved.
+                if defer and af.defer_save(False) is False:
+                    ok = False
+            if not ok:
+                return "failed"
+            return "written" if wrote else "skipped"
         except Exception:
-            failed += 1
-            continue
-    return written, failed
+            return "failed"
+
+    # Distinct FILES share nothing: every rewrite_via copies beside its OWN
+    # target and swaps it in with os.replace (mlo.atomic), so an album's
+    # tracks write side by side instead of one after another.
+    workers = worker_count(cfg, default=8, maximum=8, items=len(files))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        outcomes = list(ex.map(_stamp_one, files))
+    return (sum(1 for o in outcomes if o == "written"),
+            sum(1 for o in outcomes if o == "failed"))
 
 
 def stamp_rym_links(album_dir, cfg=None):
@@ -1979,20 +2036,48 @@ def stamp_rym_links(album_dir, cfg=None):
     if not out["album"] and not out["artist"]:
         return out
 
-    for af in files:
-        tags = {}
-        if out["album"] and not _tag(af, "RATEYOURMUSIC_ALBUM"):
-            tags["RATEYOURMUSIC_ALBUM"] = out["album"]
-        if out["artist"] and not _tag(af, "RATEYOURMUSIC_ARTIST"):
-            tags["RATEYOURMUSIC_ARTIST"] = out["artist"]
-        if not tags:
-            continue
+    def _write_links(af):
+        """Write whichever of the two links is missing, in ONE rewrite.
+
+        Both were a whole-file copy of their own before this (mlo.audio saves
+        by writing a temp beside the file and renaming it over — mlo.atomic.
+        rewrite_via), so two links cost two rewrites per track. The deferral
+        holds them for a single flush, and its verdict IS the answer: deferred,
+        a write that cannot land no longer raises out of set_tag, and a file
+        that did not reach disk must not be counted as written. The deferral is
+        turned off even when a write raised, so a half-written file is flushed
+        rather than left holding changes nobody saved."""
         try:
-            for key, value in tags.items():
-                af.set_tag(key, value)
-            out["written"] += 1
+            tags = {}
+            if out["album"] and not _tag(af, "RATEYOURMUSIC_ALBUM"):
+                tags["RATEYOURMUSIC_ALBUM"] = out["album"]
+            if out["artist"] and not _tag(af, "RATEYOURMUSIC_ARTIST"):
+                tags["RATEYOURMUSIC_ARTIST"] = out["artist"]
+            if not tags:
+                return False
+            # A stand-in for AudioFile (a test double) cannot defer: it writes
+            # per tag, exactly as it did before.
+            defer = hasattr(af, "defer_save")
+            if defer:
+                af.defer_save(True)
+            written = False
+            try:
+                for key, value in tags.items():
+                    af.set_tag(key, value)
+                written = True
+            finally:
+                if defer and af.defer_save(False) is False:
+                    written = False
+            return written
         except Exception:
-            continue
+            return False
+
+    # Distinct FILES share nothing: every rewrite_via copies beside its OWN
+    # target and swaps it in with os.replace (mlo.atomic), so the album's
+    # tracks write side by side instead of one after another.
+    workers = worker_count(cfg, default=8, maximum=8, items=len(files))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        out["written"] = sum(1 for ok in ex.map(_write_links, files) if ok)
     if out["written"]:
         _invalidate_caches()
     return out

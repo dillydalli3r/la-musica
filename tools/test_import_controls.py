@@ -391,13 +391,12 @@ with PatchAll(wish_worker_env(OFF) + add_env(OFF)):
     r = CLIENT.post("/api/library/add", json={"mbid": RELEASE, "kind": "release"})
     eq(r.status_code, 200, "Add to library is not refused by the manual switch")
     eq(len(created), 1, "and it recorded the album")
-    # The two buttons are two actions: "Add to library" records and lets the
-    # automation pick it up on its next pass, "Download all" (download=true)
-    # starts the search now. This assertion used to expect a trigger from the
-    # plain add — that was the older contract, and the split is deliberate.
-    eq(triggers, [], "Add to library records without starting a search")
-    # A second, NEW release for the Download-all half: "Download all" starts
-    # what THIS call created (no second queue, no duplicate wish).
+    # EVERY add starts the search it recorded, on the worker's own pass (no
+    # wish id — the pass reads the store and searches what is due). The two
+    # buttons are one action now: "Add to library" used to wait for the
+    # automation's next pass, up to two minutes of nothing happening.
+    eq(triggers, [None], "Add to library starts the search it recorded")
+    # A second, NEW release: one kick, one queue, one wish.
     reset()
     created.clear()
     with PatchAll([Patch(api_add, _targets=lambda *a, **k: (list(TARGETS_B), []))]):
@@ -405,9 +404,7 @@ with PatchAll(wish_worker_env(OFF) + add_env(OFF)):
                         json={"mbid": RELEASE_B, "kind": "release", "download": True})
         eq(r.status_code, 200, "Download all answers too")
         eq(len(created), 1, "and it recorded the album as well")
-        # The trigger carries the wish THIS call created (whose id counts on
-        # across the test's own sections, so the id itself is not asserted).
-        eq(len(triggers), 1, "and it starts the download it recorded")
+        eq(triggers, [None], "and it starts the search the same way")
 
 print("\nmanual_import_enabled on (the no-regression half)")
 reset()
@@ -428,7 +425,8 @@ with PatchAll(wish_worker_env(ON) + add_env(ON)):
        "the bulk queue still takes work")
     r = CLIENT.post("/api/library/add", json={"mbid": RELEASE, "kind": "release"})
     eq(r.status_code, 200, "Add to library still works")
-    eq(r.json().get("note") or "", "", "with nothing to explain")
+    eq(r.json().get("note"), "Soulseek is searching for them now.",
+       "and says the search it started")
 
 # --------------------------------------------------------------------------- #
 # 3. auto acquisition off: nothing searches, nothing queues, and both say why
@@ -504,12 +502,13 @@ reset()
 with PatchAll(wish_worker_env(ON) + add_env(ON)):
     r = CLIENT.post("/api/library/add", json={"mbid": RELEASE, "kind": "release"})
     eq(r.status_code, 200, "Add to library works")
-    eq(triggers, [], "Add to library records; the worker's next pass takes it over")
+    eq(triggers, [None], "Add to library starts the search it recorded")
+    started = len(triggers)
     with PatchAll([Patch(api_add, _targets=lambda *a, **k: (list(TARGETS_B), []))]):
         r = CLIENT.post("/api/library/add",
                         json={"mbid": RELEASE_B, "kind": "release", "download": True})
         eq(r.status_code, 200, "Download all works")
-        eq(len(triggers), 1, "and starts the download it recorded")
+        eq(len(triggers), started + 1, "and adds ONE kick for the whole call")
 
 # --------------------------------------------------------------------------- #
 # 5. the wizard's own half: minimum entry and the switch, rendered for real

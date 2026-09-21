@@ -190,6 +190,14 @@ ok(sources["audiodb"]["note"].startswith("States the genre and mood of a NAMED")
 ok(discover.skip_note(discover.BY_ID["lastfm"], {}) == "skipped: no lastfm_api_key"
    and discover.skip_note(discover.BY_ID["musicbrainz"], {}) == "",
    "the skip note names the key, and a keyless source has none")
+ok(sources["rym"]["rec_kinds"] == ["tracks"]
+   and sources["rym"]["entity_kinds"] == ["tracks"]
+   and sources["rym"]["kinds"] == [] and not sources["rym"]["genres"],
+   f"RateYourMusic recommends and answers about entities for TRACKS only — it "
+   f"lists no genre and publishes none ({sources['rym']})")
+ok(sources["rym"]["needs"] == [] and sources["rym"]["ready"] is True,
+   "…and declares no credential: with the archive route on it is asked "
+   "without a rym_cookie (its own gate says when that is impossible)")
 ok(all(spec["id"] in discover.BY_ID for spec in discover.SOURCES)
    and len(discover.SOURCES) == len(discover.BY_ID),
    "every registry id is unique and resolvable")
@@ -577,6 +585,134 @@ empty_lib = discover.recommended_payload(cfg={}, seed="library", kind="albums",
 ok(empty_lib["items"] == [] and empty_lib["sources_asked"] == []
    and empty_lib["notes"]["recommended"].startswith("skipped: the library has no"),
    "an empty library is refused as a seed rather than guessed at")
+
+# --------------------------------------------------------------------------- #
+# 4b) RateYourMusic — its OWN chart, narrowed by the genre seed
+# --------------------------------------------------------------------------- #
+print("== RateYourMusic as a recommendation source ==")
+# RYM's cookie is not its only route, so a cfg with the archive fallback on is
+# what actually ASKS it (the registry declares no credential — see above).
+RYM_CFG = {"music_folder": "C:/Music", "discovery_enabled": True,
+           "rym_archive_fallback": True}
+# `integrations.rym_chart_rows`' own row shape, as the scrape states it. The
+# titles are NOT the library fixture's own tracks: a library-seeded shelf drops
+# what the library already holds, and these are the rows that must survive it.
+RYM_TRACKS = [
+    {"kind": "track", "title": "Star Roving", "artist": "Slowdive",
+     "link": "https://rateyourmusic.com/song/slowdive/star-roving/",
+     "rym_path": "/song/slowdive/star-roving/", "rank": 1,
+     "popularity": None, "popularity_label": None, "source": "rym"},
+    {"kind": "track", "title": "Sugar for the Pill", "artist": "Slowdive",
+     "link": "https://rateyourmusic.com/song/slowdive/sugar-for-the-pill/",
+     "rym_path": "/song/slowdive/sugar-for-the-pill/", "rank": 2,
+     "popularity": None, "popularity_label": None, "source": "rym"},
+]
+
+
+def stub_rym(rows=None, chart="Best Shoegaze songs of all time", error=None):
+    """The RateYourMusic scrape seam. That SCRAPE — the chart URL, its filters,
+    the live/archive routes — is pinned by `tools/test_charts.py` and
+    `tools/test_rym_archive.py`; what is pinned here is the ARM's contract: the
+    chart it is asked for, the shape its rows arrive in, and what its refusal
+    reads as."""
+    payload = {"chart": chart, "total": None,
+               "rows": RYM_TRACKS if rows is None else rows}
+
+    def fake(kind="tracks", period="all", limit=50, cfg=None, now=None,
+             genre="", artist=""):
+        CALLS.append(("rym_charts", kind, period, genre, artist))
+        if error:
+            raise error
+        return payload
+    intg.rym_charts = fake
+
+
+def rym_calls():
+    return [call for call in CALLS if call[0] == "rym_charts"]
+
+
+fresh(router=None, search={"rows": [], "total": 0})
+stub_rym()
+rym_genre = discover.recommended_payload(cfg=RYM_CFG, seed="shoegaze",
+                                        kind="tracks", limit=5, lib=LIBRARY)
+rym_rows = [row for row in rym_genre["items"] if row["source"] == "rym"]
+ok(rym_calls() == [("rym_charts", "tracks", "all", "shoegaze", "")],
+   f"a genre seed asks RateYourMusic for its own chart OF that genre "
+   f"({rym_calls()})")
+ok({row["title"] for row in rym_rows} == {"Star Roving", "Sugar for the Pill"}
+   and all(set(row) == ROW_KEYS for row in rym_rows),
+   f"its rows arrive in the one recommendation shape, source and label "
+   f"included ({[row['title'] for row in rym_rows]})")
+ok(rym_rows[0]["reason"] == "genre: shoegaze (RateYourMusic chart)"
+   and rym_rows[0]["page_url"] == "https://rateyourmusic.com/song/slowdive/star-roving/",
+   f"…each naming the chart it came from and linking RYM's own song page "
+   f"({rym_rows[0]['reason']})")
+ok(all(not row["owned"] and row["path"] is None for row in rym_rows),
+   "…and a RYM row the library does not hold stays a recommendation")
+ok(all(row["cover_url"] is None and row["mbid"] is None for row in rym_rows),
+   "RYM states neither a cover URL nor a MusicBrainz id, and neither is invented")
+ok("rym" not in rym_genre["notes"],
+   f"a source that answered carries no note ({rym_genre['notes']})")
+
+# A refusal is RYM's own sentence — never an empty shelf, and never a reason
+# for the other sources to stop answering.
+fresh(router=None, search=mb_rows("tracks", [
+    {"id": "88888888-8888-8888-8888-888888888888", "score": 70, "title": "Soon",
+     "artist": "My Bloody Valentine", "first_release_date": "1990-01-01",
+     "length": 400000}]))
+stub_rym(error=RuntimeError(
+    "RateYourMusic refused: HTTP 403; Cloudflare challenge instead of a page; "
+    "no rym_cookie is set; paste the whole `Cookie:` header into Settings → "
+    "Discovery → rym_cookie "
+    "(https://rateyourmusic.com/charts/top/song/all-time/g:shoegaze/)"))
+rym_refused = discover.recommended_payload(cfg=RYM_CFG, seed="shoegaze",
+                                           kind="tracks", limit=5, lib=LIBRARY)
+ok(rym_refused["notes"]["rym"].startswith("failed: RateYourMusic refused: "
+                                          "HTTP 403; Cloudflare challenge"),
+   f"RYM's refusal is surfaced in its own words ({rym_refused['notes']['rym']})")
+ok("rym_cookie" in rym_refused["notes"]["rym"],
+   "…including what the user can do about it")
+ok([row["title"] for row in rym_refused["items"]] == ["Soon"],
+   f"and the other sources still answer — one refused source is not the shelf "
+   f"({[row['title'] for row in rym_refused['items']]})")
+
+# RYM answers a genre it does not know by DROPPING the filter; its unfiltered
+# chart must never be presented as that genre's.
+fresh(router=None, search={"rows": [], "total": 0})
+stub_rym(chart="Best songs of all time")
+rym_wrong_chart = discover.recommended_payload(cfg=RYM_CFG, seed="not-a-genre",
+                                              kind="tracks", limit=5, lib=LIBRARY)
+ok(rym_wrong_chart["items"] == []
+   and rym_wrong_chart["notes"]["rym"].startswith(
+       'skipped: RateYourMusic has no genre called "not-a-genre"'),
+   f"a chart that does not name the genre asked for is refused, not relabelled "
+   f"({rym_wrong_chart['notes']})")
+
+# An archived answer says so on the shelf exactly as it does on the charts page.
+fresh(router=None, search={"rows": [], "total": 0})
+stub_rym()
+intg._rym_route.update({"route": "archive", "cached": False,
+                        "snapshot": "20210325091401",
+                        "url": "https://web.archive.org/web/20210325091401/"
+                               "https://rateyourmusic.com/charts/top/song/all-time/"})
+rym_archived = discover.recommended_payload(cfg=RYM_CFG, seed="shoegaze",
+                                            kind="tracks", limit=5, lib=LIBRARY)
+intg._rym_route.clear()
+ok(rym_archived["notes"]["rym"].startswith("from an archived snapshot")
+   and "web.archive.org" in rym_archived["notes"]["rym"],
+   f"an archived answer says where the shelf's RYM rows were read from "
+   f"({rym_archived['notes']['rym']})")
+
+# The arm is asked for the kind it recommends, and no other.
+fresh(router=None, search={"rows": [], "total": 0})
+stub_rym()
+discover.recommended_payload(cfg=RYM_CFG, seed="shoegaze", kind="albums",
+                             limit=5, lib=LIBRARY)
+discover.recommended_payload(cfg=RYM_CFG, seed="shoegaze", kind="artists",
+                             limit=5, lib=LIBRARY)
+ok(rym_calls() == [],
+   "an album or artist shelf never asks RateYourMusic — its registry row says "
+   "tracks only")
 
 # --------------------------------------------------------------------------- #
 # 5) The query bounds a browse UI cannot exceed

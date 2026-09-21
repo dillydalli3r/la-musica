@@ -195,7 +195,7 @@ def _job_row(job, wish_id=None):
                     + ("" if result.get("organized") is not False
                        else " (the naming script failed — see the job log)"))
         elif result.get("wished"):
-            note = "Nothing was found — saved to the wishes list"
+            note = "Nothing was found — it is on the queue to keep looking"
         else:
             note = "Downloaded — waiting in the download folder to be imported"
     return {
@@ -299,6 +299,14 @@ def _wish_rows(wishes_list, jobs_by_wish, cfg=None):
         retry_at = float(w.get("retry_at") or 0)
         if stage == "queued" and retry_at > time.time():
             note = note or f"Retrying after a failure at {_clock(retry_at)}"
+        elif stage == "queued" and not note and wishes.outcome_of(reason) == "not_found":
+            # A search that came back empty does NOT end a wish — the shipped
+            # policy keeps looking (0 = never give up: the network is not a
+            # fixed catalogue) — so the row says it is still being searched and
+            # when the next look is, instead of leaving a reason line that
+            # reads like a give-up the user has to go and check.
+            note = ("Nothing usable so far — still looking, next search around "
+                    + _clock(wishes.due_at(w, cfg or {})))
         # The store's own verdict, read once: whether the worker will search
         # this wish again on its own is what decides every action the row has
         # (see server/wishes' retry policy).
@@ -707,9 +715,11 @@ def queue_retry(req: QueueRetryRequest):
         if wish.get("status") == "searching":
             raise HTTPException(409, "this wish is being searched right now")
         wishes.rearm(wid)
-        started = wishes_worker.trigger(wid)
-        if not started.get("ok"):
-            raise HTTPException(409, str(started.get("error") or "already running"))
+        # `trigger` never refuses: a pass already in flight takes this request
+        # and runs it the moment it ends (server.wishes_worker's follow-ups), so
+        # the retry is queued here instead of being answered with "a cycle is
+        # already running" and silently doing nothing until the next tick.
+        wishes_worker.trigger(wid)
         return {"ok": True, "retried": item_id}
     if kind == "job":
         try:

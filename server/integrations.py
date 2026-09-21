@@ -2792,6 +2792,20 @@ RYM_CHART_KINDS = ("tracks",)
 RYM_CHART_PERIODS = ("all", "year")
 _RYM_CHART_ENTITY = {"tracks": "song", "albums": "album", "artists": "artist"}
 _RYM_CHART_ROOT = "/charts/top/"
+# A chart can be NARROWED to one genre or one artist, as a further path
+# segment after the window: `/charts/top/song/all-time/g:shoegaze/`. The two
+# prefixes are RYM's own, and the shape is VERIFIED against the chart URLs it
+# has served (Wayback CDX for `rateyourmusic.com/charts/top/song/`, all
+# status 200): `/charts/top/song/1950s/g:rock-and-roll/` and
+# `/charts/top/song/all-time/a:bad-bunny/`. Those two captured pages were read
+# back with `rym_chart_rows` — same `<div id="posN">` items, same
+# `page_charts_section_charts_item_link` anchors — and they title themselves
+# "Best Rock & Roll songs of the 1950s" and "Best Bad Bunny songs of all time",
+# which is what `rym_chart_states` checks before a filtered chart is believed.
+# The album charts (`/charts/top/album,ep,…/`) are a different item shape (no
+# `/song/` link), so they are not read here at all.
+RYM_CHART_GENRE = "g:"
+RYM_CHART_ARTIST = "a:"
 # One chart page's items: RYM wraps every entry in `<div id="posN" …>` and
 # links its subject with a kind-specific anchor class.
 _RYM_CHART_ITEM_RE = re.compile(r'<div id="pos(\d+)"', re.I)
@@ -2826,6 +2840,37 @@ def rym_chart_name(html):
     "" — it is what the row's reason line quotes, so it is never guessed."""
     hit = _RYM_CHART_NAME_RE.search(html or "")
     return _rym_text(hit.group(1)) if hit else ""
+
+
+def _rym_chart_filters(genre="", artist=""):
+    """RYM's own filter segments for a chart path, or "" for the plain chart.
+
+    Every filter is spelled here, once, and a filter with no value contributes
+    nothing: a chart asked for without a genre IS the plain chart, never a
+    chart narrowed to the empty string (which RYM would read as a genre of its
+    own). The slugs come from `_rym_slug`, the module's one spelling of an RYM
+    path segment — a genre's own spelling is RYM's ("Rock & Roll" →
+    `rock-and-roll`, the slug its chart URL carries)."""
+    segments = []
+    for prefix, value in ((RYM_CHART_GENRE, genre), (RYM_CHART_ARTIST, artist)):
+        slug = _rym_slug(value)
+        if slug:
+            segments.append(prefix + slug)
+    return ("/" + "/".join(segments) + "/") if segments else ""
+
+
+def rym_chart_states(chart, name):
+    """Whether a FILTERED chart's own name states what it was filtered to.
+
+    RYM titles a narrowed chart after its filter ("Best Shoegaze songs of all
+    time"), and that title is the one piece of evidence the page gives that the
+    filter was applied rather than dropped: a genre or artist RYM does not know
+    takes the client to a chart without it, and believing THAT would present
+    RYM's all-time chart as "the shoegaze chart" — the one lie a chart source
+    must never tell. A chart whose name does not state the filter is reported
+    by the caller as no such genre/artist, never as that filter's answer."""
+    want = _rym_ref(name)
+    return bool(want) and want in _rym_ref(chart)
 
 
 def rym_chart_rows(html, limit=None):
@@ -2870,13 +2915,18 @@ def rym_chart_rows(html, limit=None):
     return rows
 
 
-def rym_charts(kind="tracks", period="all", limit=50, cfg=None, now=None):
+def rym_charts(kind="tracks", period="all", limit=50, cfg=None, now=None,
+               genre="", artist=""):
     """RYM's own chart for one kind and one window, or a raise that says why.
 
     `all` is `/charts/top/song/all-time` and `year` is the current year's
     chart; every other period is refused (`ValueError`) because RYM publishes
     no such chart — the caller reports that as unsupported, never as an
-    all-time answer. A refusal from RYM itself raises `RuntimeError` carrying
+    all-time answer. `genre` and `artist` NARROW the same chart to RYM's own
+    filter (`_rym_chart_filters`), which is what turns a genre seed and an
+    artist page into real rows instead of a text search RYM never ran; the
+    caller confirms the answer with `rym_chart_states` before it believes the
+    filter was applied. A refusal from RYM itself raises `RuntimeError` carrying
     its own words (`rym_last_response`: the status, whether a Cloudflare
     challenge came back instead of a page, and the reason sentence), so the
     endpoint's note chip shows exactly what RYM said.
@@ -2893,21 +2943,28 @@ def rym_charts(kind="tracks", period="all", limit=50, cfg=None, now=None):
         raise ValueError("RateYourMusic publishes no %s chart" % period)
     year = datetime.fromtimestamp(now if now is not None else time.time()).year
     slug = "all-time" if period == "all" else str(year)
-    path = "%s%s/%s" % (_RYM_CHART_ROOT, _RYM_CHART_ENTITY[kind], slug)
+    path = "%s%s/%s%s" % (_RYM_CHART_ROOT, _RYM_CHART_ENTITY[kind], slug,
+                          _rym_chart_filters(genre, artist))
     limit = max(1, int(limit or 50))
 
     archive = _rym_archive_on(cfg)
     html, snapshot = None, {}
-    fresh_route = False
+    live = False
     if bool(_rym_cookie(cfg)) or not archive:
         _rym_route.clear()
         html = _rym_get(path, cfg=cfg, expect=_RYM_CHART_ROOT)
-        fresh_route = True
+        live = True
     if not html and archive:
         _rym_route.clear()
         html, snapshot = _rym_archive_get(path, cfg)
     if not html:
-        raise RuntimeError(rym_refusal_text(cfg, path))
+        # Neither route answered. When BOTH were tried, say which one was
+        # missing rather than letting one refusal sentence cover two different
+        # states: a page the archive never captured is not RYM refusing us.
+        why = rym_refusal_text(cfg, path)
+        if live and archive:
+            why += " (and web.archive.org holds no capture of that page)"
+        raise RuntimeError(why)
     rows = rym_chart_rows(html, limit)
     if not rows:
         raise RuntimeError(
@@ -5222,11 +5279,20 @@ def search_mb(entity, query, limit=100, mode="free", offset=0,
                 "secondary_types": rg_secondary,
             })
         else:  # recording
+            # The release the recording was pressed on, kept for its COVER:
+            # Cover Art Archive answers by release and release group and has no
+            # recording endpoint, so a MusicBrainz-only TRACK row's artwork can
+            # only come from here (see `discovery._mb_recording_row`). The
+            # index repeats a release per matching track, so the first one is
+            # MusicBrainz's own ordering, not a pick of ours.
+            pressing = (item.get("releases") or [{}])[0]
             row.update({
                 "artist": _credit(item),
                 "artist_mbid": _credit_mbid(item),
                 "length": item.get("length"),
                 "first_release_date": item.get("first-release-date") or "",
+                "release_mbid": pressing.get("id") or "",
+                "release_group_mbid": (pressing.get("release-group") or {}).get("id") or "",
             })
         rows.append(row)
     total = data.get("count") or len(rows)

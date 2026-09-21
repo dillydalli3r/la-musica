@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Check, ChevronDown, ChevronDown as Down, ChevronUp as Up, FolderTree, Gauge, Play, RefreshCw, Wand2, X, Zap,
@@ -327,17 +327,49 @@ const LAYOUT_KINDS: { kind: string; label: string; bad: boolean }[] = [
  *  the user makes with their own file manager. */
 function LayoutPanel() {
   const [report, setReport] = useState<LayoutReport | null>(null);
+  // When the report on screen was scanned, and whether it is about a music
+  // folder other than the configured one. The rows alone cannot say either:
+  // script 20 stores its report for the Library page, and showing that here
+  // is what makes "Run All found problems" and this panel the same answer.
+  const [scannedAt, setScannedAt] = useState<string | null>(null);
+  const [foreign, setForeign] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [copied, setCopied] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    // No toast on failure: a panel that cannot read the stored report simply
+    // starts empty, which is exactly what the Scan button is for.
+    api.libraryLayoutReport()
+      .then((snap) => {
+        if (!live || !snap.exists || !snap.report) return;
+        if (snap.stale) {
+          setForeign(snap.music_folder);
+          return;
+        }
+        setReport(snap.report);
+        setScannedAt(snap.scanned_at);
+        setOpen(new Set(LAYOUT_KINDS.filter((k) => snap.report!.counts[k.kind]).map((k) => k.kind)));
+      })
+      .catch(() => { /* nothing stored yet */ });
+    return () => {
+      live = false;
+    };
+  }, []);
 
   const scan = async () => {
     setBusy(true);
     try {
       const r = await api.libraryLayout();
       setReport(r);
+      setForeign(null);
       // Open the kinds that actually have rows, so a scan lands on its findings.
       setOpen(new Set(LAYOUT_KINDS.filter((k) => r.counts[k.kind]).map((k) => k.kind)));
+      // The route stores the report it just produced; read that copy back so
+      // the stamp shown is the SERVER's clock, not the browser's guess at it.
+      const snap = await api.libraryLayoutReport();
+      setScannedAt(snap.scanned_at);
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -377,6 +409,13 @@ function LayoutPanel() {
             {report.audio_files} audio file(s) · {report.albums} album folder(s) · {report.artists} artist(s)
           </span>
         )}
+        {/* When the report on screen was measured. Without it the rows look
+            equally fresh whether Run All wrote them a minute or a month ago. */}
+        {scannedAt && (
+          <span className="text-[11px] text-zinc-500" title="When this report was scanned">
+            scanned {new Date(scannedAt).toLocaleString()}
+          </span>
+        )}
         <button className="btn-primary !py-1 text-xs tap" disabled={busy} onClick={scan}>
           <RefreshCw className={`h-3.5 w-3.5 ${busy ? "animate-spin" : ""}`} />
           {busy ? "Scanning…" : report ? "Rescan" : "Scan library layout"}
@@ -388,6 +427,16 @@ function LayoutPanel() {
         <span className="font-mono text-zinc-500"> Artists/&lt;Artist&gt;/&lt;Album&gt;/ </span>
         — misplaced files, unexpected folders, empty albums. Read-only: nothing is moved or deleted.
       </div>
+
+      {/* A stored report of ANOTHER music folder is not this library's state:
+          the rows would be about paths the app can no longer reach, so they
+          are not shown at all and the scan is offered instead. */}
+      {foreign && (
+        <div className="mt-3 text-xs text-zinc-400 bg-raise border border-border rounded-lg px-3 py-2">
+          The stored layout report describes <span className="font-mono">{foreign}</span>, not the music folder
+          configured now — it is not shown. Scan to report on the current library.
+        </div>
+      )}
 
       {report && !report.exists && (
         <div className="mt-3 text-xs text-amber-200 bg-amber-950/30 border border-amber-900/60 rounded-lg px-3 py-2">

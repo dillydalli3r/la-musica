@@ -5,15 +5,26 @@ Issue #10, in one file:
 * the merge rule is 1 > 0 > 2 and "nobody stated anything" is None, never an
   invented value (`integrations.merge_advisory`, exercised in
   `test_advisory_sources.py`);
-* when nobody stated anything, `mlo.advisory.decide_advisory` runs the ladder:
-  instrumental → AI (fed the lyrics when the file has them) → lyrics word scan
-  → `advisory_fallback`, and every answer carries the stage that produced it;
-* a provider's stated 0 is ESCALATEABLE: the two stages that read the words
-  run as explicit-only signals, and one of them finding explicit language
-  turns the 0 into 1 with a source that names it ("lyrics-scan (escalated)",
-  "ai-lyrics (escalated)") instead of leaving a provider credited with a
-  rating it never gave. A stated 1 or 2 is final — escalation only ever goes
-  0 → 1, and a track with no words cannot be escalated at all;
+* the AI provider is a SOURCE in that merge (issue #28): it is asked ONCE for
+  every track that reaches `mlo.advisory.decide_advisory` whenever one is
+  configured and `advisory_ai_classify` is on — whether or not the network
+  sources stated a value — and its answer is ranked against theirs by the same
+  1 > 0 > 2 rule. A stated 1 survives it, an AI 1 outranks a stated 0 or 2,
+  and an AI 2 never outranks a stated 0. Its answer is recorded in the caller's
+  per-source map either way, so the reply can name it;
+* it outranks a stated value only when it READ the track's words: a model shown
+  "(none available)" has read nothing, and nothing is not the evidence it takes
+  to contradict a provider. With no AI answering, nothing is asked of anyone
+  and the ladder below behaves exactly as it always did;
+* when nobody stated anything, the ladder runs: instrumental → AI (fed the
+  lyrics when the file has them) → lyrics word scan → `advisory_fallback`, and
+  every answer carries the stage that produced it;
+* a provider's stated 0 is ESCALATEABLE: the stages that read the words run as
+  explicit-only signals, and one of them finding explicit language turns the 0
+  into 1 with a source that names it ("lyrics-scan (escalated)", "ai-lyrics
+  (escalated)") instead of leaving a provider credited with a rating it never
+  gave. The SCAN only ever goes 0 → 1, and a track with no words cannot be
+  escalated at all;
 * an AI that answers 3 (or something unparseable) is "cannot tell" and falls
   THROUGH the ladder — the value space this app stores is 0/1/2, so a stored 3
   would fail the grader on every track carrying one;
@@ -80,7 +91,11 @@ def cfg(**over):
 _real_configured, _real_chat = ai_mod.ai_configured, ai_mod.ai_chat
 
 # --------------------------------------------------------------------------- #
-# 1) A provider that stated something wins outright: no AI call, no scan.
+# 1) The AI is asked for EVERY track — issue #28: it is a source now, not a
+#    last resort — and the app's one rank (1 beats 0 beats 2) decides between
+#    its answer and the providers'. A stated 1 survives it outright; a stated 0
+#    does not. Each case counts the calls: the ask is unconditional, and it is
+#    made ONCE per track however many stages want the answer.
 # --------------------------------------------------------------------------- #
 calls = []
 ai_mod.ai_configured = lambda c: True
@@ -90,29 +105,44 @@ try:
                                    lyrics="i dont give a fuck")
     assert out == {"value": 1, "source": "deezer-isrc", "stage": "sources",
                    "hits": [], "fallback": False}, out
-    assert calls == [], calls
+    assert len(calls) == 1, (
+        f"the AI WAS asked about a track a provider already rated ({calls}) — "
+        "and its 1 cannot outrank the provider's own 1, so the value AND the "
+        "provenance stay the provider's")
 
-    # a provider that stated 2 (a clean edition) is equally final
+    # the answer it gave is recorded beside the providers', which is what lets
+    # the reply's provenance chips name it (the fetch's per-track `answers`)
+    track_answers = {}
+    advisory.decide_advisory(cfg(), value=1, source="deezer-isrc",
+                             answers=track_answers, lyrics="i dont give a fuck")
+    assert track_answers == {"ai-lyrics": 1}, track_answers
+
+    # a stated 2 with NO words to read: the AI's answer cannot outrank it — a
+    # model shown "(none available)" has read nothing, and nothing is not the
+    # evidence it takes to contradict a provider
     out = advisory.decide_advisory(cfg(), value=2, source="apple-album", lyrics="")
-    assert out["value"] == 2 and out["stage"] == "sources", out
+    assert out == {"value": 2, "source": "apple-album", "stage": "sources",
+                   "hits": [], "fallback": False}, out
 
     # ----------------------------------------------------------------------- #
-    # 1b) A stated 0 is not: the stages that read the words run as EXPLICIT-
-    #     only signals, and the source names the one that overruled the
-    #     provider. The providers miss exactly here — Deezer's
+    # 1b) A stated 0 is not final: an AI that READ THE WORDS and found them
+    #     explicit outranks it. The providers miss exactly here — Deezer's
     #     `explicit_lyrics: false` also means "not classified", Apple's
     #     `notExplicit` is the master's own flag — so a 0 that the words
-    #     contradict must not be the end of the question.
+    #     contradict must not be the end of the question. The source names the
+    #     stage that overruled the provider, and the escalation costs no second
+    #     call: it reuses the answer the ladder's own step would have used.
     # ----------------------------------------------------------------------- #
     calls.clear()
     out = advisory.decide_advisory(cfg(), value=0, source="apple-album",
                                    lyrics="i dont give a fuck")
     assert out == {"value": 1, "source": "ai-lyrics (escalated)",
                    "stage": "ai", "hits": [], "fallback": False}, out
-    assert calls, "the AI read the words and is what escalated the 0"
+    assert len(calls) == 1, f"ONE call per track, not one per stage ({calls})"
 
     # no AI: the word scan is the signal, and the answer carries both things a
     # reader needs — the terms it hit and the fact the provider disagreed
+    calls.clear()
     ai_mod.ai_configured = lambda c: False
     out = advisory.decide_advisory(cfg(), value=0, source="deezer-isrc",
                                    lyrics="shut the fuck up")
@@ -132,9 +162,10 @@ try:
     out = advisory.decide_advisory(cfg(), value=0, source="deezer-isrc", lyrics="")
     assert out == {"value": 0, "source": "deezer-isrc", "stage": "sources",
                    "hits": [], "fallback": False}, out
+    assert calls == [], "no AI configured: nothing is asked, at any stage"
 
-    # a clean edition's 2 is final too: the words in the FILE may be the
-    # edited ones, and 2 is the provider's own statement about the edition
+    # a clean edition's 2 is final when nothing READ the words: the file may be
+    # the edited one, and 2 is the provider's own statement about the edition
     out = advisory.decide_advisory(cfg(), value=2, source="apple-album",
                                    lyrics="i dont give a fuck")
     assert out["value"] == 2 and out["stage"] == "sources", out
@@ -172,6 +203,38 @@ try:
                    "hits": [], "fallback": False}, out
     assert advisory_words.scan_lyrics("i dont give a fuck"), \
         "the lexicon WOULD have hit — the AI's answer is what settled it"
+
+    # an AI 2 never outranks a stated 0 — that is the SAME rank, read the other
+    # way — and because the AI's answer replaces the word list, the scan is not
+    # consulted over it either
+    calls.clear()
+    ai_mod.ai_chat = lambda *a, **k: calls.append(k) or "2"
+    out = advisory.decide_advisory(cfg(), value=0, source="deezer-isrc",
+                                   lyrics="i dont give a fuck")
+    assert out == {"value": 0, "source": "deezer-isrc", "stage": "sources",
+                   "hits": [], "fallback": False}, out
+    assert len(calls) == 1, calls
+
+    # ... while an AI 1 DOES outrank a clean edition's 2: as a source in the
+    # merge the rank decides, and the provenance is the AI's own name. The
+    # "(escalated)" wording the UI renders is for the case the providers
+    # systematically miss — a provider that stated 0.
+    ai_mod.ai_chat = lambda *a, **k: "1"
+    out = advisory.decide_advisory(cfg(), value=2, source="apple-album",
+                                   lyrics="i dont give a fuck")
+    assert out == {"value": 1, "source": "ai-lyrics", "stage": "ai",
+                   "hits": [], "fallback": False}, out
+
+    # without a read of the words it outranks nothing, so a stated 0 still
+    # stands: the call is made and its answer reported, but the provider's
+    # value decides
+    track_answers = {}
+    out = advisory.decide_advisory(cfg(), value=0, source="deezer-isrc",
+                                   answers=track_answers, lyrics="")
+    assert out == {"value": 0, "source": "deezer-isrc", "stage": "sources",
+                   "hits": [], "fallback": False}, out
+    assert track_answers == {"ai": 1}, track_answers
+
     ai_mod.ai_chat = lambda *a, **k: calls.append(k) or "1"
     # the sections below measure the AI calls their OWN case makes
     calls.clear()
@@ -248,11 +311,21 @@ try:
     assert out["stage"] == "fallback" and out["value"] == 0, out
 
     # the AI switched off with lyrics present: the scan answers (the AI is an
-    # addition to the word list, never a requirement for it)
+    # addition to the word list, never a requirement for it) and the provider
+    # is not spoken to at all — a switched-off feature costs nothing, and the
+    # ladder behaves exactly as it did before issue #28
     ai_mod.ai_configured = lambda c: True
+    ai_mod.ai_chat = lambda *a, **k: calls.append(k) or "1"
+    calls.clear()
     out = advisory.decide_advisory(cfg(advisory_ai_classify=False),
                                    lyrics="i dont give a fuck")
     assert out["stage"] == "lyrics" and out["value"] == 1, out
+    assert calls == [], "advisory_ai_classify off: the AI is never asked"
+    out = advisory.decide_advisory(cfg(advisory_ai_classify=False), value=0,
+                                   source="apple-album",
+                                   lyrics="i dont give a fuck")
+    assert calls == [], "nor over a provider's stated value"
+    assert out["value"] == 1 and out["source"] == "lyrics-scan (escalated)", out
 
     # ----------------------------------------------------------------------- #
     # 7) The lyrics come off the DISK when the caller has none in hand: the

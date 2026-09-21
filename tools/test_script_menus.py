@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Menu-consistency gate: every surface that lists the 19 scripts must agree.
+"""Menu-consistency gate: every surface that lists the 20 scripts must agree.
 
 Sources checked:
   * ``EXPECTED_SCRIPTS`` below — the frozen expected registry (number + name)
@@ -52,6 +52,14 @@ EXPECTED_SCRIPTS = {
     # aspect and size — the remedy for the codes grade_check_artist_image
     # raises (mlo/artistdata.py run_optimize_artist_images).
     19: "Optimize artist images",
+    # 20 reports the shape of the whole music folder (mlo/layout.py) and
+    # stores that report under <music>/.mlo/data, which is what the Library
+    # page warns from. Read-only: it is the one script that changes no file.
+    20: "Scan library layout",
+    # 21 completes an ACOUSTID_ID / ACOUSTID_FINGERPRINT pair a file only half
+    # carries — the grading check that had no fixer in the registry at all
+    # (mlo/acoustid.py run_fix_pairs).
+    21: "Fix AcoustID pairs",
 }
 
 
@@ -149,22 +157,39 @@ def check_run_all_migration(check):
     check("the stale script-15 entry is shed and 15 is re-anchored after beets",
           got.count(15) == 1 and got.index(15) == got.index(14) + 1, str(got))
     check("every script lands exactly once in a normalized order",
-          sorted(got) == list(range(1, 20)), str(sorted(got)))
+          sorted(got) == list(range(1, 22)), str(sorted(got)))
     # 17/18 were never in a saved order before they existed; the same
     # shed-and-anchor rule has to place them after the fetch they read from.
     check("18 (publish) lands after 13 (fetch lyrics) in a normalized order",
           got.index(18) == got.index(13) + 1, str(got))
     check("17 (AI transforms) lands after 18 (publish) in a normalized order",
           got.index(17) == got.index(18) + 1, str(got))
+    # 20 and 21 were not in any saved order yet either: they join at their
+    # anchors, which are the final pass (10) and the report on it (20).
+    check("20 (layout scan) lands after 10 (format all) for an existing install",
+          got.count(20) == 1 and got.index(20) == got.index(10) + 1, str(got))
+    check("21 (AcoustID pairs) lands right after 20 for an existing install",
+          got.count(21) == 1 and got.index(21) == got.index(20) + 1, str(got))
+    # ...and on a later load they are KEPT where the user put them: unlike 15,
+    # their ids never meant anything else, so a saved position is a real choice
+    # and re-anchoring them would silently undo the drag.
+    moved = cfg.normalize_config({"music_folder": "X",
+                                  "run_all_order": [sid for sid in got if sid not in (20, 21)] + [21, 20]})
+    check("a saved position for 20 and 21 is kept, not re-anchored after 10",
+          moved["run_all_order"][-2:] == [21, 20], str(moved["run_all_order"]))
 
     junk = cfg.normalize_config({"music_folder": "X", "run_all_order": [99, "a", 4, 4, -1]})
     check("unknown / duplicate run-all ids are dropped",
-          all(1 <= n <= 19 for n in junk["run_all_order"]) and len(set(junk["run_all_order"])) == len(junk["run_all_order"]),
+          all(1 <= n <= 21 for n in junk["run_all_order"]) and len(set(junk["run_all_order"])) == len(junk["run_all_order"]),
           str(junk["run_all_order"]))
 
     twice = cfg.normalize_config(cfg.normalize_config({"music_folder": "X"}))
     check("normalize_config is idempotent",
           twice["run_all_order"] == list(cfg.DEFAULT_RUN_ALL_ORDER), str(twice["run_all_order"]))
+    # The shipped order is the one the pipeline actually means: Grade is the
+    # last word, and the two read-outs it acts on come right before it.
+    check("the shipped order ends with the layout report, the AcoustID pair and Grade",
+          cfg.DEFAULT_RUN_ALL_ORDER[-3:] == [20, 21, 4], str(cfg.DEFAULT_RUN_ALL_ORDER[-3:]))
 
 
 def check_import_chain(check):
@@ -196,6 +221,33 @@ def check_import_chain(check):
           str(imports.DEFAULT_CHAIN))
 
 
+def check_cli_runners(check):
+    """The terminal must be able to RUN every script its own menu lists.
+
+    ``mlo.cli.SCRIPTS`` is what the menus print and ``build_script_runners()``
+    is what Run All dispatches; nothing tied the two together, so 15 and then
+    19 were each listed with no runner — Run All answered "Skipping unknown
+    script id" for a script the menu was still advertising. A missing runner
+    is a hard error in build_script_runners now, and this is the check that
+    keeps the next id from being added to one half of that pair only."""
+    sys.path.insert(0, ROOT)
+    from mlo.cli import SCRIPTS, build_script_runners  # noqa: PLC0415 - needs ROOT first
+
+    menu = {sid: name for sid, name, _desc in SCRIPTS}
+    runners = build_script_runners()
+    check("mlo.cli.SCRIPTS == canonical numbers", set(menu) == set(EXPECTED_SCRIPTS),
+          f"cli={sorted(menu)}")
+    check("build_script_runners covers every id the menu lists",
+          set(runners) == set(menu),
+          f"unrunnable={sorted(set(menu) - set(runners))}")
+    check("every one of those runners can actually be called",
+          all(callable(runner) and runner is not None for _label, runner in runners.values()),
+          str([sid for sid, (_label, runner) in runners.items() if not callable(runner)]))
+    check("the terminal names each script the way the menu does",
+          all(label == menu[sid] for sid, (label, _runner) in runners.items()),
+          str([sid for sid, (label, _r) in runners.items() if label != menu[sid]]))
+
+
 def main():
     fail = 0
     canon = EXPECTED_SCRIPTS
@@ -211,8 +263,8 @@ def main():
             fail += 1
 
     print("scripts registry")
-    check("canonical registry has 19 scripts", len(canon) == 19, str(sorted(canon)))
-    check("canonical numbers are 1..19", sorted(canon) == list(range(1, 20)))
+    check("canonical registry has 21 scripts", len(canon) == 21, str(sorted(canon)))
+    check("canonical numbers are 1..21", sorted(canon) == list(range(1, 22)))
     check("server RUNNERS == canonical numbers", runners == set(canon), f"server={sorted(runners)}")
     check("web SCRIPTS == canonical numbers", set(web) == set(canon), f"web={sorted(web)}")
     check("README table == canonical numbers", readme == set(canon), f"readme={sorted(readme)}")
@@ -231,10 +283,10 @@ def main():
 
     print("run-all order")
     py_run_all = python_default_run_all()
-    check("DEFAULT_RUN_ALL covers every script", sorted(run_all) == list(range(1, 20)), str(sorted(run_all)))
+    check("DEFAULT_RUN_ALL covers every script", sorted(run_all) == list(range(1, 22)), str(sorted(run_all)))
     check("DEFAULT_RUN_ALL has no duplicates", len(run_all) == len(set(run_all)), str(run_all))
     check("mlo/config.py DEFAULT_RUN_ALL_ORDER covers every script",
-          sorted(py_run_all) == list(range(1, 20)), str(sorted(py_run_all)))
+          sorted(py_run_all) == list(range(1, 22)), str(sorted(py_run_all)))
     check("python and web run-all order agree", py_run_all == run_all,
           f"python={py_run_all} web={run_all}")
 
@@ -252,6 +304,9 @@ def main():
 
     print("import chain")
     check_import_chain(check)
+
+    print("terminal runners")
+    check_cli_runners(check)
 
     print(f"\n{'PASS' if not fail else 'FAIL'} — {fail} problem(s)")
     return 1 if fail else 0

@@ -104,6 +104,45 @@ assert only_lossless(folder("u2", "A", "m4a")) is False, "m4a/AAC must be lossy"
 assert only_lossless(folder("u3", "A", "wav")) is True, "wav must be lossless"
 assert only_lossless(folder("u4", "A", "flac")) is True, "flac must be lossless"
 
+# 3. The rank's precedence, table-driven: lossless, then the score, then the
+#    FASTEST peer (the user's "download from the fastest good source first"),
+#    then its queue — and a total order, so a job's candidate order is
+#    reproducible run to run. A fast WRONG folder never overtakes a slower
+#    complete one: the codec bucket is the first key and the score the second,
+#    and the score's own speed bonus is capped below one matched track.
+def rankable(user, *, score=90.0, speed=1_000_000, queue=0, lossless=True,
+             folder=None):
+    return {"username": user, "dir": folder or f"Music/{user.title()}/",
+            "score": score, "speed": speed, "queue": queue, "lossless": lossless}
+
+
+def rank_order(*rows):
+    return [c["username"] for c in sorted(rows, key=soulseek_auto._rank)]
+
+
+# faster wins the tie between equally scored lossless folders, and a queue only
+# breaks a speed tie (all four share the score, so the table is exactly the
+# user's question).
+_ranked = [rankable("slow", speed=300_000), rankable("fast", speed=9_000_000),
+           rankable("busy", speed=9_000_000, queue=40), rankable("unknown", speed=0)]
+assert [c["username"] for c in sorted(_ranked, key=soulseek_auto._rank)] == \
+    ["fast", "busy", "slow", "unknown"], _ranked
+# ...and the keys above speed still outrank it: a lossy folder with the best
+# score and the fastest peer in the network loses to the slowest lossless one,
+# and a fast folder that matches fewer tracks loses to a slow complete one.
+assert rank_order(rankable("mp3", score=120, speed=20_000_000, lossless=False),
+                  rankable("flac", score=40, speed=64_000)) == ["flac", "mp3"]
+assert rank_order(rankable("fast_partial", score=60, speed=20_000_000),
+                  rankable("slow_complete", score=80, speed=64_000)) == \
+    ["slow_complete", "fast_partial"]
+# the order is TOTAL: two candidates the search reports identically still come
+# back in one fixed order, and a same-peer tie is settled by the folder.
+_twins = [rankable("same", folder="Music/B/"), rankable("same", folder="Music/A/")]
+assert [c["dir"] for c in sorted(_twins, key=soulseek_auto._rank)] == \
+    ["Music/A/", "Music/B/"], _twins
+assert rank_order(rankable("zeta", folder="Music/A/"),
+                  rankable("alpha", folder="Music/Z/")) == ["alpha", "zeta"]
+
 
 # --------------------------------------------------------------------------- #
 # _local_download_candidates: the two layouts slskd leaves on disk
@@ -870,8 +909,13 @@ class AutoSlsk:
         self.ddir = ddir
         self.responses = responses
         self.enqueued = []
-        self.queued = {}        # remote filename -> size, in enqueue order
-        self.uploader = ""
+        # Per PEER, not one flat list: a batch queues several peers before it
+        # waits on any of them, and slskd reports every user's transfers at once
+        # (_user_transfers filters by username) — a stub that remembered only the
+        # last peer asked made a cancelled candidate look like it had no
+        # transfers to cancel at all.
+        self.queues = {}        # username -> {remote filename: size}
+        self.uploader = ""      # the last peer asked
         self.cancelled = []
         self.cancelled_searches = []
         self.progress_snapshots = []
@@ -905,19 +949,21 @@ class AutoSlsk:
     def enqueue_download(self, username, wanted):
         self.enqueued.append([w["filename"] for w in wanted])
         self.uploader = username
+        queue = self.queues.setdefault(username, {})
         for w in wanted:
-            self.queued[w["filename"]] = int(w.get("size") or 0)
+            queue[w["filename"]] = int(w.get("size") or 0)
         return True
 
     def downloads_state(self):
         # record what the job published on every poll, so the test can prove
         # the search / logging / download phase wiring end to end
         self.progress_snapshots.append(soulseek_auto.job_state()["progress"])
-        return [{"username": self.uploader, "directories": [{"files": [
+        return [{"username": user, "directories": [{"files": [
             {"id": name, "filename": name, "state": "Completed, Succeeded",
              "bytesTransferred": size, "size": size, "percentComplete": 100,
              "averageSpeed": 0, "remainingTime": 0}
-            for name, size in self.queued.items()]}]}]
+            for name, size in sorted(queue.items())]}]}
+            for user, queue in self.queues.items()]
 
     def cancel_downloads(self, username, transfer_ids, cfg=None, failed=None):
         # the real signature (server.soulseek.cancel_downloads): `failed` is
@@ -981,7 +1027,7 @@ def _tree_files(root):
 
 
 def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSlsk,
-            confirm_lossy=False, answer=None, keep_dir=False):
+            confirm_lossy=False, answer=None, keep_dir=False, **over):
     """Drive one whole _run() against a scripted slskd and planted downloads.
 
     Files are planted as finished downloads only where the job is supposed to
@@ -1001,7 +1047,9 @@ def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSls
     a rejected candidate is inspectable, and JobRun.calls lists every
     ("stamp"|"verify"|"import", root, media) the job reached, so "was the
     medium switched BEFORE verification?" is answerable. The slskd double
-    itself is on JobRun.stub (its query journal, cancellation log, ...)."""
+    itself is on JobRun.stub (its query journal, cancellation log, ...), and any
+    further `over` keyword replaces one of the stubbed stages for a test that
+    needs the real one (the download-dir clear) or a scripted verdict."""
     saved = _snapshot_job()
     saved_time = soulseek_auto.time
     # Every worker this call starts, joined before the global job state is
@@ -1031,27 +1079,38 @@ def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSls
                                    "confirm": None, "search": None, "cancel": False})
         soulseek_auto._confirm_event.clear()
         soulseek_auto._confirm_answer["accept"] = False
+        # The stages this suite stubs, with any `over` from the caller applied on
+        # top: a test that needs the REAL clear (or a scripted verify verdict)
+        # overrides exactly that one stage.
+        _patches = dict(
+            load_config=lambda: dict(cfg or JOB_CFG),
+            _score_logs=scores or score_logs(),
+            # The download-dir clear runs on a SUCCESSFUL import and this suite's
+            # `_import` never moves anything: stubbed here so the trees the
+            # assertions elsewhere read stay put (the clear itself is driven for
+            # real, with keep_dir, in its own block).
+            _clear_downloads=lambda *a, **k: {},
+            _verify_album=lambda root, c, is_cd: (
+                verified.append(root)
+                or calls.append(("verify", root, is_cd))
+                or (True, [])),
+            _stamp_media=lambda root, media, c: (
+                calls.append(("stamp", root, media)) or (0, [])),
+            _import=lambda root, r, c, media: (
+                imported.append(root)
+                or calls.append(("import", root,
+                                 list(r.get("medium_formats") or []), media))
+                or {"album_path": root, "imported": True}),
+            traceback=SimpleNamespace(print_exc=lambda *a, **k: None),
+        )
+        _patches.update(over)
         with Patch(soulseek, is_running=stub.is_running, web_up=stub.web_up,
                    server_state=stub.server_state, download_dir=stub.download_dir,
                    search=stub.search, search_results=stub.search_results,
                    enqueue_download=stub.enqueue_download,
                    downloads_state=stub.downloads_state,
                    cancel_downloads=stub.cancel_downloads), \
-             Patch(soulseek_auto,
-                   load_config=lambda: dict(cfg or JOB_CFG),
-                   _score_logs=scores or score_logs(),
-                   _verify_album=lambda root, c, is_cd: (
-                       verified.append(root)
-                       or calls.append(("verify", root, is_cd))
-                       or (True, [])),
-                   _stamp_media=lambda root, media, c: (
-                       calls.append(("stamp", root, media)) or (0, [])),
-                   _import=lambda root, r, c, media: (
-                       imported.append(root)
-                       or calls.append(("import", root,
-                                        list(r.get("medium_formats") or []), media))
-                       or {"album_path": root, "imported": True}),
-                   traceback=SimpleNamespace(print_exc=lambda *a, **k: None)):
+             Patch(soulseek_auto, **_patches):
             def drv():
                 # `queries=[]` is the wish case: nothing stored, so the job
                 # derives its queries from the release (release_queries). The
@@ -1345,6 +1404,224 @@ assert job.enqueued == [["Music/Webrip/01 - Alpha.flac",
 assert not job.job["attempts"], job.job["attempts"]
 
 # --------------------------------------------------------------------------- #
+# 17d. BATCHING: up to three candidates of ONE release download at once, the
+#      first that VERIFIES good is the import, and every other candidate is
+#      cancelled AND swept — its partial bytes must not keep arriving behind the
+#      album being imported. Verification (the CD .log/CRC gate included) is the
+#      verdict, so a candidate that fails it is rejected and the NEXT one
+#      imports instead of the album failing. The batch width is the user's 3,
+#      bounded by the app's own release width so the two budgets never multiply
+#      behind the user's back.
+# --------------------------------------------------------------------------- #
+def batch_rows(*users):
+    """One complete CD folder per peer (two tracks, a log and a cue)."""
+    out = []
+    for u in users:
+        root = f"Music/Batch {u[-1].upper()}"
+        out += [lrow(u, f"{root}/01 - Alpha.flac"),
+                lrow(u, f"{root}/02 - Beta.flac", 210.0),
+                lrow(u, f"{root}/rip.log"),
+                lrow(u, f"{root}/Album.cue")]
+    return out
+
+
+BATCH_FILES = ["01 - Alpha.flac", "02 - Beta.flac", "Album.cue", "rip.log"]
+
+
+def batch_files(*users):
+    return sorted(f"Music/Batch {x.upper()}/{n}" for x in users for n in BATCH_FILES)
+
+
+BATCH_ROWS = batch_rows("peerA", "peerB", "peerC")
+
+
+def verify_bad(needle):
+    """A _verify_album that fails for the folder whose path contains `needle` —
+    the CD rip that cannot produce its evidence."""
+    def verify(root, cfg_, is_cd):
+        return (False, ["00 - Track.flac: CRC mismatch"]) if needle in root else (True, [])
+    return verify
+
+
+# (a) peerA ranks first (the three tie on score and speed, so the peer name
+#     decides), downloads, and FAILS verification; peerB verifies and imports;
+#     peerC — transferring alongside both — is cancelled and swept.
+run = run_job(JOB_RELEASE, BATCH_ROWS, keep_dir=True,
+              _verify_album=verify_bad("Batch A"))
+try:
+    assert run.job["state"] == "done" and run.imported, run.job
+    # ALL THREE were started, and all three at once: each peer's .log went out in
+    # the same pass (the batch), and each passing log's album followed.
+    assert [len(b) for b in run.stub.enqueued[:3]] == [1, 1, 1], run.stub.enqueued
+    assert sorted(run.submitted()[:3]) == [f"Music/Batch {x}/rip.log" for x in "ABC"], \
+        run.submitted()[:3]
+    assert len(run.stub.enqueued) == 6, run.stub.enqueued
+    # The first candidate's rejection names it AND the cause (a CD judged on its
+    # log/CRC evidence is the fragile case); the third's says it lost the race.
+    _rejected, _lost = run.job["attempts"]
+    assert _rejected["username"] == "peerA" and _rejected["dir"] == "Music/Batch A/"
+    assert "verification failed (1 problem(s))" in _rejected["reason"] \
+        and "CRC mismatch" in _rejected["reason"], _rejected
+    assert _lost["username"] == "peerC" and _lost["dir"] == "Music/Batch C/"
+    assert "peerB delivered the album first" in _lost["reason"], _lost
+    # ...and the album that landed is peerB's.
+    assert os.path.basename(run.imported[0]) == "Batch B", run.imported
+    # A's and C's transfers are cancelled, B's are not, and the losers' folders
+    # are GONE — nothing of theirs can keep arriving behind the import.
+    assert sorted(run.cancelled) == batch_files("A", "C"), run.cancelled
+    assert _tree_files(run.ddir) == batch_files("B"), _tree_files(run.ddir)
+finally:
+    shutil.rmtree(run.ddir, ignore_errors=True)
+
+
+class QueuedPeer(AutoSlsk):
+    """AutoSlsk where one peer's ALBUM transfers sit in slskd's queue forever:
+    the first candidate in rank order is the slow one, and the whole album is
+    already on another peer's shelf. The case a batch exists for."""
+
+    def __init__(self, ddir, rows, user="peerA"):
+        super().__init__(ddir, rows)
+        self.user = user
+
+    def downloads_state(self):
+        state = super().downloads_state()
+        for entry in state:
+            if entry["username"] != self.user:
+                continue
+            for d in entry["directories"]:
+                for f in d["files"]:
+                    if not str(f["filename"]).lower().endswith(".log"):
+                        f["state"] = "Queued, Remotely"
+        return state
+
+
+# (b) The first-ranked peer never delivers while a later one has the album: the
+#     batch hands the job over instead of waiting the slow peer out — not even
+#     its own queue budget, let alone the hours a stalled peer could cost.
+run = run_job(JOB_RELEASE, BATCH_ROWS, stub_cls=QueuedPeer, keep_dir=True)
+try:
+    assert run.job["state"] == "done" and run.imported, run.job
+    _slow, _lost = run.job["attempts"]
+    assert _slow["username"] == "peerA" and "peerB delivered the album first" in _slow["reason"], _slow
+    assert _lost["username"] == "peerC", run.job["attempts"]
+    assert os.path.basename(run.imported[0]) == "Batch B", run.imported
+    assert _tree_files(run.ddir) == batch_files("B"), _tree_files(run.ddir)
+    # It did not sit out peerA at all: the batch's own clock says so.
+    assert run.clock.now < 60, run.clock.now
+finally:
+    shutil.rmtree(run.ddir, ignore_errors=True)
+
+# (c) The batch is the user's 3 and never wider than the app's own release
+#     width, so a machine configured for one release at a time is not quietly
+#     handed three times its network load.
+assert soulseek_auto._batch_width({}) == 3, soulseek_auto._batch_width({})
+assert soulseek_auto._batch_width({"soulseek_search_concurrency": 1}) == 1
+assert soulseek_auto._batch_width({"soulseek_search_concurrency": 2}) == 2
+assert soulseek_auto._batch_width({"soulseek_search_concurrency": 8}) == 3
+
+# (d) A folder that answers BOTH searches (the configured template and the
+#     broader second pass) is scored twice — and downloaded ONCE. Attempting it
+#     again after it failed is the "downloads files twice that it already failed
+#     on" the user asked about: the second attempt would spend a whole peer's
+#     bandwidth on the very bytes that just failed.
+_TWOPASS_CFG = dict(JOB_CFG, soulseek_auto_complete_ratio=0.5)
+_TWOPASS_ROWS = [lrow("peer", "Music/Partial/01 - Alpha.flac")]   # one of two tracks
+run = run_job(DIGITAL_RELEASE, _TWOPASS_ROWS, cfg=_TWOPASS_CFG,
+              _verify_album=lambda root, c, is_cd: (False, ["CRC mismatch"]))
+assert run.job["state"] == "error", run.job
+assert len(run.stub.enqueued) == 1, run.stub.enqueued      # asked for ONCE
+assert len(run.job["attempts"]) == 1, run.job["attempts"]
+assert "(1 attempt(s)" in run.job["result"]["error"], run.job["result"]
+
+# --------------------------------------------------------------------------- #
+# 17e. `soulseek_clear_downloads` (Settings → Soulseek, ON by default): the
+#      import MOVES the album into the library, so what this job left in the
+#      download dir is staging and goes with the import — only that job's own
+#      folder, only inside the download dir (`soulseek_download_dir` can be a
+#      path the user picked), only after an import that really landed, and
+#      always reported: what went, and what was kept with the reason.
+# --------------------------------------------------------------------------- #
+CLEAR_ROWS = [lrow("peer", "Music/Clear/01 - Alpha.flac"),
+              lrow("peer", "Music/Clear/02 - Beta.flac", 210.0)]
+CLEAR_FILES = ["Music/Clear/01 - Alpha.flac", "Music/Clear/02 - Beta.flac"]
+
+# (a) ON: the folder the job downloaded is deleted, and the job says so.
+run = run_job(DIGITAL_RELEASE, CLEAR_ROWS, keep_dir=True,
+              _clear_downloads=soulseek_auto._clear_downloads)
+try:
+    assert run.job["state"] == "done" and run.imported, run.job
+    assert _tree_files(run.ddir) == [], _tree_files(run.ddir)
+    _cleared = run.job["result"]
+    assert _cleared["download_cleared"] is True, _cleared
+    assert (_cleared["download_removed"]["files"],
+            _cleared["download_removed"]["dirs"]) == (2, 1), _cleared["download_removed"]
+    assert _cleared["download_kept"] == [], _cleared
+    assert any(m.startswith("Cleared the download:") for m in
+               [e["msg"] for e in run.job["log"]]), run.job["log"][-4:]
+finally:
+    shutil.rmtree(run.ddir, ignore_errors=True)
+
+# (b) OFF: everything stays, and the result says why nothing was touched.
+run = run_job(DIGITAL_RELEASE, CLEAR_ROWS, keep_dir=True,
+              cfg=dict(JOB_CFG, soulseek_clear_downloads=False),
+              _clear_downloads=soulseek_auto._clear_downloads)
+try:
+    assert run.job["state"] == "done", run.job
+    assert sorted(_tree_files(run.ddir)) == CLEAR_FILES, _tree_files(run.ddir)
+    assert run.job["result"]["download_cleared"] is False, run.job["result"]
+    assert run.job["result"]["download_removed"]["files"] == 0, run.job["result"]
+    assert run.job["result"]["download_kept"] == \
+        ["the download is kept: the setting is off"], run.job["result"]
+finally:
+    shutil.rmtree(run.ddir, ignore_errors=True)
+
+
+def import_fails(root, release, cfg, media):
+    """A real _import failure: the album could not be moved (a file still open),
+    so nothing landed in the library and the files must stay for the retry."""
+    raise RuntimeError("a file inside the album is still open")
+
+
+# (c) a FAILED import keeps its download: deleting it here would make the retry
+#     download the whole album again.
+run = run_job(DIGITAL_RELEASE, CLEAR_ROWS, keep_dir=True, _import=import_fails,
+              _clear_downloads=soulseek_auto._clear_downloads)
+try:
+    assert run.job["state"] == "error", run.job
+    assert sorted(_tree_files(run.ddir)) == CLEAR_FILES, _tree_files(run.ddir)
+    assert "still open" in run.job["result"]["error"], run.job["result"]
+    assert "download_cleared" not in run.job["result"], run.job["result"]
+finally:
+    shutil.rmtree(run.ddir, ignore_errors=True)
+
+# (d) the delete is scoped to THIS download's own bytes: a folder that also
+#     holds another download's file keeps the folder (this candidate's own file
+#     still goes), and nothing outside the download dir is ever touched.
+_settle_clear = tempfile.mkdtemp(prefix="mlo-clear-")
+_outside = tempfile.mkdtemp(prefix="mlo-clear-outside-")
+try:
+    put_file(_settle_clear, "Music", "Own", "01 - Alpha.flac")
+    _foreign = put_file(_settle_clear, "Music", "Own", "notes.txt")
+    _outside_file = put_file(_outside, "Music", "Own", "02 - Beta.flac")
+    _found = {"username": "peer", "wanted": [
+        {"filename": "Music/Own/01 - Alpha.flac", "size": 0},
+        {"filename": "Music/Own/02 - Beta.flac", "size": 0}]}
+    _res = soulseek_auto._clear_downloads(
+        SimpleNamespace(clear_transfer_files=lambda *a, **k: {"files_deleted": 0}),
+        _settle_clear, _found, {})
+    assert _res["download_cleared"] is True, _res
+    # the candidate's own file is gone, the other download's file keeps the
+    # folder standing, and the file planted OUTSIDE the download dir is untouched
+    assert not os.path.exists(os.path.join(_settle_clear, "Music", "Own",
+                                           "01 - Alpha.flac")), _res
+    assert os.path.exists(_foreign), "another download's file was deleted"
+    assert os.path.exists(_outside_file), "a file outside the download dir was deleted"
+    assert any("file(s) of another download" in k for k in _res["download_kept"]), _res
+finally:
+    shutil.rmtree(_settle_clear, ignore_errors=True)
+    shutil.rmtree(_outside, ignore_errors=True)
+
+# --------------------------------------------------------------------------- #
 # search progress payload: live counts only, never a countdown — the search
 # window is a ceiling that a usable candidate ends early, so a timer readout
 # promised a duration the search does not serve.
@@ -1481,6 +1758,18 @@ try:
         assert wish["status"] == "wanted", wish
         assert (wish["title"], wish["artist"], wish["year"]) == \
             ("Job Album", "Job Artist", "1996"), wish
+        # The wish RECORDS the attempt that just failed. Born due (no
+        # `last_search`, `retry_at` 0), the worker's next pass — at most two
+        # minutes later — re-ran this very search against the very peers that
+        # had just failed on every candidate. The retry policy's own numbers
+        # (server/wishes: attempts, empty-search budget, backoff) now apply to a
+        # job the USER ran exactly as they do to one the worker ran itself, and
+        # `due_at` is what the next pass asks.
+        assert (wish["attempts"], wish["not_found"]) == (1, 1), wish
+        assert wish["last_error"] == NO_RESULT_MSG, wish
+        _backoff = wishes_store.retry_delay(dict(JOB_CFG), 1)
+        assert _backoff >= 60 and wish["retry_at"] - run.clock.now >= _backoff - 1, \
+            (wish["retry_at"], run.clock.now, _backoff)
 
         # Declining keeps the old behaviour: the job fails with the same
         # message and nothing is wished.
@@ -2236,15 +2525,14 @@ class GateSlsk(AutoSlsk):
 
     def downloads_state(self):
         self.progress_snapshots.append(soulseek_auto.job_state()["progress"])
-        files = []
-        for name, size in self.queued.items():
-            state = (self.log_state if name.lower().endswith(".log")
-                     else "Completed, Succeeded")
-            files.append({"id": name, "filename": name, "state": state,
-                          "bytesTransferred": size, "size": size,
-                          "percentComplete": 100, "averageSpeed": 0,
-                          "remainingTime": 0})
-        return [{"username": self.uploader, "directories": [{"files": files}]}]
+        return [{"username": user, "directories": [{"files": [
+            {"id": name, "filename": name,
+             "state": (self.log_state if name.lower().endswith(".log")
+                       else "Completed, Succeeded"),
+             "bytesTransferred": size, "size": size,
+             "percentComplete": 100, "averageSpeed": 0, "remainingTime": 0}
+            for name, size in sorted(queue.items())]}]}
+            for user, queue in self.queues.items()]
 
     def cancel_downloads(self, username, transfer_ids, **kw):
         self.trees.append(sorted(_tree_files(self.ddir)))
@@ -2773,6 +3061,13 @@ try:
         assert _wishes[0]["status"] == "wanted", _wishes[0]
         assert _wishes[0]["release_mbid"] == JOB_RELEASE["id"], _wishes[0]
         assert _wishes[0]["queries"] == run.prompt["queries"], _wishes[0]
+        # ...and the RECORDED attempt is the classified one: a job that never
+        # got a byte spends an ATTEMPT (not an empty search), and carries the
+        # backoff as `retry_at` so the next pass does not re-run it at once.
+        assert (_wishes[0]["attempts"], _wishes[0]["not_found"]) == (1, 0), _wishes[0]
+        assert _wishes[0]["last_error"] == REJECTED_MSG, _wishes[0]
+        assert _wishes[0]["retry_at"] - run.clock.now >= \
+            wishes_store.retry_delay(dict(JOB_CFG), 1) - 1, (_wishes[0], run.clock.now)
 
         # (b) declined: the error the rejected-candidate dead end always raised,
         #     verbatim, and nothing wished.

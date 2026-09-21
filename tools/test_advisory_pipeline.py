@@ -216,6 +216,12 @@ class FakeAudio:
     def get_tag(self, name):
         return self.tags.get(name)
 
+    def get_lyrics(self):
+        """The embedded LYRICS tag — what `mlo.lyrics_publish.local_lyrics`
+        reads before it looks for an .lrc sidecar. None (no such tag) is what
+        the tracks below carry unless a case puts words on one."""
+        return self.tags.get("LYRICS")
+
     def set_tag(self, name, value):
         self.tags[name] = value
         FakeAudio.written[self.path] = dict(self.tags)
@@ -355,6 +361,66 @@ try:
     assert out["albums"] == {ALBUM: 1}, out
     assert out["album_updated"] == 3, out
     assert "ALBUMITUNESADVISORY" not in FakeAudio.written[MP3], FakeAudio.written[MP3]
+
+    # ----------------------------------------------------------------------- #
+    # 3b) The AI is a SOURCE in the fetch itself (issue #28): asked ONCE for
+    #     every track this run DECIDES, ranked against what the providers
+    #     stated by the app's one rule, and reported in `answers` beside them —
+    #     while `sources` keeps naming the one source that decided the value.
+    # ----------------------------------------------------------------------- #
+    from server import ai as ai_mod
+
+    for path in FILES:
+        FakeAudio.written[path].pop("ITUNESADVISORY", None)
+        FakeAudio.written[path].pop("ALBUMITUNESADVISORY", None)
+    # The escalation takes a READ of the words: the first track carries an
+    # explicit line, and the tracks without one show what an answer is worth
+    # when the model read nothing.
+    FakeAudio.written[FILES[0]]["LYRICS"] = "i dont give a fuck"
+    _real_configured, _real_chat = ai_mod.ai_configured, ai_mod.ai_chat
+    ai_calls = []
+    ai_mod.ai_configured = lambda c: True
+    ai_mod.ai_chat = lambda *a, **k: ai_calls.append(k) or "1"
+    try:
+        clear()
+        stub_http(deezer_routes())
+        out = imports.fetch_advisories([ALBUM], dict(CFG, advisory_auto_fetch=True))
+
+        # ONE call per track this run decided — four tracks, four calls, no
+        # matter how many stages wanted the answer (the escalation of a stated
+        # 0 reuses the ladder's own call instead of paying for a second one)
+        assert len(ai_calls) == len(FILES), ai_calls
+        # Chic 'N' Stu: Deezer stated 0, the AI READ the words and answered 1 —
+        # the rank gives the AI the value AND the provenance
+        # Boom!: Deezer's own 1 survives the AI's 1, so the provider keeps it
+        # Roulette: nobody stated anything — the AI's answer is the ladder's
+        # Silent Streamline: no words to read, so an AI 1 over Deezer's 0
+        # changes nothing (and the answer is not lost: it is in `answers`)
+        assert out["sources"] == {FILES[0]: "ai-lyrics (escalated)",
+                                  FILES[1]: "deezer-isrc",
+                                  FILES[2]: "ai",
+                                  FILES[3]: "deezer-isrc"}, out
+        assert out["values"] == {FILES[0]: 1, FILES[1]: 1, FILES[2]: 1,
+                                 FILES[3]: 0}, out
+        assert out["answers"] == {
+            FILES[0]: {"deezer-isrc": 0, "ai-lyrics": 1},
+            FILES[1]: {"deezer-isrc": 1, "ai": 1},
+            FILES[2]: {"ai": 1},
+            FILES[3]: {"deezer-isrc": 0, "ai": 1}}, out
+
+        # A file whose value this run ECHOES is asked about by NOBODY — the AI
+        # included: there is no decision to inform, so nothing is paid for.
+        for path in FILES:
+            FakeAudio.written[path]["ITUNESADVISORY"] = "1"
+        ai_calls.clear()
+        clear()
+        stub_http(deezer_routes())
+        out = imports.fetch_advisories([ALBUM], dict(CFG, advisory_auto_fetch=True))
+        assert ai_calls == [], ai_calls
+        assert out["sources"] == {p: "existing-tag" for p in FILES}, out
+    finally:
+        ai_mod.ai_configured, ai_mod.ai_chat = _real_configured, _real_chat
+        FakeAudio.written[FILES[0]].pop("LYRICS", None)
 
     # ----------------------------------------------------------------------- #
     # 5) Nobody spoke: the stage is in `sources`, `answers` is empty — the two

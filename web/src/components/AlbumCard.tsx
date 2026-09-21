@@ -14,12 +14,17 @@ import { originalYear } from "../lib/fmt";
 import type { ReactNode } from "react";
 import type { Album } from "../types";
 
-/** The library's album grid card, shared by the Library and Favorites pages
- * so favorites render with exactly the same layout. The library payload
- * enriches albums with an `artist` display name; elsewhere it falls back to
- * the album-artist tag. */
+/** The app's album grid card — the Library, Favorites, Artist, Trash,
+ * "more like this" and every Home shelf draw an album with this one card, so
+ * one album can never look like two. The library payload enriches albums with
+ * an `artist` display name; elsewhere it falls back to the album-artist tag. */
 export default function AlbumCard({ al, artistName, selectable, selected, onSelect, href, actions, extraMeta }: {
-  al: Album & { artist?: string };
+  /** `owned: false` marks a row the library does not hold (Home's Soulseek
+   *  wishes, a favourite whose folder moved away): nothing has graded it and
+   *  there is no audio to play or favourite yet, so the card draws identity
+   *  only — no status dot, no play button, no heart — instead of reading its
+   *  own missing fields as verdicts. */
+  al: Album & { artist?: string; owned?: boolean };
   artistName?: string;
   selectable?: boolean;
   selected?: boolean;
@@ -29,13 +34,17 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
   href?: string | null;
   /** Overrides the play button (top-left overlay); defaults to today's button. */
   actions?: ReactNode;
-  /** Extra bits for the caption's meta row (after the artist) — for pages
-   *  that state more than the shared grid does. The library grid passes
-   *  nothing and renders exactly as before. */
+  /** The caller's own bits for the row, drawn on their own line under the
+   *  caption — for pages that state more than the shared grid does (Home
+   *  passes its shelf's reason chip here). Only rendered when given, so the
+   *  library grid passes nothing and renders exactly as before. */
   extraMeta?: ReactNode;
 }) {
   const st = statusFor(!!al.pass, al.audit_summary);
   const ref = href === undefined ? albumRef(al) : href;
+  // A row outside the library has no verdict, no audio and nothing to
+  // favourite: the three controls that would claim otherwise are left off.
+  const inLibrary = al.owned !== false;
   const artist = artistName ?? al.artist ?? al.album_artist ?? al.path.split(/[\\/]/).slice(0, -1).pop() ?? "";
   const media = al.media || al.meta?.MEDIA;
   const countries = releaseCountries(al.meta?.RELEASECOUNTRY);
@@ -129,10 +138,12 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
             </>
           );
         })()}
-        <div className="absolute top-1.5 right-1.5">
-          <FavHeart kind="album" id={al.path} mbid={al.meta?.MUSICBRAINZ_ALBUMID} className="!p-1.5 bg-black/60" iconClass="h-4 w-4" revealOnHover />
-        </div>
-        {actions ?? (
+        {inLibrary && (
+          <div className="absolute top-1.5 right-1.5">
+            <FavHeart kind="album" id={al.path} mbid={al.meta?.MUSICBRAINZ_ALBUMID} className="!p-1.5 bg-black/60" iconClass="h-4 w-4" revealOnHover />
+          </div>
+        )}
+        {inLibrary && (actions ?? (
           /* A framework album has no audio to play, so the button is OFF
              rather than a control that starts nothing: the wrapper carries the
              sentence (a disabled button does not get its own tooltips). */
@@ -156,7 +167,7 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
               <Play className="h-4 w-4 fill-current" />
             </button>
           </span>
-        )}
+        ))}
       </div>
       <div className="mt-2 px-0.5">
         <div className="flex items-center gap-1.5 min-w-0">
@@ -184,9 +195,10 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
         {/* artist left · ORIGINAL release year bottom-right (no separator —
             the two ends read as their own columns) */}
         <div className="text-[11px] text-zinc-500 truncate flex items-center gap-1.5 mt-0.5">
-          <span className={`h-1.5 w-1.5 rounded-full ${st.edge} inline-block shrink-0`} title={st.label} />
+          {inLibrary && (
+            <span className={`h-1.5 w-1.5 rounded-full ${st.edge} inline-block shrink-0`} title={st.label} />
+          )}
           <span className="truncate" title={artist}>{artist}</span>
-          {extraMeta}
           {(() => {
             const y = originalYear(al.meta);
             return y ? (
@@ -201,6 +213,11 @@ export default function AlbumCard({ al, artistName, selectable, selected, onSele
             ) : null;
           })()}
         </div>
+        {/* The caller's own bits sit on a line of their OWN: sharing this one
+            with the artist and the year cost a 6-column shelf its artist
+            ("Syst…" beside a reason chip), and the chip is the shelf's own
+            sentence, not a caption. */}
+        {extraMeta && <div className="mt-1 flex items-center gap-1.5 min-w-0">{extraMeta}</div>}
       </div>
     </div>
   );

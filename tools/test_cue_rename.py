@@ -167,6 +167,85 @@ def test_format_cues_recollect(base):
     print("PASS  run_format_cues formats cues after renaming (re-collect)")
 
 
+def write_cue_custom(album_dir, name, file_refs):
+    """One FILE per track, in the order EAC writes a per-track rip."""
+    lines = ["REM DISCID DE0A3310"]
+    for i, ref in enumerate(file_refs, 1):
+        lines.append(f'FILE "{ref}" WAVE')
+        lines.append(f"  TRACK {i:02d} AUDIO")
+        lines.append("    INDEX 01 00:00:00")
+    path = os.path.join(album_dir, name)
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write("\r\n".join(lines) + "\r\n")
+    return path
+
+
+def touch_audio(album_dir, *names):
+    """Dummy files under real library names: the FILE matcher reads NAMES,
+    so a cue-repair test needs the files to exist, not to decode."""
+    for n in names:
+        with open(os.path.join(album_dir, n), "wb") as fh:
+            fh.write(b"fLaC")
+
+
+def test_disc_aware_track_refs(base):
+    """A cue whose FILE lines are track-first ("02 - 36.wav", the track
+    titled "36") over the library's own D-TT names: the reference's number is
+    a TRACK of the cue's own disc — _track_num_of reads "09 - 36.wav" as disc
+    09 / track 36, which left every reference of a real album unrepaired.
+
+    The disc restriction is what decides between two discs of one album
+    carrying the same track numbers, and a reference no track of the disc
+    explains is still left exactly as written."""
+    from mlo.discs import cue_file_refs, fix_cue_filenames
+
+    d = os.path.join(base, "TrackFirst")
+    os.makedirs(d)
+    touch_audio(d, "1-01 Alpha.flac", "1-02 36.flac", "1-03 Gamma.flac")
+    write_cue_custom(d, "CD-1.cue",
+                     ["01 - Alpha.wav", "02 - 36.wav", "03 - Gamma.wav",
+                      "77 - Nothing.wav"])
+    notes = fix_cue_filenames(d, config=CFG)
+    refs = cue_file_refs(os.path.join(d, "CD-1.cue"))
+    assert refs == ["1-01 Alpha.flac", "1-02 36.flac", "1-03 Gamma.flac",
+                    "77 - Nothing.wav"], (notes, refs)
+    assert any("77 - Nothing.wav" in n and "left as-is" in n for n in notes), notes
+    print("PASS  a track-first reference finds the D-TT track of its disc")
+
+    md = os.path.join(base, "TwoDiscs")
+    os.makedirs(md)
+    touch_audio(md, "1-01 A.flac", "1-02 B.flac", "1-03 C.flac",
+                "2-01 A.flac", "2-02 B.flac", "2-03 C.flac")
+    write_cue_custom(md, "CD-1.cue", ["01 - A.wav", "03 - C.wav"])
+    write_cue_custom(md, "CD-2.cue", ["03 - C.wav"])
+    notes = fix_cue_filenames(md, config=CFG)
+    refs1 = cue_file_refs(os.path.join(md, "CD-1.cue"))
+    refs2 = cue_file_refs(os.path.join(md, "CD-2.cue"))
+    # Track 3 exists on both discs: only the cue's own disc may answer.
+    assert refs1 == ["1-01 A.flac", "1-03 C.flac"], (notes, refs1)
+    assert refs2 == ["2-03 C.flac"], (notes, refs2)
+    print("PASS  the same track number resolves per disc")
+
+    sd = os.path.join(base, "StaleName")
+    os.makedirs(sd)
+    touch_audio(sd, "1-01 A.flac", "1-02 36 [old].flac",
+                "2-01 A.flac", "2-02 36 [old].flac")
+    write_cue_custom(sd, "CD-2.cue", ["2-02 36 [new].flac"])
+    notes = fix_cue_filenames(sd, config=CFG)
+    refs = cue_file_refs(os.path.join(sd, "CD-2.cue"))
+    assert refs == ["2-02 36 [old].flac"], (notes, refs)
+    print("PASS  a D-TT reference is read as this disc's track")
+
+    im = os.path.join(base, "ImageSheet")
+    os.makedirs(im)
+    touch_audio(im, "CD-1.flac")
+    write_cue_custom(im, "CD-1.cue", ["CDImage.wav"])
+    notes = fix_cue_filenames(im, config=CFG)
+    refs = cue_file_refs(os.path.join(im, "CD-1.cue"))
+    assert refs == ["CD-1.flac"], (notes, refs)
+    print("PASS  a single-image sheet names the disc's one file")
+
+
 def test_converted_source_repoints(base):
     """A lossless conversion renames the audio under the sheet.
 
@@ -208,6 +287,7 @@ def main():
         test_track_count_match(base)
         test_case_only_rename(base)
         test_format_cues_recollect(base)
+        test_disc_aware_track_refs(base)
         test_converted_source_repoints(base)
         print("All cue-rename tests passed.")
         return 0

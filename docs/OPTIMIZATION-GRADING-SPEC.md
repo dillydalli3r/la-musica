@@ -93,7 +93,7 @@ An issue is `{code, label, where, reason}` for album-level and artist problems
 
 ---
 
-## 2. The 19 optimization scripts
+## 2. The 21 optimization scripts
 
 Ids, titles and the shipped order are `mlo/cli.py:SCRIPTS` and
 `mlo/config.py:DEFAULT_RUN_ALL_ORDER`; the runners are
@@ -101,13 +101,22 @@ Ids, titles and the shipped order are `mlo/cli.py:SCRIPTS` and
 chain both call).
 
 **R8 — Run All runs `run_all_order`**, shipped as
-`[11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 19, 6, 7, 9, 12, 16, 10, 4]`: everything
-that moves a file first, everything that reads it last. A saved order is honoured
-as saved (ids outside 1–19 are dropped; legacy 8/9-id orders are migrated).
-**R9 — the import chain runs `import_scripts`**, shipped as
-`DEFAULT_CHAIN = [11, 3, 14, 15, 2, 1, 13, 18, 8, 5, 6, 7, 9, 12, 10, 4]`; an
-empty list means the default chain and `import_auto_scripts` (ON) off means "run
-nothing after import".
+`[11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 19, 6, 7, 9, 12, 16, 10, 20, 21, 4]`:
+everything that moves a file first, everything that reads it last. A saved order
+is honoured as saved (ids outside 1–21 are dropped; legacy 8/9-id orders are
+migrated).
+**R9 — the import chain is DERIVED from the run order, minus a declared
+exception.** `import_scripts` replaces it outright; an empty list means the
+default, which is `DEFAULT_RUN_ALL_ORDER` minus `LIBRARY_WIDE_SCRIPTS` — one
+list, so a script added to Run All cannot go missing from an import, and the
+scripts an import deliberately does not run are named as data with their reason
+rather than kept as a second hand-written list. Today the set holds exactly one
+id: **20 (Scan library layout)**, whose runner walks the whole music folder and
+writes ONE report about the whole library (the Library page warns from that
+stored report) — running it once per imported album would re-walk the library
+for every import and overwrite the report with a partial scan. Script 21 is
+per-album and does run on import. `import_auto_scripts` (ON) off still means
+"run nothing after import".
 **R10 — a failing script is reported, never fatal**: the chain carries on and
 per-script results are returned (`server/script_runners.py`).
 
@@ -132,18 +141,22 @@ per-script results are returned (`server/script_runners.py`).
 | 17 | Lyrics transliterate (AI) | Romanization/translation tags and sidecars, re-synced at `lrc_sync_level` | `TRANSLITERATION-*`, `TRANSLATION-*`, sidecars | no | **yes** (configured AI endpoint) |
 | 18 | Publish lyrics (LRCLIB) | Submits missing lyrics to the community database | nothing locally | no (external side effect) | **yes** (LRCLIB) |
 | 19 | Optimize artist images | Re-fits `Artists/<Artist>/artist.*` to `artist_image_aspect` / `artist_image_target_size`, re-encodes as `artist.jpg`/`artist.png` | the artist image in place (only when it has to move) | re-encodes in place; never deletes | no |
+| 20 | Scan library layout | The music folder's shape against `<music>/Artists/<Artist>/<Album>/…`: audio at the root or in an artist folder, stray files, unexpected folders, empty albums, `wrong_case` rows. Read-only — it moves nothing. Writes ONE report describing the whole library to `<music>/.mlo/data/`, which the Library page warns from; it ignores `targets` on purpose and is therefore not run by an import (R9) | one report file | no | no |
+| 21 | Fix AcoustID pairs | Completes an INCOMPLETE `ACOUSTID_ID`/`ACOUSTID_FINGERPRINT` pair — the failure `Missing ACOUSTID_FINGERPRINT (incomplete AcoustID pair)`, which had no fixer before. An id already on the file has its fingerprint recomputed locally; the reverse half needs a lookup and is counted, never invented | `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | no | only when the id half must be looked up |
 
 **R11 — force flags are the only way to redo work.** Each script has one, and it
 is what makes the script look at a file it has already processed:
 `force_lyrics` (1), `force_cue` (2), `force_reencode_flac` (3), `force_reencode_images`
 (5), `force_audit` (6), `force_dr_replaygain` (7), `force_auto_tag` (8),
 `force_accurip` (9), `force_audiometa` (12), `force_mood` (16), `force_xlit` (17),
-`force_publish` (18), `force_tracklist` (15). Grade (4) needs none — it re-reads.
-The *Re-run & overwrite* menu on any selection sets exactly these keys.
+`force_publish` (18), `force_tracklist` (15). Grade (4) and Scan library layout (20) need none — both
+re-read. The *Re-run & overwrite* menu on any selection sets exactly these keys.
 **R12 — a switched-off feature skips its script** instead of running it as a
 no-op: `dr_replaygain_enabled` (7), `audiometa_enabled` (12), `mood_enabled` (16),
 `lyrics_xlit_enabled` / `lyrics_translate_enabled` (17), `lrclib_auto_publish`
-(18). Scripts 9/10/11/12/13/16/17/18 whose module is missing are reported
+(18), `acoustid_enabled` (21 — the same switch the AcoustID lookup itself
+refuses on, so a run says WHY it did nothing instead of reporting an empty
+pass). Scripts 9/10/11/12/13/16/17/18 whose module is missing are reported
 unavailable rather than silently passing.
 **R13 — scripts clean up after themselves**: folders a run emptied are pruned
 bottom-up (never a folder that holds anything, never the music root), and the run
@@ -207,7 +220,7 @@ group still renders (section *Other checks*).
 | Check id | Label | Default | Asserts |
 | --- | --- | --- | --- |
 | `grade_check_audit` | Require audit tag | **off** | the track's audit verdict is REAL — missing or non-REAL fails (`AUDIT`). Off by default so an unaudited library is not auto-failed |
-| `grade_check_log_checksum` | Log checksum valid | ON | the rip log's EAC SHA256 verifies; a log that states none while `audit_verify_log_checksum` is on fails (`LOG_CHECKSUM`); XLD and older EAC logs pass (nothing claimed, nothing refuted) |
+| `grade_check_log_checksum` | Log checksum valid | ON | the rip log's EAC SHA256 verifies; a log that states none while `audit_verify_log_checksum` is on fails (`LOG_CHECKSUM`); XLD logs and EAC logs from BEFORE v1.0 pass (nothing claimed, nothing refuted — v1.0b1 is the release that introduced the checksum, and the version is read from the log's OWN header, so a modern EAC log with its checksum line removed is still a real tamper signal and still fails). The log file itself is never written, repaired or stripped: editing a log to make its checksum pass would destroy the only thing the checksum proves |
 | `grade_check_accuraterip` | AccurateRip verified (audit only) | ON | a `.accurip` whose verdict is not REAL marks the album's audit FAKE (and the track red). Together with `audit_require_accuraterip` it is what can turn the audit verdict FAKE; **it never adds a grade point** |
 | `grade_check_log_grade` | Log grade present & in range | ON | `LOG_GRADE` exists, is an integer 0-100 and is at least `grade_log_score_threshold` (default 100; 0 disables the threshold) |
 
@@ -331,8 +344,10 @@ evidence matters.
 - **R30 — the rip's checksums are graded on their own terms**, independently of
   `grade_check_audit`: `grade_check_crc` (coverage plus CRC-32 equality) and
   `grade_check_log_checksum` (the EAC SHA256 verifies, or states none while
-  `audit_verify_log_checksum` is on). Both can be switched off for a collection
-  whose logs predate EAC checksums.
+  `audit_verify_log_checksum` is on — but a log whose own header names an EAC
+  version older than 1.0 is judged by neither: it predates the checksum, so
+  nothing is claimed and nothing is refuted). Both can be switched off for a
+  collection whose logs predate EAC checksums.
 
 ## 6. Tag families and what writes them
 
@@ -358,16 +373,18 @@ The default writer of everything else is *Beets tagging (14) · import*.
 | `AUDIOAUDITOR_OVERRIDE` | provenance | the track editor (manual) | `grade_check_audit` (wins over every derived verdict) |
 | `LYRICS`, `UNSYNCEDLYRICS` | lyrics | Fetch lyrics (13) · lyrics editor | `grade_check_lyrics`, `_lyrics_format` |
 | `TRANSLITERATION`, `TRANSLATION` | lyrics | Lyrics transliterate (AI) (17) | `grade_check_xlit_transliteration`, `_xlit_translation`, `_lyrics_lang_tags` |
-| `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | provenance | the import wizard's AcoustID apply (fingerprint match) — the PAIR in one save, verified by re-read | `grade_check_acoustid` |
+| `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | provenance | the import wizard's AcoustID apply (fingerprint match) — the PAIR in one save, verified by re-read — and Fix AcoustID pairs (21) for a file already holding half of one | `grade_check_acoustid` |
 | `ENCODER_PROGRAM`, `ENCODER_QUALITY`, `ENCODER_VERSION` | provenance | Optimize FLACs (3) | `grade_check_encoder` |
 | `MUSICBRAINZ_*`, `RATEYOURMUSIC_*`, `RELEASETYPE`, `CATALOGNUMBER`, `LABEL`, `BARCODE`, `ISRC`, `WORK`, `MOVEMENT`, … | release | Beets tagging (14) · import · MusicBrainz writes | `grade_check_album_tags`, `grade_check_mb_links`, `grade_check_rym_links`, `grade_check_naming` |
 
 Notes that are easy to get wrong: `MEDIA`/`SOURCE` belong to script 1, not to
-script 8; `ACOUSTID_*` are written ONLY by the wizard's AcoustID apply — the
+script 8; `ACOUSTID_*` are written by the wizard's AcoustID apply — the
 fingerprint/recording pair goes in with one save and is read back to prove it
-landed, and a container the app cannot tag is reported per file — nothing in the
-script chain writes them; `ENCODER_*` are written by the FLAC optimizer (3) and,
-for images, by Process images (5).
+landed, and a container the app cannot tag is reported per file — and by script
+21, which completes a pair the file already holds HALF of (an id with no
+fingerprint has the fingerprint recomputed locally; the reverse half needs a
+lookup and is counted, never invented); `ENCODER_*` are written by the FLAC
+optimizer (3) and, for images, by Process images (5).
 
 A tag's VALUE is normalised on the way in as well (§7.6): the eight tags with a
 closed value set hold the canonical spelling `mlo/tagtext.py` names, every
@@ -385,8 +402,11 @@ too, with script 8's own rule, so a manual fetch never leaves it stale.
 
 A fetch reports its provenance per track, and never invents one: per source the
 STRONGEST answer wins (every ISRC the file or MusicBrainz states is asked, so a
-later pressing's explicit answer is not lost to an earlier clean one), a
-provider-stated 0 stays escalateable to 1 by the word-reading stages (the
+later pressing's explicit answer is not lost to an earlier clean one), the
+configured AI provider is a SOURCE of that merge — asked once per track and
+ranked with the providers', so a stated 1 survives it, an AI 1 overrules a
+stated 0 or 2, and an AI 2 never outranks a stated 0 — a
+provider-stated 0 stays escalateable to 1 by a word-reading stage (the
 configured AI, then the multilingual scan — the source says `(escalated)`), and
 a track that already holds 0/1/2 is echoed back UNCHANGED with
 `sources = ["existing-tag"]` unless the caller asks for a re-rate (`force`).
@@ -436,10 +456,14 @@ Even a forced re-rate rewrites only with evidence: the invented
 - **R40** — the family is *derived* from a curated 28-family table plus keyword
   rules, never asked of a model; a genre with no known family gets **no** family
   slot rather than a wrong one.
-- **R41** — display form is title-cased with explicit exceptions (small
-  connectives lowercased; `IDM`, `EDM`, `UK`, `R&B`, `DnB`, `DJ`, … upper-cased;
-  each hyphenated chunk capitalized) while the stored value is the canonical
-  MusicBrainz spelling.
+- **R41** — the stored value IS the display form, and it is title-cased with
+  explicit exceptions (small connectives lowercased; `IDM`, `EDM`, `UK`, `R&B`,
+  `DnB`, `DJ`, … upper-cased; each hyphenated chunk capitalized): every writer
+  ends in `mlo/genres.py::display_name`, so a file holds `Rock; Shoegaze` and
+  not MusicBrainz's own lowercase `rock`. The *vocabulary* comparison
+  (`mlo/genre_vocab.py::canonical`, the grader's `GENRE_VOCAB` check, the alias
+  table) folds case, so `Shoegaze` and `shoegaze` are the same genre to
+  everything that judges the value.
 
 ### 7.3 ReplayGain and dynamic range
 
@@ -555,11 +579,13 @@ Even a forced re-rate rewrites only with evidence: the invented
 Nothing here is a substitute for the app's own Dependencies page: run it first
 and install what the platform supports.
 
-1. **Before touching anything** — set the music folder, then **Optimize →
-   Library layout** (`GET /api/library/layout`) and script **4 (Grade)**. Both
-   are read-only: the grade tells you what is missing, and the layout report
-   tells you where the canonical `<music>/Artists/<Artist>/<Album>/…` shape is
-   not met (misplaced audio, stray files, empty folders, `wrong_case`).
+1. **Before touching anything** — set the music folder, then script **20 (Scan
+   library layout)** and script **4 (Grade)**. Both are read-only: the grade
+   tells you what is missing, and the layout report tells you where the
+   canonical `<music>/Artists/<Artist>/<Album>/…` shape is not met (misplaced
+   audio, stray files, empty folders, `wrong_case`). Script 20 writes that one
+   report to `<music>/.mlo/data/` and the Library page warns from it, so the
+   same facts are one click away from the album list.
 2. **Fix the folders before the tags** — *Organize* (or script 14, whose beets
    config sets `move: yes`) applies `naming_script`. This is the destructive,
    path-changing step: run it when you are ready for every file to move, and
@@ -571,15 +597,19 @@ and install what the platform supports.
    2/1 canonicalize sidecars, 13/18 fetch and publish lyrics, 17 adds
    transforms, 8 writes mood/energy/genre/advisory, 5 normalizes images, 6
    audits, 7 measures DR/ReplayGain, 9 writes `.accurip`, 12 writes key/BPM, 16
-   is the standalone mood pass, 10 is the final canonical pass and 4 grades.
+   is the standalone mood pass, 10 is the final canonical pass, 20 reports the
+   library's shape, 21 completes any half-written AcoustID pair and 4 grades.
+   An **import** runs the same list minus 20 (R9): the layout report is about
+   the whole library, so an import would only re-walk it.
 4. **Re-run only what failed.** Every script is idempotent by default: it skips
    files that already carry the work, so a second *Run All* is safe and cheap.
    To redo a specific thing use its force flag (§2, R11) — that is the only way
    a script revisits work it has done.
 
-Safe to re-run at any time: **4** (read-only), 2, 1, 5, 6, 7, 8, 9, 10, 12, 13,
-15, 16, 17. Re-running 3/11 only replaces files whose conversion/remux has not
-happened yet, unless their force flags are set. **Needs a human decision**:
+Safe to re-run at any time: **4** and **20** (both read-only), 2, 1, 5, 6, 7, 8,
+9, 10, 12, 13, 15, 16, 17, 21 (it acts only on a file holding half a pair).
+Re-running 3/11 only replaces files whose conversion/remux has not happened yet,
+unless their force flags are set. **Needs a human decision**:
 
 - `lossless_remove_original` (default **on**) — after a verified conversion,
   script 3 moves the original (WAV/AIFF/…) into the app's trash
@@ -610,7 +640,7 @@ checks see or how they judge it.
 
 | Key | Default | Effect on grading |
 | --- | --- | --- |
-| `grade_check_*` (58 keys) | all ON except `grade_check_audit` | switch one check on/off |
+| `grade_check_*` (59 keys) | all ON except `grade_check_audit` | switch one check on/off |
 | `grade_include_music`, `grade_include_cover`, `grade_include_description`, `grade_include_cue`, `grade_include_log`, `grade_include_lrc`, `grade_include_accurip`, `grade_include_video` | ON | a file category participates; off means its files are also "disallowed" for `grade_check_disallowed` |
 | `grade_include_other` | off | unclassified files participate |
 | `grade_log_score_threshold` | 100 | minimum `LOG_GRADE` for `grade_check_log_grade` (0 disables the threshold) |
@@ -645,7 +675,7 @@ checks see or how they judge it.
 | `append_final_newline`, `keep_empty_cue_lines`, `keep_other_cue_lines`, `cue_file_type`, `keep_empty_accurip_lines` | off/off/off/`WAVE`/off | the canonical form the CUE/`.accurip` checks compare against |
 | `discs_rename_enabled` / `discs_rename_pattern` / `cue_fix_filenames` | ON / `CD-{n}` / ON | the disc-sheet naming and `FILE`-line rules |
 | `audit_require_accuraterip` | ON | together with `grade_check_accuraterip`, whether a `.accurip` verdict can turn the album audit FAKE |
-| `audit_verify_log_checksum` | ON | whether a log stating no EAC SHA256 fails `grade_check_log_checksum` |
+| `audit_verify_log_checksum` | ON | whether a log stating no EAC SHA256 fails `grade_check_log_checksum` (a log whose own header names an EAC version older than 1.0 is exempt either way — see R30) |
 | `audit_check_cd_format` | ON | whether a `CD_FORMAT` failure turns the album audit FAKE |
 | `audit_verify_cd_checksums` / `audit_integrity` / `audit_cd_require_both` | ON | what script 6 verifies on a CD rip |
 | `audit_log_score_threshold` | 100 | the log score the audit accepts |
@@ -671,7 +701,7 @@ the viewer computes per-file sidecar grades; it adds no check).
 
 ## 10. Honest limits of this spec
 
-- The check **count** is 67 today; the registry derives it from
+- The check **count** is 68 today; the registry derives it from
   `DEFAULT_CONFIG`, so a new check appears on the Grading page the day it exists
   even if this document has not caught up. The registry raises when a claim here
   points at a key the config does not hold.

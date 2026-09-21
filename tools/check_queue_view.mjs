@@ -108,7 +108,7 @@ try {
     ["an album link into the library", "/album/F%3A%2FMusic%2FArtists%2FDaft%20Punk%20-%20Homework"],
     ["the MusicBrainz source chip", "MusicBrainz"],
     ["the Soulseek source chip", "Soulseek"],
-    ["the per-item clear on a finished row", "Remove this wish from the list — nothing is searched for it again"],
+    ["the per-item clear on a finished row", "Remove this row from the queue — nothing is searched for it again"],
     ["the section-wide clear", "Clear finished ("],
     ["a section's own clear", "Take the finished rows off this list"],
     ["a finished job's own clear", "Take this finished row off the queue — nothing in your library is deleted"],

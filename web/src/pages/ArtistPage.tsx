@@ -270,8 +270,9 @@ export default function ArtistPage() {
     }
   };
 
-  /** "Add to wishes" over the selection. A wish is filled by looking a RELEASE
-   *  up, so the release id wins over the release group when both are tagged. */
+  /** "Add to the queue" over the selection. The acquisition is filled by
+   *  looking a RELEASE up, so the release id wins over the release group when
+   *  both are tagged. */
   const addWishes = async () => {
     setBusy("batch-wish");
     let added = 0;
@@ -645,10 +646,10 @@ export default function ArtistPage() {
                 className="btn-ghost !py-1 text-xs"
                 onClick={addWishes}
                 disabled={!!busy}
-                title="Save each selected album on the wishlist — the background worker fills them from Soulseek"
+                title="Put each selected album on the queue — Soulseek is searched for it until it is found or you cancel it"
               >
                 {busy === "batch-wish" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <BookmarkPlus className="h-3.5 w-3.5" />}
-                Add to wishes
+                Add to the queue
               </button>
               <TagActionsMenu
                 paths={selectedTrackPaths}

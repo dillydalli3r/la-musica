@@ -500,13 +500,51 @@ else:
     ok(albums[0]["created"] and os.path.isdir(route_folder),
        "the route created the framework folder on disk", route_folder)
     ok(bool(pathmod.load_pending(route_folder)), "and marked it pending")
-    # "Add to library" is the RECORD: the album and its wish are on the queue,
-    # and the configured automation (the wishes worker's own loop) searches it.
-    # Starting the search NOW is what `download` asks for, and the next call
-    # below is that.
-    eq(triggered, [], "a plain add does not kick the queue itself")
+    # The add STARTS the search it just recorded, on the worker's OWN pass (no
+    # wish id: the pass reads the store and searches what is due). Waiting for
+    # the loop's next tick was up to two minutes of nothing happening, with the
+    # album sitting in the library saying it was waiting for a download.
+    eq(triggered, [None], "a plain add starts the search for what it recorded")
+    eq(body.get("note"), "Soulseek is searching for them now.",
+       "and the reply says the search started")
     eq(wishes.get_wish(albums[0]["wish_id"])["source"], "musicbrainz",
        "the wish is on the existing queue, labelled MusicBrainz")
+
+    # The SAME release added again is the same album and the same wish: one
+    # folder on disk and one row in the store, so there is one thing to search.
+    again = client.post("/api/library/add", json={
+        "mbid": route_release["release_group_id"], "kind": "release_group",
+        "mode": "best"})
+    again_albums = again.json().get("albums") or []
+    eq([a["wish_id"] for a in again_albums], [albums[0]["wish_id"]],
+       "adding the same release again reuses its one wish")
+    eq(len([w for w in wishes.list_wishes()
+            if w["release_mbid"] == route_release["id"]]), 1,
+       "and the store still holds one row for it")
+    triggered.clear()
+
+    # The same pressing under the OTHER id: a wish saved from an album link
+    # carries the release GROUP id (that is what the link holds), while an add
+    # resolves the edition and would key its own row by the RELEASE id. Two
+    # rows for one pressing are two jobs, both downloading the same album.
+    cross = release_variant(0, "Cross Id Add")
+    group_wish = wishes.add_wish(cross["release_group_id"], title="Cross Id Add",
+                                 artist="Test Artist 0", source="soulseek")
+    intg.auto_import_targets = lambda mbid, kind=None, mode="best", types=None: (
+        [{"mbid": cross["id"], "title": cross["title"]}], [])
+    intg.resolve_release = lambda mbid: (cross, cross["id"])
+    cross_add = client.post("/api/library/add",
+                            json={"mbid": cross["id"], "kind": "release"})
+    eq([a["wish_id"] for a in cross_add.json().get("albums") or []], [group_wish["id"]],
+       "an add keyed by the release reuses the wish saved by its release group")
+    eq([w["id"] for w in wishes.list_wishes()
+        if cross["id"] in (w["release_mbid"], (w.get("release") or {}).get("id"))
+        or w["release_mbid"] == cross["release_group_id"]], [group_wish["id"]],
+       "and the store still holds ONE row for that pressing")
+    triggered.clear()
+    intg.auto_import_targets = lambda mbid, kind=None, mode="best", types=None: (
+        [{"mbid": route_release["id"], "title": route_release["title"]}], [])
+    intg.resolve_release = lambda mbid: (route_release, route_release["id"])
 
     down_release = release_variant(2, "Download Add")
     intg.auto_import_targets = lambda mbid, kind=None, mode="best", types=None: (
@@ -518,8 +556,7 @@ else:
     eq(down.status_code, 200, "the download ask answers 200")
     down_albums = down.json().get("albums") or []
     eq(len(down_albums), 1, "the download ask added its own album")
-    eq(triggered, [down_albums[0]["wish_id"]],
-       "download=True asked the wishes worker to search it")
+    eq(triggered, [None], "download=True starts it the same way (one start, one queue)")
     eq(down.json().get("note"), "Soulseek is searching for them now.",
        "and the reply says the search started")
     triggered.clear()
@@ -542,6 +579,19 @@ else:
     ok(os.path.isdir(str(rec_albums[0]["album_path"]).replace("/", os.sep)),
        "and it created the framework folder")
     ok(not (rec.json().get("errors") or []), "no error row for the recording add")
+
+    # A recording whose release the library ALREADY holds adds nothing: the
+    # pipeline refuses to download an album it has, so the framework album this
+    # would create is one nothing can ever fill.
+    owned = release_variant(6, "Adopt Add")      # in the library, MBIDs stamped
+    intg.resolve_release = lambda mbid: (owned, owned["id"])
+    owned_rec = client.post("/api/library/add", json={
+        "mbid": "99999999-9999-9999-9999-999999999997", "kind": "recording",
+        "release_mbid": owned["id"]})
+    eq(owned_rec.status_code, 200, "a recording on an owned release answers 200")
+    eq(owned_rec.json().get("albums"), [], "and adds nothing")
+    eq([s.get("reason") for s in owned_rec.json().get("skipped") or []],
+       ["already in the library"], "saying the library already holds it")
 
     # an edition picked inside a release GROUP is the one that is added
     seventh = release_variant(4, "Chosen Edition")

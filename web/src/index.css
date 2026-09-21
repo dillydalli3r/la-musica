@@ -613,12 +613,19 @@ table td {
   pointer-events: none;
   background: radial-gradient(ellipse 125% 100% at 50% 45%, transparent 46%, rgb(9 9 11 / 0.42) 100%);
 }
-/* Lyrics legibility: the fullscreen player's backdrop is a light additive
-   color field, and white/grey text over a bright cover washes out. A tight
-   dark shadow under every glyph keeps the line readable without dimming the
-   ambience (the pane's own scrim is the other half of the fix). */
-.np-shade {
+/* Lyrics legibility: the fullscreen player's backdrop is the cover's own
+   color field, so the pane picks its ink from the cover's luminance (see
+   NowPlayingView) and the glyph shadow has to follow that choice — a dark
+   shadow under dark glyphs is what would make the inverted lyrics look wrong.
+   Both polarities keep the same offsets (1px/2px under the glyph, 8px halo):
+   the halo is what separates a line from the busier mid-tones of the
+   ambience, and with the pane's own panel gone it is the whole legibility
+   layer behind the lyrics. */
+.np-shade-dark {
   text-shadow: 0 1px 2px rgb(0 0 0 / 0.55), 0 0 8px rgb(0 0 0 / 0.35);
+}
+.np-shade-light {
+  text-shadow: 0 1px 2px rgb(255 255 255 / 0.45), 0 0 8px rgb(255 255 255 / 0.3);
 }
 /* gentle breathing on the artwork glow */
 @keyframes glow-pulse {

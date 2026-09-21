@@ -27,17 +27,29 @@ interface StatAlbum {
   track_count?: number;
 }
 
+/** The library-layout condition, as the stored scan reported it. Optional and
+ *  only ever passed for the WHOLE-library scope: the scan describes the music
+ *  folder, so it says nothing about a track selection graded on its own. */
+export interface StatLayout {
+  total: number;
+  counts: Record<string, number>;
+  /** When the scan ran (UTC ISO), or null if the report does not say. */
+  scanned_at: string | null;
+}
+
 /** Aggregated grading + audit statistics for any scope (library, selection,
  * artist or album). Rendered as a modal panel. */
 export default function StatsPanel({
   title,
   albums,
   tracks,
+  layout,
   onClose,
 }: {
   title: string;
   albums?: StatAlbum[];
   tracks: StatTrack[];
+  layout?: StatLayout;
   onClose: () => void;
 }) {
   const navigate = useNavigate();
@@ -135,7 +147,46 @@ export default function StatsPanel({
           <div className="text-lg font-bold">{s.lyricsCoverage}%</div>
           <div className="text-[11px] text-zinc-500">{s.instrumental} instrumental</div>
         </div>
+        {layout && (
+          <div className="rounded-lg bg-panel border border-border px-3 py-2">
+            <div className="text-[10px] uppercase tracking-wider text-zinc-500">Library layout</div>
+            <div className={`text-lg font-bold ${layout.total ? "text-amber-300" : "text-emerald-400"}`}>
+              {layout.total === 0 ? "clean" : layout.total}
+            </div>
+            <div className="text-[11px] text-zinc-500">
+              {layout.total === 0
+                ? "every folder in place"
+                : `${Object.keys(layout.counts).length} categor${Object.keys(layout.counts).length === 1 ? "y" : "ies"}`}
+            </div>
+          </div>
+        )}
       </div>
+
+      {/* The grade tiles above count only what the library can SEE: a file
+          outside Artists/<Artist>/<Album>/ is never graded, an empty album
+          folder grades as an error the albums tile cannot attribute. So the
+          scan's findings belong beside them — a library with layout problems
+          is not a clean library, whatever the grade percentage says. Kept
+          apart from that percentage on purpose: these are not tag failures
+          on any album, and folding them in would blame tracks that are fine. */}
+      {layout && layout.total > 0 && (
+        <div className="text-xs text-amber-200 bg-amber-950/30 border border-amber-900/60 rounded-lg px-3 py-2">
+          <div className="font-semibold">
+            Not clean: the last layout scan ({layout.scanned_at ? new Date(layout.scanned_at).toLocaleString() : "time unknown"})
+            found {layout.total} problem{layout.total === 1 ? "" : "s"} in the music folder.
+          </div>
+          <div className="mt-1 text-amber-200/90">
+            {Object.entries(layout.counts)
+              .sort((a, b) => b[1] - a[1])
+              .map(([kind, n]) => `${n}× ${kind.replace(/_/g, " ")}`)
+              .join(" · ")}
+          </div>
+          <div className="mt-1 text-amber-200/70">
+            Library-wide, not per-album tag failures — audio outside the artist/album tree is not graded at all.
+            Script 20 and Optimization → Library layout both report and fix it.
+          </div>
+        </div>
+      )}
 
       <div>
         <div className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">AUDIT</div>

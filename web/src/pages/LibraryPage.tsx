@@ -3,14 +3,14 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 import {
   ArrowDownUp, BarChart3, ChevronDown, ChevronRight, CloudDownload,
-  FileVideo, FolderSync, Info as InfoIcon, Layers, Library, ListChecks,
+  FileVideo, FolderSync, FolderTree, Info as InfoIcon, Layers, Library, ListChecks,
   ListFilter, ListPlus, Play, Tag, Trash2, Wand2,
 } from "lucide-react";
 import { api } from "../api";
 import { SCRIPTS, DEFAULT_RUN_ALL, isScriptId } from "../lib/scripts";
 import { toast, useStore } from "../store";
 import {
-  sortRows, SortHeader, groupByDisc, byDiscThenTrack, type SortState,
+  sortRows, SortHeader, groupByDisc, byDiscThenTrack,
 } from "../lib/sort.tsx";
 import {
   ColumnResizer, ColumnsMenu, useColumnPrefs, useColumnWidths, useCustomColumns,
@@ -38,56 +38,13 @@ import BulkTagsDialog from "../components/BulkTagsDialog";
 import { TrackActionsMenu } from "../components/TagActionsMenu";
 import type { Album, Artist, Track } from "../types";
 
-type View = "grid" | "compact" | "albums" | "artists" | "tracks";
-
-type Preset =
-  | "all"
-  | "failing"
-  | "cd"
-  | "digital"
-  | "explicit"
-  | "instrumental"
-  | "missingLyrics"
-  | "videos";
-
-const PRESETS: { id: Preset; label: string }[] = [
-  { id: "all", label: "All" },
-  { id: "failing", label: "Failing" },
-  { id: "cd", label: "CD rips" },
-  { id: "digital", label: "Digital" },
-  { id: "explicit", label: "Explicit" },
-  { id: "instrumental", label: "Instrumental" },
-  { id: "videos", label: "Music videos" },
-  { id: "missingLyrics", label: "No lyrics" },
-];
-
-const VIEW_TABS: { id: View; label: string }[] = [
-  { id: "grid", label: "Grid" },
-  { id: "compact", label: "Compact" },
-  { id: "albums", label: "Albums" },
-  { id: "artists", label: "Artists" },
-  { id: "tracks", label: "Tracks" },
-];
-
-/** Cover size in the grid view — the same segmented control as the view tabs. */
-const GRID_SIZES = [
-  { id: "s", label: "S" },
-  { id: "m", label: "M" },
-  { id: "l", label: "L" },
-] as const;
-
-const ALBUM_SORTS = [
-  { key: "meta.ALBUM", label: "Album name" },
-  { key: "artist", label: "Artist" },
-  { key: "meta.DATE", label: "Year" },
-  { key: "track_count", label: "Tracks" },
-  { key: "grade_pct", label: "Grade" },
-  { key: "audit_summary", label: "Audit" },
-  { key: "video_count", label: "Music videos" },
-  { key: "inst_count", label: "Instrumental tracks" },
-  { key: "meta.LABEL", label: "Label" },
-  { key: "meta.CATALOGNUMBER", label: "Catalog #" },
-];
+// The Library's browse state and option lists live in lib/libraryView.ts —
+// Home's shelves offer the same cover size and read the same settings.
+import {
+  ALBUM_SORTS, GRID_SIZES, PRESETS, VIEW_TABS,
+  useGridSize, useLibraryView, useLocalSort, useSelectMode,
+  type Preset,
+} from "../lib/libraryView";
 
 /** One floor per column, in px: the narrowest that column can be before its
  *  content starts wrapping a character per line. They also are the table's
@@ -282,6 +239,12 @@ function parseQueryTerms(raw: string): QueryTerms {
 export default function LibraryPage() {
   const { data: lib, isLoading, error } = useQuery({ queryKey: ["library"], queryFn: api.library });
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
+  // The layout report the last scan stored (script 20, or the Optimization
+  // panel's Scan). Read, never walked: this is what lets the page state a
+  // library-wide condition on every visit without scanning the library for
+  // it — and `exists: false` is what keeps a warning off the screen until a
+  // scan has actually run.
+  const { data: layout } = useQuery({ queryKey: ["layout-report"], queryFn: api.libraryLayoutReport });
   const runAllIds = Array.isArray(config?.run_all_order) && config.run_all_order.length
     ? config.run_all_order.filter((n: number) => isScriptId(n))
     : DEFAULT_RUN_ALL;
@@ -301,15 +264,9 @@ export default function LibraryPage() {
   const toggleArtist = useStore((s) => s.toggleArtist);
   const clearSelection = useStore((s) => s.clearSelection);
   const playNow = useStore((s) => s.playNow);
-  const [view, setView] = useState<View>(() => (localStorage.getItem("mlo.defaultView.v2") as View) ?? "grid");
+  const [view, setView] = useLibraryView();
   // checkboxes (and the batch toolbar they feed) only exist in select mode
-  const [selectMode, setSelectMode] = useState(false);
-  const toggleSelectMode = () => {
-    setSelectMode((v) => {
-      if (v) clearSelection();
-      return !v;
-    });
-  };
+  const { selectMode, toggleSelectMode } = useSelectMode();
   const [preset, setPreset] = useState<Preset>("all");
   const [filterOpen, setFilterOpen] = useState(false);
   const [sortOpen, setSortOpen] = useState(false);
@@ -322,10 +279,7 @@ export default function LibraryPage() {
   const [busy, setBusy] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [groupByArtist, setGroupByArtist] = useState(false);
-  const [gridSize, setGridSize] = useState<"s" | "m" | "l">(() => {
-    const v = localStorage.getItem("mlo.gridSize");
-    return v === "s" || v === "l" ? v : "m";
-  });
+  const [gridSize, pickGridSize] = useGridSize();
   const [statsOpen, setStatsOpen] = useState(false);
   const [detailTrack, setDetailTrack] = useState<{ track: Track; albumPath: string } | null>(null);
   /** The album behind the open track dialog, when this payload has it: its
@@ -718,17 +672,15 @@ export default function LibraryPage() {
     return out;
   }, [sortedAlbums, groupByArtist]);
 
-  const pickGridSize = (s: "s" | "m" | "l") => {
-    setGridSize(s);
-    try {
-      localStorage.setItem("mlo.gridSize", s);
-    } catch {
-      /* ignore */
-    }
-  };
-
   if (error) return <EmptyState title="Backend unreachable" hint={String(error)} />;
   if (isLoading || !lib) return <PageLoading label="Scanning library…" />;
+
+  // What the last layout scan actually found. A report describing a DIFFERENT
+  // music folder (`stale`) is not this library's state, and no report at all
+  // means no scan has run — neither may produce a warning, and the warning
+  // may never be the only place a scan is claimed to have happened.
+  const layoutProblems = layout?.exists && !layout.stale ? layout.report?.total ?? 0 : 0;
+  const layoutKinds = layout?.exists && !layout.stale ? Object.keys(layout.report?.counts ?? {}).length : 0;
 
   const albumRows: ({ kind: "header"; artist: string } | { kind: "album"; album: FlatAlbum })[] = [];
   if (groupByArtist) {
@@ -752,6 +704,30 @@ export default function LibraryPage() {
     <div className="p-6 space-y-5 mx-auto max-w-6xl">
       {/* toolbar rides in the header: controls left, stats/select/counts right */}
       <PageHeader icon={Library} title="Library">
+      {/* The layout finding is the one condition that is about the whole
+          library rather than an album: it says part of the music folder is
+          not a graded album at all, which no per-album badge can show. The
+          count and the moment it was measured come from the stored report,
+          and the click goes straight to the panel that can act on it. */}
+      {layoutProblems > 0 && (
+        <Link
+          to="/optimize"
+          className="text-xs text-amber-200 bg-amber-950/30 border border-amber-900/60 rounded-lg px-3 py-2 flex items-start gap-2 tap"
+          title="Open the Optimization page's library-layout panel"
+        >
+          <FolderTree className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+          <span className="min-w-0">
+            The last layout scan found <span className="font-mono">{layoutProblems}</span> problem
+            {layoutProblems === 1 ? "" : "s"} across <span className="font-mono">{layoutKinds}</span> categor
+            {layoutKinds === 1 ? "y" : "ies"} in the music folder
+            {layout?.scanned_at ? ` (${new Date(layout.scanned_at).toLocaleString()})` : ""}. This one is
+            library-wide, not an album's tags: whatever sits outside{" "}
+            <span className="font-mono">Artists/&lt;Artist&gt;/&lt;Album&gt;/</span> is not graded at all,
+            so the library does not grade clean until it is dealt with.{" "}
+            <span className="text-amber-300/90 underline underline-offset-2">Review in Optimization →</span>
+          </span>
+        </Link>
+      )}
       {/* toolbar — every control on ONE line (wrapped as a unit when the
           window is narrow): view tabs, sort, grid size, group-by, columns,
           quick filter — then stats/select and the counts on the right. */}
@@ -963,6 +939,12 @@ export default function LibraryPage() {
           }
           albums={selectionCount ? flat.albums.filter((a) => selectionAlbumDirs.includes(a.path)) : flat.albums}
           tracks={selectionCount ? flat.tracks.filter((t) => selTracks.has(t.path)) : flat.tracks}
+          /* The library's layout condition, only for the whole-library
+             readout: a selection's grade says nothing about the music folder
+             it was picked from, and the report is always about all of it. */
+          layout={!selectionCount && layout?.exists && !layout.stale && layout.report
+            ? { total: layout.report.total, counts: layout.report.counts, scanned_at: layout.scanned_at }
+            : undefined}
           onClose={() => setStatsOpen(false)}
         />
       )}
@@ -1845,36 +1827,4 @@ function useLocalPref(key: string, initial: boolean): [boolean, (v: boolean) => 
     }
   };
   return [value, set];
-}
-
-/** Sort state per table view, persisted like the column prefs (each view —
- * albums / artists / tracks — keeps its own key, so switching tabs or
- * reloading no longer resets the other tables). */
-function useLocalSort(key: string): [SortState | null, (key: string) => void] {
-  const storageKey = `mlo-sort-${key}`;
-  const [sort, setSort] = useState<SortState | null>(() => {
-    try {
-      const raw = localStorage.getItem(storageKey);
-      if (raw) {
-        const parsed = JSON.parse(raw) as SortState;
-        if (parsed && typeof parsed.key === "string" && (parsed.dir === 1 || parsed.dir === -1)) return parsed;
-      }
-    } catch {
-      /* fall through to unsorted */
-    }
-    return null;
-  });
-  const set = (k: string) => {
-    setSort((cur) => {
-      const dir: 1 | -1 = cur && cur.key === k && cur.dir === 1 ? -1 : 1;
-      const next: SortState = { key: k, dir };
-      try {
-        localStorage.setItem(storageKey, JSON.stringify(next));
-      } catch {
-        /* ignore */
-      }
-      return next;
-    });
-  };
-  return [sort, set];
 }

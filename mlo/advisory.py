@@ -1,20 +1,30 @@
-"""What ITUNESADVISORY a track gets when the providers do not settle it.
+"""What ITUNESADVISORY a track gets: the providers, the AI, and the ladder.
 
 The providers are the first move, and `server.integrations.merge_advisory`
 settles what they said (1 explicit beats everything, then a plain 0, then a
-clean edition's 2). This module is what happens when NOBODY stated anything —
-the answer would otherwise be an assumption, and the user's policy is that an
-unstated advisory must not be invented without evidence. The ladder, in order:
+clean edition's 2). The AI provider is a SOURCE of that merge now (issue #28):
+it is asked once for every track that is not already settled by its own
+INSTRUMENTAL tag, whenever one is configured (`ai_base_url` +
+`ai_model`) and `advisory_ai_classify` is on, and its answer is ranked against
+the providers' by the same rule — a stated 1 survives anything the AI says, an
+AI 1 overrules a stated 0 or 2, and an AI 2 never overrules a stated 0. It only
+overrules a stated value when it read the track's words: a model shown "(none
+available)" has read nothing, and nothing is not the evidence it takes to
+contradict a provider. Its answer is recorded either way, so the reply's
+provenance chips can name it beside the providers.
+
+This module is also what happens when NOBODY stated anything — the answer
+would otherwise be an assumption, and the user's policy is that an unstated
+advisory must not be invented without evidence. The ladder, in order:
 
 1. **Instrumental.** A track carrying INSTRUMENTAL=1 has no words to be
    explicit with, so it is 0 — `auto_zero_advisory_for_instrumental` (on by
    default) is what makes this fire.
-2. **The AI provider**, when one is configured (`ai_base_url` + `ai_model`)
-   and `advisory_ai_classify` is on. It is asked for 0/1/2 with the track's
-   lyrics when they exist (the whole point: a model reading the words beats a
-   word list), and its answer REPLACES the word scan below. 3 means "cannot
-   tell" and falls through — the value space this app stores is 0/1/2, and a
-   stored 3 would fail the grader on every track that carried one.
+2. **The AI provider**, asked for 0/1/2 with the track's lyrics when they exist
+   (the whole point: a model reading the words beats a word list), and its
+   answer REPLACES the word scan below. 3 means "cannot tell" and falls through
+   — the value space this app stores is 0/1/2, and a stored 3 would fail the
+   grader on every track that carried one.
 3. **The lyrics word scan** (`mlo.advisory_words`, an extensive multilingual
    lexicon), when `advisory_lyrics_scan` is on and the track has lyrics: any
    hit is 1, no hit is 0. A track with no lyrics states nothing (the scan
@@ -23,15 +33,16 @@ unstated advisory must not be invented without evidence. The ladder, in order:
    `"0"` (the shipped default: not explicit), `"2"` (clean edition) or
    `"none"` (write nothing at all, leaving the track unrated).
 
-The ladder is what happens when NOBODY stated anything, and it also runs the
-other way: when a provider DID state 0, the two stages that read the words are
-still consulted — as explicit-ONLY signals. The providers miss exactly there
+The ladder also runs the other way: when a provider DID state 0, the stages
+that read the words are still consulted. The providers miss exactly there
 (Deezer's `explicit_lyrics: false` covers "not classified", Apple's
 `notExplicit` is the master's own flag on a track whose words are explicit), so
 a stated 0 that the words contradict escalates to 1 and the SOURCE names the
-signal that overruled the provider ("lyrics-scan (escalated)"). Escalation is
-one-way: nothing here turns a stated 1, or a clean edition's 2, into anything
-else, and a stated 0 the words agree with stays 0.
+signal that overruled the provider ("lyrics-scan (escalated)"). The scan's job
+there is explicit-ONLY and one-way: it never turns a stated 1, or a clean
+edition's 2, into anything else, and a stated 0 the words agree with stays 0.
+The AI is not a signal but a source — the rank above decides between its answer
+and the providers' — so it is the one stage that can overrule a stated 2.
 
 Every decision carries its own provenance ("instrumental", "ai-lyrics",
 "lyrics-scan", "fallback") and the words that hit, so the UI can show why a
@@ -161,8 +172,8 @@ def _is_instrumental(cfg, af, instrumental) -> bool:
 
     The tag may be handed in or read off the file; `INSTRUMENTAL=1` with
     `auto_zero_advisory_for_instrumental` on is the ladder's FIRST step, which
-    is why both the ladder and the escalation below ask this one question
-    rather than each spelling it out.
+    is why the one question is asked in ONE place — a track settled by its own
+    tag is settled before anything is consulted about it.
     """
     tag = str(instrumental or "").strip()
     if tag != "1" and af is not None:
@@ -173,33 +184,78 @@ def _is_instrumental(cfg, af, instrumental) -> bool:
     return tag == "1" and (cfg or {}).get("auto_zero_advisory_for_instrumental", True)
 
 
-def _word_stages(cfg, *, path="", af=None, lyrics=None) -> Optional[Dict]:
+def _ai_verdict(cfg, af=None, lyrics="") -> Optional[Dict]:
+    """The AI provider's answer for one track, as a ladder decision, or None.
+
+    The ONE place the model is spoken to, because issue #28 makes the call
+    unconditional: the provider is a source of its own now, asked however the
+    network sources answered, and every consumer of the answer shares this
+    verdict — `_word_stages` when nobody stated anything, `_stated` when a
+    provider did. An N-track album therefore costs N calls, never one per stage
+    that wants the answer.
+
+    It is asked even when the file carries no lyrics (the song it knows is
+    evidence too, which is why its source reads "ai" rather than "ai-lyrics").
+    None means it said nothing usable — switched off, not configured, no reply,
+    or an answer that is not a rating (3 = "cannot tell": the value space this
+    app stores is 0/1/2, and a stored 3 would fail the grader on every track
+    carrying one).
+    """
+    if not (cfg or {}).get("advisory_ai_classify", True):
+        return None
+    artist = title = album = ""
+    if af is not None:
+        try:
+            artist = str(af.get_tag("ARTIST") or af.get_tag("ALBUMARTIST") or "")
+            title = str(af.get_tag("TITLE") or "")
+            album = str(af.get_tag("ALBUM") or "")
+        except Exception:
+            artist = title = album = ""
+    answer = ai_advisory(cfg, artist=artist, title=title, album=album,
+                         lyrics=lyrics)
+    if answer is None:
+        return None
+    return {"value": answer[0], "source": answer[1], "stage": STAGE_AI,
+            "hits": [], "fallback": False}
+
+
+def _outranks(candidate, value) -> bool:
+    """True when the AI's answer *candidate* beats the value the providers stated.
+
+    `server.integrations.merge_advisory` is the app's ONE rank for
+    ITUNESADVISORY (1 beats 0 beats 2), and it is the merge the providers' own
+    answers already went through — so the AI's answer is weighed by ASKING it
+    again over `{stated, candidate}` rather than by a second copy of the order
+    living here: one rule, one place, and the day that rule changes the AI
+    moves with the providers. It is imported lazily because `mlo/` runs
+    without `server/` in the CLI, where there is no provider map to join
+    either: a value outside 0/1/2 (a hand-edited tag, a caller's junk)
+    outranks nothing, and neither does anything when the merge is unavailable.
+    """
+    if candidate not in (0, 1, 2) or value not in (0, 1, 2) or candidate == value:
+        return False
+    try:
+        from server import integrations
+    except Exception:
+        return False
+    merged = integrations.merge_advisory({"providers": value, "ai": candidate})
+    return merged == candidate
+
+
+def _word_stages(cfg, *, text, verdict) -> Optional[Dict]:
     """The two stages that READ the words: the AI, then the word scan.
 
-    The AI goes FIRST when one is configured — the user's default is that a
-    model reading the words replaces the word list, not that it backs it up —
-    and it is asked even when the file carries no lyrics (the song it knows is
-    evidence too, which is why its source reads "ai" rather than "ai-lyrics").
+    The AI goes FIRST — the user's default is that a model reading the words
+    replaces the word list, not that it backs it up — and `verdict` is the
+    answer it already gave (`_ai_verdict`), so the one call per track is shared
+    with the stated path (`_stated`) instead of paid for twice. An answer it
+    DID give is this stage's answer, and the scan is never consulted over it.
     The scan is the second move and answers 1 on any term, 0 on none. None
     means neither stage could answer at all — both switched off, and no text
-    for the scan — which is what leaves `advisory_fallback` as the last
-    resort.
+    for the scan — which is what leaves `advisory_fallback` as the last resort.
     """
-    text = _lyrics_text(path, af, lyrics)
-    if (cfg or {}).get("advisory_ai_classify", True):
-        artist = title = album = ""
-        if af is not None:
-            try:
-                artist = str(af.get_tag("ARTIST") or af.get_tag("ALBUMARTIST") or "")
-                title = str(af.get_tag("TITLE") or "")
-                album = str(af.get_tag("ALBUM") or "")
-            except Exception:
-                artist = title = album = ""
-        ai_answer = ai_advisory(cfg, artist=artist, title=title, album=album,
-                                lyrics=text)
-        if ai_answer is not None:
-            return {"value": ai_answer[0], "source": ai_answer[1],
-                    "stage": STAGE_AI, "hits": [], "fallback": False}
+    if verdict is not None:
+        return verdict
     if (cfg or {}).get("advisory_lyrics_scan", True) and text:
         hits = scan_lyrics(text)
         return {"value": 1 if hits else 0, "source": "lyrics-scan",
@@ -207,8 +263,8 @@ def _word_stages(cfg, *, path="", af=None, lyrics=None) -> Optional[Dict]:
     return None
 
 
-def _escalate_explicit(cfg, *, path="", af=None, lyrics=None) -> Optional[Dict]:
-    """A provider's stated 0 overruled by a stage that read the words, or None.
+def _escalate_explicit(cfg, text) -> Optional[Dict]:
+    """A provider's stated 0 overruled by the word scan, or None.
 
     The providers miss on explicit content, and they miss in the same
     direction: Deezer's `explicit_lyrics: false` also covers "not classified"
@@ -216,62 +272,108 @@ def _escalate_explicit(cfg, *, path="", af=None, lyrics=None) -> Optional[Dict]:
     Apple ships an explicit track under it (`tools/test_advisory_sources.py`'s
     real Steal This Album payload marks only five of sixteen tracks explicit,
     and the app matched those five). A stated 0 therefore does not close the
-    question, and the two word-reading stages are consulted as explicit-ONLY
-    signals: either one finding explicit language turns the value into 1.
+    question, and the scan is the signal consulted for it — explicit-ONLY,
+    because this stage has no way to say "clean edition".
 
-    Only 1 escalates — a stage answering 0 agrees with the provider, and that
-    is `None` here ("no escalation"), not a new decision. The track's words
-    must EXIST for the escalation to fire at all: a model shown "(none
-    available)" has read nothing, so its answer is not the evidence it takes
-    to contradict a provider. The returned decision names the signal that
-    fired (`ESCALATED`), never the provider it overruled.
+    Only 1 escalates — a scan that hit nothing AGREES with the provider, and
+    that is `None` here ("no escalation"), not a new decision. The track's
+    words must EXIST for the escalation to fire at all: there is nothing to
+    read, and nothing is not the evidence it takes to contradict a provider.
+    The returned decision names the signal that fired (`ESCALATED`), never the
+    provider it overruled.
     """
-    text = _lyrics_text(path, af, lyrics)
-    if not text:
+    if not text or not (cfg or {}).get("advisory_lyrics_scan", True):
         return None
-    out = _word_stages(cfg, path=path, af=af, lyrics=text)
-    if out is None or out.get("value") != 1:
+    hits = scan_lyrics(text)
+    if not hits:
         return None
-    return {"value": 1, "source": str(out.get("source") or "") + ESCALATED,
-            "stage": out.get("stage") or STAGE_LYRICS,
-            "hits": out.get("hits") or [], "fallback": False}
+    return {"value": 1, "source": "lyrics-scan" + ESCALATED,
+            "stage": STAGE_LYRICS, "hits": hits, "fallback": False}
 
 
-def decide_advisory(cfg, *, value=None, source="", path="", af=None,
+def _stated(cfg, value, source, *, text, verdict) -> Dict:
+    """What to write when a provider stated *value*, once the AI has spoken.
+
+    The AI is a source of its own (issue #28), so `merge_advisory`'s rank
+    decides between its answer and the providers' merged one: a stated 1 is out
+    of its reach (nothing outranks 1, so the value AND the provenance stay the
+    provider's own), an AI 1 outranks a stated 0 or a clean edition's 2, and an
+    AI 2 never outranks a stated 0. An answer that wins takes the provenance
+    with it — the stored digit is then not what the provider said.
+
+    Overruling a stated value takes a READ of the track's words: a model shown
+    "(none available)" has read nothing, and nothing is not the evidence it
+    takes to contradict a provider (the rule `_escalate_explicit` states for
+    the scan). Without words its answer is still reported — the reply's chips
+    name it — but the provider's value decides.
+
+    A stated 0 the AI did not answer over still falls through to the word scan,
+    the explicit-only signal for exactly that case — when the AI DID answer,
+    its answer replaces the scan rather than backing it up (the same order the
+    ladder keeps). Any other stated value is returned as it stands: the scan
+    never reads the words over a provider's stated 1 or 2 (it is about the 0
+    the providers systematically miss), and only the AI, as a source in the
+    merge, outranks those.
+    """
+    value = int(value)
+    if verdict is None:
+        if value == 0:
+            escalated = _escalate_explicit(cfg, text)
+            if escalated is not None:
+                return escalated
+    elif text and _outranks(verdict["value"], value):
+        # `ESCALATED` is the wording the UI reads as "the words overruled a
+        # provider that stated 0" (web/src/components/Badges.tsx), so it is
+        # applied to that case; over a stated 2 the value is simply the AI's.
+        return {"value": int(verdict["value"]),
+                "source": str(verdict.get("source") or "")
+                          + (ESCALATED if value == 0 else ""),
+                "stage": verdict.get("stage") or STAGE_AI,
+                "hits": [], "fallback": False}
+    return {"value": value, "source": source or "",
+            "stage": STAGE_SOURCES, "hits": [], "fallback": False}
+
+
+def decide_advisory(cfg, *, value=None, source="", answers=None, path="", af=None,
                     lyrics=None, instrumental=None) -> Dict:
     """The value to WRITE for one track, its provenance and its stage.
 
     `value`/`source` come from the provider route (they may be absent — the
-    route found nothing). `lyrics` is the track's own text (read here when not
-    given), `instrumental` its INSTRUMENTAL tag. Returns ``{"value":
-    0|1|2|None, "source", "stage", "hits": [...], "fallback": bool}``; a None
-    value means "leave the tag alone", which only happens when
-    `advisory_fallback` is `none` and nothing else spoke.
+    route found nothing) and `answers` is that route's per-source map, which
+    the AI's own answer is recorded into: the reply reports one map, and the
+    UI's provenance chips name the sources behind the value from it. `lyrics`
+    is the track's own text (read here when not given), `instrumental` its
+    INSTRUMENTAL tag. Returns ``{"value": 0|1|2|None, "source", "stage",
+    "hits": [...], "fallback": bool}``; a None value means "leave the tag
+    alone", which only happens when `advisory_fallback` is `none` and nothing
+    else spoke.
 
-    A provider's answer is final in ONE direction only. A stated 1, or a clean
-    edition's 2, is returned as it stands. A stated 0 is escalateable (see
-    `_escalate_explicit`): the providers miss exactly there, and the signal
-    that overrules one is a stage that read the WORDS, so the reported source
-    says so — "lyrics-scan (escalated)", "ai-lyrics (escalated)" — instead of
-    crediting the provider with a rating it never gave. An INSTRUMENTAL track
-    is the one 0 that is not escalateable: it has no words of its own, and
-    that first rung of the ladder outranks a read of the text sitting beside
-    the file.
+    The AI is asked ONCE, for every track that reaches this function (issue
+    #28: it is a source, not a last resort), and its answer is ranked against
+    what the providers said by the app's own rule — 1 beats 0 beats 2, the one
+    `server.integrations.merge_advisory` applies. `_stated` is that comparison
+    when a provider stated something; the ladder (`_word_stages`) is what
+    decides when nobody did. An INSTRUMENTAL track is settled by its own tag
+    before anything is asked: it is 0 under the shipped rule, or whatever a
+    provider stated, and a word-reading stage has nothing to say about a track
+    with no words — so the call whose answer no branch could use is not made.
     """
-    if value is not None:
-        value = int(value)
-        if value == 0 and not _is_instrumental(cfg, af, instrumental):
-            escalated = _escalate_explicit(cfg, path=path, af=af, lyrics=lyrics)
-            if escalated is not None:
-                return escalated
-        return {"value": value, "source": source or "",
+    if _is_instrumental(cfg, af, instrumental):
+        if value is None:
+            return {"value": 0, "source": "instrumental",
+                    "stage": STAGE_INSTRUMENTAL, "hits": [], "fallback": False}
+        return {"value": int(value), "source": source or "",
                 "stage": STAGE_SOURCES, "hits": [], "fallback": False}
 
-    if _is_instrumental(cfg, af, instrumental):
-        return {"value": 0, "source": "instrumental",
-                "stage": STAGE_INSTRUMENTAL, "hits": [], "fallback": False}
+    text = _lyrics_text(path, af, lyrics)
+    verdict = _ai_verdict(cfg, af=af, lyrics=text)
+    if verdict is not None and answers is not None:
+        answers[str(verdict.get("source") or STAGE_AI)] = verdict["value"]
 
-    out = _word_stages(cfg, path=path, af=af, lyrics=lyrics)
+    if value is not None:
+        return _stated(cfg, value, source, text=text, verdict=verdict)
+
+    out = _word_stages(cfg, text=text, verdict=verdict)
     if out is not None:
         return out
 

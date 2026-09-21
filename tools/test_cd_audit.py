@@ -126,6 +126,45 @@ real_crc = None
 if FFMPEG:
     real_crc = discs_mod._audio_crc32(FFMPEG, TRACK)
 
+print("== a log that predates EAC checksums is not missing one ==")
+def write_log_header(header):
+    """A rip log with the EAC version the header names and NO checksum line:
+    what the version rule reads is the header, never the log's date."""
+    with open(os.path.join(ALBUM, "CD-1.log"), "w", encoding="utf-8") as fh:
+        fh.write(header + "\n\n"
+                 "Track |  Start  |  Length  | Start sector | End sector\n"
+                 "---------------------------------------------------------\n"
+                 "  1  | 00:00.00 | 00:00.10 | 0 | 8\n\n"
+                 "Track  1\n"
+                 "     Copy CRC 00000000\n")
+
+
+# Spec §3: "XLD and older EAC logs pass (nothing claimed, nothing refuted)".
+# EAC only began writing the Rijndael log checksum in 1.0, so a 0.99-era log
+# (this suite's fixture is a real 2008 one) cannot be missing a line its
+# version never wrote — and treating it as 'missing' failed the whole disc.
+write_log_header("Exact Audio Copy V0.99 prebeta 4 from 23. January 2008")
+state, detail = discs_mod.check_log_checksum(os.path.join(ALBUM, "CD-1.log"))
+ok(state == "unsupported",
+   f"an EAC 0.99 log is 'unsupported', not 'missing' ({state}: {detail})")
+res = _grade_album(ALBUM, "EMBEDDED", _cfg(grade_check_log_checksum=True))
+tr = res["tracks"][0]
+ok(tr.get("checksum_status") == "NONE" and "LOG_CHECKSUM" not in tr.get("issues", []),
+   f"…so the disc does not fail grading on it ({tr.get('checksum_status')} / "
+   f"{tr.get('issues')})")
+
+# A MODERN log whose checksum line is gone is the opposite case: the header
+# says a checksum exists, so its absence is the edit this check exists to
+# catch and it must keep failing.
+write_log_header("Exact Audio Copy V1.6 from 23. October 2020")
+state, detail = discs_mod.check_log_checksum(os.path.join(ALBUM, "CD-1.log"))
+ok(state == "missing",
+   f"an EAC 1.6 log with no checksum line is 'missing' ({state}: {detail})")
+res = _grade_album(ALBUM, "EMBEDDED", _cfg(grade_check_log_checksum=True))
+tr = res["tracks"][0]
+ok(tr.get("checksum_status") == "FAKE" and "LOG_CHECKSUM" in tr.get("issues", []),
+   f"…and still fails grading ({tr.get('checksum_status')} / {tr.get('issues')})")
+
 print("== a valid EAC log checksum outranks the stored verdict ==")
 import mlo.discs as _dm  # noqa: E402
 

@@ -686,11 +686,34 @@ def _lb_stats(kind, range_="month", limit=25, offset=0, timeout=None):
                  timeout=timeout, ttl=TTL_CHART)
 
 
+# Cover Art Archive's thumbnail: 250 IS the smallest it serves, and a row's
+# tile is 40px, so a bigger one is bytes the UI never shows. The URL is the ONE
+# way to a MusicBrainz-only entity's cover — `/api/art` proxies it, and its own
+# fallback then walks Cover Art Archive → Apple → Deezer by name.
+CAA_THUMB = 250
+
+
+def _caa_front(entity, mbid, size=CAA_THUMB):
+    """Cover Art Archive's front cover for one MusicBrainz entity, or None.
+
+    `entity` is Cover Art Archive's own path segment — "release" or
+    "release-group"; a RECORDING has no cover endpoint, which is why a track
+    row's cover comes from the release it was pressed on (see
+    `_mb_recording_row`) and never from the recording's own MBID."""
+    mbid = str(mbid or "").strip()
+    if not mbid:
+        return None
+    return f"https://coverartarchive.org/{entity}/{mbid}/front-{int(size)}"
+
+
 def _caa_group_url(release_mbid):
     """Cover Art Archive front cover for a release (250px thumbnail)."""
-    if not release_mbid:
-        return None
-    return f"https://coverartarchive.org/release/{release_mbid}/front-250"
+    return _caa_front("release", release_mbid)
+
+
+# Public alias — `server.discover` fills a MusicBrainz-only row's cover from
+# the same URL builder, so one convention covers every Discover arm.
+caa_front_url = _caa_front
 
 
 def listenbrainz_top_releases(range_="month", limit=25, timeout=None):
@@ -1682,8 +1705,7 @@ def _mb_album_row(row):
         "title": row.get("title") or "",
         "artist": row.get("artist") or "",
         "mbid": mbid,
-        "cover": (f"https://coverartarchive.org/release-group/{mbid}/front-250"
-                  if mbid else None),
+        "cover": _caa_front("release-group", mbid),
         "year": (row.get("first_release_date") or "")[:4],
         "record_type": (row.get("primary_type") or "").lower(),
         "secondary_types": row.get("secondary_types") or [],
@@ -2220,13 +2242,27 @@ SEARCH_LIMIT = 100
 
 
 def _mb_recording_row(row):
-    """MusicBrainz recording search row → the shared discovery row shape."""
+    """MusicBrainz recording search row → the shared discovery row shape.
+
+    The cover comes from the RELEASE the recording was pressed on: Cover Art
+    Archive answers by release and release group and has no recording endpoint
+    at all, so `search_mb` keeps the first release's identity for exactly this.
+    Without it a MusicBrainz track row rendered as the placeholder icon while
+    the album row beside it showed its cover."""
     mbid = row.get("id")
+    group = str(row.get("release_group_mbid") or "").strip()
+    release = str(row.get("release_mbid") or "").strip()
     return {
         "kind": "track",
         "title": row.get("title") or "",
         "artist": row.get("artist") or "",
         "mbid": mbid,
+        # The release group first (the app's own album identity, and what
+        # `_mb_album_row` states); the release is the fallback for a recording
+        # whose group has no front cover of its own.
+        "cover": (_caa_front("release-group", group)
+                  or _caa_front("release", release)),
+        "release_group_mbid": group or None,
         "year": (row.get("first_release_date") or "")[:4],
         "duration": _int(row.get("length")),
         "score": _int(row.get("score")),

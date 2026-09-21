@@ -380,6 +380,37 @@ def get_wish(wid):
     return _with_terminal(_row(r)) if r else None
 
 
+def find_for_release(release_mbid, release_group_mbid=""):
+    """The wish already standing for this release, whichever ID keys it.
+
+    A release reaches this store under whichever id its caller held:
+    "Add to library" resolves an EDITION and keys the wish by its release id,
+    while a wish saved from a musicbrainz.org album link carries the RELEASE
+    GROUP id (that is what the link holds) and the auto-importer's own offer
+    carries the release id. Two ids for one pressing were two wish rows, and
+    two rows are two searches — each with its own job, both downloading the
+    same album. So a caller that is about to record a release asks here first
+    and reuses what it finds.
+
+    The keys are tried first (a wish saved from a group page and then re-added
+    by its edition), then the stored identity: `release` names the edition the
+    row is actually waiting for, which is what an add holding the release id
+    has to match a group-keyed row by.
+    """
+    ids = {str(x or "").strip().lower() for x in (release_mbid, release_group_mbid)}
+    ids.discard("")
+    if not ids:
+        return None
+    rows = list_wishes()
+    for w in rows:
+        if str(w.get("release_mbid") or "").strip().lower() in ids:
+            return w
+    for w in rows:
+        if str((w.get("release") or {}).get("id") or "").strip().lower() in ids:
+            return w
+    return None
+
+
 def add_wish(release_mbid, title="", artist="", year="", note="",
              target_dir="", queries=None, source="", release=None):
     """Save a release to the wishlist. *release* is the MusicBrainz payload the
@@ -415,16 +446,28 @@ def add_wish(release_mbid, title="", artist="", year="", note="",
                     return _row(c.execute("SELECT * FROM wishes WHERE id=?",
                                           (row["id"],)).fetchone())
                 return _row(row)  # already wished — idempotent
-            cur = c.execute(
-                "INSERT INTO wishes (release_mbid, title, artist, year, status, note,"
-                " target_dir, quotes, added_at, updated_at, source, release_json)"
-                " VALUES (?,?,?,?,'wanted',?,?,?,?,?,?,?)",
-                (release_mbid, str(title or ""), str(artist or ""), str(year or ""),
-                 str(note or ""), str(target_dir or ""),
-                 json.dumps(queries) if queries else "", now, now, source,
-                 json.dumps(block) if block else ""),
-            )
-            wid = cur.lastrowid
+            try:
+                cur = c.execute(
+                    "INSERT INTO wishes (release_mbid, title, artist, year, status, note,"
+                    " target_dir, quotes, added_at, updated_at, source, release_json)"
+                    " VALUES (?,?,?,?,'wanted',?,?,?,?,?,?,?)",
+                    (release_mbid, str(title or ""), str(artist or ""), str(year or ""),
+                     str(note or ""), str(target_dir or ""),
+                     json.dumps(queries) if queries else "", now, now, source,
+                     json.dumps(block) if block else ""),
+                )
+                wid = cur.lastrowid
+            except sqlite3.IntegrityError:
+                # `release_mbid` is UNIQUE and the read above is a CHECK: a
+                # second writer (another app instance on this same wishes.db)
+                # can insert between the two, which used to raise out of an
+                # add that simply wanted what is now there. That row IS this
+                # wish, so the answer is that row.
+                row = c.execute("SELECT * FROM wishes WHERE release_mbid=?",
+                                (release_mbid,)).fetchone()
+                if row is None:
+                    raise
+                return _row(row)
     log("info", f"Wish added: {artist} — {title} ({release_mbid[:8]})")
     return get_wish(wid)
 

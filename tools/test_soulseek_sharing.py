@@ -29,7 +29,9 @@ from server import soulseek
 
 _TMP = tempfile.mkdtemp(prefix="mlo_slskd_share_")
 MUSIC = os.path.join(_TMP, "Music")
-ALBUM = os.path.join(MUSIC, "Artists", "Some Artist", "Some Album (1999)")
+# the library root — what `soulseek_share_dirs` defaults to
+ARTISTS = os.path.join(MUSIC, "Artists")
+ALBUM = os.path.join(ARTISTS, "Some Artist", "Some Album (1999)")
 os.makedirs(ALBUM)
 TRACK = os.path.join(ALBUM, "01 - A Track.flac")
 TRACK_SIZE = 4100
@@ -96,11 +98,11 @@ class FakeSlskd:
         self.scan = {"scanning": False, "scanPending": False, "ready": False,
                      "faulted": False, "cancelled": False, "scanProgress": 0.0,
                      "directories": 0, "files": 0, "hosts": ["local"]}
-        self.shares = {"local": [{"id": "a", "alias": "Music", "isExcluded": False,
-                                  "localPath": MUSIC, "remotePath": "Music",
+        self.shares = {"local": [{"id": "a", "alias": "Artists", "isExcluded": False,
+                                  "localPath": ARTISTS, "remotePath": "Artists",
                                   "directories": 3, "files": 1}]}
         self.options = {
-            "shares": {"directories": [MUSIC],
+            "shares": {"directories": [ARTISTS],
                        "filters": [x.strip("'") for x in soulseek.share_exclude(CFG)]},
             "flags": {},
         }
@@ -109,9 +111,9 @@ class FakeSlskd:
 
     @staticmethod
     def _contents_for(path, size):
-        rel = os.path.relpath(path, MUSIC).replace(os.sep, "\\")
+        rel = os.path.relpath(path, ARTISTS).replace(os.sep, "\\")
         directory, _, name = rel.rpartition("\\")
-        return [{"name": "Music\\" + directory,
+        return [{"name": "Artists\\" + directory,
                  "files": [{"filename": name, "size": size, "extension": "flac"}]}]
 
     def _payload(self, path):
@@ -191,7 +193,16 @@ def slskd_share(entry):
 # --------------------------------------------------------------------------- #
 text, _key = soulseek.generate_yaml(CFG)
 dirs, filters = shares_of(text)
-assert [slskd_share(d) for d in dirs] == [("Music", MUSIC)], dirs
+# the DEFAULT share is the library root, not the music folder it lives in: the
+# music folder also holds .mlo (data, downloads, trash) and anything not filed
+# by the organizer yet, none of which belongs on the network
+assert soulseek.share_dirs(CFG) == [ARTISTS], soulseek.share_dirs(CFG)
+assert [slskd_share(d) for d in dirs] == [("Artists", ARTISTS)], dirs
+# an explicit list still wins, and a music folder that is not set shares nothing
+assert soulseek.share_dirs(dict(CFG, soulseek_share_dirs=[MUSIC])) == [MUSIC]
+assert soulseek.share_dirs(dict(CFG, music_folder="", soulseek_share_dirs=[])) == []
+explicit, _f = shares_of(soulseek.generate_yaml(dict(CFG, soulseek_share_dirs=[MUSIC]))[0])
+assert [slskd_share(d) for d in explicit] == [("Music", MUSIC)], explicit
 
 # every filter is a real regex, and the app's own state tree is filtered out
 assert soulseek._RESERVED_SHARE_FILTERS[0] in filters, filters
@@ -285,11 +296,11 @@ def ready(**over):
     fake.scan = {"scanning": False, "scanPending": False, "ready": True,
                  "faulted": False, "cancelled": False, "scanProgress": 1.0,
                  "directories": 3, "files": 1, "hosts": ["local"]}
-    fake.shares = {"local": [{"id": "a", "alias": "Music", "isExcluded": False,
-                              "localPath": MUSIC, "remotePath": "Music",
+    fake.shares = {"local": [{"id": "a", "alias": "Artists", "isExcluded": False,
+                              "localPath": ARTISTS, "remotePath": "Artists",
                               "directories": 3, "files": 1}]}
     fake.options = {
-        "shares": {"directories": [MUSIC],
+        "shares": {"directories": [ARTISTS],
                    "filters": [x.strip("'") for x in soulseek.share_exclude(CFG)]},
         "flags": {},
     }
@@ -394,8 +405,8 @@ assert audit["problems"][0]["code"] == "share_not_live"
 
 # ...or with the folder excluded with slskd's '-' prefix
 ready()
-fake.shares = {"local": [{"id": "a", "alias": "Music", "isExcluded": True,
-                          "localPath": MUSIC, "remotePath": "Music",
+fake.shares = {"local": [{"id": "a", "alias": "Artists", "isExcluded": True,
+                          "localPath": ARTISTS, "remotePath": "Artists",
                           "directories": 0, "files": 0}]}
 audit = soulseek.share_audit(CFG)
 assert audit["status"] == "config_mismatch", audit["status"]
@@ -403,7 +414,7 @@ assert audit["problems"][0]["code"] == "share_excluded"
 
 # ...or with a filter set that differs from the generated one
 ready()
-fake.options = {"shares": {"directories": [MUSIC], "filters": ["something_else"]},
+fake.options = {"shares": {"directories": [ARTISTS], "filters": ["something_else"]},
                 "flags": {}}
 audit = soulseek.share_audit(CFG)
 assert audit["status"] == "config_mismatch", audit["status"]
@@ -412,7 +423,7 @@ assert audit["problems"][0]["code"] == "filters_stale"
 
 # slskd started with no_share_scan skips the scan that publishes the library
 ready(ready=False, files=0)
-fake.options = {"shares": {"directories": [MUSIC],
+fake.options = {"shares": {"directories": [ARTISTS],
                            "filters": [x.strip("'") for x in soulseek.share_exclude(CFG)]},
                 "flags": {"no_share_scan": True}}
 audit = soulseek.share_audit(CFG)
@@ -429,7 +440,7 @@ assert audit["problems"][0]["code"] == "logged_out"
 # ...or the daemon was told never to connect at all (a flag this app never
 # writes, so it can only come from a foreign config)
 ready()
-fake.options = {"shares": {"directories": [MUSIC],
+fake.options = {"shares": {"directories": [ARTISTS],
                            "filters": [x.strip("'") for x in soulseek.share_exclude(CFG)]},
                 "flags": {"no_connect": True}}
 audit = soulseek.share_audit(CFG)
@@ -467,8 +478,15 @@ assert audit["status"] == "unconfigured", audit["status"]
 assert audit["problems"][0]["code"] == "no_share_dir"
 
 # a config slskd would refuse (a bad path and a bad pattern) is reported, and
-# the daemon that IS running still shares
+# the daemon that IS running still shares — it serves the explicit folder the
+# config asks for (the default would be the library root)
 ready()
+fake.shares = {"local": [{"id": "a", "alias": "Music", "isExcluded": False,
+                          "localPath": MUSIC, "remotePath": "Music",
+                          "directories": 3, "files": 1}]}
+fake.options = {"shares": {"directories": [MUSIC],
+                           "filters": [x.strip("'") for x in soulseek.share_exclude(CFG)]},
+                "flags": {}}
 audit = soulseek.share_audit(dict(CFG, soulseek_share_dirs=[MUSIC, "relative/music"],
                                   soulseek_share_exclude=["[unclosed"]))
 assert audit["status"] == "misconfigured", (audit["status"], audit["problems"])

@@ -33,6 +33,7 @@ from pydantic import BaseModel
 from mlo import __version__ as APP_VERSION
 from mlo import load_config, save_config
 from mlo.config import DEFAULT_CONFIG
+from mlo import layout as mlo_layout
 from mlo import stats as stats_mod
 
 from server import library as lib_mod
@@ -4427,6 +4428,11 @@ def soulseek_status_payload():
                                 and cfg.get("soulseek_password")),
         "autostart": bool(cfg.get("soulseek_autostart", True)),
         "share_dirs": soulseek.share_dirs(cfg),
+        # The LISTEN port's real state: whether anything accepts on it here,
+        # who holds it, and what the router was actually told (mlo.portmap).
+        # A mapping is only reported as made when a router confirmed it, so
+        # the tab can say "opened" only when that is true.
+        "listen_port_state": soulseek.port_status_payload(cfg),
     }
 
 
@@ -7297,18 +7303,51 @@ def import_commit(req: ImportCommit):
     if rym:
         for p in changes:
             changes[p]["RATEYOURMUSIC_ALBUM"] = rym
-    errors = []
-    for p, tag_map in changes.items():
-        if not tag_map:
-            continue
+    # One AudioFile per track, and every tag for that track inside ONE
+    # container write. Without the deferral each set_tag costs a whole-file
+    # copy + rewrite (mlo/atomic.rewrite_via), and this step writes up to two
+    # of them per track — it is the wizard's "Saving links…", so that
+    # difference is the step's whole duration on a real album. The files are
+    # independent (rewrite_via writes its own temp beside its target and swaps
+    # it in), so they also go through the pool every other per-file pass uses.
+    from concurrent.futures import ThreadPoolExecutor
+    from mlo.stats import worker_count
+
+    def write_one(p, tag_map):
         af = AudioFile(os.path.normpath(p))
         if af.audio is None:
-            errors.append(f"{p}: {af.error or 'unreadable'}")
-            continue
-        for k, v in tag_map.items():
-            if not af.set_tag(k, v):
-                errors.append(f"{p} {k}: {af.error}")
-        tagcache.invalidate_path(os.path.normpath(p))
+            return f"{p}: {af.error or 'unreadable'}"
+        defer = hasattr(af, "defer_save")
+        if defer:
+            af.defer_save(True)
+        error = None
+        try:
+            for k, v in tag_map.items():
+                # A value already stored is not written again: walking the
+                # wizard twice must cost nothing and must not touch the file.
+                if str(af.get_tag(k) or "").strip() == str(v).strip():
+                    continue
+                if not af.set_tag(k, v):
+                    error = f"{p} {k}: {af.error}"
+                    break
+        except Exception as e:
+            error = f"{p}: {e}"
+        finally:
+            # The flush IS the write, so its verdict is the file's verdict —
+            # and it has to run on the error path too, or a failed track is
+            # left holding changes nothing will save.
+            if defer and af.defer_save(False) is False and error is None:
+                error = f"{p}: {af.error or 'tag write failed'}"
+        if error is None:
+            tagcache.invalidate_path(os.path.normpath(p))
+        return error
+
+    errors = []
+    items = [(p, t) for p, t in changes.items() if t]
+    if items:
+        workers = worker_count(cfg, default=8, maximum=8, items=len(items))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            errors = [e for e in ex.map(lambda a: write_one(*a), items) if e]
     if errors:
         raise HTTPException(500, "; ".join(errors))
     return {"ok": True, "changed": len(changes)}
@@ -7683,162 +7722,10 @@ def soulseek_staging_clear(req: StagingRequest):
 # --------------------------------------------------------------------------- #
 # Library layout — is the music folder shaped the way the app expects?
 # --------------------------------------------------------------------------- #
-# The canonical library is <music>/Artists/<Artist>/<Album>/<files>. Everything
-# else that holds audio, or that sits where no audio belongs, is reported here.
-# This is a READ-ONLY report: it says what is wrong and where, and never moves
-# anything on its own.
-_LAYOUT_ALBUM_SIDECARS = {".lrc", ".cue", ".log", ".accurip"}
-# Folders allowed directly in the music folder. `.mlo*` covers the app's own
-# state dirs; everything else is reported.
-_LAYOUT_ROOT_ALLOWED = {".mlo"}
-# Disc folders are the one nesting the app creates and understands.
-_LAYOUT_DISC_RE = re.compile(r"^(cd|disc|disk)\s*\d+$", re.I)
-
-
-def _layout_is_audio(name):
-    from mlo.paths import LIB_AUDIO_EXTS, LIB_VIDEO_EXTS
-    ext = os.path.splitext(name)[1].lower()
-    return ext in LIB_AUDIO_EXTS or ext in LIB_VIDEO_EXTS
-
-
-def _layout_list(d):
-    try:
-        return os.listdir(d)
-    except OSError:
-        return []
-
-
-def _layout_issue(kind, path, folder, detail, hint):
-    """One report row. `path` is always music-folder-relative for display, so
-    the UI never has to know the machine's absolute layout."""
-    try:
-        rel = os.path.relpath(path, folder)
-    except ValueError:
-        rel = path
-    return {"kind": kind, "path": rel.replace("\\", "/"),
-            "abs": path.replace("\\", "/"), "detail": detail, "hint": hint}
-
-
-def _layout_counts(issues):
-    counts = {}
-    for i in issues:
-        counts[i["kind"]] = counts.get(i["kind"], 0) + 1
-    return counts
-
-
-def _layout_has_audio(d):
-    """Whether any audio sits directly in *d* or one/two levels down (the only
-    nesting the layout uses: disc folders inside an album)."""
-    for root, dirs, names in os.walk(d):
-        dirs[:] = [x for x in dirs if x not in SKIP_DIRS]
-        if root.count(os.sep) - d.count(os.sep) > 2:
-            dirs[:] = []
-            continue
-        if any(_layout_is_audio(f) for f in names):
-            return True
-    return False
-
-
-def _layout_case_only(expected, actual):
-    """Whether two names are the SAME name in different letter case.
-
-    Case-only is the only kind of name mismatch the layout scanner reports.
-    Anything else — a different album, a different title — is a naming
-    problem and belongs to the grader's PATH check; repeating it here would
-    only give the user two rows for one thing, and a guess about paths is
-    what the scanner must never make.
-    """
-    return (bool(expected) and expected != actual
-            and expected.casefold() == actual.casefold())
-
-
-def _layout_case_issues(artist, album, album_dir, folder, script, seen):
-    """`wrong_case` rows for one album folder, or [] when there is nothing
-    trustworthy to compare against.
-
-    The expected names come from the naming script the ORGANIZER applies —
-    the same `naming_script` the grader evaluates — run over the album's own
-    tags. That is the whole reason this is reportable at all: Windows is
-    case-insensitive, so "abbey road" and "Abbey Road" open the same folder
-    and nothing in the normal file API will ever admit the difference. What
-    it does NOT do is lie about the spelling: `os.listdir` returns the name
-    exactly as it is STORED on disk, and that stored spelling is what every
-    comparison below reads. So a case-only mismatch shows up here precisely
-    because the scanner looks at the raw directory entries instead of asking
-    the OS whether two paths are "the same file" — it would always say yes.
-
-    Tags are read from ONE audio file per album (the first one, through the
-    tag cache), because the artist and album segments are album properties
-    and the script's last segment is only compared against the file those
-    tags came from. Any other file in the album is left alone: its expected
-    name needs its own tags, and without them a comparison would be a guess.
-    Unreadable tags, an empty tag dict or a script that evaluates to nothing
-    all end in silence — a false "wrong case" here would push the user into
-    renaming music to a name that is not actually correct.
-
-    Cost ceiling: this reads tags for one file per album on every full scan.
-    If scanning a large library ever gets slow, the cheap win is a prefilter
-    — only read tags for albums whose folder or file names do not already
-    contain the tag spelling — or a cached layout snapshot; both are more
-    machinery than a read-only report currently earns.
-
-    `seen` holds the absolute paths this scan already reported, so an artist
-    folder shared by ten albums produces one row, not ten.
-    """
-    from mlo.naming import eval_script, track_variables
-
-    src = None
-    for f in _layout_list(album_dir):
-        if _layout_is_audio(f):
-            src = f
-            break
-    if src is None:
-        return []
-    try:
-        tags = tagcache.read_track(os.path.join(album_dir, src))[0] or {}
-    except Exception:
-        return []
-    release_type = str(tags.get("RELEASETYPE") or "").strip() or None
-    expected = eval_script(script, track_variables(tags, release_type=release_type))
-    if not expected:
-        return []
-    segs = [s for s in expected.replace("\\", "/").split("/") if s]
-    if not segs:
-        return []
-
-    rows = []
-
-    def add(path, expected_name, actual_name, what):
-        key = os.path.normcase(os.path.abspath(path))
-        if key in seen:
-            return
-        seen.add(key)
-        rows.append(_layout_issue(
-            "wrong_case", path, folder,
-            "%s \u201c%s\u201d differs from the naming script\u2019s \u201c%s\u201d "
-            "in letter case only" % (what, actual_name, expected_name),
-            "run Organize \u2014 it rewrites this to the script\u2019s exact "
-            "casing (nothing is renamed by this scan)"))
-
-    # The script's leading segments are directories — segment 0 is the artist
-    # folder, segment 1 the album folder — and the last one is the file name
-    # WITHOUT its extension (beets-style: the extension belongs to the file,
-    # so it is appended from the file on disk, exactly as the grader does).
-    # A shorter script simply names fewer things, and zip then compares only
-    # what it does name.
-    for seg, actual_name, path, what in zip(
-            segs[:-1],
-            (artist, album),
-            (os.path.dirname(album_dir), album_dir),
-            ("artist folder", "album folder")):
-        if _layout_case_only(seg, actual_name):
-            add(path, seg, actual_name, what)
-    expected_file = segs[-1] + os.path.splitext(src)[1]
-    if _layout_case_only(expected_file, src):
-        add(os.path.join(album_dir, src), expected_file, src, "file")
-    return rows
-
-
+# The walk itself lives in mlo.layout — the same one Run All runs as script 20
+# — so this route, the panel and the script can never report different numbers.
+# It stays a READ-ONLY report: it says what is wrong and where, and never
+# moves anything on its own.
 @app.get("/api/library/layout")
 def library_layout():
     """Scan the whole music folder for misplaced files, unexpected folders and
@@ -7852,145 +7739,25 @@ def library_layout():
     album's description.txt (mlo.paths.ALBUM_SIDECAR_NAMES) next to the
     cover art, and inside an artist folder its artist.jpg / artist.png and
     description.txt (only audio with no album folder is reported there)."""
-    from mlo.naming import DEFAULT_NAMING_SCRIPT
-    from mlo.paths import ALBUM_SIDECAR_NAMES, IMAGE_EXTS
     cfg = load_config()
-    folder = cfg.get("music_folder") or ""
-    # The canonical spellings the `wrong_case` check compares against: the
-    # same script (same fallback) the organizer renames with and the grader
-    # grades against.
-    naming_script = (str(cfg.get("naming_script") or "").strip()
-                     or DEFAULT_NAMING_SCRIPT)
-    out = {"folder": folder.replace("\\", "/"), "artists_dir": "",
-           "exists": False, "issues": [], "counts": {}, "total": 0,
-           "albums": 0, "artists": 0, "audio_files": 0}
-    if not folder or not os.path.isdir(folder):
-        return out
-    lib = library_root(folder)
-    out["exists"] = True
-    out["artists_dir"] = (lib or "").replace("\\", "/")
-    issues = []
-    # Paths already reported as wrong_case — one artist folder serves all of
-    # its albums, and the user does not need that row ten times.
-    case_seen = set()
+    report = mlo_layout.scan_library(cfg)
+    # A manual scan IS a scan: it is what "the last scan" means to the Library
+    # page's warning, so it is remembered exactly the way script 20 remembers
+    # its own.
+    mlo_layout.save_report(cfg, report)
+    return report
 
-    # ---- 1. the music-folder root -----------------------------------------
-    # Only Artists/ and the app's own .mlo state dirs belong here. A loose
-    # audio file at the root is the classic "dropped it in the wrong place",
-    # and a foreign folder is either a manual rip dump or a stray copy.
-    for name in _layout_list(folder):
-        p = os.path.join(folder, name)
-        if os.path.isdir(p):
-            if name in _LAYOUT_ROOT_ALLOWED or name.startswith(".mlo"):
-                continue
-            if lib and os.path.normcase(os.path.abspath(p)) == os.path.normcase(os.path.abspath(lib)):
-                continue
-            holds = _layout_has_audio(p)
-            issues.append(_layout_issue(
-                "unexpected_folder", p, folder,
-                "folder in the music folder root%s" % (" holding audio" if holds else ""),
-                "the library lives in Artists/ — move anything real into "
-                "Artists/<Artist>/<Album>/"))
-        elif _layout_is_audio(name):
-            issues.append(_layout_issue(
-                "audio_at_root", p, folder, "audio file in the music folder root",
-                "move it into Artists/<Artist>/<Album>/ (or import it) so "
-                "grading and the organizer can see it"))
-        elif name.startswith(".mlo_"):
-            issues.append(_layout_issue(
-                "legacy_state_file", p, folder,
-                "leftover from the old .mlo_data layout",
-                "safe to delete once the migration has been confirmed"))
 
-    if not lib or not os.path.isdir(lib):
-        out.update(issues=issues, counts=_layout_counts(issues), total=len(issues))
-        return out
+@app.get("/api/library/layout/report")
+def library_layout_report():
+    """The layout report the last scan stored (script 20, or this panel's Scan).
 
-    # ---- 2. <music>/Artists ------------------------------------------------
-    artist_names = _layout_list(lib)
-    for name in artist_names:
-        p = os.path.join(lib, name)
-        if not os.path.isdir(p):
-            if _layout_is_audio(name):
-                issues.append(_layout_issue(
-                    "audio_in_artists", p, folder,
-                    "audio file directly in Artists/ (no artist or album folder)",
-                    "move it into Artists/<Artist>/<Album>/"))
-            else:
-                issues.append(_layout_issue(
-                    "stray_in_artists", p, folder,
-                    "non-audio file directly in Artists/",
-                    "delete it, or move it into the album it belongs to"))
-            continue
-        if name.startswith("."):
-            issues.append(_layout_issue(
-                "hidden_folder", p, folder, "hidden folder inside Artists/",
-                "hidden folders are not library content — move or delete it"))
-            continue
-
-        # ---- 3. <music>/Artists/<Artist> ----------------------------------
-        for an in _layout_list(p):
-            ap = os.path.join(p, an)
-            if not os.path.isdir(ap):
-                if _layout_is_audio(an):
-                    issues.append(_layout_issue(
-                        "audio_in_artist", ap, folder,
-                        "audio file directly in the artist folder \u201c%s\u201d "
-                        "(no album folder)" % name,
-                        "give it an album folder: Artists/<Artist>/<Album>/"))
-                # Any other file in an artist folder is the artist's own
-                # content (artist.jpg / artist.png / description.txt written
-                # by mlo.artistdata) — expected, so nothing to report.
-                continue
-            out["albums"] += 1
-            if not _layout_has_audio(ap):
-                issues.append(_layout_issue(
-                    "empty_album", ap, folder,
-                    "album folder \u201c%s / %s\u201d holds no audio" % (name, an),
-                    "remove it, or fill it \u2014 an empty album grades as an error"))
-            # Letter-case drift: the folder or file is in the right PLACE but
-            # spells its name the way the filesystem let somebody type it,
-            # not the way the naming script spells it. Reported next to the
-            # shape problems because from here it is the same kind of answer:
-            # "this is not the canonical library yet".
-            issues.extend(_layout_case_issues(
-                name, an, ap, folder, naming_script, case_seen))
-
-            # ---- 4. inside an album: strays and unexpected subfolders ------
-            for f in _layout_list(ap):
-                fp = os.path.join(ap, f)
-                if os.path.isdir(fp):
-                    if not _LAYOUT_DISC_RE.match(f):
-                        issues.append(_layout_issue(
-                            "unexpected_subfolder", fp, folder,
-                            "folder \u201c%s\u201d inside album \u201c%s / %s\u201d"
-                            % (f, name, an),
-                            "only disc folders (CD1, Disc 2, \u2026) belong "
-                            "inside an album"))
-                    continue
-                ext = os.path.splitext(f)[1].lower()
-                if _layout_is_audio(f):
-                    out["audio_files"] += 1
-                elif ext and ext in _LAYOUT_ALBUM_SIDECARS:
-                    pass                      # .lrc/.cue/.log/.accurip: expected
-                elif ext in IMAGE_EXTS:
-                    pass                      # cover art: expected
-                elif f.lower() in ALBUM_SIDECAR_NAMES:
-                    pass                      # album description.txt: expected
-                elif f.startswith("."):
-                    pass                      # the app's own manifests
-                else:
-                    issues.append(_layout_issue(
-                        "stray_file", fp, folder,
-                        "file \u201c%s\u201d is not audio, artwork or a known "
-                        "sidecar" % f,
-                        "delete it if it is junk (nfo/db/txt) — it is dead "
-                        "weight in the library"))
-
-    out["artists"] = sum(1 for n in artist_names
-                         if os.path.isdir(os.path.join(lib, n)) and not n.startswith("."))
-    out.update(issues=issues, counts=_layout_counts(issues), total=len(issues))
-    return out
+    Nothing is walked here: the Library page asks for this on every load, and
+    the point of the stored report is that its warning costs no second scan of
+    the library. An install that never scanned gets `exists: False` — a
+    warning drawn from a scan that did not happen is the one thing this must
+    never produce."""
+    return mlo_layout.load_report(load_config())
 
 
 # --------------------------------------------------------------------------- #

@@ -1,15 +1,21 @@
 import { useQuery } from "@tanstack/react-query";
-import { useRef } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { AlertTriangle, ArrowDownUp, Clock, Disc3, Heart, Loader2, RefreshCw, Sparkles, Star, Users } from "lucide-react";
+import { AlertTriangle, ArrowDownUp, BarChart3, Clock, Disc3, Heart, ListChecks, Loader2, RefreshCw, Sparkles, Star, Users } from "lucide-react";
 import { api } from "../api";
-import { EmptyState, PageLoading, PendingMark } from "../components/Badges";
+import { EmptyState, PageLoading } from "../components/Badges";
 import StorageCard from "../components/StorageCard";
 import PageHeader from "../components/PageHeader";
+import AlbumCard from "../components/AlbumCard";
+import Segmented from "../components/Segmented";
+import StatsPanel from "../components/StatsPanel";
 import { useI18n } from "../lib/i18n";
 import CoverImg from "../components/CoverImg";
-import { useFav } from "../lib/favs";
-import type { HomeAlbum, HomeArtist } from "../types";
+import { GRID_SIZE_MIN } from "../lib/fmt";
+import { albumRef } from "../lib/refs";
+import { GRID_SIZES, useGridSize, useSelectMode } from "../lib/libraryView";
+import { useStore } from "../store";
+import type { HomeAlbum, HomeArtist, Track } from "../types";
 
 /** Shelf chip: why a row is here (a wish's status, a favorite's origin). */
 function Chip({ text, title }: { text: string; title?: string }) {
@@ -23,118 +29,26 @@ function Chip({ text, title }: { text: string; title?: string }) {
   );
 }
 
-/** The Home page's like control: a small star in the corner of an owned
- *  album's cover.
- *
- *  It writes through the same favourites store as every other heart in the
- *  app (`useFav` → /api/favorites), so a star set here shows up on the album
- *  page, in Favorites, and on every other client — including the installed
- *  iOS/Android builds, which reach the same server with the session token the
- *  API client attaches (see web/src/api.ts). A wish that is not in the
- *  library yet has nothing to favourite, so it gets no star.
- */
-function StarLike({ a }: { a: HomeAlbum }) {
-  const { fav, toggle } = useFav("album", a.owned ? a.path : undefined, a.mbid);
-  if (!a.owned || !a.path) return null;
-  return (
-    <button
-      type="button"
-      className={`absolute top-1.5 right-1.5 h-7 w-7 rounded-full border border-white/10 bg-black/60 backdrop-blur flex items-center justify-center transition-colors tap-hit ${
-        fav ? "text-accent" : "text-zinc-300 hover:text-white"
-      }`}
-      onClick={(e) => {
-        // The cover sits inside a link to the album page: the star must not
-        // navigate.
-        e.preventDefault();
-        e.stopPropagation();
-        toggle();
-      }}
-      title={fav ? "Remove from favorites" : "Add to favorites"}
-      aria-pressed={fav}
-      aria-label={fav ? "Remove from favorites" : "Add to favorites"}
-    >
-      <Star className={`h-3.5 w-3.5 ${fav ? "fill-current" : ""}`} />
-    </button>
-  );
-}
-
-/** One Home shelf card. Every shelf is library-derived now, so an owned album
- *  links to its page and the rest (a wish being hunted) renders inert. */
-function HomeCard({ a }: { a: HomeAlbum }) {
-  const to = a.owned && a.path ? `/album/${encodeURIComponent(a.path)}` : null;
-
-  const art =
-    a.owned && a.path ? (
-      <CoverImg
-        albumPath={a.path}
-        coverFile={a.cover}
-        wrapperClass="aspect-square w-full rounded-xl shadow-lg ring-1 ring-black/40 overflow-hidden"
-      />
-    ) : (
-      <div className="aspect-square w-full rounded-xl shadow-lg ring-1 ring-black/40 overflow-hidden bg-raise flex items-center justify-center text-zinc-700">
-        <Disc3 className="h-1/3 w-1/3" />
-      </div>
-    );
-
-  return (
-    <div className="group flex h-full flex-col rounded-xl p-2 transition-all duration-200 hover:bg-panel/70 hover:-translate-y-0.5">
-      {/* The star is a SIBLING of the link, not a child of it. A <button>
-          inside an <a> is interactive content inside interactive content —
-          invalid HTML, and WebKit (every iOS build) hit-tests it differently
-          from Chromium: a tap on the star could navigate to the album instead
-          of toggling the favourite, which is the "the star does not work on
-          iOS" report. Absent from the anchor it is simply a button, and the
-          absolute position keeps the layout identical. */}
-      <div className="relative">
-        {to ? (
-          <Link to={to} className="block" title="Open album page">
-            {art}
-          </Link>
-        ) : (
-          <div title={a.artist ? `${a.artist} — ${a.album}` : a.album}>{art}</div>
-        )}
-        <StarLike a={a} />
-      </div>
-      <div className="mt-2 px-0.5 flex flex-1 flex-col gap-1">
-        {to ? (
-          <Link
-            to={to}
-            className="text-sm font-medium truncate hover:text-accent-soft"
-            title={a.album}
-          >
-            {a.album || "—"}
-          </Link>
-        ) : (
-          <div className="text-sm font-medium truncate" title={a.album}>
-            {a.album || "—"}
-          </div>
-        )}
-        <div className="text-[11px] text-zinc-500 truncate flex items-center gap-1.5">
-          <span className="truncate" title={a.artist}>{a.artist}</span>
-          {a.pending && <PendingMark album={a} label />}
-          {a.year && <span className="ml-auto shrink-0 tabular-nums">{a.year}</span>}
-          {a.owned && a.grade_pct != null && (
-            <span className="ml-auto shrink-0 tabular-nums" title="Checks passed">
-              {Math.round(a.grade_pct)}%
-            </span>
-          )}
-        </div>
-        {a.reason && <Chip text={a.reason} />}
-      </div>
-    </div>
-  );
-}
-
 function Shelf({
   title,
   icon: Icon,
   items,
   blurb,
+  gridSize,
+  selectable,
+  selected,
+  onSelect,
 }: {
   title: string;
   icon: typeof Sparkles;
   items: HomeAlbum[];
   blurb?: string;
+  /** The shared cover size (lib/libraryView) — Home's shelves and the
+   *  Library's grid draw their covers at the one the user picked. */
+  gridSize: "s" | "m" | "l";
+  selectable: boolean;
+  selected: string[];
+  onSelect: (path: string) => void;
 }) {
   // An empty shelf is hidden outright: the page-level empty state is Home's,
   // so a shelf never invents an empty look of its own.
@@ -146,12 +60,34 @@ function Shelf({
         <h2 className="text-sm font-semibold tracking-tight">{title}</h2>
         {blurb && <span className="text-[11px] text-zinc-600">{blurb}</span>}
       </div>
-      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-6 gap-3 stagger">
-        {items.map((a, i) => (
-          // Identity first: an index in the key remounts a card (and replays
-          // its stagger animation) whenever the shelf order changes.
-          <HomeCard key={a.mbid ?? a.path ?? `shelf-${i}`} a={a} />
-        ))}
+      {/* The Library's own grid geometry, so a shelf and the Library draw the
+          covers at the same size — and the same shared album card. */}
+      <div
+        className="grid gap-x-4 gap-y-5 stagger"
+        style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${GRID_SIZE_MIN[gridSize]}px, 1fr))` }}
+      >
+        {items.map((a, i) => {
+          // A shelf row is a library album (the server sends the library's own
+          // row) unless it is a wish the library does not hold: that one has
+          // no page to open and nothing to tick.
+          const inLibrary = a.owned !== false && !!a.path;
+          return (
+            <AlbumCard
+              // Identity first: an index in the key remounts a card (and
+              // replays its stagger animation) whenever the shelf order
+              // changes. A wish has neither a path nor always an MBID.
+              key={a.path || a.mbid || `shelf-${i}`}
+              al={a}
+              href={inLibrary ? albumRef(a) : null}
+              selectable={selectable && inLibrary}
+              selected={selected.includes(a.path)}
+              onSelect={onSelect}
+              // The shelf's own words for why the row is here, under the
+              // card's caption.
+              extraMeta={a.reason ? <Chip text={a.reason} /> : undefined}
+            />
+          );
+        })}
       </div>
     </section>
   );
@@ -213,6 +149,34 @@ export default function HomePage() {
     forceRefresh.current = true;
     void refetch();
   };
+  const [gridSize, pickGridSize] = useGridSize();
+  const { selectMode, toggleSelectMode } = useSelectMode();
+  const [statsOpen, setStatsOpen] = useState(false);
+  // The GLOBAL selection (store.ts): ticking an album here is ticking the
+  // album the Library's batch toolbar acts on.
+  const selection = useStore((s) => s.selection);
+  const toggleAlbum = useStore((s) => s.toggleAlbum);
+  // What the Stats panel reads: the albums on this page, in shelf order and
+  // de-duplicated (an album rides on several shelves). Home is a set of
+  // curated shelves rather than the library — the whole-library numbers are
+  // the ones the header above prints — so the panel reads what is on screen.
+  const shown = useMemo(() => {
+    const albums: HomeAlbum[] = [];
+    const tracks: Track[] = [];
+    const seen = new Set<string>();
+    for (const row of [
+      ...(data?.recent ?? []), ...(data?.pending ?? []), ...(data?.wanted ?? []),
+      ...(data?.top_rated ?? []), ...(data?.needs_attention ?? []),
+      ...(data?.discover ?? []), ...(data?.favorites ?? []),
+    ]) {
+      const key = row.path || `mb:${row.mbid ?? ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      albums.push(row);
+      tracks.push(...(row.tracks ?? []));
+    }
+    return { albums, tracks };
+  }, [data]);
 
   if (isLoading) {
     return (
@@ -249,6 +213,13 @@ export default function HomePage() {
   }
 
   const { stats } = data;
+  // The card options every shelf below draws with.
+  const shelfProps = {
+    gridSize,
+    selectable: selectMode,
+    selected: selection.albums,
+    onSelect: toggleAlbum,
+  };
   return (
     <div className="p-6 space-y-5 mx-auto max-w-6xl">
       {/* hero — the gradient and its glow stay; the title block is the shared
@@ -278,24 +249,75 @@ export default function HomePage() {
               </div>
             }
             actions={
-              <button
-                className="btn-ghost !py-1.5 text-xs tap"
-                onClick={refresh}
-                disabled={isFetching}
-                title={t("home.refresh_title")}
-              >
-                <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} /> {t("home.refresh")}
-              </button>
+              <>
+                {/* The Library's own controls, over Home's own content: the
+                    cover size the shelves draw at (the SAME setting the
+                    Library's grid reads — one choice, both pages), Select and
+                    Stats. They carry the Library's labels because they are
+                    the Library's controls.
+
+                    Its view tabs, Sort, quick filter and Group by artist are
+                    deliberately NOT here: all four configure ONE flat album
+                    table (which columns, which rows survive a preset, whether
+                    artist headers are drawn), and a page of curated shelves
+                    has no such table — the shelf IS the grouping. Every
+                    setting of them would produce this same page. */}
+                <span title="Cover size">
+                  <Segmented value={gridSize} onChange={pickGridSize} options={GRID_SIZES} />
+                </span>
+                <button
+                  className="btn-ghost !py-1.5 text-xs tap"
+                  onClick={() => setStatsOpen(true)}
+                  title="Statistics for the albums on this page"
+                >
+                  <BarChart3 className="h-3.5 w-3.5" /> Stats
+                </button>
+                <button
+                  className={`btn-ghost !py-1.5 text-xs tap ${selectMode ? "!text-accent !border-accent/50" : ""}`}
+                  onClick={toggleSelectMode}
+                  title="Select mode — show checkboxes for batch actions"
+                >
+                  <ListChecks className="h-3.5 w-3.5" /> Select
+                </button>
+                <button
+                  className="btn-ghost !py-1.5 text-xs tap"
+                  onClick={refresh}
+                  disabled={isFetching}
+                  title={t("home.refresh_title")}
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} /> {t("home.refresh")}
+                </button>
+              </>
             }
           />
         </div>
       </div>
 
+      {/* Home ticks the same albums the Library's batch toolbar acts on (the
+          selection is global), but the actions themselves — play, playlist,
+          trash, scripts, tags, organize — are the Library's toolbar. Saying so
+          is what keeps a tick here from being a dead end. */}
+      {selection.albums.length > 0 && (
+        <div className="flex items-center gap-2 bg-accent/15 border border-accent/40 rounded-lg px-3 py-2 flex-wrap">
+          <span className="text-xs font-medium text-accent-soft">
+            {selection.albums.length} album{selection.albums.length === 1 ? "" : "s"} selected
+          </span>
+          <Link to="/library" className="ml-auto btn-ghost !py-1 text-xs tap">
+            <ListChecks className="h-3.5 w-3.5" /> Act on them in the Library
+          </Link>
+        </div>
+      )}
+
       {/* How much room the library is taking, against what the disk has —
           the first thing a user checks before importing another batch. */}
       <StorageCard />
 
-      <Shelf title={t("home.shelf.recent")} icon={Clock} items={data.recent} />
+      {/* Every shelf draws the shared album card with the page's own options:
+          one cover size, one selection, one checkbox pass — passed once here
+          instead of at each of the seven shelves. (Sort, the preset filter and
+          Group by artist are not among them: see the header.) */}
+
+      <Shelf title={t("home.shelf.recent")} icon={Clock} items={data.recent} {...shelfProps} />
       {/* The one shelf that answers "what am I still waiting for": a pending
           album also rides along where it would otherwise be listed (recent —
           its folder is the newest thing in the library — and its artist's own
@@ -306,23 +328,35 @@ export default function HomePage() {
         icon={Loader2}
         items={data.pending ?? []}
         blurb={t("home.shelf.pending_blurb")}
+        {...shelfProps}
       />
       <Shelf
         title={t("home.shelf.wanted")}
         icon={ArrowDownUp}
         items={data.wanted ?? []}
         blurb={t("home.shelf.wanted_blurb")}
+        {...shelfProps}
       />
-      <Shelf title={t("home.shelf.best")} icon={Star} items={data.top_rated} />
+      <Shelf title={t("home.shelf.best")} icon={Star} items={data.top_rated} {...shelfProps} />
       <Shelf
         title={t("home.shelf.attention")}
         icon={AlertTriangle}
         items={data.needs_attention ?? []}
         blurb={t("home.shelf.attention_blurb")}
+        {...shelfProps}
       />
       <ArtistShelf title={t("home.shelf.artists")} artists={data.top_artists} />
-      <Shelf title={t("home.shelf.rediscover")} icon={Disc3} items={data.discover} />
-      <Shelf title={t("page.favorites")} icon={Heart} items={data.favorites} />
+      <Shelf title={t("home.shelf.rediscover")} icon={Disc3} items={data.discover} {...shelfProps} />
+      <Shelf title={t("page.favorites")} icon={Heart} items={data.favorites} {...shelfProps} />
+
+      {statsOpen && (
+        <StatsPanel
+          title="the albums on this page"
+          albums={shown.albums}
+          tracks={shown.tracks}
+          onClose={() => setStatsOpen(false)}
+        />
+      )}
     </div>
   );
 }

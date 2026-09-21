@@ -27,6 +27,7 @@ Modules:
     format_all  final canonical pass, embedded cover policy (script 10)
     grader      per-album compliance grading
     artistdata  artist artwork + descriptions stored inside the library (script 19)
+    layout      read-only library-layout report, stored under .mlo/data (script 20)
     audit       audio integrity auditing via the AudioAuditor CLI
     cli         interactive console menu
 
@@ -43,6 +44,7 @@ from .cue import run_format_cues
 from .flac import run_optimize_flacs
 from .grader import run_grade_library
 from .images import run_process_images
+from .layout import run_scan_layout
 from .loudness import run_calc_dr_replaygain
 from .lyrics import run_format_lyrics
 from .audit import run_audit_library
@@ -51,14 +53,14 @@ try:
 except ImportError:
     run_format_all = None
 
-__version__ = "3.6.0"
+__version__ = "3.7.0"
 __all__ = [
     "load_config", "save_config", "DEFAULT_CONFIG",
     "run_auto_tagging",
     "run_format_lyrics", "run_format_cues", "run_optimize_flacs",
     "run_grade_library", "run_process_images", "run_audit_library",
     "run_calc_dr_replaygain", "run_format_all",
-    "run_optimize_artist_images",
+    "run_optimize_artist_images", "run_scan_layout",
 ]
 
 

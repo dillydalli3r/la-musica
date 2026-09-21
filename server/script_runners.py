@@ -1,4 +1,4 @@
-"""The 18 library scripts, in one place every caller shares.
+"""The 20 library scripts, in one place every caller shares.
 
 Extracted from ``server/main.py``'s ``RUNNERS`` table so the import pipeline
 (:mod:`server.imports`), the bulk queue and the Soulseek importer run exactly
@@ -20,7 +20,7 @@ import traceback
 from mlo import (
     run_audit_library, run_auto_tagging, run_format_cues, run_format_lyrics,
     run_grade_library, run_optimize_artist_images, run_optimize_flacs,
-    run_process_images,
+    run_process_images, run_scan_layout,
 )
 from mlo import stats as mlo_stats
 from mlo.loudness import run_calc_dr_replaygain
@@ -202,6 +202,16 @@ RUNNERS: dict[int, tuple[str, "callable"]] = {
     # aspect/size (mlo.artistdata's own runner — the same policy the fetch and
     # the grading check use).
     19: ("Optimize artist images", run_optimize_artist_images),
+    # 20 is the ONLY read-only script: it reports the shape of the music
+    # folder and stores that report under <music>/.mlo/data, which is what the
+    # Library page warns from. No force flag — there is nothing to overwrite.
+    20: ("Scan library layout", run_scan_layout),
+    # 21 completes an AcoustID PAIR a file only half carries. That pair is a
+    # grading check of its own (grade_check_acoustid), and no other script
+    # could clear it, so this is the fixer the Grading page's failure points
+    # at. No force flag: its subject IS the incomplete pair, so a file holding
+    # both halves is deliberately left alone.
+    21: ("Fix AcoustID pairs", _optional("mlo.acoustid", "run_fix_pairs")),
 }
 
 # The config key a script's own force flag lives under. `force` may be keyed by
@@ -254,6 +264,12 @@ _DISABLED = {
     16: "mood_enabled",
     17: ("lyrics_xlit_enabled", "lyrics_translate_enabled"),
     18: "lrclib_auto_publish",
+    # 21 writes ACOUSTID_* tags, and the switch is the app's own answer to
+    # "should AcoustID do anything here" — the same one its lookup helper
+    # refuses on. Without it a chain would keep fingerprinting files for a
+    # feature the user turned off (the runner refuses too; this is what makes
+    # the run report say WHY it did nothing).
+    21: "acoustid_enabled",
 }
 
 

@@ -6,7 +6,7 @@ this module:
 
   * generates slskd's YAML config from MLO settings (credentials, profile
     description, listen/web ports, upload/download limits, shares = the
-    music folder, download dir),
+    library folder <music folder>/Artists, download dir),
   * spawns/monitors the process,
   * exposes a thin REST client (search, downloads, transfers, profile).
 
@@ -17,6 +17,7 @@ localhost).
 import json
 import os
 import re
+import socket
 import subprocess
 import threading
 import time
@@ -111,12 +112,27 @@ _RESERVED_SHARE_FILTERS = [
 
 
 def share_dirs(cfg=None):
-    """Folders shared to the Soulseek network (default: the music folder)."""
+    """Folders shared to the Soulseek network (default: the library,
+    `<music folder>/Artists`).
+
+    The default used to be the music folder itself, which published everything
+    the app keeps BESIDE the library: `.mlo` (data, downloads, in-flight
+    partials, trash) and every folder that was dropped into the music folder
+    and never filed by the organizer. The reserved filters covered that by
+    accident — one edited filter entry and the network browses the app's own
+    state. The library root is what "share my library" means: an explicit
+    `soulseek_share_dirs` still wins, and a blank/missing music folder still
+    shares nothing (the audit reports that as unconfigured)."""
     cfg = cfg or load_config()
     dirs = [str(d).strip() for d in (cfg.get("soulseek_share_dirs") or []) if str(d).strip()]
-    music = str(cfg.get("music_folder") or "").strip()
-    if not dirs and music:
-        dirs = [music]
+    if not dirs:
+        music = str(cfg.get("music_folder") or "").strip()
+        # Only ever asked with the folder THIS cfg names: library_root() falls
+        # back to the config file on disk when it is given nothing, and a share
+        # list must describe the config it was handed.
+        root = library_root(music) if music else None
+        if root:
+            dirs = [root]
     return dirs
 
 
@@ -573,18 +589,7 @@ def login_error(cfg=None):
     port it could not bind — and none of it reaches the REST API, so the last
     error/warning line of its (per-start truncated) log is republished
     verbatim. The app must never invent a reason the daemon did not give."""
-    log = os.path.join(os.path.dirname(config_path()), "slskd.log")
-    try:
-        with open(log, "rb") as f:
-            lines = [l.strip() for l in
-                     f.read().decode("utf-8", "replace").splitlines() if l.strip()]
-    except OSError:
-        return ""
-    for line in reversed(lines):
-        if any(lvl in line for lvl in _LOG_LEVELS) and \
-                any(k in line.lower() for k in _LOGIN_KEYS):
-            return line.split("] ", 1)[-1].strip()[:300]
-    return ""
+    return _log_reason(_LOGIN_KEYS)
 
 
 def _options_dirs(cfg=None):
@@ -640,6 +645,8 @@ def start(cfg=None):
             else:
                 _proc["api_key"] = None
                 _proc["started_at"] = time.time()
+                _ensure_portmap_watcher()
+                _portmap_soon(cfg, "adopted slskd")
                 return True, "adopted already-running slskd"
         if why:
             return False, f"cannot start slskd: {why} — stop the other slskd " \
@@ -678,6 +685,12 @@ def start(cfg=None):
         _proc["proc"] = proc
         _proc["api_key"] = api_key
         _proc["started_at"] = time.time()
+        # The listen port is forwarded from here on: in the BACKGROUND, because
+        # a router that answers slowly (or not at all) must never delay — let
+        # alone fail — the client's start, and the same reconciler keeps the
+        # mapping right when the port or the setting changes later.
+        _ensure_portmap_watcher()
+        _portmap_soon(cfg, "slskd start")
         return True, "started"
 
 
@@ -764,6 +777,346 @@ def stop(cfg=None):
     # a client pointing at the old base URL/API key for the next start.
     _close_client()
     return stopped
+
+
+# --------------------------------------------------------------------------- #
+# The listen port: is it forwarded, and is it even usable here?
+# --------------------------------------------------------------------------- #
+# slskd has no UPnP/NAT-PMP of its own (upstream closed the request
+# unimplemented), so the mapping is this app's to make — and to be honest about.
+# A Soulseek client whose listen port is closed looks OFFLINE to the network:
+# peers cannot initiate the download connection, and downloads stall even
+# though search and login work. The mapping is therefore made when the client
+# starts, replaced when the listen port changes, and removed when the setting is
+# turned off — never claimed when a router did not confirm it.
+#
+# Two facts are kept apart on purpose: what the ROUTER was told (mlo.portmap's
+# structured result, in _PORTMAP below) and who holds the port on THIS machine
+# (listen_port_state), because they fail for different reasons and only the
+# second one is visible from inside.
+_PORTMAP_LOCK = threading.Lock()
+_PORTMAP = {
+    "result": None,      # the last structured result from mlo.portmap
+    "port": 0,           # the port that result is about
+    "checked_at": 0.0,   # when it was obtained
+    "in_flight": False,  # an attempt is running right now
+    "reason": "",        # why the last attempt was made
+}
+# How often the watcher re-reads the config. A saved setting never goes through
+# this module, so a changed listen port (or the toggle being turned off) is only
+# visible by reading the config again — a small JSON read, with no network call
+# unless something actually differs.
+_PORTMAP_POLL = 20.0
+_PORTMAP_WATCH = {"thread": None, "stop": threading.Event()}
+# The router may cap a mapping's lease. Re-asking at half the granted lifetime
+# keeps a lease we were told about from expiring unnoticed.
+_PORTMAP_REFRESH_AT = 0.5
+
+
+def _portmap_store(result=None, port=0, reason="", in_flight=False):
+    """Record what the router was told (and about which port)."""
+    with _PORTMAP_LOCK:
+        if result is not None:
+            _PORTMAP["result"] = result
+            _PORTMAP["port"] = int(port or 0)
+            _PORTMAP["checked_at"] = time.time()
+        if reason:
+            _PORTMAP["reason"] = reason
+        _PORTMAP["in_flight"] = bool(in_flight)
+
+
+def _portmap_cfg(cfg=None):
+    """(enabled, listen_port) from the config, defensively read."""
+    cfg = cfg or load_config()
+    return (bool(cfg.get("soulseek_upnp", True)),
+            _int_setting(cfg, "soulseek_listen_port", 50000))
+
+
+def _portmap_expired(result, checked_at):
+    """True when the gateway-granted lease of `result` has run out.
+
+    `checked_at` is when the app ASKED (the result itself carries only the
+    expiry the gateway stated), so the lease length is the difference between
+    the two."""
+    expires = float((result or {}).get("expires_at") or 0.0)
+    if not expires:
+        return False  # no lease was stated: nothing to expire
+    lifetime = max(0.0, expires - float(checked_at or 0.0))
+    return time.time() >= expires - lifetime * (1.0 - _PORTMAP_REFRESH_AT)
+
+
+def _portmap_release(port, reason):
+    """Ask the router to drop a mapping this app made (best effort)."""
+    from mlo import portmap
+    try:
+        return portmap.close_port(port, timeout=3.0)
+    except Exception as e:  # never let a router take the client down with it
+        traceback.print_exc()
+        return {"state": "error", "ok": False, "method": "", "listen_port": port,
+                "detail": f"the mapping of port {port} could not be removed "
+                          f"({e})", "tried": [], "attempts": [], "verified": False,
+                "external_ip": "", "internal_ip": "", "gateway": "",
+                "expires_at": 0.0}
+
+
+def portmap_sync(cfg=None, reason="", force=False):
+    """Make the router's mapping match the config. Never raises.
+
+    `enabled` off removes a mapping this app made; on, it ensures the current
+    listen port is forwarded, replacing the previous port's mapping if it
+    changed (a forward to a port nothing listens on any more is worse than
+    none). Returns the state `portmap_state` reports."""
+    cfg = cfg or load_config()
+    enabled, port = _portmap_cfg(cfg)
+    with _PORTMAP_LOCK:
+        previous = dict(_PORTMAP["result"] or {})
+        previous_port = int(_PORTMAP["port"] or 0)
+        asked_at = float(_PORTMAP["checked_at"] or 0.0)
+        _PORTMAP["in_flight"] = True
+        _PORTMAP["reason"] = reason or _PORTMAP["reason"]
+    try:
+        if not enabled:
+            if previous_port and previous.get("state") == "mapped":
+                _portmap_store(_portmap_release(previous_port, reason), 0, reason)
+            else:
+                # Nothing of ours to remove: say the FEATURE is off, and do not
+                # invent a router answer for a request that was never sent.
+                _portmap_store({"state": "off", "ok": False, "method": "",
+                                "listen_port": port,
+                                "detail": "automatic port opening is switched "
+                                          "off in settings",
+                                "tried": [], "attempts": [], "verified": False,
+                                "external_ip": "", "internal_ip": "", "gateway": "",
+                                "expires_at": 0.0}, 0, reason)
+            return portmap_state(cfg)
+        if previous_port and previous.get("state") == "mapped" and previous_port != port:
+            _portmap_release(previous_port, reason)
+        if (not force and previous.get("state") == "mapped"
+                and previous_port == port
+                and not _portmap_expired(previous, asked_at)):
+            _portmap_store(None, 0, reason)
+            return portmap_state(cfg)
+        if not client_running(cfg):
+            # A forward with nothing listening behind it is not what the user
+            # asked for, so nothing is claimed: the client is simply not up.
+            _portmap_store(None, 0, reason)
+            return portmap_state(cfg)
+        from mlo import portmap
+        result = portmap.open_port(port)
+        _portmap_store(result, port, reason)
+        if not result.get("ok"):
+            # The router's own words (or the network's silence) go to the app
+            # log: a refused mapping is exactly the kind of thing that is
+            # invisible until someone wonders why nobody downloads from them.
+            print(f"[mlo] port mapping: {result.get('detail')}")
+        return portmap_state(cfg)
+    finally:
+        _portmap_store(None, 0, "", in_flight=False)
+
+
+def client_running(cfg=None):
+    """True when an slskd of ours answers (spawned by us, or adopted)."""
+    return is_running() or web_up(cfg)
+
+
+def portmap_state(cfg=None):
+    """What is known about the LISTEN port's router mapping.
+
+    `state` is `mlo.portmap`'s own verdict (`mapped`/`refused`/`no_gateway`/
+    `unsupported`/`error`), or one of this app's own: `off` (the setting is
+    off), `pending` (never attempted since this process started), `checking`
+    (an attempt is running now), `client_down` (nothing to map for). Nothing
+    here is guessed: a mapping is only `mapped` when a router confirmed it."""
+    cfg = cfg or load_config()
+    enabled, port = _portmap_cfg(cfg)
+    with _PORTMAP_LOCK:
+        result = dict(_PORTMAP["result"] or {})
+        checked_at = float(_PORTMAP["checked_at"] or 0.0)
+        in_flight = bool(_PORTMAP["in_flight"])
+        attempted_port = int(_PORTMAP["port"] or 0)
+        reason = str(_PORTMAP["reason"] or "")
+    out = {"enabled": enabled, "listen_port": port, "checked_at": checked_at,
+           "in_flight": in_flight, "reason": reason, "state": "", "detail": "",
+           "method": "", "verified": False, "external_ip": "", "internal_ip": "",
+           "gateway": "", "tried": [], "attempts": [], "mapped_port": attempted_port}
+    if not enabled:
+        out["state"] = "off"
+        out["detail"] = ("Automatic port opening is off — the listen port has to "
+                         "be forwarded on the router by hand.")
+        return out
+    state = str(result.get("state") or "")
+    for key in ("detail", "method", "verified", "external_ip", "internal_ip",
+                "gateway", "tried", "attempts"):
+        out[key] = result.get(key) or out[key]
+    if state == "released":
+        # A mapping this app made was removed and the switch is still on: no
+        # mapping of THIS port is in place yet (the watcher's next pass asks
+        # for one). Reporting that as "off" would claim the feature is
+        # disabled, and as "mapped" would claim a forward nobody confirmed.
+        out["state"] = "pending"
+        out["detail"] = (f"{out['detail']} A mapping of port {port} has not been "
+                         f"made yet.").strip()
+        return out
+    if state in ("mapped", "refused", "no_gateway", "unsupported", "error"):
+        out["state"] = state
+        return out
+    if in_flight:
+        out["state"] = "checking"
+        out["detail"] = "asking the router for the listen port mapping"
+        return out
+    if not client_running(cfg):
+        out["state"] = "client_down"
+        out["detail"] = ("slskd is not running, so the port is not mapped yet — "
+                         "the mapping is made when it starts.")
+        return out
+    out["state"] = "pending"
+    out["detail"] = ("the router has not been asked for a mapping yet in this "
+                     "run of the app.")
+    return out
+
+
+def _portmap_watch():
+    """Re-reconcile the mapping when the listen port or the setting changes."""
+    while not _PORTMAP_WATCH["stop"].is_set():
+        try:
+            portmap_sync(load_config(), reason="watch")
+        except Exception:
+            traceback.print_exc()
+        _PORTMAP_WATCH["stop"].wait(_PORTMAP_POLL)
+
+
+def _ensure_portmap_watcher():
+    """Start the reconciler once, on the first client start of this process."""
+    with _PORTMAP_LOCK:
+        thread = _PORTMAP_WATCH["thread"]
+        if thread is not None and thread.is_alive():
+            return
+        _PORTMAP_WATCH["stop"].clear()
+        _PORTMAP_WATCH["thread"] = threading.Thread(target=_portmap_watch,
+                                                    daemon=True,
+                                                    name="mlo-portmap")
+        _PORTMAP_WATCH["thread"].start()
+
+
+def _portmap_soon(cfg, reason="slskd start"):
+    """Ask the router in the BACKGROUND: a slow or absent router must never hold
+    up the client's start (and slskd starts listening regardless)."""
+    def run():
+        try:
+            portmap_sync(cfg, reason=reason, force=True)
+        except Exception:
+            traceback.print_exc()
+    threading.Thread(target=run, daemon=True, name="mlo-portmap-once").start()
+
+
+def listen_port_state(cfg=None):
+    """The LISTEN port's real state here: who holds it, and what the router
+    was told.
+
+    Bindability is probed FIRST because it is the cheap and decisive test: a
+    port this process can bind is a port nothing holds, so nothing is listening
+    on it either. On Windows a connect to a closed port does not even get a
+    refusal — it sits out the whole timeout — while a bind answers instantly.
+    When the bind fails, a connect tells the two remaining cases apart: a
+    listener ACCEPTS (that is what peers need, and with an slskd of ours running
+    it is the daemon [INFERENCE — the app cannot see whose socket it is]; with
+    no slskd running it is another program, which is exactly the conflict the
+    web port already reports), and a port that is held without accepting (a
+    socket left in TIME_WAIT by a previous run, or another bound socket) fails
+    the connect."""
+    cfg = cfg or load_config()
+    port = _int_setting(cfg, "soulseek_listen_port", 50000)
+    ours = client_running(cfg)
+    out = {"listen_port": port, "listening": False, "holder": "",
+           "bindable": None, "conflict": None, "error": "",
+           "mapping": portmap_state(cfg)}
+    free, why = _port_bindable(port)
+    out["bindable"] = free
+    if free:
+        if ours:
+            # slskd runs and the port is unheld: nothing is listening there, and
+            # the daemon's own log line (listen_port_error) is the only place
+            # that failure is ever explained — this app does not invent a cause.
+            out["error"] = (f"slskd is running but nothing is listening on the "
+                            f"Soulseek listen port {port}")
+        return out
+    if _port_accepts(port):
+        out["listening"] = True
+        out["holder"] = "slskd" if ours else "another program"
+        if not ours:
+            out["conflict"] = (f"another program is listening on the Soulseek "
+                               f"listen port {port} — slskd cannot use it while "
+                               f"that program runs")
+    else:
+        out["error"] = (f"port {port} cannot be bound on this machine right now "
+                        f"({why}) — slskd will fail to listen on it until "
+                        f"whatever holds the port is released")
+    return out
+
+
+def _port_bindable(port):
+    """Can this machine bind the LISTEN port? -> (free, reason it is not)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind(("", port))
+        return True, ""
+    except OSError as e:
+        return False, f"{e.strerror or e}"
+    finally:
+        sock.close()
+
+
+def _port_accepts(port):
+    """Does something LISTEN on the port (a TCP connect is accepted)?"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(0.25)
+    try:
+        sock.connect(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def port_status_payload(cfg=None):
+    """The LISTEN port's state for the status route / share audit: what this
+    machine does with the port (and who holds it) plus what the router was told.
+
+    `slskd_error` is the daemon's OWN line about a port it could not use — the
+    only place that failure is explained, since slskd reports nothing about the
+    listener over REST."""
+    cfg = cfg or load_config()
+    state = listen_port_state(cfg)
+    state["slskd_error"] = listen_port_error()
+    return state
+
+
+# slskd's own words for a listen port it could not use. Matched narrowly —
+# ERR/WRN level AND one of these words — because republishing an unrelated line
+# as the reason would be worse than saying nothing.
+_PORT_ERROR_KEYS = ("listen", "bind", "address already in use", "socket address")
+
+
+def listen_port_error():
+    """slskd's own last word about a listen port ("" when it said nothing)."""
+    return _log_reason(_PORT_ERROR_KEYS)
+
+
+def _log_reason(keys):
+    """The last ERR/WRN line of slskd's log mentioning any of *keys*."""
+    log = os.path.join(os.path.dirname(config_path()), "slskd.log")
+    try:
+        with open(log, "rb") as f:
+            lines = [l.strip() for l in
+                     f.read().decode("utf-8", "replace").splitlines() if l.strip()]
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        if any(lvl in line for lvl in _LOG_LEVELS) and \
+                any(k in line.lower() for k in keys):
+            return line.split("] ", 1)[-1].strip()[:300]
+    return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -1860,8 +2213,10 @@ def share_audit(cfg=None, probe=False):
         "disk": {"roots": [], "audio_files": 0, "truncated": False,
                  "probe_file": ""},
         "browse": {"checked": False, "ok": None, "directories": 0, "detail": ""},
-        "port": {"listen_port": _int_setting(cfg, "soulseek_listen_port", 50000),
-                 "container": False},
+        # The LISTEN port as it really is here: whether anything accepts on it,
+        # who holds it, and what the router was told (see listen_port_state).
+        # `container` is filled in once the daemon has answered below.
+        "port": dict(port_status_payload(cfg), container=False),
         "running": False,
     }
 
@@ -1956,8 +2311,9 @@ def share_audit(cfg=None, probe=False):
 
     if not entries:
         add("unconfigured", "no_share_dir", "No shared folder is configured.",
-            "Add the music folder in the list above (or set the music folder in "
-            "Settings) — without one slskd shares nothing.")
+            "The library folder (<music folder>/Artists) is what gets shared by "
+            "default, so set the music folder in Settings — or name the folders "
+            "to share in the list above. Without one slskd shares nothing.")
         return finish()
 
     # ---- the disk: what is there to share at all -------------------------- #
@@ -1969,7 +2325,8 @@ def share_audit(cfg=None, probe=False):
             add("path_unreadable", "share_missing",
                 f"{path} does not exist — slskd logs a warning and shares "
                 f"nothing from there.",
-                "Point the shared folder at the folder the music is actually in.")
+                "Point the shared folder at the folder the music is actually in "
+                "(the library defaults to <music folder>/Artists).")
         else:
             try:
                 with os.scandir(path) as it:
@@ -2016,6 +2373,32 @@ def share_audit(cfg=None, probe=False):
              "over the Soulseek listen port, which has to be published by "
              "docker-compose.yml (ports: \"<port>:<port>\") to the same port "
              "configured here.")
+    # The listen port is what a peer connects BACK to in order to download from
+    # this share: a client whose port is closed looks offline to the network
+    # even while search, login and the share index all work. Every case below is
+    # a fact read off this machine or off the router — nothing is inferred from
+    # intent, and a mapping nobody confirmed is never reported as one.
+    port_state = audit["port"]
+    if port_state["conflict"]:
+        note(f"{port_state['conflict']}.")
+    elif port_state["error"]:
+        note(f"{port_state['error']}.")
+    elif not port_state["listening"]:
+        note(f"Nothing is accepting connections on the Soulseek listen port "
+             f"{port_state['listen_port']}.")
+    mapping = port_state["mapping"]
+    if mapping["enabled"] and mapping["state"] in ("refused", "no_gateway",
+                                                   "unsupported", "error"):
+        note(f"Peers cannot connect back to this client: {mapping['detail']} "
+             f"Forward the listen port on the router (or check it on the "
+             f"Soulseek page) — an unforwarded listener cannot be reached from "
+             f"outside.")
+    elif mapping["enabled"] and mapping["state"] == "mapped":
+        note(mapping["detail"] + f" (automatic port opening, port "
+                                 f"{mapping['listen_port']}).")
+    if not mapping["enabled"]:
+        note("Automatic port opening is off — the listen port has to be "
+             "forwarded on the router by hand for peers to reach this client.")
 
     live = live_share_state(cfg)
     if live is None:

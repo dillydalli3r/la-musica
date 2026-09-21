@@ -268,6 +268,23 @@ export interface LayoutReport {
   audio_files: number;
 }
 
+/** The report the LAST layout scan stored under `<music>/.mlo/data` — what
+ *  the Library page warns from, so the warning costs no walk of the library.
+ *
+ *  `exists` is false until a scan has run (`report`/`scanned_at` are then
+ *  null): a warning must never stand in for a scan that did not happen.
+ *  `scanned_at` is when it ran (UTC, ISO); `music_folder` is the folder it
+ *  looked at, and `stale` says that folder is NOT the one configured now, so
+ *  nothing may be claimed from the report. Age alone is not staleness — see
+ *  mlo/layout.py: only a fresh walk could tell whether the folder changed. */
+export interface LayoutSnapshot {
+  exists: boolean;
+  scanned_at: string | null;
+  music_folder: string | null;
+  stale: boolean;
+  report: LayoutReport | null;
+}
+
 /** One cover-art provider the musichoarders meta-search can query. */
 export interface CoverSource {
   id: string;
@@ -877,40 +894,31 @@ export interface HomeArtist {
   cover: string | null;
 }
 
-export interface HomeAlbum {
-  /** Library path when owned, else "" (recommendation). */
-  path: string;
-  album: string;
-  artist: string;
-  year?: string | null;
-  cover: string | null;
+/** One Home shelf row: the LIBRARY's own album row plus the shelf's reason for
+ *  listing it (`server.recommendations._owned_row`). Home draws the shared
+ *  album card — the same card the Library grid draws — so the row IS the
+ *  library row: the card reads its tracks, `meta`, media, grade and audit off
+ *  it, and the framework album's marker rides along as it does in the library
+ *  payload.
+ *
+ *  A row the library does NOT hold (`owned: false` — a Soulseek wish, or a
+ *  favourite whose folder moved away) carries identity only: the title, artist
+ *  and year it is known by in `meta`, an empty track list, and nothing that
+ *  reads as a grade. The card draws those without a status dot, a play button
+ *  or a link. */
+export type HomeAlbum = Album & {
+  /** Why this shelf lists it ("Recently added", "Rediscover", …). */
   reason?: string;
-  /** A FRAMEWORK album on a shelf: added to the library before its audio
-   *  arrived. Present (true) only while it waits — a complete album carries
-   *  none of these keys, so `pending` is the whole test a card needs. The
-   *  block is the library row's own (`server/recommendations._owned_row`),
-   *  so a Home card says exactly what the album's library row says. */
-  pending?: boolean;
-  pending_reason?: string;
-  wish_id?: number | null;
-  wish?: AlbumWish | null;
+  /** False for a release the library does not hold (see above). Absent on the
+   *  shelves' library rows. */
+  owned?: boolean;
+  /** The shelf's own artist display name (ALBUMARTIST → album_artist →
+   *  ARTIST), the field the Library's flattened rows carry too. */
+  artist?: string;
   mbid?: string | null;
   /** MusicBrainz entity type behind `mbid` — "rg" (release group) or "release". */
   mb_kind?: string;
-  grade_pct?: number | null;
-  owned?: boolean;
-  /** Which discovery provider produced the row ("deezer", "listenbrainz", …).
-   *  Absent for owned-library shelves. */
-  source?: string;
-  /** Provider popularity, already formatted ("82k fans", "287k listens"). */
-  popularity_label?: string | null;
-  /** Raw provider popularity, for sorting. */
-  popularity?: number | null;
-  /** Provider catalogue id behind the row. */
-  deezer_id?: number | null;
-  /** Remote artwork URL — `cover` is the local cover file. */
-  cover_url?: string | null;
-}
+};
 
 /* ---------------------------------------------------------------------- *
  * Discovery — provider chain (server/discovery.py)                        *

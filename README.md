@@ -1,6 +1,6 @@
 # la musica
 
-**v3.6.0** — a self-hosted app that *manages, optimizes, audits, grades and
+**v3.7.0** — a self-hosted app that *manages, optimizes, audits, grades and
 plays* your music library, from the browser, a desktop window or a phone.
 
 **la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a
@@ -12,7 +12,7 @@ client whose auto-importer verifies what it downloaded. All app state — config
 playlists, favourites, the beets library, the Soulseek config, measured loudness,
 caches — lives in one hidden `.mlo` folder inside your music directory.
 
-Release notes for this version are in `local/release-notes-3.6.0.md` (older ones
+Release notes for this version are in `local/release-notes-3.7.0.md` (older ones
 follow `local/release-notes-<version>.md`); the grading and optimization contract
 is in [`docs/OPTIMIZATION-GRADING-SPEC.md`](docs/OPTIMIZATION-GRADING-SPEC.md).
 
@@ -155,7 +155,7 @@ whether or not the row is hovered: a favourite is a state, not an action.
 The top search bar searches the library (with
 `composer:`, `person:`, `genre:` and `tag:` prefixes) or MusicBrainz, and
 `/mb/search` is a full in-app MusicBrainz browser (artists, release groups,
-releases, recordings) with *Auto-import* and wishlist actions. Entity pages carry
+releases, recordings) with *Auto-import* and *Add to library* actions. Entity pages carry
 grading and auditing detail, MusicBrainz + RateYourMusic links, cover
 upload/search, Wikipedia descriptions, manual tag editing, a lyrics editor, and a
 **Credits** view built from MusicBrainz `artist-rels` (falling back to the file's
@@ -195,7 +195,7 @@ albums/artists/tracks switch. Every row names its source, whether you already ow
 it, and what else holds it; each source's outcome is shown as a chip — *0
 answered*, *skipped: needs a key*, *failed: the provider's own words* — never
 swallowed. Owned rows open the real page; everything else offers **Add to
-library**, which queues a wish and searches for its audio. **RECOMMENDED
+library**, which adds it to the queue and starts searching for its audio at once. **RECOMMENDED
 (ONLINE)** takes a seed (the whole library, one of its genres, or the album /
 artist / track page it sits on) and explains its basis on screen — the online
 half of the pair of shelves an album, artist or track page shows, whose
@@ -210,7 +210,7 @@ its own words, never hidden.
 **WATCHED ARTISTS** keeps a MusicBrainz artist under watch: policy (`new_only` /
 `backfill`), the release types worth taking, an allow/never list of specific
 releases, a per-cycle cap and auto-add. Each check queues a few release groups
-into the wish queue — never a discography — and the page reports real scheduling
+into the download queue — never a discography — and the page reports real scheduling
 ("last check 3h ago (12 total) · next in 34m", or plainly that nothing is
 scheduled yet). Watches inherit the whole acquisition chain below.
 
@@ -248,10 +248,12 @@ pair the files already carry to AcoustID's database — a two-press confirm, and
 it needs `acoustid_user_key` (a *user* key from the same account; the
 application key can only look up). The wizard's eight steps are **Select & separate → Links → Match → Covers →
 Genres → Lyrics → Advisory → Finish**, and *Finish* can run the import chain or
-the whole `run_all_order` over that album. The **import script chain** then runs (default `import_scripts`, i.e.
-`DEFAULT_CHAIN`: 11 → 3 → 14 → 15 → 2 → 1 → 13 → 18 → 8 → 5 → 6 → 7 → 9 → 12 →
-10 → 4); `import_auto_scripts` turns it off, and the chain only ever *fills* a
-tag, so what you typed in the wizard survives. **Bulk import** queues several
+the whole `run_all_order` over that album. The **import script chain** then runs
+(default `import_scripts`, i.e. `DEFAULT_CHAIN`, which *is* `run_all_order` —
+one list, in `mlo/config.py`, so a script added to Run All can never be missing
+from an import); `import_auto_scripts` turns it off, `import_scripts` replaces it
+outright, and the chain only ever *fills* a tag, so what you typed in the wizard
+survives. **Bulk import** queues several
 albums with `import_bulk_concurrency` (2 by default, 1–8).
 
 The **Advisory** step resolves `ITUNESADVISORY` from every applicable source —
@@ -260,12 +262,17 @@ MusicBrainz holds for its recording), Apple's explicit-edition album route and
 Apple's exact-title song search — merged so explicit anywhere wins, and derives
 `ALBUMITUNESADVISORY` from the per-track values with script 8's own rule (the
 *Fetch advisory rating* action derives it too, so a manual fetch never leaves
-the album tag stale). Per source the STRONGEST answer wins — every ISRC is
-asked, so a later pressing's explicit answer is not lost to an earlier clean
-one — and a provider-stated 0 can still be escalated to 1 by the word-reading
-stages (the configured AI, then the multilingual scan), whose source says so
-(`lyrics-scan (escalated)`). Each track's value names the provider behind it;
-a track no source could state anything about is not invented — `mlo/advisory.py`
+the album tag stale). The configured AI provider is one of those sources: it is
+asked once for every track (when `advisory_ai_classify` is on) and its answer is
+ranked with the providers' by the same rule, so an AI `1` overrules a stated `0`
+or `2` while a stated `1` survives whatever it says — and it only overrules one
+when it actually read the track's words. Per source the STRONGEST answer wins —
+every ISRC is asked, so a later pressing's explicit answer is not lost to an
+earlier clean one — and a provider-stated 0 can still be escalated to 1 by a
+word-reading stage (the configured AI, then the multilingual scan), whose source
+says so (`lyrics-scan (escalated)`). Each track's value names the source behind
+it, and the reply carries every answer it weighed beside it; a track no source
+could state anything about is not invented — `mlo/advisory.py`
 decides (instrumental → configured AI → the multilingual lyrics scan →
 `advisory_fallback`) and reports the stage it used. A routine fetch never
 re-asks a track that already holds 0/1/2: it reports the value back with its
@@ -276,10 +283,11 @@ tags answer to their own switches:
 `advisory_auto_fetch` for the per-track rating, *Auto Album Advisory*
 (`auto_advisory`) for the album tag script 8 derives.
 
-### Soulseek & wishes
+### Soulseek & the download queue
 
-A managed slskd instance (autostart, shares = the music folder, a share rescan
-scheduled whenever the library changes), with search & download UI, a live status
+A managed slskd instance (autostart, shares = the library folder
+`<music>/Artists`, a share rescan scheduled whenever the library changes), with
+search & download UI, a live status
 dot, share browsing, bulk and whole-user downloads, transfer-level clearing and
 staging management (`GET /api/soulseek/staging`). The **auto-importer** searches
 each release by what can only point at THAT release: a physical pressing (CD
@@ -295,20 +303,43 @@ whose titles are in another locale opens extra searches using its MusicBrainz
 aliases in the configured `beets_locale` (`ぴーなた` → `pinata`). It gates a CD
 candidate on its rip log *before* requesting any album byte
 (`soulseek_auto_log_min_score`, default 100), ranks candidates towards the copy
-that arrives fastest, verifies completeness (`soulseek_auto_complete_ratio`) and
-losslessness, and cleans up everything a rejected candidate left behind. A
-**wish** records a MusicBrainz release without downloading anything; a background
-worker re-searches every open wish on `wishes_interval_hours` (default 6) and
-imports a verified copy, flipping the wish to **Imported**. *Import all completed*
+that arrives fastest — lossless first, then the match score, then the peer's own
+advertised speed and queue — and downloads up to **three** candidates of one
+release at once: the first that passes the same verification becomes the import
+and the others are cancelled and swept, so a peer that stalls does not cost the
+whole album. It verifies completeness (`soulseek_auto_complete_ratio`) and
+losslessness, and cleans up everything a rejected candidate left behind.
+
+Adding a release to the library **starts its search immediately** and puts it on
+the **download queue**, which is the one surface for wanted releases: a row shows
+what the search is doing, and the durable behaviour behind it (re-searching on
+`wishes_interval_hours`, default 6, with retry backoff) keeps looking **until the
+release is found or the user cancels it** — a release nobody is sharing this week
+is not abandoned. A release that already failed is not re-attempted on the next
+pass: the retry decision comes from the recorded attempt and backoff state. When
+the import lands, the downloaded copy is deleted
+(`soulseek_clear_downloads`, ON — the import MOVES the album into the library, so
+the download dir is only staging; a failed import keeps its files so its retry
+does not download them again), and a terminal failure removes the framework album
+the add created. *Import all completed*
 imports every finished download **sequentially**, with cancel finishing the album
 in flight (`GET /api/soulseek/import-all/status`).
 
-### Optimization — the 19 scripts
+The **listen port** is opened on the router by the app itself
+(`soulseek_upnp`, ON): slskd has no UPnP/NAT-PMP option — upstream closed the
+request unimplemented — so `mlo/portmap.py` does it, trying UPnP IGD first and
+NAT-PMP behind it. A mapping is only reported as made when the gateway confirms
+it, and the Soulseek page says which of the two answered (or the router's own
+words when it refuses) instead of only writing a port number into slskd's
+config.
+
+### Optimization — the 21 scripts
 
 Optimization → *Run All* executes `run_all_order`, shipped as **11 → 3 → 14 → 15
-→ 2 → 1 → 13 → 18 → 17 → 8 → 5 → 19 → 6 → 7 → 9 → 12 → 16 → 10 → 4** — everything
-that moves a file first, everything that reads it last. Every script also runs on
-its own, on a selection, or with its force flag from the *Re-run & overwrite* menu.
+→ 2 → 1 → 13 → 18 → 17 → 8 → 5 → 19 → 6 → 7 → 9 → 12 → 16 → 10 → 20 → 21 → 4** —
+everything that moves a file first, everything that reads it last. Every script
+also runs on its own, on a selection, or with its force flag from the *Re-run &
+overwrite* menu.
 
 | # | Script | What it does |
 | --- | --- | --- |
@@ -331,6 +362,8 @@ its own, on a selection, or with its force flag from the *Re-run & overwrite* me
 | 17 | Lyrics transliterate (AI) | `TRANSLITERATION-<LANG>-LATN` / `TRANSLATION-<LANG>` tags and sidecars, re-synced at `lrc_sync_level` |
 | 18 | Publish lyrics (LRCLIB) | Submits this library's lyrics for recordings LRCLIB does not have (`lrclib_auto_publish`, `force_publish`) |
 | 19 | Optimize artist images | Crops `Artists/<Artist>/artist.*` to `artist_image_aspect`, downscales to `artist_image_target_size` (never upscales, and back to the size it recorded writing when a file was enlarged afterwards), re-encodes as `artist.jpg`/`artist.png` |
+| 20 | Scan library layout | Read-only walk of the whole music folder: audio loose in the root or in an artist folder, unexpected folders, empty albums, stray files, names whose letter case differs from `naming_script`. Writes `.mlo/data/layout_report.json` (`scanned_at` included) — the Library page's warning and the Optimization panel's report read it instead of walking again. Moves nothing |
+| 21 | Fix AcoustID pairs | Completes a half-written AcoustID pair: an `ACOUSTID_ID` with no `ACOUSTID_FINGERPRINT` gets the local `fpcalc` fingerprint, a fingerprint with no id gets the lookup. Both halves present (or none) is left alone — it is the fixer for the grading failure *Missing ACOUSTID_FINGERPRINT (incomplete AcoustID pair)*, and it writes only the half that is missing |
 
 Force flags, one per script: `force_lyrics`, `force_cue`, `force_tracklist`,
 `force_reencode_flac`, `force_reencode_images`, `force_audit`, `force_accurip`,
@@ -338,7 +371,8 @@ Force flags, one per script: `force_lyrics`, `force_cue`, `force_tracklist`,
 `force_xlit`, `force_publish`. Scripts whose feature has its own off switch are
 skipped rather than run as no-ops: `dr_replaygain_enabled` (7),
 `audiometa_enabled` (12), `mood_enabled` (16), `lyrics_xlit_enabled` /
-`lyrics_translate_enabled` (17), `lrclib_auto_publish` (18).
+`lyrics_translate_enabled` (17), `lrclib_auto_publish` (18),
+`acoustid_enabled` (21).
 
 By default the optimizer does **not** embed cover art — it removes it, and
 covers live on disk as `cover.*` plus per-track sidecars; Settings → *Embedded
@@ -484,7 +518,7 @@ and the GHCR image.
 python -m mlo
 ```
 
-That is the classic console menu — scripts 1–19, Run All, the config editor and
+That is the classic console menu — scripts 1–21, Run All, the config editor and
 the dependency table. It is **not** stdlib-only: `mlo` imports `mutagen` for
 every tag operation, so run it from the same environment that has
 `server/requirements.txt` installed (script 14 additionally needs
@@ -595,10 +629,10 @@ Where the app stores what it fetches (all under `<music>/.mlo/`):
 | `GET /api/library` | tag-rich library tree (grades, audits, tags, tech info; gzipped) |
 | `GET /api/health` `GET /api/version` | liveness (`status`, `version`); `{version, latest, update_available, release_url, checked_at, source}` cached 6 h, `latest: null` when GitHub is unreachable — a container reports its image's `MLO_VERSION` |
 | `GET /api/auth/status`, `POST /api/auth/setup` `…/login` `…/logout` `…/password` `…/revoke-all`, `GET …/sessions`, `GET/POST /api/auth/users`, `DELETE …/{name}` | the gate's state (`required`, `has_password`, `username`, `host`, `public_url`, `session_days`); first-run password, sign in (optional `username`), sign out, change, revoke everywhere, session count, user management |
-| `GET /api/library/layout` | read-only layout scan (misplaced audio, stray files, empty albums, `wrong_case`); `GET /api/home` and `GET /api/recommend` back the Home shelves and **Recommended (Local)** |
+| `GET /api/library/layout`, `GET /api/library/layout/report` | read-only layout scan (misplaced audio, stray files, empty albums, `wrong_case`); the same scan as a script (20) plus the last one stored under `.mlo/data` (`scanned_at`, stale when it describes another music folder); `GET /api/home` and `GET /api/recommend` back the Home shelves and **Recommended (Local)** |
 | `GET /api/storage` | one disk snapshot for the Home card: the volume, the library, the **app's own footprint** (`app_total` = state + bin + transfers + tools, with `dependencies` measured where it lives), the bin and the transfer folders — every figure the OS refused is `null`, never 0 |
 | `GET /api/album` `GET /api/artist` `GET /api/artist/artwork`, `GET /api/stream` `GET /api/videos/stream` `GET /api/videos/meta` `GET /api/videos/thumb` | entity details, stored artist image/description + provenance and the artist's own grade; audio/video streaming (Range; `?transcode=1`), codec probe, scrub frames |
-| `GET /api/tags` `POST /api/tags/bulk` `…/videos/tag`, `POST /api/run`, `POST /api/organize` | per-track tag read view; bulk tag surgery; video tag writes; run scripts 1–19; apply the naming script (dry-run supported) |
+| `GET /api/tags` `POST /api/tags/bulk` `…/videos/tag`, `POST /api/run`, `POST /api/organize` | per-track tag read view; bulk tag surgery; video tag writes; run scripts 1–21; apply the naming script (dry-run supported) |
 | `POST /api/export`, `GET /api/export/codecs` `…/drives` `…/defaults` | multi-format export plus its codec table, drives and saved defaults |
 | `GET/POST/PATCH/DELETE /api/wishes…`, `POST /api/wishes/{id}/search` `…/search-all` `…/reconcile` `…/import` | the wishlist and its worker |
 | `GET /api/sources/health` `…/{id}`, `GET /api/capabilities`, `GET /api/dependencies` | every external source with its `needs`/`configured` state (`?probe=1`); what this server can run; the tool table with installed/pinned/upstream versions |

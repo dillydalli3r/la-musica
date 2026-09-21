@@ -947,6 +947,59 @@ def _converted_twin(ref_base, album_dir, audio):
     return siblings[0]
 
 
+def _cue_disc_audio(cue_name, discs):
+    """The disc a cue sheet belongs to, and that disc's audio files.
+
+    A FILE reference numbered like a track only means something against the
+    audio of the sheet's OWN disc, so the disc mapping is the app's own
+    (`album_discs`) and the disc comes from the sheet's name ("CD-1.cue") —
+    the same reading `rename_cues_for_discs` and `grade_album_logs` use.
+
+    The caller owns the lone-cue fallback (a folder with no D-TT structure
+    and one sheet is one disc, so it hands in a synthetic mapping); an empty
+    mapping here means there is no disc evidence, and a number is then read
+    against nothing rather than against every file in the folder. A sheet
+    naming a disc this album does not have reads against nothing too:
+    (None, []) — never another disc's audio.
+    """
+    d = _log_name_disc(cue_name)
+    if d is not None:
+        return (d, list(discs[d])) if d in discs else (None, [])
+    if len(discs) == 1:
+        only = next(iter(discs))
+        return only, list(discs[only])
+    return None, []
+
+
+def _ref_track_numbers(ref_base, disc):
+    """Track numbers a cue FILE reference can name on *disc*, best first.
+
+    A reference is written either "TT - Title.ext" (track first — what EAC
+    writes) or "D-TT Title.ext" (the library's own name), and the two are
+    identical text when the title itself starts with a number: "09 - 36.wav"
+    on disc 1 is its ninth track, titled "36", while `_track_num_of` reads
+    that very text as disc 09 / track 36 — one library's every reference left
+    unrepaired because of it.
+
+    The leading number is the track. Only when it IS this disc's number can
+    the text also be this disc's own D-TT name, and then that reading is
+    tried first ("2-05 x" on disc 2 is track 5) before the track-first one
+    ("02 - 36" on disc 2 is track 2, titled "36"). The number after the dash
+    is never offered otherwise: it belongs to the title far more often than
+    to a second track, and offering it would leave a disc carrying both
+    tracks 09 and 36 unrepaired.
+    """
+    base = _ascii_dashes(os.path.basename(ref_base))
+    m = re.match(r"^(\d{1,3})\s*[-._\s]\s*(\d{1,3})?", base)
+    if not m:
+        return []
+    lead = int(m.group(1))
+    second = int(m.group(2)) if m.group(2) else None
+    if second is not None and lead == disc:
+        return [second, lead]
+    return [lead]
+
+
 # One cue at a time: a conversion (script 3) fixes the sheet from several
 # worker threads as it walks an album's files, and two writers computing
 # different texts for the same sheet would let the last one win with a
@@ -966,7 +1019,14 @@ def fix_cue_filenames(album_dir, log_fn=None, config=None):
          tracks of one album folder (single-cue sanity); or
       2. the referenced file exists but a conversion left exactly one
          same-stem twin under another extension — the file the library
-         actually holds (see _converted_twin).
+         actually holds (see _converted_twin); or
+      3. the referenced file does not exist and its number identifies
+         exactly one track OF THE DISC THIS CUE BELONGS TO — the app's own
+         disc mapping, so "09 - 36.wav" in CD-1.cue finds disc 1's ninth
+         track without reading the title as a track 36 (see
+         _ref_track_numbers); or
+      4. the sheet is a single-image sheet (one FILE line for the whole
+         disc) and that disc holds exactly one audio file.
     Ambiguous or missing matches are left untouched and reported.
 
     Returns a list of note strings describing every change.
@@ -987,6 +1047,16 @@ def _fix_cue_filenames_locked(album_dir, log_fn, config):
     audio = [f for f in sorted(os.listdir(album_dir)) if is_audio_file(f)]
     if not audio:
         return notes
+
+    # The app's own disc mapping, for reading a FILE reference's number as a
+    # track. A folder with no D-TT structure and a single cue is still one
+    # disc — the same fallback rename_cues_for_discs uses — so that folder
+    # gets a synthetic mapping and its references can be read as that disc's
+    # tracks; with more than one cue and no mapping there is no disc to read
+    # them against, and the rules below simply do not apply.
+    discs = album_discs(album_dir)
+    if not discs and len(cues) == 1:
+        discs = {1: [os.path.join(album_dir, f) for f in audio]}
 
     # Lookup tables over real files.
     exact = {f.lower(): f for f in audio}
@@ -1014,6 +1084,22 @@ def _fix_cue_filenames_locked(album_dir, log_fn, config):
             # corrupt the sheet on the write-back below.
             text = raw.decode("latin-1")
         lines = text.splitlines(keepends=True)
+
+        # Which disc this sheet describes, and which files of the folder are
+        # that disc's. A rewritten reference is a name in this folder, so the
+        # per-disc table is keyed by basename.
+        cue_disc, disc_audio = _cue_disc_audio(cue, discs)
+        disc_audio = [os.path.basename(p) for p in disc_audio]
+        disc_nums = {}
+        for f in disc_audio:
+            n = _track_num_of(f)
+            if n is not None:
+                disc_nums.setdefault(n, []).append(f)
+        # One FILE line for the whole disc: the sheet names the disc's image,
+        # not a track, so a number can never resolve it.
+        single_image = (len(disc_audio) == 1
+                        and sum(1 for ln in lines
+                                if CUE_FILE_RE.match(ln.rstrip("\n"))) == 1)
 
         changed = False
         out_lines = []
@@ -1058,6 +1144,18 @@ def _fix_cue_filenames_locked(album_dir, log_fn, config):
                     c2 = nums.get(tn, [])
                     if len(c2) == 1:
                         candidates = c2
+            if candidates is None and cue_disc is not None:
+                # 3) the reference's number as a track of THIS cue's disc
+                #    (the number alone is ambiguous — see _ref_track_numbers)
+                for n in _ref_track_numbers(ref_base, cue_disc):
+                    c3 = disc_nums.get(n, [])
+                    if len(c3) == 1:
+                        candidates = c3
+                        break
+                if candidates is None and single_image:
+                    # 4) one FILE line for the whole disc, and the disc holds
+                    #    one file: that file IS the audio the sheet names.
+                    candidates = list(disc_audio)
             if candidates:
                 actual = candidates[0]
                 # Keep any directory part of the original reference.
@@ -1216,6 +1314,13 @@ def check_log_checksum(log_path):
     return 'unsupported' so callers can treat them as PASS when the toggle is
     on (avoids false-failing XLD collections). A log that claims a checksum
     but fails verification returns 'invalid'.
+
+    "Older EAC" is read off the log's OWN header: a version below 1.0 (the
+    release the checksum arrived in, same boundary as the line above) is
+    'unsupported' — nothing claimed, nothing refuted, exactly like XLD. The
+    version is never guessed from the log's date, and a 1.x log whose
+    checksum line is gone stays 'missing': that is a log edited after EAC
+    signed it, which is the one signal this check exists to raise.
     """
     try:
         if not log_path or not os.path.isfile(log_path):
@@ -1237,6 +1342,17 @@ def check_log_checksum(log_path):
         # Log claims a checksum?
         has_line = bool(re.search(r"====\s*Log checksum\s+[0-9A-Fa-f]+\s*====", txt))
         if not has_line:
+            # A version that never wrote the line cannot be missing it: EAC
+            # added the checksum in 1.0, so a 0.99-era log is 'unsupported'
+            # (the spec's "older EAC logs pass") instead of FAKE — that
+            # verdict failed every track of an honest 2008 rip. Read from the
+            # header only: a 1.x log with the line deleted keeps failing.
+            m_ver = re.search(r"Exact Audio Copy\s+v?(\d+)\.(\d+)", txt,
+                              re.IGNORECASE)
+            if m_ver and (int(m_ver.group(1)), int(m_ver.group(2))) < (1, 0):
+                return ("unsupported",
+                        f"EAC {m_ver.group(1)}.{m_ver.group(2)} predates "
+                        f"log checksums")
             return ("missing", "no 'Log checksum' line")
         if not HAS_EAC_CHECKER or eac_logchecker is None:
             # Fallback to Logchecker PHP if eac-logchecker not installed

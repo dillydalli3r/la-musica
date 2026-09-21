@@ -25,7 +25,7 @@ import type {
 } from "../types";
 import { SCRIPTS, DEFAULT_RUN_ALL, SCRIPT_LABEL, isScriptId } from "../lib/scripts";
 import { fmtCounts, fmtSteps } from "../lib/fmt";
-import { GENRE_COUNT_MAX, GENRE_FAMILIES, familyOf, splitGenres } from "../lib/genres";
+import { GENRE_COUNT_MAX, GENRE_FAMILIES, canonicalGenre, familyOf, splitGenres } from "../lib/genres";
 
 const STEPS = ["Select & separate", "Links", "Match", "Covers", "Genres", "Lyrics", "Advisory", "Finish"];
 
@@ -362,9 +362,9 @@ export default function ImportWizard() {
   const [release, setRelease] = useState<MBRelease | null>(null);
   const [releaseId, setReleaseId] = useState("");
   const [suggestions, setSuggestions] = useState<MatchSuggestion[]>([]);
-  // Per-track genre LIST (specific genres first, the derived family last) —
-  // a track's GENRE tag is repeated fields, so a joined string here would
-  // collapse three genres into one tag on save.
+  // Per-track genre LIST (the derived family first, the specific genres after
+  // it) — a track's GENRE tag is repeated fields, so a joined string here
+  // would collapse three genres into one tag on save.
   const [genres, setGenres] = useState<Record<string, string[]>>({});
   const [discGenres, setDiscGenres] = useState<Record<number, string>>({});
   const [genreAddValues, setGenreAddValues] = useState<Record<string, string>>({});
@@ -1812,6 +1812,16 @@ export default function ImportWizard() {
 
   const genreList = (path: string): string[] => genres[path] ?? [];
 
+  /** A list in the order the app WRITES it: the family first, the specific
+   *  genres after it (`mlo.genres.normalize_genres`, and the slots the
+   *  grader's GENRE_ORDER check reads). A list typed or read in another order
+   *  is put right here, so the chips, the written tag and the grade all
+   *  describe one order. */
+  const familyFirst = (list: string[]): string[] => {
+    const family = list.find((g) => GENRE_FAMILIES[g.toLowerCase()]);
+    return family ? [family, ...list.filter((g) => g !== family)] : list;
+  };
+
   /** Every genre currently on ANY track, with how many tracks carry it, most
    *  common first — the album-wide cleanup control renders one chip per entry. */
   const allGenres = useMemo(() => {
@@ -1822,6 +1832,38 @@ export default function ImportWizard() {
     return [...m.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stepTracks, genres]);
+
+  /** What the last source run wrote, as this app renders any genre list: one
+   *  name per chip, deduped on the spelling the server canonicalises to, the
+   *  family in the FIRST slot the write puts it in. The run report used to
+   *  print the album-wide union as one comma-joined line, which read as a
+   *  single genre. */
+  const jobGenres = useMemo(() => {
+    const byName = new Map<string, string>();
+    for (const raw of genreJobResult?.genres ?? []) {
+      for (const g of splitGenres(raw)) {
+        const key = canonicalGenre(g);
+        if (key && !byName.has(key)) byName.set(key, g);
+      }
+    }
+    const names = [...byName.values()];
+    // `familyOf` reads a list's first slot, so ask it one name at a time — the
+    // union arrives in whatever order the sources answered in.
+    const family = names.find((g) => familyOf([g]));
+    return family ? [family, ...names.filter((g) => g !== family)] : names;
+  }, [genreJobResult]);
+  /** The family chip of that report: the first slot, by construction above. */
+  const jobFamily = familyOf(jobGenres);
+  /** The per-source half of the report: one row per source that answered, its
+   *  own names as chips beside it — the names used to be a `title` only, so
+   *  they were invisible on the page. */
+  const genreSourceRows = useMemo(
+    () =>
+      Object.entries(genreJobResult?.per_source ?? {})
+        .filter(([, names]) => names.length)
+        .map(([name, names]) => [name, splitGenres(names.join("; "))] as const),
+    [genreJobResult]
+  );
 
   const setGenreList = (path: string, list: string[]) =>
     setGenres((g) => ({ ...g, [path]: list }));
@@ -1854,7 +1896,7 @@ export default function ImportWizard() {
     if (!paths.length) return;
     setGenres((g) => {
       const next = { ...g };
-      for (const p of paths) next[p] = splitGenres(value).slice(0, genreCap);
+      for (const p of paths) next[p] = familyFirst(splitGenres(value)).slice(0, genreCap);
       return next;
     });
     setDiscGenres((m) => ({ ...m, [disc]: "" }));
@@ -1885,10 +1927,13 @@ export default function ImportWizard() {
     try {
       // GENRE goes as a LIST, so the server writes one field per name. Sent as
       // the joined string it used to be, every genre list became ONE tag
-      // literally named "shoegaze; rock". The family is not sent: the server
-      // derives it (mlo.genres.normalize_genres) when it writes.
+      // literally named "shoegaze; rock". The family is not added here — the
+      // server derives it (mlo.genres.normalize_genres) — but every list goes
+      // in the order that write produces: the family first, then the
+      // specifics, which is what the grader's GENRE_ORDER check reads.
       const writes: Record<string, Record<string, string | string[] | null>> = {};
-      for (const [p, list] of Object.entries(genres)) writes[p] = { GENRE: list.length ? list : null };
+      for (const [p, list] of Object.entries(genres))
+        writes[p] = { GENRE: list.length ? familyFirst(list) : null };
       await api.mbAssign(writes, staged);
       toast("Genres saved");
       setStep(5);
@@ -2282,22 +2327,26 @@ export default function ImportWizard() {
     }
   };
 
-  // The post-import chain comes from lib/scripts.ts — the single source of
-  // truth every other script menu in the app already uses. This was an
+  // The Done step's script list comes from lib/scripts.ts — the single source
+  // of truth every other script menu in the app already uses. This was an
   // 8-entry list hardcoded here, and it silently drifted: AccurateRip, Format
-  // all, Remux videos, Key & BPM, Fetch lyrics and Beets were all
-  // missing, so "Run all scripts" ran 8 of the 14 that exist.
-  const POST_IMPORT_DEFAULT_ON = new Set([1, 2, 5, 7, 4]);
-  const POST_IMPORT_SCRIPTS = SCRIPTS.map((s) => ({
-    id: s.ids[0],
-    label: s.label,
-    defaultOn: POST_IMPORT_DEFAULT_ON.has(s.ids[0]),
-  }));
-const [runAfterImport, setRunAfterImport] = useState<number[]>(
-  POST_IMPORT_SCRIPTS.filter((s) => s.defaultOn).map((s) => s.id)
-);
-const [scriptsRunning, setScriptsRunning] = useState(false);
-const [runningAll, setRunningAll] = useState(false);
+  // all, Remux videos, Key & BPM, Fetch lyrics and Beets were all missing.
+  // The default ticks were a hand-kept five of their own ([1, 2, 5, 7, 4]),
+  // which is neither the set nor the ORDER any other Run All surface uses —
+  // Done then ran Grade (4) before the scripts that write the tags it grades.
+  // They are now the app's own run order: run_all_order when the user set one,
+  // DEFAULT_RUN_ALL otherwise — the same list, in the same order, the
+  // Optimization page and the library's Run All run.
+  const postImportOrder = Array.isArray(cfg?.run_all_order) && (cfg.run_all_order as number[]).length
+    ? (cfg.run_all_order as number[]).filter(isScriptId)
+    : DEFAULT_RUN_ALL;
+  const POST_IMPORT_SCRIPTS = SCRIPTS.map((s) => ({ id: s.ids[0], label: s.label }));
+  // Null = the boxes have not been touched, so they follow the configured
+  // order — which the config answers only after the first render.
+  const [runAfterImport, setRunAfterImport] = useState<number[] | null>(null);
+  const runAfterImportIds = runAfterImport ?? postImportOrder;
+  const [scriptsRunning, setScriptsRunning] = useState(false);
+  const [runningAll, setRunningAll] = useState(false);
 // Last action's outcome, shown in the step: a toast is gone by the time you
 // look back at a chain that took a minute to run.
 const [finishMsg, setFinishMsg] = useState<string | null>(null);
@@ -2441,8 +2490,8 @@ const finish = async () => {
     // Same targets as the chain: an album opened via ?album= is just as real
     // an import, it simply has nothing "uploaded".
     const targets = albumTargets();
-    if (runAfterImport.length && targets.length) {
-      await api.run(runAfterImport, targets);
+    if (runAfterImportIds.length && targets.length) {
+      await api.run(runAfterImportIds, targets);
     }
   } catch (e) {
     toast.error(String(e));
@@ -2544,9 +2593,13 @@ const finish = async () => {
     ? uploaded
     : albums.filter((g) => g.files.length).map((g) => ({ name: g.name.trim() || "Album", path: "" }));
   const hasRipFiles = albums.some((g) => g.files.some((f) => /\.(cue|log|accurip)$/i.test(f.relPath)));
+  // What step 0 is about to import: the staged files, every album named. The
+  // later steps open on it too — a step past the first needs an album.
+  const albumsReady =
+    totalFiles > 0 && albums.length > 0 && albums.every((g) => g.name.trim() || g.files.length === 0);
   const canNext =
     step === 0
-      ? totalFiles > 0 && albums.length > 0 && albums.every((g) => g.name.trim() || g.files.length === 0)
+      ? albumsReady
       : step === 1
         ? !!(releaseId || extractMbid(mbLink))
         : true;
@@ -2563,6 +2616,21 @@ const finish = async () => {
     if (step === 1) return "Enter a MusicBrainz release URL or ID first";
     return null;
   })();
+
+  /** Why a step ahead of the current one is not a jump yet: the data its body
+   *  reads is not there, and the jump would land on an empty form (step 3
+   *  renders nothing at all without an album, step 2 only a "no data" line).
+   *  The steps behind the current one are never gated — they were walked. */
+  const stepGate = (i: number): string | null => {
+    if (i <= step) return null;
+    if (i === 1 && !albumPath && !albumsReady)
+      return "Add the album's files on the first step first";
+    if (i === 2 && !release && !suggestions.length)
+      return "Fetch the MusicBrainz release on the Links step first";
+    if (i >= 3 && !albumPath)
+      return "Import the album first — these steps read and write the files on disk";
+    return null;
+  };
 
   // Manual importing is off (Settings → Import pipeline): every importing
   // /api/import/* call answers 409 with this same sentence, so the wizard says
@@ -2662,26 +2730,37 @@ const finish = async () => {
         </div>
       )}
 
-      {/* step indicator */}
+      {/* step indicator — every step is a jump, in both directions, like the
+          setup wizard's own rail. The strip used to swallow a forward click
+          (`i < step && setStep(i)`), which reads as a dead button; a step
+          whose body needs data that is not there yet stays disabled and says
+          what it is waiting for, so a jump never lands on an empty form. */}
       <div className="flex items-center gap-1.5 overflow-x-auto">
-        {STEPS.map((s, i) => (
-          <div key={s} className="flex items-center gap-1.5 shrink-0">
-            <button
-              onClick={() => i < step && setStep(i)}
-              className={`flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs tap transition-colors ${
-                i === step
-                  ? "bg-accent on-accent"
-                  : i < step
-                    ? "bg-accent/10 text-accent-soft hover:bg-accent/20"
-                    : "bg-raise text-zinc-500 border border-border"
-              }`}
-            >
-              {i < step ? <Check className="h-3 w-3" /> : <span>{i + 1}</span>}
-              {s}
-            </button>
-            {i < STEPS.length - 1 && <div className="h-px w-3 bg-border" />}
-          </div>
-        ))}
+        {STEPS.map((s, i) => {
+          const waiting = stepGate(i);
+          return (
+            <div key={s} className="flex items-center gap-1.5 shrink-0">
+              <button
+                onClick={() => setStep(i)}
+                disabled={busy || !!waiting}
+                title={waiting ?? undefined}
+                className={`flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs tap transition-colors ${
+                  i === step
+                    ? "bg-accent on-accent"
+                    : i < step
+                      ? "bg-accent/10 text-accent-soft hover:bg-accent/20"
+                      : waiting
+                        ? "bg-raise text-zinc-600 border border-border opacity-60 cursor-not-allowed"
+                        : "bg-raise text-zinc-400 border border-border hover:text-white"
+                }`}
+              >
+                {i < step ? <Check className="h-3 w-3" /> : <span>{i + 1}</span>}
+                {s}
+              </button>
+              {i < STEPS.length - 1 && <div className="h-px w-3 bg-border" />}
+            </div>
+          );
+        })}
       </div>
 
       {/* ---- what this album is still missing -----------------------------
@@ -3672,10 +3751,31 @@ const finish = async () => {
               <div className="panel px-3 py-2 space-y-1" role="status">
                 <div className="text-xs text-zinc-300">
                   {genreJobResult.updated} track(s) updated
-                  {genreJobResult.genres.length
-                    ? ` — ${genreJobResult.genres.join(", ")}`
-                    : " — no genres returned"}
+                  {jobGenres.length ? "" : " — no genres returned"}
                 </div>
+                {/* What the run wrote, one chip per name with the family first
+                    — the order the write puts it in. This printed the union as
+                    one comma-joined line in the sources' own spelling, so
+                    three genres read as one name. */}
+                {jobGenres.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {jobGenres.map((g) => (
+                      <span
+                        key={g}
+                        className={
+                          g === jobFamily
+                            ? "chip bg-raise border border-border text-zinc-400"
+                            : "chip bg-accent/10 text-accent-soft border border-accent/25"
+                        }
+                      >
+                        {g === jobFamily && (
+                          <span className="text-[9px] uppercase tracking-wider text-zinc-600">family</span>
+                        )}
+                        {g}
+                      </span>
+                    ))}
+                  </div>
+                )}
                 {/* The cap these genres were written and trimmed to, so the
                     value is visible where the genres are, not only in Settings
                     → Import (`mb_genre_count`). */}
@@ -3684,15 +3784,23 @@ const finish = async () => {
                   {genreJobResult.trimmed > 0 &&
                     ` — ${genreJobResult.trimmed} track(s) trimmed to ${genreJobResult.genre_count}`}
                 </div>
-                {Object.entries(genreJobResult.per_source).filter(([, names]) => names.length).length > 0 && (
-                  <div className="flex flex-wrap gap-1.5">
-                    {Object.entries(genreJobResult.per_source)
-                      .filter(([, names]) => names.length)
-                      .map(([name, names]) => (
-                        <span key={name} className="chip bg-raise border border-border text-zinc-300" title={names.join(", ")}>
+                {/* What each source answered, its own names beside it — the
+                    count says how many, the names were a `title` only and so
+                    unreadable on the page. */}
+                {genreSourceRows.length > 0 && (
+                  <div className="space-y-1">
+                    {genreSourceRows.map(([name, names]) => (
+                      <div key={name} className="flex flex-wrap items-center gap-1.5">
+                        <span className="chip bg-raise border border-border text-zinc-400 shrink-0">
                           {name} <span className="tabular-nums">{names.length}</span>
                         </span>
-                      ))}
+                        {names.map((n) => (
+                          <span key={n} className="chip bg-raise border border-border text-zinc-300">
+                            {n}
+                          </span>
+                        ))}
+                      </div>
+                    ))}
                   </div>
                 )}
                 {Object.entries(genreJobResult.notes).length > 0 && (
@@ -3708,8 +3816,8 @@ const finish = async () => {
             )}
             <span className="text-xs text-zinc-500 -mt-1 block">
               Genres are not fetched automatically — set the per-track limit, then ask MusicBrainz, RateYourMusic, or both.
-              The app writes the specific genres first and derives the family (rock, electronic…) into the last slot:
-              at most {genreCap} genre value{genreCap === 1 ? "" : "s"} per track (Settings → Import).
+              The app derives the family (rock, electronic…) from the specific genres and writes it in the first slot,
+              the specific genres after it: at most {genreCap} genre value{genreCap === 1 ? "" : "s"} per track (Settings → Import).
             </span>
           </MinBlock>
           <MinBlock min={minMode} here={missingHere} mine="genres">
@@ -3798,25 +3906,15 @@ const finish = async () => {
                       <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
                       <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
                       <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                        {list.filter((x) => x !== family).map((gen) => (
-                          <span key={gen} className="chip bg-accent/10 text-accent-soft border border-accent/25">
-                            {gen}
-                            <button
-                              className="hover:text-white transition-colors"
-                              onClick={() => removeGenre(t.path, gen)}
-                              title={`Remove ${gen}`}
-                            >
-                              <X className="h-3 w-3" />
-                            </button>
-                          </span>
-                        ))}
                         {family ? (
                           // The family's own slot: it is DERIVED from the
-                          // specific genre and written last, so it is labelled
-                          // rather than shown as one more name to edit.
+                          // specific genre and written FIRST — the slot the
+                          // grader's GENRE_ORDER check reads — so it is
+                          // labelled and rendered first rather than shown as
+                          // one more name to edit.
                           <span
                             className="chip bg-raise border border-border text-zinc-400"
-                            title={`${family} is the family — the app derives it from the specific genre and writes it last`}
+                            title={`${family} is the family — the app derives it from the specific genre and writes it in the first slot`}
                           >
                             <span className="text-[9px] uppercase tracking-wider text-zinc-600">family</span>
                             {family}
@@ -3838,6 +3936,18 @@ const finish = async () => {
                             </span>
                           )
                         )}
+                        {list.filter((x) => x !== family).map((gen) => (
+                          <span key={gen} className="chip bg-accent/10 text-accent-soft border border-accent/25">
+                            {gen}
+                            <button
+                              className="hover:text-white transition-colors"
+                              onClick={() => removeGenre(t.path, gen)}
+                              title={`Remove ${gen}`}
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </span>
+                        ))}
                         <input
                           className={`input !w-36 !py-1 text-xs tap${unknown ? " !border-amber-700" : ""}`}
                           list="wizard-genres"
@@ -4173,9 +4283,12 @@ const finish = async () => {
                 <label key={s.id} className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none">
                   <input
                     type="checkbox"
-                    checked={runAfterImport.includes(s.id)}
+                    checked={runAfterImportIds.includes(s.id)}
                     onChange={(e) =>
-                      setRunAfterImport((ids) => (e.target.checked ? [...ids, s.id] : ids.filter((i) => i !== s.id)))
+                      setRunAfterImport((ids) => {
+                        const current = ids ?? postImportOrder;
+                        return e.target.checked ? [...current, s.id] : current.filter((i) => i !== s.id);
+                      })
                     }
                   />
                   {s.label}
@@ -4183,7 +4296,9 @@ const finish = async () => {
               ))}
             </div>
             <div className="text-[10px] text-zinc-600 mt-2">
-              Progress shows at the top of the window. Scripts can also be run individually anytime from the album page.
+              Ticked by default in your Run All order (Settings → Script chain) — the same scripts, in the same
+              order, the Optimization page and the library's Run All run. Progress shows at the top of the window.
+              Scripts can also be run individually anytime from the album page.
             </div>
             <div className="flex items-center gap-2 mt-3 flex-wrap">
               <button

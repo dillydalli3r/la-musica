@@ -620,6 +620,70 @@ check("write_tags never raises at a caller",
       acoustid.write_tags(None, "r", "f")["ok"] is False)
 
 # --------------------------------------------------------------------------- #
+# run_fix_pairs: an incomplete pair is COMPLETED from evidence, never guessed
+# --------------------------------------------------------------------------- #
+FIX_DIR = os.path.join(ALBUM, "fix-pairs")
+ID_ONLY = make_wav(os.path.join(FIX_DIR, "01 - id only.wav"))
+FP_ONLY = make_wav(os.path.join(FIX_DIR, "02 - fp only.wav"))
+COMPLETE = make_wav(os.path.join(FIX_DIR, "03 - complete.wav"))
+NO_TAGS = make_wav(os.path.join(FIX_DIR, "04 - no tags.wav"))
+
+
+def tag(path, **values):
+    """Put tags on a file the way the app's writers do (one save)."""
+    af = AudioFile(path)
+    af.defer_save(True)
+    for name, value in values.items():
+        af.set_tag(name, value)
+    af.defer_save(False)
+
+
+tag(ID_ONLY, ACOUSTID_ID="rec-tag-only")
+tag(FP_ONLY, ACOUSTID_FINGERPRINT="AQABstored")
+tag(COMPLETE, ACOUSTID_ID="rec-both", ACOUSTID_FINGERPRINT="AQABboth")
+
+# fpcalc is stubbed: what `fingerprint` does with a missing exe, a too-short
+# track or no audio is pinned above — this section is about WHICH half of the
+# pair is completed from what.
+acoustid.fpcalc_path = lambda cfg=None: mine
+acoustid.run_tool = lambda *a, **k: _R(0, '{"duration": 30.0, "fingerprint": "AQABlocal"}')
+
+FIX_CFG = {"targets": [FIX_DIR], "music_folder": ALBUM,
+           "acoustid_enabled": True, "acoustid_api_key": ""}
+acoustid.lookup = real_lookup
+stats = acoustid.run_fix_pairs(dict(FIX_CFG))
+check("an id-only track is completed from the audio, with no key and no network",
+      AudioFile(ID_ONLY).get_tag("ACOUSTID_FINGERPRINT") == "AQABlocal"
+      and AudioFile(ID_ONLY).get_tag("ACOUSTID_ID") == "rec-tag-only")
+check("…and counted as modified", stats["modified_count"] == 1)
+check("a file already carrying both halves is unchanged",
+      stats["unchanged_count"] == 1)
+check("a file carrying neither is not this pass's business",
+      stats["skipped_count"] == 1)
+check("every audio file in the target is scanned", stats["total_scanned"] == 4)
+check("the half that cannot be looked up is counted and NAMED",
+      stats["error_count"] == 1 and len(stats["errors"]) == 1
+      and "02 - fp only.wav" in stats["errors"][0]
+      and "no API key" in stats["errors"][0])
+check("…and no id was invented for it",
+      not str(AudioFile(FP_ONLY).get_tag("ACOUSTID_ID") or "").strip())
+
+# With a key, the id half is completed from the identity the lookup RETURNS,
+# written together with the fingerprint that identity was matched from.
+acoustid.lookup = stub_lookup({
+    "02 - fp only.wav": [cand_row(RG_A, "rec-looked-up", "T", 0.95)]})
+stats = acoustid.run_fix_pairs(dict(FIX_CFG, acoustid_api_key="gh5HwBPwmAs"))
+af = AudioFile(FP_ONLY)
+check("a fingerprint-only track gets the id the lookup returned",
+      af.get_tag("ACOUSTID_ID") == "rec-looked-up")
+check("…as a pair, with the fingerprint that identity was matched from",
+      af.get_tag("ACOUSTID_FINGERPRINT") == "AQAB")
+check("…and the run reports one completed pair, no failures",
+      stats["modified_count"] == 1 and stats["error_count"] == 0
+      and stats["skipped_count"] == 1)
+acoustid.lookup = real_lookup
+
+# --------------------------------------------------------------------------- #
 # applying a match the caller ALREADY has: no fpcalc, no lookup
 # --------------------------------------------------------------------------- #
 from server import imports as imports_mod  # noqa: E402

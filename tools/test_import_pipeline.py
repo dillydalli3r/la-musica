@@ -31,7 +31,7 @@ import wave
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mlo import paths as mlo_paths
-from mlo.config import load_config
+from mlo.config import DEFAULT_RUN_ALL_ORDER, load_config
 from server import imports, script_runners
 
 ROOT = tempfile.mkdtemp(prefix="mlo_import_pipeline_")
@@ -75,8 +75,22 @@ CFG = {"music_folder": MF, "import_auto_scripts": False, "import_scripts": [],
 # Path-changing scripts first (11 videos → 3 FLACs → 14 beets, which moves),
 # then the sidecar namers that must see final audio names (15 manifest → 2
 # CUEs → 1 lyrics format), then content, then 10 Format all, then 4 Grade.
-assert imports.DEFAULT_CHAIN == [11, 3, 14, 15, 2, 1, 13, 18, 8, 5, 6, 7, 9, 12, 10, 4], \
+# The chain IS the Run All order — one list, in `mlo.config` — minus the
+# library-wide scripts it declares (`LIBRARY_WIDE_SCRIPTS`): a script added to
+# Run All can never be silently missing from the import path again. Three were
+# (16 Mood & Energy, 17 Lyrics transliterate (AI), 19 Optimize artist images:
+# Run All ran them, an import never did), which is what this assertion now
+# catches — and the ONLY thing an import leaves out is the one script whose
+# runner walks the whole music folder instead of the album it is handed.
+assert imports.DEFAULT_CHAIN == [sid for sid in DEFAULT_RUN_ALL_ORDER
+                                 if sid not in imports.LIBRARY_WIDE_SCRIPTS], \
     imports.DEFAULT_CHAIN
+assert imports.LIBRARY_WIDE_SCRIPTS == (20,), imports.LIBRARY_WIDE_SCRIPTS
+assert set(DEFAULT_RUN_ALL_ORDER) - set(imports.DEFAULT_CHAIN) == {20}, \
+    set(DEFAULT_RUN_ALL_ORDER) - set(imports.DEFAULT_CHAIN)
+for _sid in (16, 17, 19):
+    assert _sid in imports.DEFAULT_CHAIN, \
+        f"script {_sid} must be reached by an import, not only by Run All"
 assert imports.chain_for({}) == imports.DEFAULT_CHAIN
 assert imports.chain_for({"import_auto_scripts": True, "import_scripts": []}) \
     == imports.DEFAULT_CHAIN
@@ -92,7 +106,7 @@ assert imports.chain_for({"import_auto_scripts": False}) == []
 # --------------------------------------------------------------------------- #
 # Registry + one script
 # --------------------------------------------------------------------------- #
-assert sorted(script_runners.RUNNERS) == list(range(1, 20)), sorted(script_runners.RUNNERS)
+assert sorted(script_runners.RUNNERS) == list(range(1, 22)), sorted(script_runners.RUNNERS)
 assert script_runners.RUNNERS[2][0] == "Format CUEs", script_runners.RUNNERS[2]
 assert script_runners.RUNNERS[2][1].__name__ == "run_format_cues", script_runners.RUNNERS[2]
 assert all(label for label, _ in script_runners.RUNNERS.values())
