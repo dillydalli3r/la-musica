@@ -151,7 +151,10 @@ def current():
 
     The inner call of a job must never queue behind its own outer call: the
     import pipeline holds the album it is importing and then organizes it, and
-    both happen in one context.
+    both happen in one context. (A harness that drives the app IN-PROCESS — a
+    TestClient — hands its own context to the request it makes, so a job held
+    there is inherited by that request; a real client arrives with a context of
+    its own.)
     """
     stack = _active.get()
     return stack[-1] if stack else None

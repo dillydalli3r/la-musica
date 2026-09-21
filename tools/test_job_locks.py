@@ -16,13 +16,18 @@ is using what; these checks pin the rules it enforces:
     waiter (an import) gets in as soon as the holder finishes;
   * a raise inside the block releases everything — nothing is left locked —
     and a timed-out wait is a refusal, not a hang;
-  * an async route (a cover write) keeps its hold across its await.
+  * an async route (a cover write) keeps its hold across its await, and two
+    concurrent async requests on one event loop are two jobs — the second is
+    refused, not joined;
+  * a claim handed to a background worker (:func:`in_background`) outlives the
+    block that started it — an import returns while its chain is still writing,
+    and the album stays locked until that chain ends.
 
 Over HTTP, through the real app and a temp library, each route that changes
-library files is driven twice — once while a foreign job holds what it claims
-(409) and once when it is free (it proceeds): tag writes, album remove,
-organize (dry runs exempt), cover upload / download / clear, the lyrics
-sidecar, beets, export, the album ingest and the downloads import.
+library files is driven twice — once while a foreign job on another thread
+holds what it claims (409) and once when it is free (it proceeds): tag writes,
+album remove, organize (dry runs exempt), cover upload / download / clear, the
+lyrics sidecar, beets, export, the album ingest and the downloads import.
 
 No network, no ffmpeg, no real audio: the paths are plain files in a temp
 library, and the one script runner is a stub.
