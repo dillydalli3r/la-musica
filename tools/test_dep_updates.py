@@ -372,7 +372,13 @@ if fetchdeps.installable("oxipng"):
         def _extract(archive, dest_dir, log):
             payload = os.path.join(dest_dir, "payload")
             os.makedirs(payload, exist_ok=True)
-            open(os.path.join(payload, "oxipng.exe"), "wb").close()
+            # The installer checks the installed folder against THIS host's own
+            # binary names (`oxipng.exe` on Windows, `oxipng` on Linux — see
+            # fetchdeps.LINUX_BINARIES), so the stub lands both: the suite runs
+            # on either platform, and a Windows-only name made it fail on the
+            # Linux runners with "Installed folder is missing: oxipng".
+            for name in ("oxipng.exe", "oxipng"):
+                open(os.path.join(payload, name), "wb").close()
 
         def _refuse(*a, **k):
             raise AssertionError("a copy that is not behind was re-downloaded")
@@ -391,7 +397,8 @@ if fetchdeps.installable("oxipng"):
             check(f"...from the newest release, not the pin ({seen.get('urls')})",
                   seen.get("urls") == ["https://example.invalid/" + asset])
             check("...into a folder stamped with the new version",
-                  os.path.isfile(os.path.join(tmp, "oxipng v10.2.1", "oxipng.exe")))
+                  any(os.path.isfile(os.path.join(tmp, "oxipng v10.2.1", n))
+                      for n in ("oxipng.exe", "oxipng")))
 
             # A copy NEWER than the newest release (a hand-pulled build, or a
             # release upstream yanked): an update must leave it alone.
