@@ -30,6 +30,9 @@ import os
 import threading
 import time
 import traceback
+from urllib.parse import quote
+
+from server import imports
 
 _lock = threading.RLock()
 _stop = threading.Event()
@@ -40,7 +43,8 @@ _job = {
     "total": 0,
     "done": 0,
     "current": None,     # album path being processed
-    "results": [],       # [{path, ok, error, album_root}]
+    "results": [],       # [{path, ok, error, album_root, chained, chain_off,
+                         #   chain, scripts, note}] — see _run
     "errors": [],
     "started_at": 0.0,
     "finished_at": 0.0,
@@ -122,6 +126,33 @@ def start(paths=None, on_done=None):
         return {"ok": True, "status": status()}
 
 
+def _chain_of(res):
+    """The ``finish_album`` result inside an importer's own result, or ``{}``.
+
+    ``server.main._import_one_album`` puts it under ``"chain"`` — ``None`` when
+    the chain was handed to a background thread (the one-click route), in which
+    case there is no outcome to report yet and the row says exactly that
+    instead of claiming one.
+    """
+    chain = (res or {}).get("chain")
+    return chain if isinstance(chain, dict) else {}
+
+
+def _run_note(entries):
+    """What the run's albums' chains did, in one line for the notification.
+
+    The album's own line when the run was a single album (that is the case a
+    notification links to an album page), a tally otherwise."""
+    if not entries:
+        return ""
+    if len(entries) == 1:
+        return str(entries[0].get("note") or "")
+    chained = sum(1 for e in entries if e.get("chained"))
+    off = sum(1 for e in entries if e.get("chain_off") and not e.get("chained"))
+    note = f"{chained} of {len(entries)} albums ran the configured script chain"
+    return note + (f"; {off} have no chain configured" if off else "")
+
+
 def _run(work, on_done=None):
     """The worker: one album fully through the import, then the next."""
     from server import events
@@ -149,17 +180,44 @@ def _run(work, on_done=None):
                     job_locks.set_progress(job, index - 1, len(work),
                                            f"importing {name}")
                     res = _importer(path) or {}
+                chain = _chain_of(res)
                 ok = not res.get("errors")
+                error = "; ".join(str(x) for x in (res.get("errors") or []))
+                if ok and chain and not chain.get("scripts") \
+                        and not chain.get("chain_off") \
+                        and not res.get("chain_started"):
+                    # The album landed but its configured chain never ran (the
+                    # library lock timed out, a crash): the same rule the bulk
+                    # queue applies — "imported" is only honest when the chain
+                    # ran, or when this library configures none.
+                    ok = False
+                    error = ("imported, but the script chain did not run: "
+                             + (imports.chain_summary(chain) or "no reason reported"))
                 job_locks.set_progress(job, index, len(work), name)
             except Exception as e:
                 traceback.print_exc()
                 res = {"path": path, "errors": [str(e)]}
+                chain = {}
                 ok = False
+                error = str(e)
             entry = {
                 "path": path,
                 "ok": bool(ok),
                 "album_root": res.get("album_root") or path,
-                "error": "; ".join(str(x) for x in (res.get("errors") or [])) or "",
+                "error": error,
+                # What the chain did with this album, on the row: which scripts
+                # ran, what failed, or that there was nothing to run. The queue
+                # view reads these; so does anything reporting the run.
+                "chained": bool(chain.get("chained")),
+                "chain_off": bool(chain.get("chain_off")),
+                "chain": list(chain.get("chain") or []),
+                "scripts": [{"id": s.get("id"), "label": s.get("label"),
+                             "error": str(s.get("error") or "")}
+                            for s in (chain.get("scripts") or [])
+                            if isinstance(s, dict)],
+                "note": imports.chain_summary(chain) if chain else (
+                    "the script chain is running in the background"
+                    if res.get("chain_started") else ""),
             }
             mine.append(entry)
             with _lock:
@@ -185,14 +243,28 @@ def _run(work, on_done=None):
             traceback.print_exc()
     try:
         if imported:
+            # The subject of "imported 3 albums": the album itself when the run
+            # was exactly one (its own page), the library otherwise. Quoted the
+            # way the UI quotes a path into a route, so the tray can navigate
+            # with it verbatim.
+            only = str(mine[0].get("album_root") or "") if len(mine) == 1 else ""
+            note = _run_note(mine)
             events.emit(
                 "download_done",
                 f"Imported {imported} album" + ("s" if imported != 1 else ""),
                 (f"{failed} failed" if failed else "all done")
-                + f" — {imported} of {total} finished downloading and imported",
+                + f" — {imported} of {total} finished downloading and imported"
+                + (f". {note[0].upper()}{note[1:]}." if note else ""),
+                {"link": f"/album/{quote(only, safe='')}" if only else "/library",
+                 "album_path": only.replace("\\", "/"),
+                 "imported": imported, "failed": failed, "note": note},
             )
         elif failed:
+            # Nothing was imported: the downloads are still waiting, so the
+            # wizard (which lists them) is the page to send the user to.
             events.emit("download_done", "Import finished with errors",
-                        f"{failed} of {total} album(s) could not be imported")
+                        f"{failed} of {total} album(s) could not be imported",
+                        {"link": "/import",
+                         "errors": [str(e)[:300] for e in (_job["errors"] or [])[:3]]})
     except Exception:
         pass

@@ -9,10 +9,10 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 
-from mlo.stats import _find_albums, worker_count
+from mlo.stats import _find_albums, worker_count, WALK_FILES
 from mlo.grader import _empty_folder_result, _find_empty_folders, _grade_album
 from mlo.audio import AudioFile
-from mlo.paths import (LIB_VIDEO_EXTS, load_expected_tracks,
+from mlo.paths import (LIB_VIDEO_EXTS, load_expected_tracks, load_pending,
                        load_track_covers, _album_file, SIDECAR_COVER_EXTS)
 from server import tagcache
 
@@ -34,6 +34,11 @@ TRACK_TAGS = [
     # MOOD/ENERGY (script 8 or 16) ride along so the track page and the
     # `tag:MOOD` / `tag:ENERGY` columns show the pair without a second read.
     "MOOD", "ENERGY",
+    # RATING is the user's own star rating (half-stars, `server/ratings.py`) and
+    # BPM/INITIALKEY are script 12's analysis values: the library browser's
+    # query engine filters on all three, so they have to reach the payload the
+    # browser filters — three more cached tag reads per track, no extra decode.
+    "RATING", "BPM", "INITIALKEY",
     # read on every track so _album_meta can lift the album-level value
     "ALBUM DYNAMIC RANGE",
 ]
@@ -279,6 +284,10 @@ def build_album(album_dir, cfg, light=False):
         _enrich_track(tr, album_dir, cover_for)
     res["meta"] = _album_meta(album_dir, res.get("tracks", []))
     _add_expected_tracks(res, album_dir)
+    # Every row carries the flag, so no reader has to treat "absent" as a case
+    # of its own. A folder whose audio HAS arrived is a normal album: the
+    # import that filled it cleared the framework marker on its way through.
+    res["pending"] = False
     res["artwork"] = _album_artwork(album_dir, light=light)
     tc = res.get("total_checks", 0)
     res["grade_pct"] = round(100.0 * res.get("pass_count", 0) / tc, 1) if tc else None
@@ -306,6 +315,60 @@ def _empty_album_row(folder, root):
     row["grade_pct"] = 0.0
     row["pass"] = False
     row["audit_summary"] = None
+    return row
+
+
+def _pending_album_row(folder, root):
+    """Library row for a FRAMEWORK album (see ``server.pending_albums``): the
+    folder "Add to library" created before any audio arrived.
+
+    The folder is in the library the second it is asked for, so it is listed —
+    with the two things that must never lie: ``track_count`` is 0 (there is no
+    file on disk to play) and ``pending`` says why the album is here and empty.
+    The track list the album page renders comes from the release manifest the
+    framework album was created with, so the page greys out exactly the tracks
+    the search is still filling, and the placeholder cover is the album's cover
+    until the import writes a real one.
+    """
+    row = _empty_folder_result(folder, root)
+    info = load_pending(folder) or {}
+    row["path"] = row["path"].replace("\\", "/")
+    # Nothing was graded — the empty-folder row's single failed check would
+    # report a deliberately audio-less placeholder as a broken album.
+    row["total_checks"] = 0
+    row["pass_count"] = 0
+    row["issues"] = {}
+    row["grade_pct"] = None
+    row["pass"] = False
+    row["audit_summary"] = None
+    row["pending"] = True
+    row["pending_reason"] = str(info.get("waiting_for") or "")
+    row["wish_id"] = info.get("wish_id")
+    cover = info.get("cover") or {}
+    row["cover_file"] = str(cover.get("file") or "")
+    row["cover_ok"] = bool(row["cover_file"])
+    row["cover_detail"] = ("release-group cover (placeholder)"
+                           if row["cover_file"] else "")
+    row["album_artist"] = str(info.get("artist") or "")
+    meta = {t: None for t in ALBUM_LEVEL_TAGS}
+    meta.update({
+        "ALBUM": info.get("title") or None,
+        "ALBUMARTIST": info.get("artist") or None,
+        "ARTIST": info.get("artist") or None,
+        "DATE": info.get("date") or info.get("year") or None,
+        "MUSICBRAINZ_ALBUMID": info.get("release_id") or None,
+        "MUSICBRAINZ_RELEASEGROUPID": info.get("release_group_id") or None,
+        "RELEASETYPE": info.get("release_type") or None,
+    })
+    row["meta"] = meta
+    for key, val in (("ALBUM", info.get("title")), ("ALBUMARTIST", info.get("artist")),
+                     ("ARTIST", info.get("artist")), ("DATE", info.get("year"))):
+        if key in row["album_values"]:
+            row["album_values"][key] = str(val or "").strip()
+    # The release's own tracklist, with nothing on disk matching it: every
+    # entry is missing, which is exactly what the album page should show.
+    _add_expected_tracks(row, folder)
+    row["artwork"] = _album_artwork(folder, light=True)
     return row
 
 
@@ -417,6 +480,21 @@ def build_library(cfg, progress=None):
                 artists.setdefault(os.path.dirname(d), [])
                 empty_rows.setdefault(os.path.dirname(d), []).append(d)
 
+        # Framework albums: folders holding the release manifest, the
+        # placeholder cover and a pending marker but no audio at all, so the
+        # album walk above never sees them. They ARE albums the user asked for,
+        # so they are listed — read from the SAME directory scan the walk
+        # produced (directories holding files but no audio) and only where the
+        # marker is: an audio-less folder WITHOUT one is the empty-folder case
+        # below, not a placeholder.
+        pending_rows = {}
+        for d, held in dir_scan.items():
+            if held != WALK_FILES or not load_pending(d):
+                continue
+            parent = os.path.dirname(d)
+            artists.setdefault(parent, [])
+            pending_rows.setdefault(parent, []).append(d)
+
         result = []
         total = len(artists)
         for i, (artist_dir, alb_list) in enumerate(sorted(artists.items())):
@@ -424,6 +502,8 @@ def build_library(cfg, progress=None):
                 progress(i + 1, total, "Scanning library")
             albums_data = (build_albums_parallel(sorted(alb_list), cfg, light=True)
                            if alb_list else [])
+            albums_data.extend(_pending_album_row(d, folder)
+                               for d in pending_rows.get(artist_dir, []))
             albums_data.extend(_empty_album_row(d, folder)
                                for d in empty_rows.get(artist_dir, []))
             albums_data.sort(key=lambda a: str(a.get("path", "")).lower())

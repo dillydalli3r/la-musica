@@ -7,7 +7,8 @@ import tempfile
 from .paths import (CONFIG_FILE, DEFAULT_DIGITAL_SOURCE, app_data_dir, downloads_dir,
                     legacy_state_dirs, read_music_folder_guess, trash_dir,
                     trash_root)
-from .naming import DEFAULT_NAMING_SCRIPT
+from .naming import (DEFAULT_NAMING_SCRIPT, PRIMARY_RELEASE_TYPES,
+                     SECONDARY_RELEASE_TYPES)
 # The genre-list ceiling, so `mb_genre_count`'s validated range below and the
 # value mlo.genres enforces can never drift apart: one number, one home.
 from .genres import GENRE_COUNT_MAX
@@ -103,15 +104,16 @@ LEGACY_DEFAULT_DIGITAL_QUERIES = (
 # beets, whose generated config sets `move: yes`), then the sidecar namers
 # that must see final audio names (15 manifest → 2 CUEs → 1 lyrics format),
 # then content: 13 fetch lyrics → 18 publish → 17 AI transforms, 8 auto
-# tagging (mood/genre/advisory), 5 images, 6 audit, 7 DR & ReplayGain, 9
-# AccurateRip, 12 key & BPM, 16 mood & energy, and finally 10 Format all
-# (the canonical trim) then 4 Grade last.
+# tagging (mood/genre/advisory), 5 images → 19 artist images (the two image
+# passes together: covers then the artwork stored beside them), 6 audit, 7 DR
+# & ReplayGain, 9 AccurateRip, 12 key & BPM, 16 mood & energy, and finally 10
+# Format all (the canonical trim) then 4 Grade last.
 # The order this replaced ran CUEs before the converters — a cue could name
 # "….wav" for an album that had become FLAC — and beets fourth-from-last, so
 # the album was moved after images/audit/DR had been computed for paths that
 # no longer existed. 15 stays right after 14: it reads the release id beets
 # matched. Keep in step with web/src/lib/scripts.ts (tests/test_script_menus).
-DEFAULT_RUN_ALL_ORDER = [11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 6, 7, 9, 12, 16, 10, 4]
+DEFAULT_RUN_ALL_ORDER = [11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 19, 6, 7, 9, 12, 16, 10, 4]
 
 # The genre-source order that shipped before the two-source default: recognizing
 # it lets normalize_config treat it as "never customized" (see below).
@@ -136,6 +138,7 @@ AUDIO_TAG_FAMILIES = [
     "GENRE",          # GENRE (import / auto tagging, one per configured count)
     "MOOD",           # MOOD (audio/provider classification, script 8/16)
     "ENERGY",         # ENERGY (0-100, audio analysis, written with MOOD)
+    "RATING",         # RATING (0-100 Picard scale, the listener's own stars)
 ]
 AUDIO_TAG_TYPES = ["flac", "mp3", "mp4", "ogg", "opus", "aac"]
 
@@ -161,6 +164,7 @@ _TAG_TO_FAMILY = {
     "GENRE": "GENRE",
     "MOOD": "MOOD",
     "ENERGY": "ENERGY",
+    "RATING": "RATING",
     # integrity tags follow AUDIT family (written alongside audit when present)
     "AUDIO_MD5": "AUDIT",
     "INTEGRITY": "AUDIT",
@@ -223,6 +227,10 @@ def should_write_audio_tag(config, tag_name, filepath=None, filetype=None):
         "ADVISORY": "auto_advisory",
         "GENRE": "genre_autofill",
         "MOOD": "mood_enabled",
+        # RATING is the user's own star rating (server.ratings): the API writes
+        # it the moment a star is clicked, so its master switch is what turns
+        # writing the TAG off while keeping the rating in the app.
+        "RATING": "write_rating_tags",
         # ENERGY is written by the same analysis pass as MOOD, so it answers
         # to the same switch; the grader requires it when it is on.
         "ENERGY": "mood_enabled",
@@ -319,11 +327,16 @@ DEFAULT_CONFIG = {
     # the library itself — Artists/<Artist>/artist.jpg, description.txt and
     # artist.json (provenance: provider, source URL, fetch time). Artist
     # images have no minimum resolution by default; they are only cropped to
-    # the configured cover aspect and re-encoded at the cover JPEG quality.
+    # `artist_image_aspect` and re-encoded at the cover JPEG quality.
     # A target size of 0 keeps the provider's native size.
     "artist_image_enabled": True,
     "artist_image_sources": [],       # ordered provider ids; [] = built-in order
     "artist_image_crop": True,
+    # The shape every artist image is stored in, "width:height" (1:1 is the
+    # shipped square). Read by the fetch (mlo.artistdata), by the artist image
+    # grading check and by script 19, so the audit and the pass that fixes it
+    # judge by the same number. Only enforced while `artist_image_crop` is on.
+    "artist_image_aspect": "1:1",
     "artist_image_target_size": 0,
     "artist_description_enabled": True,
     "album_description_enabled": True,
@@ -413,6 +426,11 @@ DEFAULT_CONFIG = {
     "write_log_grade": True,
     "write_replaygain_tags": True,
     "write_dynamic_range_tags": True,
+    # Rating a track also writes RATING (0-100, Picard's scale) into the file,
+    # and clearing a rating removes the tag. Off, ratings still live in the
+    # app's own database — only the tag write stops, which is what a library
+    # whose ratings belong to someone else's player wants.
+    "write_rating_tags": True,
 
     # Grading
     "grade_verbose": True,
@@ -827,6 +845,47 @@ DEFAULT_CONFIG = {
     # into the final album folder, which grading requires.
     "beets_organize_after": True,
 
+    # Import autonomy — how much of an import the app decides on its own.
+    # "automatic" (the default) runs the configured chain end to end, fetches
+    # everything the configured sources can answer, and only comes back to the
+    # user for what nothing could supply: the album is imported either way, and
+    # whatever it is still missing is reported as ONE prompt — a notification
+    # plus an entry the wizard lists — naming the families and the fields, and
+    # linking to the album at the step where each decision is made. "review" is
+    # the wizard's own behaviour applied to the pipeline instead: the import
+    # stops before the first step that needs a decision (a family the album
+    # still lacks) and hands the album over rather than deciding past it. What
+    # "missing" means is `mlo.grader`'s own checks — this adds no second
+    # completeness opinion.
+    "import_autonomy": "automatic",
+    # Families the USER decides even in automatic mode: "links", "cover",
+    # "genres", "lyrics", "advisory" (the wizard's own steps). A family named
+    # here is never auto-decided — the cover step stages candidates instead of
+    # writing the first hit, the links and advisory fetches are skipped, the
+    # lyrics script drops out of the chain — and the album's prompt names it as
+    # awaiting a decision instead of as unsourced. Empty = the app decides
+    # everything any configured source can answer, which is the point of
+    # automatic mode.
+    "import_review_families": [],
+
+    # The two switches over the whole acquisition surface. Both default on,
+    # which is how the app has always behaved. `auto_acquisition_enabled` is
+    # the MASTER switch for everything the app does on its own: the wishes
+    # worker searching the queue, an artist watch queueing a new release, and
+    # an "Add to library" request starting a download. Off, the request is
+    # still RECORDED — the wish, the watch's row, the framework album — and
+    # reported honestly ("nothing searched: automatic acquisition is off"),
+    # but nothing is searched or downloaded until the user acts on it (the
+    # wish's own Search now, the wizard, the Soulseek page). It is not the
+    # same switch as `wishes_auto_import`, which keeps searching and only
+    # stops the download. `manual_import_enabled` is the switch over the
+    # user-driven import path: the wizard and every POST /api/import/* route.
+    # Off, those routes answer 409 naming this setting instead of importing,
+    # so a user can hand the whole importer over to the automatic pipeline (or
+    # stop imports entirely) without anything importing behind their back.
+    "auto_acquisition_enabled": True,
+    "manual_import_enabled": True,
+
     # Import — drag & drop, the import wizard and the Soulseek pipelines all
     # run the same script chain, so a freshly imported album leaves the
     # pipeline complete instead of half-tagged. Empty `import_scripts` = the
@@ -908,23 +967,53 @@ DEFAULT_CONFIG = {
     # ~11 s (peers arrive in a burst, then trickle). 15 keeps the wait to a
     # few seconds while still scoring fifteen whole folders.
     "soulseek_auto_response_limit": 15,
+    # How many releases the auto-importer works on AT THE SAME TIME — the
+    # wishes worker fills up to this many wishes in one pass, and a bulk
+    # "download all" run keeps this many jobs in flight. Searching is mostly
+    # waiting on the network, so one album at a time left the page showing a
+    # queue that only ever moved one item; the TRANSFERS themselves are still
+    # capped by slskd's own `soulseek_download_slots` / `soulseek_upload_slots`
+    # (slskd queues whatever they cannot take), which is why this can be
+    # raised without touching the network's own limits.
+    "soulseek_search_concurrency": 3,
     # Park an interactive job that found no usable folder and ask the user
     # whether to add the release to the wishes list, instead of failing the job
     # outright: a rare album is worth watching for, and the background wishes
     # worker keeps searching with the queries the job already used. The
     # background path itself never asks (a wish must not be turned into a wish).
     "soulseek_auto_wish_prompt": True,
-    # Release-choice policy for auto-import (single release, release group or
-    # an artist's whole catalogue): prefer status=Official, never auto-pick a
-    # Promotion / Bootleg / Pseudo-Release while avoid-promo is on, require a
-    # RELEASECOUNTRY while require-country is on, and order the remaining
-    # editions by medium (MusicBrainz format), earliest date breaking ties.
+    # Release-choice policy (mlo.release_choice — the ONE policy every
+    # acquisition path ranks editions with: "Add to library", the bulk
+    # auto-import, the wish worker and the artist watch). It prefers
+    # status=Official, never auto-picks a Promotion / Bootleg / Pseudo-Release
+    # while avoid-promo is on, requires a RELEASECOUNTRY while require-country
+    # is on, and ranks the rest by the caller's release-group TYPE filter
+    # first, then medium, then completeness, then how close the edition's own
+    # date is to the group's original release date, then the two keys below.
     # Country matters because it is the one trait that proves the edition was
     # actually sold somewhere: a country-less MusicBrainz release is usually an
     # unsorted import, and the folder-name query templates are built around it.
     "auto_import_avoid_promo": True,
     "auto_import_require_country": True,
-    "auto_import_medium_order": ["CD", "Digital Media", "Vinyl", "Cassette", "Other"],
+    # Best medium first, by MusicBrainz format name. CD leads (the pressings
+    # rips and the folder templates are built for), the other PHYSICAL media
+    # follow, and digital is last: a digital edition carries no catalog number
+    # and no pressing to match against, so it is the edition a Soulseek folder
+    # matches least reliably. A format the list does not name ranks after every
+    # configured one.
+    "auto_import_medium_order": ["CD", "Vinyl", "Cassette", "Other", "Digital Media"],
+    # The release country preferred among otherwise EQUAL editions — a
+    # tie-breaker, never a filter. An ISO 3166-1 alpha-2 code, the spelling
+    # MusicBrainz publishes on the release ("US", "GB", "XW" for worldwide),
+    # compared case-insensitively; blank (the default) states no preference.
+    # It can never outrank status, medium, completeness or the date rule.
+    "prefer_release_country": "",
+    # Prefer the explicit/original edition over a clean or edited one, where
+    # MusicBrainz says so in the release title or its disambiguation comment: a
+    # clean edition may carry altered audio, so it is taken only when nothing
+    # else is on offer. Off = a clean edition ranks on the other rules like any
+    # other edition.
+    "prefer_original_edition": True,
     # Covers: fetch and write cover art during import when the album has none.
     # On by default — a downloaded album without a cover grades as incomplete,
     # and the finder's provider chain (Cover Art Archive → Deezer → Apple) can
@@ -947,8 +1036,50 @@ DEFAULT_CONFIG = {
     # and auto-imports the release the moment a verified match appears.
     "wishes_enabled": True,
     "wishes_interval_hours": 6,
+    # The retry policy (one place: server/wishes' "Retry policy" section).
+    # TRANSIENT failures — a refused/absent slskd, a MusicBrainz outage, a
+    # failed verification — are retried with backoff: the wait doubles per
+    # attempt, up to `wishes_max_attempts` attempts (0 = retry forever).
+    # A search that found NOTHING is not a failure to try harder: it spends a
+    # not-found attempt instead, and after `wishes_not_found_attempts` empty
+    # searches (0 = never give up) the wish ends 'not_found' — terminal and
+    # announced once, with the queue's retry button as the way back. Both
+    # ends record why, and neither is retried by the timer again.
     "wishes_max_attempts": 0,       # 0 = retry forever
+    "wishes_not_found_attempts": 3,  # empty searches before 'not_found' (0 = never)
+    "wishes_retry_backoff_minutes": 30,  # extra wait per retry, doubled (0 = off)
     "wishes_auto_import": True,
+
+    # Artist watches — follow an artist and add what it releases from NOW on.
+    # The whole point is what a watch refuses to do: a fresh watch never
+    # enumerates a back catalogue, so "new" is a release group whose FIRST
+    # release date is after the watch was created (an undated group is never
+    # new), and one cycle queues at most `artist_watch_max_per_cycle` albums
+    # whatever the watch's own policy is ("backfill" only widens the date rule,
+    # per watch, on purpose). The worker that runs the cycles is
+    # server/artist_watch_worker; the policy itself is server/artist_watch.
+    "artist_watch_enabled": True,
+    # How long between two checks of the SAME artist (a watch has its own
+    # timer; the worker ticks far more often than this).
+    "artist_watch_interval_hours": 24,
+    # The hard per-cycle cap — the anti-dump rule. One album is the shipped
+    # default: a watch that queued a hundred at once is the discography dump
+    # this feature exists to avoid.
+    "artist_watch_max_per_cycle": 1,
+    # Which release-group TYPES a watch may queue. MusicBrainz's own type names
+    # (lowercase) — the vocabulary is mlo.naming.PRIMARY_RELEASE_TYPES /
+    # SECONDARY_RELEASE_TYPES, and the rule is server.artist_watch's: a
+    # secondary type is a QUALIFIER and decides the match (a live album is
+    # Album + Live, so "album" alone must not queue it and ticking "live"
+    # must), otherwise the group's primary type has to be selected. Album + EP
+    # is the shipped default, so a watch sweeps up new studio records and EPs
+    # and leaves the live records, compilations and scores alone. A watch may
+    # override the set per artist.
+    "artist_watch_types": ["album", "ep"],
+    # Queue a matched release into the library automatically. Off means a watch
+    # only reports what it found (the notification is the whole output), which
+    # is what a user who wants to choose the edition by hand wants.
+    "artist_watch_auto_add": True,
 
     # Genres imported per release/track (top voted first). Sources are tried
     # in this order and merged, and EVERY source is asked for EVERY track
@@ -1208,8 +1339,19 @@ _INT_RANGES = {
     "soulseek_auto_log_min_score": (0, 100),
     "soulseek_auto_search_wait": (2, 300),
     "soulseek_auto_response_limit": (5, 500),
+    "soulseek_search_concurrency": (1, 8),
     "wishes_interval_hours": (1, 168),
     "wishes_max_attempts": (0, 1000),
+    # The not-found budget and the retry backoff's step (see the wishes block
+    # in DEFAULT_CONFIG): both 0 = off, and a backoff longer than a day is
+    # pointless because retry_delay caps there anyway.
+    "wishes_not_found_attempts": (0, 1000),
+    "wishes_retry_backoff_minutes": (0, 1440),
+    # A watch may not be checked more than hourly (MusicBrainz etiquette), and
+    # a longer gap than a month is not a watch any more. The per-cycle cap's
+    # floor is 1: a watch that may queue nothing would never add anything.
+    "artist_watch_interval_hours": (1, 720),
+    "artist_watch_max_per_cycle": (1, 50),
     "home_recent_count": (4, 60),
     "artist_image_target_size": (0, 4000),
     "discovery_timeout_s": (3, 30),
@@ -1229,6 +1371,9 @@ _INT_RANGES = {
 }
 _CHOICES = {
     "lyrics_format": {"EMBEDDED", "LRC", "BOTH"},
+    # Import autonomy: the whole chain, or the wizard's stop-at-each-step
+    # behaviour applied to the pipeline (see DEFAULT_CONFIG).
+    "import_autonomy": {"automatic", "review"},
     "auth_mode": {"auto", "required", "off"},
     "advisory_fallback": {"0", "2", "none"},
     "ai_genre_effort": {"minimal", "low", "medium", "high"},
@@ -1334,6 +1479,15 @@ def normalize_config(user=None) -> dict:
         str(source).strip() or DEFAULT_DIGITAL_SOURCE
     )
 
+    # The preferred release country: a bare ISO 3166-1 alpha-2 code (the
+    # spelling MusicBrainz publishes on the release) compared case-
+    # insensitively. Kept upper-cased and short; anything unrecognized simply
+    # never matches, which is exactly what the default (blank = no preference)
+    # already means.
+    cfg["prefer_release_country"] = (
+        str(cfg.get("prefer_release_country") or "").strip().upper()[:12]
+    )
+
     # `library_codec_args` reaches the encoder verbatim (mlo.containers.
     # codec_extra_args splits it on whitespace), so the app does not validate
     # its content — only its shape: control characters and newlines become
@@ -1355,6 +1509,15 @@ def normalize_config(user=None) -> dict:
         cfg["cover_crop_threshold"] = max(0.0, min(0.5, thr))
     except (TypeError, ValueError):
         cfg["cover_crop_threshold"] = 0.05
+
+    # The artist image's configured aspect ("W:H"). Validated with the parser the
+    # fetch, the audit and script 19 all read, so a hand-edited config cannot
+    # wedge the grader into failing every artist image for a shape nothing can
+    # parse — an unusable value falls back to the shipped default.
+    from .artistdata import parse_aspect
+    if parse_aspect(cfg.get("artist_image_aspect")) is None:
+        cfg["artist_image_aspect"] = DEFAULT_CONFIG["artist_image_aspect"]
+
     for k, default, lo, hi in (
         ("discs_toc_tolerance_s", 4.0, 0.5, 10.0),
         ("discs_toc_unique_margin_s", 4.0, 0.5, 10.0),
@@ -1431,6 +1594,25 @@ def normalize_config(user=None) -> dict:
     if saved in LEGACY_DEFAULT_GENRE_SOURCES:
         saved = []
     cfg["genre_sources"] = saved or list(DEFAULT_CONFIG["genre_sources"])
+
+    # Release-group types a watch may queue: a CLOSED vocabulary (MusicBrainz's
+    # own names, compared case-insensitively), so an unknown name is dropped
+    # rather than kept as a filter that could never match anything — and a list
+    # left with nothing selectable falls back to the shipped default (album+EP)
+    # instead of leaving every watch type-less.
+    v = cfg.get("artist_watch_types")
+    if isinstance(v, str):
+        v = [t for t in v.replace("\n", ";").split(";") if t.strip()]
+    if not isinstance(v, (list, tuple)):
+        v = []
+    known = {t.lower() for t in (PRIMARY_RELEASE_TYPES + SECONDARY_RELEASE_TYPES)}
+    picked = []
+    for t in v:
+        name = str(t).strip().lower()
+        if name in known and name not in picked:
+            picked.append(name)
+    cfg["artist_watch_types"] = (picked[:len(known)]
+                                 or list(DEFAULT_CONFIG["artist_watch_types"]))
 
     # An untouched install holds the old shipped genres-per-track count (see
     # LEGACY_DEFAULT_GENRE_COUNTS) and follows the new one.
@@ -1513,6 +1695,14 @@ def normalize_config(user=None) -> dict:
         if value not in chain:
             chain.append(value)
     cfg["import_scripts"] = chain[:32]
+
+    # Import autonomy: which families the user decides by hand. The names are
+    # validated against mlo.import_policy's own registry (this list is the one
+    # place the pipeline and the wizard both read), so a typo in a hand-edited
+    # config cannot make the pipeline review a family that does not exist —
+    # and the stored order is the wizard's, so "first" always means first step.
+    from .import_policy import configured_families
+    cfg["import_review_families"] = list(configured_families(cfg))
 
     script = cfg.get("naming_script")
     if not isinstance(script, str) or not script.strip():
@@ -1612,6 +1802,8 @@ def normalize_config(user=None) -> dict:
         # and grading
         _insert_script(clean_order, 18, [13, 12, 16])
         _insert_script(clean_order, 17, [18, 13, 12, 16])
+        # 19 artist images — with script 5's image pass, whose policy it shares
+        _insert_script(clean_order, 19, [5, 8, 16])
     cfg["run_all_order"] = clean_order or list(DEFAULT_RUN_ALL_ORDER)
     return cfg
 

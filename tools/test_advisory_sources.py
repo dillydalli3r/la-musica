@@ -80,7 +80,9 @@ def stub_http(routes):
 
     def fake_post(url, data=None, headers=None, timeout=None):
         calls.append(("POST", url, dict(data or {}), dict(headers or {})))
-        return _route(url, data or {})
+        # `(body, error)` — the seam keeps a refusal's own words, so a stub has
+        # to answer both halves (a stubbed call never refuses here).
+        return _route(url, data or {}), ""
 
     intg._advisory_json, intg._advisory_post = fake_get, fake_post
     return calls

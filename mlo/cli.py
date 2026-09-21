@@ -57,6 +57,7 @@ SCRIPTS = (
     (16, "Mood & Energy", "MOOD/ENERGY from the track's audio"),
     (17, "Lyrics transliterate (AI)", "TRANSLITERATION/TRANSLATION tags + sidecars"),
     (18, "Publish lyrics (LRCLIB)", "submit missing lyrics to the community DB"),
+    (19, "Optimize artist images", "crop/resize artist artwork to the configured aspect and size"),
 )
 SCRIPT_LABELS = {sid: name for sid, name, _ in SCRIPTS}
 

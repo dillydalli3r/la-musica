@@ -22,10 +22,19 @@ whole pipeline a careful human would do by hand:
      never fatal),
   5. import into the library: stamp the MusicBrainz release/recording IDs
      that drove the search into the tags, write MEDIA, organize with the
-     naming script, then stage the album in the background — RateYourMusic
-     links, artist metadata and cover art — via
-     ``server.imports.finish_album(..., defer_tagging=True)``. Nothing
-     unattended tags: the script chain is the wizard's / menu actions' job.
+     naming script, then finish the album in the background via
+     ``server.imports.finish_album`` — RateYourMusic links, artist metadata
+     and cover art, AND the configured script chain (optimization, tagging,
+     grading), because a download the user waited for must come out finished
+     rather than half-tagged. Whatever the chain cannot supply (no cover
+     found, a family the user kept for themselves) raises the album's own
+     prompt there, which is the notification the queue's "Needs you" row and
+     the wizard link come from.
+
+Every settled job announces its outcome ONCE on ``server.events`` and links to
+the thing it is about — the album, the download folder, or this queue (see
+``_notify_finish``): no acquisition is allowed to end in silence, whether it
+succeeded, found nothing, or gave up with a reason.
 
 Progress is reported through mlo.stats.progress_hook (the same relay the
 WebSocket /ws/progress endpoint forwards to the UI) and mirrored into a
@@ -38,6 +47,7 @@ import threading
 import time
 import traceback
 import unicodedata
+from urllib.parse import quote
 
 from mlo.config import load_config
 
@@ -46,60 +56,280 @@ from mlo.config import load_config
 # --------------------------------------------------------------------------- #
 # Reentrant: cancel() holds the lock while calling _log(), which locks again.
 _lock = threading.RLock()
-_job = {
+
+# The stage vocabulary the whole pipeline is spoken in: the wish queue, the
+# auto-import jobs, the bulk release queue and the import runner all report one
+# of these names, so server/api_queue.py — and every client drawn from it —
+# render the same word for the same state.
+STAGES = ("queued", "searching", "downloading", "verifying", "importing",
+          "completed", "failed", "needs_attention")
+
+# SEVERAL jobs run at once (see `soulseek_search_concurrency`): one thread per
+# job. `_jobs` is the registry job_state()/jobs() read, `_order` keeps the jobs
+# oldest-first and `_primary` is the job a caller WITHOUT an id means — the
+# single-job API this module grew up with (start/cancel/confirm/job_state),
+# which the Auto-import panel and the tests still speak.
+#
+# A module-level `_job[...]` read/write means "the job on THIS thread" (see
+# _CurrentJob) and falls back to the primary job, which is exactly what it
+# meant when there was only ever one. The post-import staging chain re-binds
+# the id in its own thread so its log lines land in the job that earned them.
+_jobs: dict = {}
+_order: list = []
+_primary = 0
+_seq = 0
+_tl = threading.local()
+
+# Settled jobs the registry keeps: enough that the queue view can show what
+# just finished, bounded so a server up for a week does not accumulate one dict
+# per album it ever downloaded.
+_KEEP_SETTLED = 40
+
+# How many releases run at once when nothing is configured.
+_CONCURRENCY_DEFAULT = 3
+
+# A job parked on a prompt waits here for the user's answer (confirm()):
+# "only lossy copies found" and "no usable results — add to wishes?".
+# These two are the IDLE job's own pair — the objects every older caller (and
+# their tests) reaches for. A real job gets its own, which is what lets three
+# jobs park on three different prompts at once.
+_confirm_event = threading.Event()
+_confirm_answer = {"accept": False}
+
+# The job a caller with no job of its own means, and the shape job_state()
+# answers with before anything has run: what the single-job registry published
+# when it was idle, plus the fields the queue view needs.
+_IDLE_JOB = {
     # idle | running | confirm | done | error | cancelled
-    #   confirm = only lossy copies passed the search; waiting for the user
+    #   confirm = waiting for the user (only lossy copies found, no rip log, or
+    #             the "add to wishes?" offer)
+    "id": 0,
     "state": "idle",
     "stage": "",           # human-readable current step
+    "stage_key": "",       # its name in STAGES — what the queue view groups on
     "release": None,       # compact release summary
     "log": [],             # [{t, msg}] progress lines (newest last)
     "attempts": [],        # [{username, dir, reason}] rejected candidates
     "result": None,        # {album_path, imported, organized}
-    # {reason, formats, candidates} (lossy_only) or
-    # {reason, waited, queries, formats, candidates} (no_results)
     "confirm": None,
     "search": None,        # live per-query progress while searching
     "progress": None,      # live download metrics while a transfer runs
     "cancel": False,
+    "wish_id": None,       # the wish this job is filling, when it fills one
+    "source": "",          # "", "musicbrainz", "soulseek", "auto" — who asked
+    "label": "",           # "Artist — Album", for a row with no release yet
+    "leftovers": [],       # partial bytes a rejected candidate could not free
+    "started_at": 0.0,
+    "ended_at": 0.0,
+    "_event": _confirm_event,   # the prompt this job waits on
+    "_answer": _confirm_answer,
+    "_claim": None,             # its library folder's job_locks claim
 }
-# A job parked on a prompt waits here for the user's answer (confirm()):
-# "only lossy copies found" and "no usable results — add to wishes?".
-_confirm_event = threading.Event()
-_confirm_answer = {"accept": False}
+_jobs[0] = _IDLE_JOB
 
-# Bulk import queue (artist / release-group "download all"): the pipeline runs
-# ONE job at a time, so extra releases wait here and _finish() starts the next
-# one — same machinery, no second pipeline.
+
+class _CurrentJob(dict):
+    """`_job` as the CALLING context's job (see the registry above).
+
+    A dict subclass so every existing ``_job[...]`` / ``_job.get(...)`` /
+    ``_job.items()`` in this file (and in the tests that poke the shape) keeps
+    working unchanged while the value it resolves to depends on who is asking:
+    the thread's own job, else the primary one.
+    """
+
+    def _ref(self):
+        jid = getattr(_tl, "jid", None)
+        if jid is None:
+            jid = _primary
+        return _jobs.get(jid) or _IDLE_JOB
+
+    def __getitem__(self, key):
+        return self._ref()[key]
+
+    def __setitem__(self, key, value):
+        self._ref()[key] = value
+
+    def __delitem__(self, key):
+        del self._ref()[key]
+
+    def __contains__(self, key):
+        return key in self._ref()
+
+    def __iter__(self):
+        return iter(self._ref())
+
+    def __len__(self):
+        return len(self._ref())
+
+    def __bool__(self):
+        return bool(self._ref())
+
+    def __eq__(self, other):
+        return dict(self._ref()) == other
+
+    def __ne__(self, other):
+        return dict(self._ref()) != other
+
+    def get(self, key, default=None):
+        return self._ref().get(key, default)
+
+    def items(self):
+        return self._ref().items()
+
+    def keys(self):
+        return self._ref().keys()
+
+    def values(self):
+        return self._ref().values()
+
+    def update(self, *args, **kwargs):
+        self._ref().update(*args, **kwargs)
+
+    def pop(self, *args):
+        return self._ref().pop(*args)
+
+    def setdefault(self, *args):
+        return self._ref().setdefault(*args)
+
+    def copy(self):
+        return dict(self._ref())
+
+
+_job = _CurrentJob()
+
+
+def _published(job):
+    """A job's public state: the internals (its prompt event, its claim) never
+    leave the module."""
+    return {k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
+            for k, v in job.items() if not k.startswith("_") and k != "cancel"}
+
+
+def _active_locked():
+    """Every job holding the pipeline right now. Caller holds ``_lock``."""
+    return [j for j in _jobs.values() if j["state"] in ("running", "confirm")]
+
+
+def concurrency(cfg=None):
+    """How many releases the pipeline may work on at the same time.
+
+    The config key is clamped to 1..8 here as well as in mlo.config (a saved
+    value can be older than the range, or hand-edited). This is a ceiling on
+    SEARCHES and DOWNLOADS the pipeline runs itself; what slskd actually takes
+    off the network is still its own `soulseek_download_slots`, and everything
+    over that waits in slskd's queue."""
+    try:
+        n = int((cfg or load_config()).get("soulseek_search_concurrency")
+                or _CONCURRENCY_DEFAULT)
+    except (TypeError, ValueError):
+        n = _CONCURRENCY_DEFAULT
+    return max(1, min(8, n))
+
+
+def job_stage(job):
+    """The STAGES name a job is in — the ONE vocabulary the queue view renders.
+
+    A settled job answers with its outcome, a running one with the stage it
+    published, and a parked one with ``needs_attention``: the queue must never
+    say "downloading" about a job that is really waiting for the user.
+    ``cancelled`` is deliberately NOT one of STAGES (a cancelled item vanishes
+    from the queue instead of pretending to be a failure) — callers detect it
+    by this value and drop the row."""
+    state = str(job.get("state") or "idle")
+    if state == "done":
+        return "completed"
+    if state == "error":
+        return "failed"
+    if state == "cancelled":
+        return "cancelled"
+    if state == "confirm":
+        return "needs_attention"
+    key = str(job.get("stage_key") or "")
+    return key if key in STAGES else ("queued" if state == "running" else "")
+
+
+def _pick(job_id=None):
+    """The job a call means: the id it named, else the one this thread is in,
+    else the newest job parked on a prompt, else the primary job. Caller holds
+    ``_lock``."""
+    if job_id:
+        try:
+            return _jobs.get(int(job_id))
+        except (TypeError, ValueError):
+            return None
+    jid = getattr(_tl, "jid", None)
+    if jid is not None and jid in _jobs:
+        return _jobs[jid]
+    for jid in reversed(_order):
+        if _jobs[jid]["state"] == "confirm":
+            return _jobs[jid]
+    return _jobs.get(_primary) or _IDLE_JOB
+
+
+def _stage(key, text=None):
+    """Name the stage this job is in (one of STAGES), for the queue view.
+
+    Written where the work actually moves — a job that has finished searching
+    must not still be listed as searching — and the free-text `stage` the page
+    already shows follows it when `text` is given."""
+    with _lock:
+        _job["stage_key"] = key
+        if text:
+            _job["stage"] = str(text)
+
+# Bulk import queue (artist / release-group "download all"): extra releases wait
+# here and _finish() starts the next one — same machinery, no second pipeline.
+# The pipeline runs `soulseek_search_concurrency` of them at a time, so this
+# queue drains at that width instead of one release per finished download.
 #
-# Reentrant: _start_next holds it while calling start_job(), which reports the
-# new job through job_state() → queued() → this same lock. With a plain Lock
-# that was a self-deadlock — EVERY enqueue (the release/release-group/artist
-# Auto-import button) hung the request thread forever, holding _queue_lock so
-# no later job could ever start. The same trap server.wishes documents.
+# Reentrant: enqueue() holds it while calling _start_next → start_job(), which
+# reports the new job through job_state() → queued() → this same lock. With a
+# plain Lock that was a self-deadlock — EVERY enqueue (the release/release-group
+# /artist Auto-import button) hung the request thread forever, holding
+# _queue_lock so no later job could ever start. The same trap server.wishes
+# documents.
 _queue = []
 _queue_lock = threading.RLock()
 
 
 def _start_next():
-    """Start the next queued release when the pipeline is idle."""
-    with _queue_lock:
-        if not _queue or job_active():
-            return
-        item = _queue.pop(0)
+    """Fill the pipeline: start queued releases while there is capacity.
+
+    Popping under the queue lock and STARTING without it keeps the two module
+    locks from nesting in either direction (see job_state()/cancel()), which is
+    what makes concurrent jobs safe to start from a job's own finish path."""
+    while True:
+        with _queue_lock:
+            if not _queue:
+                return
+            item = _queue[0]
+        with _lock:
+            if len(_active_locked()) >= concurrency():
+                return
+        with _queue_lock:
+            if not _queue or _queue[0] is not item:
+                continue          # another thread took it
+            _queue.pop(0)
         res = start_job(**item)
-        if not res.get("ok"):
-            # Only the TRANSIENT refusal ("a job is already running" — the
-            # pipeline got taken between the check and the start) puts the
-            # item back. Permanent ones ("already in your library", "already
-            # queued") used to be re-inserted at the head too, so a bulk
-            # download that reached a release imported in the meantime
-            # retried that same item forever: the pipeline went idle and the
-            # queue could not be emptied from the UI.
-            if "already running" in str(res.get("error") or ""):
-                _queue.insert(0, item)
-            else:
-                _log(f"queue: dropped {item.get('release_mbid') or item.get('target_dir') or 'item'}"
-                     f" — {res.get('error') or 'could not start'}")
+        if res.get("ok"):
+            continue
+        # Only the TRANSIENT refusals put the item back: the pipeline filled up
+        # between the capacity check and the start, or the release is waiting on
+        # an album folder another job holds. The permanent ones ("already in
+        # your library", "already queued") used to be re-inserted at the head
+        # too, so a bulk download that reached a release imported in the
+        # meantime retried that same item forever: the pipeline went idle and
+        # the queue could not be emptied from the UI.
+        if res.get("transient"):
+            with _queue_lock:
+                if item not in _queue:
+                    _queue.insert(0, item)
+            if "already running" not in str(res.get("error") or ""):
+                _log(f"queue: waiting on {item.get('release_mbid') or 'item'}"
+                     f" — {res.get('error')}")
+            return
+        _log(f"queue: dropped {item.get('release_mbid') or item.get('target_dir') or 'item'}"
+             f" — {res.get('error') or 'could not start'}")
 
 
 def _release_key(release_mbid, release=None):
@@ -108,10 +338,14 @@ def _release_key(release_mbid, release=None):
     return str(release_mbid or (release or {}).get("id") or "").strip().lower()
 
 
-def _running_key():
-    """The release id of the job the pipeline is currently on ("" when none)."""
+def _running_keys():
+    """Release ids the pipeline is working on right now.
+
+    A SET: three jobs can be in flight, and a release being searched is just as
+    much "already being imported" as one that is downloading."""
     with _lock:
-        return _release_key((_job.get("release") or {}).get("id"))
+        return {_release_key((j.get("release") or {}).get("id"))
+                for j in _active_locked()} - {""}
 
 
 def _queued_keys():
@@ -122,13 +356,14 @@ def _queued_keys():
 
 
 def enqueue(release_mbid=None, release=None, queries=None, kind=None, mode=None):
-    """Queue one release for auto-import; starts it immediately when idle.
+    """Queue one release for auto-import; starts it immediately when there is
+    capacity.
 
     kind/mode describe an ID the HTTP route queued BEFORE resolving it (a
     release group or a whole artist): the job does that lookup — see _run.
 
-    The same release id is never queued twice, and never while it is the job
-    already running: the "download all" routes hand over a target list that can
+    The same release id is never queued twice, and never while it is being
+    imported: the "download all" routes hand over a target list that can
     repeat (an artist page whose groups share an edition, a release already
     queued behind it), and a second copy of the same id just downloads and
     imports the same album again. A duplicate is logged with its reason and the
@@ -138,16 +373,14 @@ def enqueue(release_mbid=None, release=None, queries=None, kind=None, mode=None)
     item = {"release_mbid": release_mbid, "release": release,
             "queries": queries, "kind": kind, "mode": mode}
     key = _release_key(release_mbid, release)
-    # Read the running job's id BEFORE taking the queue lock. _start_next calls
-    # job_state()/start_job() WITH the queue lock held, so queue → job is the
-    # order this module locks in; taking them the other way round here would
-    # deadlock against it.
-    running = _running_key()
+    # Read the running job's ids BEFORE taking the queue lock: the two locks
+    # are taken one at a time everywhere (see _start_next), never nested.
+    running = _running_keys()
     dup = ""
     with _queue_lock:
         if not key:
             _queue.append(item)
-        elif key == running:
+        elif key in running:
             dup = "already being imported"
         elif any(_release_key(i.get("release_mbid"), i.get("release")) == key
                  for i in _queue):
@@ -165,10 +398,33 @@ def enqueue(release_mbid=None, release=None, queries=None, kind=None, mode=None)
 
 
 def queued():
-    """Pending bulk-import releases (running job excluded)."""
+    """Pending bulk-import releases (running job excluded).
+
+    Each entry carries its `key` — the release id it is deduped by, or `#n`
+    when it has none (a browsed folder) — which is what the queue view names
+    the row by and what drop_queued() takes."""
     with _queue_lock:
-        return [{"release_mbid": i.get("release_mbid"), "release": i.get("release")}
-                for i in _queue]
+        return [{"release_mbid": i.get("release_mbid"),
+                 "key": _release_key(i.get("release_mbid"), i.get("release")) or f"#{n}",
+                 "release": i.get("release")}
+                for n, i in enumerate(_queue)]
+
+
+def drop_queued(ref):
+    """Take one waiting release out of the bulk queue; True when it was there.
+
+    The queue view's cancel for a row that has not started yet, keyed the same
+    way the row is (`queued()`'s `key`). A release that already started is NOT
+    in this queue and answers False: stopping that is cancel(job_id), which the
+    caller does instead."""
+    key = str(ref or "")
+    with _queue_lock:
+        for index, item in enumerate(_queue):
+            mine = _release_key(item.get("release_mbid"), item.get("release"))
+            if key and (key == mine or key == f"#{index}"):
+                _queue.pop(index)
+                return True
+    return False
 
 
 
@@ -202,16 +458,37 @@ def _job_progress(payload):
         _job["progress"] = payload
 
 
-def job_state():
+def job_state(job_id=None):
+    """One job's state — the calling context's job, else `job_id`, else the
+    primary one — plus the bulk queue behind it.
+
+    The queue is read OUTSIDE `_lock`: `_queue_lock` and `_lock` are never held
+    at the same time anywhere in this module (see _start_next), so no lock
+    order exists for two threads to disagree about."""
     with _lock:
-        st = {k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
-              for k, v in _job.items() if k != "cancel"}
+        job = _jobs.get(job_id) if job_id else _pick()
+        st = _published(job or _IDLE_JOB)
+        st["running"] = len(_active_locked())
+        st["concurrency"] = concurrency()
+        st["jobs"] = [_published(_jobs[j]) for j in list(_order)
+                      if _jobs[j]["state"] != "idle"]
     st["queue"] = queued()
     return st
 
 
-def confirm(accept):
-    """Answer the job's pending prompt.
+def jobs():
+    """Every job the registry holds, oldest first — the queue view's rows.
+
+    Unlike job_state() this is not "the" job: three downloads can be in flight
+    and the page shows all of them. Idle placeholders are left out — a row with
+    nothing behind it is noise."""
+    with _lock:
+        return [_published(_jobs[j]) for j in list(_order)
+                if _jobs[j]["state"] != "idle"]
+
+
+def confirm(accept, job_id=None):
+    """Answer a job's pending prompt (`job_id`, else the parked/primary one).
 
     Both prompts a job can park on end here — "only lossy copies found" and
     "no usable results — add to wishes?" — because the waiter is one event
@@ -220,35 +497,49 @@ def confirm(accept):
     (the job moved on, or was cancelled) — the caller must not read that as an
     accepted download."""
     with _lock:
-        if _job["state"] != "confirm" or _job["cancel"]:
+        job = _pick(job_id)
+        if job is None or job["state"] != "confirm" or job["cancel"]:
             return False
-        _job["state"] = "running"
-        _job["confirm"] = None
-        _confirm_answer["accept"] = bool(accept)
-    _confirm_event.set()
+        job["state"] = "running"
+        job["confirm"] = None
+        job["_answer"]["accept"] = bool(accept)
+    job["_event"].set()
     return True
 
 
-def cancel():
+def cancel(job_id=None):
+    """Stop one job (`job_id`) — or, with no id, the whole pipeline.
+
+    The queue view cancels a single row: that download's transfers are dropped
+    and its thread stops at the next step, leaving the other jobs alone. The
+    Auto-import panel's Stop means "stop the pipeline", which with several jobs
+    in flight is all of them plus everything still waiting in the bulk queue.
+    A job parked on a prompt is woken either way, so its thread does not sit on
+    an answer nobody will give."""
     with _lock:
-        if _job["state"] in ("running", "confirm"):
-            _job["cancel"] = True
-            _log("Cancellation requested — will stop after the current step.")
-            released = True
+        if job_id:
+            job = _pick(job_id)
+            targets = [job] if job and job["state"] in ("running", "confirm") else []
         else:
-            released = False
-    if released:
-        # Stop the bulk queue too: the user pressed stop, so the whole
-        # run stops (a single-job cancel is the same button).
+            targets = list(_active_locked())
+        for job in targets:
+            job["cancel"] = True
+            job["_event"].set()
+        if targets:
+            _log("Cancellation requested — will stop after the current step.")
+    if not targets:
+        return False
+    if not job_id:
+        # Stop the bulk queue too: the user pressed stop, so the whole run
+        # stops (there is one Stop button, and it is not a per-row cancel).
+        # Taken AFTER releasing _lock: the two locks never nest.
         with _queue_lock:
             dropped = len(_queue)
             del _queue[:]
         if dropped:
             with _lock:
                 _log(f"Stopped {dropped} queued release(s).")
-        _confirm_event.set()  # a job parked on a prompt must wake up
-        return True
-    return False
+    return True
 
 
 def _log(msg):
@@ -265,7 +556,14 @@ def _prune_downloads():
     The job's rejected/cancelled candidates and its imported album all take
     files away; slskd never removes a directory it created, so without this
     the `<user>/<batch id>/<album>` chains pile up. rmdir-only (see
-    soulseek.prune_download_dirs) — nothing that still holds a byte goes."""
+    soulseek.prune_download_dirs) — nothing that still holds a byte goes.
+
+    Only when NO other job is running: slskd creates a transfer's destination
+    directories before it writes the first byte, so a sweep here would delete
+    the empty tree another job is about to download into."""
+    with _lock:
+        if _active_locked():
+            return
     try:
         from server import soulseek as slsk
         slsk.prune_download_dirs(slsk.download_dir())
@@ -276,15 +574,39 @@ def _prune_downloads():
 def _finish(state, result=None):
     with _lock:
         release = dict(_job.get("release") or {})
+        # The result is what every surface reads afterwards (the queue row, the
+        # notification, the manual retry): the partial bytes this job could not
+        # free and, for a failure, its CLASSIFICATION ("not_found" is not
+        # something to retry) are added here, in the one place a job settles.
+        result = dict(result or {})
+        leftovers = list(_job.get("leftovers") or [])
+        if leftovers:
+            result["leftovers"] = leftovers
+        if state == "error" and "outcome" not in result:
+            from server import wishes
+            result["outcome"] = wishes.outcome_of(result.get("error"))
         _job["state"] = state
         _job["result"] = result
         _job["progress"] = None   # nothing is downloading any more
+        _job["ended_at"] = time.time()
+        claim = _job.get("_claim")
+        _job["_claim"] = None
         if state == "done":
             _job["stage"] = "Done"
+            _job["stage_key"] = "completed"
+        elif state == "error":
+            _job["stage_key"] = "failed"
+        else:
+            _job["stage_key"] = "cancelled"
+    if claim is not None:
+        # The album's library folder is free again — BEFORE the queue refills,
+        # so a release that has been waiting on this same folder can claim it.
+        claim.release()
     _notify_finish(state, result or {}, release)
     _prune_downloads()
     if state != "cancelled":
-        # Bulk import: this release is over, start the next one in the queue.
+        # Bulk import: this release is over, start the next one in the queue
+        # (which may be several, up to the concurrency ceiling).
         # A cancelled job stops the queue instead (the user said stop).
         _start_next()
 
@@ -292,38 +614,85 @@ def _finish(state, result=None):
 def _notify_finish(state, result, release):
     """Announce a settled auto-import job (see server/events.py).
 
-    Only a `done` job is worth a notification: an error is not something the
-    user can act on from a phone at the other end of the house, and a
-    cancelled job is one they just cancelled themselves.
+    EVERY terminal state is announced, exactly once, with a `link` that opens
+    the thing the notification is about. That is the whole rule:
 
-    A job that IMPORTED the album is a finished download; one that only landed
-    it in the download folder is a job half done — the user still has to
-    import it — so it goes out as `import_ready` instead. One job, one
-    notification, and the kind is the one that says whether anything is left
-    to do.
+    * it landed in the library          -> download_done   (/album/…)
+    * it only landed in the download
+      folder                            -> import_ready    (/import?album=…)
+    * nothing usable was found and the
+      release went to the wishlist      -> wish_not_found  (/soulseek)
+    * the job gave up — an absent or
+      refused slskd, a MusicBrainz
+      outage, a failed verification     -> download_failed (/soulseek)
+
+    A CANCELLED job says nothing: the user just cancelled it themselves, and a
+    frame about their own button press is noise. A job that is merely retried
+    (or re-queued behind another) has not settled and says nothing either.
+
+    Never raises: a notification must not fail the download that earned it.
     """
-    if state != "done":
+    if state == "cancelled":
         return
     try:
         from server import events
+
         artist = ""
         artists = release.get("artists") or []
         if artists and isinstance(artists[0], dict):
             artist = str(artists[0].get("name") or "")
         title = str(release.get("title") or "")
-        label = f"{artist} — {title}" if artist and title else (title or artist or "Soulseek download")
-        imported = bool(result.get("imported"))
-        if imported:
-            kind = "download_done"
-            body = "Downloaded and imported into your library."
-        else:
-            kind = "import_ready"
-            body = (result.get("error")
-                    or "Downloaded — it is in the download folder, ready to import.")
-        events.emit(kind, label, body,
-                    {"release_mbid": str(release.get("id") or ""),
-                     "album_path": str(result.get("album_path") or ""),
-                     "imported": imported})
+        label = f"{artist} — {title}" if artist and title else (
+            title or artist or "Soulseek download")
+        mbid = str(release.get("id") or "")
+        album_path = str(result.get("album_path") or "")
+        staging = str(result.get("staging_path") or "")
+
+        if state == "error":
+            # Nothing else on the bus says "your download gave up": without
+            # this frame a refused slskd, a dead peer or a verification that
+            # failed all looked identical to a job that was still running.
+            err = str(result.get("error") or "the download did not finish")
+            leftover = [str(p) for p in (result.get("leftovers") or [])]
+            body = err
+            if leftover:
+                body += (f" — {len(leftover)} partial file(s) could not be "
+                         f"removed and are still in the download folder")
+            events.emit("download_failed", f"Download failed: {label}", body,
+                        {"link": "/soulseek", "release_mbid": mbid,
+                         "outcome": str(result.get("outcome") or ""),
+                         "error": err[:400],
+                         "album_path": album_path,
+                         "leftovers": leftover[:20]})
+            return
+
+        if result.get("wished"):
+            # The search found nothing and the release was parked in the wish
+            # list. "Kept looking" is not the same outcome as a failure, so it
+            # is not reported as one.
+            events.emit("wish_not_found", f"Nothing found: {label}",
+                        "No usable copy was on the network — the release is in "
+                        "your wish list and the worker keeps searching it there.",
+                        {"link": "/soulseek", "release_mbid": mbid,
+                         "wish_id": result.get("wish_id"), "outcome": "not_found"})
+            return
+
+        if result.get("imported"):
+            events.emit("download_done", label,
+                        "Downloaded and imported into your library.",
+                        {"link": f"/album/{quote(album_path, safe='')}" if album_path
+                                 else "/soulseek",
+                         "release_mbid": mbid, "album_path": album_path,
+                         "imported": True})
+            return
+
+        events.emit("import_ready", label,
+                    result.get("error")
+                    or "Downloaded — it is in the download folder, ready to import.",
+                    {"link": f"/import?album={quote(staging, safe='')}" if staging
+                             else "/soulseek",
+                     "release_mbid": mbid, "album_path": album_path or staging,
+                     "staging_path": staging, "imported": False})
     except Exception:
         traceback.print_exc()
 
@@ -1418,6 +1787,29 @@ def _drop_candidate(slsk, ddir, username, wanted, remove_root=None):
     if passes > 1:
         _log(f"  candidate removed in {passes} pass(es) — slskd kept writing "
              f"after the cancel")
+    # Whatever survived the sweeps is partial bytes of a REJECTED candidate: a
+    # locked file, or a peer still flushing. It is recorded on the job (and so
+    # reported in its outcome and its queue row) rather than left in the
+    # download folder for someone to find by accident.
+    _note_leftovers(_local_wanted_files(ddir, username, wanted))
+
+
+def _note_leftovers(paths):
+    """Record partial bytes a rejected candidate could not be freed of.
+
+    A sweep that did not remove everything must not pass in silence: the paths
+    ride into the job's result — and from there into the failure notification
+    and the queue row — so "a partial download was left behind" is something
+    the user is told, not something they discover."""
+    if not paths:
+        return
+    with _lock:
+        seen = _job.setdefault("leftovers", [])
+        for p in paths:
+            if p not in seen:
+                seen.append(p)
+    _log(f"  {len(paths)} partial file(s) could not be removed — still in "
+         f"{os.path.dirname(paths[0])}")
 
 
 def _in_candidate_folder(path, remote):
@@ -1902,14 +2294,31 @@ def _stamp_mb_tags(album_dir, release):
 # The orchestrator
 # --------------------------------------------------------------------------- #
 def job_active():
-    """True while a job holds the pipeline (running or parked on the lossy
-    prompt) — no second job may start, and the wishes worker must stand down."""
+    """True while ANY job holds the pipeline (running or parked on a prompt).
+
+    No longer "the pipeline is taken": several jobs run side by side, so the
+    wishes worker uses this to know whether a USER-started job is in flight,
+    not to stand down (it fills its own slots — see server/wishes_worker.py)."""
     with _lock:
-        return _job["state"] in ("running", "confirm")
+        return bool(_active_locked())
+
+
+def _prune_jobs_locked():
+    """Drop the oldest SETTLED jobs past the keep window. Caller holds _lock.
+
+    Running jobs are never dropped, and neither is the primary one: it is what
+    a caller with no id (the Auto-import panel) is looking at."""
+    settled = [j for j in _order if _jobs[j]["state"] not in ("running", "confirm")]
+    for jid in settled[:-_KEEP_SETTLED] if len(settled) > _KEEP_SETTLED else []:
+        if jid == _primary:
+            continue
+        _jobs.pop(jid, None)
+        _order.remove(jid)
 
 
 def start_job(release_mbid=None, release=None, queries=None, username=None,
-              target_dir=None, confirm_lossy=False, kind=None, mode=None):
+              target_dir=None, confirm_lossy=False, kind=None, mode=None,
+              wish_id=None, source=""):
     """Kick off an auto-import job in a daemon thread; returns the job state.
 
     release — a full release dict (from integrations.release_lookup); when
@@ -1922,10 +2331,18 @@ def start_job(release_mbid=None, release=None, queries=None, username=None,
     found no usable folder at all and the release could be wished instead.
     False (the background wishes worker) means lossy copies are never taken
     silently — and a wish is never asked to become a wish.
+    wish_id — the wish this job is filling, so the queue view shows ONE row for
+    the release instead of a wish and its job side by side.
+    source — who asked ("musicbrainz" / "soulseek" / "auto"), for that row.
+
+    Up to `soulseek_search_concurrency` jobs run at once; a further one is
+    refused with `transient` set (the caller should retry, the pipeline is
+    simply busy — that is not a failed release).
 
     A release id already waiting in the bulk queue is refused: it is about to
     run anyway, and letting it through here both downloaded it twice and left
     the duplicate behind in the queue to run a third time."""
+    global _seq, _primary
     # The queue lock is taken on its own (never while holding _lock): _finish
     # holds _lock and calls _start_next, which takes this one, so queue → job
     # is the order this module locks in and the reverse would deadlock.
@@ -1949,22 +2366,42 @@ def start_job(release_mbid=None, release=None, queries=None, username=None,
         except Exception:
             pass      # a library that cannot be read must not block the job
     with _lock:
-        if _job["state"] in ("running", "confirm"):
-            return {"ok": False, "error": "a job is already running", "job": job_state()}
-        _job.update({"state": "running", "stage": "Starting…", "log": [],
-                     "attempts": [], "result": None, "confirm": None, "search": None,
-                     "progress": None, "cancel": False,
-                     "release": {"id": release_mbid} if release_mbid else None})
-    _confirm_event.clear()
-    _confirm_answer["accept"] = False
-    threading.Thread(target=_run, name="mlo-soulseek-auto",
+        active = len(_active_locked())
+        if active >= concurrency():
+            return {"ok": False, "transient": True,
+                    "error": f"{active} releases are already running "
+                             "(soulseek_search_concurrency)",
+                    "job": job_state()}
+        _seq += 1
+        jid = _seq
+        job = dict(_IDLE_JOB)
+        job.update({
+            "id": jid,
+            "state": "running", "stage": "Starting…", "stage_key": "queued",
+            "log": [], "attempts": [], "result": None, "confirm": None,
+            "search": None, "progress": None, "cancel": False,
+            # Its OWN list, not the one _IDLE_JOB carries: dict(_IDLE_JOB) is a
+            # shallow copy, so every job would otherwise share one list.
+            "leftovers": [],
+            "release": {"id": release_mbid} if release_mbid else None,
+            "wish_id": int(wish_id) if wish_id else None,
+            "source": str(source or ""), "label": "",
+            "started_at": time.time(), "ended_at": 0.0,
+            # Its OWN prompt plumbing: three jobs can park on three prompts.
+            "_event": threading.Event(), "_answer": {"accept": False}, "_claim": None,
+        })
+        _jobs[jid] = job
+        _order.append(jid)
+        _primary = jid
+        _prune_jobs_locked()
+    threading.Thread(target=_run, name=f"mlo-soulseek-auto-{jid}",
                      kwargs=dict(release_mbid=release_mbid, release=release,
                                  queries=queries, username=username,
                                  target_dir=target_dir,
                                  confirm_lossy=confirm_lossy,
-                                 kind=kind, mode=mode),
+                                 kind=kind, mode=mode, job_id=jid),
                      daemon=True).start()
-    return {"ok": True, "job": job_state()}
+    return {"ok": True, "job": job_state(jid)}
 
 
 def _cancelled():
@@ -2043,6 +2480,7 @@ def _ask_to_wish(release, queries, waited, cfg, confirm_lossy):
     with _lock:
         _job["state"] = "confirm"
         _job["stage"] = "No usable results — add to wishes?"
+        _job["stage_key"] = "needs_attention"
         _job["confirm"] = {
             "reason": "no_results",
             "waited": int(waited),
@@ -2050,12 +2488,12 @@ def _ask_to_wish(release, queries, waited, cfg, confirm_lossy):
             "formats": [],
             "candidates": [],
         }
-    _confirm_event.wait()  # released by confirm() or cancel()
-    _confirm_event.clear()
+    _job["_event"].wait()  # released by confirm(job_id) or cancel(job_id)
+    _job["_event"].clear()
     with _lock:
         _job["confirm"] = None
         _job["state"] = "running"
-        accepted = _confirm_answer["accept"]
+        accepted = _job["_answer"]["accept"]
     if not accepted:
         return None
     wish = wishes.add_wish(
@@ -2081,11 +2519,97 @@ def _ask_to_wish(release, queries, waited, cfg, confirm_lossy):
             "imported": 0, "organized": 0, "organize_error": None}
 
 
+def _album_name(release):
+    """The album's folder name from its own tags — the ONE spelling _import()
+    and the folder claim both use, so they can never disagree about which
+    folder a release is heading for."""
+    return f"{(release.get('artists') or [{}])[0].get('name', '')} - {release.get('title', '')}".strip(" -")
+
+
+def _album_dir_name(release):
+    """That name with the characters a filesystem refuses removed."""
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", _album_name(release)).strip() or "Soulseek Import"
+
+
+def _album_claim(release, cfg):
+    """The library folder this release will be imported into, for job_locks.
+
+    THE arbiter for "two items must never land in one library folder at once":
+    the folder is named exactly as _import() names it — `<library root>/<Artist
+    - Album>`, BEFORE the `(2)` suffix a second import into an existing folder
+    gets — so two jobs heading for the same folder (two editions of one album,
+    an artist run that picked the same edition twice, a wish and a manual grab
+    of the same release) serialize here instead of racing to move their files
+    in and splitting one album across two jobs. The claim is held for the whole
+    job (search, download, verify, import) and released when the job ends."""
+    from mlo.paths import library_root
+    folder = str(cfg.get("music_folder") or "").strip()
+    if not folder or not _album_name(release):
+        return ""
+    return os.path.join(library_root(folder), _album_dir_name(release))
+
+
+class _AlbumClaim:
+    """One job's claim on its album folder, held for the job's whole life.
+
+    ``job_locks.holding()`` is a context manager and a job here is a long
+    function with a dozen exits, so the claim lives on a small thread of its
+    own: it takes the folder through the public API (WAITING for whoever holds
+    it, up to the registry's own budget), reports back so the job can carry on
+    — or fail with the refusal — and lets go the moment the job ends. Nothing
+    here re-implements the locking; job_locks remains the one arbiter.
+    """
+
+    def __init__(self, path, label):
+        self.path = path
+        self.label = label
+        self.job = ""
+        self.error = ""
+        self._ready = threading.Event()
+        self._done = threading.Event()
+
+    def start(self):
+        def keeper():
+            from server import job_locks
+            try:
+                with job_locks.holding([self.path], kind="auto-import",
+                                       label=self.label, wait=True) as job:
+                    self.job = job
+                    self._ready.set()
+                    # A job that gave up while it was still waiting sets this
+                    # immediately, so the folder is handed straight back.
+                    self._done.wait(24 * 3600)
+            except job_locks.PathLocked as e:
+                self.error = str(e)
+                self._ready.set()
+            except Exception as e:      # pragma: no cover - never leave a job waiting
+                self.error = str(e)
+                self._ready.set()
+
+        threading.Thread(target=keeper, name="mlo-album-claim",
+                         daemon=True).start()
+
+    def wait(self, cancel_check=None):
+        """Block until the folder is ours; "" when it never became ours."""
+        while not self._ready.wait(1.0):
+            if cancel_check is not None and cancel_check():
+                return ""
+        return self.job
+
+    def release(self):
+        self._done.set()
+
+
 def _run(release_mbid=None, release=None, queries=None, username=None,
-         target_dir=None, confirm_lossy=False, kind=None, mode=None):
+         target_dir=None, confirm_lossy=False, kind=None, mode=None, job_id=0):
     from server import soulseek as slsk
     from server import integrations as intg
 
+    # This thread IS this job: every module-level `_job[...]` in the pipeline
+    # below (and in the threads it spawns, which re-bind it) resolves to it.
+    # 0 = the idle/primary job, which is what a direct _run() call in a test
+    # means.
+    _tl.jid = int(job_id or 0)
     cfg = load_config()
     try:
         if not (slsk.is_running() or slsk.web_up(cfg)):
@@ -2134,6 +2658,8 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                     "edition of it is ineligible for auto-import")
             release_mbid = rid
         is_cd = "CD" in (release.get("medium_formats") or [])
+        label = (f"{(release.get('artists') or [{}])[0].get('name') or ''} — "
+                 f"{release.get('title') or ''}").strip(" —")
         with _lock:
             _job["release"] = {
                 "id": release.get("id"), "title": release.get("title"),
@@ -2141,11 +2667,43 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 "date": release.get("date"), "country": release.get("country"),
                 "catalog_number": release.get("catalog_number"),
                 "media": is_cd and "CD" or "Digital Media",
+                # What the release's OWN data says, for a row that shows which
+                # release is being fetched: the medium(s) it is pressed on and
+                # how many tracks it has. Both are already in hand here — the
+                # queue view must never spend a MusicBrainz request per row to
+                # learn them (the network is throttled to 1 req/s and the view
+                # is polled every few seconds).
+                "media_formats": list(release.get("medium_formats") or []),
+                "tracks": len(release.get("media") or []),
             }
+            _job["label"] = label
         _log(f"Target: {(release.get('artists') or [{}])[0].get('name', '?')} — "
              f"{release.get('title')} ({release.get('date') or 'n/a'})"
              f"{', ' + release.get('catalog_number') if release.get('catalog_number') else ''}"
              f" · {len(release.get('media') or [])} track(s) · {'CD' if is_cd else 'Digital Media'}")
+
+        # One album folder, one job: claimed BEFORE a single byte is searched
+        # for or downloaded. A job that shadows this folder waits here instead
+        # of racing this one into the same library folder — and the wait is
+        # visible (stage "queued", with the reason) rather than looking like a
+        # search that never answers.
+        claim_path = _album_claim(release, cfg)
+        if claim_path:
+            _stage("queued",
+                   f"Waiting for the album folder {os.path.basename(claim_path)}…")
+            claim = _AlbumClaim(claim_path, label)
+            claim.start()
+            # Blocking is the point (the job in front of us owns the folder),
+            # and cancel has to get through, hence the cancel_check.
+            if not claim.wait(_cancelled):
+                if _cancelled():
+                    return _finish("cancelled")
+                _log(f"Could not take {os.path.basename(claim_path)}: {claim.error}")
+                _finish("error", {"error": claim.error
+                                  or "the album folder stayed busy"})
+                return
+            with _lock:
+                _job["_claim"] = claim
 
         # ---- candidates ------------------------------------------------------
         # The queries this job searched with and the window it waited out are
@@ -2153,6 +2711,7 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
         # both on EITHER path (a browsed-folder grab searches with nothing).
         queries_built, search_wait = [], 0
         if username and target_dir:
+            _stage("searching", f"Browsing {username}…")
             _log(f"Manual entry: {username} · {target_dir}")
             entries = slsk.browse(username)
             want = str(target_dir).replace("\\", "/").rstrip("/")
@@ -2216,6 +2775,8 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 return [c for c in find_candidates(merged, release, cfg)
                         if c["complete"] and c["lossless"]]
 
+            _stage("searching",
+                   f"Searching Soulseek with {len(queries_built)} query template(s)…")
             _log(f"Searching Soulseek with {len(queries_built)} query template(s) in "
                  f"parallel: “{'” · “'.join(queries_built)}” … (a good folder ends "
                  f"the search at once, otherwise {response_limit} responses or "
@@ -2286,6 +2847,7 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 with _lock:
                     _job["state"] = "confirm"
                     _job["stage"] = "No rip log — import as Digital Media?"
+                    _job["stage_key"] = "needs_attention"
                     _job["confirm"] = {
                         "reason": "no_logs",
                         "media": "Digital Media",
@@ -2303,12 +2865,12 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 _log(f"No CD rip with a .log/.cue found — {len(loose)} complete "
                      f"lossless folder(s) hold every track but no log to grade. "
                      f"Waiting for your go-ahead to take one as Digital Media.")
-                _confirm_event.wait()  # released by confirm() or cancel()
-                _confirm_event.clear()
+                _job["_event"].wait()  # released by confirm(job_id) or cancel(job_id)
+                _job["_event"].clear()
                 with _lock:
                     _job["confirm"] = None
                     _job["state"] = "running"
-                    accepted = _confirm_answer["accept"]
+                    accepted = _job["_answer"]["accept"]
                 if _cancelled():
                     return _finish("cancelled")
                 if accepted:
@@ -2379,6 +2941,7 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 with _lock:
                     _job["state"] = "confirm"
                     _job["stage"] = "Waiting: only lossy copies found"
+                    _job["stage_key"] = "needs_attention"
                     _job["confirm"] = {
                         "reason": "lossy_only",
                         "formats": formats,
@@ -2393,12 +2956,12 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                             "score": c["score"],
                         } for c in candidates[:5]],
                     }
-                _confirm_event.wait()  # released by confirm() or cancel()
-                _confirm_event.clear()
+                _job["_event"].wait()  # released by confirm(job_id) or cancel(job_id)
+                _job["_event"].clear()
                 with _lock:
                     _job["confirm"] = None
                     _job["state"] = "running"
-                    accepted = _confirm_answer["accept"]
+                    accepted = _job["_answer"]["accept"]
                 if _cancelled():
                     return _finish("cancelled")
                 if not accepted:
@@ -2467,6 +3030,7 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 # all local instead of waiting out a junk extra log's timeout.
                 # They are also the ONLY transfers queued so far, so the block
                 # shows them and nothing else.
+                _stage("downloading", "Downloading the rip log(s) first…")
                 _log("Downloading .log file(s) first for a quality check…")
                 got_logs = _wait_for_files(slsk, ddir, uname, wanted_logs,
                                            timeout_s=_LOG_TIMEOUT_S,
@@ -2525,6 +3089,8 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
 
             # --- the album (queued above: the log first, the album after it) ----
             est_timeout = _est_timeout(cand)
+            _stage("downloading",
+                   f"Downloading {len(wanted)} file(s) from {uname}…")
             _log(f"Downloading {len(wanted)} file(s) "
                  f"({cand['total_size'] / (1024 * 1024):.0f} MB, up to {est_timeout}s)…")
             got = _wait_for_files(slsk, ddir, uname, album_wanted or wanted,
@@ -2562,6 +3128,7 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                                        "folder under the download dir")
                 _drop_candidate(slsk, ddir, uname, wanted)
                 continue
+            _stage("verifying", "Verifying downloads against the rip log / decoders…")
             _log("Verifying downloads against the rip log / decoders…")
             media = "CD" if is_cd else "Digital Media"
             _stamped, tag_problems = _stamp_media(local_root, media, cfg)
@@ -2579,6 +3146,7 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 # there goes with it, and the sweep still runs afterwards
                 _drop_candidate(slsk, ddir, uname, wanted, remove_root=local_root)
                 continue
+            _stage("importing", "Importing into the library…")
             _log("Verification passed — importing into the library…")
 
             # --- stage 4: import -------------------------------------------------
@@ -2684,20 +3252,28 @@ def _cleanup_partial(ddir, local_files, remove_root=None):
 
 
 def _start_import_chain(album_dir, cfg):
-    """Stage the freshly imported album — links, metadata, covers — and stop.
+    """Finish the freshly imported album in the background: links, metadata,
+    cover art — and the configured script chain.
 
-    Delegates to ``server.imports.finish_album(..., defer_tagging=True)``: the
-    album was moved, AcoustID-checked, converted, MB/MEDIA-stamped and named
-    by ``_import`` before this runs, so all that is left is the identity
-    stamping, the artist metadata and the cover art. The tag-writing chain
-    (auto tagging, lyrics, DR & ReplayGain, grade, format all) is deliberately
-    NOT run — an unattended download must not rewrite the user's tags, that is
-    what the wizard and the menu actions are for.
+    Delegates to ``server.imports.finish_album(album_dir, cfg)``: the album was
+    moved, AcoustID-checked, converted, MB/MEDIA-stamped and named by
+    ``_import`` before this runs, and the chain the user configured
+    (optimization, tagging, grading) runs over it now that it is in the
+    library — a download the user waited for must come out finished, not
+    sitting half-tagged in the library.
 
     It runs in a daemon thread (a job's result is where the album is, not
     twenty minutes of re-encoding) and is failure-tolerant by design: a
     failure is written into the job log and the import still succeeds — the
     album is already in the library.
+
+    Whatever the chain could not supply is reported by `finish_album` itself
+    (``_report_gaps`` → ``import_autonomy.raise_prompt``): the album's missing
+    families go out as ONE ``import_needs_data`` notification and land in
+    ``GET /api/import/prompts``, which is what the queue's "Needs you" row and
+    its wizard link are made of. That is the download path's half of "stop and
+    ask for help", through the same seam every other import path uses rather
+    than a second opinion about what is missing.
 
     ``_account_metadata`` runs after it: the artist image and the artist/album
     descriptions are the three things an unattended import has to account for,
@@ -2706,22 +3282,39 @@ def _start_import_chain(album_dir, cfg):
     """
     from server import imports
 
+    # The job this album belongs to, captured on ITS thread: the chain runs on
+    # a thread of its own long after _run() returned, and its log lines (and
+    # the metadata progress it reports) are the job's, not whichever job
+    # happens to be primary by then.
+    owner = int(_job.get("id") or 0)
+
     def chain():
+        _tl.jid = owner
         try:
-            result = imports.finish_album(album_dir, cfg, defer_tagging=True)
-            for err in result["errors"]:
+            result = imports.finish_album(album_dir, cfg)
+            for err in result.get("errors") or []:
                 _log("  ! " + err)
-            _log("Album staged and placed: links, metadata and cover art. "
-                 "Tagging (auto tagging, lyrics, DR, grade, format all) is "
-                 "left to the wizard / menu actions.")
+            # The chain's own one-line report ("ran 12 of 14 scripts — 2
+            # failed"), then what the album is still short of. The missing
+            # families were already announced (import_needs_data, one frame)
+            # by the import that computed them; this is the job log's copy.
+            summary = imports.chain_summary(result)
+            if summary:
+                _log(summary)
+            missing = ((result.get("autonomy") or {}).get("missing") or {})
+            if missing:
+                names = ", ".join(sorted(str((v or {}).get("label") or k)
+                                         for k, v in missing.items()))
+                _log(f"Still missing after the chain: {names} — reported for a "
+                     f"decision (Soulseek queue → Needs you).")
         except Exception:
             traceback.print_exc()
             _log("Import pipeline crashed: "
                  f"{traceback.format_exc().strip().splitlines()[-1]}")
         _account_metadata(album_dir, cfg)
 
-    _log("Staging the imported album in the background "
-         "(RateYourMusic links, metadata, cover art).")
+    _log("Running the import chain in the background (RateYourMusic links, "
+         "metadata, cover art, then the configured scripts).")
     threading.Thread(target=chain, name="mlo-soulseek-import-chain",
                      daemon=True).start()
 
@@ -2776,7 +3369,14 @@ def _verify_acoustid(album_dir, release, cfg):
     a different pressing/edition downloads fine, passes the log/CRC gate and
     is still not the release the tags claim. That is a WARNING in the job log
     (``server.imports.release_group_mismatch``), never a rejected download —
-    the user can see it on the Soulseek page and decide.
+    the user can see it on the Soulseek page and decide. The tag-derived
+    candidate (`release`) goes in as *expect*, so the fingerprint is
+    CROSS-CHECKED rather than trusted, and it never writes anything: the
+    release the job matched stays the identity of the album.
+
+    A check that could not be RUN says so by name (no fpcalc, a timeout, a
+    rejected key) — "no release group matched" is only ever the service's own
+    answer.
     """
     want = str(release.get("release_group_id") or "").strip()
     if not want or not cfg.get("import_acoustid"):
@@ -2788,8 +3388,14 @@ def _verify_acoustid(album_dir, release, cfg):
         if not acoustid.available(cfg):
             _log(f"AcoustID check skipped: {acoustid.acoustid_enabled_note(cfg)}")
             return
-        result = imports.acoustid_match([album_dir], cfg)
+        result = imports.acoustid_match([album_dir], cfg, expect=release)
         row = (result.get("albums") or [{}])[0]
+        status = str(row.get("status") or "")
+        if status == "error":
+            _log("WARNING: the AcoustID check could not answer: "
+                 f"{row.get('reason') or row.get('code')} — the download is "
+                 "unverified, not rejected.")
+            return
         warning = imports.release_group_mismatch(row, want)
         if warning:
             _log("WARNING: " + warning + " — the download may be a different "
@@ -2797,11 +3403,16 @@ def _verify_acoustid(album_dir, release, cfg):
         elif row.get("release_group_id"):
             _log(f"AcoustID confirmed the release group "
                  f"({row.get('matched')}/{row.get('total')} tracks).")
+        elif status == "skipped":
+            _log(f"AcoustID check skipped: "
+                 f"{row.get('reason') or row.get('code')} (not a rejection).")
         else:
             _log("AcoustID check: no release group matched the audio "
                  "(inconclusive, not a rejection).")
     except Exception:
         traceback.print_exc()
+        _log("WARNING: the AcoustID check crashed — the download is "
+             "unverified, not rejected.")
 
 
 def _import(local_root, release, cfg, media):
@@ -2817,8 +3428,8 @@ def _import(local_root, release, cfg, media):
     if not folder or not os.path.isdir(folder):
         raise RuntimeError("music_folder is not configured")
 
-    name = f"{(release.get('artists') or [{}])[0].get('name', '')} - {release.get('title', '')}".strip(" -")
-    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", name).strip() or "Soulseek Import"
+    name = _album_name(release)
+    safe = _album_dir_name(release)
     # the library lives in <music folder>/Artists — the music folder root is
     # what the Soulseek network is shared from, not where albums belong.
     dest = os.path.join(library_root(folder), safe)

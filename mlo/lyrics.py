@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .audio import AudioFile
 from .config import should_write_audio_tag
-from .paths import AUDIO_EXTS, DEFAULT_DIGITAL_SOURCE
+from .paths import AUDIO_EXTS, DEFAULT_DIGITAL_SOURCE, fsync_dir
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _diff_bytes,
     _walk_files, is_audio_file, _find_albums, _clean_set, _summarize_values,
@@ -429,14 +429,9 @@ def _atomic_write_text(path, text):
             except Exception:
                 pass
         _os.replace(tmp, path)
-        try:
-            d_fd = _os.open(_os.path.dirname(path) or ".", _os.O_DIRECTORY)
-            try:
-                _os.fsync(d_fd)
-            finally:
-                _os.close(d_fd)
-        except Exception:
-            pass
+        # The directory fsync is POSIX-only (see paths.fsync_dir); on Windows
+        # the call it used to make could not work at all.
+        fsync_dir(_os.path.dirname(path))
         return True
     except Exception:
         try:
@@ -510,6 +505,7 @@ def _process_lyrics_for_audio(audio_path, cfg):
                     modified = True
 
     # Clean existing LRC file (no trailing newline / blank lines).
+    lrc_cleaned = None
     if lrc_exists and (force or cfg.get("optimize_lrc", True)):
         try:
             with open(lrc_path, "r", encoding="utf-8", errors="replace") as f:
@@ -518,6 +514,9 @@ def _process_lyrics_for_audio(audio_path, cfg):
             final = _format_for_storage(
                 lrc_content, cfg, optimize=cfg.get("optimize_lrc", True), is_for_lrc=True
             )
+            # What the sidecar holds now: the text just read, or the canonical
+            # text just written over it.
+            lrc_cleaned = final
 
             if final != lrc_content:
                 _atomic_write_text(lrc_path, final)
@@ -538,11 +537,17 @@ def _process_lyrics_for_audio(audio_path, cfg):
 
     lrc_raw = None
     if lrc_exists:
-        try:
-            with open(lrc_path, "r", encoding="utf-8", errors="replace") as f:
-                lrc_raw = f.read()
-        except Exception as e:
-            return ("fail", 0, 0, f"lrc read: {e}")
+        if lrc_cleaned is not None:
+            # The cleaning pass above already read this sidecar — and wrote it
+            # when the canonical text differed — so reading it off the disk a
+            # second time only re-fetched the bytes already in hand.
+            lrc_raw = lrc_cleaned
+        else:
+            try:
+                with open(lrc_path, "r", encoding="utf-8", errors="replace") as f:
+                    lrc_raw = f.read()
+            except Exception as e:
+                return ("fail", 0, 0, f"lrc read: {e}")
 
         if not lrc_raw.strip() and lyrics_format == "EMBEDDED":
             # Empty sidecar with lyrics living in the tag: remove the

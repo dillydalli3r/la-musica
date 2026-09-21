@@ -1,18 +1,25 @@
 """The import service: what happens to an album once it is on disk.
 
 Every import path (the wizard's upload/ingest, the downloads page, the bulk
-queue, the Soulseek auto-import) ends in the same place — :func:`finish_album`
-runs the configured script chain over the new album folder, and
-:func:`bulk_import` is the queue that moves staging folders into the library
-first. The Soulseek auto-import additionally verifies the downloaded audio
-against the release it was looking for (:func:`acoustid_match`), and calls
-:func:`finish_album` with ``defer_tagging`` — nothing unattended may tag, it
-only stages and places the album.
+queue, the sequential import queue, the Soulseek auto-importer and the wish /
+artist-watch pipeline behind it) ends in the same place — :func:`finish_album`
+runs the configured script chain over the new album folder, on the folder the
+organizer left it at, and :func:`bulk_import` is the queue that moves staging
+folders into the library first. There is no path that acquires an album and
+then leaves it without the optimization/tagging pass: the one that used to
+(auto-import "staged" the album and deferred every tag-writing script) is what
+this module's `chained`/`chain_off`/`note` result reports on now. The Soulseek
+auto-import additionally verifies the downloaded audio against the release it
+was looking for (:func:`acoustid_match`) before handing it to the same call.
 
 Config keys this module owns:
 
     import_auto_scripts     master switch for the post-import chain
     import_scripts          explicit chain ids ([] = DEFAULT_CHAIN)
+    import_autonomy         automatic (whole chain, then one prompt for what is
+                            still missing) | review (stop before the first
+                            family that needs a decision)
+    import_review_families  families the user decides even in automatic mode
     import_bulk_concurrency albums processed at once by bulk_import
     import_acoustid         run the AcoustID release check on an import
     acoustid_*              key / availability of the AcoustID lookup itself
@@ -31,7 +38,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from mlo.config import load_config
 from mlo.paths import library_root, move_path
 from mlo import advisory
+from mlo import import_policy
 
+from server import import_autonomy
 from server import script_runners
 from server import tagcache
 
@@ -69,7 +78,9 @@ def chain_for(cfg=None):
     ``import_auto_scripts`` off is no chain at all. Otherwise an explicit
     ``import_scripts`` list replaces the built-in chain (ids outside the
     runner registry dropped, duplicates dropped, order kept); an empty one
-    means DEFAULT_CHAIN.
+    means DEFAULT_CHAIN. Ids a family under review needs — script 13 is the
+    only one, the lyrics fetch — are dropped last, so the preview a caller
+    shows and the run it describes can never disagree.
     """
     cfg = cfg or {}
     if not cfg.get("import_auto_scripts", True):
@@ -86,8 +97,16 @@ def chain_for(cfg=None):
                 continue
             if SCRIPT_ID_MIN <= sid <= SCRIPT_ID_MAX and sid not in ids:
                 ids.append(sid)
+        return _without_reviewed(ids, cfg)
+    return _without_reviewed(list(DEFAULT_CHAIN), cfg)
+
+
+def _without_reviewed(ids, cfg):
+    """*ids* minus the scripts that would decide a family the user kept."""
+    dropped = import_policy.dropped_chain_ids(cfg)
+    if not dropped:
         return ids
-    return list(DEFAULT_CHAIN)
+    return [sid for sid in ids if sid not in dropped]
 
 
 def _invalidate_caches():
@@ -108,44 +127,103 @@ def _invalidate_caches():
         pass
 
 
-def finish_album(album_dir, cfg=None, progress=None, force=None, *,
-                 defer_tagging=False):
+def finish_album(album_dir, cfg=None, progress=None, force=None):
     """Run the configured chain over ONE album folder.
 
-    The single call every import path makes after an album is on disk.
-    Returns ``{"path", "scripts", "chain", "errors"}``; ``scripts`` is one
-    result per chain id (``server.script_runners`` shape) and ``errors`` a
-    flat list for a caller that only wants to know what went wrong. A failing
-    script is reported, never raised: the album is already imported.
+    The single call every import path makes after an album is on disk — the
+    wizard's finish, the downloads page's one-click import, the sequential
+    import queue, the bulk queue, the Soulseek auto-importer and the wish /
+    artist-watch pipeline behind it, so what an album ends up as cannot depend
+    on which button was pressed. Returns ``{"path", "chain", "scripts",
+    "errors", "chained", "chain_off", "note", "autonomy"}``: ``scripts`` is one
+    result per chain id (``server.script_runners`` shape), ``errors`` a flat
+    list for a caller that only wants to know what went wrong, and ``path`` the
+    folder the album actually ended at (a chain script renames it — see
+    :func:`_resolve_moved_album`). The three chain keys say what happened to
+    the chain itself, which is what an unattended path has to report instead
+    of a bare "imported":
 
-    ``defer_tagging`` is the auto-import's mode: the album is staged and
-    placed — RYM link stamps, the metadata step and the cover step, the three
-    things an unattended import can do without deciding anything for the user
-    — and nothing else. The ITUNESADVISORY and INSTRUMENTAL fetches and the
-    whole script chain (auto tagging, lyrics, DR & ReplayGain, grade, format
-    all) are tag-writing work that was never asked for, so an album the
-    auto-import dropped in the library keeps the tags it arrived with until
-    the user runs the wizard or a menu action. That is also why this is a
-    keyword here and not a config key: the manual paths (``/api/import/
-    finish``, the Soulseek page, the bulk queue) call without it and keep the
-    full chain. ``chain``/``scripts`` come back empty — nothing was deferred
-    to a later run either.
+        ``chained``    the configured chain ran over this folder
+        ``chain_off``  there was no chain to run (``import_auto_scripts`` off,
+                       or every configured id held for review)
+        ``note``       ONE honest line about it, for a log, a queue row or a
+                       notification — :func:`chain_summary` is that wording,
+                       and it is "" only for a result that says nothing about a
+                       chain at all
 
-    The artist image and the artist/album descriptions are accounted for by
-    the caller instead: ``soulseek_auto`` is the ONLY ``defer_tagging``
-    caller (its unattended importer), and it runs
-    ``api_discovery.ensure_artist_album_metadata`` right after this returns,
-    logging one line per item — the step lives there rather than here so it
-    can never run twice on that path.
+    A failing script is reported, never raised: the album is already imported.
+    An import whose chain did not run is never reported as an ordinary success.
+    Nothing is emitted from here: every caller already reports its own outcome
+    (see ``server.events``), and a second emitter would double-report the same
+    import.
+
+    The staged work is gated by its OWN keys, not by the chain switch:
+    ``metadata_auto_fetch`` / ``cover_auto_fetch`` decide the artist image,
+    descriptions and cover art and ``rym_links_auto`` the links, so an import
+    with the chain switched off still does those (the unattended import has
+    fetched them since it existed, and turning the scripts off must not silently
+    take the cover art with it) — while ``advisory_auto_fetch`` /
+    ``instrumental_auto_fetch`` only run when a chain is configured to read what
+    they write.
+
+    WHAT IS LEFT is always reported, in both modes, by
+    ``_report_gaps``: the album's ``autonomy`` block carries what it is still
+    missing (per family, from the grader's own checks) and, when there is
+    anything, the one prompt that was raised for it — a notification plus an
+    entry the wizard lists, naming the families and linking to the album at
+    the step where each decision is made. ``import_autonomy`` decides how far
+    the import got before that report: ``automatic`` (the default) runs
+    everything and reports what no source could supply, ``review`` stops
+    before the first family that needs a decision. In neither mode is an album
+    left out of the library, and a prompt is withdrawn by the next import of
+    the same album (the call that resolves the gaps is the one that clears it).
     """
     cfg = cfg or load_config()
     path = os.path.normpath(str(album_dir))
-    out = {"path": path, "scripts": [], "chain": [], "errors": []}
+    out = {"path": path, "scripts": [], "chain": [], "errors": [],
+           "chained": False, "chain_off": False, "note": ""}
     chain = chain_for(cfg)
     out["chain"] = chain
+    # Nothing to run: `import_auto_scripts` off, or every configured id is one
+    # the user kept for themselves. Not the same as "the chain ran", which is
+    # the whole point of the flag — see `note` at every exit below.
+    out["chain_off"] = not chain
     if not os.path.isdir(path):
         out["errors"].append("album folder not found")
+        out["note"] = "the album folder is not there"
         return out
+    # How far this import goes on its own, decided BEFORE anything runs:
+    # `run_cfg` is what every family step below reads, so a family the user
+    # kept for themselves (`import_review_families`) is left alone by the very
+    # switches that would otherwise decide it, and `stop` is the family a
+    # review hands the album over at — read from the album AS IT ARRIVED, which
+    # is why the plan is made here and not after the chain
+    # (`mlo.import_policy.plan`).
+    policy = import_policy.plan(cfg, path)
+    run_cfg = import_policy.effective_config(cfg)
+    # A FRAMEWORK album (`server.pending_albums`) loses OUR placeholder cover
+    # here, BEFORE the cover step below — that step then sees a folder with no
+    # cover and fetches the release's real artwork instead of accepting the
+    # placeholder. Only the file the framework album wrote is ever deleted, and
+    # only the placeholder: the album's PENDING MARKER stays until the
+    # configured chain has run (see the ends of this function), so a folder
+    # whose import never got there keeps being reported as pending rather than
+    # being dressed up as a finished album. Runs before the review stop too:
+    # dropping the placeholder is not one of the decisions a review is about.
+    try:
+        from server import pending_albums
+        pending_albums.drop_placeholder_cover(path)
+    except Exception:
+        traceback.print_exc()
+    if policy["stop"]:
+        # Review: the album is handed over before the first step that needs a
+        # decision, so nothing tag-writing runs past it. It keeps what it
+        # arrived with and the wizard picks up where this stops — which is also
+        # why a framework album stays pending: a configured chain has NOT run.
+        out["chain"] = []
+        out["note"] = (f"stopped for review at {policy['stop']} — the script "
+                       "chain has not run")
+        return _report_gaps(out, cfg, policy, path)
     # The album's identity, read while it is still where the caller put it:
     # the chain's beets/organize step renames the folder to its canonical
     # layout, and after that the old path is the only handle this function has
@@ -161,23 +239,21 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, *,
     # links. Gated by rym_links_auto; a lookup that finds nothing is one log
     # line (the user pastes the URL in the links editor), never an error.
     try:
-        rym = stamp_rym_links(path, cfg)
+        rym = stamp_rym_links(path, run_cfg)
         if rym["note"].startswith("could not resolve"):
             print(f"[mlo] rateyourmusic: {rym['note']} — {os.path.basename(path)}")
     except Exception:
         traceback.print_exc()
 
-    # defer_tagging keeps going to the metadata/cover steps below; its chain
-    # is empty by definition and is set when it returns.
-    if not chain and not defer_tagging:
-        return out                      # auto scripts off / no ids configured
-
     # Advisory BEFORE the chain: script 8 derives ALBUMITUNESADVISORY from the
     # per-track values, so writing ITUNESADVISORY afterwards would leave the
-    # album tag stale. Gated by advisory_auto_fetch; never fatal.
-    if not defer_tagging and cfg.get("advisory_auto_fetch", True):
+    # album tag stale. Gated by advisory_auto_fetch; never fatal. Only fetched
+    # when a chain is configured to read them — they exist to feed script 8 and
+    # the lyrics step, and a chain that is switched off must not leave those
+    # tags behind as a side effect.
+    if chain and run_cfg.get("advisory_auto_fetch", True):
         try:
-            out["advisory"] = fetch_advisories([path], cfg)
+            out["advisory"] = fetch_advisories([path], run_cfg)
         except Exception:
             traceback.print_exc()
 
@@ -185,7 +261,7 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, *,
     # lyrics step reads INSTRUMENTAL), and is independent of the advisory: a
     # track can be instrumental and explicit-rated. Gated by
     # instrumental_auto_fetch; never fatal.
-    if not defer_tagging and cfg.get("instrumental_auto_fetch", True):
+    if chain and cfg.get("instrumental_auto_fetch", True):
         try:
             out["instrumental"] = fetch_instrumentals([path], cfg)
         except Exception:
@@ -198,7 +274,7 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, *,
     # `staged_metadata`), so it survives the chain moving the album to its
     # canonical folder — which it does, via beets/organize. Never fatal.
     try:
-        out["metadata"] = run_metadata_step(path, cfg)
+        out["metadata"] = run_metadata_step(path, run_cfg)
     except Exception:
         traceback.print_exc()
 
@@ -208,34 +284,146 @@ def finish_album(album_dir, cfg=None, progress=None, force=None, *,
     # ``covers`` on the album's entry in the same review file the metadata step
     # writes, so the two steps share one record and neither clobbers the
     # other). Gated by cover_auto_fetch; never fatal.
+    #
+    # Both steps run on EVERY path, chain or no chain: `metadata_auto_fetch` /
+    # `cover_auto_fetch` are their own switches, and the unattended import has
+    # fetched them since it existed — the chain's own switch is about the
+    # scripts, and turning it off must not silently take the cover art away
+    # with it.
     try:
-        out["cover"] = run_cover_step(path, cfg)
+        out["cover"] = run_cover_step(path, run_cfg)
     except Exception:
         traceback.print_exc()
 
-    if defer_tagging:
-        # Stage and place, stop. The identity is stamped (RYM links) and the
-        # album got its artist image/description and cover art, but every
-        # tag-writing script stays unrun — see the docstring. `chain` empty so
-        # a caller reads "no chain ran" rather than "these ids ran".
-        out["chain"] = []
+    if not chain:
+        # `import_auto_scripts` off / every id held for review: deliberately
+        # nothing to run. The album is finished by configuration — which is NOT
+        # the same as the chain having run, so the result says which (`note`),
+        # and every caller that reports the import says it too instead of
+        # passing a bare "imported" on. A framework album's pending state ends
+        # here as well: no chain is coming to end it later, and a folder the
+        # user can never clear is a trap, not a warning.
+        out["note"] = _chain_off_note(cfg)
         _invalidate_caches()            # the steps above wrote tags/files
+        _clear_pending(path, cfg, chained=False, chain_off=True)
         return out
 
     try:
         # wait=True: an import must not skip its chain just because a UI run
         # happens to hold the library lock — it queues behind it instead.
         out["scripts"] = script_runners.run_chain(
-            cfg, chain, targets=[path], force=force, progress=progress, wait=True)
+            run_cfg, chain, targets=[path], force=force, progress=progress,
+            wait=True)
     except script_runners.RunBusy as e:
         # Only reachable after the (1 h) wait timed out: report it so the
         # caller marks the album unfinished instead of "imported".
         out["errors"] = [str(e)]
+        out["note"] = f"the script chain could not start: {e}"
         return out
+    out["chained"] = True
     out["errors"] = [f"script {r.get('id')}: {r['error']}"
                      for r in out["scripts"] if r.get("error")]
     out["path"] = _resolve_moved_album(out["path"], album_mbid, album_rgid)
     _invalidate_caches()
+    # The configured chain has run, over the folder it left the album at — only
+    # now is a framework album finished (`chained=True`), and only on the FINAL
+    # path: the marker lives inside the album, so clearing it on a stale one
+    # would leave the real folder pending forever.
+    _clear_pending(out["path"], cfg, chained=True)
+    out["note"] = chain_summary(out)
+    return _report_gaps(out, cfg, policy, out["path"])
+
+
+def chain_summary(result):
+    """The ONE honest line about what an import's script chain did.
+
+    Every surface that reports an import the caller did not watch — the job
+    log, the wish notification, the queue row — says it with this, so the
+    claim is the same everywhere and a chain that did not run can never be
+    reported as one that did. "" for a result that says nothing about a chain
+    at all (a caller's own fallback dict, the auto-importer's job result before
+    the chain's background thread has finished), never a claim either way.
+    """
+    res = result if isinstance(result, dict) else {}
+    if isinstance(res.get("chain"), dict):
+        # A caller that carries a whole finish_album result under "chain" —
+        # the auto-importer's job result does — is asking about THAT result,
+        # not about a chain field of its own.
+        return chain_summary(res["chain"])
+    if not any(k in res for k in ("chain", "scripts", "chained", "chain_off")):
+        return ""
+    scripts = list(res.get("scripts") or [])
+    errors = [str(e) for e in (res.get("errors") or []) if str(e)]
+    if not scripts:
+        if res.get("note"):
+            return str(res["note"])
+        if res.get("chain_off") or not res.get("chain"):
+            return "no script chain was run (import_auto_scripts is off)"
+        return "the script chain did not run" + (f": {errors[0]}" if errors else "")
+    failed = [s for s in scripts if isinstance(s, dict) and s.get("error")]
+    total = len(scripts)
+    if not failed:
+        return f"the script chain ran {total} script" + ("" if total == 1 else "s")
+    names = ", ".join(str(s.get("label") or s.get("id")) for s in failed[:3])
+    return (f"the script chain ran {total - len(failed)} of {total} scripts — "
+            f"{len(failed)} failed ({names})")
+
+
+def _chain_off_note(cfg):
+    """Why nothing ran, for a config that configures no chain."""
+    if not cfg.get("import_auto_scripts", True):
+        return "no script chain was run: import_auto_scripts is off"
+    return ("no script chain was run: every configured script decides a family "
+            "you kept for yourself")
+
+
+def _clear_pending(path, cfg, *, chained, chain_off=False):
+    """End a framework album's pending state — never fatal to the import.
+
+    `server.pending_albums` owns the rule (the marker goes once the chain ran,
+    or when this config runs none at all; a folder with no audio stays
+    pending); this only makes the call safe from an import that must not fail
+    because a marker could not be removed.
+    """
+    try:
+        from server import pending_albums
+        pending_albums.clear_if_filled(path, cfg, chained=chained,
+                                       chain_off=chain_off)
+    except Exception:
+        traceback.print_exc()
+
+
+def _report_gaps(out, cfg, policy, path):
+    """End an import: report what it could not finish, and raise ONE prompt.
+
+    The single place a finished import says what it is missing, called by both
+    ways out of :func:`finish_album` — the review stop and the end of the
+    chain — so an album that still lacks a family always announces it, and
+    announcing it is the same call whatever the import's mode was. `automatic`
+    has already decided everything the configured sources could answer, so what
+    is left is what no source supplied; `review` stopped before it decided.
+
+    The gaps themselves come from `mlo.import_policy.gaps`, i.e. from the
+    grader's own checks, so a prompt here and a grading failure there are the
+    same statement. ``out["autonomy"]`` is the caller's view of it:
+
+        {mode, stopped, missing: {family: {...}}, prompt: {...}|None}
+
+    and is only present when there was something to report at all: an import
+    that ran no chain decided nothing, so it reports nothing (the same early
+    return the function always had for `import_auto_scripts` off).
+    """
+    gaps = import_policy.gaps(path, import_policy.effective_config(cfg),
+                              steps={"advisory": out.get("advisory"),
+                                     "cover": out.get("cover")})
+    out["autonomy"] = {
+        "mode": policy["mode"],
+        "stopped": policy["stop"],
+        "missing": gaps,
+        "prompt": import_autonomy.raise_prompt(
+            path, cfg, gaps, mode=policy["mode"],
+            reason="stopped" if policy["stop"] else "missing"),
+    }
     return out
 
 
@@ -500,25 +688,12 @@ def _review_load(path):
 def _album_mbids(album_dir):
     """(album id, release-group id) from an album's own tags, either "".
 
-    Read from a few files only: album-level tags are uniform across the tracks
-    (the same reason `_album_mbids` caps its scan), and this runs for
-    every staged-entry lookup.
+    Lowercased for comparison; read off `_tag_candidate`, which caps its scan
+    at five files for the same reason (album-level tags are uniform across the
+    tracks).
     """
-    from mlo.audio import AudioFile
-
-    album_id = rg = ""
-    for p in _audio_files(album_dir)[:5]:
-        try:
-            af = AudioFile(p)
-            if af.audio is None:
-                continue
-            album_id = album_id or str(af.get_tag("MUSICBRAINZ_ALBUMID") or "").strip().lower()
-            rg = rg or str(af.get_tag("MUSICBRAINZ_RELEASEGROUPID") or "").strip().lower()
-        except Exception:
-            continue
-        if album_id or rg:
-            break
-    return album_id, rg
+    cand = _tag_candidate(album_dir)
+    return (cand["release_id"].lower(), cand["release_group_id"].lower())
 
 
 def staged_metadata(album_dir, cfg=None):
@@ -817,16 +992,31 @@ def run_cover_step(album_dir, cfg=None):
     return out
 
 
-def acoustid_match(paths, cfg=None, progress=None, apply=False):
+def acoustid_match(paths, cfg=None, progress=None, apply=False, expect=None):
     """Which release group the audio in these albums really is (AcoustID).
 
     Album folders or track paths; the tracks of each folder are fingerprinted
     and voted on as one album (see ``mlo.acoustid.match_release``). Returns
-    ``{"available", "note", "albums": [{"path", "release_group_id",
-    "release_group_title", "release_group_type", "artists", "score",
-    "matched", "total", "recordings", "tagged"}]}`` — ``available`` False with
-    a human-readable ``note`` when no key/fpcalc is configured, and never an
-    exception.
+    ``{"available", "note", "ok", "code", "albums": [{"path",
+    "release_group_id", "release_group_title", "release_group_type", "artists",
+    "score", "matched", "total", "recordings", "tagged", "status", "code",
+    "reason", "conflict", "conflicts", "skips", "failures"}]}``.
+
+    ``available`` False with a human-readable ``note`` when no key/fpcalc is
+    configured, and never an exception. Each row always carries its own
+    verdict: ``status`` is "matched", "no_match", "skipped" (no fingerprintable
+    audio: a video container, a clip under five seconds) or "error" (fpcalc
+    could not run or the lookup could not be answered) — a failed lookup is
+    never dressed up as "no match", and ``reason`` is the sentence to show.
+    ``skips``/``failures`` name the tracks behind each.
+
+    *expect* is the tag-derived candidate (a release dict with
+    ``release_group_id`` / ``release_group_title`` / ``artists``); the match is
+    cross-checked against it and any disagreement comes back in ``conflicts``
+    (``release_group_mismatch`` renders it). Without *expect* the album's own
+    tags are read (`_tag_candidate`) and used the same way. The comparison
+    never writes anything: the release the import was matched to is what the
+    import keeps.
 
     With *apply* the accepted match is also written into the files
     (`ACOUSTID_ID` + `ACOUSTID_FINGERPRINT`, the tags Picard writes and the
@@ -839,7 +1029,8 @@ def acoustid_match(paths, cfg=None, progress=None, apply=False):
     try:
         from mlo import acoustid
     except ImportError as e:                      # pragma: no cover - stripped backend
-        return {"available": False, "note": f"acoustid unavailable: {e}", "albums": []}
+        return {"available": False, "note": f"acoustid unavailable: {e}",
+                "albums": [], "ok": False, "code": "unavailable"}
 
     albums = []
     for p in paths or []:
@@ -850,18 +1041,25 @@ def acoustid_match(paths, cfg=None, progress=None, apply=False):
     if not acoustid.available(cfg):
         return {"available": False,
                 "note": acoustid.acoustid_enabled_note(cfg) or "AcoustID unavailable",
-                "albums": []}
+                "albums": [], "ok": False, "code": acoustid.check(cfg)["code"]}
 
     rows = []
     for album in albums:
         row = {"path": album, "tagged": 0, **_ACOUSTID_ROW}
-        tracks = []
         try:
             tracks = _audio_files(album)[:acoustid.MAX_TRACKS]
-            match = acoustid.match_release(cfg, tracks, progress=progress) if tracks else None
         except Exception:
             traceback.print_exc()
-            match = None
+            tracks = []
+        try:
+            report = acoustid.match_release(
+                cfg, tracks, progress=progress,
+                expect=expect if isinstance(expect, dict) else _tag_candidate(album))
+        except Exception as e:
+            traceback.print_exc()
+            report = acoustid.error_report(f"AcoustID check failed: {e}",
+                                           total=len(tracks))
+        match = report.get("match")
         if match:
             row.update({k: match.get(k) for k in _ACOUSTID_ROW})
             row["path"] = album
@@ -874,27 +1072,77 @@ def acoustid_match(paths, cfg=None, progress=None, apply=False):
                 row["tagged"] = tagged
                 if tagged:
                     tagcache.invalidate_all()
-        else:
-            row["total"] = len(tracks)
+        for key in ("status", "code", "reason", "conflict", "conflicts",
+                    "skips", "failures"):
+            row[key] = report.get(key)
+        row["total"] = report["tracks"]["total"]
         rows.append(row)
-    return {"available": True, "note": "", "albums": rows}
+
+    errors = [r for r in rows if r.get("status") == "error"]
+    return {"available": True,
+            "note": errors[0].get("reason") if errors else "",
+            "ok": not errors,
+            "code": errors[0].get("code") if errors else acoustid.OK,
+            "albums": rows}
+
+
+def _tag_candidate(album_dir):
+    """What an album's own tags claim, for the AcoustID cross-check.
+
+    Release-group id, release id, album title and album artist off up to five
+    tracks — album-level tags are uniform across an album's files, which is
+    the same cap (and the same reason) :func:`_album_mbids` uses. Every field
+    may be "" (an untagged download): a field only one side carries is not a
+    disagreement.
+    """
+    from mlo.audio import AudioFile
+
+    cand = {"release_group_id": "", "release_id": "", "title": "", "artists": []}
+    for p in _audio_files(album_dir)[:5]:
+        try:
+            af = AudioFile(p)
+            if af.audio is None:
+                continue
+            cand["release_group_id"] = cand["release_group_id"] or str(
+                af.get_tag("MUSICBRAINZ_RELEASEGROUPID") or "").strip()
+            cand["release_id"] = cand["release_id"] or str(
+                af.get_tag("MUSICBRAINZ_ALBUMID") or "").strip()
+            cand["title"] = cand["title"] or str(af.get_tag("ALBUM") or "").strip()
+            artist = str(af.get_tag("ALBUMARTIST")
+                         or af.get_tag("ARTIST") or "").strip()
+            if artist and artist not in cand["artists"]:
+                cand["artists"].append(artist)
+        except Exception:
+            continue
+        if cand["release_group_id"] or cand["title"]:
+            break
+    return cand
 
 
 def release_group_mismatch(match_row, release_group_id):
-    """Warning text when an AcoustID result is another release group, else "".
+    """Warning text when an AcoustID result disagrees with the import, else "".
 
-    Used by the Soulseek auto-import as a *verification* of an already
-    accepted download: a different pressing is worth telling the user about,
-    never worth throwing the album away over.
+    The release-group id is what decides — the fingerprint names the group the
+    audio is, the import was matched to *want* — and any further disagreement
+    ``mlo.acoustid.cross_check`` found (a title or an artist only the tags
+    claim) is appended. Used by the Soulseek auto-import as a *verification* of
+    an already accepted download: a conflict is worth telling the user about,
+    never worth throwing the album away over, and it never overwrites the
+    release the import was matched to.
     """
+    row = match_row or {}
     want = str(release_group_id or "").strip()
-    got = str((match_row or {}).get("release_group_id") or "").strip()
-    if not want or not got or got == want:
-        return ""
-    title = (match_row or {}).get("release_group_title") or "?"
-    return (f"AcoustID matched release group {got} ({title}, "
-            f"{(match_row or {}).get('matched')}/{(match_row or {}).get('total')} "
-            f"tracks) but the release being imported is {want}")
+    got = str(row.get("release_group_id") or "").strip()
+    parts = []
+    if want and got and got != want:
+        title = row.get("release_group_title") or "?"
+        parts.append(f"AcoustID matched release group {got} ({title}, "
+                     f"{row.get('matched')}/{row.get('total')} "
+                     f"tracks) but the release being imported is {want}")
+    for c in row.get("conflicts") or []:
+        if isinstance(c, dict) and c.get("kind") != "release_group" and c.get("reason"):
+            parts.append(str(c["reason"]))
+    return " | ".join(parts)
 
 
 # --------------------------------------------------------------------------- #
@@ -1249,6 +1497,12 @@ def _bulk_one(item, cfg):
     row["album_path"] = finished["path"].replace("\\", "/")
     row["scripts"] = finished["scripts"]
     row["error"] = "; ".join(filter(None, [stamp_error, *finished["errors"]])) or None
+    # What the chain did, on the row: which scripts ran, what failed, or that
+    # there was nothing to run. `_bulk_one` is the one place a bulk album's
+    # outcome is recorded, so this is what the bulk queue reports.
+    row["chained"] = bool(finished.get("chained"))
+    row["chain_off"] = bool(finished.get("chain_off"))
+    row["note"] = chain_summary(finished)
     # "Imported" means the album is in the library. It is only honest to say
     # so when the chain actually ran (or when nothing is configured to run):
     # an album that landed with none of its scripts executed is unfinished,
@@ -1280,7 +1534,11 @@ def bulk_import(items, cfg=None, progress=None):
     A row's ``status``: ``imported`` — the album is in the library (a failing
     *script* rides along in ``error``, it does not un-import the album);
     ``skipped`` — nothing to import (no audio files); ``failed`` — it never
-    got into the library, and ``error`` says why.
+    got into the library, and ``error`` says why. ``chained``/``chain_off`` and
+    ``note`` say what the configured chain did: a row that is ``imported`` with
+    ``chain_off`` was imported without the optimization/tagging pass because
+    this library configures none, and says so rather than looking like a run
+    that happened.
     """
     cfg = cfg or load_config()
     items = [dict(it) for it in (items or [])]

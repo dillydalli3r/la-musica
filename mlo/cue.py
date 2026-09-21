@@ -4,6 +4,7 @@ import re
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from .paths import fsync_dir
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _walk_files, _diff_bytes,
     _collect_targets, worker_count,
@@ -131,9 +132,14 @@ def _process_cue_file(args):
         if b"\x00" in data:
             return (filename, False, "binary file skipped (not a cue)", 0, 0)
 
+        # Decoded from the bytes just read: the text-mode open that used to
+        # follow read the same bytes off the disk a second time for every cue
+        # sheet. Decoding the buffer is the same text (a BOM is stripped by
+        # utf-8-sig either way) — and it no longer lets universal-newline
+        # translation hide a CRLF sheet from the comparison below, which is
+        # what the "unchanged" check is there to catch.
         try:
-            with open(filename, "r", encoding="utf-8-sig") as f:
-                original_content = f.read()
+            original_content = data.decode("utf-8-sig")
         except UnicodeDecodeError:
             # Non-UTF-8 sheets are left byte-for-byte untouched: the canonical
             # text below is written back as UTF-8, so the old latin-1 fallback
@@ -169,14 +175,7 @@ def _process_cue_file(args):
                 pass
 
         os.replace(tmp_path, filename)
-        try:
-            d_fd2 = os.open(os.path.dirname(filename) or ".", os.O_DIRECTORY)
-            try:
-                os.fsync(d_fd2)
-            finally:
-                os.close(d_fd2)
-        except Exception:
-            pass
+        fsync_dir(os.path.dirname(filename))
         tmp_path = None
 
         final_size = os.path.getsize(filename)

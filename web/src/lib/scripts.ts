@@ -22,6 +22,7 @@ export const SCRIPTS: { ids: number[]; label: string }[] = [
   { ids: [16], label: "Mood & Energy" },
   { ids: [17], label: "Lyrics transliterate (AI)" },
   { ids: [18], label: "Publish lyrics (LRCLIB)" },
+  { ids: [19], label: "Optimize artist images" },
 ];
 
 /** Script number → label, for surfaces that render a bare id. */
@@ -37,12 +38,13 @@ export const SCRIPT_LABEL: Record<number, string> = Object.fromEntries(
  *  sidecar names AND the cue's FILE lines, now pointed at the names the album
  *  actually has) → 1 lyrics format (writes .lrc named after the track). From
  *  there every script reads or writes final paths: 13 fetch lyrics → 18
- *  publish → 17 transliterate, 8 auto tagging, 5 images, 6 audit, 7 DR &
- *  ReplayGain, 9 AccurateRip (its own sidecar names), 12 key & BPM, 16 mood,
- *  15 the release manifest (after the tagger that gives it its release id),
- *  10 format all, and 4 grade last. This mirrors server/imports.py's
- *  DEFAULT_CHAIN, which lists the same steps minus the opt-in 16/17. */
-export const DEFAULT_RUN_ALL = [11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 6, 7, 9, 12, 16, 10, 4];
+ *  publish → 17 transliterate, 8 auto tagging, 5 images → 19 the artist images
+ *  stored beside them, 6 audit, 7 DR & ReplayGain, 9 AccurateRip (its own
+ *  sidecar names), 12 key & BPM, 16 mood, 15 the release manifest (after the
+ *  tagger that gives it its release id), 10 format all, and 4 grade last. This
+ *  mirrors server/imports.py's DEFAULT_CHAIN, which lists the same steps minus
+ *  the opt-in 16/17 and 19. */
+export const DEFAULT_RUN_ALL = [11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 19, 6, 7, 9, 12, 16, 10, 4];
 
 /** True when the id is a script the runner knows about. */
 export function isScriptId(n: unknown): n is number {

@@ -376,71 +376,31 @@ def remove_tracks(pid, paths, user=""):
 # --------------------------------------------------------------------------- #
 # Smart playlists
 # --------------------------------------------------------------------------- #
-def _as_num(v):
-    """The value as a float, or None when it is not number-like."""
-    try:
-        return float(str(v).strip())
-    except (TypeError, ValueError):
+# The evaluator lives in `mlo.query` now (the condition language, the operator
+# semantics, the walk) because the library browser asks the same questions of
+# the same payload — a saved smart playlist and an ad-hoc query may never
+# disagree about what matches. This module keeps only playlist storage.
+def _uses_rating(spec):
+    """Whether the spec compares the numeric `rating` field.
+
+    `tags.RATING` is a TEXT tag comparison (Picard's 0-100 scale) and must not
+    drag the store in: only the field the store answers for does."""
+    for cond in (spec or {}).get("conditions") or ():
+        if str((cond or {}).get("field") or "") == "rating":
+            return True
+    return False
+
+
+def _rating_of(user, spec):
+    """The rating store adapter, for a spec that actually asks about rating.
+
+    Built lazily and only then: a spec with no rating condition must not pay
+    for a store read (the engine calls this per row, and the first call pays
+    for the whole map)."""
+    if not _uses_rating(spec):
         return None
-
-
-def _pair(a, b):
-    """Both operands as numbers when both are numeric, else as text.
-
-    The filter editor sends `value` as a string while tag/tech values can be
-    numeric, so comparing the raw operands raises TypeError (`2020 < "1"`)."""
-    na, nb = _as_num(a), _as_num(b)
-    if na is not None and nb is not None:
-        return na, nb
-    return ("" if a is None else str(a)), ("" if b is None else str(b))
-
-
-def _ord_cmp(op):
-    def run(a, b):
-        if a is None or b is None:
-            return False
-        x, y = _pair(a, b)
-        return op(x, y)
-    return run
-
-
-_OPS = {
-    "eq": lambda a, b: a is not None and _pair(a, b)[0] == _pair(a, b)[1],
-    "ne": lambda a, b: _pair(a, b)[0] != _pair(a, b)[1],
-    "lt": _ord_cmp(lambda x, y: x < y),
-    "gt": _ord_cmp(lambda x, y: x > y),
-    "lte": _ord_cmp(lambda x, y: x <= y),
-    "gte": _ord_cmp(lambda x, y: x >= y),
-    "contains": lambda a, b: a is not None and str(b).lower() in str(a).lower(),
-    "missing": lambda a, b: a is None or str(a).strip() == "",
-    "present": lambda a, b: a is not None and str(a).strip() != "",
-}
-
-
-def _track_value(track, field):
-    """Extract a sortable value from an enriched track payload.
-
-    The UI sends dotted keys ("tags.GENRE", "tech.length"); bare fields
-    ("grade_pass", "audit", "lyrics_present", top-level keys) still resolve
-    against the track itself."""
-    scope, _, key = str(field or "").partition(".")
-    if scope == "tags":
-        return (track.get("tags") or {}).get(key)
-    if scope == "tech":
-        return (track.get("tech") or {}).get(key)
-    tags = track.get("tags") or {}
-    if field in tags:
-        return tags[field]
-    if field in track:
-        return track.get(field)
-    tech = track.get("tech") or {}
-    if field in tech:
-        return tech[field]
-    if field == "grade_pass":
-        return track.get("grade_pass")
-    if field == "lyrics_present":
-        return track.get("lyrics_present")
-    return None
+    from server.api_query import rating_source
+    return rating_source(user)
 
 
 def evaluate_smart(pid, library, base_paths=None, user=""):
@@ -449,33 +409,16 @@ def evaluate_smart(pid, library, base_paths=None, user=""):
     filter spec: {"conditions": [{field, op, value}], "match": "all"|"any"}
     Returns ordered list of matching track paths (respecting optional base_paths).
     """
+    from mlo import query as query_mod
+    from server.api_query import bool_fields
+
     pl = get_playlist(pid, user)
     if pl is None or pl["kind"] != "smart":
         return None
     spec = pl.get("filter") or {}
-    conditions = spec.get("conditions", [])
-    match_all = spec.get("match", "all") == "all"
-
-    hits = []
-    for artist in library.get("artists", []):
-        for alb in artist.get("albums", []):
-            for tr in alb.get("tracks", []):
-                if base_paths is not None and tr.get("path") not in base_paths:
-                    continue
-                results = []
-                for cond in conditions:
-                    op = cond.get("op", "eq")
-                    field = cond.get("field")
-                    value = cond.get("value")
-                    fn = _OPS.get(op)
-                    if fn is None:
-                        results.append(False)
-                        continue
-                    results.append(fn(_track_value(tr, field), value))
-                ok = all(results) if match_all else any(results)
-                if ok:
-                    hits.append(tr.get("path"))
-    return hits
+    return query_mod.match_paths(library, spec, base_paths,
+                                 rating_of=_rating_of(user, spec),
+                                 bool_fields=bool_fields())
 
 
 def set_smart_filter(pid, filter_spec, user=""):

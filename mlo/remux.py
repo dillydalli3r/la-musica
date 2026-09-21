@@ -117,9 +117,9 @@ def _ffprobe_json(ffprobe_exe, path, timeout=60):
         return None
 
 
-def _stream_info(path, ffprobe_exe):
-    """(video_codec, [audio_codecs], [subtitle_codecs], duration) or None."""
-    data = _ffprobe_json(ffprobe_exe, path)
+def _streams_from(data):
+    """(video_codec, [audio_codecs], [subtitle_codecs], duration) from a
+    probe payload, or None."""
     if not data:
         return None
     video = None
@@ -144,6 +144,28 @@ def _stream_info(path, ffprobe_exe):
     return video, audio, subs, duration
 
 
+def _stream_info(path, ffprobe_exe):
+    """(video_codec, [audio_codecs], [subtitle_codecs], duration) or None."""
+    return _streams_from(_ffprobe_json(ffprobe_exe, path))
+
+
+def _chapters_from(data):
+    """[{title, start, end}] from a probe payload, [] when it has none."""
+    out = []
+    for n, ch in enumerate((data or {}).get("chapters") or [], start=1):
+        def _secs(key):
+            try:
+                return float(ch.get(key))
+            except (TypeError, ValueError):
+                return None
+        out.append({
+            "title": (ch.get("tags") or {}).get("title") or f"Chapter {n}",
+            "start": _secs("start_time"),
+            "end": _secs("end_time"),
+        })
+    return out
+
+
 def probe_chapters(path, ffprobe_exe=None):
     """[{title, start, end}] for a video's chapters, [] when it has none.
 
@@ -158,22 +180,7 @@ def probe_chapters(path, ffprobe_exe=None):
         ffprobe_exe = (detect_all_tools().get("ffmpeg") or {}).get("ffprobe_exe")
     if not ffprobe_exe:
         return []
-    data = _ffprobe_json(ffprobe_exe, path)
-    if not data:
-        return []
-    out = []
-    for n, ch in enumerate(data.get("chapters") or [], start=1):
-        def _secs(key):
-            try:
-                return float(ch.get(key))
-            except (TypeError, ValueError):
-                return None
-        out.append({
-            "title": (ch.get("tags") or {}).get("title") or f"Chapter {n}",
-            "start": _secs("start_time"),
-            "end": _secs("end_time"),
-        })
-    return out
+    return _chapters_from(_ffprobe_json(ffprobe_exe, path))
 
 
 def _unique_dest(src, out_ext=".mkv"):
@@ -259,7 +266,10 @@ def remux_video(src, dest, ffmpeg_exe, ffprobe_exe, cfg):
     # the mux. Windows ffmpeg accepts forward slashes everywhere.
     src = str(src).replace("\\", "/")
     dest = str(dest).replace("\\", "/")
-    info = _stream_info(src, ffprobe_exe)
+    # ONE probe of the source: -show_chapters is already in the payload, so
+    # asking ffprobe for the chapter list separately re-probed the same file.
+    src_probe = _ffprobe_json(ffprobe_exe, src)
+    info = _streams_from(src_probe)
     if info is None:
         return False, "unreadable by ffprobe"
     vcodec, acodecs, scodecs, duration = info
@@ -288,7 +298,7 @@ def remux_video(src, dest, ffmpeg_exe, ffprobe_exe, cfg):
     stream_maps = ["-map", "0:v", "-map", "0:a?", "-map", "0:s?"]
 
     last_err = ""
-    src_chapters = probe_chapters(src, ffprobe_exe)
+    src_chapters = _chapters_from(src_probe)
     for mode in ("2", "2s", "3") if allow_reencode else ("2", "2s"):
         cmd = ([ffmpeg_exe, "-y", "-v", "error", "-nostdin"]
                + input_flags + ["-i", src] + stream_maps)
@@ -311,7 +321,8 @@ def remux_video(src, dest, ffmpeg_exe, ffprobe_exe, cfg):
         # streams, the SAME subtitle (caption) streams — a remux that would
         # drop captions fails rather than losing them — and (when known) a
         # duration within 0.5% / 1 s of the source.
-        out_info = _stream_info(dest, ffprobe_exe)
+        out_probe = _ffprobe_json(ffprobe_exe, dest)
+        out_info = _streams_from(out_probe)
         if out_info is None:
             last_err = "output failed verification (ffprobe)"
             continue
@@ -326,7 +337,7 @@ def remux_video(src, dest, ffmpeg_exe, ffprobe_exe, cfg):
             last_err = f"subtitle streams dropped ({len(scodecs)} -> {len(osubs)}) — refusing to lose captions"
             continue
         if src_chapters:
-            out_chapters = probe_chapters(dest, ffprobe_exe)
+            out_chapters = _chapters_from(out_probe)
             if len(out_chapters) < len(src_chapters):
                 last_err = (f"chapters dropped ({len(src_chapters)} -> "
                             f"{len(out_chapters)})")

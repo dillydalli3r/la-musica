@@ -21,7 +21,7 @@ from .lyrics_providers import (  # noqa: F401  (lrclib_fetch is a re-export shim
 from .paths import AUDIO_EXTS
 from .stats import (
     is_audio_file, new_stats, _collect_targets, _find_albums,
-    _make_pbar, _pbar_skip, _pbar_update,
+    _make_pbar, _pbar_skip, _pbar_update, worker_count,
 )
 from .ui import print_header, log, c, Color
 
@@ -164,22 +164,47 @@ def run_fetch_lyrics(config):
 
     counts = {"ok": 0, "skip": 0, "fail": 0}
     pbar = _make_pbar(total=len(files), desc="Fetch lyrics")
+
+    def _finish(path, res):
+        """Book one track's result — the runner thread owns every counter, so
+        the workers below never touch shared state."""
+        if res["status"] == "ok":
+            pid = res["provider"]
+            stats["by_provider"][pid] = stats["by_provider"].get(pid, 0) + 1
+            stats["modified_count"] += 1
+            _pbar_update(pbar, counts, "ok")
+        elif res["status"] == "failed":
+            stats["error_count"] += 1
+            if len(stats["errors"]) < 25:
+                stats["errors"].append(f"{os.path.basename(path)}: {res['error']}")
+            _pbar_update(pbar, counts, "fail")
+        else:
+            stats["skipped_count"] += 1
+            _pbar_skip(pbar, counts)
+
+    # Bounded parallelism: each track is its own provider search plus its own
+    # tag/sidecar write, and the provider layer throttles request STARTS
+    # globally while leaving the request itself outside the lock (see
+    # mlo.lyrics_providers._request), so N lanes overlap the waiting with the
+    # network instead of paying it once per track. The writes are per file, so
+    # nothing is shared but the counters kept on this thread.
+    workers = worker_count(config, default=4, maximum=8, items=len(files))
     try:
-        for path in files:
-            res = fetch_one(path, config, force=force)
-            if res["status"] == "ok":
-                pid = res["provider"]
-                stats["by_provider"][pid] = stats["by_provider"].get(pid, 0) + 1
-                stats["modified_count"] += 1
-                _pbar_update(pbar, counts, "ok")
-            elif res["status"] == "failed":
-                stats["error_count"] += 1
-                if len(stats["errors"]) < 25:
-                    stats["errors"].append(f"{os.path.basename(path)}: {res['error']}")
-                _pbar_update(pbar, counts, "fail")
-            else:
-                stats["skipped_count"] += 1
-                _pbar_skip(pbar, counts)
+        if len(files) == 1 or workers == 1:
+            for path in files:
+                _finish(path, fetch_one(path, config, force=force))
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futures = {ex.submit(fetch_one, p, config, force): p
+                           for p in files}
+                for fut in as_completed(futures):
+                    path = futures[fut]
+                    try:
+                        res = fut.result()
+                    except Exception as e:      # a worker must never kill the run
+                        res = {"status": "failed", "error": str(e)}
+                    _finish(path, res)
     finally:
         try:
             pbar.close()

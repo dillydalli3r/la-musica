@@ -19,6 +19,7 @@ from .subproc import run_tool
 from .paths import (
     VALID_EXTENSIONS, ALL_IMAGE_EXTS, LOSSLESS_IMAGE_EXTS, CONVERTIBLE_EXTENSIONS,
     JPEG_QUALITY_MARKER, PNG_OPTIMIZATION_LEVEL, DEPS_DIR, LIB_AUDIO_EXTS,
+    library_root,
 )
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _diff_bytes,
@@ -26,6 +27,51 @@ from .stats import (
 )
 from .tools import detect_all_tools, _version_is_older
 from .ui import log, fmt_size, print_header, c, Color
+
+def _artist_image_stems():
+    """The app's artist-image stems.
+
+    mlo.artistdata owns what counts as an artist image (ARTIST_IMAGE_STEMS);
+    asking it here keeps this pass from becoming a second list that can drift
+    from the one has_image() reads.
+    """
+    try:
+        from .artistdata import ARTIST_IMAGE_STEMS
+        return tuple(ARTIST_IMAGE_STEMS)
+    except Exception:
+        return ("artist",)
+
+
+def _artist_image_guard(music_folder):
+    """A predicate: True when an image is artist artwork, never a cover.
+
+    Artist artwork lives directly in an artist folder — ``<library>/Artists/
+    <Artist>/artist.jpg``, the one place has_image() looks. The cover-rename
+    map ranks the single best image of every folder and renames it to
+    cover.*, so an artist folder's only image won that ranking and became
+    ``cover.jpg``: the artist page and the artist-image grade then reported
+    the image as missing, with the file renamed out from under them. The
+    app's own stems cover the name; the FOLDER rule covers an artist image
+    the library holds in another container (``artist.webp``), which script 19
+    converts rather than renames.
+    """
+    stems = _artist_image_stems()
+    root = library_root(music_folder)
+    root_key = os.path.normcase(os.path.normpath(root)) if root else None
+
+    def _is_artist_image(path):
+        if os.path.splitext(os.path.basename(path))[0].lower() in stems:
+            return True
+        if not root_key:
+            return False
+        folder = os.path.normcase(os.path.normpath(os.path.dirname(path)))
+        # The library root itself, or one level under it (an artist folder).
+        if folder == root_key:
+            return True
+        return os.path.normcase(os.path.normpath(os.path.dirname(folder))) == root_key
+
+    return _is_artist_image
+
 
 def _exif_transposed(img):
     """*img* with its EXIF orientation applied, or *img* unchanged.
@@ -113,13 +159,11 @@ def _png_has_alpha(filepath):
         return False
     try:
         with Image.open(filepath) as img:
-            # Force a full read so PIL releases the underlying file handle;
-            # otherwise later os.remove/os.replace of the same file fails on
-            # Windows with WinError 32 while the caller still holds it.
-            try:
-                img.load()
-            except Exception:
-                pass
+            # Header only. Mode and the tRNS transparency flag are read at
+            # open(), and the file handle is released by this `with` block,
+            # not by load() — which decoded every PNG in the library (even the
+            # ones this run then skips) to answer a question the header
+            # already answers.
             return (
                 img.mode in ("RGBA", "LA")
                 or (img.mode == "P" and "transparency" in img.info)
@@ -346,6 +390,16 @@ def _prepare_image_streamlined(src_path, dst_path, config, remove_alpha=False):
                 save_kwargs["quality"] = _jpeg_write_quality(
                     src_path, dst_path, config, did_cover)
                 save_kwargs["optimize"] = True
+                # jpeg_progressive was honoured only by the in-place jpegtran
+                # path (-progressive), so a cover CONVERTED to .jpg came out
+                # baseline while the setting asked for progressive.
+                if config is None:
+                    save_kwargs["progressive"] = bool(
+                        DEFAULT_CONFIG["jpeg_progressive"])
+                else:
+                    save_kwargs["progressive"] = bool(
+                        config.get("jpeg_progressive",
+                                   DEFAULT_CONFIG["jpeg_progressive"]))
             elif ext_dst == ".png":
                 save_kwargs["format"] = "PNG"
                 save_kwargs["optimize"] = True
@@ -2097,6 +2151,10 @@ def _process_convert_image(args):
     else:
         src_path, target_ext, rename_to_cover = args[:3]
         config = args[3] if len(args) > 3 else None
+    # (oxipng_exe, version, optimization_level): the lossless optimiser a
+    # converted PNG is handed to (see the .png branch below). All None when
+    # the caller passed none.
+    png_tool = (tuple(args[4:7]) + (None, None, None))[:3]
     target_ext = target_ext.lower()
     if target_ext == ".jpeg":
         target_ext = ".jpg"
@@ -2179,16 +2237,35 @@ def _process_convert_image(args):
             except Exception:
                 pass
         elif target_ext == ".png":
-            try:
-                from .containers import _inject_png_text
-                # Use png optimization level as quality marker
+            # A converted PNG is handed to the lossless optimiser when it is
+            # installed: stamping it "pillow/png level N" made the in-place
+            # oxipng pass skip the file forever (its skip check compares the
+            # level and ignores the program name), so png_optimization_level
+            # never reached a converted PNG. _process_png_in_place is the
+            # existing pass for exactly that, and it writes the oxipng
+            # identity itself.
+            stamped = False
+            if png_tool[0] and os.path.isfile(png_tool[0]):
                 try:
-                    lvl = int(config.get("png_optimization_level", 6)) if config else 6
+                    _n, status, _br, _ba, _info = _process_png_in_place((
+                        png_tool[0], png_tool[1], temp_out, False, False,
+                        False, png_tool[2], enc, None))
+                    stamped = status in ("modified", "unchanged")
+                except Exception as e:
+                    log(f"[convert png warn] {src_path}: {e}")
+            if not stamped:
+                # No optimiser available (or it failed): record what actually
+                # wrote the pixels, so no later pass believes a level was
+                # applied that never ran.
+                try:
+                    from .containers import _inject_png_text
+                    try:
+                        lvl = int(config.get("png_optimization_level", 6)) if config else 6
+                    except Exception:
+                        lvl = 6
+                    _inject_png_text(temp_out, _encoder_dict("pillow/png", lvl, "pillow", enc.get("png") or {}))
                 except Exception:
-                    lvl = 6
-                _inject_png_text(temp_out, _encoder_dict("pillow/png", lvl, "pillow", enc.get("png") or {}))
-            except Exception:
-                pass
+                    pass
     except Exception as e:
         log(f"[convert tag warn] {src_path}: {e}")
 
@@ -2357,10 +2434,14 @@ def run_process_images(config):
     # name; every other image keeps its own basename. Otherwise front/back/
     # booklet scans would all write to the same cover.* file and clobber
     # each other (losing every image but the last).
+    # Artist artwork is never a folder's cover: see _artist_image_guard.
+    _is_artist_image = _artist_image_guard(config.get("music_folder"))
     cover_map = {}
     if rename_to_cover:
         groups = {}
         for f in files:
+            if _is_artist_image(f):
+                continue
             groups.setdefault(os.path.dirname(f), []).append(f)
         for folder, group in groups.items():
             cover_map[folder] = max(group, key=_cover_rank)
@@ -2435,7 +2516,10 @@ def run_process_images(config):
                 if _is_coverish:
                     tasks.append((
                         _process_convert_image,
-                        (f, ".jpg", _renames(f), config),
+                        (f, ".jpg", _renames(f), config,
+                         (ox or {}).get("oxipng_exe"),
+                         (ox or {}).get("version"),
+                         optimization_level),
                         f,
                     ))
                     continue
@@ -2578,12 +2662,10 @@ def run_process_images(config):
                     # Use Pillow conversion via streamlined helper
                     tasks.append((
                         _process_convert_image,
-                        (
-                            f,
-                            target_ext,
-                            _renames(f),
-                            config,
-                        ),
+                        (f, target_ext, _renames(f), config,
+                         (ox or {}).get("oxipng_exe"),
+                         (ox or {}).get("version"),
+                         optimization_level),
                         f,
                     ))
                 else:
@@ -2664,11 +2746,14 @@ def run_process_images(config):
             # lose the per-track mapping. Its stem matching a track's means
             # it is never a candidate, so a folder holding only sidecars
             # (the common single-track release) keeps every one of them.
+            # Artist artwork in an artist folder is not a candidate either:
+            # renaming it to cover.* is what made has_image() report the
+            # artist image as missing.
             track_stems = {os.path.splitext(n)[0].lower() for n in names
                            if n.lower().endswith(LIB_AUDIO_EXTS)}
             group = [f for f in group
                      if os.path.splitext(os.path.basename(f))[0].lower()
-                     not in track_stems]
+                     not in track_stems and not _is_artist_image(f)]
             if not group:
                 continue
 
@@ -2678,9 +2763,11 @@ def run_process_images(config):
             if os.path.normcase(os.path.normpath(candidate)) == os.path.normcase(os.path.normpath(target)):
                 continue
             try:
-                if os.path.exists(target):
-                    os.remove(target)
-                os.rename(candidate, target)
+                # os.replace, not remove-then-rename: the two calls left a
+                # window with no cover at all if the process died between
+                # them (the has_cover check above already guarantees the
+                # target is free, so this only overwrites a race).
+                os.replace(candidate, target)
                 stats["total_scanned"] += 1
                 stats["modified_count"] += 1
                 renamed += 1

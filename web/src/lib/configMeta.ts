@@ -258,6 +258,10 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "write_log_grade", label: "Write LOG_GRADE scores", type: "bool" },
         { k: "write_replaygain_tags", label: "Write ReplayGain tags", type: "bool" },
         { k: "write_dynamic_range_tags", label: "Write DR tags", type: "bool" },
+        { k: "write_rating_tags", label: "Write RATING tags (your stars)", type: "bool",
+          help: "Rating a track also writes RATING (0-100, Picard's scale: one half-star = 10) into the file, "
+                + "and clearing a rating removes the tag. Off, ratings stay in the app only. Keeping it on is what "
+                + "makes an imported Picard-rated library and this app agree." },
         { k: "normalize_media_source", label: "Normalize MEDIA / SOURCE", type: "bool" },
         { k: "strip_source_on_cd", label: "Strip SOURCE on CD rips", type: "bool" },
         { k: "fill_empty_source", label: "Fill empty SOURCE on digital", type: "bool" },
@@ -361,16 +365,21 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "soulseek_auto_response_limit", label: "Responses before a search is scored (5–500)", type: "number", min: 5, max: 500, help: "slskd only hands back a search's results once it has ENDED, and a popular album never goes quiet — this ends the search early instead of waiting out the whole window. Lower = faster and fewer peers; higher = slower and more candidates." },
         { k: "auto_import_avoid_promo", label: "Never auto-import promotional / bootleg editions", type: "bool" },
         { k: "auto_import_require_country", label: "Only auto-import editions with a release country", type: "bool", help: "A MusicBrainz release without RELEASECOUNTRY is usually an unsorted import, and the CD query templates are built from that field — such editions are skipped, and a group whose only editions lack one is reported as ineligible instead." },
-        { k: "auto_import_medium_order", label: "Medium preference (comma-separated, best first)", type: "csv", help: "Editions are chosen by this media order first, then by earliest release date — and among editions of the same year the one that states the full date, since the album folder is named after it. Blank = the built-in order (CD, Digital Media, Vinyl, Cassette, Other)." },
+        { k: "auto_import_medium_order", label: "Medium preference (comma-separated, best first)", type: "csv", help: "Editions are ranked by this media order first, then by how close the edition is to the release group's original date; a format not named here ranks after every configured one. Blank = the built-in order (CD, Vinyl, Cassette, Other, Digital Media) — CD first, other physical media next, digital last." },
+        { k: "prefer_release_country", label: "Preferred release country (ISO code, blank = none)", type: "text", help: "The spelling MusicBrainz publishes on the release, e.g. US or GB. A tie-breaker only: it never outranks status, medium, track count or the original-edition rule." },
+        { k: "prefer_original_edition", label: "Prefer the original (explicit) edition over a clean or edited one", type: "bool", help: "MusicBrainz states this in the release title or its disambiguation comment. Off, a clean edition is ranked on the other rules like any other — a clean edition may carry altered audio." },
       ],
     },
     {
       title: "Wishes (auto-fill)",
       blurb: "Releases saved to the library without downloading them. The background worker re-searches Soulseek for every open wish on the interval below and imports a release the moment a verified match appears.",
       fields: [
+        { k: "soulseek_search_concurrency", label: "Releases searched / downloaded at once", type: "number", min: 1, max: 8, help: "The wishes worker fills up to this many wishes per pass, and a bulk auto-import run keeps this many jobs in flight. The transfers themselves are still capped by slskd's own download slots (Soulseek group above), so raising this only uses the queue harder, it does not open more connections than slskd allows." },
         { k: "wishes_enabled", label: "Run the wishes worker", type: "bool" },
         { k: "wishes_interval_hours", label: "Search interval (hours)", type: "number", min: 1, max: 168 },
         { k: "wishes_max_attempts", label: "Max attempts per wish (0 = forever)", type: "number", min: 0, max: 1000 },
+        { k: "wishes_not_found_attempts", label: "Empty searches before a wish ends as not-found (0 = never give up)", type: "number", min: 0, max: 1000, help: "A wish that many searched-and-found-nothing turns ends as not-found: it is notified once and only a manual retry searches again. 0 never gives up." },
+        { k: "wishes_retry_backoff_minutes", label: "Extra wait before retrying after a transient failure (minutes, doubles per attempt, 0 = none)", type: "number", min: 0, max: 1440, help: "A refused slskd, a MusicBrainz outage or a failed verification is not the album being unavailable — the wish waits this long before the next try, doubling each attempt up to 24 hours." },
         { k: "wishes_auto_import", label: "Auto-import when a verified match is found", type: "bool" },
         { k: "soulseek_auto_wish_prompt", label: "Keep searching wishes automatically while the app runs", type: "bool" },
       ],
@@ -406,7 +415,8 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "metadata_auto_fetch", label: "Fetch artist image / descriptions on import", type: "bool" },
         { k: "metadata_review", label: "Review metadata candidates before writing them", type: "bool" },
         { k: "artist_image_enabled", label: "Fetch artist images", type: "bool" },
-        { k: "artist_image_crop", label: "Crop artist images to a square", type: "bool" },
+        { k: "artist_image_crop", label: "Crop artist images to the configured aspect", type: "bool", help: "Off keeps whatever shape the provider served. The aspect below is judged and cropped only while this is on and covers are configured with an aspect at all (cover_crop_enabled)." },
+        { k: "artist_image_aspect", label: "Artist image aspect (W:H)", type: "text", pattern: "^\\s*\\d+(\\.\\d+)?\\s*[:x/×]\\s*\\d+(\\.\\d+)?\\s*$", patternHelp: "width:height, e.g. 1:1 (square), 4:5, 16:9", help: "The shape artist images are stored in, e.g. 1:1. The fetch crops to it, grading fails an image further than 2% from it, and script 19 (Optimize artist images) crops the ones already in the library back to it." },
         { k: "artist_image_target_size", label: "Artist image max size (px, 0 = keep native size)", type: "number", min: 0, max: 4000 },
         { k: "artist_description_enabled", label: "Fetch artist descriptions", type: "bool" },
         { k: "album_description_enabled", label: "Fetch album descriptions", type: "bool" },
@@ -417,6 +427,10 @@ export const CONFIG_GROUPS: CfgGroup[] = [
       title: "Import pipeline",
       blurb: "What happens after an album lands in the library (Soulseek downloads, Drag & drop, Finish import). The script chain below runs in order; leaving it blank runs the built-in chain: dedupe → sort → tag → covers → lyrics → audit → ReplayGain → AccurateRip. AcoustID fingerprints the audio to identify the exact release — it needs a free application key from acoustid.org; without one, matching falls back to title/artist/genre against MusicBrainz.",
       fields: [
+        { k: "auto_acquisition_enabled", label: "Automatic acquisition (searching and downloading on their own)", type: "bool", help: "Off, nothing the app starts by itself searches or downloads: the wishes worker stops its passes, an artist watch queues nothing, and \"Add to library\" records the album and its wish without starting a download. What you asked for is still recorded and a check says the switch is off rather than \"nothing found\" — the wish's own Search now, the wizard and the Soulseek page still work, because those are you acting, not the app." },
+        { k: "manual_import_enabled", label: "Manual importing (the wizard and POST /api/import/*)", type: "bool", help: "Off, the import wizard and every importing /api/import/* route refuse with a sentence naming this setting instead of importing — the wizard shows that sentence where its steps would be. The automatic pipeline still imports what it downloads; only the paths you drive by hand are turned off." },
+        { k: "import_autonomy", label: "Import autonomy", type: "select", options: [["automatic", "Automatic — decide everything the sources can answer (default)"], ["review", "Review — stop at each step that needs a decision"]], help: "Automatic runs the whole chain and only comes back to you for what nothing could supply: the album is imported either way and whatever it still lacks is reported as ONE prompt — a notification plus an entry the Import page lists — naming the families and linking to the album at the step where each decision is made. Review is the wizard's own behaviour applied to an import: it stops before the first step that needs a decision (a family the album is still missing) and hands the album over instead of deciding past it." },
+        { k: "import_review_families", label: "Decide by hand, even when automatic", type: "multi", options: [["links", "Links"], ["cover", "Cover art"], ["genres", "Genres"], ["lyrics", "Lyrics"], ["advisory", "Advisory"]], help: "Families an import must never decide for you, whatever the mode above. A cover kept here has its candidates staged instead of writing the first hit; the links and advisory fetches are skipped; lyrics drop out of the chain. The rest of the import stays automatic, and the album's prompt names that family as waiting for you rather than as unsourced." },
         { k: "import_auto_scripts", label: "Run the script chain after import", type: "bool" },
         { k: "import_scripts", label: "Import script ids (e.g. 1, 3, 5, 7 — blank = built-in chain)", type: "text", pattern: "^(\\s*\\d+\\s*[,;]?)*$", patternHelp: "comma-separated script ids, e.g. 1, 3, 5, 7" },
         { k: "import_bulk_concurrency", label: "Bulk import concurrency", type: "number", min: 1, max: 8 },
@@ -594,6 +608,18 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "notify_import_ready", label: "Album ready to import", type: "bool" },
       ],
     },
+    {
+      title: "Artist watch",
+      blurb:
+        "Follow an artist instead of re-checking them by hand: the worker asks MusicBrainz for releases after the watch was created and queues what matches. Nothing is queued twice, an undated release group is never 'new', and the per-cycle cap is what keeps a first check from dumping a back catalogue into the queue.",
+      fields: [
+        { k: "artist_watch_enabled", label: "Watch artists for new releases", type: "bool" },
+        { k: "artist_watch_interval_hours", label: "Check interval (hours)", type: "number", min: 1, max: 720, help: "How long between two checks of the SAME artist; the worker itself ticks far more often." },
+        { k: "artist_watch_max_per_cycle", label: "Releases queued per artist per check", type: "number", min: 1, max: 50, help: "The hard anti-dump cap. One is the shipped default: a watch that queued a hundred at once is the discography dump this feature exists to avoid." },
+        { k: "artist_watch_types", label: "Release types a watch may queue", type: "multi", options: [["album","Album"],["ep","EP"],["single","Single"],["broadcast","Broadcast"],["other","Other"],["compilation","Compilation"],["soundtrack","Soundtrack"],["spokenword","Spoken word"],["interview","Interview"],["audiobook","Audiobook"],["live","Live"],["remix","Remix"],["dj-mix","DJ mix"],["mixtape/street","Mixtape / street"],["demo","Demo"],["audio drama","Audio drama"],["field recording","Field recording"]], help: "MusicBrainz's own type names. A release group matches when its primary type is ticked or ANY secondary type is (a live album is Album + Live, so ticking Live finds it). A watch can narrow this per artist." },
+        { k: "artist_watch_auto_add", label: "Queue a matched release into the library automatically", type: "bool", help: "Off, a watch only reports what it found (the notification is the whole output) — which is what you want if you pick the edition by hand." },
+      ],
+    },
 ];
 
 /** The groups a first run actually asks about. Every other group is one click
@@ -665,13 +691,14 @@ export const SETUP_STEPS: SetupStep[] = [
     label: "Imports",
     title: "Imports & tagging",
     blurb:
-      "What an album goes through after it lands: the script chain's own options, genre and mood tagging, and the metadata fetched from online providers.",
+      "What an album goes through after it lands: the script chain's own options, genre and mood tagging, and the metadata fetched from online providers — plus the artist watch that queues new releases on its own.",
     groups: [
       "Import & tag cleanup",
       "AutoTag (script 8)",
       "Beets tagging (script 14)",
       "Release tracklist (script 15)",
       "Artist images & descriptions",
+      "Artist watch",
     ],
   },
   {

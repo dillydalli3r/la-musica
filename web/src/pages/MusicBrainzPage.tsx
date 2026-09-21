@@ -1,20 +1,22 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   keepPreviousData, useInfiniteQuery, useQuery, useQueryClient,
 } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, ArrowUpDown, ArrowUpRight, BookmarkPlus, Check, Loader2, Search, Zap } from "lucide-react";
+import { ArrowDown, ArrowUp, ArrowUpDown, ArrowUpRight, Check, Library, Loader2, Search, Zap } from "lucide-react";
 import { api } from "../api";
 import type {
   Library as LibraryData, MBArtistBrowse, MBReleaseGroupBrowse, MBReleaseGroupRow,
-  MBReleaseRow, MBRecordingBrowse, MBSearchRow as MBSearchRowData,
+  MBReleaseRow, MBRecordingBrowse, MBSearchRow as MBSearchRowData, MBSearchRows,
 } from "../types";
 import { albumRef } from "../lib/refs";
 import { TABLE_FIT } from "../lib/columns";
 import { EmptyState, PageLoading } from "../components/Badges";
 import { MbIcon } from "../components/Links";
 import PageHeader from "../components/PageHeader";
+import ReleaseChoice from "../components/ReleaseChoice";
 import Segmented from "../components/Segmented";
+import { WatchArtistButton } from "../components/WatchDialog";
 import { toast } from "../store";
 
 /* In-app MusicBrainz browser: search across the four browsable entities and
@@ -108,6 +110,10 @@ function useOwnedAlbum(ids: (string | null | undefined)[]) {
     const wanted = want.split(",");
     for (const artist of lib?.artists ?? []) {
       for (const al of artist.albums ?? []) {
+        // A pending framework album carries the release ids but holds no audio
+        // yet — "already in your library" would be a lie the download then
+        // obeys (the server's own owned check skips them for the same reason).
+        if (al.pending) continue;
         const meta = al.meta ?? {};
         const have = [meta.MUSICBRAINZ_ALBUMID, meta.MUSICBRAINZ_RELEASEGROUPID]
           .map((v) => String(v ?? "").toLowerCase());
@@ -161,8 +167,8 @@ function StatusBadge({ status, formats }: { status?: string | null; formats?: st
   );
 }
 
-/** "best" = the one edition the auto-import policy prefers per release group
- *  (default); "all" = every eligible edition. Sent to /api/mb/auto-import. */
+/** "best" = the one edition the add/import policy prefers per release group
+ *  (default); "all" = every eligible edition. Sent to /api/library/add. */
 const IMPORT_MODES = [
   { id: "best", label: "Best edition" },
   { id: "all", label: "All editions" },
@@ -187,30 +193,40 @@ function MbHeaderActions({ href, query }: { href?: string; query: string }) {
   );
 }
 
-/** Bulk auto-import with a busy flag: queues one server-side job per id and
- *  reports what the server actually queued (`queued` / `skipped`), never what
- *  was asked for. `missing` is ids that had nothing to send (already counted
- *  as skipped). A call that times out or fails toasts the reason instead of a
- *  bare "nothing queued" — the server answers in a few seconds now, so a
- *  timeout really is MusicBrainz (or the backend) being slow. */
-function useAutoImport() {
+/** "Add to library" with a busy flag: the server creates the FRAMEWORK album
+ *  (the folder the naming script names, with the release's own tracklist and
+ *  the release-group cover) and starts the search for its audio, so the album
+ *  is in the library and visibly pending the moment the button is pressed.
+ *  Reports what the server ACTUALLY added (`albums[].created`), never what was
+ *  asked for; `missing` is ids that had nothing to send (already counted).
+ *  A call that fails toasts the reason instead of a bare "nothing added". */
+function useAddToLibrary() {
   const [busy, setBusy] = useState(false);
   const run = async (
     ids: string[],
-    kind: "release" | "release_group" | "artist",
-    mode: ImportMode,
-    missing = 0
+    kind: "release" | "release_group" | "artist" | "recording",
+    mode: ImportMode = "best",
+    missing = 0,
+    extra: { title?: string; artist?: string; year?: string; release_mbid?: string } = {}
   ) => {
     setBusy(true);
-    let queued = 0;
+    let added = 0;
+    let have = 0;
     let skipped = missing;
     let reason = "";
     try {
       for (const mbid of ids) {
         try {
-          const res = await api.mbAutoImport({ mbid, kind, mode });
-          queued += res.queued;
-          skipped += res.skipped.length;
+          const res = await api.libraryAdd({ mbid, kind, mode, ...extra });
+          if (res.background) {
+            // An artist's discography is prepared off-request; the albums
+            // appear (and start searching) as each one is created.
+            toast.success(res.note || "Preparing the discography — the albums appear as they are added");
+            return;
+          }
+          added += res.albums.filter((a) => a.created).length;
+          have += res.albums.filter((a) => a.already_in_library).length;
+          skipped += res.skipped.length + res.errors.length;
         } catch (e) {
           // one bad id must not abandon the rest of the batch
           skipped += 1;
@@ -223,20 +239,21 @@ function useAutoImport() {
     } finally {
       setBusy(false);
     }
-    const tail = `${skipped ? ` · ${skipped} skipped` : ""}${reason ? ` · ${reason}` : ""}`;
-    if (queued) toast.success(`${queued} queued${tail}`);
-    else toast.error(`Nothing queued${tail || " — MusicBrainz is busy, try again"}`);
+    const tail = `${have ? ` · ${have} already in the library` : ""}` +
+      `${skipped ? ` · ${skipped} skipped` : ""}${reason ? ` · ${reason}` : ""}`;
+    if (added) toast.success(`Added ${added} to your library${tail}`);
+    else toast.error(`Nothing added${tail || " — MusicBrainz is busy, try again"}`);
   };
   return { busy, run };
 }
 
-/** The Zap that becomes a spinner while a queue call is in flight — the
+/** The library glyph that becomes a spinner while an add is in flight — the
  *  button must look busy, not dead, when MusicBrainz takes a few seconds. */
-function ImportIcon({ busy }: { busy: boolean }) {
+function AddIcon({ busy }: { busy: boolean }) {
   return busy ? (
     <Loader2 className="h-3.5 w-3.5 animate-spin" />
   ) : (
-    <Zap className="h-3.5 w-3.5" />
+    <Library className="h-3.5 w-3.5" />
   );
 }
 
@@ -249,11 +266,16 @@ function LoadError({ e }: { e: unknown }) {
   );
 }
 
-/** Footer under a paged list: what's shown, and a load-more control. */
-function LoadMore({ loaded, total, busy, onLoad }: {
-  loaded: number; total: number; busy: boolean; onLoad: () => void;
+/** Footer under a paged list: what's shown, and a load-more control.
+ *
+ *  `hasMore` is the server's own answer (the payload carries the offset of the
+ *  next page, null at the end) rather than a guess from the row count: rows are
+ *  de-duplicated, so a list can sit one row below `total` forever while there
+ *  is nothing left to load. */
+function LoadMore({ loaded, total, busy, hasMore, onLoad }: {
+  loaded: number; total: number; busy: boolean; hasMore: boolean; onLoad: () => void;
 }) {
-  if (loaded >= total) return null;
+  if (!hasMore) return null;
   return (
     <button
       className="w-full py-2 text-xs text-zinc-400 hover:text-white hover:bg-raise transition-colors disabled:opacity-50 flex items-center justify-center gap-1.5"
@@ -263,6 +285,36 @@ function LoadMore({ loaded, total, busy, onLoad }: {
       {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
       Load more — showing {loaded} of {total}
     </button>
+  );
+}
+
+/** One index-constraint box (artist / year / label / cat #).
+ *
+ *  Local text + the same 400 ms debounce the search box uses: typing
+ *  "Radiohead" into the URL on every keystroke would be nine searches behind
+ *  MusicBrainz's 1 req/s etiquette. Enter applies at once. */
+function ConstraintBox({ value, placeholder, title, onSet }: {
+  value: string; placeholder: string; title: string; onSet: (v: string) => void;
+}) {
+  const [text, setText] = useState(value);
+  useEffect(() => setText(value), [value]); // stay in sync with back/forward
+  useEffect(() => {
+    if (text === value) return;
+    const t = setTimeout(() => onSet(text), 400);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [text]);
+  return (
+    <input
+      className="input !py-1 !w-40 text-xs"
+      placeholder={placeholder}
+      title={title}
+      value={text}
+      onChange={(e) => setText(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") onSet(text);
+      }}
+    />
   );
 }
 
@@ -312,34 +364,60 @@ function SortTh({ label, k, sort, onSort, className }: {
   );
 }
 
-/** Warm an entity page while the pointer is over a row that links to it —
- * by click time the payload is usually already in the query cache. */
+/** Warm an entity page while the pointer RESTS on a row that links to it —
+ * by click time the payload is usually already in the query cache.
+ *
+ *  MusicBrainz answers one request per second, so a warming request per row
+ *  is not free: sweeping the pointer across a hundred rows used to queue a
+ *  hundred entity fetches behind that etiquette. The pointer has to dwell on
+ *  a row before anything is asked, an already-warm (or in-flight) payload is
+ *  never asked for twice, and `cool` clears a pending warm when the pointer
+ *  leaves. */
 function useMbPrefetch() {
   const qc = useQueryClient();
-  return (type: string, id: string) => {
-    if (!id) return;
-    if (type === "artist") {
-      qc.prefetchInfiniteQuery({
-        queryKey: ["mbArtist", id],
-        queryFn: ({ pageParam }) => api.mbArtist(id, pageParam),
-        initialPageParam: 0,
-      });
-    } else if (type === "release-group") {
-      qc.prefetchInfiniteQuery({
-        queryKey: ["mbRG", id],
-        queryFn: ({ pageParam }) => api.mbReleaseGroup(id, pageParam),
-        initialPageParam: 0,
-      });
-    } else if (type === "release") {
-      qc.prefetchQuery({ queryKey: ["mbRelease", id], queryFn: () => api.mbRelease(id) });
-    } else if (type === "recording") {
-      qc.prefetchInfiniteQuery({
-        queryKey: ["mbRecording", id],
-        queryFn: ({ pageParam }) => api.mbRecording(id, pageParam),
-        initialPageParam: 0,
-      });
+  const timer = useRef<number | null>(null);
+
+  const clear = () => {
+    if (timer.current !== null) {
+      clearTimeout(timer.current);
+      timer.current = null;
     }
   };
+  useEffect(() => clear, []);
+
+  const warm = (type: string, id: string) => {
+    if (!id) return;
+    clear();
+    const key =
+      type === "release" ? ["mbRelease", id] : [`mb${type === "release-group" ? "RG" : type === "artist" ? "Artist" : "Recording"}`, id];
+    if (qc.getQueryData(key) !== undefined) return; // already in the cache
+    timer.current = setTimeout(() => {
+      timer.current = null;
+      if (qc.getQueryData(key) !== undefined) return;
+      if (type === "artist") {
+        qc.prefetchInfiniteQuery({
+          queryKey: key,
+          queryFn: ({ pageParam }) => api.mbArtist(id, pageParam),
+          initialPageParam: 0,
+        });
+      } else if (type === "release-group") {
+        qc.prefetchInfiniteQuery({
+          queryKey: key,
+          queryFn: ({ pageParam }) => api.mbReleaseGroup(id, pageParam),
+          initialPageParam: 0,
+        });
+      } else if (type === "release") {
+        qc.prefetchQuery({ queryKey: key, queryFn: () => api.mbRelease(id) });
+      } else if (type === "recording") {
+        qc.prefetchInfiniteQuery({
+          queryKey: key,
+          queryFn: ({ pageParam }) => api.mbRecording(id, pageParam),
+          initialPageParam: 0,
+        });
+      }
+    }, 150);
+  };
+  return { warm, cool: clear };
 }
 
 /* ------------------------------------------------------------------ */
@@ -396,18 +474,27 @@ export function MBSearchPage() {
   const type = (params.get("type") as MBType) || "release";
   const ptype = params.get("ptype") ?? "";
   const stype = params.get("stype") ?? "";
+  // Index constraints: MusicBrainz's own fields, each one ANDed into the
+  // Lucene query server-side. Filtering the returned rows instead cannot
+  // answer them — the rows that would match are not in the page.
+  const artist = params.get("artist") ?? "";
+  const year = params.get("year") ?? "";
+  const label = params.get("label") ?? "";
+  const catno = params.get("catno") ?? "";
+  const hasConstraints = !!(artist.trim() || year.trim() || label.trim() || catno.trim());
   const [text, setText] = useState(q);
   const nav = useNavigate();
-  const prefetch = useMbPrefetch();
+  const { warm: prefetch, cool: unprefetch } = useMbPrefetch();
 
   useEffect(() => setText(q), [q]); // stay in sync with back/forward
 
   const pushParams = (nextQ: string) => {
-    const next = new URLSearchParams();
+    // Rebuilt from the CURRENT params so the type filter and the constraints
+    // survive a new query.
+    const next = new URLSearchParams(params);
     if (nextQ.trim()) next.set("q", nextQ.trim());
+    else next.delete("q");
     next.set("type", type);
-    if (ptype) next.set("ptype", ptype);
-    if (stype) next.set("stype", stype);
     setParams(next, { replace: true });
   };
 
@@ -415,6 +502,18 @@ export function MBSearchPage() {
     const next = new URLSearchParams(params);
     if (value) next.set(key, value);
     else next.delete(key);
+    setParams(next, { replace: true });
+  };
+
+  const setConstraint = (key: "artist" | "year" | "label" | "catno", value: string) => {
+    const next = new URLSearchParams(params);
+    if (value.trim()) next.set(key, value.trim());
+    else next.delete(key);
+    setParams(next, { replace: true });
+  };
+  const clearConstraints = () => {
+    const next = new URLSearchParams(params);
+    for (const key of ["artist", "year", "label", "catno"]) next.delete(key);
     setParams(next, { replace: true });
   };
 
@@ -454,25 +553,57 @@ export function MBSearchPage() {
   const looksCatno = /^[a-z0-9]{1,8}[\s-]?\d{3,8}([-]?\d{1,4})?$/i.test(q.trim());
   const looksBarcode = /^\d{8,14}$/.test(q.trim());
   const mode = type === "release" ? (looksBarcode ? "barcode" : looksCatno ? "catno" : "free") : "free";
+  // The fallback is decided ONCE, from the first page: asking per page mixed
+  // pages of two different queries (exact for page 1, free text for page 2)
+  // into one result list.
+  const [freeTextFallback, setFreeTextFallback] = useState(false);
+  const searchMode = freeTextFallback ? "free" : mode;
+
   const search = useInfiniteQuery({
-    queryKey: ["mbSearch", type, q, mode, ptype, stype],
-    queryFn: async ({ pageParam }) => {
-      const page = await api.mbSearch(type, q, PAGE, mode, pageParam as number, ptype, stype);
-      if (mode === "free" || page.rows.length) return page;
-      // exact search found nothing at this offset — show the free-text list
-      return api.mbSearch(type, q, PAGE, "free", pageParam as number, ptype, stype);
-    },
+    queryKey: ["mbSearch", type, q, searchMode, ptype, stype, artist, year, label, catno],
+    queryFn: ({ pageParam }) =>
+      api.mbSearch({
+        type, q, limit: PAGE, mode: searchMode, offset: pageParam as number,
+        primaryType: ptype, secondaryType: stype,
+        artist, year, label, catno,
+      }),
     initialPageParam: 0,
-    getNextPageParam: (last, all) => {
-      const loaded = all.reduce((n, p) => n + p.rows.length, 0);
-      return loaded < (last.total ?? 0) ? loaded : undefined;
-    },
-    enabled: q.trim().length >= 2 && !idLike,
+    // The server hands back the offset of the next page (null at the end), so
+    // paging never re-derives an offset from de-duplicated row counts.
+    getNextPageParam: (last: MBSearchRows) => last.next ?? undefined,
+    enabled: (q.trim().length >= 2 || hasConstraints) && !idLike,
     placeholderData: keepPreviousData, // keep rows visible while re-querying
   });
 
-  const rows = (search.data?.pages ?? []).flatMap((p) => p.rows);
+  useEffect(() => { setFreeTextFallback(false); }, [q, type, mode]);
+  useEffect(() => {
+    const pages = search.data?.pages ?? [];
+    if (!freeTextFallback && mode !== "free" && pages.length === 1 && !pages[0].rows.length
+        && (pages[0].total ?? 0) === 0) {
+      setFreeTextFallback(true); // the exact search has nothing: show free text
+    }
+  }, [search.data, mode, freeTextFallback]);
+
+  // Rows are de-duplicated by id: MusicBrainz repeats an entity when a query
+  // matches it twice (a multi-disc release), and the same row twice in a table
+  // is a bug, not a second result.
+  const rows = useMemo(() => {
+    const seen = new Set<string>();
+    const out: MBSearchRowData[] = [];
+    for (const page of search.data?.pages ?? []) {
+      for (const row of page.rows ?? []) {
+        const id = String(row.id ?? "");
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        out.push(row);
+      }
+    }
+    return out;
+  }, [search.data]);
   const total = search.data?.pages.at(-1)?.total ?? 0;
+  // The Lucene query MusicBrainz actually answered — shown above the table so
+  // a surprising result list can be read (and re-run on musicbrainz.org).
+  const shownQuery = search.data?.pages[0]?.query ?? "";
 
   // Flatten entity-specific shapes into sortable flat rows for the columns.
   const shaped = useMemo(
@@ -493,11 +624,10 @@ export function MBSearchPage() {
   );
   const { sort, onSort, sorted } = useSort(shaped, null);
 
-  // Bulk auto-import works off release-group ids, so selection only exists on
-  // that tab; it resets whenever the tab or the query changes.
+  // Bulk "Add to library" works off release-group ids, so selection only
+  // exists on that tab; it resets whenever the tab or the query changes.
   const [sel, setSel] = useState<string[]>([]);
-  const [wishBatchBusy, setWishBatchBusy] = useState(false);
-  const { busy: importBusy, run: runImport } = useAutoImport();
+  const { busy: importBusy, run: runImport } = useAddToLibrary();
   useEffect(() => setSel([]), [type, q]);
   const selectable = type === "release-group";
   const toggleSel = (id: string) =>
@@ -660,6 +790,48 @@ export function MBSearchPage() {
             )}
           </div>
         )}
+
+        {/* The constraints the index can answer and a row filter cannot:
+            artist:"…" date:[…] label:"…" catno:"…" are ANDed into one WS/2
+            query, so "albums by X from 1999 on label Y" is asked, not
+            approximated. */}
+        {(type === "release" || type === "release-group") && (
+          <div className="flex items-center gap-2 flex-wrap">
+            <ConstraintBox
+              value={artist}
+              placeholder="Artist"
+              title="Only releases credited to this artist (artist:)"
+              onSet={(v) => setConstraint("artist", v)}
+            />
+            <ConstraintBox
+              value={year}
+              placeholder="Year"
+              title="A year, or a range like 1990-1999 — releases date the pressing, release groups their earliest release"
+              onSet={(v) => setConstraint("year", v)}
+            />
+            {type === "release" && (
+              <>
+                <ConstraintBox
+                  value={label}
+                  placeholder="Label"
+                  title="Only releases on this label (label:)"
+                  onSet={(v) => setConstraint("label", v)}
+                />
+                <ConstraintBox
+                  value={catno}
+                  placeholder="Cat #"
+                  title="Only releases with this catalog number (catno:)"
+                  onSet={(v) => setConstraint("catno", v)}
+                />
+              </>
+            )}
+            {hasConstraints && (
+              <button className="btn-ghost !py-1 text-[11px]" onClick={clearConstraints}>
+                Clear
+              </button>
+            )}
+          </div>
+        )}
       </PageHeader>
 
       <div>
@@ -673,21 +845,39 @@ export function MBSearchPage() {
           ) : detect.error ? (
             <EmptyState title="No MusicBrainz entity found" hint={`Nothing lives at ${bareId}.`} />
           ) : null
-        ) : !q || q.trim().length < 2 ? (
+        ) : !(q.trim().length >= 2 || hasConstraints) ? (
           <EmptyState
-            title="Type at least two characters"
-            hint="Results come straight from musicbrainz.org (rate-limited to 1 request/second — repeated views are cached and pages prefetch on hover)."
+            title="Type at least two characters, or set a constraint"
+            hint="Results come straight from musicbrainz.org (rate-limited to 1 request/second — repeated searches are cached and pages prefetch when the pointer rests on a row)."
           />
         ) : search.isLoading || (search.isPlaceholderData && !rows.length) ? (
           <PageLoading label="Asking MusicBrainz…" />
         ) : search.error ? (
           <LoadError e={search.error} />
         ) : rows.length === 0 ? (
-          <EmptyState title="No results" hint={`Nothing on MusicBrainz for “${q}”.`} />
+          <EmptyState
+            title="No results"
+            hint={shownQuery ? `MusicBrainz matched nothing for ${shownQuery}.` : "Nothing on MusicBrainz for this search."}
+          />
         ) : (
           <>
-            <div className="mb-3 flex items-center justify-between gap-3 text-[11px] text-zinc-500">
-              <span>{rows.length} of {total} result{total === 1 ? "" : "s"} loaded</span>
+            <div className="mb-3 flex items-center justify-between gap-3 text-[11px] text-zinc-500 flex-wrap">
+              <span>
+                {rows.length} of {total} result{total === 1 ? "" : "s"} loaded
+                {freeTextFallback ? " · free-text fallback (the exact catalog-number search had nothing)" : ""}
+              </span>
+              {shownQuery ? (
+                <a
+                  className="font-mono truncate max-w-[60%] hover:text-accent-soft"
+                  href={`https://musicbrainz.org/search?query=${encodeURIComponent(shownQuery)}` +
+                        `&type=${type === "release-group" ? "release_group" : type}&method=indexed`}
+                  target="_blank"
+                  rel="noreferrer"
+                  title={`The query this list came from — MusicBrainz answers it in score order:\n${shownQuery}`}
+                >
+                  {shownQuery}
+                </a>
+              ) : null}
             </div>
             {selectable && sel.length > 0 && (
               <div className="panel mb-3 flex items-center gap-2 flex-wrap">
@@ -699,42 +889,9 @@ export function MBSearchPage() {
                     className="btn-primary !py-1 text-xs"
                     disabled={importBusy}
                     onClick={() => runImport(selIds, "release_group", "best", sel.length - selIds.length)}
-                    title="Queue one release per group — the edition the auto-import policy prefers"
+                    title="Add the edition the policy prefers for each selected group to your library and start searching for it"
                   >
-                    <ImportIcon busy={importBusy} /> {importBusy ? "Queuing…" : "Auto-import (best per group)"}
-                  </button>
-                  <button
-                    className="btn-ghost !py-1 text-xs"
-                    disabled={importBusy}
-                    onClick={() => runImport(selIds, "release_group", "all", sel.length - selIds.length)}
-                    title="Queue every eligible edition of each selected group"
-                  >
-                    {importBusy ? "Queuing…" : "Auto-import (all)"}
-                  </button>
-                  <button
-                    className="btn-ghost !py-1 text-xs"
-                    disabled={wishBatchBusy}
-                    onClick={async () => {
-                      setWishBatchBusy(true);
-                      let added = 0;
-                      try {
-                        for (const release_mbid of selIds) {
-                          try {
-                            await api.wishAdd({ release_mbid });
-                            added += 1;
-                          } catch {
-                            /* one refused wish must not abandon the batch */
-                          }
-                        }
-                      } finally {
-                        setWishBatchBusy(false);
-                      }
-                      const missed = sel.length - added;
-                      toast.success(`Added ${added} to wishes${missed ? ` · ${missed} skipped` : ""}`);
-                      setSel([]);
-                    }}
-                  >
-                    <BookmarkPlus className="h-3.5 w-3.5" /> Add to wishes
+                    <AddIcon busy={importBusy} /> {importBusy ? "Adding…" : "Add to library"}
                   </button>
                   <button className="btn-ghost !py-1 text-xs" onClick={() => setSel([])}>
                     Clear
@@ -776,6 +933,7 @@ export function MBSearchPage() {
                         className={`table-row !cursor-pointer ${sel.includes(String(r.id)) ? "bg-accent/15" : ""}`}
                         onClick={() => nav(`/mb/${routeFor(type)}/${r.id}`)}
                         onMouseEnter={() => prefetch(type, String(r.id))}
+                        onMouseLeave={unprefetch}
                       >
                         {selectable && (
                           <td className="td w-8 pr-0" onClick={(e) => e.stopPropagation()}>
@@ -791,13 +949,25 @@ export function MBSearchPage() {
                           {type === "artist" && (
                             <button
                               className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-raise transition-colors"
-                              title="Auto-import this artist's discography (one release per release group)"
+                              title="Add this artist's release groups to your library and start searching for them"
                               onClick={(e) => {
                                 e.stopPropagation();
                                 runImport([String(r.id)], "artist", "best");
                               }}
                             >
-                              <Zap className="h-4 w-4" />
+                              <Library className="h-4 w-4" />
+                            </button>
+                          )}
+                          {type === "recording" && (
+                            <button
+                              className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-raise transition-colors"
+                              title="Add the release this recording appears on to your library and start searching for it"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                runImport([String(r.id)], "recording", "best");
+                              }}
+                            >
+                              <Library className="h-4 w-4" />
                             </button>
                           )}
                           <ExtLink href={mbUrl(type, String(r.id))} title="Open on MusicBrainz" />
@@ -811,6 +981,7 @@ export function MBSearchPage() {
                 loaded={rows.length}
                 total={total}
                 busy={search.isFetchingNextPage}
+                hasMore={search.hasNextPage}
                 onLoad={() => search.fetchNextPage()}
               />
             </div>
@@ -828,22 +999,25 @@ export function MBSearchPage() {
 export function MBArtistPage() {
   const { id = "" } = useParams();
   const nav = useNavigate();
-  const prefetch = useMbPrefetch();
+  const { warm: prefetch, cool: unprefetch } = useMbPrefetch();
+  // The release-type filter is the SERVER's (see artist_release_groups): it is
+  // part of the query key, so switching types asks MusicBrainz again instead of
+  // filtering a window that may not contain the type at all.
+  const [typeFilter, setTypeFilter] = useState<string>("All");
   const discography = useInfiniteQuery({
-    queryKey: ["mbArtist", id],
-    queryFn: ({ pageParam }) => api.mbArtist(id, pageParam as number),
+    queryKey: ["mbArtist", id, typeFilter],
+    queryFn: ({ pageParam }) =>
+      api.mbArtist(id, pageParam as number, 300, typeFilter === "All" ? "" : typeFilter),
     initialPageParam: 0,
-    getNextPageParam: (last: MBArtistBrowse, all: MBArtistBrowse[]) => {
-      const loaded = all.reduce((n, p) => n + (p.release_groups?.length ?? 0), 0);
-      return loaded < (last.total ?? 0) ? loaded : undefined;
-    },
+    // The server's own next offset (null at the end): it also knows which
+    // rows MusicBrainz served, which a client-side row count does not.
+    getNextPageParam: (last: MBArtistBrowse) => last.next ?? undefined,
     enabled: !!id,
     placeholderData: keepPreviousData,
   });
   const { isLoading, error } = discography;
-  const [typeFilter, setTypeFilter] = useState<string>("All");
   const [mode, setMode] = useState<ImportMode>("best");
-  const { busy, run } = useAutoImport();
+  const { busy, run } = useAddToLibrary();
   // No reset-on-id effect: the artist id is a PATH param, and App keys the
   // route subtree by `location.pathname`, so another artist is a fresh mount
   // with the filter already back at "All".
@@ -854,19 +1028,15 @@ export function MBArtistPage() {
   // Release TYPE grouping: primary type splits the sections (Album / EP /
   // Single / …); secondary types (Compilation, Live, …) keep an edition in
   // its own combined category instead of vanishing into "Album".
-  const primaryOf = (rg: RGRow) => rg.primary_type || "Other";
   const catOf = (rg: RGRow) =>
     [rg.primary_type || "Other", ...(rg.secondary_types ?? [])].join(" + ");
 
-  const primaries = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const rg of groups) {
-      const p = primaryOf(rg);
-      counts.set(p, (counts.get(p) ?? 0) + 1);
-    }
-    return [...counts.entries()].sort((x, y) => y[1] - x[1]);
-  }, [groups]);
-  const shown = typeFilter === "All" ? groups : groups.filter((rg) => primaryOf(rg) === typeFilter);
+  // The filter is the SERVER's (see artist_release_groups): browse cannot
+  // filter by type at all, and filtering the loaded window is what made this
+  // page report an artist's albums as missing when they sat past the first
+  // page. So every loaded group already belongs to the selected type, and
+  // "All" is the unfiltered discography.
+  const shown = groups;
 
   const byCat: Record<string, RGRow[]> = {};
   for (const rg of shown) (byCat[catOf(rg)] ??= []).push(rg);
@@ -888,11 +1058,12 @@ export function MBArtistPage() {
         chips={[...(a.genres ?? []), ...(a.tags ?? []).slice(0, 5)].slice(0, 8)}
         actions={
           <>
-            {/* Wishes are per release, so an artist offers only the discography
-                import. The server fans an artist out to its release groups by
-                itself — best edition each, capped at 50 groups per call — so
-                `mode` rides along for the API's shared shape, and "all" still
-                means one release per group here. */}
+            {/* One button, one meaning: add the albums in the area the user is
+                looking at. With "All" selected that is the whole discography,
+                which the server prepares off-request (one MusicBrainz browse
+                per release group — `mode` rides along for the API's shared
+                shape, and still means one release per group here); with a type
+                selected it is exactly the groups on screen. */}
             <Segmented
               value={mode}
               onChange={setMode}
@@ -901,26 +1072,45 @@ export function MBArtistPage() {
             />
             <button
               className="btn-primary !py-1.5 text-xs"
-              disabled={busy}
-              title="Find → verify → download → import this artist's release groups from Soulseek (one job at a time)"
-              onClick={() => run([String(a.id)], "artist", mode)}
+              disabled={busy || shown.length === 0}
+              title={
+                typeFilter === "All"
+                  ? "Add one album per release group of this artist to your library and start searching for them"
+                  : `Add one album per release group shown (${shown.length}) to your library and start searching for them`
+              }
+              onClick={() =>
+                typeFilter === "All"
+                  ? run([String(a.id)], "artist", mode)
+                  : run(shown.map((rg) => String(rg.id)), "release_group", mode)
+              }
             >
-              <ImportIcon busy={busy} /> {busy ? "Queuing…" : "Auto-import"}
+              <AddIcon busy={busy} /> {busy ? "Adding…" : "Add to library"}
             </button>
             <MbHeaderActions
               href={mbUrl("artist", a.id)}
               query={a.name}
             />
+            {/* Watching is the third way to get at an artist's releases —
+                alongside adding one album and adding the whole discography —
+                so it sits with them, on the artist page itself. */}
+            <WatchArtistButton artistMbid={String(a.id)} artist={a.name} />
           </>
         }
       />
       <div>
         {groups.length === 0 ? (
-          <EmptyState title="No release groups on MusicBrainz" />
+          <EmptyState
+            title={typeFilter === "All"
+              ? "No release groups on MusicBrainz"
+              : `No ${typeFilter} release groups`}
+            hint={typeFilter === "All"
+              ? undefined
+              : "MusicBrainz's index holds no release group of that type for this artist — switch back to All."}
+          />
         ) : (
           <>
             <div className="flex gap-1 flex-wrap mb-4">
-              {["All", ...primaries.map(([p]) => p)].map((p) => (
+              {["All", ...PRIMARY_TYPES].map((p) => (
                 <button
                   key={p}
                   className={`chip px-2.5 py-1 border ${
@@ -928,16 +1118,21 @@ export function MBArtistPage() {
                       ? "bg-accent on-accent border-transparent font-semibold"
                       : "bg-raise border-border text-zinc-400 hover:text-white"
                   }`}
+                  title={
+                    p === "All"
+                      ? "Every release group MusicBrainz holds for this artist"
+                      : `Ask MusicBrainz's index for this artist's ${p} release groups only`
+                  }
                   onClick={() => setTypeFilter(p)}
                 >
                   {p}
-                  {p === "All" ? ` (${groups.length})` : ` (${primaries.find(([x]) => x === p)?.[1] ?? 0})`}
+                  {p === "All" && typeFilter === "All" ? ` (${rgTotal})` : ""}
                 </button>
               ))}
             </div>
-            {groups.length !== shown.length && (
+            {groups.length !== rgTotal && (
               <div className="text-[11px] text-zinc-500 mb-3">
-                Showing {shown.length} of {groups.length} release groups
+                Showing {groups.length} of {rgTotal}{typeFilter === "All" ? "" : ` ${typeFilter}`} release groups
               </div>
             )}
             {Object.entries(byCat).map(([cat, list]) => (
@@ -953,6 +1148,7 @@ export function MBArtistPage() {
                         className="table-row !cursor-pointer"
                         onClick={() => nav(`/mb/rg/${rg.id}`)}
                         onMouseEnter={() => prefetch("release-group", rg.id)}
+                        onMouseLeave={unprefetch}
                       >
                         <div className="px-3 py-2 flex items-center gap-3 min-w-0">
                           <span className="text-xs font-mono text-zinc-500 w-10 shrink-0">
@@ -964,6 +1160,17 @@ export function MBArtistPage() {
                               <span className="text-zinc-500 text-xs"> ({rg.secondary_types.join(" + ")})</span>
                             ) : null}
                           </span>
+                          <button
+                            className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-raise transition-colors shrink-0"
+                            title="Add this release group to your library and start searching for it"
+                            disabled={busy}
+                            onClick={(e) => {
+                              e.stopPropagation();   // the row itself opens the group
+                              run([String(rg.id)], "release_group", mode);
+                            }}
+                          >
+                            <Library className="h-4 w-4" />
+                          </button>
                           <ExtLink href={mbUrl("release-group", rg.id)} title="Open on MusicBrainz" />
                         </div>
                       </div>
@@ -976,6 +1183,7 @@ export function MBArtistPage() {
               loaded={groups.length}
               total={rgTotal}
               busy={discography.isFetchingNextPage}
+              hasMore={discography.hasNextPage}
               onLoad={() => discography.fetchNextPage()}
             />
           </>
@@ -992,15 +1200,12 @@ export function MBArtistPage() {
 export function MBReleaseGroupPage() {
   const { id = "" } = useParams();
   const nav = useNavigate();
-  const prefetch = useMbPrefetch();
+  const { warm: prefetch, cool: unprefetch } = useMbPrefetch();
   const editions = useInfiniteQuery({
     queryKey: ["mbRG", id],
     queryFn: ({ pageParam }) => api.mbReleaseGroup(id, pageParam as number),
     initialPageParam: 0,
-    getNextPageParam: (last: MBReleaseGroupBrowse, all: MBReleaseGroupBrowse[]) => {
-      const loaded = all.reduce((n, p) => n + (p.releases?.length ?? 0), 0);
-      return loaded < (last.total ?? 0) ? loaded : undefined;
-    },
+    getNextPageParam: (last: MBReleaseGroupBrowse) => last.next ?? undefined,
     enabled: !!id,
     placeholderData: keepPreviousData,
   });
@@ -1012,10 +1217,12 @@ export function MBReleaseGroupPage() {
   // carries the library's select-mode: checkbox column, selected rows tinted
   // and a batch bar above the table.
   const [sel, setSel] = useState<string[]>([]);
-  const [wished, setWished] = useState(false);
-  const [wishBusy, setWishBusy] = useState(false);
   const [mode, setMode] = useState<ImportMode>("best");
-  const { busy, run } = useAutoImport();
+  // The edition the user forced ("" = the policy's own pick). Owned here
+  // because the add call carries the same id: the panel and the button must
+  // never disagree about which edition the app is about to fetch.
+  const [edition, setEdition] = useState("");
+  const { busy, run } = useAddToLibrary();
   const toggleSel = (rid: string) =>
     setSel((s) => (s.includes(rid) ? s.filter((x) => x !== rid) : [...s, rid]));
   // rows the payload could not identify still count as selected, so the batch
@@ -1032,26 +1239,6 @@ export function MBReleaseGroupPage() {
   const rg = editions.data?.pages[0];
   if (!rg) return null;
   const typeLabel = [rg.primary_type, ...(rg.secondary_types ?? [])].filter(Boolean).join(" + ");
-
-  const wishHere = async (mbids: string[]) => {
-    setWishBusy(true);
-    let added = 0;
-    try {
-      for (const release_mbid of mbids) {
-        try {
-          await api.wishAdd({ release_mbid, title: rg.title, artist: rg.artist });
-          added += 1;
-        } catch {
-          /* one refused wish must not abandon the batch */
-        }
-      }
-    } finally {
-      setWishBusy(false);
-    }
-    const missed = mbids.length - added;
-    toast.success(`Added ${added} to wishes${missed ? ` · ${missed} skipped` : ""}`);
-    return added;
-  };
 
   return (
     <div className="p-6 space-y-5 mx-auto max-w-6xl">
@@ -1094,24 +1281,25 @@ export function MBReleaseGroupPage() {
               className="btn-primary !py-1.5 text-xs"
               disabled={busy}
               title={
-                mode === "best"
-                  ? "Queue the one edition the auto-import policy prefers for this group"
-                  : "Queue every eligible edition of this group (one job at a time)"
+                mode === "all"
+                  ? "Add every eligible edition of this group to your library and start searching for them"
+                  : edition
+                    ? "Add the edition you picked to your library and start searching for it"
+                    : "Add the edition the policy prefers for this group to your library and start searching for it"
               }
-              onClick={() => run([String(rg.id)], "release_group", mode)}
+              onClick={() =>
+                run(
+                  [String(rg.id)],
+                  "release_group",
+                  mode,
+                  0,
+                  // The override is deliberately not sent with mode "all":
+                  // the pick is one edition, and "all" means every eligible one.
+                  mode === "best" && edition ? { release_mbid: edition } : {}
+                )
+              }
             >
-              <ImportIcon busy={busy} /> {busy ? "Queuing…" : "Auto-import"}
-            </button>
-            <button
-              className="btn-ghost !py-1.5 text-xs"
-              title="Save this release group to the wishlist — it is auto-imported from Soulseek when a verified copy appears"
-              disabled={wishBusy || wished}
-              onClick={async () => {
-                if (await wishHere([String(rg.id)])) setWished(true);
-              }}
-            >
-              {wished ? <Check className="h-3.5 w-3.5" /> : <BookmarkPlus className="h-3.5 w-3.5" />}
-              {wished ? "Wished" : "Add to wishes"}
+              <AddIcon busy={busy} /> {busy ? "Adding…" : "Add to library"}
             </button>
             <MbHeaderActions
               href={mbUrl("release-group", rg.id)}
@@ -1119,7 +1307,15 @@ export function MBReleaseGroupPage() {
             />
           </>
         }
-      />
+      >
+        {/* Beside the Add-to-library button, and the override it reports is
+            the release_mbid that button sends. */}
+        <ReleaseChoice
+          releaseGroupMbid={String(rg.id)}
+          override={edition}
+          onOverride={(mbid) => setEdition(mbid)}
+        />
+      </PageHeader>
       <div>
         <div className="text-[11px] uppercase tracking-widest text-zinc-500 mb-1.5">
           Releases{releasesAll.length < relTotal ? ` · ${releasesAll.length} of ${relTotal}` : ` · ${relTotal}`}
@@ -1133,28 +1329,10 @@ export function MBReleaseGroupPage() {
               <button
                 className="btn-primary !py-1 text-xs"
                 disabled={busy}
-                onClick={() => run(selIds, "release_group", "best", sel.length - selIds.length)}
-                title="Queue one release per selected group — the edition the auto-import policy prefers"
+                onClick={() => run(selIds, "release", "best", sel.length - selIds.length)}
+                title="Add the selected editions to your library and start searching for them"
               >
-                <ImportIcon busy={busy} /> {busy ? "Queuing…" : "Auto-import (best per group)"}
-              </button>
-              <button
-                className="btn-ghost !py-1 text-xs"
-                disabled={busy}
-                onClick={() => run(selIds, "release_group", "all", sel.length - selIds.length)}
-                title="Queue every eligible edition of each selected group"
-              >
-                {busy ? "Queuing…" : "Auto-import (all)"}
-              </button>
-              <button
-                className="btn-ghost !py-1 text-xs"
-                disabled={wishBusy}
-                onClick={async () => {
-                  await wishHere(selIds);
-                  setSel([]);
-                }}
-              >
-                <BookmarkPlus className="h-3.5 w-3.5" /> Add to wishes
+                <AddIcon busy={busy} /> {busy ? "Adding…" : "Add to library"}
               </button>
               <button className="btn-ghost !py-1 text-xs" onClick={() => setSel([])}>
                 Clear
@@ -1196,6 +1374,7 @@ export function MBReleaseGroupPage() {
                     className={`table-row !cursor-pointer ${sel.includes(String(r.id)) ? "bg-accent/15" : ""}`}
                     onClick={() => nav(`/mb/release/${r.id}`)}
                     onMouseEnter={() => prefetch("release", r.id)}
+                    onMouseLeave={unprefetch}
                     title="Open this release"
                   >
                     <td className="td w-8 pr-0" onClick={(e) => e.stopPropagation()}>
@@ -1243,6 +1422,7 @@ export function MBReleaseGroupPage() {
             loaded={releasesAll.length}
             total={relTotal}
             busy={editions.isFetchingNextPage}
+            hasMore={editions.hasNextPage}
             onLoad={() => editions.fetchNextPage()}
           />
         </div>
@@ -1257,16 +1437,13 @@ export function MBReleaseGroupPage() {
 
 export function MBReleasePage() {
   const { id = "" } = useParams();
-  const nav = useNavigate();
   const { data: r, isLoading, error } = useQuery({
     queryKey: ["mbRelease", id],
     queryFn: () => api.mbRelease(id),
     enabled: !!id,
   });
-  const [wished, setWished] = useState(false);
-  const [wishBusy, setWishBusy] = useState(false);
   const [mode, setMode] = useState<ImportMode>("best");
-  const { busy, run } = useAutoImport();
+  const { busy, run } = useAddToLibrary();
   // The release, or failing that its group, is already on disk: the header
   // links to the local album rather than pretending this is new music.
   const owned = useOwnedAlbum([r?.id, r?.release_group_id]);
@@ -1337,40 +1514,16 @@ export function MBReleasePage() {
               disabled={busy}
               title={
                 importTarget.kind === "release_group"
-                  ? "Find → verify → download → audit → import every eligible edition of this release group from Soulseek"
-                  : "Find → verify → download → audit → import this exact release from Soulseek"
+                  ? "Add every eligible edition of this release group to your library and start searching for them"
+                  : "Add this exact release to your library and start searching for it"
               }
-              onClick={async () => {
-                await run([importTarget.mbid], importTarget.kind, mode);
-                nav(`/soulseek?release=${encodeURIComponent(r.id)}`);
-              }}
+              onClick={() =>
+                run([importTarget.mbid], importTarget.kind, mode, 0, {
+                  title: r.title, artist, year: (r.date || "").slice(0, 4),
+                })
+              }
             >
-              <ImportIcon busy={busy} /> {busy ? "Queuing…" : "Auto-import"}
-            </button>
-            <button
-              className="btn-ghost !py-1.5 text-xs"
-              title="Save this release to the wishlist — it is auto-imported from Soulseek when a verified copy appears"
-              disabled={wishBusy || wished}
-              onClick={async () => {
-                setWishBusy(true);
-                try {
-                  await api.wishAdd({
-                    release_mbid: r.id,
-                    title: r.title,
-                    artist,
-                    year: (r.date || "").slice(0, 4),
-                  });
-                  setWished(true);
-                  toast.success("Added to wishes");
-                } catch (e) {
-                  toast.error(String(e));
-                } finally {
-                  setWishBusy(false);
-                }
-              }}
-            >
-              {wished ? <Check className="h-3.5 w-3.5" /> : <BookmarkPlus className="h-3.5 w-3.5" />}
-              {wished ? "Wished" : "Add to wishes"}
+              <AddIcon busy={busy} /> {busy ? "Adding…" : "Add to library"}
             </button>
             {owned && (
               <Link
@@ -1431,6 +1584,21 @@ export function MBReleasePage() {
                     </div>
                     <span className="text-[11px] font-mono text-zinc-500 shrink-0">{fmtLen(t.length)}</span>
                     {t.recording_mbid && (
+                      <button
+                        className="p-1 rounded-lg text-zinc-600 hover:text-white hover:bg-raise transition-colors shrink-0"
+                        title="Add this track's release to your library and start searching for it"
+                        disabled={busy}
+                        onClick={() =>
+                          run([t.recording_mbid as string], "recording", "best", 0, {
+                            release_mbid: r.id, title: r.title, artist,
+                            year: (r.date || "").slice(0, 4),
+                          })
+                        }
+                      >
+                        <Library className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                    {t.recording_mbid && (
                       <Link
                         to={`/mb/recording/${t.recording_mbid}`}
                         className="p-1 rounded-lg text-zinc-600 hover:text-white hover:bg-raise transition-colors shrink-0"
@@ -1457,15 +1625,12 @@ export function MBReleasePage() {
 export function MBRecordingPage() {
   const { id = "" } = useParams();
   const nav = useNavigate();
-  const prefetch = useMbPrefetch();
+  const { warm: prefetch, cool: unprefetch } = useMbPrefetch();
   const appearances = useInfiniteQuery({
     queryKey: ["mbRecording", id],
     queryFn: ({ pageParam }) => api.mbRecording(id, pageParam as number),
     initialPageParam: 0,
-    getNextPageParam: (last: MBRecordingBrowse, all: MBRecordingBrowse[]) => {
-      const loaded = all.reduce((n, p) => n + (p.releases?.length ?? 0), 0);
-      return loaded < (last.total ?? 0) ? loaded : undefined;
-    },
+    getNextPageParam: (last: MBRecordingBrowse) => last.next ?? undefined,
     enabled: !!id,
     placeholderData: keepPreviousData,
   });
@@ -1473,6 +1638,7 @@ export function MBRecordingPage() {
   const releasesAll: RelRow[] = (appearances.data?.pages ?? []).flatMap((p) => p.releases ?? []);
   const relTotal: number = appearances.data?.pages.at(-1)?.total ?? releasesAll.length;
   const { sort, onSort, sorted } = useSort(releasesAll, "date");
+  const { busy, run } = useAddToLibrary();
 
   if (!id) return null;
   if (isLoading) return <PageLoading label="Asking MusicBrainz…" />;
@@ -1497,6 +1663,21 @@ export function MBRecordingPage() {
         chips={r.genres ?? []}
         actions={
           <>
+            {/* A recording is a track, and an album is what the library holds:
+                this adds the RELEASE the track appears on — the best edition
+                when none of the rows below has been picked. */}
+            <button
+              className="btn-primary !py-1.5 text-xs"
+              disabled={busy}
+              title="Add the release this track appears on to your library and start searching for it"
+              onClick={() =>
+                run([r.id], "recording", "best", 0, {
+                  title: r.title, artist: r.artist || "",
+                })
+              }
+            >
+              <AddIcon busy={busy} /> {busy ? "Adding…" : "Add to library"}
+            </button>
             {r.artist_mbid && (
               <Link className="btn-ghost !py-1.5 text-xs" to={`/mb/artist/${r.artist_mbid}`}>
                 Artist page
@@ -1534,6 +1715,7 @@ export function MBRecordingPage() {
                     className="table-row !cursor-pointer"
                     onClick={() => nav(`/mb/release/${rel.id}`)}
                     onMouseEnter={() => prefetch("release", rel.id)}
+                    onMouseLeave={unprefetch}
                   >
                     <td className="td text-zinc-500 cell-nowrap">{rel.date || "—"}</td>
                     <td className="td text-zinc-200">
@@ -1555,7 +1737,23 @@ export function MBRecordingPage() {
                     </td>
                     <td className="td text-zinc-500">{rel.country || "—"}</td>
                     <td className="td w-10 pr-2">
-                      <ExtLink href={mbUrl("release", rel.id)} title="Open on MusicBrainz" />
+                      <span className="inline-flex items-center">
+                        <button
+                          className="p-1.5 rounded-lg text-zinc-500 hover:text-white hover:bg-raise transition-colors"
+                          title={`Add “${rel.title}” to your library and start searching for it`}
+                          disabled={busy}
+                          onClick={(e) => {
+                            e.stopPropagation();   // the row itself opens the release
+                            run([rel.id], "release", "best", 0, {
+                              title: rel.title || "", artist: r.artist || "",
+                              year: (rel.date || "").slice(0, 4),
+                            });
+                          }}
+                        >
+                          <Library className="h-3.5 w-3.5" />
+                        </button>
+                        <ExtLink href={mbUrl("release", rel.id)} title="Open on MusicBrainz" />
+                      </span>
                     </td>
                   </tr>
                 ))}
@@ -1573,6 +1771,7 @@ export function MBRecordingPage() {
             loaded={releasesAll.length}
             total={relTotal}
             busy={appearances.isFetchingNextPage}
+            hasMore={appearances.hasNextPage}
             onLoad={() => appearances.fetchNextPage()}
           />
         </div>

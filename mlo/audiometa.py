@@ -300,18 +300,34 @@ def _needs_analysis(path, force, overwrite):
 def _write_tags(path, bpm, key_str, config, af=None):
     """Write BPM/INITIALKEY respecting per-filetype gates. Returns True when
     the file changed. *af* is the already-open handle from _needs_analysis,
-    when there is one."""
+    when there is one.
+
+    Both tags are held for ONE flush: set two tags and the container used to
+    be rewritten twice for the same run — a full rewrite of the file, for a
+    tag that arrived at the same moment as its sibling.
+    """
     changed = False
     try:
         af = af or AudioFile(path)
-        if bpm is not None and should_write_audio_tag(config, "BPM", filepath=path):
-            if str(af.get_tag("BPM") or "").strip() != str(bpm):
-                if af.set_tag("BPM", str(bpm)):
-                    changed = True
-        if key_str and should_write_audio_tag(config, "INITIALKEY", filepath=path):
-            if str(af.get_tag("INITIALKEY") or "").strip() != key_str:
-                if af.set_tag("INITIALKEY", key_str):
-                    changed = True
+        # A handle that only implements the get/set contract (a caller's stub)
+        # writes per tag, like before.
+        defer = hasattr(af, "defer_save")
+        if defer:
+            af.defer_save(True)
+        try:
+            if bpm is not None and should_write_audio_tag(config, "BPM", filepath=path):
+                if str(af.get_tag("BPM") or "").strip() != str(bpm):
+                    if af.set_tag("BPM", str(bpm)):
+                        changed = True
+            if key_str and should_write_audio_tag(config, "INITIALKEY", filepath=path):
+                if str(af.get_tag("INITIALKEY") or "").strip() != key_str:
+                    if af.set_tag("INITIALKEY", key_str):
+                        changed = True
+        finally:
+            # A failed flush wrote nothing, so the file is not reported as
+            # changed; the deferral is always turned off again either way.
+            if defer and af.defer_save(False) is not True:
+                changed = False
     except Exception:
         return False
     return changed

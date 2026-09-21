@@ -19,6 +19,7 @@ import MoreLikeThis from "../components/MoreLikeThis";
 import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
 import TagActionsMenu from "../components/TagActionsMenu";
+import { WatchArtistButton } from "../components/WatchDialog";
 import type { Album } from "../types";
 import { artistMbid } from "../lib/refs";
 import { auditFails } from "../lib/status";
@@ -128,9 +129,12 @@ export default function ArtistPage() {
   const descText = art?.description ?? "";
   const grade = data.grade;
   const gradeIssues = grade?.issues ?? [];
+  // Notes inform without failing (an undersized artist image is accepted here):
+  // they are shown muted, next to the chips the failures use.
+  const gradeNotes = grade?.notes ?? [];
   const monogram = name.trim().split(/\s+/).map((w) => w[0] ?? "").join("").slice(0, 2).toUpperCase();
   const artistGradeTitle = gradeIssues.length
-    ? gradeIssues.map((i) => i.label).join(" · ")
+    ? gradeIssues.map((i) => i.reason || i.label).join(" · ")
     : "Artist image and description — both present";
 
   /** Every artwork/description write invalidates the SAME queries the rest of
@@ -350,7 +354,16 @@ export default function ArtistPage() {
                     <span
                       key={i.code}
                       className="chip bg-red-950/40 text-red-300/90 border border-red-900/50"
-                      title={i.where ? `${i.label} — ${i.where}` : i.label}
+                      title={[i.label, i.where, i.reason].filter(Boolean).join(" — ")}
+                    >
+                      {i.label}
+                    </span>
+                  ))}
+                  {gradeNotes.map((i) => (
+                    <span
+                      key={i.code}
+                      className="chip bg-raise/60 text-zinc-400 border border-border"
+                      title={[i.label, i.where, i.reason].filter(Boolean).join(" — ")}
                     >
                       {i.label}
                     </span>
@@ -402,6 +415,11 @@ export default function ArtistPage() {
                   onDone={refresh}
                   buttonTitle="Tag actions on every track of this artist"
                 />
+                {/* The library artist page is the other place a user meets an
+                    artist they care about, so it carries the same control the
+                    MusicBrainz artist page does. The MBID comes from the tags;
+                    an artist that carries none cannot be watched. */}
+                <WatchArtistButton artistMbid={artistMb ?? ""} artist={name} />
                 <button
                   className="btn-ghost"
                   onClick={() => setReviewOpen(true)}

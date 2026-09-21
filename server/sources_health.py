@@ -40,7 +40,19 @@ SAMPLE_ISRC = "GBAYE9200070"
 # RYM links are their own row rather than a second reading of the genre
 # source that shares the cookie: the genre probe asks for genres, this one
 # resolves the sample album's links, which is the thing the import writes.
-KINDS = ("lyrics", "advisory", "genre", "metadata", "links")
+# `discover` is the /api/discover/* surface: its sources are the ones
+# `server.discover`'s registry declares, probed with what each can actually
+# answer (a genre list, a genre browse, a recommendation feed).
+#
+# `credentials` is the odd one out and is LAST for that reason: these rows are
+# not sources, they are the logins the sources need. A source row answers "can
+# this source do its job here", which is NOT the same question — Discogs
+# browses anonymously, so its row stays green with a discarded token, and
+# Spotify is simply skipped without a client secret, so a REJECTED secret read
+# as "not configured". These rows ask the provider's own credential endpoint
+# instead; see server/credential_checks.
+KINDS = ("lyrics", "advisory", "genre", "metadata", "links", "discover",
+         "credentials")
 
 # The ask order of the advisory routes — `resolve_advisory_route`'s own order.
 _ADVISORY_ORDER = ["deezer-isrc", "spotify-isrc", "apple-album", "itunes-song",
@@ -90,6 +102,16 @@ def _image_detail(label, url):
         else label
 
 
+def _why(prefix, reason):
+    """*prefix* with the provider's own refusal appended, when there is one.
+
+    A keyed source that answers nothing and a keyed source that was REFUSED
+    both leave an empty result behind; the provider's sentence is what tells
+    them apart ("check the credentials" sends the user looking for a key that
+    is already there)."""
+    return f"{prefix} — {reason}" if reason else prefix
+
+
 # --------------------------------------------------------------------------- #
 # Lyrics — the providers' own probe, unchanged
 # --------------------------------------------------------------------------- #
@@ -114,10 +136,12 @@ def _probe_advisory(pid, cfg):
         return "ok", "explicit" if hit[0] else "clean (not explicit)"
 
     if pid == "spotify-isrc":
+        started = time.time()
         hit = intg._spotify_advisory(SAMPLE_ISRC, cfg)
         if hit is None:
-            return "fail", ("no Spotify track for the sample ISRC — check the "
-                            "credentials")
+            return "fail", _why("no Spotify track for the sample ISRC — check "
+                                "the credentials",
+                                intg.spotify_last_error(started))
         return "ok", "explicit" if hit[0] else "clean (not explicit)"
 
     if pid == "apple-album":
@@ -146,9 +170,15 @@ def _probe_advisory(pid, cfg):
     if pid == "discogs-parental":
         # The release lookup is the token's real test: a bad or missing token
         # answers nothing here, while a hit with no flag is a working source.
+        started = time.time()
         row = discovery._discogs_release(SAMPLE_ARTIST, SAMPLE_ALBUM, cfg=cfg)
         if not row:
-            return "fail", "no Discogs release matched — check discogs_token"
+            got = discovery.last_http_error("api.discogs.com")
+            reason = ""
+            if got and float(got.get("at") or 0) >= started and got.get("status"):
+                reason = f"Discogs answered HTTP {got['status']} {got['body']}".strip()
+            return "fail", _why("no Discogs release matched — check "
+                                "discogs_token", reason)
         flagged = discovery.discogs_parental_advisory(SAMPLE_ARTIST,
                                                       SAMPLE_ALBUM, cfg)
         if flagged:
@@ -266,13 +296,24 @@ def _probe_genre(pid, cfg):
         return ("ok", detail) if detail else ("fail", "no Wikidata genres")
 
     if pid == "lastfm":
+        started = time.time()
         detail = _count_detail(discovery.lastfm_artist_genres(SAMPLE_ARTIST, cfg))
-        return ("ok", detail) if detail else ("fail", "no Last.fm tags")
+        if detail:
+            return "ok", detail
+        return "fail", _why("no Last.fm tags",
+                            discovery.lastfm_last_error(started))
 
     if pid == "discogs":
+        started = time.time()
         detail = _count_detail(discovery.discogs_album_genres(SAMPLE_ARTIST,
                                                              SAMPLE_ALBUM, cfg))
-        return ("ok", detail) if detail else ("fail", "no Discogs genres")
+        if detail:
+            return "ok", detail
+        got = discovery.last_http_error("api.discogs.com")
+        reason = ""
+        if got and float(got.get("at") or 0) >= started and got.get("status"):
+            reason = f"Discogs answered HTTP {got['status']} {got['body']}".strip()
+        return "fail", _why("no Discogs genres", reason)
 
     if pid == "theaudiodb":
         detail = _count_detail(intg._audiodb_genre_names(SAMPLE_ARTIST,
@@ -285,13 +326,116 @@ def _probe_genre(pid, cfg):
         return ("ok", detail) if detail else ("fail", "no Bandcamp tags")
 
     if pid == "spotify":
+        started = time.time()
         detail = _count_detail(discovery.spotify_artist_genres(SAMPLE_ARTIST, cfg))
-        return ("ok", detail) if detail else ("fail", "no Spotify genres")
+        if detail:
+            return "ok", detail
+        return "fail", _why("no Spotify genres",
+                            intg.spotify_last_error(started))
 
     if pid == "deezer":
         detail = _count_detail(discovery.album_genres(SAMPLE_ARTIST, SAMPLE_ALBUM,
                                                       cfg=cfg))
         return ("ok", detail) if detail else ("fail", "no Deezer genres")
+
+    return "skipped", "unknown source"
+
+
+# --------------------------------------------------------------------------- #
+# Discover (/api/discover/*) — genre lists, genre browse, recommendations
+# --------------------------------------------------------------------------- #
+# One probe per registry source, each asking the thing that source is FOR, so
+# the panel's answer means "this source can do its job here" rather than "a
+# request did not raise". The registry note travels on the row (`notes`), which
+# is what explains that TheAudioDB/Wikidata/Wikipedia are description and
+# verification sources — they publish no genre list at all.
+def _probe_discover(pid, cfg):
+    from server import discovery
+    from server import integrations as intg
+
+    if pid == "musicbrainz":
+        got = discovery.musicbrainz_genre_list(pages=1)
+        detail = _count_detail([row["name"] for row in got["genres"]])
+        if not detail:
+            return "fail", "MusicBrainz stated no genres"
+        if not got.get("done"):
+            return "ok", "%s (partial: %d of %s)" % (detail, got["loaded"],
+                                                     got["count"] or "?")
+        return "ok", detail
+
+    if pid == "deezer":
+        detail = _count_detail([row["name"] for row in discovery.deezer_genre_list()])
+        return ("ok", detail) if detail else ("fail", "no Deezer genre list")
+
+    if pid == "itunes":
+        got = discovery.itunes_genre_albums("shoegaze", limit=1)
+        rows = got.get("rows") or []
+        return ("ok", "%s for a genre search" % _count_detail(
+            [r.get("title") for r in rows], "albums")) if rows \
+            else ("fail", "no Apple genre album")
+
+    if pid == "audiodb":
+        row = discovery.audiodb_artist(SAMPLE_ARTIST) or {}
+        parts = [p for p in (row.get("genre"), row.get("mood")) if p]
+        return ("ok", " · ".join(parts) + " (states a named artist's genre, "
+                                          "no list endpoint)") if parts \
+            else ("fail", "TheAudioDB stated no genre for the sample artist")
+
+    if pid == "lastfm":
+        started = time.time()
+        got = discovery.lastfm_tag_top("albums", "shoegaze", limit=1, cfg=cfg)
+        detail = _count_detail([r.get("title") for r in got.get("rows") or []],
+                               "albums")
+        if detail:
+            return "ok", "%s under the sample tag" % detail
+        return "fail", _why("no Last.fm albums for the sample tag",
+                            discovery.lastfm_last_error(started))
+
+    if pid == "listenbrainz":
+        mbid = _artist_mbid(cfg)
+        if not mbid:
+            return "fail", "could not resolve the sample artist on MusicBrainz"
+        rows = discovery.listenbrainz_similar_artists(mbid, limit=1) or []
+        return ("ok", _count_detail([r.get("title") for r in rows],
+                                    "artists") + " similar to the sample") if rows \
+            else ("fail", "no ListenBrainz similar artists")
+
+    if pid == "discogs":
+        started = time.time()
+        got = discovery.discogs_style_search("Shoegaze", limit=1, cfg=cfg)
+        rows = got.get("rows") or []
+        if rows:
+            return "ok", "%s under the sample style" % _count_detail(
+                [r.get("title") for r in rows], "releases")
+        got_http = discovery.last_http_error("api.discogs.com")
+        reason = ""
+        if got_http and float(got_http.get("at") or 0) >= started \
+                and got_http.get("status"):
+            reason = (f"Discogs answered HTTP {got_http['status']} "
+                      f"{got_http['body']}").strip()
+        return "fail", _why("no Discogs release for the sample style", reason)
+
+    if pid == "wikidata":
+        got = discovery.wikidata_genres(term="%s %s" % (SAMPLE_ARTIST, SAMPLE_ALBUM))
+        detail = _count_detail((got or {}).get("genres"))
+        return ("ok", "%s (description source, never a list)" % detail) if detail \
+            else ("fail", "Wikidata stated no genres")
+
+    if pid == "wikipedia":
+        summary = discovery.wikipedia_summary(SAMPLE_ARTIST) or {}
+        return ("ok", "article summary (description source, never a list)") \
+            if summary.get("extract") or summary.get("description") \
+            else ("fail", "no Wikipedia summary")
+
+    if pid == "spotify":
+        started = time.time()
+        got = discovery.spotify_genre_albums("rock", limit=1, cfg=cfg)
+        rows = got.get("rows") or []
+        if rows:
+            return "ok", "%s for a genre search" % _count_detail(
+                [r.get("title") for r in rows], "albums")
+        return "fail", _why("no Spotify genre album",
+                            intg.spotify_last_error(started))
 
     return "skipped", "unknown source"
 
@@ -367,6 +511,21 @@ def _probe_links(pid, cfg):
 
 
 # --------------------------------------------------------------------------- #
+# Credentials — is the saved login accepted by the provider?
+# --------------------------------------------------------------------------- #
+def _probe_credentials(cid, cfg):
+    """One credential's own verdict, from `server.credential_checks`.
+
+    These rows are the only ones that may answer `fail` for a reason that is
+    NOT about the sample: a refused token is refused whatever album is asked
+    about, which is what makes them worth asking separately from the source
+    that uses the credential."""
+    from server import credential_checks
+
+    return credential_checks.check(cid, cfg)
+
+
+# --------------------------------------------------------------------------- #
 # The registry: one spec per source, in a stable order
 # --------------------------------------------------------------------------- #
 def _specs(kind=None):
@@ -418,6 +577,32 @@ def _specs(kind=None):
         specs.append({"id": pid, "kind": "links",
                       "label": _RYM_LABELS[pid], "needs": ["rym_cookie"],
                       "probe": lambda cfg, p=pid: _probe_links(p, cfg)})
+
+    # Discover: `server.discover` IS the registry for the /api/discover/*
+    # surface, so its sources are read from there — a source added to that
+    # registry appears in this panel (and in the wizard) without a second list
+    # to keep in step. `notes` is the source's own capability text.
+    from server import discover as discover_mod
+
+    for spec in discover_mod.SOURCES:
+        specs.append({"id": spec["id"], "kind": "discover",
+                      "label": spec["label"], "needs": list(spec["needs"]),
+                      "notes": spec["note"],
+                      "probe": lambda cfg, p=spec["id"]: _probe_discover(p, cfg)})
+
+    # Credentials: the logins every row above depends on, each asked through
+    # its provider's own credential endpoint (server.credential_checks). The
+    # registry lives there rather than here because the checks belong beside
+    # the request builders they exercise, and because a credential is not a
+    # source: `needs` is what a person must paste, and an unset key is a
+    # `needs <key>` row rather than silence.
+    from server import credential_checks
+
+    for spec in credential_checks.CREDENTIALS:
+        specs.append({"id": spec["id"], "kind": "credentials",
+                      "label": spec["label"], "needs": list(spec["needs"]),
+                      "free": bool(spec["free"]),
+                      "probe": lambda cfg, p=spec["id"]: _probe_credentials(p, cfg)})
 
     return [s for s in specs if kind is None or s["kind"] == kind]
 
@@ -475,7 +660,7 @@ def health_payload(cfg=None, kind=None, probe=False):
     for spec in specs:
         missing = _missing(spec, cfg)
         row = {"id": spec["id"], "kind": spec["kind"], "label": spec["label"],
-               "free": True, "needs": list(spec["needs"]),
+               "free": bool(spec.get("free", True)), "needs": list(spec["needs"]),
                "configured": not missing, "status": "ok" if not missing else "skipped",
                "detail": "configured" if not missing
                          else "needs " + ", ".join(missing),

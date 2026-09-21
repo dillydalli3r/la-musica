@@ -61,7 +61,11 @@ LIB = os.path.join(MF, "Artists")
 # chain off: these albums must be moved and reported, not processed
 CFG = {"music_folder": MF, "import_auto_scripts": False, "import_scripts": [],
        "import_bulk_concurrency": 2, "advisory_auto_fetch": True,
-       # the RateYourMusic link step is a network lookup: this suite runs
+       # the network steps an import reaches whatever the chain does (the
+       # artist image / descriptions and the cover art): this suite runs
+       # offline, and tools/test_add_to_library.py covers them stubbed
+       "metadata_auto_fetch": False, "cover_auto_fetch": False,
+       # the RateYourMusic link step is a network lookup too: this suite runs
        # offline (tools/test_rym_links.py covers it with stubbed HTTP)
        "rym_links_auto": False}
 
@@ -88,7 +92,7 @@ assert imports.chain_for({"import_auto_scripts": False}) == []
 # --------------------------------------------------------------------------- #
 # Registry + one script
 # --------------------------------------------------------------------------- #
-assert sorted(script_runners.RUNNERS) == list(range(1, 19)), sorted(script_runners.RUNNERS)
+assert sorted(script_runners.RUNNERS) == list(range(1, 20)), sorted(script_runners.RUNNERS)
 assert script_runners.RUNNERS[2][0] == "Format CUEs", script_runners.RUNNERS[2]
 assert script_runners.RUNNERS[2][1].__name__ == "run_format_cues", script_runners.RUNNERS[2]
 assert all(label for label, _ in script_runners.RUNNERS.values())
@@ -145,17 +149,27 @@ finally:
 # --------------------------------------------------------------------------- #
 # finish_album: the single post-import call
 # --------------------------------------------------------------------------- #
+# With no chain configured the result must SAY so — `chain_off` plus one honest
+# line — rather than look like an import whose scripts all ran.
 empty = imports.finish_album(album, CFG)
-assert empty == {"path": os.path.normpath(album), "scripts": [], "chain": [], "errors": []}, empty
+assert empty["path"] == os.path.normpath(album), empty
+assert empty["scripts"] == [] and empty["chain"] == [] and empty["errors"] == [], empty
+assert empty["chain_off"] is True and empty["chained"] is False, empty
+assert "import_auto_scripts is off" in empty["note"], empty
+assert imports.chain_summary(empty) == empty["note"], empty
 missing = imports.finish_album(os.path.join(ROOT, "nope"), {"import_scripts": [4]})
 assert missing["chain"] == [4] and missing["errors"] == ["album folder not found"], missing
+assert missing["chain_off"] is False and missing["chained"] is False, missing
+# a result that says nothing about a chain claims nothing about one
+assert imports.chain_summary({"path": album}) == "", imports.chain_summary({"path": album})
 
 # --------------------------------------------------------------------------- #
-# defer_tagging: the auto-import stages and places, and does NOT tag
+# EVERY path runs the chain on the album — the auto-import included
 # --------------------------------------------------------------------------- #
-# A non-empty chain, both auto fetches on: the default call must run all
-# three, the deferred one none of them — while the RYM stamp, the metadata
-# step and the cover step run either way.
+# There is no "stage and place, no tagging" flavour any more: that flavour is
+# what left auto-downloaded files without their optimization/tagging pass. The
+# same call stages the album (RYM links, metadata, cover) and then runs the
+# configured chain over the folder the organizer left it at.
 DF_CFG = {"music_folder": MF, "import_scripts": [4, 3],
           "advisory_auto_fetch": True, "instrumental_auto_fetch": True,
           "rym_links_auto": True}
@@ -186,10 +200,6 @@ try:
     imports.run_cover_step = _spy("cover", {})
     script_runners.run_chain = _spy("chain", [])
 
-    staged = imports.finish_album(defer_album, DF_CFG, defer_tagging=True)
-    deferred_seen = {k: len(v) for k, v in _seen.items()}
-    deferred_args = {k: list(v) for k, v in _seen.items()}
-    _seen.clear()
     full = imports.finish_album(defer_album, DF_CFG)
     default_seen = {k: len(v) for k, v in _seen.items()}
     default_args = {k: list(v) for k, v in _seen.items()}
@@ -198,42 +208,32 @@ finally:
         setattr(imports, _n, _fn)
     script_runners.run_chain = _real_run_chain
 
-# the three staging steps ran, on the album, exactly once
-assert deferred_seen == {"rym": 1, "metadata": 1, "cover": 1}, deferred_seen
-assert deferred_args["rym"][0][0] == (DF_PATH, DF_CFG), deferred_args["rym"]
-assert deferred_args["metadata"][0][0] == (DF_PATH, DF_CFG), deferred_args["metadata"]
-# the tag-writing work did NOT: no advisory, no instrumental, no chain
-assert "advisory" not in deferred_seen, deferred_seen
-assert "instrumental" not in deferred_seen, deferred_seen
-assert "chain" not in deferred_seen, deferred_seen
-
-# the returned dict is still the documented one, with an EMPTY chain/scripts
-assert staged["path"] == DF_PATH, staged
-assert staged["chain"] == [] and staged["scripts"] == [], staged
-assert staged["errors"] == [], staged
-for key in ("path", "scripts", "chain", "errors"):
-    assert key in staged, (key, staged)
-
-# …and the DEFAULT call (no flag) keeps today's behaviour: chain + both fetches
-assert full["chain"] == [4, 3], full
+# the staging steps, both tag-writing fetches AND the chain: once each
 assert default_seen == {"rym": 1, "metadata": 1, "cover": 1,
                         "advisory": 1, "instrumental": 1, "chain": 1}, default_seen
+assert default_args["rym"][0][0] == (DF_PATH, DF_CFG), default_args["rym"]
+assert default_args["metadata"][0][0] == (DF_PATH, DF_CFG), default_args["metadata"]
 assert default_args["chain"][0][0][1] == [4, 3], default_args["chain"]
 assert default_args["chain"][0][1]["targets"] == [DF_PATH], default_args["chain"]
-assert full["scripts"] == [], full
+assert full["chain"] == [4, 3] and full["chained"] is True, full
+assert full["chain_off"] is False and full["scripts"] == [], full
+# the chain was configured but reported no results: the note says exactly that
+assert full["note"] == "the script chain did not run", full
+assert imports.chain_summary(full) == full["note"], full
 
-# the auto-import call site is the reason the flag exists: it must pass it
+# the auto-import's own seam hands the album to the SAME call, with nothing
+# deferred — this is the path the user's downloads take
 from server import soulseek_auto as _auto
 
 _auto_calls = []
 _real_finish_album = imports.finish_album
 
 
-def _capture(album_dir, cfg=None, progress=None, force=None, *,
-             defer_tagging=False):
-    _auto_calls.append((os.path.normpath(album_dir), defer_tagging))
-    return {"path": os.path.normpath(album_dir), "scripts": [], "chain": [],
-            "errors": []}
+def _capture(album_dir, cfg=None, progress=None, force=None, **kwargs):
+    _auto_calls.append((os.path.normpath(album_dir), dict(kwargs)))
+    return {"path": os.path.normpath(album_dir), "scripts": [], "chain": [4],
+            "errors": [], "chained": True, "chain_off": False,
+            "note": "the script chain ran 1 script"}
 
 
 imports.finish_album = _capture
@@ -247,7 +247,7 @@ finally:
 _deadline = time.time() + 10
 while not _auto_calls and time.time() < _deadline:
     time.sleep(0.01)
-assert _auto_calls == [(DF_PATH, True)], _auto_calls
+assert _auto_calls == [(DF_PATH, {})], _auto_calls
 
 # --------------------------------------------------------------------------- #
 # AcoustID: unusable says why, and says nothing about matching
@@ -266,28 +266,70 @@ try:
     res = imports.acoustid_match([album], {"acoustid_enabled": True,
                                            "acoustid_api_key": "k"})
     assert res["available"] is False and res["note"] == "fpcalc not installed", res
-    # the Soulseek download check: a mismatch is a WARNING in the job log
+    # the Soulseek download check: a conflict is a WARNING in the job log, and
+    # the release the job matched goes in as the cross-check candidate
     from server import soulseek_auto
     soulseek_auto._job["log"] = []
     _acoustid.available = lambda cfg=None: True
+    SEEN = {}
 
-    def _match(paths, cfg=None, progress=None):
-        return {"available": True, "note": "", "albums": [{
-            "path": paths[0], "release_group_id": "rg-OTHER",
-            "release_group_title": "Other Pressing", "matched": 9, "total": 9}]}
+    def _match(paths, cfg=None, progress=None, expect=None):
+        SEEN["expect"] = expect
+        return {"available": True, "note": "", "ok": True, "code": "conflict",
+                "albums": [{
+                    "path": paths[0], "release_group_id": "rg-OTHER",
+                    "release_group_title": "Other Pressing", "matched": 9,
+                    "total": 9, "status": "matched", "conflict": True,
+                    "conflicts": [{"kind": "release_group",
+                                   "reason": "the audio is release group rg-OTHER "
+                                             "but the tags say rg-WANT"}]}]}
 
+    WANT = {"release_group_id": "rg-WANT"}
     _real_match = imports.acoustid_match
     imports.acoustid_match = _match
     try:
-        soulseek_auto._verify_acoustid(os.path.normpath(album),
-                                       {"release_group_id": "rg-WANT"}, {"import_acoustid": True})
+        soulseek_auto._verify_acoustid(os.path.normpath(album), WANT,
+                                       {"import_acoustid": True})
+    finally:
+        imports.acoustid_match = _real_match
+    assert SEEN["expect"] == WANT, SEEN
+    msgs_conflict = " | ".join(line["msg"] for line in soulseek_auto.job_state()["log"])
+
+    # a check that could not RUN says so: never dressed up as "no match"
+    def _error_match(paths, cfg=None, progress=None, expect=None):
+        return {"available": True, "note": "AcoustID lookup timed out after 30s",
+                "ok": False, "code": "lookup_failed",
+                "albums": [{"path": paths[0], "status": "error",
+                            "code": "lookup_failed", "reason": "AcoustID lookup "
+                            "timed out after 30s", "matched": 0, "total": 4}]}
+
+    soulseek_auto._job["log"] = []
+    imports.acoustid_match = _error_match
+    try:
+        soulseek_auto._verify_acoustid(os.path.normpath(album), WANT,
+                                       {"import_acoustid": True})
     finally:
         imports.acoustid_match = _real_match
 finally:
     _acoustid.fpcalc_path, _acoustid.available = _real_fpcalc, _real_available
 
 msgs = " | ".join(line["msg"] for line in soulseek_auto.job_state()["log"])
-assert "WARNING" in msgs and "rg-OTHER" in msgs and "rg-WANT" in msgs, msgs
+assert "WARNING" in msgs and "could not answer" in msgs, msgs
+assert "timed out" in msgs and "unverified, not rejected" in msgs, msgs
+assert "no release group matched" not in msgs, msgs
+assert "rg-OTHER" not in msgs, msgs
+# the conflict pass named both release groups, as a warning
+assert "WARNING" in msgs_conflict and "rg-OTHER" in msgs_conflict, msgs_conflict
+assert "rg-WANT" in msgs_conflict and "pressing or edition" in msgs_conflict, msgs_conflict
+
+# ...and the earlier conflict pass is the one that named both release groups
+assert imports.release_group_mismatch(
+    {"release_group_id": "rg-OTHER", "release_group_title": "Other Pressing",
+     "matched": 9, "total": 9}, "rg-WANT").find("rg-OTHER") >= 0
+assert imports.release_group_mismatch(
+    {"release_group_id": "rg-OTHER", "conflicts": [
+        {"kind": "artist", "reason": "the audio is by A but the tags say B"}]},
+    "rg-OTHER").strip().startswith("the audio is by A")
 # a mismatch is a warning string, never an exception
 assert imports.release_group_mismatch({"release_group_id": "abc"}, "abc") == ""
 assert "abc" in imports.release_group_mismatch({"release_group_id": "abc"}, "xyz")

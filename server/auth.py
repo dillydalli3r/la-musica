@@ -139,25 +139,59 @@ def hash_password(password: str) -> str:
     return f"pbkdf2${_PBKDF2_ROUNDS}${salt.hex()}${digest.hex()}"
 
 
+def _parse_hash(stored):
+    """`(rounds, salt, digest)` for a stored hash, or None when unreadable.
+
+    The ONE place that knows the stored format, so "this hash cannot match any
+    password" and "this is not the password" stay distinguishable — see
+    `hash_problem`."""
+    if not stored or not isinstance(stored, str):
+        return None
+    parts = stored.split("$")
+    if len(parts) != 4 or parts[0] != "pbkdf2":
+        return None
+    try:
+        rounds = int(parts[1])
+        salt = bytes.fromhex(parts[2])
+        want = bytes.fromhex(parts[3])
+    except ValueError:
+        return None
+    if rounds <= 0 or not salt or not want:
+        return None
+    return rounds, salt, want
+
+
+def hash_problem(stored: str) -> str:
+    """Why *stored* can never match a password, or "" when it is readable.
+
+    `verify_password` answers False for both an unparsable hash and a wrong
+    password, and those need different fixes: "you typed it wrong" against
+    "this install's stored credential is corrupt, set a new one". Whoever
+    reports the state of the login (the wizard's security step, the
+    credentials panel) uses this to say which it is."""
+    if not stored:
+        return "no password hash is stored"
+    if not isinstance(stored, str):
+        return f"the stored password hash is a {type(stored).__name__}, not text"
+    if len(stored.split("$")) != 4 or not stored.startswith("pbkdf2$"):
+        return ("the stored password hash is not a "
+                "pbkdf2$<rounds>$<salt>$<hash> string")
+    if _parse_hash(stored) is None:
+        return ("the stored password hash has an unreadable round count, salt "
+                "or digest")
+    return ""
+
+
 def verify_password(password: str, stored: str) -> bool:
     """Constant-time check of `password` against a stored hash.
 
     An absent or unparsable hash is "no password set" (False), never an
     accidental pass — the caller decides what that means (first-run setup).
     """
-    if not stored or not isinstance(stored, str):
+    parsed = _parse_hash(stored)
+    if parsed is None:
         return False
-    parts = stored.split("$")
-    if len(parts) != 4 or parts[0] != "pbkdf2":
-        return False
-    try:
-        rounds = int(parts[1])
-        salt = bytes.fromhex(parts[2])
-        want = bytes.fromhex(parts[3])
-    except ValueError:
-        return False
-    if rounds <= 0 or not salt or not want:
-        return False
+    rounds, salt, want = parsed
     got = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, rounds)
     return hmac.compare_digest(got, want)
 

@@ -237,8 +237,8 @@ def _gate_codes() -> dict:
     out: Dict[str, set] = {}
     for _tag, (gate, code) in TAG_PRESENCE_CHECKS.items():
         out.setdefault(gate, set()).add(code)
-    for gate, (code, _key) in _ARTIST_CHECK_ISSUES.items():
-        out.setdefault(gate, set()).add(code)
+    for gate, (codes, _key) in _ARTIST_CHECK_ISSUES.items():
+        out.setdefault(gate, set()).update(codes)
     return {gate: sorted(codes) for gate, codes in out.items()}
 
 

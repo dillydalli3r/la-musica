@@ -167,6 +167,17 @@ TAG_MAP = {
         "mp3": ("TXXX", "ENERGY"),
         "mp4": ("freeform", "com.apple.iTunes", "ENERGY"),
     },
+    # The listener's own star rating, written by the ratings API
+    # (server.ratings) in Picard's 0-100 (one half-star = 10) — the de-facto
+    # standard, so a library Picard rated reads back as its stars and what
+    # this app writes is what Picard shows. A user OPINION, not a measured
+    # fact: nothing grades it, and every strip pass must keep it, which this
+    # entry is what guarantees (TAG_ALLOWLIST is built from TAG_MAP).
+    "RATING": {
+        "flac": "RATING",
+        "mp3": ("TXXX", "RATING"),
+        "mp4": ("freeform", "com.apple.iTunes", "RATING"),
+    },
     # AcoustID identity (Picard-compatible). Written during import when a
     # fingerprint match is accepted; graded only when a file already carries
     # one of the two, so a library that never fingerprinted anything is never
@@ -2193,28 +2204,34 @@ class AudioFile:
             return []
 
     def remove_embedded_pictures(self):
-        """Strip every embedded picture. True when the file was changed."""
+        """Strip every embedded picture. True when the file was changed.
+
+        Goes through _save(), not _save_container(): with defer_save on, the
+        strip is held for the caller's flush, so replacing art (strip the old
+        picture, add the new one) costs ONE container rewrite instead of two.
+        A caller that does not defer still writes here, like before.
+        """
         self._invalidate_cache()
         try:
             if self.kind == "flac" and self.audio is not None:
                 if not self.audio.pictures:
                     return False
                 self.audio.clear_pictures()
-                self._save_container()
+                self._save()
                 return True
 
             if self.kind in _ID3_KINDS and self.audio is not None and self.audio.tags:
                 if not self.audio.tags.getall("APIC"):
                     return False
                 self.audio.tags.delall("APIC")
-                self._save_container()
+                self._save()
                 return True
 
             if self.kind == "mp4" and self.audio is not None and self.audio.tags:
                 if "covr" not in self.audio.tags:
                     return False
                 del self.audio.tags["covr"]
-                self._save_container()
+                self._save()
                 return True
 
             if self.kind in ("ogg", "opus") and self.audio is not None and self.audio.tags:
@@ -2224,7 +2241,7 @@ class AudioFile:
                     return False
                 for k in keys:
                     del self.audio.tags[k]
-                self._save_container()
+                self._save()
                 return True
             return False
         except Exception as e:
@@ -2232,7 +2249,12 @@ class AudioFile:
             return False
 
     def add_embedded_picture(self, data, mime="image/jpeg"):
-        """Embed one front-cover picture. True when the file was changed."""
+        """Embed one front-cover picture. True when the file was changed.
+
+        Like remove_embedded_pictures, this honours defer_save(): an art
+        REPLACEMENT is a remove plus an add, and holding both for one flush
+        saves a whole container rewrite per file.
+        """
         self._invalidate_cache()
         try:
             if self.kind == "flac" and self.audio is not None:
@@ -2241,7 +2263,7 @@ class AudioFile:
                 pic.mime = mime
                 pic.data = data
                 self.audio.add_picture(pic)
-                self._save_container()
+                self._save()
                 return True
 
             if self.kind in _ID3_KINDS and self.audio is not None:
@@ -2249,13 +2271,13 @@ class AudioFile:
                     self.audio.add_tags()
                 self.audio.tags.delall("APIC")
                 self.audio.tags.add(APIC(encoding=3, mime=mime, type=3, data=data))
-                self._save_container()
+                self._save()
                 return True
 
             if self.kind == "mp4" and self.audio is not None:
                 fmt = MP4Cover.FORMAT_PNG if mime == "image/png" else MP4Cover.FORMAT_JPEG
                 self.audio.tags["covr"] = [MP4Cover(data, imageformat=fmt)]
-                self._save_container()
+                self._save()
                 return True
 
             if self.kind in ("ogg", "opus") and self.audio is not None:
@@ -2265,7 +2287,7 @@ class AudioFile:
                 pic.mime = mime
                 pic.data = data
                 self.audio.tags["METADATA_BLOCK_PICTURE"] = base64.b64encode(pic.write()).decode("ascii")
-                self._save_container()
+                self._save()
                 return True
             return False
         except Exception as e:

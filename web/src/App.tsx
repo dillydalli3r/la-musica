@@ -2,8 +2,8 @@ import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Activity, ArrowDownUp, ArrowUpRight, ChevronLeft, ChevronRight, ClipboardCheck, Disc3, Download, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
-  Keyboard, Library, ListChecks, ListMusic, Menu, Music2, Music4, PanelLeftClose, Search, Tags, Trash2, User, WifiOff, X,
+  Activity, ArrowDownUp, ArrowUpRight, ChevronLeft, ChevronRight, ClipboardCheck, Compass, Disc3, Download, Eye, Gauge, HardDriveDownload, Heart, HeartHandshake, Home, Import,
+  Keyboard, Library, ListChecks, ListMusic, Menu, Music2, Music4, PanelLeftClose, Search, SlidersHorizontal, Sparkles, Tags, Trash2, User, WifiOff, X,
   Settings as SettingsIcon, Wrench,
 } from "lucide-react";
 import { api, AuthError, getToken, IN_TAURI, onAuthLost, serverUrl } from "./api";
@@ -41,6 +41,10 @@ const DownloadsPage = lazy(() => import("./pages/DownloadsPage"));
 const ImportWizard = lazy(() => import("./pages/ImportWizard"));
 const DonationsPage = lazy(() => import("./pages/DonationsPage"));
 const InProgressPage = lazy(() => import("./pages/InProgressPage"));
+const BrowsePage = lazy(() => import("./pages/BrowsePage"));
+const DiscoverPage = lazy(() => import("./pages/DiscoverPage"));
+const RecommendedPage = lazy(() => import("./pages/RecommendedPage"));
+const WatchedArtistsPage = lazy(() => import("./pages/WatchedArtistsPage"));
 const CheckStackPage = lazy(() => import("./pages/CheckStackPage"));
 const MBSearchPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBSearchPage })));
 const MBArtistPage = lazy(() => import("./pages/MusicBrainzPage").then((m) => ({ default: m.MBArtistPage })));
@@ -72,6 +76,9 @@ const NAV_GROUPS: { labelKey: MessageKey; items: { to: string; labelKey: Message
     items: [
       { to: "/", labelKey: "nav.home", icon: Home, end: true },
       { to: "/library", labelKey: "nav.library", icon: Library, end: false },
+      // Complex browsing (tag/rating/technical queries, facets, grouping) is a
+      // view OF the library, so it sits with it rather than under Discover.
+      { to: "/browse", labelKey: "nav.browse", icon: SlidersHorizontal, end: false },
       { to: "/genres", labelKey: "nav.genres", icon: Tags, end: true },
       { to: "/trash", labelKey: "nav.trash", icon: Trash2, end: true },
       { to: "/playlists", labelKey: "nav.playlists", icon: ListMusic, end: false },
@@ -82,6 +89,11 @@ const NAV_GROUPS: { labelKey: MessageKey; items: { to: string; labelKey: Message
   {
     labelKey: "nav.group.discover",
     items: [
+      { to: "/discover", labelKey: "nav.discover", icon: Compass, end: false },
+      { to: "/recommended", labelKey: "nav.recommended", icon: Sparkles, end: false },
+      // Watched artists are the same queue as Discover: a release group added
+      // here is searched, downloaded and imported by the one pipeline.
+      { to: "/watched", labelKey: "nav.watched", icon: Eye, end: false },
       { to: "/import", labelKey: "nav.import", icon: Import, end: false },
       { to: "/soulseek", labelKey: "nav.soulseek", icon: ArrowDownUp, end: false },
       // MusicBrainz sits with acquiring: browsing the database IS how a user
@@ -1135,6 +1147,10 @@ export default function App() {
             <Route path="/optimize" element={<OptimizationPage />} />
             <Route path="/grading" element={<GradingPage />} />
             <Route path="/in-progress" element={<InProgressPage />} />
+            <Route path="/browse" element={<BrowsePage />} />
+            <Route path="/discover" element={<DiscoverPage />} />
+            <Route path="/recommended" element={<RecommendedPage />} />
+            <Route path="/watched" element={<WatchedArtistsPage />} />
             <Route path="/checks" element={<CheckStackPage />} />
             <Route path="/dependencies" element={<DependenciesPage />} />
             <Route path="/import" element={<ImportWizard />} />

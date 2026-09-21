@@ -10,6 +10,8 @@ import { fmtPair, fmtTech, isVideoFile } from "../lib/fmt";
 import { nextSpeed, fmtSpeed } from "../lib/playback";
 import { offlineMediaUrl } from "../lib/mediaCache";
 import { AdvisoryMark } from "./Badges";
+import StarRating from "./StarRating";
+import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
 import VolumePct from "./VolumePct";
 import { applyReplayGain, attachAnalyser, resumeAnalyser } from "../lib/analyser";
 import NowPlayingView from "./NowPlayingView";
@@ -226,6 +228,12 @@ export default function PlayerBar() {
   // carry no title — fetch the tag lazily so the bar shows the song title,
   // never the file name, whenever a TITLE tag exists. Also yields the
   // MusicBrainz recording ID used for move-safe likes.
+  // The rating control rides beside the advisory mark: one map for the whole
+  // player, the same optimistic setter the rows use.
+  const { data: ratingsData } = useRatings();
+  const { setRating, pending } = useSetRating();
+  const ratings = ratingsData?.ratings;
+
   const { data: currentTags } = useQuery({
     queryKey: ["tags", current?.path],
     queryFn: () => api.tags(current!.path),
@@ -942,6 +950,13 @@ export default function PlayerBar() {
                   <ScrollingText text={displayTitle} />
                 </Link>
                 <AdvisoryMark value={currentTags?.tags?.ITUNESADVISORY ?? current.advisory} />
+                <StarRating
+                  size="sm"
+                  className="self-center"
+                  value={ratingOf(ratings, current.path)}
+                  onChange={(v) => setRating(current.path, v)}
+                  pending={pending(current.path)}
+                />
                 {techStr && (
                   <span className="text-[10px] font-mono text-zinc-500 shrink-0" title={techTip || "Bit depth/sample rate"}>
                     {techStr}

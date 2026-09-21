@@ -14,6 +14,10 @@ older than six hours, and `cached()` — what `/api/health` answers with — nev
 touches the network at all, because the launchers probe health with a
 two-second timeout to decide whether this port is even ours. A health reply
 that finds the cache stale starts ONE background refresh (`refresh_soon`).
+
+A fresh answer that finds a newer release publishes it on the event bus
+(`update_available`) so every client's notification tray hears about it,
+remembered per version in the same cache file so it is announced once.
 """
 
 import json
@@ -24,6 +28,13 @@ import urllib.request
 
 REPO = "dillydalli3r/la-musica"
 _RELEASES_API = f"https://api.github.com/repos/{REPO}/releases/latest"
+
+# The project's own home, handed to every client in the same answer as the
+# version (see _result): the app credits everyone it leans on, so it should be
+# able to point back at itself — source, and where a bug report goes. Derived
+# from REPO so a moved repository moves the links with it.
+PROJECT_URL = f"https://github.com/{REPO}"
+ISSUES_URL = f"https://github.com/{REPO}/issues"
 
 # Six hours: long enough that the API is asked a handful of times a day at
 # most, short enough that a fresh release shows up in the same session.
@@ -97,6 +108,28 @@ def _fetch_latest() -> dict:
     }
 
 
+def _build_info() -> dict:
+    """What this process is actually running as.
+
+    `revision` / `built` come from the Docker build (the Dockerfile's
+    MLO_REVISION / MLO_BUILT args, which the release workflow fills), so a
+    self-hosted image can say which commit it came from; `container` says
+    whether this is an image at all. A user asking "is my updater working?"
+    needs exactly this next to `latest`: the release check alone cannot tell a
+    stale image from a current one, because both report the same version string
+    until the image is replaced.
+    """
+    revision = str(os.environ.get("MLO_REVISION") or "").strip()
+    built = str(os.environ.get("MLO_BUILT") or "").strip()
+    in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+    return {
+        # A full 40-char sha is noise in a UI; twelve is what `git log` shows.
+        "revision": revision[:12],
+        "built": built,
+        "container": in_container,
+    }
+
+
 def _result(fresh: dict) -> dict:
     """The public shape, from a cached (or freshly fetched) answer."""
     from mlo import __version__
@@ -110,6 +143,9 @@ def _result(fresh: dict) -> dict:
         "latest": latest,
         "update_available": bool(newer and current and newer > current),
         "release_url": fresh.get("release_url") or None,
+        "project_url": PROJECT_URL,
+        "issues_url": ISSUES_URL,
+        "build": _build_info(),
         "checked_at": float(fresh.get("checked_at") or now),
         "source": str(fresh.get("source") or "unavailable"),
     }
@@ -163,12 +199,19 @@ def refresh_soon() -> None:
     threading.Thread(target=run, name="mlo-version-check", daemon=True).start()
 
 
+# Serializes the announce decision with the cache write that remembers it.
+_announce_lock = threading.Lock()
+
+
 def check(force: bool = False) -> dict:
     """`{version, latest, update_available, release_url, checked_at, source}`.
 
     The cached answer is reused until it is `CACHE_TTL_S` old (`force` skips
     that), and a failed check is cached too — an unreachable GitHub must not
     mean a fresh five-second wait on every health poll.
+
+    A fresh answer that finds a newer release announces it once (see
+    `_announce`); a cached one never repeats it.
     """
     now = time.time()
     cached_answer = _read_cache()
@@ -179,5 +222,38 @@ def check(force: bool = False) -> dict:
     except Exception:
         fresh = {"latest": None, "release_url": None,
                  "checked_at": now, "source": "unavailable"}
-    _write_cache(fresh)
-    return _result(fresh)
+    # One announcement per version, even when two requests race here — the
+    # lock covers the decision AND the cache write that remembers it.
+    with _announce_lock:
+        result = _result(fresh)
+        if _announce(result, cached_answer.get("announced")) and result.get("latest"):
+            fresh["announced"] = result["latest"]
+        _write_cache(fresh)
+    return result
+
+
+def _announce(result: dict, announced) -> bool:
+    """Tell every client a newer release exists — at most once per version.
+
+    Which version was last announced is remembered in the cache file, so a
+    second client asking, a restart or the health route's background refresh
+    does not repeat the frame. Returns whether this version should be
+    remembered as announced. Never raises: a version banner is a courtesy.
+    """
+    latest = result.get("latest")
+    if not (result.get("update_available") and latest):
+        return False
+    if str(latest) == str(announced or ""):
+        return False
+    try:
+        from server import events
+        events.emit(
+            "update_available",
+            f"la musica {latest} is available",
+            f"You are running {result.get('version')}.",
+            {"link": "/settings", "url": result.get("release_url") or "",
+             "version": result.get("version"), "latest": latest},
+        )
+    except Exception:
+        pass
+    return True

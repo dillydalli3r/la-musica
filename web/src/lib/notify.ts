@@ -1,16 +1,26 @@
 import { IN_TAURI, getToken, serverUrl } from "../api";
-import { t } from "./i18n";
+import { t, type MessageKey } from "./i18n";
 import { toast } from "../store";
+import {
+  OS_KINDS,
+  ingest,
+  openNotification,
+  type NotificationRecord,
+  type NotifyEvent,
+} from "./notifications";
 
 /** Desktop notifications for the events the server publishes.
  *
  *  The backend already knows when a wished-for release shows up on Soulseek, a
- *  download finishes and an album is ready to import — it announces each one on
- *  `/ws/events` (see server/events.py). This module is the client half: it
- *  keeps that socket open, and turns each frame into an operating-system
- *  notification so the news reaches the user when the app is in the background
- *  — which is the entire point, since a wish can be found hours after it was
- *  saved.
+ *  download finishes, an album is ready to import, an import needs a decision,
+ *  a script run ends, a grade lands and a newer release exists — it announces
+ *  each one on `/ws/events` (see server/events.py). This module is the client
+ *  half: it keeps that socket open and hands every frame to the notification
+ *  tray (lib/notifications.ts), which is what the bell's panel lists. The kinds
+ *  that happen while the user is looking elsewhere (`OS_KINDS`) additionally
+ *  raise an operating-system notification, so the news reaches them with the
+ *  app in the background — which is the entire point, since a wish can be found
+ *  hours after it was saved.
  *
  *  What this deliberately is NOT: remote push (Web Push / APNs / FCM). Those
  *  need a public server with VAPID keys (or an Apple/Google developer account)
@@ -25,16 +35,24 @@ import { toast } from "../store";
  *  ring does not re-notify what the user already saw.
  */
 
-export type EventKind = "wish_found" | "download_done" | "import_ready";
+export type EventKind =
+  | "wish_found"
+  | "wish_failed"
+  /** A wish whose searches found nothing: it stops being searched and waits
+   *  for the user's own retry (see server/wishes' retry policy). */
+  | "wish_not_found"
+  | "download_done"
+  | "download_failed"
+  | "import_ready"
+  | "import_needs_data"
+  | "script_done"
+  | "script_failed"
+  | "grade_done"
+  | "update_available";
 
-export interface AppEvent {
+/** A frame from `/ws/events`, plus the envelope field that marks it as one. */
+export interface AppEvent extends NotifyEvent {
   type: string;
-  event: EventKind | string;
-  title: string;
-  body: string;
-  data: Record<string, unknown>;
-  at: number;
-  seq?: number;
 }
 
 const SEQ_KEY = "mlo.notify.seq";
@@ -95,16 +113,29 @@ export async function requestNotifications(): Promise<NotifyState> {
   }
 }
 
-/** Show one notification, wherever this client can. `data.kind` picks the
- *  image-less fallback title when the server sent none. */
-export async function showNotification(ev: AppEvent): Promise<void> {
-  const fallback = ev.event === "wish_found"
-    ? t("notify.wish_found")
-    : ev.event === "import_ready"
-    ? t("notify.import_ready")
-    : t("notify.download_done");
-  const title = ev.title || fallback;
+/** Fallback wording for a frame the server sent without a title. Every emitter
+ *  in this app composes its own (the server owns the wording: it knows the
+ *  artist and the album), so this is the safety net for an older server or a
+ *  kind a newer one grew. */
+const FALLBACK_TITLE: Partial<Record<EventKind, MessageKey>> = {
+  wish_found: "notify.wish_found",
+  download_done: "notify.download_done",
+  import_ready: "notify.import_ready",
+};
+
+/** Show one notification, wherever this client can. The tray already holds
+ *  `rec` (see lib/notifications.ts); this raises the OS popup for the kinds
+ *  that deserve one and falls back to a toast otherwise — a toast is not a
+ *  downgrade the user should have to discover. */
+export async function showNotification(ev: AppEvent, rec: NotificationRecord): Promise<void> {
+  const title = ev.title || t(FALLBACK_TITLE[ev.event as EventKind] ?? "notify.event");
   const body = ev.body || "";
+  if (!OS_KINDS[ev.event]) {
+    // The user's own foreground work (a script run, a grade, a newer release):
+    // the tray keeps it, a toast says it now, and no OS popup interrupts.
+    toast(body ? `${title} — ${body}` : title);
+    return;
+  }
   // `@tauri-apps/plugin-notification` is a dependency of the desktop/mobile
   // shell (desktop/package.json), NOT of the web app — it is a
   // platform-specific module that does not exist in a browser bundle, so the
@@ -124,10 +155,22 @@ export async function showNotification(ev: AppEvent): Promise<void> {
     try {
       const reg = await navigator.serviceWorker?.getRegistration();
       // Through the worker when there is one: the notification then survives
-      // this page being closed, and clicking it focuses the app (the worker's
-      // notificationclick handler).
-      if (reg) await reg.showNotification(title, { body, tag: `mlo-${ev.event}` });
-      else new Notification(title, { body });
+      // this page being closed, and clicking it focuses the app and follows the
+      // frame's own route (the worker's notificationclick handler reads
+      // `data.url`). Without a worker the page keeps the click itself.
+      if (reg) {
+        await reg.showNotification(title, {
+          body,
+          tag: `mlo-${ev.event}`,
+          data: { url: rec.link || rec.url },
+        });
+      } else {
+        const popup = new Notification(title, { body });
+        popup.onclick = () => {
+          window.focus();
+          openNotification(rec);
+        };
+      }
       return;
     } catch {
       /* fall through to the toast */
@@ -179,7 +222,16 @@ function handle(raw: string) {
   if (frame.type !== "event") return; // "ping" and anything future
   if (frame.seq && frame.seq <= lastSeq()) return; // already told
   rememberSeq(frame.seq);
-  void showNotification(frame);
+  // The tray takes EVERY outcome — including the kinds that raise no OS popup,
+  // because the panel is the only place a "download failed" lives after the
+  // toast is gone. `ingest` answers null for a frame it has already seen (a
+  // replayed ring), which is what keeps one outcome to one entry.
+  // A frame the server sent no title for still gets words: the tray must never
+  // list a blank row.
+  if (!frame.title) frame.title = t(FALLBACK_TITLE[frame.event as EventKind] ?? "notify.event");
+  const rec = ingest(frame);
+  if (!rec) return;
+  void showNotification(frame, rec);
 }
 
 /** Open the event socket and keep it open. Safe to call once per app mount;

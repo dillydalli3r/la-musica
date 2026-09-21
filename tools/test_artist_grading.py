@@ -3,7 +3,10 @@
 tolerance the artwork / description features depend on.
 
 Artist grading covers ONLY what applies to an artist folder: its artist.jpg
-and its description.txt. The same files — plus the album's own
+and its description.txt. The image check reads the decoded file (its size,
+aspect and pixels, mlo.artistdata's policy), so the fixtures below are REAL
+images: a junk byte string named artist.jpg is a corrupt image, which is a
+failure of its own. The same files — plus the album's own
 description.txt — are legitimate library content for the album grader and for
 the read-only layout scanner, so neither may report them as stray.
 
@@ -85,13 +88,24 @@ def write(path, data=b"x"):
     return path
 
 
+def image_bytes(w=100, h=100, fmt="PNG"):
+    """A real (if flat) image, so the image check can decode and measure it."""
+    import io
+
+    from mlo.deps import Image, HAS_PIL
+    assert HAS_PIL, "these fixtures need Pillow"
+    buf = io.BytesIO()
+    Image.new("RGB", (w, h), (10, 120, 200)).save(buf, fmt)
+    return buf.getvalue()
+
+
 # --------------------------------------------------------------------------- #
 # grade_artist
 # --------------------------------------------------------------------------- #
 print("== grade_artist ==")
 ART = os.path.join(MF, "Artists", "Artist")
 os.makedirs(ART, exist_ok=True)
-IMAGE = write(os.path.join(ART, "artist.jpg"), b"\xff\xd8\xff\xe0JFIF")
+IMAGE = write(os.path.join(ART, "artist.jpg"), image_bytes(fmt="JPEG"))
 DESC = write(os.path.join(ART, "description.txt"), b"A band from nowhere.\n")
 
 ok([c["key"] for c in ARTIST_CHECKS]
@@ -127,7 +141,7 @@ ok(res["artwork"]["image"] is False and res["artwork"]["image_file"] is None
    "artwork says which half is missing")
 
 os.remove(DESC)
-write(os.path.join(ART, "artist.png"), b"\x89PNG\r\n\x1a\n")
+write(os.path.join(ART, "artist.png"), image_bytes())
 res = grade_artist(ART, {})
 ok([i["code"] for i in res["issues"]] == ["ARTIST_DESCRIPTION_MISSING"],
    f"only ARTIST_DESCRIPTION_MISSING is raised ({res['issues']})")
@@ -192,7 +206,7 @@ ALBUM = os.path.join(MF, "Artists", "Artist", "Album")
 write(os.path.join(ALBUM, "01 - Song.flac"))
 write(os.path.join(ALBUM, "cover.jpg"))
 write(os.path.join(ALBUM, "description.txt"), b"Album notes.\n")
-write(os.path.join(ART, "artist.jpg"), b"\xff\xd8\xff\xe0JFIF")
+write(os.path.join(ART, "artist.jpg"), image_bytes(fmt="JPEG"))
 write(os.path.join(ART, "description.txt"), b"A band from nowhere.\n")
 
 mlo_main.load_config = lambda: {"music_folder": MF}

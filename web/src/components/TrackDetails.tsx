@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ShieldCheck, CircleAlert, Info, ExternalLink, Loader2, RefreshCw, ChevronDown, ChevronRight, Users } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api, answerSources, checkTrackValues, replyFor } from "../api";
 import { toast } from "../store";
@@ -29,6 +30,50 @@ const INFO_KEYS = [
   "LABEL", "CATALOGNUMBER", "COMPOSER", "LYRICIST", "REMIXER", "COPYRIGHT",
   "ISRC", "MUSICBRAINZ_TRACKID", "MUSICBRAINZ_ALBUMID",
 ];
+
+/** One row of a details table: `value` is whatever the row renders — a string,
+ *  a link, a small control. */
+export interface DetailItem {
+  label: string;
+  value: ReactNode;
+  title?: string;
+}
+
+/** The bordered label/value table every details readout is built from (track
+ *  details, album details): one renderer, so a further readout is a list of
+ *  rows and never a second table implementation. */
+export function DetailRows({ rows }: { rows: DetailItem[] }) {
+  return (
+    <div className="rounded-md border border-border overflow-hidden">
+      <table className="w-full text-xs">
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={`${r.label}-${i}`}>
+              <td className="px-2 py-1 text-zinc-500 w-28 align-top" title={r.title}>{r.label}</td>
+              <td className="px-2 py-1 text-zinc-200 break-all">{r.value}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** The uppercase section heading with its glyph — and an optional action on the
+ *  right — that the details modals open their sections with. */
+export function DetailSection({ icon: Icon, title, action, children }: {
+  icon: LucideIcon; title: string; action?: ReactNode; children: ReactNode;
+}) {
+  return (
+    <div>
+      <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">
+        <Icon className="h-3.5 w-3.5" /> {title}
+        {action ? <div className="ml-auto normal-case tracking-normal">{action}</div> : null}
+      </div>
+      {children}
+    </div>
+  );
+}
 
 /** Per-track song info + grading/audit detail modal (metadata, credits,
  * tech, lyrics, checks, verdicts). */
@@ -101,11 +146,12 @@ export default function TrackDetails({
       bodyClass="px-5 py-5 space-y-4"
     >
       {/* ---- song info: metadata & credits ---- */}
-      <div>
-        <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">
-          <Info className="h-3.5 w-3.5" /> Song info
+      <DetailSection
+        icon={Info}
+        title="Song info"
+        action={
           <button
-            className="btn-ghost !py-0.5 !px-1.5 ml-auto normal-case tracking-normal text-[10px] font-normal"
+            className="btn-ghost !py-0.5 !px-1.5 text-[10px] font-normal"
             onClick={checkPerTrack}
             disabled={checking}
             title="Ask the configured sources for this track's advisory + INSTRUMENTAL and write what they state"
@@ -113,47 +159,25 @@ export default function TrackDetails({
             {checking ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
             Check advisory + instrumental
           </button>
-        </div>
+        }
+      >
         {tech && <div className="text-[11px] font-mono text-zinc-500 mb-1.5">{tech}</div>}
-        <div className="rounded-md border border-border overflow-hidden">
-          <table className="w-full text-xs">
-            <tbody>
-              <tr>
-                <td className="px-2 py-1 text-zinc-500 w-28 align-top">Title</td>
-                <td className="px-2 py-1 text-zinc-200">{track.tags?.TITLE ?? track.file}</td>
-              </tr>
-              {infoRows.map((key) => (
-                <tr key={key}>
-                  <td className="px-2 py-1 text-zinc-500 align-top" title={tagTooltip(reg, key)}>{tagLabel(reg, key)}</td>
-                  <td className="px-2 py-1 text-zinc-200 break-all">{String(tags[key as keyof typeof tags])}</td>
-                </tr>
-              ))}
-              <tr>
-                <td className="px-2 py-1 text-zinc-500">Lyrics</td>
-                <td className="px-2 py-1 text-zinc-200">{lyricsState}</td>
-              </tr>
-              <tr>
-                <td className="px-2 py-1 text-zinc-500 align-top">Advisory</td>
-                <td className="px-2 py-1 text-zinc-200">{advisory}</td>
-              </tr>
-              <tr>
-                <td className="px-2 py-1 text-zinc-500 align-top">Instrumental</td>
-                <td className="px-2 py-1 text-zinc-200">{instrumental}</td>
-              </tr>
-              <tr>
-                <td className="px-2 py-1 text-zinc-500 align-top">AudioAuditor</td>
-                <td className="px-2 py-1">
-                  <AuditOverride path={track.path} current={track.audit} />
-                </td>
-              </tr>
-              <tr>
-                <td className="px-2 py-1 text-zinc-500 align-top">Path</td>
-                <td className="px-2 py-1 text-zinc-200 break-all">{track.path ?? albumPath}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
+        <DetailRows
+          rows={[
+            { label: "Title", value: track.tags?.TITLE ?? track.file },
+            ...infoRows.map((key) => ({
+              label: tagLabel(reg, key),
+              title: tagTooltip(reg, key),
+              value: String(tags[key as keyof typeof tags]),
+            })),
+            { label: "Lyrics", value: lyricsState },
+            { label: "Advisory", value: advisory },
+            { label: "Instrumental", value: instrumental },
+            { label: "AudioAuditor", value: <AuditOverride path={track.path} current={track.audit} /> },
+            { label: "Path", value: track.path ?? albumPath },
+          ]}
+        />
+      </DetailSection>
 
       {/* ---- credits: performers & roles, looked up only when opened ---- */}
       <div>

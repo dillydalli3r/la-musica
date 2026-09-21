@@ -15,13 +15,17 @@ import type {
   HomeData,
   ImportBulkJob,
   ImportBulkResult,
+  ImportAutonomy,
+  ImportPrompt,
   ImportScriptsPreview,
   LayoutReport,
+  LibraryAddResult,
   LyricsAutoResult,
   LyricsHit,
   LyricsProviders,
   MBArtistBrowse,
   MBRecordingBrowse,
+  MBReleaseChoicePayload,
   MBSearchRows,
   ScriptRunResult,
   SourceHealth,
@@ -621,6 +625,115 @@ export interface SlskAutoJob {
   } | null;
 }
 
+/** One row of the ONE download queue (`GET /api/queue`, server/api_queue.py):
+ *  a wish, a running auto-import job, a release waiting in the pipeline, an
+ *  import run or a finished download still in the download folder.
+ *
+ *  `stage` is the shared vocabulary — queued / searching / downloading /
+ *  verifying / importing / completed / failed / needs_attention — so a wish
+ *  from MusicBrainz and a folder grabbed off the Soulseek page read the same.
+ *  `source` says which of those put it there. */
+export interface SlskQueueItem {
+  /** "<kind>:<ref>" — pass it back verbatim to queueCancel(). */
+  id: string;
+  kind: "wish" | "job" | "pipeline" | "import" | "ready" | "prompt";
+  /** Set when this row IS a pipeline job (running or settled). */
+  job_id: number | null;
+  /** Set when a wish owns this row. */
+  wish_id: number | null;
+  stage: "queued" | "searching" | "downloading" | "verifying" | "importing"
+       | "completed" | "failed" | "needs_attention";
+  source_key: "musicbrainz" | "soulseek" | "auto" | string;
+  source: string;
+  title: string;
+  artist: string;
+  release_mbid: string;
+  /** Where the album is (or landed) — the album link, when there is one. */
+  album_path: string;
+  /** A finished download's folder in the download dir (kind "ready"): what
+   *  the Import action on that row sends. Not a library album. */
+  path?: string;
+  /** The release's own facts, on rows the server has them for (a pipeline job
+   *  knows its MusicBrainz release: date, the medium it is pressed on and its
+   *  track count). Absent on wish/ready/import rows, which have no such data —
+   *  the row then shows no line rather than a wrong one, and nothing here ever
+   *  costs a MusicBrainz request. */
+  release?: { id: string; date?: string; media?: string[]; track_count?: number };
+  progress: {
+    text?: string;
+    done?: number;
+    total?: number;
+    /** byte-weighted share, null while a search has nothing to weigh */
+    percent?: number | null;
+    files_done?: number;
+    files_total?: number;
+    speed?: number | null;
+    eta_s?: number | null;
+  } | null;
+  /** Why it failed (or what the job is waiting on). */
+  reason: string;
+  /** One line about what this row's state means right now. */
+  note: string;
+  attempts?: number;
+  /** Why a FAILED row stopped: "not_found" is never retried on its own, every
+   *  other reason is worth another press once the cause is fixed. */
+  outcome?: string;
+  /** Partial bytes of rejected candidates that could not be removed — still in
+   *  the download folder, reported rather than left for someone to find. */
+  leftovers?: string[];
+  /** What this row's manual action is ("manual" = enter it by hand in the
+   *  wizard, "answer" = a question parked on the auto-import tab), and where
+   *  it happens. "" when the row has no such action. */
+  action?: "manual" | "answer" | "";
+  action_link?: string;
+  /** Whether POST /api/queue/retry can bring this row back (a terminal state:
+   *  nothing found, or a failed job). */
+  retryable?: boolean;
+  /** Families this album is still missing (kind "prompt"), in wizard order. */
+  missing?: string[];
+  missing_labels?: string[];
+  /** The wizard link that opens the album AT the first missing family — the
+   *  same link the import_needs_data notification carries. */
+  wizard_link?: string;
+  /** Whether POST /api/import/prompts/dismiss applies (kind "prompt"). */
+  dismissable?: boolean;
+  /** Empty searches so far (wish rows): the budget `wishes_not_found_attempts`
+   *  is compared against. */
+  not_found?: number;
+  /** When the next AUTOMATIC attempt may run, 0 when none will (a terminal
+   *  row waits for the user's own retry). */
+  retry_at?: number;
+  /** A wish whose framework album ("Add to library") is on disk with no audio
+   *  yet: cancelling it removes the folder too. */
+  pending?: boolean;
+  created_at: number;
+  updated_at: number;
+  cancelable: boolean;
+  /** The job's last few log lines, for the row's expander. */
+  log_tail: string[];
+}
+
+/** `GET /api/queue` — every section with its rows, plus the counts the tab
+ *  badges show. `running`/`concurrency` say how full the pipeline is, and
+ *  `download_slots` is slskd's own transfer ceiling (what the concurrency is
+ *  really bounded by once several downloads are in flight). */
+export interface SlskQueuePayload {
+  sections: {
+    queued: SlskQueueItem[];
+    in_progress: SlskQueueItem[];
+    needs_attention: SlskQueueItem[];
+    completed: SlskQueueItem[];
+    failed: SlskQueueItem[];
+  };
+  counts: {
+    queued: number; in_progress: number; needs_attention: number;
+    completed: number; failed: number; total: number;
+  };
+  running: number;
+  concurrency: number;
+  download_slots: number;
+}
+
 /** One slskd transfer (download or upload). `state` is slskd's own enum:
  *  Queued / InProgress / Completed / Errored / Cancelled / Rejected / … */
 export interface SlskTransfer {
@@ -902,6 +1015,14 @@ export interface ServerVersion {
   latest: string;
   update_available: boolean;
   release_url: string;
+  /** Where the project lives and where a bug report goes — always present, so
+   *  the app can link back to itself (credits footer, Settings). */
+  project_url: string;
+  issues_url: string;
+  /** What this process is running as: the commit the image was built from
+   *  (empty outside a release build), when, and whether it is an image at all.
+   *  `version` alone cannot tell a stale image from a current one. */
+  build: { revision: string; built: string; container: boolean };
   checked_at: number;
   source: "github" | "unavailable";
 }
@@ -958,6 +1079,244 @@ export interface JobLock {
 /** GET /api/jobs/locks — everything holding library paths right now. */
 export interface JobLocksPayload {
   jobs: JobLock[];
+}
+
+/* ---------------------------------------------------------------------- *
+ * Discover — browsing the library AND the online providers by genre       *
+ * (server/api_discover.py), plus the online recommendation shelf.         *
+ * ---------------------------------------------------------------------- */
+
+/** Which side of the line a Discover request reads: the library, the online
+ *  providers, or both at once. */
+export type DiscoverScope = "library" | "online" | "all";
+
+/** What a Discover row IS — the three shapes every view asks for. */
+export type DiscoverKind = "albums" | "artists" | "tracks";
+
+/** One row of the Discover genre / recommendation routes.
+ *
+ *  `owned` means the library holds THIS item (matched by MBID, then by
+ *  normalized artist+title) and `path` is set exactly then — so an owned row
+ *  links into the library and an unowned one offers the add action, never the
+ *  other way round. `in_library` is the weaker statement: the library holds
+ *  something by that artist, which is a hint and not ownership. `source` is the
+ *  provider that stated the row (registry-first when several did) and
+ *  `source_label` the name to print; `also_from` lists the other sources that
+ *  named the same row. */
+export interface DiscoverItem {
+  kind: "album" | "artist" | "track";
+  title: string;
+  artist: string;
+  /** Release year as the provider stated it — "" when it stated none. */
+  year: string;
+  source: string;
+  source_label: string;
+  /** Provider artwork and page, both absolute URLs (the artwork is rendered
+   *  through `artUrl`, never straight from the provider). */
+  cover_url: string | null;
+  page_url: string | null;
+  mbid: string | null;
+  release_group_mbid: string | null;
+  /** Library path — present exactly when the library has this item. */
+  path: string | null;
+  /** The library holds this exact item. */
+  owned?: boolean;
+  /** The library holds something by this artist (not this item). */
+  in_library?: boolean;
+  /** The further sources that named the same row, primary excluded. */
+  also_from?: string[];
+  /** Library album rows: the track titles the folder holds. */
+  tracks?: string[];
+  /** Why this row is here ("genre: shoegaze"). */
+  reason?: string;
+}
+
+/** Why a source said nothing: source id → the server's own words ("skipped:
+ *  no lastfm_api_key"). A source absent from this map answered.
+ *
+ *  Two keys are not failures: `recommended` is the recommendation shelf's own
+ *  verdict on the seed (the one non-source key), and a note beginning
+ *  "partial:" is a source answering with part of a long list. A source the
+ *  server does not know is keyed by what was asked for, with "unknown source". */
+export type DiscoverNotes = Record<string, string>;
+
+/** `GET /api/discover/genres` — the genre list of the requested scope, with
+ *  the counts each side can state (library counts are tracks, albums and
+ *  artists; online ones are what the providers reported). */
+export interface DiscoverGenres {
+  genres: {
+    name: string;
+    track_count: number;
+    album_count: number;
+    artist_count: number;
+    /** Which side(s) contributed this genre — "library", "musicbrainz", … */
+    sources: string[];
+  }[];
+  sources_asked: string[];
+  notes: DiscoverNotes;
+}
+
+/** `GET /api/discover/genre` — one page of rows. `next_offset` is the cursor
+ *  for the next page, null/absent at the end. */
+export interface DiscoverItems {
+  genre: string;
+  kind: DiscoverKind;
+  source: string;
+  items: DiscoverItem[];
+  sources_asked: string[];
+  notes: DiscoverNotes;
+  next_offset: number | null;
+}
+
+/** `GET /api/discover/recommended` — an online shelf seeded by the whole
+ *  library (`seed=library`) or by one genre. `basis` says what the rows were
+ *  built from. */
+export interface DiscoverRecommended {
+  items: DiscoverItem[];
+  sources_asked: string[];
+  notes: DiscoverNotes;
+  basis: string;
+}
+
+/** `GET /api/ratings` — every rated track, or the requested subset.
+ *
+ *  `ratings` maps a normalized track path to the rating in HALF-STARS as an
+ *  integer 0-10 (0 = unrated, 1 = half a star … 10 = five stars) — the unit
+ *  the app-owned SQLite table, the API and the `RATING` file tag (0-100, one
+ *  half-star = 10, Picard's convention) all agree on. The UI works in the
+ *  familiar 0-5 scale and converts in exactly one place (lib/ratings.ts);
+ *  nothing outside it should ever see these integers.
+ *
+ *  `counts` is how many tracks sit at each value, keyed "1"…"10" (a value
+ *  with no tracks is absent) — it is what the library/genre surfaces show
+ *  without walking the map. */
+export interface RatingsPayload {
+  ratings: Record<string, number>;
+  counts: Record<string, number>;
+}
+
+/* ── the library query engine ──────────────────────────────────────────────
+ *
+ *  ONE engine answers every way of browsing the library (see mlo/query.py):
+ *  the Browse page's ad-hoc builder, the facet rail, the live match count and
+ *  a saved smart playlist all send the SAME filter spec
+ *  (`{conditions:[{field,op,value}], match}`), so a saved playlist can never
+ *  disagree with the browser it was saved from.
+ *
+ *  `GET /api/library/fields` is the ONE field catalogue: the builder, the
+ *  facet rail and the smart-playlist rule editor all render from it, so a
+ *  field added on the server appears in every surface at once. */
+
+/** One operator a field offers. `op` is the spec's vocabulary — the id the
+ *  engine evaluates and a saved playlist stores; `label` is what the picker
+ *  shows. Read them from the catalogue, never hardcode a list: the engine
+ *  owns the set. */
+export interface LibraryFieldOp {
+  op: string;
+  label: string;
+}
+
+/** One filterable field. `type` decides the value control (text input, number
+ *  input, or a select over `values`); `ops` is the field's own operator set,
+ *  in the order the picker lists it. `facetable` marks the fields the rail may
+ *  count and list; `sortable` marks the keys `/api/library/query` accepts as a
+ *  `sort.key`. Numeric fields carry `unit`/`min`/`max` for the value control
+ *  (rating is 0-5 in half stars). */
+export interface LibraryField {
+  field: string;
+  label: string;
+  type: "text" | "number" | "enum" | "bool" | string;
+  ops: LibraryFieldOp[];
+  values?: (string | number)[];
+  facetable?: boolean;
+  sortable?: boolean;
+  /** False when the library payload does not carry this tag yet, so every
+   *  query on it answers empty — the picker says so rather than letting a user
+   *  build a rule that can only ever match nothing. */
+  in_payload?: boolean;
+  /** Which results the field is meaningful for ("tracks"/"albums"); rating is
+   *  tracks-only. The picker warns when the page is showing the other one. */
+  targets?: string[];
+  unit?: string;
+  min?: number;
+  max?: number;
+  /** Value-control step (rating moves in half stars). */
+  step?: number;
+  /** One sentence on what the field means, shown as the picker row's tooltip. */
+  hint?: string;
+}
+
+export interface LibraryFieldGroup {
+  id: string;
+  label: string;
+  fields: LibraryField[];
+}
+
+/** `GET /api/library/fields`. */
+export interface LibraryFields {
+  groups: LibraryFieldGroup[];
+}
+
+/** One value of a facet with the number of matching rows. `value` is a number
+ *  for numeric fields (a year, a rating) and a string otherwise. */
+export interface FacetValue {
+  value: string | number;
+  count: number;
+}
+
+export interface LibraryFacet {
+  field: string;
+  values: FacetValue[];
+  /** How many rows have NO value for this field (unrated, no genre). A blank
+   *  value is never a `values[]` entry, so "Unrated" / "No genre" comes from
+   *  here — without it a rating facet would hide the unrated rows entirely. */
+  missing?: number;
+  /** Distinct values before `limit` — what lets the rail say "50 of 1,204". */
+  total_values: number;
+}
+
+/** A row-level condition. `value` is a scalar for the comparison ops, a
+ *  two-element `[lo, hi]` for "between", an ARRAY for eq/ne ("is any of" /
+ *  "is none of" — how a facet's multi-select becomes one OR group), and
+ *  unused by the empty/present/unrated ops. */
+export interface LibraryCondition {
+  field: string;
+  op: string;
+  value?: string | number | boolean | (string | number)[] | null;
+}
+
+export interface LibraryQueryRequest {
+  conditions: LibraryCondition[];
+  match: "all" | "any";
+  target: "tracks" | "albums";
+  sort?: { key: string; dir: 1 | -1 } | null;
+  limit?: number;
+  offset?: number;
+  /** Grouping key: artist|album|genre|year|rating (null = flat). With a group
+   *  set, every returned item also carries `group` — its key — and the rows
+   *  arrive sorted by group. */
+  group?: string | null;
+  /** Field names to count over the matched set. */
+  facets?: string[];
+}
+
+/** One grouped bucket: `key` and how many TARGET rows (tracks or albums,
+ *  whichever `target` asked for) fall in it, over the whole matched set —
+ *  not just this page. */
+export interface LibraryGroupCount {
+  key: string;
+  count: number;
+}
+
+export interface LibraryQueryResponse {
+  /** The same row shape the library page renders (tracks carry the album
+   *  folder's `artist`/`album`/`album_path`), plus `group` when grouping. */
+  items: Record<string, any>[];
+  /** Matched rows before pagination. */
+  total: number;
+  facets: LibraryFacet[];
+  group_counts: LibraryGroupCount[];
+  took_ms: number;
 }
 
 export const api = {
@@ -1046,6 +1405,31 @@ export const api = {
       body: JSON.stringify(body),
     }, 60000),
   library: () => json<import("./types").Library>(`${API}/library`),
+  /** The ONE field catalogue every filter UI renders (the Browse builder, the
+   *  facet rail, the smart-playlist rule editor). Cached hard: it only changes
+   *  when the server's own field list does. */
+  libraryFields: () =>
+    json<LibraryFields>(`${API}/library/fields`, undefined, 30000),
+  /** A field's distinct values with counts, over the WHOLE library (not the
+   *  current result — the rows a query matched come back as `facets` in the
+   *  query's own reply). `q` searches the values server-side (what the
+   *  tag-value autocomplete needs), `limit` caps what comes back while
+   *  `total_values` stays honest, and `target` decides whether the counts are
+   *  of tracks or of albums. */
+  libraryFacets: (field: string, limit = 50, q = "", target: "tracks" | "albums" = "tracks") =>
+    json<LibraryFacet>(
+      `${API}/library/facets?field=${encodeURIComponent(field)}&limit=${limit}&target=${target}${q ? `&q=${encodeURIComponent(q)}` : ""}`,
+      undefined,
+      30000
+    ),
+  /** Run a filter spec. `limit: 0` is honoured and is how the builder's live
+   *  count asks "how many match?" without transferring a single row. */
+  libraryQuery: (req: LibraryQueryRequest, timeoutMs = 60000) =>
+    json<LibraryQueryResponse>(`${API}/library/query`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(req),
+    }, timeoutMs),
   album: (path: string, staged = false) =>
     json<import("./types").Album>(`${API}/album?path=${encodeURIComponent(path)}${stagedQ(staged)}`),
   artist: (path: string) => json<import("./types").Artist>(`${API}/artist?path=${encodeURIComponent(path)}`),
@@ -1240,22 +1624,55 @@ export const api = {
   mbSearchArtists: (q: string) => json<any[]>(`${API}/mb/search/artists?q=${encodeURIComponent(q)}`),
   mbReleaseGroup: (id: string, offset = 0, limit = 300) =>
     json<any>(`${API}/mb/release-group/${id}?offset=${offset}&limit=${limit}`),
-  // Generic MusicBrainz browser (in-app entity pages). Searches and
-  // discographies page 100 rows at a time — pass offset for "load more".
+  /** Which edition of a release group the download policy picks, why, and the
+   *  ranked alternatives — the same policy the auto-import and the watch run.
+   *  `prefer` forces one release (the user's override); the server re-ranks
+   *  with it and says so in its reasons, so the UI explains nothing itself.
+   *  primaryType/secondaryType are the release-group kind the caller is after
+   *  (see mlo/naming); empty means "whatever the group is". */
+  releaseChoice: (opts: {
+    releaseGroupMbid: string;
+    prefer?: string;
+    primaryType?: string;
+    secondaryType?: string;
+  }) => {
+    const p = new URLSearchParams({ release_group_mbid: opts.releaseGroupMbid });
+    if (opts.prefer) p.set("prefer", opts.prefer);
+    if (opts.primaryType) p.set("primary_type", opts.primaryType);
+    if (opts.secondaryType) p.set("secondary_type", opts.secondaryType);
+    return json<MBReleaseChoicePayload>(`${API}/mb/release-choice?${p}`, undefined, 60000);
+  },
+  // Generic MusicBrainz browser (in-app entity pages). Searches page 100
+  // rows at a time — the reply's `next` is the offset of the following page
+  // (null at the end) and `query` is the Lucene query MusicBrainz answered.
   // primaryType/secondaryType map onto MusicBrainz's own release-type
-  // qualifiers (Album/EP/Single + Soundtrack/Live/Compilation/...).
-  mbSearch: (
-    type: string, q: string, limit = 100,
-    mode: "free" | "catno" | "barcode" = "free", offset = 0,
-    primaryType = "", secondaryType = ""
-  ) =>
-    json<MBSearchRows>(
-      `${API}/mb/search?type=${encodeURIComponent(type)}&q=${encodeURIComponent(q)}` +
-      `&limit=${limit}&offset=${offset}&mode=${mode}` +
+  // qualifiers (Album/EP/Single + Soundtrack/Live/Compilation/...); artist,
+  // year, label and catno are further constraints, ANDed into that same
+  // query, so a narrow search is answered by the index and not by throwing
+  // rows away afterwards.
+  mbSearch: (opts: {
+    type: string; q: string; limit?: number;
+    mode?: "free" | "catno" | "barcode"; offset?: number;
+    primaryType?: string; secondaryType?: string;
+    artist?: string; year?: string; label?: string; catno?: string;
+  }) => {
+    const p = new URLSearchParams({
+      type: opts.type, q: opts.q, limit: String(opts.limit ?? 100),
+      offset: String(opts.offset ?? 0), mode: opts.mode ?? "free",
+    });
+    for (const [key, value] of [["primary_type", opts.primaryType],
+                                ["secondary_type", opts.secondaryType],
+                                ["artist", opts.artist], ["year", opts.year],
+                                ["label", opts.label], ["catno", opts.catno]] as const) {
+      if (value) p.set(key, value);
+    }
+    return json<MBSearchRows>(`${API}/mb/search?${p}`);
+  },
+  mbArtist: (id: string, offset = 0, limit = 300, primaryType = "", secondaryType = "") =>
+    json<MBArtistBrowse>(
+      `${API}/mb/artist/${id}?offset=${offset}&limit=${limit}` +
       `&primary_type=${encodeURIComponent(primaryType)}&secondary_type=${encodeURIComponent(secondaryType)}`
     ),
-  mbArtist: (id: string, offset = 0, limit = 300) =>
-    json<MBArtistBrowse>(`${API}/mb/artist/${id}?offset=${offset}&limit=${limit}`),
   mbRecording: (id: string, offset = 0, limit = 300) =>
     json<MBRecordingBrowse>(`${API}/mb/recording/${id}?offset=${offset}&limit=${limit}`),
   /** Which MusicBrainz kind a bare pasted MBID is — the browser routes a
@@ -1798,6 +2215,54 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ kind, key, mbid: mbid ?? null }),
     }),
+
+  /** Track ratings. The `rating` argument is the half-star INTEGER 0-10 the
+   *  DB and the file tag speak — see lib/ratings.ts, the one place the 0-5
+   *  UI value is converted to it. */
+  ratings: (paths?: string[]) =>
+    json<RatingsPayload>(
+      `${API}/ratings${paths?.length ? `?${paths.map((p) => `paths=${encodeURIComponent(p)}`).join("&")}` : ""}`
+    ),
+  /** Set one track's rating; 0 clears it (row removed, `RATING` tag removed).
+   *  `tag` reports the file write: `written`/`skipped` and, when the file
+   *  refused it, `error` — the rating is STORED either way, so a tag failure
+   *  is a warning, never a rollback. Writes the tag too unless the
+   *  `write_rating_tags` config key is off. */
+  setRating: (path: string, rating: number) =>
+    json<{
+      ok: boolean;
+      path: string;
+      rating: number;
+      tag: { rating100: number; written: boolean; skipped: boolean; error: string | null };
+    }>(
+      `${API}/ratings`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path, rating }),
+      },
+      60000
+    ),
+  /** The same value onto many tracks at once (select-all → rate). One failed
+   *  file does not fail the call: `failed` is a rating that was NOT stored,
+   *  `tags_failed` a stored rating whose file could not be tagged (it still
+   *  counts in `updated`). */
+  bulkRating: (paths: string[], rating: number) =>
+    json<{
+      ok: boolean;
+      updated: number;
+      failed: { path: string; error: string }[];
+      tags_written: number;
+      tags_failed: { path: string; error: string }[];
+    }>(
+      `${API}/ratings/bulk`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths, rating }),
+      },
+      300000
+    ),
   // export to device
   exportDrives: () => json<{ drives: { letter: string; root: string; type: string; free: number | null; total: number | null }[] }>(`${API}/export/drives`),
   /** Codec specs come from the server (quality presets, custom ranges and
@@ -1854,6 +2319,60 @@ export const api = {
   wishImport: (id: number) =>
     json<ImportRun>(`${API}/wishes/${id}/import`, { method: "POST" }, 30000),
 
+  // ----------------------------------------------------------------- //
+  // Watched artists — an artist the app keeps an eye on. A watch is    //
+  // the artist-level counterpart of a wish: the server browses         //
+  // MusicBrainz for the artist's release groups and ENQUEUES the ones  //
+  // the rules allow into the wish queue, a few per cycle (see          //
+  // server/api_watch.py). It never queues a discography.               //
+  // ----------------------------------------------------------------- //
+  /** Every watch, plus the worker's own state: when it runs next and what
+   *  its last cycle did. The reads are one request each way — the release
+   *  groups themselves are browsed once per artist, not once per release. */
+  watches: () => json<WatchesPayload>(`${API}/watches`, undefined, 30000),
+  /** Start watching an artist. 400 = unknown/invalid artist id, 409 = the
+   *  artist is already watched (both carry the reason in `detail`). */
+  watchAdd: (body: WatchInput) =>
+    json<{ ok: boolean; watch: Watch }>(`${API}/watches`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, 60000),
+  /** Change one watch — any subset of its rules, plus `enabled` (the
+   *  pause/resume the row's button uses). */
+  watchUpdate: (id: number, patch: WatchPatch) =>
+    json<{ ok: boolean; watch: Watch }>(`${API}/watches/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }, 60000),
+  watchDelete: (id: number) => json<{ ok: boolean; id: number }>(`${API}/watches/${id}`, { method: "DELETE" }),
+  /** One check, now, on the user's command: browse the artist once, queue
+   *  at most `max_per_cycle` release groups, and answer what it did
+   *  (`summary` is the server's own sentence about this run). */
+  watchCheck: (id: number) =>
+    json<WatchCheckResult>(`${API}/watches/${id}/check`, { method: "POST" }, 120000),
+  /** The release groups this artist has, with the watch's own rules applied
+   *  to each row — the picker behind the allow/never lists. One MusicBrainz
+   *  browse per request. */
+  watchCandidates: (id: number) =>
+    json<WatchCandidates>(`${API}/watches/${id}/candidates`, undefined, 60000),
+  /** The same list for an artist nobody watches yet — the dialog asks for it
+   *  while the watch is still being created. The rule params are the ones the
+   *  user has picked so far (repeatable, or comma-separated), so each row's
+   *  `allowed` and `reason` describe the rules on screen, not the defaults. */
+  watchCandidatesFor: (artistMbid: string, rules: {
+    policy?: WatchPolicy; release_types?: string[]; include?: string[]; exclude?: string[];
+  } = {}) => {
+    const q = new URLSearchParams();
+    q.set("artist_mbid", artistMbid);
+    if (rules.policy) q.set("policy", rules.policy);
+    for (const t of rules.release_types ?? []) q.append("release_types", t);
+    for (const id of rules.include ?? []) q.append("include", id);
+    for (const id of rules.exclude ?? []) q.append("exclude", id);
+    return json<WatchCandidates>(`${API}/watches/candidates?${q}`, undefined, 60000);
+  },
+
   /** Albums sitting in the download dir, done downloading, waiting to be
    *  imported (the "Import all completed" worklist). */
   soulseekReady: () => json<ReadyAlbums>(`${API}/soulseek/ready`, undefined, 60000),
@@ -1868,6 +2387,30 @@ export const api = {
   soulseekImportAll: () => json<ImportRun>(`${API}/soulseek/import-all`, { method: "POST" }, 30000),
   importAllStatus: () => json<ImportRunStatus>(`${API}/soulseek/import-all/status`),
   importAllCancel: () => json<ImportRun>(`${API}/soulseek/import-all/cancel`, { method: "POST" }),
+
+  /** The ONE download queue: queued/searching, in-progress, needs-attention,
+   *  completed and failed rows for the whole pipeline (see api_queue.py). */
+  queue: () => json<SlskQueuePayload>(`${API}/queue`, undefined, 30000),
+  /** Cancel ONE row (`item.id`, e.g. "job:3" / "wish:12" / "pipeline:<mbid>").
+   *  409 = the row is not cancelable any more (it finished, or it is only a
+   *  finished download whose action is the import). */
+  queueCancel: (id: string) =>
+    json<{ ok: boolean; cancelled: string; removed?: boolean }>(`${API}/queue/cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    }, 60000),
+  /** Retry ONE terminal row by hand — the other half of the retry policy: a
+   *  "nothing found" wish or a spent attempts cap is never retried by the
+   *  server on its own, so this press is the way back. A `wish:` row is
+   *  re-armed and searched now; a `job:` row's release goes back into the
+   *  pipeline. 409 = the row is still running, or has nothing to retry with. */
+  queueRetry: (id: string) =>
+    json<{ ok: boolean; retried: string }>(`${API}/queue/retry`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id }),
+    }, 60000),
 
   // Home page (recommendations + highlights)
   // `refresh` is the "Your library" card's button: the payload is TTL-cached
@@ -1980,9 +2523,16 @@ export const api = {
       },
       600000
     ),
-  /** Run the configured import script chain over already-imported albums. */
+  /** Run the configured import script chain over already-imported albums.
+   *  Each album's reply also carries its `autonomy` block: what the import
+   *  could not finish (see server/imports._report_gaps). */
   importFinish: (paths: string[], force: Record<string, boolean> = {}, staged = false) =>
-    json<{ albums: { path: string; chain: number[]; scripts: unknown[]; errors: unknown[] }[] }>(
+    json<{
+      albums: {
+        path: string; chain: number[]; scripts: unknown[]; errors: unknown[];
+        autonomy?: ImportAutonomy;
+      }[];
+    }>(
       `${API}/import/finish`,
       {
         method: "POST",
@@ -2003,6 +2553,17 @@ export const api = {
       60000
     ),
   importBulkStatus: () => json<ImportBulkJob>(`${API}/import/bulk/status`),
+  /** Albums an import could not finish, each with the wizard link that lands
+   *  on the album at the step needing a decision (GET /api/import/prompts). */
+  importPrompts: () => json<{ prompts: ImportPrompt[] }>(`${API}/import/prompts`),
+  /** Stop asking about one album. The next import of it recomputes the gaps
+   *  and raises the prompt again if the family is still missing. */
+  dismissImportPrompt: (path: string, staged = false) =>
+    json<{ ok: boolean }>(`${API}/import/prompts/dismiss`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, staged }),
+    }),
   importScriptsPreview: (paths: string[] = []) =>
     json<ImportScriptsPreview>(
       `${API}/import/scripts/preview`,
@@ -2016,6 +2577,35 @@ export const api = {
   // ----------------------------------------------------------------- //
   // Bulk acquisition, genre facets, metadata review, video matching.   //
   // ----------------------------------------------------------------- //
+  /** Add a MusicBrainz entity to the LIBRARY: the framework album (the folder
+   *  the naming script names, with the release tracklist and the
+   *  release-group cover) is created on disk and shown as pending while the
+   *  wish queue searches Soulseek for its audio. `kind: "artist"` prepares the
+   *  discography in the background (`background: true`) and reports itself on
+   *  the event channel — one MusicBrainz browse per release group does not fit
+   *  in a request. 60 s: a release group's editions are a handful of lookups. */
+  libraryAdd: (body: {
+    mbid: string;
+    kind?: "release" | "release_group" | "artist" | "recording" | "auto";
+    mode?: "best" | "all";
+    release_mbid?: string;
+    title?: string;
+    artist?: string;
+    year?: string;
+    queries?: string[];
+  }) =>
+    json<LibraryAddResult>(`${API}/library/add`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }, 60000),
+  /** Undo an "Add to library": the wish and its framework folder both go. */
+  libraryAddCancel: (body: { album_path?: string; wish_id?: number }) =>
+    json<{ ok: boolean; removed: boolean; wish_deleted: boolean; wish_id: number | null }>(
+      `${API}/library/add/cancel`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
+      20000
+    ),
   /** Queue a release / release group / whole artist into the auto-import
    *  pipeline. `mode: "best"` takes one release per release group (the
    *  preferred format), `"all"` every release. The server only RESOLVES for a
@@ -2115,6 +2705,34 @@ export const api = {
       `${API}/genres/facets`
     ),
 
+  /** The genre list of one scope — the library's own genres, the online
+   *  providers' (MusicBrainz, Last.fm…), or both. 45 s: the online side walks
+   *  the provider chains, and the answer is TTL-cached server-side. */
+  discoverGenres: (scope: DiscoverScope = "all") =>
+    json<DiscoverGenres>(`${API}/discover/genres?scope=${scope}`, undefined, 45000),
+  /** One page of a genre's albums/artists/tracks from one source or all of
+   *  them. `offset` pages by the previous reply's `next_offset`. */
+  discoverGenre: (p: {
+    genre: string;
+    kind: DiscoverKind;
+    /** Source id, or "all" (the server asks everything it can). */
+    source?: string;
+    limit?: number;
+    offset?: number;
+  }) => {
+    const q = new URLSearchParams({ genre: p.genre, kind: p.kind });
+    if (p.source) q.set("source", p.source);
+    if (p.limit != null) q.set("limit", String(p.limit));
+    if (p.offset != null) q.set("offset", String(p.offset));
+    return json<DiscoverItems>(`${API}/discover/genre?${q}`, undefined, 60000);
+  },
+  /** Online recommendations for the whole library, or for one genre. */
+  discoverRecommended: (p: { seed?: string; kind: DiscoverKind; limit?: number }) => {
+    const q = new URLSearchParams({ seed: p.seed || "library", kind: p.kind });
+    if (p.limit != null) q.set("limit", String(p.limit));
+    return json<DiscoverRecommended>(`${API}/discover/recommended?${q}`, undefined, 60000);
+  },
+
   /** Candidate artist images + descriptions for the metadata review modal. */
   metadataCandidates: (artist: string, albumPath?: string, staged = false) => {
     const p = new URLSearchParams({ artist });
@@ -2184,6 +2802,171 @@ export const api = {
       body: JSON.stringify({ album_path: albumPath, assignments }),
     }, 600000).then(noteContainerSwap),
 };
+
+/* ---------------------------------------------------------------------- *
+ * Watched artists (server/api_watch.py) — the types the `watch*` methods  *
+ * above answer with.                                                     *
+ * ---------------------------------------------------------------------- */
+
+/** How far back a watch looks. `new_only` (the default) takes release groups
+ *  it has not seen before, so a fresh watch can never pull in a catalogue it
+ *  has been sitting on for years; `backfill` deliberately walks the existing
+ *  discography, still `max_per_cycle` at a time. */
+export type WatchPolicy = "new_only" | "backfill";
+
+/** One release group a watch acted on — the row behind the "queued" and
+ *  "imported" lists. `status` is what happened to it: handed to the wish
+ *  queue, announced only (auto-add off), imported, or failed. */
+export interface WatchItem {
+  release_group_mbid: string;
+  title: string;
+  year: string;
+  release_id: string;
+  /** The wish this became; null when the watch only notified. */
+  wish_id: number | null;
+  status: "queued" | "notified" | "imported" | "failed";
+  at: number;
+  note: string;
+}
+
+/** One watched artist. The rules are the whole point: `release_types` says
+ *  which kinds of release group count, `include` narrows it to a chosen
+ *  allow-list, `exclude` blocks individual release groups, and
+ *  `max_per_cycle` caps how many the watch may queue per check. */
+export interface Watch {
+  id: number;
+  artist_mbid: string;
+  artist: string;
+  added_at: number;
+  /** false = paused: the worker skips it and `next_check_at` reads 0. */
+  enabled: boolean;
+  policy: WatchPolicy;
+  /** MusicBrainz's own release-group type names, lowercased (album, ep,
+   *  single, broadcast, other, compilation, soundtrack, spokenword,
+   *  interview, audiobook, live, remix, dj-mix, mixtape/street, demo,
+   *  field recording). A release group matches when its PRIMARY type is in
+   *  here OR any of its secondary types is. */
+  release_types: string[];
+  /** Allow-list of release-group MBIDs; EMPTY means "no restriction" — any
+   *  new release of the allowed types. Non-empty means only these. */
+  include: string[];
+  /** Release groups that must never be fetched. */
+  exclude: string[];
+  /** The per-check ceiling (1-10): how many release groups ONE cycle may
+   *  queue. This is what keeps a watch from ever dumping a discography. */
+  max_per_cycle: number;
+  /** true = queue straight into the library; false = notify and let the user
+   *  decide from the wish list. */
+  auto_add: boolean;
+  /** 0 = never checked yet. */
+  last_checked_at: number;
+  /** When the worker checks next; 0 while the watch is paused. */
+  next_check_at: number;
+  /** The newest release group the watch has seen, so the next `new_only`
+   *  check knows what is new. */
+  last_seen_release_group: string;
+  checked_count: number;
+  queued_count: number;
+  notified_count: number;
+  imported_count: number;
+  /** The server's own sentence about the last check. */
+  last_result: string;
+  last_error: string;
+  note: string;
+  /** What this watch queued / imported, newest first. */
+  queued: WatchItem[];
+  imported: WatchItem[];
+}
+
+/** `POST /api/watches` — a new watch, or a prefill for one. Everything but
+ *  the artist id is optional; the server fills the rest with its defaults
+ *  (policy `new_only`, types album+ep, one release per cycle, auto-add on). */
+export interface WatchInput {
+  artist_mbid: string;
+  artist?: string;
+  policy?: WatchPolicy;
+  release_types?: string[];
+  include?: string[];
+  exclude?: string[];
+  max_per_cycle?: number;
+  auto_add?: boolean;
+  note?: string;
+}
+
+/** `PATCH /api/watches/{id}` — any subset of the rules, plus the pause. */
+export interface WatchPatch {
+  artist?: string;
+  enabled?: boolean;
+  policy?: WatchPolicy;
+  release_types?: string[];
+  include?: string[];
+  exclude?: string[];
+  max_per_cycle?: number;
+  auto_add?: boolean;
+  note?: string;
+}
+
+/** `GET /api/watches` — the watches, plus the worker that walks them. */
+export interface WatchesPayload {
+  watches: Watch[];
+  worker: {
+    running: boolean;
+    /** Cycles completed since the server started. */
+    cycles: number;
+    last_cycle: number;
+    next_run: number;
+    last_result: string;
+    /** The artists the running cycle is working on. */
+    current: string[];
+  };
+}
+
+/** `POST /api/watches/{id}/check` — what one on-demand check did. */
+export interface WatchCheckResult {
+  ok: boolean;
+  /** Release groups the browse returned for the artist. */
+  checked: number;
+  queued: WatchItem[];
+  notified: WatchItem[];
+  /** The server's own sentence: what it queued, or why it queued nothing. */
+  summary: string;
+}
+
+/** One row of the release-group picker. `allowed` is the server's verdict
+ *  once the watch's rules are applied, and `reason` says why in words —
+ *  including for rows it would NOT fetch ("single", "blocked", "in the
+ *  library", "already queued"). */
+export interface WatchCandidate {
+  release_group_mbid: string;
+  title: string;
+  /** First-release year, "" when MusicBrainz dates it not at all. */
+  year: string;
+  primary_type: string;
+  secondary_types: string[];
+  first_release_date: string;
+  in_library: boolean;
+  queued: boolean;
+  allowed: boolean;
+  /** True when the watch has not seen this release group yet. */
+  is_new: boolean;
+  reason: string;
+}
+
+/** `GET /api/watches/{id}/candidates` (and the by-artist form for a watch
+ *  that does not exist yet): the artist's release groups, filtered so
+ *  `allowed` reflects the current rules. `watch_id` is null for the
+ *  by-artist form. */
+export interface WatchCandidates {
+  artist_mbid: string;
+  artist: string;
+  watch_id: number | null;
+  items: WatchCandidate[];
+  sources_asked: string[];
+  /** What the rows were filtered by — the policy sentence, the type names
+   *  asked for, and how many ids the include / exclude lists hold. */
+  notes: { policy: string; types: string[]; include: number; exclude: number };
+}
+
 /** One row of `GET /api/capabilities`: what one feature can do HERE. */
 export interface Capability {
   label: string;

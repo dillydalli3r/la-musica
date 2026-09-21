@@ -42,12 +42,19 @@ from server import integrations as intg
 from server import tagcache
 from server import exporter
 from server import api_discovery
+from server import api_discover
 from server import api_imports
 from server import api_lyrics
 from server import api_media
 from server import api_auth
 from server import api_jobs
+from server import api_query
+from server import api_ratings
 from server import api_recommend
+from server import api_watch
+from server import api_queue
+from server import api_add
+from server import api_choice
 from server import api_stack
 from server import api_storage
 from server import auth as auth_mod
@@ -90,6 +97,13 @@ async def _lifespan(app: FastAPI):
         wishes_worker.start()
     except Exception as e:
         print(f"[mlo] wishes worker failed to start: {e}")
+    # Artist watches: periodically looks for NEW releases from followed artists
+    # (never their back catalogue — see server/artist_watch).
+    try:
+        from server import artist_watch_worker
+        artist_watch_worker.start()
+    except Exception as e:
+        print(f"[mlo] artist watch worker failed to start: {e}")
     # Soulseek status watcher: pushes a frame the moment the login state,
     # daemon state or port conflict changes (see _soulseek_watch).
     threading.Thread(target=_soulseek_watch, daemon=True).start()
@@ -97,6 +111,11 @@ async def _lifespan(app: FastAPI):
     try:
         from server import wishes_worker
         wishes_worker.stop()
+    except Exception:
+        pass
+    try:
+        from server import artist_watch_worker
+        artist_watch_worker.stop()
     except Exception:
         pass
 
@@ -209,6 +228,13 @@ app.include_router(api_imports.router)
 app.include_router(api_lyrics.router)
 app.include_router(api_auth.router)
 app.include_router(api_recommend.router)
+app.include_router(api_ratings.router)
+app.include_router(api_query.router)
+app.include_router(api_discover.router)
+app.include_router(api_watch.router)
+app.include_router(api_queue.router)
+app.include_router(api_add.router)
+app.include_router(api_choice.router)
 app.include_router(api_jobs.router)
 app.include_router(api_media.router)
 app.include_router(api_stack.router)
@@ -910,14 +936,21 @@ def capabilities_report():
 @app.get("/api/sources/health")
 def sources_health(kind: str = Query(None), probe: int = Query(0)):
     """Which external sources work right now — the wizard's and Settings' one
-    answer, for all four kinds at once (`lyrics`, `advisory`, `genre`,
-    `metadata`).
+    answer, for every kind at once (`lyrics`, `advisory`, `genre`, `metadata`,
+    `links`, `discover`, `credentials`).
 
     `probe=0` (default) reports the CONFIG only and performs no request at
     all: unconfigured sources are `skipped` (with the config keys they need)
     and the rest `ok`. `probe=1` runs one cheap lookup per configured source
     against the same fixed sample the lyrics providers already probe with —
     in parallel, a few seconds in total — and says what answered.
+
+    The `credentials` rows are not sources: they are the saved logins the
+    other kinds need, each asked through its provider's own credential
+    endpoint (Discogs `/oauth/identity`, Last.fm `chart.gettoptags`, Spotify
+    `POST /api/token`, an AcoustID lookup, slskd's live state, this server's own
+    stored password). A source row cannot answer that question — Discogs
+    browses anonymously, so its row stays green with a discarded token.
     """
     from server import sources_health as health_mod
 
@@ -936,10 +969,11 @@ def sources_health_source(source_id: str, kind: str = Query(None),
     `sources`, so a per-source Test button reads one shape.
 
     An id can belong to two kinds (`deezer` and `itunes` are both a genre
-    source and a metadata provider), so the row kinds are searched in the
-    payload's own order — lyrics, advisory, genre, metadata — unless `kind=`
-    picks one. The row always carries its kind, so a caller that sends both
-    ids (`kind=id`) is never guessing.
+    source and a metadata provider, and `discogs`/`lastfm`/`spotify` are also
+    credentials), so the row kinds are searched in the payload's own order —
+    lyrics, advisory, genre, metadata, links, discover, credentials — unless
+    `kind=` picks one. The row always carries its kind, so a caller that sends
+    both ids (`kind=id`) is never guessing.
     """
     from server import sources_health as health_mod
 
@@ -2695,7 +2729,68 @@ def _run_scripts(req: RunRequest):
     )
     tagcache.invalidate_all()
     mbresolve.invalidate()
+    _announce_run(req.ids, results, cfg.get("targets"))
     return {"results": results}
+
+
+def _announce_run(ids, results, targets=None):
+    """One notification per finished script run (see server/events.py).
+
+    A UI run is the user's own long job — grading a big library takes minutes,
+    and the request that carries it may outlive their attention — so its
+    OUTCOME is announced once, on the bus, instead of only in the response.
+    Exactly one frame per run: the failed kind when anything errored, the
+    grader's own kind for a pure grade run, the plain kind otherwise. A run
+    where every script was skipped has no outcome to report (nothing ran), so
+    it says nothing.
+
+    A skipped step is not a failure: `run_script` reports it as `skipped`,
+    which is the "this feature is switched off" answer, not an error.
+    """
+    try:
+        from server import script_runners
+        failed = [r for r in results if r.get("error")]
+        ran = [r for r in results if not r.get("error") and not r.get("skipped")]
+        if not failed and not ran:
+            return
+        names = [str(r.get("label") or f"Script {r.get('id')}") for r in results]
+        listing = ", ".join(names[:4]) + (f" +{len(names) - 4}" if len(names) > 4 else "")
+        # Where the run's subject is: a single album the user graded is that
+        # album's page, everything else is the library-wide view.
+        targets = [str(t) for t in (targets or []) if str(t).strip()]
+        subject = f"/album/{quote(targets[0], safe='')}" if len(targets) == 1 else "/library"
+        if failed:
+            first = failed[0]
+            events_mod.emit(
+                "script_failed",
+                f"{first.get('label') or 'Script'} failed",
+                "; ".join(str(r.get("error"))[:200] for r in failed[:2]),
+                {"link": "/in-progress", "ids": list(ids),
+                 "failed": [r.get("id") for r in failed]},
+            )
+        elif list(ids) == [4]:
+            dist = (ran[0].get("stats") or {}).get("grade_dist") or {}
+            events_mod.emit(
+                "grade_done",
+                "Grade finished",
+                (f"{dist.get('PASS', 0)} passed, {dist.get('FAIL', 0)} failed"
+                 if dist else "The library has been graded"),
+                {"link": subject, "ids": list(ids), "grade_dist": dist,
+                 "album_path": targets[0].replace("\\", "/") if len(targets) == 1 else ""},
+            )
+        else:
+            events_mod.emit(
+                "script_done",
+                (f"{names[0]} finished" if len(names) == 1
+                 else f"{len(ran)} scripts finished"),
+                listing,
+                {"link": "/in-progress", "ids": list(ids),
+                 "ran": [r.get("id") for r in ran]},
+            )
+    except Exception:
+        # A notification must never turn a finished run into a failed request.
+        import traceback
+        traceback.print_exc()
 
 
 # --------------------------------------------------------------------------- #
@@ -2969,35 +3064,51 @@ def mb_release_group(mbid: str, limit: int = Query(300), offset: int = Query(0))
 
 # ---- generic MusicBrainz browser (search + entity pages) -------------------
 @app.get("/api/mb/search")
-def mb_search(q: str = Query(..., min_length=1), type: str = Query("release"),
+def mb_search(q: str = Query(""), type: str = Query("release"),
               limit: int = Query(100), offset: int = Query(0),
               mode: str = Query("free"), primary_type: str = Query(""),
-              secondary_type: str = Query("")):
+              secondary_type: str = Query(""), artist: str = Query(""),
+              year: str = Query(""), label: str = Query(""), catno: str = Query("")):
     """Search MusicBrainz for the in-app browser: type = artist |
     release-group | release | recording; mode = free | catno | barcode
     (catno/barcode only apply to releases); primary_type/secondary_type narrow
     releases and release groups to MusicBrainz release types (Album, EP,
-    Single, Soundtrack, Live, ...). Returns {rows, total} — searches page 100
-    rows at a time via offset."""
+    Single, Soundtrack, Live, ...). artist / year / label / catno are further
+    constraints and COMBINE with all of the above — the whole query goes to
+    the index, which is the only way to answer "albums by X from 1999 on
+    label Y". `q` may be empty when a constraint says enough (a label/year
+    browse). Returns {rows, total, offset, next, query}: `next` is the offset
+    of the following page (null at the end) and `query` the Lucene query the
+    index was asked, so the UI can show it."""
     if type not in intg.MB_ENTITIES:
         raise HTTPException(400, "type must be one of " + ", ".join(intg.MB_ENTITIES))
     if mode not in ("free", "catno", "barcode"):
         raise HTTPException(400, "mode must be free, catno or barcode")
+    if not (q.strip() or any(x.strip() for x in
+                             (primary_type, secondary_type, artist, year, label, catno))):
+        raise HTTPException(400, "q or a search constraint is required")
     try:
         return intg.search_mb(type, q, limit, mode, max(0, offset),
                               primary_type=primary_type.strip(),
-                              secondary_type=secondary_type.strip())
+                              secondary_type=secondary_type.strip(),
+                              artist=artist.strip(), year=year.strip(),
+                              label=label.strip(), catno=catno.strip())
     except Exception as e:
         raise HTTPException(502, f"MusicBrainz search failed: {e}")
 
 
 @app.get("/api/mb/artist/{mbid}")
-def mb_artist(mbid: str, limit: int = Query(300), offset: int = Query(0)):
+def mb_artist(mbid: str, limit: int = Query(300), offset: int = Query(0),
+              primary_type: str = Query(""), secondary_type: str = Query("")):
+    """Artist page: identity + a page of release groups. A type filter is
+    answered by the search index (browse cannot filter by type at all), so
+    the discography it reports is the whole one, not the loaded window."""
     rid = intg._mbid(mbid)
     if not rid:
         raise HTTPException(400, "invalid MusicBrainz ID or URL")
     try:
-        return intg.artist_browse(rid, max(1, limit), max(0, offset))
+        return intg.artist_browse(rid, max(1, limit), max(0, offset),
+                                  primary_type.strip(), secondary_type.strip())
     except Exception as e:
         raise HTTPException(502, f"MusicBrainz lookup failed: {e}")
 
@@ -5431,7 +5542,12 @@ def wishes_update(wid: int, req: WishUpdateRequest):
 
 @app.delete("/api/wishes/{wid}")
 def wishes_delete(wid: int):
-    from server import wishes
+    """Drop a wish. A FRAMEWORK album is that wish's own folder (it was created
+    for it, before the download existed), so it goes with it — a placeholder
+    the user no longer wants is not a library album. A folder whose audio has
+    already arrived is a real album and stays."""
+    from server import pending_albums, wishes
+    pending_albums.remove_for_wish(wid)
     return {"ok": wishes.delete_wish(wid)}
 
 
@@ -5504,11 +5620,12 @@ def _resolve_release(mbid):
     """(release, release_id) for a release OR release-group MBID/URL.
 
     One resolution path for every caller in this file: the edition is picked
-    by the auto-import policy (Official first, CD → Digital Media → … by
-    medium, earliest date breaking ties, promotional/bootleg editions never
-    while auto_import_avoid_promo is on, editions with no release country
-    never while auto_import_require_country is on). Raises 502 when
-    MusicBrainz cannot resolve the id at all."""
+    by the release-choice policy in `mlo.release_choice` (Official above
+    promotional/bootleg, the configured medium order with physical before
+    digital, the most complete tracklist, then the earliest date; the
+    preferred country and the original-over-reissue rule break ties), and its
+    reasons are reported next to the pick by `/api/mb/release-choice`. Raises
+    502 when MusicBrainz cannot resolve the id at all."""
     try:
         return intg.resolve_release(mbid)
     except Exception as e:
@@ -6568,6 +6685,28 @@ def organize(req: OrganizeRequest):
             new_root = os.path.commonpath(dst_dirs)
         except ValueError:
             new_root = os.path.dirname(moves[0][1]) if moves else p
+
+        # A framework album for this release may already sit where the script
+        # names — "Add to library" created that folder before the download
+        # existed. Its marker carries the release identity, so an album whose
+        # tags say it is the same release lands IN that folder: without this,
+        # a name that differs by one segment (the MEDIA spelling the importer
+        # detected vs MusicBrainz's) would drop the album beside the
+        # placeholder and leave the placeholder pending forever.
+        try:
+            from server import pending_albums
+            adopted = pending_albums.adopt_root(new_root, meta_tags)
+        except Exception:
+            traceback.print_exc()
+            adopted = new_root
+        if os.path.normcase(os.path.normpath(adopted)) != \
+                os.path.normcase(os.path.normpath(new_root)):
+            base = new_root
+            new_root = adopted
+            moves = [(s, os.path.join(adopted, os.path.relpath(d, base)))
+                     for s, d in moves]
+            dst_dirs = [os.path.join(adopted, os.path.relpath(d, base))
+                        for d in dst_dirs]
 
         # companion sidecars: same stem as an audio file, different extension.
         # Matches exact stems ("04 - Psycho.jpg") AND extended stems

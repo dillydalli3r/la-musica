@@ -21,9 +21,12 @@ import Modal from "../components/Modal";
 import MoreLikeThis from "../components/MoreLikeThis";
 import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
+import StarRating from "../components/StarRating";
+import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
 import TagActionsMenu from "../components/TagActionsMenu";
 import StatsPanel from "../components/StatsPanel";
 import TrackDetails, { CreditsPanel, creditTagsFrom } from "../components/TrackDetails";
+import { AlbumDetails } from "../components/AlbumDetails";
 import { SortHeader, sortRows, toggleSort, groupByDisc, type SortState } from "../lib/sort.tsx";
 import { ColumnsMenu, ColumnResizer, useColumnPrefs, useColumnWidths, useCustomColumns, customCols, customColValue, ALBUM_TRACK_COLS, ALBUM_TRACK_COL_W, ALBUM_TRACK_MIN_W, TAG_COL_W, type Col } from "../lib/columns";
 import { toast, useStore } from "../store";
@@ -95,6 +98,8 @@ export default function AlbumPage() {
   const [coverInfoOpen, setCoverInfoOpen] = useState(false);
   // Album-wide credits dialog — nothing is fetched until it is opened.
   const [creditsOpen, setCreditsOpen] = useState(false);
+  // Album details: the stored readout, rendered from THIS page's payload.
+  const [detailsOpen, setDetailsOpen] = useState(false);
   // track checkboxes (and the selection toolbar) only exist in select mode
   const [selectMode, setSelectMode] = useState(false);
   const [tagsDialogOpen, setTagsDialogOpen] = useState(false);
@@ -136,6 +141,10 @@ export default function AlbumPage() {
   // Whether the album-description check grades this folder (Settings →
   // Grading). The config is already in the app-wide cache, so this is free.
   const { data: config } = useQuery({ queryKey: ["config"], queryFn: api.config });
+  // One GET /api/ratings for the whole page (react-query dedupes it across
+  // every row) and the optimistic setter the star controls share.
+  const { data: ratingsData } = useRatings();
+  const { setRating, pending } = useSetRating();
 
   const convertVideos = async () => {
     setRemuxing(true);
@@ -302,6 +311,14 @@ export default function AlbumPage() {
   };
   const selectNoneHere = () =>
     setSelection({ tracks: selection.tracks.filter((p) => !data.tracks.some((t) => t.path === p)) });
+
+  const ratings = ratingsData?.ratings;
+  // The album's own star read-out: the mean over the tracks that ARE rated
+  // (an unrated track must not drag it toward zero), snapped to a half star.
+  const albumRatings = (data?.tracks ?? []).map((t) => ratingOf(ratings, t.path)).filter((v) => v > 0);
+  const albumRating = albumRatings.length
+    ? Math.round((albumRatings.reduce((a, b) => a + b, 0) / albumRatings.length) * 2) / 2
+    : 0;
 
   const queueTracks = data.tracks.map((t) => ({
     path: t.path, file: t.file, albumPath: data.path,
@@ -617,6 +634,11 @@ export default function AlbumPage() {
                     aria-label="Grading verdict"
                   />
                   <AdvisoryMark value={data.meta?.ITUNESADVISORY ?? data.meta?.ALBUMITUNESADVISORY} size="md" />
+                  {/* the album's average over the RATED tracks only — an unrated
+                      track must not drag it toward zero */}
+                  {albumRating > 0 && (
+                    <StarRating readOnly size="lg" showValue label="Album rating" value={albumRating} />
+                  )}
                   {/* MusicBrainz / RateYourMusic identity links: exactly one
                       of each — prefer the release over its group */}
                   <LinkChips
@@ -721,6 +743,7 @@ export default function AlbumPage() {
                     { label: "Organize (naming script)", icon: FolderSync, onClick: organizeAlbum },
                     { label: "Open folder", icon: FolderOpen, onClick: async () => { try { await api.openFolder(data.path); } catch (e) { toast.error(String(e)); } } },
                     { label: "Stats", icon: BarChart3, onClick: () => setStatsOpen(true) },
+                    { label: "Details", icon: InfoIcon, onClick: () => setDetailsOpen(true) },
                     { label: "Credits", icon: Users, onClick: () => setCreditsOpen(true) },
                   ],
                 },
@@ -951,6 +974,8 @@ export default function AlbumPage() {
           />
         </Modal>
       )}
+
+      {detailsOpen && <AlbumDetails album={data} onClose={() => setDetailsOpen(false)} />}
 
       {(selectMode || selectedHere.length > 0) && (
         <div className="flex items-center gap-2 bg-accent/15 border border-accent/40 rounded-lg px-3 py-2 flex-wrap">
@@ -1254,7 +1279,14 @@ export default function AlbumPage() {
                   </td>
                 )}
                 {trackCols.includes("genre") && <td className="td text-zinc-500 break-words">{tr.tags.GENRE ?? "—"}</td>}
-                {trackCols.includes("dur") && <td className="td text-zinc-500">{fmtDuration(tr.tech.length)}</td>}
+                {trackCols.includes("dur") && (
+                  <td className="td text-zinc-500">
+                    <div className="flex items-center gap-2">
+                      <StarRating size="sm" value={ratingOf(ratings, tr.path)} onChange={(v) => setRating(tr.path, v)} pending={pending(tr.path)} />
+                      <span>{fmtDuration(tr.tech.length)}</span>
+                    </div>
+                  </td>
+                )}
                 {trackCols.includes("bitrate") && (
                   <td className="td text-zinc-500">
                     {tr.tech.bitrate || tr.tech.bits_per_sample ? fmtTech(tr.tech) : "—"}

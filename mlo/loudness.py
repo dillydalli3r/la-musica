@@ -146,6 +146,20 @@ def _dr_python_usable(python):
         return False, str(e)
 
 
+def _drop_dr_file(dr_path):
+    """Remove dr.txt a failed meter run may have left in an ALBUM folder.
+
+    simple-dr-meter writes its log beside the music, so a failed or timed-out
+    run left a stray dr.txt in the user's library — a file grading then
+    reports as a disallowed sidecar, blaming the album for the tool's failure.
+    """
+    try:
+        if os.path.exists(dr_path):
+            os.remove(dr_path)
+    except OSError:
+        pass
+
+
 def _run_dr_meter(script_path, ffmpeg_dir, album, workdir, python=None):
     """Run simple-dr-meter on an album; returns path to dr.txt or None."""
     if python is None:
@@ -172,10 +186,14 @@ def _run_dr_meter(script_path, ffmpeg_dir, album, workdir, python=None):
             tail = (proc.stderr or "").strip().splitlines()
             log(c(f"      dr-meter: {(tail[-1] if tail else 'failed')}",
                   Color.YELLOW))
+            _drop_dr_file(dr_path)
             return None
-        return dr_path if os.path.isfile(dr_path) else None
+        if os.path.isfile(dr_path):
+            return dr_path
+        return None
     except Exception as e:
         log(c(f"      dr-meter error: {e}", Color.YELLOW))
+        _drop_dr_file(dr_path)
         return None
 
 

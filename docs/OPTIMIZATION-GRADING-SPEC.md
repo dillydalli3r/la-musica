@@ -51,10 +51,24 @@ Grade script (4) over an album and reading the report.
   `grade_check_artist_image` and `grade_check_artist_description`; with both
   switched off it reports 100 % and `pass: true` (nothing graded is nothing
   failed). An absent artist folder is `ARTIST_FOLDER_MISSING`.
+- **R7a — the artist image is judged on its decoded pixels**, never on its name
+  or suffix: Pillow reads the stored file, and every issue names the numbers it
+  judged. OVERSIZED fails (`image_policy()`'s ceiling: `artist_image_target_size`,
+  else the 2000 px `DEFAULT_MAX_SIDE`); a ratio further than 2 %
+  (`ASPECT_TOLERANCE`) from `artist_image_aspect` fails, naming both ratios and
+  the delta; a file that does not decode fails as `ARTIST_IMAGE_CORRUPT`; a
+  decodable image in a container the library does not read fails as
+  `ARTIST_IMAGE_FORMAT`; and a file larger than the size `save_image` recorded
+  writing it fails as `ARTIST_IMAGE_UPSCALED` (its detail is interpolated).
+  **Undersized is accepted** — it lands in the result's `notes` with the shortfall
+  and never fails, because nothing in the pipeline upscales and failing it would
+  fail the folder permanently. Script 19 (`Optimize artist images`) is the pass
+  that clears every one of these.
 
 ### Issue codes
 
-An issue is `{code, label, where}` for album-level problems and a code list
+An issue is `{code, label, where, reason}` for album-level and artist problems
+(`reason` is the sentence naming the numbers) and a code list
 (`["GENRE_COUNT", …]`) per track. The codes that exist today:
 
 | Code | Means |
@@ -74,11 +88,12 @@ An issue is `{code, label, where}` for album-level problems and a code list
 | `LOG_CHECKSUM` | the rip log's EAC SHA256 does not verify |
 | `AUDIT` | the audit tag is missing or not REAL (with `grade_check_audit` on) |
 | `EMPTY_FOLDER`, `EXPECTED_TRACKS_MISSING` | folder/release-level failures |
-| `ARTIST_IMAGE_MISSING`, `ARTIST_DESCRIPTION_MISSING`, `ARTIST_FOLDER_MISSING` | artist-folder failures |
+| `ARTIST_IMAGE_MISSING`, `ARTIST_IMAGE_CORRUPT`, `ARTIST_IMAGE_FORMAT`, `ARTIST_IMAGE_OVERSIZED`, `ARTIST_IMAGE_ASPECT`, `ARTIST_IMAGE_UPSCALED`, `ARTIST_DESCRIPTION_MISSING`, `ARTIST_FOLDER_MISSING` | artist-folder failures (script 19 clears the image ones) |
+| `ARTIST_IMAGE_UNDERSIZED` | informational note on an artist image below `artist_image_target_size` — reported, never failing |
 
 ---
 
-## 2. The 18 optimization scripts
+## 2. The 19 optimization scripts
 
 Ids, titles and the shipped order are `mlo/cli.py:SCRIPTS` and
 `mlo/config.py:DEFAULT_RUN_ALL_ORDER`; the runners are
@@ -86,9 +101,9 @@ Ids, titles and the shipped order are `mlo/cli.py:SCRIPTS` and
 chain both call).
 
 **R8 — Run All runs `run_all_order`**, shipped as
-`[11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 6, 7, 9, 12, 16, 10, 4]`: everything
+`[11, 3, 14, 15, 2, 1, 13, 18, 17, 8, 5, 19, 6, 7, 9, 12, 16, 10, 4]`: everything
 that moves a file first, everything that reads it last. A saved order is honoured
-as saved (ids outside 1–18 are dropped; legacy 8/9-id orders are migrated).
+as saved (ids outside 1–19 are dropped; legacy 8/9-id orders are migrated).
 **R9 — the import chain runs `import_scripts`**, shipped as
 `DEFAULT_CHAIN = [11, 3, 14, 15, 2, 1, 13, 18, 8, 5, 6, 7, 9, 12, 10, 4]`; an
 empty list means the default chain and `import_auto_scripts` (ON) off means "run
@@ -116,6 +131,7 @@ per-script results are returned (`server/script_runners.py`).
 | 16 | Mood & Energy | The mood classifier alone | `MOOD`, `ENERGY` | no | no |
 | 17 | Lyrics transliterate (AI) | Romanization/translation tags and sidecars, re-synced at `lrc_sync_level` | `TRANSLITERATION-*`, `TRANSLATION-*`, sidecars | no | **yes** (configured AI endpoint) |
 | 18 | Publish lyrics (LRCLIB) | Submits missing lyrics to the community database | nothing locally | no (external side effect) | **yes** (LRCLIB) |
+| 19 | Optimize artist images | Re-fits `Artists/<Artist>/artist.*` to `artist_image_aspect` / `artist_image_target_size`, re-encodes as `artist.jpg`/`artist.png` | the artist image in place (only when it has to move) | re-encodes in place; never deletes | no |
 
 **R11 — force flags are the only way to redo work.** Each script has one, and it
 is what makes the script look at a file it has already processed:
@@ -183,7 +199,7 @@ group still renders (section *Other checks*).
 
 | Check id | Label | Default | Asserts |
 | --- | --- | --- | --- |
-| `grade_check_artist_image` | Artist image stored | ON | the artist folder holds `artist.jpg`/`artist.png` (`ARTIST_IMAGE_MISSING`) |
+| `grade_check_artist_image` | Artist image stored | ON | the artist folder holds `artist.jpg`/`artist.png` within `artist_image_aspect` (±2 %) and under the size ceiling, in the library's format and decodable — see R7a (`ARTIST_IMAGE_MISSING` / `_CORRUPT` / `_FORMAT` / `_OVERSIZED` / `_ASPECT` / `_UPSCALED`; `ARTIST_IMAGE_UNDERSIZED` is a note) |
 | `grade_check_artist_description` | Artist description stored | ON | the artist folder holds a non-blank `description.txt` (`ARTIST_DESCRIPTION_MISSING`) |
 
 ### Auditing
@@ -537,6 +553,8 @@ checks see or how they judge it.
 | `cover_enforce_size` / `cover_enforce_square` | ON | whether the cover's size/squareness is enforced at all |
 | `cover_resize_enabled` / `cover_force_exact_size` | ON | whether the cover is expected to be the target size exactly |
 | `cover_target_size`, `cover_jpeg_target_size`, `cover_png_target_size`, `cover_jxl_target_size` | 1200 / 0 / 0 / 0 | expected cover dimensions (0 = the global target) |
+| `artist_image_aspect` / `artist_image_crop` | `1:1` / ON | the artist image's configured shape and whether it is enforced at all (off, or `cover_crop_enabled` off, means no aspect is graded; script 19 crops to the same value) |
+| `artist_image_target_size` | 0 | the artist image's size ceiling (0 = the provider's native size, bounded by the 2000 px `mlo.artistdata.DEFAULT_MAX_SIDE`); only OVERSIZED fails, undersized is a note |
 | `reencode_images` | ON | whether cover encoder tags are graded |
 | `encoder_tags` | per-format map | which `ENCODER_*` markers `grade_check_encoder` requires (`ENCODER_QUALITY` / `ENCODER_VERSION` on, `ENCODER_PROGRAM` off, per format) |
 | `strip_unknown_tags` | ON | whether `grade_check_excess_tags` reports junk tags |

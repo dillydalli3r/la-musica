@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Menu-consistency gate: every surface that lists the 18 scripts must agree.
+"""Menu-consistency gate: every surface that lists the 19 scripts must agree.
 
 Sources checked:
   * ``EXPECTED_SCRIPTS`` below — the frozen expected registry (number + name)
   * ``server/script_runners.py`` RUNNERS — the numbers /api/run accepts
   * ``web/src/lib/scripts.ts`` SCRIPTS    — the UI's single source of truth
-  * ``README.md``            the 18-script table
+  * ``README.md``            the 19-script table
   * ``web/src/lib/force.ts`` FORCE_SCRIPTS, ``SettingsPage`` FORCE_KEYS —
     the one-shot force switches must map onto /api/run's force dict keys
 
@@ -48,6 +48,10 @@ EXPECTED_SCRIPTS = {
     # 18 gives back: this library's lyrics are submitted to LRCLIB for
     # recordings the database does not have yet.
     18: "Publish lyrics (LRCLIB)",
+    # 19 re-fits the artist images already in the library to the configured
+    # aspect and size — the remedy for the codes grade_check_artist_image
+    # raises (mlo/artistdata.py run_optimize_artist_images).
+    19: "Optimize artist images",
 }
 
 
@@ -145,7 +149,7 @@ def check_run_all_migration(check):
     check("the stale script-15 entry is shed and 15 is re-anchored after beets",
           got.count(15) == 1 and got.index(15) == got.index(14) + 1, str(got))
     check("every script lands exactly once in a normalized order",
-          sorted(got) == list(range(1, 19)), str(sorted(got)))
+          sorted(got) == list(range(1, 20)), str(sorted(got)))
     # 17/18 were never in a saved order before they existed; the same
     # shed-and-anchor rule has to place them after the fetch they read from.
     check("18 (publish) lands after 13 (fetch lyrics) in a normalized order",
@@ -155,7 +159,7 @@ def check_run_all_migration(check):
 
     junk = cfg.normalize_config({"music_folder": "X", "run_all_order": [99, "a", 4, 4, -1]})
     check("unknown / duplicate run-all ids are dropped",
-          all(1 <= n <= 18 for n in junk["run_all_order"]) and len(set(junk["run_all_order"])) == len(junk["run_all_order"]),
+          all(1 <= n <= 19 for n in junk["run_all_order"]) and len(set(junk["run_all_order"])) == len(junk["run_all_order"]),
           str(junk["run_all_order"]))
 
     twice = cfg.normalize_config(cfg.normalize_config({"music_folder": "X"}))
@@ -207,8 +211,8 @@ def main():
             fail += 1
 
     print("scripts registry")
-    check("canonical registry has 18 scripts", len(canon) == 18, str(sorted(canon)))
-    check("canonical numbers are 1..18", sorted(canon) == list(range(1, 19)))
+    check("canonical registry has 19 scripts", len(canon) == 19, str(sorted(canon)))
+    check("canonical numbers are 1..19", sorted(canon) == list(range(1, 20)))
     check("server RUNNERS == canonical numbers", runners == set(canon), f"server={sorted(runners)}")
     check("web SCRIPTS == canonical numbers", set(web) == set(canon), f"web={sorted(web)}")
     check("README table == canonical numbers", readme == set(canon), f"readme={sorted(readme)}")
@@ -227,10 +231,10 @@ def main():
 
     print("run-all order")
     py_run_all = python_default_run_all()
-    check("DEFAULT_RUN_ALL covers every script", sorted(run_all) == list(range(1, 19)), str(sorted(run_all)))
+    check("DEFAULT_RUN_ALL covers every script", sorted(run_all) == list(range(1, 20)), str(sorted(run_all)))
     check("DEFAULT_RUN_ALL has no duplicates", len(run_all) == len(set(run_all)), str(run_all))
     check("mlo/config.py DEFAULT_RUN_ALL_ORDER covers every script",
-          sorted(py_run_all) == list(range(1, 19)), str(sorted(py_run_all)))
+          sorted(py_run_all) == list(range(1, 20)), str(sorted(py_run_all)))
     check("python and web run-all order agree", py_run_all == run_all,
           f"python={py_run_all} web={run_all}")
 

@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useParams, Link } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams, Link } from "react-router-dom";
 import {
   ChevronDown, ChevronUp, Download, ListMusic, ListPlus, ListStart, Pencil, Play, Plus, Trash2,
 } from "lucide-react";
@@ -17,32 +17,21 @@ import FavHeart from "../components/FavHeart";
 import OverflowMenu from "../components/OverflowMenu";
 import { trackRef, entityLinkClick } from "../lib/refs";
 import { fmtDuration } from "../lib/fmt";
-import type { FilterCondition, Playlist } from "../types";
+import {
+  fieldIndex, newCondition, opsFor, useLibraryFields, ValueControl,
+} from "../components/QueryBuilder";
+import type { LibraryCondition } from "../api";
+import type { Playlist } from "../types";
 
-const FIELDS = [
-  { value: "grade_pass", label: "Grade (pass/fail)" },
-  { value: "audit", label: "Audit" },
-  { value: "tags.GENRE", label: "Genre" },
-  { value: "tags.ITUNESADVISORY", label: "Advisory" },
-  { value: "tags.INSTRUMENTAL", label: "Instrumental" },
-  { value: "tags.MEDIA", label: "Media" },
-  { value: "tags.SOURCE", label: "Source" },
-  { value: "tags.DATE", label: "Year" },
-  { value: "lyrics_present", label: "Has lyrics" },
-  { value: "tech.length", label: "Duration (s)" },
-  { value: "tech.bitrate", label: "Bitrate" },
-  { value: "tags.TITLE", label: "Title" },
-];
-
-const OPS = [
-  { value: "eq", label: "=" },
-  { value: "ne", label: "≠" },
-  { value: "contains", label: "contains" },
-  { value: "lt", label: "<" },
-  { value: "gt", label: ">" },
-  { value: "missing", label: "is missing" },
-  { value: "present", label: "is present" },
-];
+/** The rule editor renders the app's ONE field catalogue
+ *  (`GET /api/library/fields`) — the same list the Browse page's builder and
+ *  facet rail render — so a field or operator added on the server shows up
+ *  here too instead of drifting behind a second hardcoded list.
+ *
+ *  A spec written before that catalogue existed may name a field it no longer
+ *  lists (`grade_pass`, `tech.length`): the row keeps the raw key as a
+ *  selectable option and the engine still resolves it, so opening an older
+ *  smart playlist can never silently rewrite or drop its rules. */
 
 /** Deterministic per-playlist cover gradient (same recipe as the cards). */
 function coverGradient(p: Playlist): string {
@@ -68,11 +57,18 @@ export default function PlaylistDetailPage() {
   });
   const { data: detail, error: detailError } = useQuery({ queryKey: ["playlist", pid], queryFn: () => api.playlist(pid) });
   const { data: lib } = useQuery({ queryKey: ["library"], queryFn: api.library });
+  const { data: catalogue } = useLibraryFields();
+  const fields = useMemo(() => fieldIndex(catalogue), [catalogue]);
 
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(playlist?.name ?? "");
   const [filterOpen, setFilterOpen] = useState(false);
-  const [conditions, setConditions] = useState<FilterCondition[]>([]);
+  // `?rules=1` is how a just-created smart playlist lands the user in the rule
+  // editor instead of an empty page: the create button in the playlists list
+  // sends it, and the param is stripped once the editor is open so a refresh
+  // or a back-navigation does not reopen a modal the user closed.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [conditions, setConditions] = useState<LibraryCondition[]>([]);
   const [matchAll, setMatchAll] = useState(true);
   const [dragIdx, setDragIdx] = useState<number | null>(null);
   const [overIdx, setOverIdx] = useState<number | null>(null);
@@ -130,6 +126,24 @@ export default function PlaylistDetailPage() {
     [tracks, trackMeta]
   );
 
+  // A just-created smart playlist links here with `?rules=1`: the editor opens
+  // on arrival and the param is dropped straight away, so a refresh or a back
+  // navigation does not reopen a modal the user has since closed.
+  //
+  // This effect MUST stay above the loading/not-found returns below: a hook
+  // that only runs on the renders that got past them changes the hook order
+  // between one render and the next, which is a crash — and it does happen on
+  // a real path, because a deep link or a reload renders once with no playlist
+  // yet. So it opens the editor from the playlist itself rather than through
+  // `openFilterEditor`, which is defined below the returns.
+  useEffect(() => {
+    if (searchParams.get("rules") !== "1" || !playlist) return;
+    setConditions(playlist.filter?.conditions ?? []);
+    setMatchAll(playlist.filter?.match !== "any");
+    setFilterOpen(true);
+    setSearchParams({}, { replace: true });
+  }, [playlist, searchParams, setSearchParams]);
+
   const enqueue = (position: "next" | "end") => {
     if (!queueTracks.length) return;
     if (!queue.length) {
@@ -148,7 +162,6 @@ export default function PlaylistDetailPage() {
     },
     onError: (e) => toast.error(String(e)),
   });
-
   const del = useMutation({
     mutationFn: () => api.deletePlaylist(pid),
     onSuccess: () => {
@@ -486,28 +499,74 @@ export default function PlaylistDetailPage() {
             <input type="checkbox" checked={matchAll} onChange={(e) => setMatchAll(e.target.checked)} />
             Match all conditions (AND)
           </label>
-          {conditions.map((c, i) => (
-            <div key={i} className="flex gap-2">
-              <select className="input flex-1" value={c.field} onChange={(e) => setConditions((cs) => cs.map((x, j) => (j === i ? { ...x, field: e.target.value } : x)))}>
-                {FIELDS.map((f) => (
-                  <option key={f.value} value={f.value}>{f.label}</option>
-                ))}
-              </select>
-              <select className="input w-28" value={c.op} onChange={(e) => setConditions((cs) => cs.map((x, j) => (j === i ? { ...x, op: e.target.value } : x)))}>
-                {OPS.map((o) => (
-                  <option key={o.value} value={o.value}>{o.label}</option>
-                ))}
-              </select>
-              {!["missing", "present"].includes(c.op) && (
-                <input className="input w-32" value={String(c.value ?? "")} onChange={(e) => setConditions((cs) => cs.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)))} />
-              )}
-              <button className="btn-danger !px-2" onClick={() => setConditions((cs) => cs.filter((_, j) => j !== i))} title="Remove condition" aria-label="Remove condition">
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          ))}
+          {conditions.map((c, i) => {
+            const def = fields.get(c.field);
+            const ops = opsFor(def);
+            return (
+              <div key={i} className="flex flex-wrap items-center gap-2">
+                <select
+                  className="input !py-1 text-xs flex-1 min-w-[150px]"
+                  aria-label="Field"
+                  value={c.field}
+                  onChange={(e) => {
+                    // A different field means a different operator set and a
+                    // different kind of value: start that row over from the
+                    // new field's own defaults rather than carrying an op the
+                    // new field does not offer.
+                    const next = fields.get(e.target.value);
+                    setConditions((cs) =>
+                      cs.map((x, j) => (j === i ? (next ? newCondition(next) : { ...x, field: e.target.value }) : x))
+                    );
+                  }}
+                >
+                  {/* A field the catalogue no longer lists (an older saved
+                      spec) stays selectable instead of being rewritten. */}
+                  {!def && <option value={c.field}>{c.field} (older field)</option>}
+                  {(catalogue?.groups ?? []).map((g) => (
+                    <optgroup key={g.id} label={g.label}>
+                      {g.fields.map((f) => (
+                        <option key={f.field} value={f.field}>
+                          {f.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+                <select
+                  className="input !py-1 text-xs w-32"
+                  aria-label="Operator"
+                  value={c.op}
+                  onChange={(e) => setConditions((cs) => cs.map((x, j) => (j === i ? { ...x, op: e.target.value } : x)))}
+                >
+                  {ops.some((o) => o.op === c.op) ? null : <option value={c.op}>{c.op}</option>}
+                  {ops.map((o) => (
+                    <option key={o.op} value={o.op}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+                <ValueControl
+                  def={def}
+                  op={c.op}
+                  value={c.value ?? null}
+                  onChange={(v) => setConditions((cs) => cs.map((x, j) => (j === i ? { ...x, value: v } : x)))}
+                  className="w-36"
+                />
+                <button className="btn-danger !px-2 ml-auto" onClick={() => setConditions((cs) => cs.filter((_, j) => j !== i))} title="Remove condition" aria-label="Remove condition">
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            );
+          })}
           <div>
-            <button className="btn-ghost text-xs" onClick={() => setConditions((cs) => [...cs, { field: "grade_pass", op: "eq", value: false }])}>
+            <button
+              className="btn-ghost text-xs"
+              disabled={!catalogue}
+              onClick={() => {
+                const first = catalogue?.groups.flatMap((g) => g.fields)[0];
+                if (first) setConditions((cs) => [...cs, newCondition(first)]);
+              }}
+            >
               <Plus className="h-3.5 w-3.5" /> Add condition
             </button>
           </div>

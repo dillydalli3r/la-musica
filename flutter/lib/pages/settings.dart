@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
 import '../api.dart';
+import '../open_external.dart';
+import '../project.dart';
 import '../shell.dart';
 import '../state.dart';
 import '../theme.dart';
@@ -58,6 +60,9 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _saving = false;
   String? _error;
   String? _healthNote;
+  // Where the project lives: from /api/health when it carries the fields, from
+  // the build's own constants otherwise (see lib/project.dart).
+  ProjectLinks _project = const ProjectLinks();
 
   String _rgMode = 'track';
   final TextEditingController _preamp = TextEditingController();
@@ -120,9 +125,12 @@ class _SettingsPageState extends State<SettingsPage> {
         try {
           final health = await client.health();
           if (mounted) {
-            setState(
-              () => _healthNote = health['version']?.toString() ?? 'unknown',
-            );
+            setState(() {
+              _healthNote = health['version']?.toString() ?? 'unknown';
+              // Same answer, no second request: the project links ride along
+              // with the version.
+              _project = ProjectLinks.fromHealth(health);
+            });
           }
         } on ApiException catch (e) {
           if (mounted) setState(() => _healthNote = e.message);
@@ -535,8 +543,42 @@ class _SettingsPageState extends State<SettingsPage> {
             onTap: _saving ? null : _signOut,
           ),
         ]),
+        // The app credits every service it leans on, so it points back at
+        // itself too: the repository, and where a bug report goes. Both links
+        // come from the server's own REPO constant via /api/health.
+        const SectionLabel('Project'),
+        _card([
+          ListTile(
+            dense: true,
+            leading: const Icon(Icons.code, size: 20),
+            title: const Text('Source code'),
+            subtitle: Text(_project.repo),
+            trailing: const Icon(Icons.open_in_new, size: 18),
+            onTap: () => _openProject(_project.repo),
+          ),
+          ListTile(
+            dense: true,
+            leading: const Icon(Icons.bug_report_outlined, size: 20),
+            title: const Text('Report an issue'),
+            subtitle: Text(_project.issues),
+            trailing: const Icon(Icons.open_in_new, size: 18),
+            onTap: () => _openProject(_project.issues),
+          ),
+        ]),
       ],
     );
+  }
+
+  /// Hand a link to the user's own browser. The platform opener does not exist
+  /// everywhere (a mobile build has none), so a failure shows the URL to copy
+  /// instead of pretending the link opened.
+  Future<void> _openProject(String url) async {
+    final opened = await openExternal(url);
+    if (!opened && mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: SelectableText(url)));
+    }
   }
 
   Widget _card(List<Widget> children) => Card(

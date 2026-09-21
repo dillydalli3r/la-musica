@@ -27,7 +27,7 @@ from .cue import canonical_cue_text
 from .deps import HAS_PIL, Image
 from .images import _exif_transposed
 from .lyrics import _canonical_lyrics, format_lyrics_text
-from .paths import AUDIO_EXTS, IMAGE_EXTS
+from .paths import AUDIO_EXTS, IMAGE_EXTS, fsync_dir
 from .stats import _collect_targets, _walk_files, new_stats, _make_pbar, worker_count
 from .ui import print_header, log, c, Color
 
@@ -190,10 +190,22 @@ def _format_embedded_covers(path, cfg, cover_cache, af=None):
         data, mime = prep
         if len(pics) == 1 and pics[0][0] == mime and pics[0][1] == data:
             return (path, False, None)  # exactly this art is already embedded
+        # Replacing art is TWO mutations of one container — strip the old
+        # picture, then add the new one. Each wrote the whole file for itself
+        # and the tag pass below wrote a third time; deferring both into one
+        # flush saves a full container rewrite per re-covered file, and the
+        # tag pass only writes again when a tag actually changed.
+        af.defer_save(True)
         if pics and not af.remove_embedded_pictures():
+            af.defer_save(False)
             return (path, False, af.error or "could not replace embedded art")
         if not af.add_embedded_picture(data, mime):
+            af.defer_save(False)
             return (path, False, af.error or "could not embed cover")
+        if af.defer_save(False) is False:
+            # A failed flush is an error, never a reported success: the art is
+            # not on disk and grading would keep failing on the old picture.
+            return (path, False, af.error or "could not write embedded art")
         return (path, True, None)
     except Exception as e:
         return (path, False, str(e))
@@ -225,14 +237,7 @@ def _format_accurip_file(path, cfg=None, force=False):
                 pass
         os.replace(tmp, path)
         # Ensure directory entry is durable
-        try:
-            d_fd = os.open(os.path.dirname(path) or ".", os.O_DIRECTORY)
-            try:
-                os.fsync(d_fd)
-            finally:
-                os.close(d_fd)
-        except Exception:
-            pass
+        fsync_dir(os.path.dirname(path))
         return (path, True, None)
     except Exception as e:
         try:
@@ -244,27 +249,21 @@ def _format_accurip_file(path, cfg=None, force=False):
 
 
 def _format_cue_file(path, cfg, force=False):
-    # Repoint FILE lines first: this pass bakes the sheet into canonical form
-    # verbatim, so a stale name would be written in as if it were correct.
-    try:
-        from .discs import fix_cue_filenames
-        fix_cue_filenames(os.path.dirname(path) or ".", config=cfg)
-    except Exception:
-        pass
+    # FILE references are repointed ONCE per album folder by run_format_all
+    # before any sheet is submitted (see the .cue block there): doing it here
+    # re-read and re-matched every sheet in the folder once per sheet.
     try:
         with open(path, "rb") as raw:
             data = raw.read()
         if b"\x00" in data:
             return (path, False, None)
-        if data.startswith(b"\xef\xbb\xbf"):
-            # BOM will be stripped, so needs formatting
-            pass
+        # Decoded from the bytes just read. Opening the file again for
+        # utf-8-sig — and a third time for latin-1 — read the very same bytes
+        # off the disk twice more; decoding the buffer is the same text.
         try:
-            with open(path, "r", encoding="utf-8-sig", newline="") as f:
-                original = f.read()
+            original = data.decode("utf-8-sig")
         except UnicodeDecodeError:
-            with open(path, "r", encoding="latin-1", newline="") as f:
-                original = f.read()
+            original = data.decode("latin-1")
         canonical = canonical_cue_text(
             original,
             keep_empty_lines=cfg.get("keep_empty_cue_lines", False),
@@ -284,14 +283,7 @@ def _format_cue_file(path, cfg, force=False):
             except Exception:
                 pass
         os.replace(tmp, path)
-        try:
-            d_fd = os.open(os.path.dirname(path) or ".", os.O_DIRECTORY)
-            try:
-                os.fsync(d_fd)
-            finally:
-                os.close(d_fd)
-        except Exception:
-            pass
+        fsync_dir(os.path.dirname(path))
         return (path, True, None)
     except Exception as e:
         return (path, False, str(e))
@@ -349,14 +341,7 @@ def _format_lrc_file(path, cfg, force=False):
             except Exception:
                 pass
         os.replace(tmp, path)
-        try:
-            d_fd = os.open(os.path.dirname(path) or ".", os.O_DIRECTORY)
-            try:
-                os.fsync(d_fd)
-            finally:
-                os.close(d_fd)
-        except Exception:
-            pass
+        fsync_dir(os.path.dirname(path))
         return (path, True, None)
     except Exception as e:
         return (path, False, str(e))
@@ -604,6 +589,19 @@ def run_format_all(config):
                     try: pbar.update(1)
                     except: pass
         # .cue
+        # Repoint stale FILE references once per ALBUM folder, before any of
+        # its sheets is submitted: _format_cue_file used to do it for itself,
+        # so a folder with N sheets re-read and re-matched all of them N times
+        # (and a sheet could be formatted before a sibling's repair landed).
+        try:
+            from .discs import fix_cue_filenames
+            for ad in sorted({os.path.dirname(f) or "." for f in cue_files}):
+                try:
+                    fix_cue_filenames(ad, config=config)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         futures = {}
         for f in cue_files:
             fut = ex.submit(_format_cue_file, f, config, force["cue"])

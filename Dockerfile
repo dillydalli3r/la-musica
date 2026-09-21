@@ -80,9 +80,20 @@ ENV HOME=/home/mlo
 # leaves it empty, and the server then reports its own code version instead of
 # claiming to be a release it is not. `tools/check_versions.py` keeps the
 # ARG default in step with mlo/__init__.py.
-ARG MLO_VERSION=3.2.0
+ARG MLO_VERSION=3.3.0
 ENV MLO_VERSION=${MLO_VERSION}
+# The commit the image was built from, and when. The release workflow passes
+# both; a plain `docker build` leaves them empty and the server then reports
+# the code version alone rather than inventing a revision. They exist so the
+# running app can answer "which image am I?" beside "which release is newest?"
+# — the two facts a user needs to tell a stale image from a broken updater.
+ARG MLO_REVISION=""
+ARG MLO_BUILT=""
+ENV MLO_REVISION=${MLO_REVISION} \
+    MLO_BUILT=${MLO_BUILT}
 LABEL org.opencontainers.image.version="${MLO_VERSION}" \
+      org.opencontainers.image.revision="${MLO_REVISION}" \
+      org.opencontainers.image.created="${MLO_BUILT}" \
       org.opencontainers.image.title="la musica" \
       org.opencontainers.image.source="https://github.com/dillydalli3r/la-musica"
 

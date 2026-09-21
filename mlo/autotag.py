@@ -432,30 +432,48 @@ def _fill_release_tags(info, config, album_dir):
             ("MUSICBRAINZ_RELEASETRACKID", slot.get("release_track_mbid") or ""),
             ("ISRC", (slot.get("isrcs") or [""])[0]),
         ]
-        for tag, value in values + per_track:
-            try:
-                have = str(af.get_tag(tag) or "").strip()
-                if have:
-                    # A tag that already holds a value is never overwritten.
-                    # The one exception is a DATE MusicBrainz spells more
-                    # precisely: the album folder is named after it, so a
-                    # bare year would otherwise pin the folder there for
-                    # good. fuller_date can only add detail.
-                    value = fuller_date(have, value)
-                    if not value:
+        # ONE container rewrite per file. Each set_tag used to save the whole
+        # file for itself, so filling twelve tags on a 30 MB track rewrote it
+        # twelve times; the flush below is where all of them land. A handle
+        # that only implements the get/set contract (a caller's stub) simply
+        # writes per tag, like before.
+        defer = hasattr(af, "defer_save")
+        if defer:
+            af.defer_save(True)
+        pending = 0
+        try:
+            for tag, value in values + per_track:
+                try:
+                    have = str(af.get_tag(tag) or "").strip()
+                    if have:
+                        # A tag that already holds a value is never overwritten.
+                        # The one exception is a DATE MusicBrainz spells more
+                        # precisely: the album folder is named after it, so a
+                        # bare year would otherwise pin the folder there for
+                        # good. fuller_date can only add detail.
+                        value = fuller_date(have, value)
+                        if not value:
+                            continue
+                    if not str(value or "").strip():
+                        # An empty answer is not a value. Writing it produced a
+                        # blank tag AND counted as "written" on every run — an
+                        # unmatched track, or a release that simply has no
+                        # artist/ISRC/status for this file, looked tagged.
                         continue
-                if not str(value or "").strip():
-                    # An empty answer is not a value. Writing it produced a
-                    # blank tag AND counted as "written" on every run — an
-                    # unmatched track, or a release that simply has no
-                    # artist/ISRC/status for this file, looked tagged.
+                    if not should_write_audio_tag(config, tag, filepath=af.path):
+                        continue      # the same gate every write here honours
+                    if af.set_tag(tag, value):
+                        pending += 1
+                except Exception:
                     continue
-                if not should_write_audio_tag(config, tag, filepath=af.path):
-                    continue          # the same gate every write here honours
-                if af.set_tag(tag, value):
-                    written += 1
-            except Exception:
-                continue
+        finally:
+            # The one write of this file. A failed flush wrote nothing, so the
+            # tags never reached the disk and must not be reported as written;
+            # a Ctrl+C between here and the loop's end still flushes what the
+            # loop already applied instead of dropping it.
+            if defer and af.defer_save(False) is not True:
+                pending = 0
+        written += pending
     if not written:
         return 0, "release tags: nothing to fill"
     note = f"release tags={written}"
@@ -538,6 +556,10 @@ def run_auto_tagging(config):
 
         # Single pass: load every file once and cache the values needed,
         # instead of re-parsing each file for advisory + instrumental.
+        # The handle stays valid across every write below: AudioFile.set_tag()
+        # drops its own read caches, so a later get_tag() on this same
+        # instance already sees the value just written — re-opening the file
+        # per fix (one full container parse each) bought nothing.
         info = []
         for path in files:
             try:
@@ -579,7 +601,6 @@ def run_auto_tagging(config):
                         value = split_stored(stripped) or stripped
                         if d["af"].set_tag("GENRE", value):
                             modified += 1
-                            d["af"] = AudioFile(d["af"].path)  # refresh
             except Exception:
                 pass
             # ITUNESADVISORY: trim spaces; keep 0/1/2 only (grading will flag others)
@@ -632,7 +653,6 @@ def run_auto_tagging(config):
                     modified += 1
                     instrumental_modified += 1
                     d["instrumental"] = str(target)
-                    d["af"] = AudioFile(d["af"].path)  # refresh
             if instrumental_modified:
                 notes.append("instrumental")
 

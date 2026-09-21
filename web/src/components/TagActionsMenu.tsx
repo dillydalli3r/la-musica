@@ -1,12 +1,15 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Activity, BadgeInfo, Disc3, Flame, Gauge, ImagePlus, ListMusic, Music2, Music4, RefreshCw,
-  ShieldCheck, Sparkles, Tags,
+  Activity, BadgeInfo, Disc3, Flame, Gauge, ImagePlus, Info, ListMusic, Music2, Music4, RefreshCw,
+  ShieldCheck, Sparkles, Tags, Users,
 } from "lucide-react";
 import { api } from "../api";
 import OverflowMenu from "./OverflowMenu";
 import MetadataReviewModal from "./MetadataReviewModal";
+import Modal from "./Modal";
+import { CreditsPanel } from "./TrackDetails";
+import { DetailsDialog } from "./AlbumDetails";
 import { toast } from "../store";
 import type { ScriptRunResult } from "../types";
 
@@ -46,6 +49,12 @@ export default function TagActionsMenu({
   buttonLabel?: string;
 }) {
   const [review, setReview] = useState<null | "artist" | "album">(null);
+  // Credits / Details of the CURRENT selection. Per release, so they need an
+  // album folder (the whole release) or exactly one file (that recording);
+  // a multi-track selection without an album has nothing to show.
+  const [view, setView] = useState<null | "credits" | "details">(null);
+  const viewable = !!albumPath || paths.length === 1;
+  const singleTrack = albumPath ? undefined : paths[0];
   const navigate = useNavigate();
 
   // Generic over the reply: each action reports from its OWN payload, so the
@@ -83,6 +92,29 @@ export default function TagActionsMenu({
         icon={Tags}
         label={buttonLabel}
         sections={[
+          {
+            // What the selection IS, before what can be done to it: the
+            // release's credits (or the single track's) and the stored readout.
+            title: "View",
+            items: [
+              {
+                label: albumPath ? "Credits (this album)…" : "Credits (this track)…",
+                icon: Users,
+                hidden: !viewable,
+                title: albumPath
+                  ? "Performers, instruments and studio roles for the whole release — one MusicBrainz request"
+                  : "Performers, instruments and studio roles for this recording",
+                onClick: () => setView("credits"),
+              },
+              {
+                label: albumPath ? "Details (this album)…" : "Details (this track)…",
+                icon: Info,
+                hidden: !viewable,
+                title: "The stored tags, technical readout and grading for the selection",
+                onClick: () => setView("details"),
+              },
+            ],
+          },
           {
             title: "Tags",
             items: [
@@ -222,6 +254,24 @@ export default function TagActionsMenu({
           onClose={() => setReview(null)}
           onSaved={onDone}
         />
+      )}
+      {view === "credits" && (
+        <Modal
+          onClose={() => setView(null)}
+          icon={Users}
+          title="Credits"
+          subtitle={albumPath || singleTrack}
+          width="max-w-lg"
+          bodyClass="px-5 py-5"
+        >
+          {/* An album is one release request; a single file is one recording
+              request. Both come from the same panel the album and track pages
+              mount, so the three entry points cannot drift apart. */}
+          <CreditsPanel album={albumPath} path={singleTrack} />
+        </Modal>
+      )}
+      {view === "details" && (
+        <DetailsDialog albumPath={albumPath} trackPath={singleTrack} onClose={() => setView(null)} />
       )}
     </>
   );

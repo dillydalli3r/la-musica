@@ -101,6 +101,9 @@ _HOST_WAIT = {
     "ws.audioscrobbler.com": 1.05,
     "api.discogs.com": 1.05,
     "www.wikidata.org": 1.05,
+    # ListenBrainz Labs serves the similar-artists feed; it is the same
+    # MetaBrainz service as api.listenbrainz.org, so it keeps the same 1 req/s.
+    "labs.api.listenbrainz.org": 1.05,
 }
 
 
@@ -117,6 +120,33 @@ def _host_unreachable(host, reason):
             return
         _HOST_WARNED.add(host)
     print(f"[mlo] {host}: {reason} — that source is skipped this run")
+
+
+# Why a host last refused, per host: the status and the body it sent back.
+# `_json` answers None for every failure, which is right for a library pass —
+# but a REJECTED key and "this album is not there" both arrive as None, and
+# the settings panel has to tell them apart ("Discogs refused the token: HTTP
+# 401 …" is a different fix from "no release matched"). One entry per host is
+# enough because the only reader is a probe that just made the call itself.
+_LAST_HTTP: dict = {}
+_LAST_HTTP_LOCK = threading.Lock()
+
+
+def last_http_error(host):
+    """The last refusal *host* gave, or {} — `{status, body, url, at}`.
+
+    `status` is None when nothing answered at all (DNS, refused, timeout);
+    `body` is the first 300 characters of the response, verbatim, because a
+    provider's own sentence ("Invalid API key") is the whole diagnosis."""
+    with _LAST_HTTP_LOCK:
+        got = _LAST_HTTP.get(str(host or ""))
+        return dict(got) if got else {}
+
+
+def _record_http_error(host, url, status, body):
+    with _LAST_HTTP_LOCK:
+        _LAST_HTTP[host] = {"status": status, "body": (body or "")[:300],
+                            "url": url, "at": time.time()}
 
 
 TTL_META = 1800.0        # artist/album metadata, images, descriptions, MBIDs
@@ -244,10 +274,16 @@ def _json(url, params=None, headers=None, timeout=None, ttl=TTL_META, host=None)
             # 404 is an identity that does not exist there, not a dead source.
             if resp.status_code != 404:
                 _host_unreachable(target, f"HTTP {resp.status_code}")
+            # EVERY >=400 keeps its body: a 401/403 from a keyed provider is
+            # the credential answer, and the provider's own words are the only
+            # honest way to report it.
+            _record_http_error(target, url, resp.status_code,
+                               getattr(resp, "text", ""))
         else:
             data = resp.json()
     except Exception as e:
         data = None
+        _record_http_error(host or "", url, None, f"{type(e).__name__}: {e}")
         _host_unreachable(host or "", f"no answer ({type(e).__name__})")
     finally:
         with _CACHE_LOCK:
@@ -538,6 +574,8 @@ def listenbrainz_top_artists(range_="month", limit=25, timeout=None):
             "popularity": _int(item.get("listen_count")),
             "popularity_label": _listens_label(_int(item.get("listen_count"))),
             "source": "listenbrainz",
+            "link": (f"https://musicbrainz.org/artist/{item['artist_mbid']}"
+                     if item.get("artist_mbid") else None),
         })
     return rows
 
@@ -558,6 +596,8 @@ def listenbrainz_top_recordings(range_="month", limit=25, timeout=None):
             "popularity": _int(item.get("listen_count")),
             "popularity_label": _listens_label(_int(item.get("listen_count"))),
             "source": "listenbrainz",
+            "link": (f"https://musicbrainz.org/recording/{item['recording_mbid']}"
+                     if item.get("recording_mbid") else None),
         })
     return rows
 
@@ -811,15 +851,19 @@ def _discogs_release(artist, album, cfg=None, timeout=None):
         return None
     data = _json(f"{DISCOGS_BASE}/database/search",
                  {"artist": artist, "release_title": album, "type": "release",
-                  "token": token, "per_page": 3}, timeout=timeout)
+                  "token": token, "per_page": 3}, timeout=timeout,
+                 host="api.discogs.com")
     results = (data or {}).get("results") or []
     if not results:
         return None
     rid = results[0].get("id")
     if not rid:
         return None
+    # `host=` labels both requests as Discogs for the throttle, the "one line
+    # per dead host" log AND the refusal record a probe reads — one service
+    # must not split into two hostnames.
     return _json(f"{DISCOGS_BASE}/releases/{rid}", {"token": token},
-                 timeout=timeout)
+                 timeout=timeout, host="api.discogs.com")
 
 
 def discogs_album_genres(artist, album, cfg=None, timeout=None):
@@ -858,14 +902,119 @@ def _lastfm_key(cfg):
     return str((cfg or {}).get("lastfm_api_key") or "").strip()
 
 
-def _lastfm_tags(method, params, cfg=None, timeout=None):
-    """`{method}` top tags for one entity; [] without a key or on any failure."""
+# The host every Last.fm call is throttled and recorded against.
+_LASTFM_HOST = "ws.audioscrobbler.com"
+
+
+def _lastfm_json(method, params, cfg=None, timeout=None, ttl=TTL_META):
+    """One Last.fm call, or None without a key / on any failure.
+
+    The keyed sibling of `_json` for audioscrobbler: same transport, same TTL
+    cache and same 1 req/s etiquette, with the API key and the JSON envelope
+    Last.fm insists on. Every Last.fm reader in this module (the genre chain
+    and the Discover tag feeds) goes through this one seam.
+
+    A REFUSED key is recorded, not swallowed: Last.fm states an invalid key in
+    its own envelope (`{"error": 10, "message": "Invalid API key"}`) which is
+    an ordinary 200 or 403 carrying nothing the readers look for, so without
+    this the source reported "no Last.fm tags" for a key that was never
+    accepted. `lastfm_last_error()` is what the Test row reads."""
     key = _lastfm_key(cfg)
     if not key:
-        return []
+        return None
     sent = dict(params, method=method, api_key=key, format="json", autocorrect=1)
-    data = _json(LASTFM_BASE, sent, timeout=timeout,
-                 host="ws.audioscrobbler.com")
+    data = _json(LASTFM_BASE, sent, timeout=timeout, ttl=ttl,
+                 host=_LASTFM_HOST)
+    if isinstance(data, dict) and data.get("error"):
+        code = data.get("error")
+        message = str(data.get("message") or "").strip()
+        _record_http_error(_LASTFM_HOST, LASTFM_BASE, None,
+                           f"error {code}: {message}" if message
+                           else f"error {code}")
+        return None
+    return data
+
+
+def lastfm_last_error(since=None):
+    """Why Last.fm last refused, as its own words, or "" — see `_lastfm_json`.
+
+    `since` (a `time.time()` stamp taken before the call) filters out a
+    refusal from an earlier run: the record is per host and process-wide, so
+    without it a probe could report an earlier 403 as its own answer."""
+    got = last_http_error(_LASTFM_HOST)
+    if not got or (since and float(got.get("at") or 0) < float(since)):
+        return ""
+    if got.get("status"):
+        return f"HTTP {got['status']}: {got.get('body') or ''}".strip()
+    return str(got.get("body") or "")
+
+
+def lastfm_check(cfg=None, timeout=None):
+    """Is the saved `lastfm_api_key` accepted? -> `{ok, checked, detail}`.
+
+    `chart.gettoptags` is the cheapest call Last.fm answers for a key alone: a
+    chart, so no user, no artist and no tag has to exist for it to be a real
+    request. Live by construction (`ttl=0`) — a Test button must ask again
+    after a key is pasted, not be served this process's cached answer."""
+    key = _lastfm_key(cfg)
+    if not key:
+        return {"ok": False, "checked": "",
+                "detail": "no lastfm_api_key is set"}
+    started = time.time()
+    data = _lastfm_json("chart.gettoptags", {"limit": 1}, cfg, timeout=timeout,
+                        ttl=0)
+    tags = (((data or {}).get("tags") or {}).get("tag")) or []
+    if isinstance(tags, dict):
+        tags = [tags]
+    if tags:
+        return {"ok": True, "detail": ("key accepted — chart.gettoptags "
+                                       "answered"),
+                "checked": "chart.gettoptags", "tags": len(tags)}
+    reason = lastfm_last_error(started)
+    return {"ok": False, "checked": "chart.gettoptags",
+            "detail": (f"Last.fm rejected the API key — {reason}" if reason
+                       else "Last.fm answered chart.gettoptags with no tags")}
+
+
+def discogs_check(cfg=None, timeout=None):
+    """Is the saved `discogs_token` accepted? -> `{ok, checked, detail}`.
+
+    `/oauth/identity` is Discogs' own "who is this token" endpoint, and it is
+    the ONE endpoint that wants the token in a header
+    (`Authorization: Discogs token=<t>`) rather than the `token` query
+    parameter the data endpoints take — Discogs documents both forms, and a
+    token pasted from the developer page works as either. Asking identity
+    separately is what tells a REJECTED token apart from "the sample release
+    is not in Discogs": `database/search` answers anonymously, so a discarded
+    token used to look like a working source."""
+    token = str((cfg or {}).get("discogs_token") or "").strip()
+    if not token:
+        return {"ok": False, "checked": "",
+                "detail": "no discogs_token is set"}
+    started = time.time()
+    data = _json(f"{DISCOGS_BASE}/oauth/identity", {}, headers={
+        "Authorization": f"Discogs token={token}"}, timeout=timeout, ttl=0,
+        host="api.discogs.com")
+    username = str((data or {}).get("username") or "").strip()
+    if username:
+        return {"ok": True, "checked": "GET /oauth/identity",
+                "detail": f"token accepted as {username} (GET /oauth/identity)",
+                "username": username}
+    got = last_http_error("api.discogs.com")
+    if float(got.get("at") or 0) < started:
+        got = {}
+    if got.get("status"):
+        return {"ok": False, "checked": "GET /oauth/identity",
+                "detail": f"Discogs rejected the token — HTTP {got['status']}"
+                          + (f" {got['body']}".rstrip() if got.get("body") else "")}
+    return {"ok": False, "checked": "GET /oauth/identity",
+            "detail": "Discogs did not answer"
+                      + (f" ({got['body']})" if got.get("body") else "")}
+
+
+def _lastfm_tags(method, params, cfg=None, timeout=None):
+    """`{method}` top tags for one entity; [] without a key or on any failure."""
+    data = _lastfm_json(method, params, cfg, timeout)
     tags = (((data or {}).get("toptags") or {}).get("tag")) or []
     if isinstance(tags, dict):
         tags = [tags]
@@ -874,13 +1023,10 @@ def _lastfm_tags(method, params, cfg=None, timeout=None):
 
 def lastfm_album_genres(artist, album, cfg=None, timeout=None):
     """Last.fm top tags for an album; [] without a configured API key."""
-    key = _lastfm_key(cfg)
-    if not key or not (artist or album):
+    if not _lastfm_key(cfg) or not (artist or album):
         return []
-    data = _json(LASTFM_BASE,
-                 {"method": "album.getinfo", "artist": artist, "album": album,
-                  "api_key": key, "format": "json", "autocorrect": 1},
-                 timeout=timeout, host="ws.audioscrobbler.com")
+    data = _lastfm_json("album.getinfo", {"artist": artist, "album": album},
+                        cfg, timeout)
     tags = (((data or {}).get("album") or {}).get("tags") or {}).get("tag") or []
     if isinstance(tags, dict):
         tags = [tags]
@@ -1282,6 +1428,11 @@ def _mb_album_row(row):
         "link": f"https://musicbrainz.org/release-group/{mbid}" if mbid else None,
         "source": "musicbrainz",
     }
+
+
+# Public alias — `server.discover` builds the Discover album rows from the same
+# mapper, so a MusicBrainz release group has one shape everywhere in the app.
+mb_album_row = _mb_album_row
 
 
 def resolve_release_group(artist, album, cfg=None, timeout=None):
@@ -1686,3 +1837,527 @@ def album_genres(artist, album, dz_id=None, cfg=None):
     return out
 
 
+# --------------------------------------------------------------------------- #
+# Discover: genre lists, genre browse and recommendation feeds
+# --------------------------------------------------------------------------- #
+# What the three /api/discover/* endpoints ask a provider for. Every wrapper
+# goes through one of the two seams above — `_json` (TTL cache, single-flight,
+# per-host throttle) or `integrations.mb_get_cached` (MusicBrainz's own 1 req/s
+# etiquette) — so Discover inherits the app's caching and politeness instead of
+# opening a second, unthrottled client against the same APIs.
+#
+# WHICH source can answer WHICH kind is declared once, in `server.discover`'s
+# registry; this module only talks to the APIs, and each browse wrapper returns
+# `{"rows": [...], "total": n|None}` where `total` is the provider's own match
+# count when it states one (MusicBrainz's `count`, Discogs' `pagination.items`,
+# Last.fm's `@attr.total`) and None when it does not (`itunes`, Deezer charts).
+LISTENBRAINZ_LABS = "https://labs.api.listenbrainz.org"
+# Labs requires a named algorithm; this is its default session-based one, which
+# answers with a `score` per artist (how often listeners move between the two).
+LB_SIMILAR_ALGORITHM = ("session_based_days_9000_session_300_contribution_5"
+                        "_threshold_15_limit_50_skip_30")
+
+# MusicBrainz's genre taxonomy: `/genre/all` pages 100 names at a time, in name
+# order, and states the total (`genre-count`: 2 202 when this was written).
+MB_GENRE_PAGE = 100
+# The taxonomy's page count at the size MusicBrainz states (2 202 names); the
+# page ORDER below spreads over this, and a shorter taxonomy simply skips the
+# indices it does not have.
+_MB_GENRE_SPREAD = 24
+_MB_GENRE_ROWS: dict = {}
+_MB_GENRE_STATE: dict = {}
+_MB_GENRE_PAGES: list = []
+_MB_GENRE_LOCK = threading.Lock()
+
+
+def _mb_page_order():
+    """The taxonomy's page indices to fetch, midpoints first — computed once.
+
+    `/genre/all` is ALPHABETICAL, so fetching it front to back opens a partly
+    loaded list on "2 tone", "aak", "abhang": two hundred of MusicBrainz's
+    2 202 names, not one of them recognisable. Taking the middle page of every
+    range first (12, then 6 and 18, then 3, 9, 15, 21, …) samples the whole
+    alphabet instead, so even a list that is 10% loaded is worth reading. The
+    order is fixed for `_MB_GENRE_SPREAD` pages — the taxonomy's own length —
+    so it does not shift under a fetch that is already in flight."""
+    if not _MB_GENRE_PAGES:
+        order, pending = [], [(0, _MB_GENRE_SPREAD)]
+        while pending:
+            following = []
+            for low, high in pending:
+                if low >= high:
+                    continue
+                mid = (low + high) // 2
+                order.append(mid)
+                following.append((low, mid))
+                following.append((mid + 1, high))
+            pending = following
+        _MB_GENRE_PAGES[:] = order
+    return _MB_GENRE_PAGES
+
+
+def _mb_genre_page(offset):
+    """One `/genre/all` page, or None when MusicBrainz did not answer."""
+    try:
+        data = integrations.mb_get_cached("genre/all",
+                                          {"limit": MB_GENRE_PAGE, "offset": offset,
+                                           "fmt": "json"})
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    rows = [{"name": g.get("name"), "id": g.get("id")}
+            for g in data.get("genres") or [] if g.get("name")]
+    return {"rows": rows, "count": _int(data.get("genre-count"))}
+
+
+def musicbrainz_genre_list(pages=2):
+    """MusicBrainz's genre taxonomy, a couple of pages at a time.
+
+    The whole list is 23 requests at MusicBrainz's 1 req/s — minutes of waiting
+    a page must not do — so the pages are fetched a few at a time and kept:
+    each call costs at most *pages* requests until the taxonomy is complete,
+    and a repeat call is answered from memory. The pages come in `_mb_page_order`
+    (spread over the alphabet, not front to back). The answer says how much of
+    the taxonomy it holds (`loaded`/`done`), so a half-fetched list is never
+    presented as the whole one."""
+    with _MB_GENRE_LOCK:
+        order = _mb_page_order()
+        for _ in range(max(0, int(pages or 0))):
+            count = _MB_GENRE_STATE.get("count")
+            asked = _MB_GENRE_STATE.get("pages", 0)
+            # A shorter taxonomy than this module assumed has fewer pages: the
+            # indices past its end are stepped over, not requested.
+            size = -(-count // MB_GENRE_PAGE) if count else len(order)
+            while asked < len(order) and order[asked] >= size:
+                asked += 1
+            if asked >= len(order):
+                break
+            page = _mb_genre_page(order[asked] * MB_GENRE_PAGE)
+            _MB_GENRE_STATE["pages"] = asked + 1
+            if page is None:
+                break       # MusicBrainz is not answering: keep what we hold.
+            for row in page["rows"]:
+                _MB_GENRE_ROWS.setdefault(row["name"], row)
+            if page["count"]:
+                _MB_GENRE_STATE["count"] = page["count"]
+            if not page["rows"]:
+                break
+        rows = sorted(_MB_GENRE_ROWS.values(), key=lambda r: str(r["name"]).lower())
+        count = _MB_GENRE_STATE.get("count")
+        asked = _MB_GENRE_STATE.get("pages", 0)
+        return {"genres": rows, "count": count, "loaded": len(rows),
+                "done": bool(count) and asked >= -(-count // MB_GENRE_PAGE)}
+
+
+# MusicBrainz's own page ceiling for a search request (`SEARCH_LIMIT_MAX`);
+# named here so this module does not have to import integrations' constant.
+SEARCH_LIMIT = 100
+
+
+def musicbrainz_tag_search(kind, genre, limit=25, offset=0):
+    """MusicBrainz's tag (= genre) search for ONE entity kind.
+
+    WS/2 has no genre *browse* filter — a `genre=<mbid>` parameter is rejected
+    on release groups, artists and recordings alike (verified) — so a genre
+    list from MusicBrainz is the Lucene `tag:` field, which the search index
+    carries for all three. `kind` is the caller's own vocabulary
+    (albums/artists/tracks) and MusicBrainz's relevance `score` is kept, which
+    is what orders the rows.
+
+    Raises on a MusicBrainz failure (`MusicBrainzError`): the caller reports it
+    in `notes` rather than letting an empty list look like "nothing matched"."""
+    entity = {"albums": "release-group", "artists": "artist",
+              "tracks": "recording"}.get(str(kind or "").strip().lower())
+    term = str(genre or "").replace("\\", " ").replace('"', " ").strip()
+    if not entity or not term:
+        return {"rows": [], "total": None}
+    result = integrations.search_mb(entity, f'tag:"{term}"',
+                                    limit=max(1, min(SEARCH_LIMIT, int(limit))),
+                                    offset=max(0, int(offset or 0)))
+    rows = []
+    for row in (result or {}).get("rows") or []:
+        mbid = row.get("id")
+        if entity == "release-group":
+            rows.append(_mb_album_row(row))
+        elif entity == "artist":
+            rows.append({
+                "kind": "artist",
+                "title": row.get("title") or "",
+                "artist": row.get("title") or "",
+                "mbid": mbid,
+                "country": row.get("country") or "",
+                "disambiguation": row.get("disambiguation") or "",
+                "tags": row.get("tags") or [],
+                "score": _int(row.get("score")),
+                "link": f"https://musicbrainz.org/artist/{mbid}" if mbid else None,
+                "source": "musicbrainz",
+            })
+        else:
+            rows.append({
+                "kind": "track",
+                "title": row.get("title") or "",
+                "artist": row.get("artist") or "",
+                "mbid": mbid,
+                "year": (row.get("first_release_date") or "")[:4],
+                "duration": _int(row.get("length")),
+                "score": _int(row.get("score")),
+                "link": f"https://musicbrainz.org/recording/{mbid}" if mbid else None,
+                "source": "musicbrainz",
+            })
+    return {"rows": rows, "total": _int((result or {}).get("total"))}
+
+
+def deezer_genre_list(timeout=None):
+    """Deezer's own genre list — 22 broad genres, id 0 ("All") dropped."""
+    data = _json(f"{DEEZER_BASE}/genre", timeout=timeout)
+    rows = []
+    for item in (data or {}).get("data") or []:
+        gid, name = _int(item.get("id")), (item.get("name") or "").strip()
+        if not gid or not name:
+            continue
+        rows.append({"id": gid, "name": name,
+                     "picture": item.get("picture_xl") or item.get("picture_big")})
+    return rows
+
+
+def deezer_genre_id(name, timeout=None):
+    """Deezer's genre id for *name*, or None when Deezer has no such genre.
+
+    Deezer files music under 22 broad genres ("Rock", "Rap/Hip Hop"), so a
+    specific genre like "shoegaze" is NOT one of its genres and this returns
+    None — the caller reports that instead of asking Deezer's text search and
+    passing its answer off as a genre."""
+    want = _norm(name)
+    if not want:
+        return None
+    for row in deezer_genre_list(timeout=timeout):
+        if _norm(row["name"]) == want:
+            return row["id"]
+    return None
+
+
+def deezer_genre_browse(genre_id, kind="albums", limit=25, offset=0, timeout=None):
+    """One page of a Deezer genre chart (albums/tracks) or its artist list.
+
+    `chart/<id>/albums`, `chart/<id>/tracks` and `genre/<id>/artists`, all
+    paged with Deezer's `index` (verified). A chart's own `total` is the page
+    size rather than a corpus count, so no total is reported — a full page is
+    what "more may follow" means there."""
+    gid = _int(genre_id)
+    kind = str(kind or "").strip().lower()
+    path = {"albums": f"/chart/{gid}/albums", "tracks": f"/chart/{gid}/tracks",
+            "artists": f"/genre/{gid}/artists"}.get(kind)
+    if not gid or not path:
+        return {"rows": [], "total": None}
+    data = _json(f"{DEEZER_BASE}{path}",
+                 {"limit": max(1, min(100, int(limit))), "index": max(0, int(offset or 0))},
+                 timeout=timeout)
+    rows = []
+    for item in (data or {}).get("data") or []:
+        if kind == "albums":
+            rows.append({
+                "kind": "album",
+                "title": item.get("title") or "",
+                "artist": (item.get("artist") or {}).get("name") or "",
+                "deezer_id": _int(item.get("id")),
+                "cover": item.get("cover_xl") or item.get("cover_big"),
+                "year": "",
+                "record_type": (item.get("record_type") or "").lower(),
+                "link": item.get("link"),
+                "source": "deezer",
+            })
+        elif kind == "artists":
+            rows.append({
+                "kind": "artist",
+                "title": item.get("name") or "",
+                "artist": item.get("name") or "",
+                "deezer_id": _int(item.get("id")),
+                "cover": item.get("picture_xl") or item.get("picture_big"),
+                "popularity": _int(item.get("nb_fan")),
+                "link": item.get("link"),
+                "source": "deezer",
+            })
+        else:
+            album = item.get("album") or {}
+            rows.append({
+                "kind": "track",
+                "title": item.get("title") or "",
+                "artist": (item.get("artist") or {}).get("name") or "",
+                "album": album.get("title") or "",
+                "deezer_id": _int(item.get("id")),
+                "cover": album.get("cover_xl") or album.get("cover_big"),
+                "duration": _int(item.get("duration")),
+                "popularity": _int(item.get("rank")),
+                "link": item.get("link"),
+                "source": "deezer",
+            })
+    return {"rows": rows, "total": None}
+
+
+def itunes_genre_albums(genre, limit=25, offset=0, cfg=None, timeout=None):
+    """Apple's genreIndex album search — the one Apple filter that IS a genre.
+
+    Apple ignores `offset` (verified: the same page comes back), so a deeper
+    page is served by asking for `offset + limit` rows and returning this
+    offset's slice, up to Apple's own 200-row ceiling. `primaryGenreName` is
+    Apple's coarse genre ("Alternative" for a shoegaze record), never passed
+    off as the caller's genre."""
+    term = str(genre or "").strip()
+    if not term:
+        return {"rows": [], "total": None}
+    offset = max(0, int(offset or 0))
+    limit = max(1, min(200, int(limit)))
+    want = max(1, min(200, offset + limit))
+    data = _json(f"{ITUNES_BASE}/search",
+                 {"term": term, "entity": "album", "attribute": "genreIndex",
+                  "limit": want, "country": integrations._apple_country(cfg)},
+                 timeout=timeout, host="itunes.apple.com")
+    rows = []
+    for item in (data or {}).get("results") or []:
+        art = item.get("artworkUrl100") or item.get("artworkUrl60")
+        rows.append({
+            "kind": "album",
+            "title": item.get("collectionName") or "",
+            "artist": item.get("artistName") or "",
+            "itunes_id": _int(item.get("collectionId")),
+            "cover": itunes_artwork(art, 600) if art else None,
+            "year": (item.get("releaseDate") or "")[:4],
+            "track_count": _int(item.get("trackCount")),
+            "genre": item.get("primaryGenreName") or "",
+            "link": item.get("collectionViewUrl"),
+            "source": "itunes",
+        })
+    seen = offset + len(rows)
+    return {"rows": rows[offset:][:limit], "total": seen}
+
+
+def discogs_style_search(style, limit=25, offset=0, cfg=None, timeout=None):
+    """Discogs release browse by style ("Shoegaze") through `database/search`.
+
+    Anonymous search answers this endpoint (verified) — a configured
+    `discogs_token` is sent when there is one and only raises Discogs' rate
+    limit, so this source is keyless here. Discogs rows name an artist and a
+    title in ONE string ("Ride - This Is Not A Safe Place"), which is split at
+    its first " - "; the raw split is what makes a dotted artist name safe."""
+    text = str(style or "").strip()
+    if not text:
+        return {"rows": [], "total": None}
+    offset = max(0, int(offset or 0))
+    limit = max(1, min(100, int(limit)))
+    # `database/search` pages 100 at a time; the row this offset starts at is
+    # inside that page (`start`), so one request answers a 100-row window.
+    page = offset // 100 + 1
+    start = offset % 100
+    params = {"style": text, "type": "release", "per_page": 100, "page": page}
+    token = str((cfg or {}).get("discogs_token") or "").strip()
+    if token:
+        params["token"] = token
+    data = _json(f"{DISCOGS_BASE}/database/search", params, timeout=timeout,
+                 host="api.discogs.com")
+    rows = []
+    for item in (data or {}).get("results") or []:
+        artist, _, title = str(item.get("title") or "").partition(" - ")
+        rows.append({
+            "kind": "album",
+            "title": title.strip(),
+            "artist": artist.strip(),
+            "discogs_id": _int(item.get("id")),
+            "cover": item.get("cover_image") or item.get("thumb"),
+            "year": str(item.get("year") or ""),
+            "genres": item.get("genre") or [],
+            "styles": item.get("style") or [],
+            "link": (f"https://www.discogs.com/release/{item.get('id')}"
+                     if item.get("id") else None),
+            "source": "discogs",
+        })
+    total = ((data or {}).get("pagination") or {}).get("items")
+    return {"rows": rows[start:][:limit], "total": _int(total)}
+
+
+def _lastfm_image(item):
+    """A Last.fm row's largest image URL (its image list is size-keyed)."""
+    sized = {}
+    for image in item.get("image") or []:
+        if isinstance(image, dict) and image.get("size"):
+            sized[image["size"]] = image.get("#text")
+    for size in ("mega", "extralarge", "large", "medium", "small"):
+        if sized.get(size):
+            return sized[size]
+    return None
+
+
+def lastfm_top_tags(limit=100, cfg=None, timeout=None):
+    """Last.fm's most-used tags sitewide (`chart.gettoptags`), as names.
+
+    Last.fm's tag vocabulary is its genre vocabulary — the same tags
+    `tag.gettopalbums` browses by — so the chart is what makes Last.fm a genre
+    LIST source, and it needs `lastfm_api_key` like every other call here."""
+    data = _lastfm_json("chart.gettoptags", {"limit": max(1, min(500, int(limit)))},
+                        cfg, timeout)
+    tags = ((data or {}).get("tags") or {}).get("tag") or []
+    if isinstance(tags, dict):
+        tags = [tags]
+    return [t.get("name") for t in tags if isinstance(t, dict) and t.get("name")]
+
+
+def lastfm_tag_top(kind, tag, limit=25, offset=0, cfg=None, timeout=None):
+    """Last.fm's most-listened albums/artists/tracks under ONE tag (genre).
+
+    `tag.gettopalbums` / `tag.gettopartists` / `tag.gettoptracks`: Last.fm's
+    own ranking of the tag, which is what makes this a genre browse rather
+    than a text search. Needs `lastfm_api_key`; [] without one."""
+    kind = str(kind or "").strip().lower()
+    method = {"albums": "tag.gettopalbums", "artists": "tag.gettopartists",
+              "tracks": "tag.gettoptracks"}.get(kind)
+    singular = {"albums": "album", "artists": "artist",
+                "tracks": "track"}.get(kind)
+    text = str(tag or "").strip()
+    if not method or not text:
+        return {"rows": [], "total": None}
+    per_page = max(1, min(100, int(limit)))
+    page = max(0, int(offset or 0)) // per_page + 1
+    data = _lastfm_json(method, {"tag": text, "limit": per_page, "page": page},
+                        cfg, timeout)
+    block = (data or {}).get(kind) or {}
+    items = block.get(singular) or []
+    if isinstance(items, dict):
+        items = [items]
+    rows = []
+    for item in items:
+        artist = (item.get("artist") or {}).get("name") or ""
+        rows.append({
+            "kind": {"albums": "album", "artists": "artist",
+                     "tracks": "track"}[kind],
+            "title": item.get("name") or "",
+            "artist": artist or (item.get("name") or ""),
+            "cover": _lastfm_image(item),
+            "duration": _int(item.get("duration")),
+            "link": item.get("url"),
+            "source": "lastfm",
+        })
+    return {"rows": rows,
+            "total": _int((block.get("@attr") or {}).get("total"))}
+
+
+def lastfm_similar_artists(artist, limit=25, cfg=None, timeout=None):
+    """Last.fm's similar artists (`artist.getsimilar`) — the seed for a
+    library-seeded recommendation. `match` is Last.fm's own 0-1 similarity."""
+    name = str(artist or "").strip()
+    if not name:
+        return []
+    data = _lastfm_json("artist.getsimilar",
+                        {"artist": name, "limit": max(1, min(100, int(limit)))},
+                        cfg, timeout)
+    items = ((data or {}).get("similarartists") or {}).get("artist") or []
+    if isinstance(items, dict):
+        items = [items]
+    rows = []
+    for item in items:
+        got = item.get("name") or ""
+        if not got or _norm(got) == _norm(name):
+            continue
+        rows.append({
+            "kind": "artist",
+            "title": got,
+            "artist": got,
+            "cover": _lastfm_image(item),
+            "match": item.get("match"),
+            "link": item.get("url"),
+            "source": "lastfm",
+        })
+    return rows
+
+
+def lastfm_similar_tracks(artist, track, limit=25, cfg=None, timeout=None):
+    """Last.fm's similar tracks (`track.getsimilar`), for a track seed."""
+    name, title = str(artist or "").strip(), str(track or "").strip()
+    if not title:
+        return []
+    data = _lastfm_json("track.getsimilar",
+                        {"artist": name, "track": title,
+                         "limit": max(1, min(100, int(limit)))}, cfg, timeout)
+    items = ((data or {}).get("similartracks") or {}).get("track") or []
+    if isinstance(items, dict):
+        items = [items]
+    rows = []
+    for item in items:
+        rows.append({
+            "kind": "track",
+            "title": item.get("name") or "",
+            "artist": (item.get("artist") or {}).get("name") or "",
+            "duration": _int(item.get("duration")),
+            "match": item.get("match"),
+            "link": item.get("url"),
+            "source": "lastfm",
+        })
+    return rows
+
+
+def listenbrainz_similar_artists(mbid, limit=25, timeout=None):
+    """ListenBrainz Labs' similar artists for one MBID — keyless.
+
+    The response is an array of artists with a `score` (how often listeners
+    move between the two), which is a real recommendation signal and needs no
+    account. LB Radio itself (the genre radio) DOES demand a user token
+    (verified: 401 without one), so it is not wired."""
+    ident = str(mbid or "").strip()
+    if not ident:
+        return []
+    data = _json(f"{LISTENBRAINZ_LABS}/similar-artists/json",
+                 {"artist_mbids": ident, "algorithm": LB_SIMILAR_ALGORITHM,
+                  "limit": max(1, min(100, int(limit)))},
+                 timeout=timeout, ttl=TTL_CHART,
+                 host="labs.api.listenbrainz.org")
+    rows = []
+    for item in data or []:
+        if not isinstance(item, dict):
+            continue
+        name, got = item.get("name") or "", str(item.get("artist_mbid") or "")
+        if not name or got == ident:
+            continue        # the seed artist is not a similar artist
+        rows.append({
+            "kind": "artist",
+            "title": name,
+            "artist": name,
+            "mbid": got or None,
+            "popularity": _int(item.get("score")),
+            "disambiguation": item.get("comment") or "",
+            "link": f"https://musicbrainz.org/artist/{got}" if got else None,
+            "source": "listenbrainz",
+        })
+    return rows
+
+
+def spotify_genre_albums(genre, limit=25, offset=0, cfg=None, timeout=None):
+    """Spotify's album search filtered by ITS OWN genre names (`genre:<name>`).
+
+    Empty without `spotify_client_id`/`spotify_client_secret` (the search needs
+    a bearer token) — the source is skipped entirely, never defaulted."""
+    text = str(genre or "").strip()
+    token = integrations._spotify_token(cfg, timeout=timeout)
+    if not text or not token:
+        return {"rows": [], "total": None}
+    data = _json(f"{SPOTIFY_API}/search",
+                 {"q": f"genre:{text}", "type": "album",
+                  "limit": max(1, min(50, int(limit))),
+                  "offset": max(0, int(offset or 0))},
+                 headers={"Authorization": f"Bearer {token}"},
+                 timeout=timeout, host="api.spotify.com")
+    block = ((data or {}).get("albums") or {})
+    rows = []
+    for item in block.get("items") or []:
+        images = item.get("images") or []
+        artists = item.get("artists") or []
+        rows.append({
+            "kind": "album",
+            "title": item.get("name") or "",
+            "artist": ((artists[0] or {}).get("name") if artists else "") or "",
+            "spotify_id": item.get("id"),
+            "cover": (images[0] or {}).get("url") if images else None,
+            "year": (item.get("release_date") or "")[:4],
+            "track_count": _int(item.get("total_tracks")),
+            "link": (item.get("external_urls") or {}).get("spotify"),
+            "source": "spotify",
+        })
+    return {"rows": rows, "total": _int(block.get("total"))}

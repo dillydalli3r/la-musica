@@ -26,6 +26,7 @@ Modules:
     accurip     AccurateRip .accurip generation + verification (script 9)
     format_all  final canonical pass, embedded cover policy (script 10)
     grader      per-album compliance grading
+    artistdata  artist artwork + descriptions stored inside the library (script 19)
     audit       audio integrity auditing via the AudioAuditor CLI
     cli         interactive console menu
 
@@ -36,6 +37,7 @@ into a lossless one: that can only lose quality. Encoder marker tags
 re-runs can skip finished files.
 """
 from .config import load_config, save_config, DEFAULT_CONFIG
+from .artistdata import run_optimize_artist_images
 from .autotag import run_auto_tagging
 from .cue import run_format_cues
 from .flac import run_optimize_flacs
@@ -49,13 +51,14 @@ try:
 except ImportError:
     run_format_all = None
 
-__version__ = "3.2.0"
+__version__ = "3.3.0"
 __all__ = [
     "load_config", "save_config", "DEFAULT_CONFIG",
     "run_auto_tagging",
     "run_format_lyrics", "run_format_cues", "run_optimize_flacs",
     "run_grade_library", "run_process_images", "run_audit_library",
     "run_calc_dr_replaygain", "run_format_all",
+    "run_optimize_artist_images",
 ]
 
 

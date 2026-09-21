@@ -289,6 +289,15 @@ _SECONDARY_TYPE_CAPS = {
     "audio drama": "Audio drama", "field recording": "Field recording",
 }
 
+# The same vocabulary as plain type NAMES, in MusicBrainz's own lowercase
+# spelling — what a release-group TYPE FILTER selects and compares against
+# (see server/artist_watch). Derived from the maps above so a type the app can
+# name in a folder path is exactly a type a watch may select, and the two can
+# never drift apart.
+PRIMARY_RELEASE_TYPES = tuple(_PRIMARY_TYPE_CAPS)
+SECONDARY_RELEASE_TYPES = tuple(_SECONDARY_TYPE_CAPS)
+RELEASE_TYPES = PRIMARY_RELEASE_TYPES + SECONDARY_RELEASE_TYPES
+
 
 def _type_parts(value):
     """Release types in *value*, whichever of the three spellings it uses."""

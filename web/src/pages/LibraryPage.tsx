@@ -25,6 +25,8 @@ import { EmptyState, GradeBadge, MediaChip, AdvisoryMark, CachedMark, PageLoadin
 import { forceDict, loadForceSel } from "../lib/force";
 import Segmented from "../components/Segmented";
 import PageHeader from "../components/PageHeader";
+import StarRating from "../components/StarRating";
+import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
 import CoverImg, { TrackCover } from "../components/CoverImg";
 import FavHeart from "../components/FavHeart";
 import AlbumCard from "../components/AlbumCard";
@@ -611,6 +613,12 @@ export default function LibraryPage() {
     }
   };
 
+  // One GET /api/ratings for the whole page (react-query dedupes it across
+  // every row) and the optimistic setter the star controls share.
+  const { data: ratingsData } = useRatings();
+  const { setRating, pending } = useSetRating();
+  const ratings = ratingsData?.ratings;
+
   const playSelection = () => {
     const out: { path: string; file: string; albumPath: string; artist?: string; album?: string; title?: string; coverFile?: string | null; albumCover?: string | null; advisory?: string | null }[] = [];
     for (const al of sortedAlbums)
@@ -1119,6 +1127,7 @@ export default function LibraryPage() {
                           {t.tags.INSTRUMENTAL === "1" && (
                             <span className="chip bg-zinc-800 text-zinc-400 border border-border text-[9px] shrink-0">INST</span>
                           )}
+                          <StarRating size="sm" value={ratingOf(ratings, t.path)} onChange={(v) => setRating(t.path, v)} pending={pending(t.path)} />
                           <span className="text-[10px] text-zinc-600 font-mono w-10 text-right shrink-0 cell-nowrap">{fmtDuration(t.tech.length)}</span>
                         </div>
                       );
@@ -1369,7 +1378,14 @@ export default function LibraryPage() {
                       {trackCols.includes("year") && <td className={`td text-zinc-500${phoneHide(TRACK_PHONE_CLS, "year")}`} title={tr.tags.DATE ?? undefined}>{fmtDateCell(tr.tags.DATE, fullDates)}</td>}
                       {trackCols.includes("genre") && <td className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, "genre")}`}>{tr.tags.GENRE ?? "—"}</td>}
                       {trackCols.includes("media") && <td className={`td${phoneHide(TRACK_PHONE_CLS, "media")}`}><MediaChip media={tr.tags.MEDIA} /></td>}
-                      {trackCols.includes("duration") && <td className={`td text-zinc-500${phoneHide(TRACK_PHONE_CLS, "duration")}`}>{fmtDuration(tr.tech.length)}</td>}
+                      {trackCols.includes("duration") && (
+                        <td className={`td text-zinc-500${phoneHide(TRACK_PHONE_CLS, "duration")}`}>
+                          <div className="flex items-center gap-2">
+                            <StarRating size="sm" value={ratingOf(ratings, tr.path)} onChange={(v) => setRating(tr.path, v)} pending={pending(tr.path)} />
+                            <span>{fmtDuration(tr.tech.length)}</span>
+                          </div>
+                        </td>
+                      )}
                       {trackCols.includes("bitrate") && <td className={`td text-zinc-500${phoneHide(TRACK_PHONE_CLS, "bitrate")}`}>{fmtTech(tr.tech) || "—"}</td>}
                       {trackCols.includes("dr") && (
                         <td className={`td text-zinc-500 tabular-nums${phoneHide(TRACK_PHONE_CLS, "dr")}`} title={`Dynamic range${tr.tags["ALBUM DYNAMIC RANGE"] ? ` · album ${tr.tags["ALBUM DYNAMIC RANGE"]}` : ""}`}>
@@ -1460,6 +1476,11 @@ function AlbumRowGroup({
   onTrackWidth: (id: string, px: number) => void;
   onResetTrackWidths: () => void;
 }) {
+  // The rows this component renders are their own tree: same two hooks as
+  // the page, and react-query serves them from one GET /api/ratings.
+  const { data: ratingsData } = useRatings();
+  const { setRating, pending } = useSetRating();
+  const ratings = ratingsData?.ratings;
   const navigate = useNavigate();
   const tracks = useMemo(() => [...(album.tracks ?? [])].sort(byDiscThenTrack), [album.tracks]);
   // The album-name cell IS the row title (AlbumRow renders it, with the link
@@ -1656,7 +1677,14 @@ function AlbumRowGroup({
                             </td>
                           )}
                           {trackCols.includes("genre") && <td className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, "genre")}`}>{t.tags.GENRE ?? "—"}</td>}
-                          {trackCols.includes("dur") && <td className="td text-zinc-500">{fmtDuration(t.tech.length)}</td>}
+                          {trackCols.includes("dur") && (
+                            <td className="td text-zinc-500">
+                              <div className="flex items-center gap-2">
+                                <StarRating size="sm" value={ratingOf(ratings, t.path)} onChange={(v) => setRating(t.path, v)} pending={pending(t.path)} />
+                                <span>{fmtDuration(t.tech.length)}</span>
+                              </div>
+                            </td>
+                          )}
                           {trackCols.includes("bitrate") && (
                             <td className={`td text-zinc-500${phoneHide(TRACK_PHONE_CLS, "bitrate")}`}>{fmtTech(t.tech) || "—"}</td>
                           )}

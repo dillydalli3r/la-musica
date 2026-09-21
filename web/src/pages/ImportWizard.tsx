@@ -4,7 +4,7 @@ import { useSearchParams, Link } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   UploadCloud, ExternalLink, Check, ChevronLeft, ChevronRight, ChevronDown, Wand2,
-  Plus, Trash2, Disc3, FolderOpen, X, Search, Loader2, Image as ImageIcon,
+  Plus, Trash2, Disc3, FolderOpen, X, Search, Loader2, Image as ImageIcon, AlertTriangle,
 } from "lucide-react";
 import { api, answerSources, replyFor, IN_MOBILE_SHELL } from "../api";
 import type { AdvisoryFetchResult, MetadataFetchItem, MetadataItemKind } from "../api";
@@ -17,14 +17,112 @@ import CoverImg, { TrackCover } from "../components/CoverImg";
 import PageHeader from "../components/PageHeader";
 import MetadataReviewModal from "../components/MetadataReviewModal";
 import type {
-  AcoustidAlbumMatch, AcoustidMatch, CoverResult, ImportBulkJob, ImportScriptsPreview,
-  LyricsAutoResult, MBRelease, MatchSuggestion, ScriptRunResult, Track,
+  AcoustidAlbumMatch, AcoustidMatch, CoverResult, ImportBulkJob, ImportPrompt,
+  ImportScriptsPreview, LyricsAutoResult, MBRelease, MatchSuggestion, ScriptRunResult, Track,
 } from "../types";
 import { SCRIPTS, DEFAULT_RUN_ALL, SCRIPT_LABEL, isScriptId } from "../lib/scripts";
 import { fmtCounts, fmtSteps } from "../lib/fmt";
 import { GENRE_COUNT_MAX, GENRE_FAMILIES, familyOf, splitGenres } from "../lib/genres";
 
 const STEPS = ["Select & separate", "Links", "Match", "Covers", "Genres", "Lyrics", "Advisory", "Finish"];
+
+/** The wizard step each import family lives on, and the words for it — the
+ *  same five families the server's own registry names (mlo/import_policy
+ *  .FAMILIES), looked up by step NAME so a step a later edit inserts cannot
+ *  land a prompt's link on the wrong one. */
+const FAMILY_STEP: Record<string, string> = {
+  links: "Links",
+  cover: "Covers",
+  genres: "Genres",
+  lyrics: "Lyrics",
+  advisory: "Advisory",
+};
+
+const FAMILY_LABEL: Record<string, string> = {
+  links: "Links",
+  cover: "Cover art",
+  genres: "Genres",
+  lyrics: "Lyrics",
+  advisory: "Advisory",
+};
+
+const FAMILY_ORDER = Object.keys(FAMILY_STEP);
+
+/** The family ids a `?missing=` param names, in wizard order. */
+function missingFromParam(raw: string | null): string[] {
+  return (raw ?? "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter((id) => id in FAMILY_STEP)
+    .sort((a, b) => FAMILY_ORDER.indexOf(a) - FAMILY_ORDER.indexOf(b));
+}
+
+/** The step a `?step=` param asks for: a family id ("cover"), a step name
+ *  ("Covers") or an index. Null when it names nothing — then the first missing
+ *  family decides, and failing that the album's own default. */
+function stepFromParam(raw: string | null, missing: string[]): number | null {
+  const value = (raw ?? "").trim();
+  // Whatever the param spells, the step it lands on comes from the registry
+  // above — never from a number a reordered STEPS list would invalidate.
+  const wanted = value
+    ? FAMILY_STEP[value.toLowerCase()] ?? value
+    : missing.length
+      ? FAMILY_STEP[missing[0]]
+      : "";
+  const byName = wanted ? STEPS.findIndex((s) => s.toLowerCase() === wanted.toLowerCase()) : -1;
+  if (byName >= 0) return byName;
+  const index = Number(value);
+  return value && Number.isInteger(index) && index >= 0 && index < STEPS.length ? index : null;
+}
+
+/** Minimum entry mode — the wizard opened from a prompt's own link
+ *  (`/import?album=…&step=…&missing=cover,advisory`), which is what the queue
+ *  and the notification hand the user: "this album still needs these", not
+ *  "here is the whole step's form".
+ *
+ *  `min` marks such a visit, `here` is the family the step the user landed on
+ *  is missing (null when this step has nothing missing), and `mine` is the
+ *  family a block of the step belongs to. In an ordinary visit every block
+ *  renders exactly where it sits. In a minimum visit the block for `here` is
+ *  the visible step and every other block of that step is one
+ *  collapse-until-asked disclosure; `order-last` keeps the disclosure after
+ *  the controls whatever order the source is in (the step container is a
+ *  column flex box in this mode, see the step markup), so the user reads what
+ *  they were sent for first.
+ *
+ *  Each block is wrapped exactly ONCE per step, so a control belonging to the
+ *  family can never be rendered twice — the disclosure holds what the controls
+ *  do not, never a second copy of them. */
+function MinBlock({ min, here, mine, children }: {
+  min: boolean; here: string | null; mine: string; children: ReactNode;
+}) {
+  if (!children) return null;
+  // The three cases that render as usual: an ordinary visit, the block the
+  // visit is about, and a step with nothing missing — there is no question to
+  // put to the user there, so nothing is taken away from them either (the step
+  // says as much in MinNothingMissing).
+  if (!min || !here || mine === here) return <>{children}</>;
+  return (
+    <details className="order-last rounded-lg border border-border bg-zinc-950/40 px-3 py-2">
+      <summary className="text-xs font-medium cursor-pointer text-zinc-400 select-none">
+        Show everything else on this step
+      </summary>
+      <div className="mt-2 space-y-3">{children}</div>
+    </details>
+  );
+}
+
+/** What a minimum visit gets on a step with nothing missing: the step is not
+ *  empty, it is simply not being asked for — so say that, instead of showing a
+ *  form the visit is not about. Nothing is hidden from the user here. */
+function MinNothingMissing() {
+  return (
+    <div className="rounded-lg border border-border bg-zinc-950/40 px-3 py-2 text-xs text-zinc-500">
+      Nothing is missing on this step for this album — nothing here is waiting
+      for you, and you can leave it as it is.
+    </div>
+  );
+}
 
 /** The lyrics step's status words. The provider chain reports "ok"/"skipped"/
  *  "failed"; a chip is a label and reads as one. */
@@ -215,7 +313,15 @@ export default function ImportWizard() {
   const [params, setParams] = useSearchParams();
   const albumParam = params.get("album");
   const initialAlbum = albumParam ?? null;
-  const [step, setStep] = useState(initialAlbum ? 1 : 0);
+  // A prompt's own link opens the album AT the step that needs a decision
+  // (`?album=…&step=Covers&missing=cover,advisory`): the step is where the
+  // user lands, and the missing families ride along so every step can say
+  // what is still open on this album.
+  const paramMissing = missingFromParam(params.get("missing"));
+  const [missingFamilies, setMissingFamilies] = useState<string[]>(paramMissing);
+  const [step, setStep] = useState(
+    () => stepFromParam(params.get("step"), paramMissing) ?? (initialAlbum ? 1 : 0)
+  );
 
   const [albumPath, setAlbumPath] = useState<string | null>(initialAlbum);
   const [albumName, setAlbumName] = useState("");
@@ -337,6 +443,17 @@ export default function ImportWizard() {
     queryKey: ["importScripts"],
     queryFn: () => api.importScriptsPreview(),
   });
+
+  // Albums an import could not finish by itself, raised by
+  // server.imports.finish_album (one entry per album, with the wizard link
+  // that lands on it at the step needing a decision). The same list the
+  // notification announces, so the decision is one click from the step.
+  const { data: promptData } = useQuery({
+    queryKey: ["importPrompts"],
+    queryFn: api.importPrompts,
+    staleTime: 15_000,
+  });
+  const importPrompts = promptData?.prompts ?? [];
 
   // Poll the bulk queue while it runs; done/failed stops the poll.
   useEffect(() => {
@@ -2050,6 +2167,7 @@ const runAllScripts = async () => {
   setScriptsRunning(true);
   setFinishMsg("Running the import chain…");
   setRunRows(null);
+  let stillMissing: string[] = [];
   try {
     setAct({ label: `Import chain — ${scriptChain?.chain?.length ?? 0} script(s) on ${targets.length} album(s)` });
     const res = await api.importFinish(targets, {}, staged);
@@ -2067,6 +2185,13 @@ const runAllScripts = async () => {
       );
       const mine = res.albums[Math.min(albumIndex, res.albums.length - 1)];
       if (mine?.path) setAlbumPath(mine.path);
+      // What the chain still could not finish, from the reply's own autonomy
+      // block (the same families the notification names): the banner then
+      // points at the step that decides each one instead of leaving the album
+      // looking finished.
+      stillMissing = Object.keys(mine?.autonomy?.missing ?? {}).filter((id) => id in FAMILY_STEP);
+      setMissingFamilies(stillMissing);
+      qc.invalidateQueries({ queryKey: ["importPrompts"] });
     }
     // The chain reports one result per chain id per album; the album is kept
     // in the label so a multi-album queue stays readable.
@@ -2089,7 +2214,10 @@ const runAllScripts = async () => {
     setFinishMsg(
       errors.length
         ? `Import chain: ${errors.length} script error(s) — ${errors.slice(0, 3).join("; ")}`
-        : `Import chain finished on ${targets.length} album${targets.length > 1 ? "s" : ""}`
+        : `Import chain finished on ${targets.length} album${targets.length > 1 ? "s" : ""}` +
+          (stillMissing.length
+            ? ` — still missing ${stillMissing.map((id) => FAMILY_LABEL[id]).join(", ")}`
+            : "")
     );
     qc.invalidateQueries({ queryKey: ["library"] });
     qc.invalidateQueries({ queryKey: ["album"] });
@@ -2115,6 +2243,7 @@ const finish = async () => {
     toast.error(String(e));
   }
   qc.invalidateQueries({ queryKey: ["library"] });
+  qc.invalidateQueries({ queryKey: ["importPrompts"] });
   setParams({});
   toast(uploaded.length > 1 ? `Imported ${uploaded.length} albums — enrich each from its album page` : "Import complete — album graded");
 };
@@ -2165,6 +2294,44 @@ const finish = async () => {
     setAcoustid(null);
   };
 
+  /** Open the album a prompt is about, on the step that needs the decision.
+   *  The missing list goes back into the URL so a reload keeps landing on the
+   *  same step with the same warning. */
+  const openPrompt = (p: ImportPrompt) => {
+    const ids = p.families.map((f) => f.id).filter((id) => id in FAMILY_STEP);
+    setMissingFamilies(ids);
+    setAlbumPath(p.album);
+    setStep(stepFromParam(null, ids) ?? 1);
+    setParams({ album: p.album, step: FAMILY_STEP[ids[0]] ?? "", missing: ids.join(",") });
+    qc.invalidateQueries({ queryKey: ["album"] });
+  };
+
+  /** Stop asking about one album. It is not "resolved" — the next import of
+   *  the same album recomputes the gaps and raises the prompt again. */
+  const dismissPrompt = async (album: string) => {
+    try {
+      await api.dismissImportPrompt(album, !inMusicFolder(album, cfg?.music_folder));
+    } catch (e) {
+      toast.error(String(e));
+    }
+    if (albumPath === album) setMissingFamilies([]);
+    qc.invalidateQueries({ queryKey: ["importPrompts"] });
+  };
+
+  /** Hide this album's missing banner without touching the queue entry: the
+   *  user is on the album and does not want the reminder while they work. */
+  const hideMissing = () => {
+    setMissingFamilies([]);
+    setParams(albumPath ? { album: albumPath } : {});
+  };
+
+  const missingHere = missingFamilies.find((id) => FAMILY_STEP[id] === STEPS[step]) ?? null;
+  // Minimum entry: this visit came from a prompt's own link, so the steps ask
+  // for what is missing and nothing else. The live list, not the URL param:
+  // answering the last gap (or Dismiss) ends the mode and hands the ordinary
+  // wizard back.
+  const minMode = missingFamilies.length > 0;
+
   const totalFiles = albums.reduce((n, g) => n + g.files.length, 0);
   // Queue panel rows: the staged albums, else what step 0 is about to import.
   const queueItems: { name: string; path: string }[] = uploaded.length
@@ -2190,6 +2357,43 @@ const finish = async () => {
     if (step === 1) return "Enter a MusicBrainz release URL or ID first";
     return null;
   })();
+
+  // Manual importing is off (Settings → Import pipeline): every importing
+  // /api/import/* call answers 409 with this same sentence, so the wizard says
+  // it once, in place of eight steps whose every button would come back
+  // refused. The user still gets the album link and the queue's own pages —
+  // only the path they drive by hand is closed. The words mirror
+  // mlo/import_policy.MANUAL_OFF_NOTE, which is what the API answers with.
+  if (cfg && cfg.manual_import_enabled === false) {
+    return (
+      <div className="p-6 space-y-5 mx-auto max-w-6xl">
+        <PageHeader
+          icon={UploadCloud}
+          title="Import"
+          subtitle={albumPath ? (
+            <span className="truncate">
+              <Link to={`/album/${encodeURIComponent(albumPath)}`} className="hover:text-accent-soft">
+                {albumPath.split("/").pop()}
+              </Link>
+            </span>
+          ) : undefined}
+        />
+        <div className="panel p-6 space-y-2">
+          <div className="flex items-center gap-2 text-sm font-semibold text-amber-200">
+            <AlertTriangle className="h-4 w-4 shrink-0" /> Importing by hand is off
+          </div>
+          <p className="text-sm text-zinc-400">
+            Importing by hand is off (manual_import_enabled) — turn it back on in
+            Settings → Import pipeline to import albums yourself.
+          </p>
+          <p className="text-xs text-zinc-500">
+            Nothing was imported. Downloads that finish are still imported by the automatic
+            pipeline, and this album's page and the queue stay available.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="p-6 space-y-5 mx-auto max-w-6xl">
@@ -2218,6 +2422,40 @@ const finish = async () => {
         }
       />
 
+      {/* ---- imports waiting on a decision -------------------------------
+          One row per album an import could not finish (server.import_prompts,
+          raised by the same call that raises the notification). "Decide" opens
+          the album at the step that answers it; "Dismiss" stops the asking and
+          is not a resolution — the next import of the album recomputes it. */}
+      {importPrompts.length > 0 && (
+        <div className="panel p-3 space-y-1.5">
+          <div className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
+            Imports waiting on you ({importPrompts.length})
+          </div>
+          {importPrompts.map((p) => (
+            <div key={p.album} className="flex items-center gap-2 flex-wrap text-xs">
+              <span className="text-zinc-200 truncate max-w-[16rem]">{p.album_name}</span>
+              <span className="text-amber-300/90 truncate">
+                {p.families.map((f) => f.label || FAMILY_LABEL[f.id] || f.id).join(", ")}
+                {p.reason === "stopped" ? " — import stopped there" : ""}
+              </span>
+              <div className="ml-auto flex items-center gap-1.5">
+                <button className="btn-primary !py-1 !px-2 text-[11px] tap" onClick={() => openPrompt(p)}>
+                  Decide
+                </button>
+                <button
+                  className="btn-ghost !py-1 !px-2 text-[11px] tap"
+                  title="Stop asking about this album (a later import of it asks again if something is still missing)"
+                  onClick={() => dismissPrompt(p.album)}
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* step indicator */}
       <div className="flex items-center gap-1.5 overflow-x-auto">
         {STEPS.map((s, i) => (
@@ -2239,6 +2477,49 @@ const finish = async () => {
           </div>
         ))}
       </div>
+
+      {/* ---- what this album is still missing -----------------------------
+          The prompt's own banner: the families an import could not decide,
+          each one a click from the step that answers it. It stays until the
+          album is imported again (a resolved gap clears it) or the user
+          dismisses the prompt. */}
+      {missingFamilies.length > 0 && (
+        <div className="panel px-3 py-2 text-xs">
+          <div className="flex items-center gap-2 flex-wrap">
+            <AlertTriangle className="h-3.5 w-3.5 text-amber-300 shrink-0" />
+            <span className="text-amber-200">
+              This import could not finish: {missingFamilies.map((id) => FAMILY_LABEL[id]).join(", ")} still missing
+            </span>
+            <span className="text-zinc-500">Decide each one, then Finish.</span>
+            <div className="ml-auto flex items-center gap-1.5">
+              {missingFamilies.map((id) => {
+                const i = STEPS.indexOf(FAMILY_STEP[id]);
+                return (
+                  <button
+                    key={id}
+                    className={`!py-1 !px-2 text-[11px] tap rounded-lg border border-border ${
+                      i === step ? "bg-accent on-accent" : "bg-raise text-zinc-300 hover:text-white"
+                    }`}
+                    onClick={() => i >= 0 && setStep(i)}
+                  >
+                    {FAMILY_LABEL[id]}
+                  </button>
+                );
+              })}
+              <button className="btn-ghost !py-1 !px-2 text-[11px] tap" onClick={hideMissing}>
+                Hide
+              </button>
+              <button
+                className="btn-ghost !py-1 !px-2 text-[11px] tap"
+                title="Stop asking about this album (a later import of it asks again if something is still missing)"
+                onClick={() => albumPath && dismissPrompt(albumPath)}
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ---- the wizard's one progress strip -------------------------------
           Every action below reports here: the action's own step count when it
@@ -2346,6 +2627,14 @@ const finish = async () => {
             onUse={useAcoustidRelease}
             onMatchAll={matchQueueToRelease}
           />
+        </div>
+      )}
+
+      {/* The step the user landed on is the one that answers a missing family:
+          say so in place, not only in the banner above. */}
+      {missingHere && (
+        <div className="rounded-lg border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+          {FAMILY_LABEL[missingHere]} is still open for this album — the import could not decide it.
         </div>
       )}
 
@@ -2511,175 +2800,183 @@ const finish = async () => {
 
       {/* ---------------- Step 1: links ---------------- */}
       {step === 1 && (
-        <div className="space-y-4">
-          {/* Queue mode carries this block in the queue panel above. */}
-          {!queueMode && (
-            <AcoustidBlock
-              match={acoustid}
-              busy={acoustidBusy}
-              queue={false}
-              canMatchAll={false}
-              matchAllBusy={false}
-              onRun={runAcoustid}
-              onUse={useAcoustidRelease}
-              onMatchAll={matchQueueToRelease}
-            />
-          )}
-          <div className="panel p-4 space-y-3">
-            <div className="text-sm font-semibold text-zinc-300">
-              MusicBrainz release <span className="text-zinc-500 font-normal">— {currentAlbumName}</span>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <input
-                className={`input flex-1 ${releaseId ? "!border-emerald-700" : ""} tap`}
-                placeholder="MusicBrainz release URL or ID (e.g. https://musicbrainz.org/release/…)"
-                value={mbLink}
-                onChange={(e) => setMbLink(e.target.value)}
+        <div className={minMode && missingHere ? "flex flex-col gap-4" : "space-y-4"}>
+          {minMode && !missingHere && <MinNothingMissing />}
+          {/* The fingerprint match is how a release is FOUND, not the link
+              itself: a minimum visit came for the link, so the match waits
+              behind the disclosure. */}
+          <MinBlock min={minMode} here={missingHere} mine="">
+            {/* Queue mode carries this block in the queue panel above. */}
+            {!queueMode && (
+              <AcoustidBlock
+                match={acoustid}
+                busy={acoustidBusy}
+                queue={false}
+                canMatchAll={false}
+                matchAllBusy={false}
+                onRun={runAcoustid}
+                onUse={useAcoustidRelease}
+                onMatchAll={matchQueueToRelease}
               />
-              {releaseId ? (
-                <span className="chip bg-emerald-900/60 text-emerald-300 border border-emerald-800 shrink-0">
-                  <Check className="h-3 w-3" /> {detectedFromTags ? "Detected from track tags" : "Recognized"}
-                </span>
-              ) : mbLink.trim() ? (
-                <span className="chip bg-amber-900/50 text-amber-300 border border-amber-900 shrink-0">No MusicBrainz ID found</span>
-              ) : null}
-            </div>
-            {detectStatus !== "idle" && !releaseId && (
-              <div className="text-xs text-zinc-500 flex items-center gap-1.5">
-                {detectStatus === "scanning" && (
-                  <span className="animate-pulse">Scanning track tags for a MusicBrainz release ID…</span>
-                )}
-                {detectStatus === "none" && (
-                  <span>
-                    No MusicBrainz release ID found in the track tags — paste a link, search, or{" "}
-                    <button className="text-accent-soft underline underline-offset-2" onClick={detectFromTags}>rescan</button>
+            )}
+          </MinBlock>
+          <MinBlock min={minMode} here={missingHere} mine="links">
+            <div className="panel p-4 space-y-3">
+              <div className="text-sm font-semibold text-zinc-300">
+                MusicBrainz release <span className="text-zinc-500 font-normal">— {currentAlbumName}</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  className={`input flex-1 ${releaseId ? "!border-emerald-700" : ""} tap`}
+                  placeholder="MusicBrainz release URL or ID (e.g. https://musicbrainz.org/release/…)"
+                  value={mbLink}
+                  onChange={(e) => setMbLink(e.target.value)}
+                />
+                {releaseId ? (
+                  <span className="chip bg-emerald-900/60 text-emerald-300 border border-emerald-800 shrink-0">
+                    <Check className="h-3 w-3" /> {detectedFromTags ? "Detected from track tags" : "Recognized"}
                   </span>
-                )}
+                ) : mbLink.trim() ? (
+                  <span className="chip bg-amber-900/50 text-amber-300 border border-amber-900 shrink-0">No MusicBrainz ID found</span>
+                ) : null}
               </div>
-            )}
-            {detectStatus === "found" && releaseId && (
-              <div className="text-xs text-emerald-400 flex items-center gap-1.5">
-                <Check className="h-3 w-3" /> Release detected in track tags — fetched automatically
-              </div>
-            )}
-            <div className="text-xs text-zinc-600">or search:</div>
-            <div className="flex gap-2">
-              <div className="flex flex-wrap gap-2">
-                <select
-                  className="input !w-auto text-xs shrink-0 tap"
-                  value={searchMode}
-                  onChange={(e) => setSearchMode(e.target.value as any)}
-                  title="Search MusicBrainz by"
-                >
-                  <option value="release">Title / artist</option>
-                  <option value="track">Track title</option>
-                  <option value="catno">Catalog number</option>
-                  <option value="barcode">Barcode</option>
-                </select>
-                <input className="input tap" placeholder="Search MusicBrainz…" value={mbSearch} onChange={(e) => setMbSearch(e.target.value)} onKeyDown={(e) => e.key === "Enter" && doSearch()} />
-                <button className="btn-ghost shrink-0 tap" onClick={() => doSearch()} disabled={busy}>Search</button>
-              </div>
-            </div>
-            <div className="text-xs text-zinc-600">or find an artist:</div>
-            <div className="flex gap-2">
-              <input
-                className="input tap"
-                placeholder="Artist name…"
-                value={artistQuery}
-                onChange={(e) => setArtistQuery(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && doArtistSearch()}
-              />
-              <button className="btn-ghost shrink-0 tap" onClick={doArtistSearch} disabled={busy}>Find artist</button>
-            </div>
-            {artistHits.length > 0 && (
-              <div className="max-h-40 overflow-auto space-y-1">
-                {artistHits.map((a) => (
-                  <button key={a.id} className="w-full text-left px-3 py-2 rounded bg-panel hover:bg-raise text-sm flex items-center gap-2"
-                    onClick={() => applyArtist(a.name)} title={`Search releases by ${a.name}`}>
-                    <span className="flex-1 truncate min-w-0 text-zinc-200">{a.name}</span>
-                    {a.type && <span className="chip bg-zinc-800 text-zinc-500 border border-border text-[10px]">{a.type}</span>}
-                  </button>
-                ))}
-              </div>
-            )}
-            {searchHits.length > 0 && (
-              <div className="max-h-48 overflow-auto space-y-1">
-                {searchHits.map((h) => (
-                  <button key={h.id} className="w-full text-left px-3 py-2 rounded bg-panel hover:bg-raise text-sm flex items-center gap-2"
-                    onClick={() => { setMbLink(`https://musicbrainz.org/release/${h.id}`); setReleaseId(h.id); }}>
-                    <span className="flex-1 truncate min-w-0">
-                      <span className="text-zinc-200">{h.title}</span>
-                      <span className="text-zinc-500"> — {h.artist} ({h.date})</span>
+              {detectStatus !== "idle" && !releaseId && (
+                <div className="text-xs text-zinc-500 flex items-center gap-1.5">
+                  {detectStatus === "scanning" && (
+                    <span className="animate-pulse">Scanning track tags for a MusicBrainz release ID…</span>
+                  )}
+                  {detectStatus === "none" && (
+                    <span>
+                      No MusicBrainz release ID found in the track tags — paste a link, search, or{" "}
+                      <button className="text-accent-soft underline underline-offset-2" onClick={detectFromTags}>rescan</button>
                     </span>
-                    {h.catalog_number && (
-                      <span className="chip bg-raise border border-border text-zinc-400 shrink-0">catno {h.catalog_number}</span>
-                    )}
-                    {h.barcode && (
-                      <span className="chip bg-raise border border-border text-zinc-500 font-mono shrink-0">{h.barcode}</span>
-                    )}
-                    {releaseId === h.id && <Check className="h-4 w-4 text-accent shrink-0" />}
-                  </button>
-                ))}
+                  )}
+                </div>
+              )}
+              {detectStatus === "found" && releaseId && (
+                <div className="text-xs text-emerald-400 flex items-center gap-1.5">
+                  <Check className="h-3 w-3" /> Release detected in track tags — fetched automatically
+                </div>
+              )}
+              <div className="text-xs text-zinc-600">or search:</div>
+              <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
+                  <select
+                    className="input !w-auto text-xs shrink-0 tap"
+                    value={searchMode}
+                    onChange={(e) => setSearchMode(e.target.value as any)}
+                    title="Search MusicBrainz by"
+                  >
+                    <option value="release">Title / artist</option>
+                    <option value="track">Track title</option>
+                    <option value="catno">Catalog number</option>
+                    <option value="barcode">Barcode</option>
+                  </select>
+                  <input className="input tap" placeholder="Search MusicBrainz…" value={mbSearch} onChange={(e) => setMbSearch(e.target.value)} onKeyDown={(e) => e.key === "Enter" && doSearch()} />
+                  <button className="btn-ghost shrink-0 tap" onClick={() => doSearch()} disabled={busy}>Search</button>
+                </div>
               </div>
-            )}
-            {release && (
-              <div className="text-xs text-zinc-400 pt-2 border-t border-border">
-                <span className="font-semibold text-zinc-200">{release.title}</span> · {release.artists.map((a) => a.name).join(", ")} · {release.date} · {release.medium_count} disc(s) · {release.media.length} tracks
+              <div className="text-xs text-zinc-600">or find an artist:</div>
+              <div className="flex gap-2">
+                <input
+                  className="input tap"
+                  placeholder="Artist name…"
+                  value={artistQuery}
+                  onChange={(e) => setArtistQuery(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && doArtistSearch()}
+                />
+                <button className="btn-ghost shrink-0 tap" onClick={doArtistSearch} disabled={busy}>Find artist</button>
               </div>
-            )}
-            <div className="text-sm font-semibold text-zinc-300 pt-2">RateYourMusic links (optional)</div>
+              {artistHits.length > 0 && (
+                <div className="max-h-40 overflow-auto space-y-1">
+                  {artistHits.map((a) => (
+                    <button key={a.id} className="w-full text-left px-3 py-2 rounded bg-panel hover:bg-raise text-sm flex items-center gap-2"
+                      onClick={() => applyArtist(a.name)} title={`Search releases by ${a.name}`}>
+                      <span className="flex-1 truncate min-w-0 text-zinc-200">{a.name}</span>
+                      {a.type && <span className="chip bg-zinc-800 text-zinc-500 border border-border text-[10px]">{a.type}</span>}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {searchHits.length > 0 && (
+                <div className="max-h-48 overflow-auto space-y-1">
+                  {searchHits.map((h) => (
+                    <button key={h.id} className="w-full text-left px-3 py-2 rounded bg-panel hover:bg-raise text-sm flex items-center gap-2"
+                      onClick={() => { setMbLink(`https://musicbrainz.org/release/${h.id}`); setReleaseId(h.id); }}>
+                      <span className="flex-1 truncate min-w-0">
+                        <span className="text-zinc-200">{h.title}</span>
+                        <span className="text-zinc-500"> — {h.artist} ({h.date})</span>
+                      </span>
+                      {h.catalog_number && (
+                        <span className="chip bg-raise border border-border text-zinc-400 shrink-0">catno {h.catalog_number}</span>
+                      )}
+                      {h.barcode && (
+                        <span className="chip bg-raise border border-border text-zinc-500 font-mono shrink-0">{h.barcode}</span>
+                      )}
+                      {releaseId === h.id && <Check className="h-4 w-4 text-accent shrink-0" />}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {release && (
+                <div className="text-xs text-zinc-400 pt-2 border-t border-border">
+                  <span className="font-semibold text-zinc-200">{release.title}</span> · {release.artists.map((a) => a.name).join(", ")} · {release.date} · {release.medium_count} disc(s) · {release.media.length} tracks
+                </div>
+              )}
+              <div className="text-sm font-semibold text-zinc-300 pt-2">RateYourMusic links (optional)</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  className={`input flex-1 ${rymValid === true ? "!border-emerald-700" : rymValid === false ? "!border-red-800" : ""} tap`}
+                  placeholder="Album: https://rateyourmusic.com/release/…"
+                  value={rymLink}
+                  onChange={(e) => {
+                    setRymLink(e.target.value);
+                    setRymNote(""); // a stale "That is an artist page" must not outlive the paste it described
+                  }}
+                />
+                <LinkValidChip state={rymValid} kind={rymKind} />
+                <button
+                  className="btn-ghost shrink-0 tap"
+                  onClick={findRymLinks}
+                  disabled={findingLinks || busy}
+                  title="Ask RateYourMusic for this album's and this artist's pages and fill both fields for review"
+                >
+                  {findingLinks ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}{" "}
+                  Find links
+                </button>
+              </div>
+              {rymNote && <div className="text-[10px] text-amber-300/80">{rymNote}</div>}
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  className={`input flex-1 ${rymArtistValid === true ? "!border-emerald-700" : rymArtistValid === false ? "!border-red-800" : ""} tap`}
+                  placeholder="Artist: https://rateyourmusic.com/artist/…"
+                  value={rymArtistLink}
+                  onChange={(e) => {
+                    setRymArtistLink(e.target.value);
+                    setRymArtistNote("");
+                  }}
+                />
+                <LinkValidChip state={rymArtistValid} kind={rymArtistKind} />
+              </div>
+              <div className="text-[10px] text-zinc-600">
+                Written to every track as RATEYOURMUSIC_ARTIST — only an artist page is accepted.
+              </div>
+              {rymArtistNote && <div className="text-[10px] text-amber-300/80">{rymArtistNote}</div>}
+            </div>
             <div className="flex flex-wrap items-center gap-2">
-              <input
-                className={`input flex-1 ${rymValid === true ? "!border-emerald-700" : rymValid === false ? "!border-red-800" : ""} tap`}
-                placeholder="Album: https://rateyourmusic.com/release/…"
-                value={rymLink}
-                onChange={(e) => {
-                  setRymLink(e.target.value);
-                  setRymNote(""); // a stale "That is an artist page" must not outlive the paste it described
-                }}
-              />
-              <LinkValidChip state={rymValid} kind={rymKind} />
-              <button
-                className="btn-ghost shrink-0 tap"
-                onClick={findRymLinks}
-                disabled={findingLinks || busy}
-                title="Ask RateYourMusic for this album's and this artist's pages and fill both fields for review"
-              >
-                {findingLinks ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}{" "}
-                Find links
+              <button className="btn-primary tap" onClick={handleFetch} disabled={busy}>
+                <Wand2 className="h-4 w-4" /> Fetch release & auto-match
               </button>
+              <button className="btn-ghost tap" onClick={detectFromTags} disabled={busy || !albumPath}>
+                Detect from tags
+              </button>
+              {busy && fetchStatus && (
+                <span className="text-xs text-accent-soft animate-pulse flex items-center gap-1.5">
+                  {fetchStatus}
+                </span>
+              )}
             </div>
-            {rymNote && <div className="text-[10px] text-amber-300/80">{rymNote}</div>}
-            <div className="flex flex-wrap items-center gap-2">
-              <input
-                className={`input flex-1 ${rymArtistValid === true ? "!border-emerald-700" : rymArtistValid === false ? "!border-red-800" : ""} tap`}
-                placeholder="Artist: https://rateyourmusic.com/artist/…"
-                value={rymArtistLink}
-                onChange={(e) => {
-                  setRymArtistLink(e.target.value);
-                  setRymArtistNote("");
-                }}
-              />
-              <LinkValidChip state={rymArtistValid} kind={rymArtistKind} />
-            </div>
-            <div className="text-[10px] text-zinc-600">
-              Written to every track as RATEYOURMUSIC_ARTIST — only an artist page is accepted.
-            </div>
-            {rymArtistNote && <div className="text-[10px] text-amber-300/80">{rymArtistNote}</div>}
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            <button className="btn-primary tap" onClick={handleFetch} disabled={busy}>
-              <Wand2 className="h-4 w-4" /> Fetch release & auto-match
-            </button>
-            <button className="btn-ghost tap" onClick={detectFromTags} disabled={busy || !albumPath}>
-              Detect from tags
-            </button>
-            {busy && fetchStatus && (
-              <span className="text-xs text-accent-soft animate-pulse flex items-center gap-1.5">
-                {fetchStatus}
-              </span>
-            )}
-          </div>
+          </MinBlock>
         </div>
       )}
 
@@ -2736,242 +3033,491 @@ const finish = async () => {
 
       {/* ---------------- Step 3: covers ---------------- */}
       {step === 3 && albumPath && (
-        <div className="space-y-4">
-          {coverNotice && (
-            <div className="rounded-lg border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
-              {coverNotice}
-            </div>
-          )}
-
-          {/* What an import owes besides the cover: the artist's image and
-              description, and the album's own description. Each row states
-              whether it is already there and who supplied it; one button
-              fetches whatever is missing and the rows are re-read after. */}
-          <div className="panel px-3 py-2 space-y-1.5">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-sm font-semibold text-zinc-300">Artist &amp; album metadata</span>
-              <span className="text-[11px] text-zinc-500">
-                artist: {artistName || "—"}
-                {artistArt?.path ? <span className="font-mono"> · {artistArt.path}</span> : null}
-              </span>
-              {metaReply && (
-                <button className="btn-ghost !py-0.5 !px-1.5 text-[11px] ml-auto tap" onClick={() => setMetaReply(null)}>
-                  Clear result
-                </button>
-              )}
-              <button
-                className={`btn-ghost !py-1 text-xs tap ${metaReply ? "" : "ml-auto"}`}
-                onClick={fetchArtistMeta}
-                disabled={busy || !albumPath}
-                title="Ask the configured sources for the missing artist image, artist description and album description; what is already present is left alone"
-              >
-                <CloudDownloadIcon /> Fetch missing
-              </button>
-            </div>
-            {act?.kind === "metadata" && (
-              <ActionBar active label={act.label} done={act.done} total={act.total} />
-            )}
-            {metaRows.map((row) => {
-              const item = metaReply?.[row.kind];
-              return (
-                <div key={row.kind} className="flex flex-wrap items-center gap-2 text-[11px]">
-                  <span className="w-28 sm:w-40 shrink-0 text-zinc-400">{row.label}</span>
-                  <span
-                    className={`chip border shrink-0 ${
-                      row.present
-                        ? "bg-emerald-900/40 text-emerald-300 border-emerald-800"
-                        : "bg-raise text-zinc-500 border-border"
-                    }`}
-                  >
-                    {row.present ? "present" : "missing"}
-                  </span>
-                  <span className="text-zinc-500 truncate" title={row.source ?? undefined}>
-                    {row.present ? (row.source ?? "source unknown") : ""}
-                  </span>
-                  {!row.enabled && (
-                    <span className="text-amber-300/90 shrink-0">
-                      fetching switched off in Settings (Artist images &amp; descriptions)
-                    </span>
-                  )}
-                  {item && (
-                    <span
-                      className={`ml-auto shrink-0 ${item.state === "error" ? "text-red-300" : "text-zinc-400"}`}
-                      title={item.detail ?? undefined}
-                    >
-                      {item.state === "fetched" ? `fetched · ${item.source ?? "?"}` : `${item.state}${item.detail ? ` — ${item.detail}` : ""}`}
-                    </span>
-                  )}
-                </div>
-              );
-            })}
-            {metaError && (
-              <div className="text-[11px] text-red-300" role="alert">
-                Metadata fetch failed — {metaError}
+        <div className={minMode && missingHere ? "flex flex-col gap-4" : "space-y-4"}>
+          {minMode && !missingHere && <MinNothingMissing />}
+          <MinBlock min={minMode} here={missingHere} mine="cover">
+            {coverNotice && (
+              <div className="rounded-lg border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+                {coverNotice}
               </div>
             )}
-          </div>
+          </MinBlock>
 
-          <div className="grid md:grid-cols-2 gap-3">
-            <div className="panel p-4 space-y-2">
-              <div className="text-sm font-semibold text-zinc-300">Current album cover</div>
-              <CoverImg
-                albumPath={albumPath}
-                coverFile={coverInfo?.file}
-                staged={staged}
-                wrapperClass="h-40 w-40 rounded-lg bg-raise border border-border overflow-hidden"
-              />
-              <div className="text-xs text-zinc-500">
-                {coverInfo?.file
-                  ? `${coverInfo.file} — ${coverInfo.width ?? "?"}×${coverInfo.height ?? "?"} px · ${Math.max(1, Math.round(coverInfo.bytes / 1024))} KB`
-                  : "No album cover on disk yet."}
+          <MinBlock min={minMode} here={missingHere} mine="">
+            {/* What an import owes besides the cover: the artist's image and
+                description, and the album's own description. Each row states
+                whether it is already there and who supplied it; one button
+                fetches whatever is missing and the rows are re-read after. */}
+            <div className="panel px-3 py-2 space-y-1.5">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-sm font-semibold text-zinc-300">Artist &amp; album metadata</span>
+                <span className="text-[11px] text-zinc-500">
+                  artist: {artistName || "—"}
+                  {artistArt?.path ? <span className="font-mono"> · {artistArt.path}</span> : null}
+                </span>
+                {metaReply && (
+                  <button className="btn-ghost !py-0.5 !px-1.5 text-[11px] ml-auto tap" onClick={() => setMetaReply(null)}>
+                    Clear result
+                  </button>
+                )}
+                <button
+                  className={`btn-ghost !py-1 text-xs tap ${metaReply ? "" : "ml-auto"}`}
+                  onClick={fetchArtistMeta}
+                  disabled={busy || !albumPath}
+                  title="Ask the configured sources for the missing artist image, artist description and album description; what is already present is left alone"
+                >
+                  <CloudDownloadIcon /> Fetch missing
+                </button>
+              </div>
+              {act?.kind === "metadata" && (
+                <ActionBar active label={act.label} done={act.done} total={act.total} />
+              )}
+              {metaRows.map((row) => {
+                const item = metaReply?.[row.kind];
+                return (
+                  <div key={row.kind} className="flex flex-wrap items-center gap-2 text-[11px]">
+                    <span className="w-28 sm:w-40 shrink-0 text-zinc-400">{row.label}</span>
+                    <span
+                      className={`chip border shrink-0 ${
+                        row.present
+                          ? "bg-emerald-900/40 text-emerald-300 border-emerald-800"
+                          : "bg-raise text-zinc-500 border-border"
+                      }`}
+                    >
+                      {row.present ? "present" : "missing"}
+                    </span>
+                    <span className="text-zinc-500 truncate" title={row.source ?? undefined}>
+                      {row.present ? (row.source ?? "source unknown") : ""}
+                    </span>
+                    {!row.enabled && (
+                      <span className="text-amber-300/90 shrink-0">
+                        fetching switched off in Settings (Artist images &amp; descriptions)
+                      </span>
+                    )}
+                    {item && (
+                      <span
+                        className={`ml-auto shrink-0 ${item.state === "error" ? "text-red-300" : "text-zinc-400"}`}
+                        title={item.detail ?? undefined}
+                      >
+                        {item.state === "fetched" ? `fetched · ${item.source ?? "?"}` : `${item.state}${item.detail ? ` — ${item.detail}` : ""}`}
+                      </span>
+                    )}
+                  </div>
+                );
+              })}
+              {metaError && (
+                <div className="text-[11px] text-red-300" role="alert">
+                  Metadata fetch failed — {metaError}
+                </div>
+              )}
+            </div>
+          </MinBlock>
+
+          <MinBlock min={minMode} here={missingHere} mine="cover">
+            <div className="grid md:grid-cols-2 gap-3">
+              <div className="panel p-4 space-y-2">
+                <div className="text-sm font-semibold text-zinc-300">Current album cover</div>
+                <CoverImg
+                  albumPath={albumPath}
+                  coverFile={coverInfo?.file}
+                  staged={staged}
+                  wrapperClass="h-40 w-40 rounded-lg bg-raise border border-border overflow-hidden"
+                />
+                <div className="text-xs text-zinc-500">
+                  {coverInfo?.file
+                    ? `${coverInfo.file} — ${coverInfo.width ?? "?"}×${coverInfo.height ?? "?"} px · ${Math.max(1, Math.round(coverInfo.bytes / 1024))} KB`
+                    : "No album cover on disk yet."}
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button className="btn-ghost !py-1 text-xs tap" onClick={() => albumCoverInput.current?.click()} disabled={busy}>
+                    <UploadCloud className="h-3.5 w-3.5" /> Upload image
+                  </button>
+                  <button className="btn-ghost !py-1 text-xs tap" onClick={() => setCoverSearch({})} disabled={busy}>
+                    Search covers
+                  </button>
+                </div>
+                {/* The import staged covers for this album but the pick is the
+                    user's — same one-click affordance as the album page. */}
+                {!coverInfo?.file && !!stagedCoverRows?.length && (
+                  <button
+                    className="btn-primary !py-1.5 text-xs tap"
+                    onClick={() =>
+                      setCoverSearch({ results: stagedCoverRows, provider: stagedCovers.data?.provider ?? null })
+                    }
+                    title="Covers fetched during import, waiting for you to pick one"
+                  >
+                    <ImageIcon className="h-3.5 w-3.5" /> Choose a cover ({stagedCoverRows.length})
+                  </button>
+                )}
+              </div>
+
+              <div className="panel p-4 space-y-2">
+                <div className="text-sm font-semibold text-zinc-300">MusicBrainz release cover</div>
+                <div className="text-xs text-zinc-500">
+                  The release's own cover — compare it with musichoarders before you accept it.
+                </div>
+                {mbCoverUrl ? (
+                  <img
+                    src={api.artUrl(mbCoverUrl)}
+                    alt="MusicBrainz release cover"
+                    referrerPolicy="no-referrer"
+                    className="h-40 w-40 rounded-lg bg-raise border border-border object-cover"
+                  />
+                ) : (
+                  <div className="h-40 w-40 rounded-lg bg-raise border border-border flex items-center justify-center text-center px-3 text-xs text-zinc-600">
+                    No release picked yet — fetch it in the Links step.
+                  </div>
+                )}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    className="btn-ghost !py-1 text-xs tap"
+                    onClick={() => mbCoverUrl && applyCoverUrl(mbCoverUrl)}
+                    disabled={busy || !mbCoverUrl}
+                  >
+                    <CloudDownloadIcon /> Use the MusicBrainz cover
+                  </button>
+                  {mbCoverUrl && (
+                    <a
+                      href={mbCoverUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-xs text-accent-soft underline underline-offset-2"
+                    >
+                      open on coverartarchive.org
+                    </a>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="panel p-3 space-y-2">
+              <div className="text-xs text-zinc-400">
+                MusicBrainz cover wrong? Find the correct one on{" "}
+                <a
+                  href="https://covers.musichoarders.xyz"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-accent-soft underline underline-offset-2"
+                >
+                  covers.musichoarders.xyz <ExternalLink className="inline h-3 w-3" />
+                </a>
+                , then apply it here with Search covers or an image URL.
               </div>
               <div className="flex items-center gap-2 flex-wrap">
-                <button className="btn-ghost !py-1 text-xs tap" onClick={() => albumCoverInput.current?.click()} disabled={busy}>
-                  <UploadCloud className="h-3.5 w-3.5" /> Upload image
-                </button>
-                <button className="btn-ghost !py-1 text-xs tap" onClick={() => setCoverSearch({})} disabled={busy}>
-                  Search covers
+                <span className="text-xs font-semibold text-zinc-400">Album cover from URL</span>
+                <input
+                  className="input flex-1 min-w-0 !py-1 text-xs tap"
+                  placeholder="https://…/cover.jpg"
+                  value={coverUrl}
+                  onChange={(e) => setCoverUrl(e.target.value)}
+                />
+                <button
+                  className="btn-ghost !py-1 text-xs tap"
+                  onClick={() => applyCoverUrl(coverUrl)}
+                  disabled={busy || !coverUrl.trim()}
+                >
+                  <ExternalLink className="h-3.5 w-3.5" /> Apply to album
                 </button>
               </div>
-              {/* The import staged covers for this album but the pick is the
-                  user's — same one-click affordance as the album page. */}
-              {!coverInfo?.file && !!stagedCoverRows?.length && (
-                <button
-                  className="btn-primary !py-1.5 text-xs tap"
-                  onClick={() =>
-                    setCoverSearch({ results: stagedCoverRows, provider: stagedCovers.data?.provider ?? null })
-                  }
-                  title="Covers fetched during import, waiting for you to pick one"
-                >
-                  <ImageIcon className="h-3.5 w-3.5" /> Choose a cover ({stagedCoverRows.length})
-                </button>
-              )}
             </div>
 
-            <div className="panel p-4 space-y-2">
-              <div className="text-sm font-semibold text-zinc-300">MusicBrainz release cover</div>
-              <div className="text-xs text-zinc-500">
-                The release's own cover — compare it with musichoarders before you accept it.
+            <div className="panel p-3 space-y-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-sm font-semibold text-zinc-300">Per-track covers</span>
+                <span className="text-xs text-zinc-500">
+                  {coverSel.size} selected — one image applied to several tracks is stored once and shared between them (that is how
+                  tracks 7 and 8 get the same art).
+                </span>
+                <button
+                  className="btn-ghost !py-1 text-xs ml-auto tap"
+                  onClick={() =>
+                    setCoverSel(
+                      coverSel.size && coverSel.size === stepTracks.length
+                        ? new Set()
+                        : new Set(stepTracks.map((t) => t.path))
+                    )
+                  }
+                >
+                  {coverSel.size && coverSel.size === stepTracks.length ? "Select none" : "Select all"}
+                </button>
               </div>
-              {mbCoverUrl ? (
-                <img
-                  src={api.artUrl(mbCoverUrl)}
-                  alt="MusicBrainz release cover"
-                  referrerPolicy="no-referrer"
-                  className="h-40 w-40 rounded-lg bg-raise border border-border object-cover"
-                />
-              ) : (
-                <div className="h-40 w-40 rounded-lg bg-raise border border-border flex items-center justify-center text-center px-3 text-xs text-zinc-600">
-                  No release picked yet — fetch it in the Links step.
-                </div>
-              )}
               <div className="flex items-center gap-2 flex-wrap">
                 <button
                   className="btn-ghost !py-1 text-xs tap"
-                  onClick={() => mbCoverUrl && applyCoverUrl(mbCoverUrl)}
-                  disabled={busy || !mbCoverUrl}
+                  onClick={() => trackCoverInput.current?.click()}
+                  disabled={busy || !coverSel.size}
                 >
-                  <CloudDownloadIcon /> Use the MusicBrainz cover
+                  <UploadCloud className="h-3.5 w-3.5" /> Upload to selected
                 </button>
-                {mbCoverUrl && (
-                  <a
-                    href={mbCoverUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-xs text-accent-soft underline underline-offset-2"
-                  >
-                    open on coverartarchive.org
-                  </a>
+                <input
+                  className="input !w-64 !py-1 text-xs tap"
+                  placeholder="Cover image URL for the selection…"
+                  value={trackCoverUrl}
+                  onChange={(e) => setTrackCoverUrl(e.target.value)}
+                />
+                <button
+                  className="btn-ghost !py-1 text-xs tap"
+                  onClick={() => applyCoverUrl(trackCoverUrl, selectedCoverFiles())}
+                  disabled={busy || !coverSel.size || !trackCoverUrl.trim()}
+                >
+                  <ExternalLink className="h-3.5 w-3.5" /> Use URL
+                </button>
+                <button
+                  className="btn-ghost !py-1 text-xs tap"
+                  onClick={() => mbCoverUrl && applyCoverUrl(mbCoverUrl, selectedCoverFiles())}
+                  disabled={busy || !coverSel.size || !mbCoverUrl}
+                >
+                  <CloudDownloadIcon /> MusicBrainz cover
+                </button>
+                <button className="btn-danger !py-1 text-xs tap" onClick={clearTrackCovers} disabled={busy || !coverSel.size}>
+                  <Trash2 className="h-3.5 w-3.5" /> Clear per-track cover
+                </button>
+              </div>
+              {stepTracks.length === 0 && (
+                <div className="text-xs text-zinc-500">No tracks — go back and fetch the release.</div>
+              )}
+              {groupByDisc(stepTracks, discOfTrack).map((g) => (
+                <DiscSection
+                  key={g.disc ?? "unmatched"}
+                  disc={g.disc}
+                  count={g.rows.length}
+                  collapsed={collapsedDiscs.has(g.disc ?? null)}
+                  onToggle={() => toggleDisc(g.disc ?? null)}
+                  extra={
+                    <>
+                      <button
+                        className="btn-ghost !py-0.5 !px-1.5 text-[11px] tap"
+                        onClick={() => setCoverSelFor(g.rows.map((t) => t.path), true)}
+                      >
+                        All
+                      </button>
+                      <button
+                        className="btn-ghost !py-0.5 !px-1.5 text-[11px] tap"
+                        onClick={() => setCoverSelFor(g.rows.map((t) => t.path), false)}
+                      >
+                        None
+                      </button>
+                    </>
+                  }
+                >
+                  {g.rows.map((t) => {
+                    const shared = t.cover_file ? (coverShares.get(t.cover_file) ?? 0) - 1 : 0;
+                    return (
+                      <label
+                        key={t.path}
+                        className={`flex items-center gap-3 panel px-3 py-2 cursor-pointer ${
+                          coverSel.has(t.path) ? "border-accent/60" : "border-border"
+                        }`}
+                      >
+                        <input type="checkbox" checked={coverSel.has(t.path)} onChange={() => toggleCoverSel(t.path)} />
+                        <TrackCover albumPath={albumPath} trackCover={t.cover_file} albumCover={coverInfo?.file} staged={staged} />
+                        <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
+                        <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
+                        {t.cover_file ? (
+                          <span
+                            className="chip bg-accent/10 text-accent-soft border border-accent/25 shrink-0"
+                            title={t.cover_file}
+                          >
+                            own art{shared > 0 ? ` · shared with ${shared}` : ""}
+                          </span>
+                        ) : (
+                          <span className="chip bg-raise border border-border text-zinc-500 shrink-0">album cover</span>
+                        )}
+                      </label>
+                    );
+                  })}
+                </DiscSection>
+              ))}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 justify-end">
+              <span className="text-xs text-zinc-500">Covers are written as you apply them — Continue just moves on.</span>
+              <button className="btn-primary tap" onClick={saveCovers}>Continue to genres</button>
+            </div>
+
+            <input
+              ref={albumCoverInput}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.target.value = "";
+                if (f) uploadCover(f);
+              }}
+            />
+            <input
+              ref={trackCoverInput}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                const files = selectedCoverFiles();
+                e.target.value = "";
+                if (f && files.length) uploadCover(f, files);
+              }}
+            />
+
+            {coverSearch && (
+              <CoverSearchModal
+                albumPath={albumPath}
+                artist={release?.artists.map((a) => a.name).join(", ") || trackArtist(stepTracks[0]?.path ?? "")}
+                album={trackAlbum || currentAlbumName}
+                releaseGroupMbid={release?.release_group_id ?? undefined}
+                tracks={coverSel.size ? selectedCoverFiles() : undefined}
+                initialResults={coverSearch.results}
+                initialProvider={coverSearch.provider}
+                onClose={() => setCoverSearch(null)}
+                onApplied={() => {
+                  refreshCovers();
+                  qc.invalidateQueries({ queryKey: ["stagedCovers", albumPath] });
+                  qc.invalidateQueries({ queryKey: ["album"] });
+                }}
+              />
+            )}
+          </MinBlock>
+        </div>
+      )}
+
+      {/* ---------------- Step 4: genres ---------------- */}
+      {step === 4 && (
+        <div className={minMode && missingHere ? "flex flex-col gap-3" : "space-y-3"}>
+          {minMode && !missingHere && <MinNothingMissing />}
+          <MinBlock min={minMode} here={missingHere} mine="">
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                className="btn-ghost tap"
+                onClick={() => importGenresFrom("musicbrainz")}
+                disabled={busy || !albumTargets().length}
+                title="Ask MusicBrainz for this album's genres (recording → release → release group → artist) and write what it states"
+              >
+                <CloudDownloadIcon /> Genres from MusicBrainz
+              </button>
+              <button
+                className="btn-ghost tap"
+                onClick={() => importGenresFrom("rateyourmusic")}
+                disabled={busy || !albumTargets().length}
+                title="Ask RateYourMusic for this album's genres and write what its page states — a blocked RYM says so instead of writing a guess"
+              >
+                <CloudDownloadIcon /> Genres from RateYourMusic
+              </button>
+              {/* The per-run limit can only LOWER the app's own cap: the server
+                  writes and trims every genre list to `mb_genre_count`, so an
+                  option above it would be a promise nothing keeps. */}
+              <label className="flex items-center gap-1.5 text-xs text-zinc-400 ml-auto">
+                Max genres / track
+                <select
+                  className="input !w-auto !py-1 text-xs tap"
+                  value={genreLimitValue}
+                  onChange={(e) => setGenreLimit(Number(e.target.value))}
+                  title={`The app writes at most ${genreCap} genre value(s) per track (mb_genre_count, Settings → Import)`}
+                >
+                  {Array.from({ length: genreCap }, (_, i) => i + 1).map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                      {n === genreCap ? " (app cap — Settings → Import)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            {/* What the last source wrote — one source at a time, so a blocked
+                or empty one is never hidden behind the other's answer. */}
+            {genreError && (
+              <div className="text-xs text-red-300" role="alert">
+                {genreError}
+              </div>
+            )}
+            {genreJobResult && (
+              <div className="panel px-3 py-2 space-y-1" role="status">
+                <div className="text-xs text-zinc-300">
+                  {genreJobResult.updated} track(s) updated
+                  {genreJobResult.genres.length
+                    ? ` — ${genreJobResult.genres.join(", ")}`
+                    : " — no genres returned"}
+                </div>
+                {/* The cap these genres were written and trimmed to, so the
+                    value is visible where the genres are, not only in Settings
+                    → Import (`mb_genre_count`). */}
+                <div className="text-[11px] text-zinc-500">
+                  Genres per track: {genreJobResult.genre_count} (Settings → Import)
+                  {genreJobResult.trimmed > 0 &&
+                    ` — ${genreJobResult.trimmed} track(s) trimmed to ${genreJobResult.genre_count}`}
+                </div>
+                {Object.entries(genreJobResult.per_source).filter(([, names]) => names.length).length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {Object.entries(genreJobResult.per_source)
+                      .filter(([, names]) => names.length)
+                      .map(([name, names]) => (
+                        <span key={name} className="chip bg-raise border border-border text-zinc-300" title={names.join(", ")}>
+                          {name} <span className="tabular-nums">{names.length}</span>
+                        </span>
+                      ))}
+                  </div>
+                )}
+                {Object.entries(genreJobResult.notes).length > 0 && (
+                  <ul className="text-[11px] text-zinc-500 space-y-0.5">
+                    {Object.entries(genreJobResult.notes).map(([name, note]) => (
+                      <li key={name}>
+                        <span className="text-zinc-400">{name}</span>: {note}
+                      </li>
+                    ))}
+                  </ul>
                 )}
               </div>
-            </div>
-          </div>
-
-          <div className="panel p-3 space-y-2">
-            <div className="text-xs text-zinc-400">
-              MusicBrainz cover wrong? Find the correct one on{" "}
-              <a
-                href="https://covers.musichoarders.xyz"
-                target="_blank"
-                rel="noreferrer"
-                className="text-accent-soft underline underline-offset-2"
-              >
-                covers.musichoarders.xyz <ExternalLink className="inline h-3 w-3" />
-              </a>
-              , then apply it here with Search covers or an image URL.
-            </div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-xs font-semibold text-zinc-400">Album cover from URL</span>
-              <input
-                className="input flex-1 min-w-0 !py-1 text-xs tap"
-                placeholder="https://…/cover.jpg"
-                value={coverUrl}
-                onChange={(e) => setCoverUrl(e.target.value)}
-              />
-              <button
-                className="btn-ghost !py-1 text-xs tap"
-                onClick={() => applyCoverUrl(coverUrl)}
-                disabled={busy || !coverUrl.trim()}
-              >
-                <ExternalLink className="h-3.5 w-3.5" /> Apply to album
-              </button>
-            </div>
-          </div>
-
-          <div className="panel p-3 space-y-2">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-sm font-semibold text-zinc-300">Per-track covers</span>
-              <span className="text-xs text-zinc-500">
-                {coverSel.size} selected — one image applied to several tracks is stored once and shared between them (that is how
-                tracks 7 and 8 get the same art).
-              </span>
-              <button
-                className="btn-ghost !py-1 text-xs ml-auto tap"
-                onClick={() =>
-                  setCoverSel(
-                    coverSel.size && coverSel.size === stepTracks.length
-                      ? new Set()
-                      : new Set(stepTracks.map((t) => t.path))
-                  )
-                }
-              >
-                {coverSel.size && coverSel.size === stepTracks.length ? "Select none" : "Select all"}
-              </button>
-            </div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <button
-                className="btn-ghost !py-1 text-xs tap"
-                onClick={() => trackCoverInput.current?.click()}
-                disabled={busy || !coverSel.size}
-              >
-                <UploadCloud className="h-3.5 w-3.5" /> Upload to selected
-              </button>
-              <input
-                className="input !w-64 !py-1 text-xs tap"
-                placeholder="Cover image URL for the selection…"
-                value={trackCoverUrl}
-                onChange={(e) => setTrackCoverUrl(e.target.value)}
-              />
-              <button
-                className="btn-ghost !py-1 text-xs tap"
-                onClick={() => applyCoverUrl(trackCoverUrl, selectedCoverFiles())}
-                disabled={busy || !coverSel.size || !trackCoverUrl.trim()}
-              >
-                <ExternalLink className="h-3.5 w-3.5" /> Use URL
-              </button>
-              <button
-                className="btn-ghost !py-1 text-xs tap"
-                onClick={() => mbCoverUrl && applyCoverUrl(mbCoverUrl, selectedCoverFiles())}
-                disabled={busy || !coverSel.size || !mbCoverUrl}
-              >
-                <CloudDownloadIcon /> MusicBrainz cover
-              </button>
-              <button className="btn-danger !py-1 text-xs tap" onClick={clearTrackCovers} disabled={busy || !coverSel.size}>
-                <Trash2 className="h-3.5 w-3.5" /> Clear per-track cover
-              </button>
-            </div>
-            {stepTracks.length === 0 && (
-              <div className="text-xs text-zinc-500">No tracks — go back and fetch the release.</div>
+            )}
+            <span className="text-xs text-zinc-500 -mt-1 block">
+              Genres are not fetched automatically — set the per-track limit, then ask MusicBrainz, RateYourMusic, or both.
+              The app writes the specific genres first and derives the family (rock, electronic…) into the last slot:
+              at most {genreCap} genre value{genreCap === 1 ? "" : "s"} per track (Settings → Import).
+            </span>
+          </MinBlock>
+          <MinBlock min={minMode} here={missingHere} mine="genres">
+            {/* One datalist for every add input in the step: the browser's own
+                autocomplete, so a name is offered the way MusicBrainz spells it
+                without a keystroke of React work — and the options stay one DOM
+                copy however many tracks the album has. */}
+            <datalist id="wizard-genres">
+              {[...genreSuggestions.values()].map((n) => (
+                <option key={n} value={n} />
+              ))}
+            </datalist>
+            {stepTracks.length === 0 && <div className="text-xs text-zinc-500">No tracks — go back and fetch the release.</div>}
+            {/* Album-wide cleanup: every genre currently on any track, one click
+                to strip it from ALL of them, plus a clear-everything button.
+                A wrong genre lands on a whole album at once, so removing it
+                everywhere is the common correction — and until now it could only
+                be done one track at a time. */}
+            {allGenres.length > 0 && (
+              <div className="panel px-3 py-2 flex items-center gap-1.5 flex-wrap">
+                <span className="text-xs font-semibold text-zinc-400 shrink-0">Remove a genre everywhere:</span>
+                {allGenres.map(([gen, n]) => (
+                  <button
+                    key={gen}
+                    className={`chip border ${GENRE_FAMILIES[gen.toLowerCase()]
+                      ? "bg-raise border-border text-zinc-500"
+                      : "bg-raise border-border text-zinc-300"} hover:border-red-800 hover:text-red-200`}
+                    onClick={() => removeGenreEverywhere(gen)}
+                    title={GENRE_FAMILIES[gen.toLowerCase()]
+                      // A derived family comes back on the next write, so this
+                      // only helps while the step is open — say so.
+                      ? `Remove “${gen}” (a derived family) from all ${n} track(s) for this run`
+                      : `Remove “${gen}” from all ${n} track(s)`}
+                  >
+                    {gen}
+                    <span className="text-[10px] text-zinc-500 tabular-nums">{n}</span>
+                    <X className="h-3 w-3" />
+                  </button>
+                ))}
+                <button
+                  className="btn-danger !py-1 text-xs ml-auto tap"
+                  onClick={removeAllGenres}
+                  title="Clear the genre field on every track in this step"
+                >
+                  <Trash2 className="h-3.5 w-3.5" /> Remove all genres
+                </button>
+              </div>
             )}
             {groupByDisc(stepTracks, discOfTrack).map((g) => (
               <DiscSection
@@ -2981,560 +3527,335 @@ const finish = async () => {
                 collapsed={collapsedDiscs.has(g.disc ?? null)}
                 onToggle={() => toggleDisc(g.disc ?? null)}
                 extra={
-                  <>
-                    <button
-                      className="btn-ghost !py-0.5 !px-1.5 text-[11px] tap"
-                      onClick={() => setCoverSelFor(g.rows.map((t) => t.path), true)}
-                    >
-                      All
-                    </button>
-                    <button
-                      className="btn-ghost !py-0.5 !px-1.5 text-[11px] tap"
-                      onClick={() => setCoverSelFor(g.rows.map((t) => t.path), false)}
-                    >
-                      None
-                    </button>
-                  </>
+                  g.disc
+                    ? [
+                        <input
+                          key="in"
+                          className="input !w-52 !py-1 text-xs tap"
+                          list="wizard-genres"
+                          placeholder="Apply genre to whole disc…"
+                          value={discGenres[g.disc!] ?? ""}
+                          onChange={(e) => setDiscGenres((m) => ({ ...m, [g.disc!]: e.target.value }))}
+                          onKeyDown={(e) => e.key === "Enter" && applyGenresToDisc(g.disc!, (discGenres[g.disc!] ?? "").trim())}
+                        />,
+                        <button
+                          key="btn"
+                          className="btn-ghost !py-1 text-xs tap"
+                          onClick={() => applyGenresToDisc(g.disc!, (discGenres[g.disc!] ?? "").trim())}
+                        >
+                          Apply to all
+                        </button>,
+                      ]
+                    : undefined
                 }
               >
                 {g.rows.map((t) => {
-                  const shared = t.cover_file ? (coverShares.get(t.cover_file) ?? 0) - 1 : 0;
+                  const list = genreList(t.path);
+                  const family = familyOf(list);
+                  const typed = genreAddValues[t.path] ?? "";
+                  const unknown = !!typed.trim() && !genreSuggestions.has(typed.trim().toLowerCase());
                   return (
-                    <label
-                      key={t.path}
-                      className={`flex items-center gap-3 panel px-3 py-2 cursor-pointer ${
-                        coverSel.has(t.path) ? "border-accent/60" : "border-border"
-                      }`}
-                    >
-                      <input type="checkbox" checked={coverSel.has(t.path)} onChange={() => toggleCoverSel(t.path)} />
-                      <TrackCover albumPath={albumPath} trackCover={t.cover_file} albumCover={coverInfo?.file} staged={staged} />
+                    <div key={t.path} className="flex items-center gap-3 panel px-3 py-2">
                       <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
                       <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
-                      {t.cover_file ? (
-                        <span
-                          className="chip bg-accent/10 text-accent-soft border border-accent/25 shrink-0"
-                          title={t.cover_file}
-                        >
-                          own art{shared > 0 ? ` · shared with ${shared}` : ""}
-                        </span>
-                      ) : (
-                        <span className="chip bg-raise border border-border text-zinc-500 shrink-0">album cover</span>
-                      )}
-                    </label>
+                      <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                        {list.filter((x) => x !== family).map((gen) => (
+                          <span key={gen} className="chip bg-accent/10 text-accent-soft border border-accent/25">
+                            {gen}
+                            <button
+                              className="hover:text-white transition-colors"
+                              onClick={() => removeGenre(t.path, gen)}
+                              title={`Remove ${gen}`}
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </span>
+                        ))}
+                        {family ? (
+                          // The family's own slot: it is DERIVED from the
+                          // specific genre and written last, so it is labelled
+                          // rather than shown as one more name to edit.
+                          <span
+                            className="chip bg-raise border border-border text-zinc-400"
+                            title={`${family} is the family — the app derives it from the specific genre and writes it last`}
+                          >
+                            <span className="text-[9px] uppercase tracking-wider text-zinc-600">family</span>
+                            {family}
+                            <button
+                              className="hover:text-white transition-colors"
+                              onClick={() => removeGenre(t.path, family)}
+                              title={`Remove ${family} for this run — the app derives it again when it writes`}
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </span>
+                        ) : (
+                          list.length > 0 && (
+                            <span
+                              className="chip bg-raise border border-dashed border-border text-zinc-600"
+                              title={`The app derives the family of ${list[0]} when it writes — it is not typed in here`}
+                            >
+                              family derived on save
+                            </span>
+                          )
+                        )}
+                        <input
+                          className={`input !w-36 !py-1 text-xs tap${unknown ? " !border-amber-700" : ""}`}
+                          list="wizard-genres"
+                          placeholder={list.length ? "+ add genre…" : "Add genre…"}
+                          value={typed}
+                          disabled={list.length >= genreCap}
+                          title={
+                            list.length >= genreCap
+                              ? `Genres per track is ${genreCap} (Settings → Import) — remove one to add another`
+                              : unknown
+                                ? `“${typed.trim()}” is not a name the app's vocabulary knows — it is written as typed and the grade check flags it`
+                                : undefined
+                          }
+                          onChange={(e) => setGenreAddValues((v) => ({ ...v, [t.path]: e.target.value }))}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              addGenre(t.path, typed);
+                              setGenreAddValues((v) => ({ ...v, [t.path]: "" }));
+                            }
+                          }}
+                        />
+                      </div>
+                    </div>
                   );
                 })}
               </DiscSection>
             ))}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2 justify-end">
-            <span className="text-xs text-zinc-500">Covers are written as you apply them — Continue just moves on.</span>
-            <button className="btn-primary tap" onClick={saveCovers}>Continue to genres</button>
-          </div>
-
-          <input
-            ref={albumCoverInput}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              e.target.value = "";
-              if (f) uploadCover(f);
-            }}
-          />
-          <input
-            ref={trackCoverInput}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              const files = selectedCoverFiles();
-              e.target.value = "";
-              if (f && files.length) uploadCover(f, files);
-            }}
-          />
-
-          {coverSearch && (
-            <CoverSearchModal
-              albumPath={albumPath}
-              artist={release?.artists.map((a) => a.name).join(", ") || trackArtist(stepTracks[0]?.path ?? "")}
-              album={trackAlbum || currentAlbumName}
-              releaseGroupMbid={release?.release_group_id ?? undefined}
-              tracks={coverSel.size ? selectedCoverFiles() : undefined}
-              initialResults={coverSearch.results}
-              initialProvider={coverSearch.provider}
-              onClose={() => setCoverSearch(null)}
-              onApplied={() => {
-                refreshCovers();
-                qc.invalidateQueries({ queryKey: ["stagedCovers", albumPath] });
-                qc.invalidateQueries({ queryKey: ["album"] });
-              }}
-            />
-          )}
-        </div>
-      )}
-
-      {/* ---------------- Step 4: genres ---------------- */}
-      {step === 4 && (
-        <div className="space-y-3">
-          <div className="flex items-center gap-2 flex-wrap">
-            <button
-              className="btn-ghost tap"
-              onClick={() => importGenresFrom("musicbrainz")}
-              disabled={busy || !albumTargets().length}
-              title="Ask MusicBrainz for this album's genres (recording → release → release group → artist) and write what it states"
-            >
-              <CloudDownloadIcon /> Genres from MusicBrainz
-            </button>
-            <button
-              className="btn-ghost tap"
-              onClick={() => importGenresFrom("rateyourmusic")}
-              disabled={busy || !albumTargets().length}
-              title="Ask RateYourMusic for this album's genres and write what its page states — a blocked RYM says so instead of writing a guess"
-            >
-              <CloudDownloadIcon /> Genres from RateYourMusic
-            </button>
-            {/* The per-run limit can only LOWER the app's own cap: the server
-                writes and trims every genre list to `mb_genre_count`, so an
-                option above it would be a promise nothing keeps. */}
-            <label className="flex items-center gap-1.5 text-xs text-zinc-400 ml-auto">
-              Max genres / track
-              <select
-                className="input !w-auto !py-1 text-xs tap"
-                value={genreLimitValue}
-                onChange={(e) => setGenreLimit(Number(e.target.value))}
-                title={`The app writes at most ${genreCap} genre value(s) per track (mb_genre_count, Settings → Import)`}
-              >
-                {Array.from({ length: genreCap }, (_, i) => i + 1).map((n) => (
-                  <option key={n} value={n}>
-                    {n}
-                    {n === genreCap ? " (app cap — Settings → Import)" : ""}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          {/* What the last source wrote — one source at a time, so a blocked
-              or empty one is never hidden behind the other's answer. */}
-          {genreError && (
-            <div className="text-xs text-red-300" role="alert">
-              {genreError}
+            <div className="flex justify-end">
+              <button className="btn-primary tap" onClick={saveGenres} disabled={busy}>Save genres</button>
             </div>
-          )}
-          {genreJobResult && (
-            <div className="panel px-3 py-2 space-y-1" role="status">
-              <div className="text-xs text-zinc-300">
-                {genreJobResult.updated} track(s) updated
-                {genreJobResult.genres.length
-                  ? ` — ${genreJobResult.genres.join(", ")}`
-                  : " — no genres returned"}
-              </div>
-              {/* The cap these genres were written and trimmed to, so the
-                  value is visible where the genres are, not only in Settings
-                  → Import (`mb_genre_count`). */}
-              <div className="text-[11px] text-zinc-500">
-                Genres per track: {genreJobResult.genre_count} (Settings → Import)
-                {genreJobResult.trimmed > 0 &&
-                  ` — ${genreJobResult.trimmed} track(s) trimmed to ${genreJobResult.genre_count}`}
-              </div>
-              {Object.entries(genreJobResult.per_source).filter(([, names]) => names.length).length > 0 && (
-                <div className="flex flex-wrap gap-1.5">
-                  {Object.entries(genreJobResult.per_source)
-                    .filter(([, names]) => names.length)
-                    .map(([name, names]) => (
-                      <span key={name} className="chip bg-raise border border-border text-zinc-300" title={names.join(", ")}>
-                        {name} <span className="tabular-nums">{names.length}</span>
-                      </span>
-                    ))}
-                </div>
-              )}
-              {Object.entries(genreJobResult.notes).length > 0 && (
-                <ul className="text-[11px] text-zinc-500 space-y-0.5">
-                  {Object.entries(genreJobResult.notes).map(([name, note]) => (
-                    <li key={name}>
-                      <span className="text-zinc-400">{name}</span>: {note}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
-          <span className="text-xs text-zinc-500 -mt-1 block">
-            Genres are not fetched automatically — set the per-track limit, then ask MusicBrainz, RateYourMusic, or both.
-            The app writes the specific genres first and derives the family (rock, electronic…) into the last slot:
-            at most {genreCap} genre value{genreCap === 1 ? "" : "s"} per track (Settings → Import).
-          </span>
-          {/* One datalist for every add input in the step: the browser's own
-              autocomplete, so a name is offered the way MusicBrainz spells it
-              without a keystroke of React work — and the options stay one DOM
-              copy however many tracks the album has. */}
-          <datalist id="wizard-genres">
-            {[...genreSuggestions.values()].map((n) => (
-              <option key={n} value={n} />
-            ))}
-          </datalist>
-          {stepTracks.length === 0 && <div className="text-xs text-zinc-500">No tracks — go back and fetch the release.</div>}
-          {/* Album-wide cleanup: every genre currently on any track, one click
-              to strip it from ALL of them, plus a clear-everything button.
-              A wrong genre lands on a whole album at once, so removing it
-              everywhere is the common correction — and until now it could only
-              be done one track at a time. */}
-          {allGenres.length > 0 && (
-            <div className="panel px-3 py-2 flex items-center gap-1.5 flex-wrap">
-              <span className="text-xs font-semibold text-zinc-400 shrink-0">Remove a genre everywhere:</span>
-              {allGenres.map(([gen, n]) => (
-                <button
-                  key={gen}
-                  className={`chip border ${GENRE_FAMILIES[gen.toLowerCase()]
-                    ? "bg-raise border-border text-zinc-500"
-                    : "bg-raise border-border text-zinc-300"} hover:border-red-800 hover:text-red-200`}
-                  onClick={() => removeGenreEverywhere(gen)}
-                  title={GENRE_FAMILIES[gen.toLowerCase()]
-                    // A derived family comes back on the next write, so this
-                    // only helps while the step is open — say so.
-                    ? `Remove “${gen}” (a derived family) from all ${n} track(s) for this run`
-                    : `Remove “${gen}” from all ${n} track(s)`}
-                >
-                  {gen}
-                  <span className="text-[10px] text-zinc-500 tabular-nums">{n}</span>
-                  <X className="h-3 w-3" />
-                </button>
-              ))}
-              <button
-                className="btn-danger !py-1 text-xs ml-auto tap"
-                onClick={removeAllGenres}
-                title="Clear the genre field on every track in this step"
-              >
-                <Trash2 className="h-3.5 w-3.5" /> Remove all genres
-              </button>
-            </div>
-          )}
-          {groupByDisc(stepTracks, discOfTrack).map((g) => (
-            <DiscSection
-              key={g.disc ?? "unmatched"}
-              disc={g.disc}
-              count={g.rows.length}
-              collapsed={collapsedDiscs.has(g.disc ?? null)}
-              onToggle={() => toggleDisc(g.disc ?? null)}
-              extra={
-                g.disc
-                  ? [
-                      <input
-                        key="in"
-                        className="input !w-52 !py-1 text-xs tap"
-                        list="wizard-genres"
-                        placeholder="Apply genre to whole disc…"
-                        value={discGenres[g.disc!] ?? ""}
-                        onChange={(e) => setDiscGenres((m) => ({ ...m, [g.disc!]: e.target.value }))}
-                        onKeyDown={(e) => e.key === "Enter" && applyGenresToDisc(g.disc!, (discGenres[g.disc!] ?? "").trim())}
-                      />,
-                      <button
-                        key="btn"
-                        className="btn-ghost !py-1 text-xs tap"
-                        onClick={() => applyGenresToDisc(g.disc!, (discGenres[g.disc!] ?? "").trim())}
-                      >
-                        Apply to all
-                      </button>,
-                    ]
-                  : undefined
-              }
-            >
-              {g.rows.map((t) => {
-                const list = genreList(t.path);
-                const family = familyOf(list);
-                const typed = genreAddValues[t.path] ?? "";
-                const unknown = !!typed.trim() && !genreSuggestions.has(typed.trim().toLowerCase());
-                return (
-                  <div key={t.path} className="flex items-center gap-3 panel px-3 py-2">
-                    <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
-                    <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
-                    <div className="flex items-center gap-1.5 flex-wrap justify-end">
-                      {list.filter((x) => x !== family).map((gen) => (
-                        <span key={gen} className="chip bg-accent/10 text-accent-soft border border-accent/25">
-                          {gen}
-                          <button
-                            className="hover:text-white transition-colors"
-                            onClick={() => removeGenre(t.path, gen)}
-                            title={`Remove ${gen}`}
-                          >
-                            <X className="h-3 w-3" />
-                          </button>
-                        </span>
-                      ))}
-                      {family ? (
-                        // The family's own slot: it is DERIVED from the
-                        // specific genre and written last, so it is labelled
-                        // rather than shown as one more name to edit.
-                        <span
-                          className="chip bg-raise border border-border text-zinc-400"
-                          title={`${family} is the family — the app derives it from the specific genre and writes it last`}
-                        >
-                          <span className="text-[9px] uppercase tracking-wider text-zinc-600">family</span>
-                          {family}
-                          <button
-                            className="hover:text-white transition-colors"
-                            onClick={() => removeGenre(t.path, family)}
-                            title={`Remove ${family} for this run — the app derives it again when it writes`}
-                          >
-                            <X className="h-3 w-3" />
-                          </button>
-                        </span>
-                      ) : (
-                        list.length > 0 && (
-                          <span
-                            className="chip bg-raise border border-dashed border-border text-zinc-600"
-                            title={`The app derives the family of ${list[0]} when it writes — it is not typed in here`}
-                          >
-                            family derived on save
-                          </span>
-                        )
-                      )}
-                      <input
-                        className={`input !w-36 !py-1 text-xs tap${unknown ? " !border-amber-700" : ""}`}
-                        list="wizard-genres"
-                        placeholder={list.length ? "+ add genre…" : "Add genre…"}
-                        value={typed}
-                        disabled={list.length >= genreCap}
-                        title={
-                          list.length >= genreCap
-                            ? `Genres per track is ${genreCap} (Settings → Import) — remove one to add another`
-                            : unknown
-                              ? `“${typed.trim()}” is not a name the app's vocabulary knows — it is written as typed and the grade check flags it`
-                              : undefined
-                        }
-                        onChange={(e) => setGenreAddValues((v) => ({ ...v, [t.path]: e.target.value }))}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            addGenre(t.path, typed);
-                            setGenreAddValues((v) => ({ ...v, [t.path]: "" }));
-                          }
-                        }}
-                      />
-                    </div>
-                  </div>
-                );
-              })}
-            </DiscSection>
-          ))}
-          <div className="flex justify-end">
-            <button className="btn-primary tap" onClick={saveGenres} disabled={busy}>Save genres</button>
-          </div>
+          </MinBlock>
         </div>
       )}
 
       {/* ---------------- Step 5: lyrics ---------------- */}
       {step === 5 && (
-        <div className="space-y-4">
-          {lyricsNotice && (
-            <div className="rounded-lg border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
-              {lyricsNotice}
-            </div>
-          )}
-          <div className="flex flex-wrap items-center gap-2">
-            <button className="btn-primary text-xs tap" onClick={() => autoImportLyrics()} disabled={busy}>
-              <CloudDownloadIcon /> Auto-import lyrics
-            </button>
-            <span className="text-xs text-zinc-500">
-              Tries every provider in the saved order (Settings → Lyrics) and writes them straight to the
-              files. Review below — Space stamps time while previewing; INSTRUMENTAL=1 skips lyrics.
-            </span>
-          </div>
-          {Object.keys(lyrResults).length > 0 && (
-            <div className="panel px-3 py-2 text-xs space-y-0.5">
-              <div className="flex items-center gap-3 text-zinc-400 flex-wrap">
-                {Object.entries(LYR_STATUS_LABEL).map(([status, label]) => {
-                  const rows = Object.values(lyrResults).filter((r) => r.status === status);
-                  if (!rows.length) return null;
-                  const labels = [...new Set(rows.map((r) => r.provider_label).filter(Boolean))];
-                  return (
-                    <span key={status}>
-                      <b className="text-zinc-200">{rows.length}</b> {label}
-                      {status === "ok" && labels.length > 0 && ` — ${labels.join(", ")}`}
-                    </span>
-                  );
-                })}
+        <div className={minMode && missingHere ? "flex flex-col gap-4" : "space-y-4"}>
+          {minMode && !missingHere && <MinNothingMissing />}
+          <MinBlock min={minMode} here={missingHere} mine="lyrics">
+            {lyricsNotice && (
+              <div className="rounded-lg border border-amber-900/60 bg-amber-950/30 px-3 py-2 text-xs text-amber-200">
+                {lyricsNotice}
               </div>
-              <div className="text-[10px] text-zinc-600">
-                Per track below — nothing found is normal for instrumentals and unreleased tracks.
-              </div>
+            )}
+          </MinBlock>
+          <MinBlock min={minMode} here={missingHere} mine="">
+            <div className="flex flex-wrap items-center gap-2">
+              <button className="btn-primary text-xs tap" onClick={() => autoImportLyrics()} disabled={busy}>
+                <CloudDownloadIcon /> Auto-import lyrics
+              </button>
+              <span className="text-xs text-zinc-500">
+                Tries every provider in the saved order (Settings → Lyrics) and writes them straight to the
+                files. Review below — Space stamps time while previewing; INSTRUMENTAL=1 skips lyrics.
+              </span>
             </div>
-          )}
-          {/* One compact row per track, like every other step: badge, title and
-              the chips on a single line, the editor behind Edit. */}
-          {stepTracks.map((t) => {
-            const inst = instrumental[t.path] ?? t.tags.INSTRUMENTAL;
-            const hasDraft = hasLyrics(t);
-            const open = lyrOpen.has(t.path);
-            return (
-              <div key={t.path} className="panel px-3 py-2 space-y-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
-                  <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
-                  {hasDraft && (
-                    <span className="chip bg-emerald-900/60 text-emerald-300 border border-emerald-800 shrink-0">
-                      <Check className="h-3 w-3" /> Lyrics
-                    </span>
-                  )}
-                  {lyrResults[t.path] && (
-                    <span
-                      className={`chip border shrink-0 ${
-                        lyrResults[t.path].status === "ok"
-                          ? "bg-emerald-900/50 text-emerald-300 border-emerald-800"
-                          : lyrResults[t.path].status === "failed"
-                            ? "bg-red-900/40 text-red-300 border-red-900"
-                            : "bg-raise text-zinc-500 border-border"
-                      }`}
-                      title={lyrResults[t.path].reason || lyrResults[t.path].error || ""}
-                    >
-                      {lyrResults[t.path].status === "ok"
-                        ? lyrResults[t.path].provider_label
-                        : LYR_STATUS_LABEL[lyrResults[t.path].status] ?? lyrResults[t.path].status}
-                    </span>
-                  )}
-                  {inst === "1" && (
-                    <span className="chip bg-raise text-zinc-400 border border-border shrink-0">Instrumental</span>
-                  )}
-                  <label className="flex items-center gap-1.5 text-xs text-zinc-400 select-none shrink-0">
-                    <input
-                      type="checkbox"
-                      checked={inst === "1"}
-                      onChange={(e) => setInstrumental((m) => ({ ...m, [t.path]: e.target.checked ? "1" : "0" }))}
-                      className=""
-                    />
-                    INSTRUMENTAL
-                  </label>
-                  <button
-                    className="btn-ghost !py-0.5 text-[11px] shrink-0 tap"
-                    onClick={() => toggleLyricsRow(t.path)}
-                    disabled={inst === "1"}
-                    title={inst === "1" ? "Marked instrumental — uncheck INSTRUMENTAL to edit lyrics" : "Open the lyrics editor for this track"}
-                  >
-                    {open ? "Hide" : "Edit"}
-                  </button>
+            {Object.keys(lyrResults).length > 0 && (
+              <div className="panel px-3 py-2 text-xs space-y-0.5">
+                <div className="flex items-center gap-3 text-zinc-400 flex-wrap">
+                  {Object.entries(LYR_STATUS_LABEL).map(([status, label]) => {
+                    const rows = Object.values(lyrResults).filter((r) => r.status === status);
+                    if (!rows.length) return null;
+                    const labels = [...new Set(rows.map((r) => r.provider_label).filter(Boolean))];
+                    return (
+                      <span key={status}>
+                        <b className="text-zinc-200">{rows.length}</b> {label}
+                        {status === "ok" && labels.length > 0 && ` — ${labels.join(", ")}`}
+                      </span>
+                    );
+                  })}
                 </div>
-                {open && inst !== "1" && (
-                  <div className="space-y-1.5">
-                    <button
-                      className="btn-ghost !py-0.5 text-[11px] tap"
-                      onClick={() => autoImportLyrics([t.path])}
-                      disabled={busy}
-                      title="Fetch this track's lyrics through the provider chain and write them to the file"
-                    >
-                      <CloudDownloadIcon /> Auto-import lyrics
-                    </button>
-                    <LyricsViewer
-                      path={t.path}
-                      initialLyrics={lyricsDrafts[t.path] ?? ""}
-                      onChange={(lrc) => setLyricsDrafts((d) => ({ ...d, [t.path]: lrc }))}
-                      artist={trackArtist(t.path)}
-                      track={trackTitle(t.path)}
-                      album={trackAlbum}
-                      duration={trackDuration(t.path)}
-                      staged={staged}
-                    />
-                  </div>
-                )}
+                <div className="text-[10px] text-zinc-600">
+                  Per track below — nothing found is normal for instrumentals and unreleased tracks.
+                </div>
               </div>
-            );
-          })}
-          <div className="flex justify-end">
-            <button className="btn-primary tap" onClick={saveLyricsStep} disabled={busy}>Save lyrics & instrumental</button>
-          </div>
+            )}
+          </MinBlock>
+          <MinBlock min={minMode} here={missingHere} mine="lyrics">
+            {/* One compact row per track, like every other step: badge, title and
+                the chips on a single line, the editor behind Edit. */}
+            {stepTracks.map((t) => {
+              const inst = instrumental[t.path] ?? t.tags.INSTRUMENTAL;
+              const hasDraft = hasLyrics(t);
+              const open = lyrOpen.has(t.path);
+              return (
+                <div key={t.path} className="panel px-3 py-2 space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
+                    <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
+                    {hasDraft && (
+                      <span className="chip bg-emerald-900/60 text-emerald-300 border border-emerald-800 shrink-0">
+                        <Check className="h-3 w-3" /> Lyrics
+                      </span>
+                    )}
+                    {lyrResults[t.path] && (
+                      <span
+                        className={`chip border shrink-0 ${
+                          lyrResults[t.path].status === "ok"
+                            ? "bg-emerald-900/50 text-emerald-300 border-emerald-800"
+                            : lyrResults[t.path].status === "failed"
+                              ? "bg-red-900/40 text-red-300 border-red-900"
+                              : "bg-raise text-zinc-500 border-border"
+                        }`}
+                        title={lyrResults[t.path].reason || lyrResults[t.path].error || ""}
+                      >
+                        {lyrResults[t.path].status === "ok"
+                          ? lyrResults[t.path].provider_label
+                          : LYR_STATUS_LABEL[lyrResults[t.path].status] ?? lyrResults[t.path].status}
+                      </span>
+                    )}
+                    {inst === "1" && (
+                      <span className="chip bg-raise text-zinc-400 border border-border shrink-0">Instrumental</span>
+                    )}
+                    <label className="flex items-center gap-1.5 text-xs text-zinc-400 select-none shrink-0">
+                      <input
+                        type="checkbox"
+                        checked={inst === "1"}
+                        onChange={(e) => setInstrumental((m) => ({ ...m, [t.path]: e.target.checked ? "1" : "0" }))}
+                        className=""
+                      />
+                      INSTRUMENTAL
+                    </label>
+                    <button
+                      className="btn-ghost !py-0.5 text-[11px] shrink-0 tap"
+                      onClick={() => toggleLyricsRow(t.path)}
+                      disabled={inst === "1"}
+                      title={inst === "1" ? "Marked instrumental — uncheck INSTRUMENTAL to edit lyrics" : "Open the lyrics editor for this track"}
+                    >
+                      {open ? "Hide" : "Edit"}
+                    </button>
+                  </div>
+                  {open && inst !== "1" && (
+                    <div className="space-y-1.5">
+                      <button
+                        className="btn-ghost !py-0.5 text-[11px] tap"
+                        onClick={() => autoImportLyrics([t.path])}
+                        disabled={busy}
+                        title="Fetch this track's lyrics through the provider chain and write them to the file"
+                      >
+                        <CloudDownloadIcon /> Auto-import lyrics
+                      </button>
+                      <LyricsViewer
+                        path={t.path}
+                        initialLyrics={lyricsDrafts[t.path] ?? ""}
+                        onChange={(lrc) => setLyricsDrafts((d) => ({ ...d, [t.path]: lrc }))}
+                        artist={trackArtist(t.path)}
+                        track={trackTitle(t.path)}
+                        album={trackAlbum}
+                        duration={trackDuration(t.path)}
+                        staged={staged}
+                      />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            <div className="flex justify-end">
+              <button className="btn-primary tap" onClick={saveLyricsStep} disabled={busy}>Save lyrics & instrumental</button>
+            </div>
+          </MinBlock>
         </div>
       )}
 
       {/* ---------------- Step 6: advisory ---------------- */}
       {step === 6 && (
-        <div className="space-y-3">
-          <div className="text-sm text-zinc-400">Set iTunes advisory per track: <b className="text-zinc-200">0</b> unrated/clean, <b className="text-zinc-200">1</b> explicit, <b className="text-zinc-200">2</b> safe edited version.</div>
-          <div className="flex items-center gap-2 panel px-3 py-2 flex-wrap">
-            <span className="text-xs font-semibold text-zinc-400">Apply to all tracks:</span>
-            {["0", "1", "2"].map((v) => (
-              <button
-                key={v}
-                onClick={() => applyAdvisoryToAll(v)}
-                className="btn-ghost !py-1 text-xs tap"
-                title={`Set every track to ${v === "0" ? "clean" : v === "1" ? "explicit" : "safe"}`}
-              >
-                {v === "0" ? "0 · clean" : v === "1" ? "1 · explicit" : "2 · safe"}
-              </button>
-            ))}
-          </div>
-          {/* Fetch the rating for the WHOLE album here: the wizard used to
-              have no way to run the advisory sources at all — this is the
-              album page's own Check, with the bar and the per-track outcome
-              the click deserves. */}
-          <div className="panel px-3 py-2 space-y-1.5">
-            <div className="flex items-center gap-2 flex-wrap">
-              <button
-                className="btn-ghost !py-1 text-xs tap"
-                onClick={fetchAdvisoryAll}
-                disabled={busy || !stepTracks.length}
-                title="Ask the configured advisory sources (Deezer / Spotify by ISRC, Apple) for every track and write what they state"
-              >
-                <CloudDownloadIcon /> Auto-import advisory for all tracks
-              </button>
-              <span className="text-[11px] text-zinc-500">
-                Asks the same sources the album page's Check does, for all {stepTracks.length} track(s) at once.
-                {advReply ? ` ${advReply.updated} value(s) written.` : ""}
-              </span>
-            </div>
-            {advError && (
-              <div className="text-xs text-red-300" role="alert">
-                Advisory fetch failed — {advError}
-              </div>
-            )}
-            {advReply && (
-              <div className="space-y-0.5">
-                {stepTracks.map((t) => (
-                  <div key={t.path} className="flex items-center gap-2 text-[11px]">
-                    <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
-                    <span className="flex-1 truncate text-zinc-400">{displayTitle(t.path)}</span>
-                    <span className="text-zinc-300" title="what the sources said, and who said it">
-                      {advisoryLine(
-                        replyFor(advReply.values, t.path),
-                        answerSources(replyFor(advReply.answers, t.path), replyFor(advReply.sources, t.path))
-                      )}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-          {stepTracks.map((t) => (
-            <div key={t.path} className="flex flex-wrap items-center gap-3 panel px-3 py-2">
-              <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
-              <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
-              {!!t.tags.ITUNESADVISORY && !["0", "1", "2"].includes(t.tags.ITUNESADVISORY.trim()) && (
-                <span
-                  className="chip bg-amber-950/40 text-amber-300 border border-amber-900 shrink-0"
-                  title="ITUNESADVISORY must be 0, 1 or 2 — pick a value below to fix it"
+        <div className={minMode && missingHere ? "flex flex-col gap-3" : "space-y-3"}>
+          {minMode && !missingHere && <MinNothingMissing />}
+          <MinBlock min={minMode} here={missingHere} mine="">
+            <div className="text-sm text-zinc-400">Set iTunes advisory per track: <b className="text-zinc-200">0</b> unrated/clean, <b className="text-zinc-200">1</b> explicit, <b className="text-zinc-200">2</b> safe edited version.</div>
+            <div className="flex items-center gap-2 panel px-3 py-2 flex-wrap">
+              <span className="text-xs font-semibold text-zinc-400">Apply to all tracks:</span>
+              {["0", "1", "2"].map((v) => (
+                <button
+                  key={v}
+                  onClick={() => applyAdvisoryToAll(v)}
+                  className="btn-ghost !py-1 text-xs tap"
+                  title={`Set every track to ${v === "0" ? "clean" : v === "1" ? "explicit" : "safe"}`}
                 >
-                  invalid existing value “{t.tags.ITUNESADVISORY}”
-                </span>
-              )}
-              <div className="flex gap-1">
-                {["0", "1", "2"].map((v) => (
-                  <button
-                    key={v}
-                    onClick={() => setAdvisory((a) => ({ ...a, [t.path]: v }))}
-                    className={`px-2 sm:px-3 py-1.5 rounded text-xs border ${
-                      (advisory[t.path] ?? t.tags.ITUNESADVISORY) === v
-                        ? "bg-accent on-accent border-accent"
-                        : "bg-panel text-zinc-400 border-border hover:border-accent/50"
-                    }`}
-                  >
-                    {v === "0" ? "0 · clean" : v === "1" ? "1 · explicit" : "2 · safe"}
-                  </button>
-                ))}
-              </div>
+                  {v === "0" ? "0 · clean" : v === "1" ? "1 · explicit" : "2 · safe"}
+                </button>
+              ))}
             </div>
-          ))}
-          <div className="flex justify-end">
-            <button className="btn-primary tap" onClick={saveAdvisory} disabled={busy}>Save advisory</button>
-          </div>
+            {/* Fetch the rating for the WHOLE album here: the wizard used to
+                have no way to run the advisory sources at all — this is the
+                album page's own Check, with the bar and the per-track outcome
+                the click deserves. */}
+            <div className="panel px-3 py-2 space-y-1.5">
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  className="btn-ghost !py-1 text-xs tap"
+                  onClick={fetchAdvisoryAll}
+                  disabled={busy || !stepTracks.length}
+                  title="Ask the configured advisory sources (Deezer / Spotify by ISRC, Apple) for every track and write what they state"
+                >
+                  <CloudDownloadIcon /> Auto-import advisory for all tracks
+                </button>
+                <span className="text-[11px] text-zinc-500">
+                  Asks the same sources the album page's Check does, for all {stepTracks.length} track(s) at once.
+                  {advReply ? ` ${advReply.updated} value(s) written.` : ""}
+                </span>
+              </div>
+              {advError && (
+                <div className="text-xs text-red-300" role="alert">
+                  Advisory fetch failed — {advError}
+                </div>
+              )}
+              {advReply && (
+                <div className="space-y-0.5">
+                  {stepTracks.map((t) => (
+                    <div key={t.path} className="flex items-center gap-2 text-[11px]">
+                      <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
+                      <span className="flex-1 truncate text-zinc-400">{displayTitle(t.path)}</span>
+                      <span className="text-zinc-300" title="what the sources said, and who said it">
+                        {advisoryLine(
+                          replyFor(advReply.values, t.path),
+                          answerSources(replyFor(advReply.answers, t.path), replyFor(advReply.sources, t.path))
+                        )}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </MinBlock>
+          <MinBlock min={minMode} here={missingHere} mine="advisory">
+            {stepTracks.map((t) => (
+              <div key={t.path} className="flex flex-wrap items-center gap-3 panel px-3 py-2">
+                <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
+                <span className="flex-1 truncate text-sm">{displayTitle(t.path)}</span>
+                {!!t.tags.ITUNESADVISORY && !["0", "1", "2"].includes(t.tags.ITUNESADVISORY.trim()) && (
+                  <span
+                    className="chip bg-amber-950/40 text-amber-300 border border-amber-900 shrink-0"
+                    title="ITUNESADVISORY must be 0, 1 or 2 — pick a value below to fix it"
+                  >
+                    invalid existing value “{t.tags.ITUNESADVISORY}”
+                  </span>
+                )}
+                <div className="flex gap-1">
+                  {["0", "1", "2"].map((v) => (
+                    <button
+                      key={v}
+                      onClick={() => setAdvisory((a) => ({ ...a, [t.path]: v }))}
+                      className={`px-2 sm:px-3 py-1.5 rounded text-xs border ${
+                        (advisory[t.path] ?? t.tags.ITUNESADVISORY) === v
+                          ? "bg-accent on-accent border-accent"
+                          : "bg-panel text-zinc-400 border-border hover:border-accent/50"
+                      }`}
+                    >
+                      {v === "0" ? "0 · clean" : v === "1" ? "1 · explicit" : "2 · safe"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+            <div className="flex justify-end">
+              <button className="btn-primary tap" onClick={saveAdvisory} disabled={busy}>Save advisory</button>
+            </div>
+          </MinBlock>
         </div>
       )}
 
@@ -3861,6 +4182,30 @@ function AcoustidBlock({
                   {row.score != null && (
                     <span className="text-zinc-600 font-mono">score {Math.round(row.score * 100)}%</span>
                   )}
+                  {/* A matched row can still be short of coverage ("3 of 5
+                      track(s) could not be fingerprinted"): the release IS
+                      this audio's, but not every track proved it. Muted, not a
+                      warning — the count behind it is row.skips (nothing
+                      fingerprintable, never retryable) and row.failures (the
+                      tool or service could not answer, which a retry can). */}
+                  {row.reason && (
+                    <span className="text-zinc-600 truncate max-w-full" title={row.reason}>
+                      {row.reason}
+                    </span>
+                  )}
+                  {/* The tags claim another release group than the audio is.
+                      Nothing was overwritten — the import keeps the release it
+                      was matched to — so this is shown, not acted on. */}
+                  {row.conflict && (
+                    <span
+                      className="chip bg-amber-900/50 text-amber-300 border border-amber-900 max-w-full truncate"
+                      title={(row.conflicts ?? []).map((c) => c.reason).join(" | ")}
+                    >
+                      {(row.conflicts ?? []).length > 1
+                        ? `${row.conflicts!.length} tag conflicts`
+                        : row.conflicts?.[0]?.reason || "tags disagree with the audio"}
+                    </span>
+                  )}
                   <button
                     className="btn-ghost !py-0.5 text-[11px] ml-auto tap"
                     onClick={() => onUse(row)}
@@ -3870,9 +4215,25 @@ function AcoustidBlock({
                     Use this release
                   </button>
                 </>
-              ) : (
+              ) : row.status === "error" ? (
+                // A lookup that FAILED is not a lookup that found nothing: the
+                // server says which, and saying "no match" here would send the
+                // user hunting for a release the app never asked about.
+                <span className="text-amber-300">
+                  {row.reason || row.code} — the audio was not identified (not "no match").
+                </span>
+              ) : row.status === "skipped" ? (
                 <span className="text-zinc-500">
-                  No release group matched {row.total} track(s) — search by title or paste a release link below.
+                  {row.reason || "nothing fingerprintable"} (skipped).
+                </span>
+              ) : (
+                // The server's own sentence says WHY there is no match ("it
+                // identified none of the 2 tracks" vs "no group owned enough
+                // of the 3 identified ones"); the generic line is only for a
+                // row from a server that predates it.
+                <span className="text-zinc-500">
+                  {row.reason || `No release group matched ${row.total} track(s)`} — search by title or paste
+                  a release link below.
                 </span>
               )}
             </div>

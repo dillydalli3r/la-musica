@@ -5,10 +5,10 @@ import {
   ArrowDownUp, Download, Disc3, Eye, EyeOff, FolderInput, FolderOpen, Loader2, Play, Power, RefreshCw, Search,
   User, Zap, Square, FileCheck2, FileVideo, Music2, Save, Tag, Trash2, PackageOpen,
   Star, Plus, CheckCircle2, CircleDashed, AlertTriangle, ExternalLink, RotateCw, ChevronDown, ChevronRight, Link2,
-  MessageSquare, X,
+  MessageSquare, SearchX, X, Wand2, CheckCheck, MessageCircleQuestion,
 } from "lucide-react";
 import { api } from "../api";
-import type { ImportRunStatus, ReadyAlbum, SlskAutoFile, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskSearchProgress, SlskTransfer, StagingEntry, StagingRoot, StagingRootId } from "../api";
+import type { ImportRunStatus, ReadyAlbum, SlskAutoFile, SlskAutoProgress, SlskConversation, SlskDownloads, SlskMessage, SlskQueueItem, SlskSearchProgress, SlskTransfer, StagingEntry, StagingRoot, StagingRootId } from "../api";
 import { toast } from "../store";
 import { EmptyState, PageLoading } from "../components/Badges";
 import CachedTracksView from "../components/CachedTracksView";
@@ -1452,6 +1452,384 @@ function ImportRunCard({ run }: { run: ImportRunStatus | undefined }) {
   );
 }
 
+const QUEUE_KEY = ["soulseekQueue"];
+
+/** How each stage of the ONE queue is drawn. The labels are the shared
+ *  vocabulary (server/soulseek_auto.py STAGES) — a wish from MusicBrainz and a
+ *  folder grabbed from the search box read the same, because they ARE the same
+ *  queue. */
+const QUEUE_STAGE: Record<string, { label: string; cls: string; icon: typeof Star }> = {
+  queued: { label: "Queued", cls: "bg-zinc-800/70 text-zinc-300 border-zinc-700", icon: CircleDashed },
+  searching: { label: "Searching", cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: Search },
+  downloading: { label: "Downloading", cls: "bg-sky-900/40 text-sky-300 border-sky-800", icon: Download },
+  verifying: { label: "Verifying", cls: "bg-violet-900/40 text-violet-300 border-violet-800", icon: FileCheck2 },
+  importing: { label: "Importing", cls: "bg-indigo-900/40 text-indigo-300 border-indigo-800", icon: FolderInput },
+  completed: { label: "Completed", cls: "bg-emerald-900/40 text-emerald-300 border-emerald-800", icon: CheckCircle2 },
+  failed: { label: "Failed", cls: "bg-red-950/60 text-red-300 border-red-900", icon: AlertTriangle },
+  needs_attention: { label: "Needs you", cls: "bg-amber-900/40 text-amber-300 border-amber-800", icon: AlertTriangle },
+};
+
+function QueueProgress({ p, stage }: { p: NonNullable<SlskQueueItem["progress"]>; stage: string }) {
+  const pct = typeof p.percent === "number" ? Math.max(0, Math.min(100, p.percent)) : null;
+  return (
+    <div className="mt-1 space-y-0.5">
+      <div className="flex items-center gap-2 text-[10px] text-zinc-500">
+        {pct !== null && <span className="text-zinc-400 w-9 text-right shrink-0 tabular-nums">{fmtPercent(pct)}</span>}
+        {p.files_total ? <span>{p.files_done ?? 0}/{p.files_total} file(s)</span> : null}
+        {p.total ? <span>{fmtSize(p.done ?? 0)} / {fmtSize(p.total)}</span> : null}
+        {p.speed ? <span className="text-sky-400/80">{fmtRate(p.speed)}</span> : null}
+        {typeof p.eta_s === "number" && p.eta_s > 0 ? <span>ETA {fmtDur(p.eta_s)}</span> : null}
+        {/* Searching is a ceiling a good candidate ends early — the counts are
+            what the network really answered, never a fake countdown. */}
+        {stage === "searching" && p.text ? <span className="truncate">{p.text}</span> : null}
+      </div>
+      {pct !== null && (
+        <div className="h-1 rounded-full bg-zinc-800 overflow-hidden">
+          <div className="h-full bg-sky-600" style={{ width: `${pct}%` }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One row of the queue: where it came from, what it is doing, how far along,
+ *  and the one action that makes sense for it right now. */
+function QueueRow({ item, busy, onCancel, onRetry, onImport, onDismiss }: {
+  item: SlskQueueItem;
+  busy: boolean;
+  onCancel: () => void;
+  onRetry: () => void;
+  onImport: () => void;
+  onDismiss: () => void;
+}) {
+  const navigate = useNavigate();
+  const st = QUEUE_STAGE[item.stage] ?? QUEUE_STAGE.queued;
+  const Icon = st.icon;
+  const active = item.stage === "searching" || item.stage === "downloading"
+    || item.stage === "verifying" || item.stage === "importing";
+  const label = item.title || item.artist || "(unknown release)";
+  // One Retry button, whichever registry owns the row: a wish is re-armed and
+  // searched (terminal or not — a "search now" is always allowed), a job's
+  // release goes back into the pipeline. Only a row the server says can be
+  // retried draws it.
+  const canRetry = item.kind === "job"
+    ? !!item.retryable
+    : item.kind === "wish" && item.wish_id != null && item.stage !== "completed";
+  const missing = item.missing_labels ?? [];
+  return (
+    <div className="rounded-lg border border-border bg-card overflow-hidden">
+      <div className="flex flex-wrap items-center gap-3 p-2.5">
+        <div className="flex-1 min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={`chip text-[9px] border ${st.cls}`}>
+              <Icon className={`h-3 w-3 ${active ? "animate-pulse" : ""}`} /> {st.label}
+            </span>
+            <span className="chip text-[9px] border border-border bg-raise text-zinc-400" title={
+              item.source_key === "musicbrainz"
+                ? "Saved from MusicBrainz — the wish queue searches it for you"
+                : item.source_key === "auto"
+                  ? "The auto-importer offered this one for the wish list"
+                  : item.source_key === "import"
+                    ? "An import that could not finish the album by itself"
+                    : "Started from a Soulseek search or browse"
+            }>{item.source}</span>
+            {item.attempts ? <span className="text-[10px] text-zinc-600">{item.attempts} attempt(s)</span> : null}
+            {item.progress?.percent != null && item.stage === "downloading" && (
+              <span className="text-[10px] text-zinc-500">{fmtPercent(item.progress.percent)}</span>
+            )}
+          </div>
+          <div className="text-sm text-zinc-100 truncate mt-0.5" title={label}>{label}</div>
+          <div className="text-[11px] text-zinc-500 truncate">
+            {item.artist}{item.artist && item.title ? " · " : ""}{item.artist ? item.title : ""}
+          </div>
+          {/* Which release this row is for. Facts only — no verb: the same
+              facts sit on queued, downloading and finished rows, and "fetching"
+              would be a lie on two of those three. Only a pipeline job knows
+              them, so every other row simply shows nothing here. */}
+          {item.release?.track_count ? (
+            <div className="text-[10px] text-zinc-500 truncate">
+              {[item.release.date, (item.release.media || []).join(" + "),
+                `${item.release.track_count} tracks`].filter(Boolean).join(" · ")}
+            </div>
+          ) : null}
+          {item.note && <div className="text-[10px] text-zinc-500 truncate" title={item.note}>{item.note}</div>}
+          {/* What the album is still missing (kind "prompt"): the wizard
+              steps that have no answer yet, in the wizard's own order. */}
+          {missing.length > 0 && (
+            <div className="text-[10px] text-amber-300/90 truncate" title={missing.join(", ")}>
+              Missing: {missing.join(", ")}
+            </div>
+          )}
+          {/* Partial bytes a rejected candidate could not free: named here so
+              the failure is actionable rather than a folder full of orphans. */}
+          {(item.leftovers?.length ?? 0) > 0 && (
+            <div className="text-[10px] text-amber-300/80 truncate"
+              title={(item.leftovers ?? []).join("\n")}>
+              {item.leftovers!.length} partial file(s) left in the download folder
+            </div>
+          )}
+          {item.reason && <div className="text-[10px] text-red-400/80 truncate" title={item.reason}>{item.reason}</div>}
+          {item.progress && <QueueProgress p={item.progress} stage={item.stage} />}
+        </div>
+        <div className="flex flex-wrap items-center gap-1 shrink-0 w-full justify-end sm:w-auto">
+          {item.kind === "ready" && (
+            <button className="btn-primary !py-1 text-xs tap" onClick={onImport} disabled={busy}
+              title="Import this album all the way through (convert, tag, organize, then the chain)">
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />} Import
+            </button>
+          )}
+          {/* MANUAL COMPLETION for a stalled album: the wizard opens ON this
+              album at the step that decides the first thing it is missing
+              (?album=…&step=…&missing=…), which is the same link its
+              notification carries. */}
+          {item.action === "manual" && item.action_link && (
+            <button className="btn-primary !py-1 text-xs tap" disabled={busy}
+              onClick={() => navigate(item.action_link!)}
+              title={`Enter what is missing for ${label} by hand`}>
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />} Enter manually
+            </button>
+          )}
+          {item.action === "answer" && item.action_link && (
+            <button className="btn-ghost !py-1 text-xs tap" disabled={busy}
+              onClick={() => navigate(item.action_link!)}
+              title="Answer the question this download is parked on">
+              <MessageCircleQuestion className="h-3.5 w-3.5" /> Answer…
+            </button>
+          )}
+          {/* "The album is fine as it is": the prompt goes away and a later
+              import of the same album raises it again only if it is still
+              missing the family. */}
+          {item.dismissable && (
+            <button className="btn-ghost !py-1 text-xs tap" onClick={onDismiss} disabled={busy}
+              title="Mark this album complete — stop asking about it">
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCheck className="h-3.5 w-3.5" />} Mark complete
+            </button>
+          )}
+          {canRetry && (
+            <button className="btn-ghost !py-1 text-xs tap" onClick={onRetry} disabled={busy}
+              title={item.retryable
+                ? "Retry this terminal item — it is not retried automatically"
+                : "Search Soulseek for this wish right now"}>
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Search className="h-3.5 w-3.5" />}
+            </button>
+          )}
+          {item.album_path && (
+            <a className="btn-ghost !py-1 text-xs tap"
+              href={`/album/${encodeURIComponent(item.album_path)}`}
+              title="Open the album">
+              <PackageOpen className="h-3.5 w-3.5" />
+            </a>
+          )}
+          {item.release_mbid && (
+            <a className="btn-ghost !py-1 text-xs tap"
+              href={`https://musicbrainz.org/release/${item.release_mbid}`}
+              target="_blank" rel="noreferrer" title="Open on MusicBrainz">
+              <ExternalLink className="h-3.5 w-3.5" />
+            </a>
+          )}
+          {item.cancelable && (
+            <button className="btn-ghost !py-1 text-xs text-red-300 tap" onClick={onCancel} disabled={busy}
+              title={item.stage === "queued" ? "Take it back off the queue" : "Cancel this item"}>
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function QueueSection({ title, hint, rows, tone, empty, busyId, onCancel, onRetry, onImport, onDismiss }: {
+  title: string;
+  hint: string;
+  rows: SlskQueueItem[];
+  tone: string;
+  empty: string;
+  busyId: string | null;
+  onCancel: (item: SlskQueueItem) => void;
+  onRetry: (item: SlskQueueItem) => void;
+  onImport: (item: SlskQueueItem) => void;
+  onDismiss: (item: SlskQueueItem) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className={`chip text-[10px] border ${tone}`}>{title} · {rows.length}</span>
+        <span className="text-[11px] text-zinc-500">{hint}</span>
+      </div>
+      {rows.length === 0
+        ? <div className="text-[11px] text-zinc-600 px-1">{empty}</div>
+        : rows.map((item) => (
+            <QueueRow
+              key={item.id}
+              item={item}
+              busy={busyId === item.id}
+              onCancel={() => onCancel(item)}
+              onRetry={() => onRetry(item)}
+              onImport={() => onImport(item)}
+              onDismiss={() => onDismiss(item)}
+            />
+          ))}
+    </div>
+  );
+}
+
+/** THE queue: queued/searching, in-progress, needs-attention, completed and
+ *  failed, in one list, for everything that is getting itself into the
+ *  library — a MusicBrainz wish, a "download everything by this artist" run, a
+ *  folder grabbed off the Soulseek page, an import run. The rows come from
+ *  `/api/queue` (server/api_queue.py), which reads the registries that own
+ *  them, so this panel never invents a state the backend does not have. */
+function QueuePanel({ running }: { running: boolean }) {
+  const qc = useQueryClient();
+  const { data, refetch, isFetching } = useQuery({
+    queryKey: QUEUE_KEY,
+    queryFn: api.queue,
+    // Fast while something is moving (progress bars, stage changes), slow
+    // while the queue is only sitting there.
+    refetchInterval: running ? 3000 : 10000,
+  });
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const sections = data?.sections;
+  const counts = data?.counts;
+
+  const cancel = async (item: SlskQueueItem) => {
+    setBusyId(item.id);
+    try {
+      // A framework album ("Add to library") owns a folder on disk, so its
+      // cancel is the one that removes the folder AND the wish; every other
+      // row goes through the queue's own dispatcher.
+      if (item.kind === "wish" && item.pending && item.wish_id != null) {
+        await api.libraryAddCancel({ wish_id: item.wish_id });
+      } else {
+        await api.queueCancel(item.id);
+      }
+      toast(item.stage === "queued" ? "Removed from the queue" : "Cancelled");
+      refetch();
+      qc.invalidateQueries({ queryKey: ["wishes"] });
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
+  const retry = async (item: SlskQueueItem) => {
+    setBusyId(item.id);
+    try {
+      // A TERMINAL row (nothing found, or a job that gave up) is re-armed
+      // first: the server never retries those by itself, so this press is the
+      // only way back (POST /api/queue/retry). A wish that is merely waiting
+      // is just searched now.
+      if (item.retryable) {
+        await api.queueRetry(item.id);
+        toast("Retrying…");
+      } else {
+        if (item.wish_id == null) return;
+        const r = await api.wishSearch(item.wish_id);
+        if (!r.ok) toast(r.error || "Already searching");
+        else toast("Searching…");
+      }
+      refetch();
+      qc.invalidateQueries({ queryKey: ["wishes"] });
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
+  const dismiss = async (item: SlskQueueItem) => {
+    if (!item.album_path) return;
+    setBusyId(item.id);
+    try {
+      // "The album is fine as it is": the prompt goes away, and the next
+      // import of the same album raises it again only if the family is really
+      // still missing (server/api_imports.py's dismiss).
+      await api.dismissImportPrompt(item.album_path);
+      toast(`${item.title} — marked complete`);
+      refetch();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
+  const doImport = async (item: SlskQueueItem) => {
+    const path = item.path || "";
+    if (!path) return;
+    setBusyId(item.id);
+    try {
+      const r = await api.soulseekImportOne(path);
+      qc.setQueryData(IMPORT_RUN_KEY, r.status);
+      toast(`Importing ${item.title}…`);
+      refetch();
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-md border border-border bg-panel/60 p-2.5 flex flex-wrap items-center gap-2 text-xs">
+        <span className="font-semibold text-zinc-300 flex items-center gap-1.5">
+          <ArrowDownUp className="h-3.5 w-3.5" /> Pipeline
+        </span>
+        <span className="text-[11px] text-zinc-500">
+          {counts ? `${counts.total} item(s)` : "…"}
+          {data ? ` · ${data.running}/${data.concurrency} running` : ""}
+          {data?.download_slots ? ` · ${data.download_slots} slskd transfer slot(s)` : ""}
+        </span>
+        <span className="text-[10px] text-zinc-600 hidden sm:inline">
+          the same queue for MusicBrainz wishes, bulk auto-imports and manual grabs
+        </span>
+        <button className="btn-ghost !py-0.5 !px-2 text-[11px] ml-auto tap"
+          onClick={() => refetch()} disabled={isFetching} title="Reload the queue">
+          <RefreshCw className={`h-3 w-3 ${isFetching ? "animate-spin" : ""}`} /> Refresh
+        </button>
+      </div>
+
+      {!sections ? (
+        <PageLoading />
+      ) : (
+        <>
+          <QueueSection
+            title="Queued / searching" hint="waiting for a slot, or looking right now"
+            rows={sections.queued} tone="border-amber-800 text-amber-300"
+            empty="nothing is waiting — add a release to the wish list or start an auto-import"
+            busyId={busyId} onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+          />
+          <QueueSection
+            title="In progress" hint="downloading, verifying or moving into the library"
+            rows={sections.in_progress} tone="border-sky-800 text-sky-300"
+            empty="nothing is downloading right now"
+            busyId={busyId} onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+          />
+          {sections.needs_attention.length > 0 && (
+            <QueueSection
+              title="Needs you" hint="parked on a question, or waiting for a manual import"
+              rows={sections.needs_attention} tone="border-amber-800 text-amber-300"
+              empty="" busyId={busyId} onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+            />
+          )}
+          <QueueSection
+            title="Completed" hint="downloaded — and whether it made it into the library"
+            rows={sections.completed} tone="border-emerald-800 text-emerald-300"
+            empty="nothing has finished yet"
+            busyId={busyId} onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+          />
+          <QueueSection
+            title="Failed" hint="gave up, with the reason"
+            rows={sections.failed} tone="border-red-900 text-red-300"
+            empty="nothing failed"
+            busyId={busyId} onCancel={cancel} onRetry={retry} onImport={doImport} onDismiss={dismiss}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
 /** The albums that finished downloading and are waiting to be imported — the
  *  same list a full import run would take. Each row sends ONE album through
  *  the whole pipeline on its own, unlike the one-click Import completed
@@ -1984,6 +2362,11 @@ const WISH_STATUS: Record<Wish["status"], { label: string; cls: string; icon: ty
   imported: { label: "Imported", cls: "bg-emerald-900/40 text-emerald-300 border-emerald-800", icon: CheckCircle2 },
   failed: { label: "Failed", cls: "bg-red-950/60 text-red-300 border-red-900", icon: AlertTriangle },
   available: { label: "Available", cls: "bg-violet-900/40 text-violet-300 border-violet-800", icon: Star },
+  // The network answered "nothing there" (`wishes_not_found_attempts` empty
+  // searches): distinct from `failed` — nothing was rejected, there was simply
+  // nothing to try — and terminal, so only the row's own Search button starts
+  // it again (server.wishes.mark_not_found).
+  not_found: { label: "Not found", cls: "bg-zinc-800/70 text-zinc-400 border-zinc-700", icon: SearchX },
 };
 
 function WishRow({ w, run, importing, pageBusy, onImport, onChanged }: {
@@ -2360,6 +2743,9 @@ function WishesPanel() {
 }
 
 function openWishCount(wishes: Wish[]) {
+  // `not_found` is terminal (the searches came back empty, the worker stopped
+  // looking): counting it as "open" would keep a badge lit for a wish nothing
+  // is doing anything about.
   return wishes.filter((w) => w.status === "wanted" || w.status === "searching" || w.status === "failed").length;
 }
 
@@ -2469,10 +2855,13 @@ export default function SoulseekPage() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const releaseParam = params.get("release") ?? undefined;
 
-  // Page tabs — Search is the default; the badge on Downloads counts active
-  // transfers so progress is visible from any tab.
-  type TabId = "search" | "auto" | "wishes" | "downloads" | "cached" | "messages" | "sharing" | "settings";
+  // Page tabs — Queue is the default: it is the one place that shows
+  // EVERYTHING on its way into the library (wishes, bulk auto-imports, manual
+  // grabs, imports). The badge on Downloads counts active transfers so
+  // progress is visible from any tab.
+  type TabId = "queue" | "search" | "auto" | "wishes" | "downloads" | "cached" | "messages" | "sharing" | "settings";
   const TAB_LIST: { id: TabId; label: string }[] = [
+    { id: "queue", label: "Queue" },
     { id: "search", label: "Search" },
     { id: "auto", label: "Auto-import" },
     { id: "wishes", label: "Wishes" },
@@ -2482,7 +2871,22 @@ export default function SoulseekPage() {
     { id: "sharing", label: "Sharing" },
     { id: "settings", label: "Settings" },
   ];
-  const [tab, setTab] = useState<TabId>(() => (releaseParam ? "auto" : "search"));
+  const [tab, setTab] = useState<TabId>(() => {
+    // A link can name the tab it wants: a queue row's "Answer…" opens the tab
+    // the parked question is answered on (`/soulseek?tab=auto`), and the
+    // notifications link back to the queue.
+    const want = params.get("tab") ?? "";
+    if (TAB_LIST.some((t) => t.id === want)) return want as TabId;
+    return releaseParam ? "auto" : "queue";
+  });
+  const { data: queue } = useQuery({
+    queryKey: QUEUE_KEY,
+    queryFn: api.queue,
+    enabled: running,
+    refetchInterval: running ? 5000 : false,
+  });
+  const queueBusy = (queue?.counts.queued ?? 0) + (queue?.counts.in_progress ?? 0)
+    + (queue?.counts.needs_attention ?? 0);
   const dlFiles = (downloads?.downloads ?? []).flatMap((u: any) =>
     (u.directories ?? []).flatMap((d: any) =>
       (d.files ?? []).map((f: any) => ({ ...f, username: u.username, dir: d.directory }))));
@@ -2495,6 +2899,7 @@ export default function SoulseekPage() {
     label:
       t.id === "downloads" && dlActive > 0 ? `${t.label} · ${dlActive}`
       : t.id === "messages" && msgUnread > 0 ? `${t.label} · ${msgUnread}`
+      : t.id === "queue" && queueBusy > 0 ? `${t.label} · ${queueBusy}`
       : t.id === "search" && results.length > 0 ? `${t.label} · ${results.length}`
       : t.label,
   }));
@@ -2820,6 +3225,8 @@ export default function SoulseekPage() {
       )}
 
       {tab === "auto" && <AutoPanel initialMbid={releaseParam} />}
+
+      {tab === "queue" && <QueuePanel running={running} />}
 
       {tab === "wishes" && <WishesPanel />}
 

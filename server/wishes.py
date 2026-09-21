@@ -10,6 +10,11 @@ flips to ``imported`` when it lands.
 
 The wishlist lives in its own SQLite database next to playlists.db, so it
 survives restarts and travels with the ``.mlo/data`` folder.
+
+Every outcome of that search is announced exactly once and the wish ends in a
+state that says the truth about it (see the retry policy below): an album that
+keeps being retried says nothing on the bus, an album that gave up says so
+once, with the reason and a link to its own row in the queue.
 """
 import json
 import os
@@ -25,7 +30,21 @@ import time
 # wishes call needed. Same trap server.soulseek_auto documents for its RLock.
 _lock = threading.RLock()
 
-STATUSES = ("wanted", "searching", "imported", "failed", "available")
+STATUSES = ("wanted", "searching", "imported", "failed", "available", "not_found")
+
+# Terminal statuses: the worker never searches one of these again on its own.
+# `not_found` always is — "the network does not have it" is an ANSWER, and
+# re-asking the same question on a timer is the silent stalling the retry
+# policy below exists to stop. `failed` becomes terminal once its attempt cap
+# is reached (see is_terminal).
+TERMINAL_STATUSES = ("imported", "not_found")
+
+# Where a wish came from — one field, so every surface labels a row the same
+# way: "musicbrainz" is a framework album ("Add to library" on a MusicBrainz
+# entity), "soulseek" a want saved by hand from the Soulseek page, "auto" the
+# entry an auto-import job offers to save. "" is a wish saved before this was
+# recorded.
+SOURCES = ("musicbrainz", "soulseek", "auto")
 
 
 def db_path():
@@ -77,7 +96,17 @@ def _init():
                     updated_at REAL NOT NULL,
                     last_search REAL NOT NULL DEFAULT 0,
                     last_error TEXT NOT NULL DEFAULT '',
-                    album_path TEXT NOT NULL DEFAULT ''
+                    album_path TEXT NOT NULL DEFAULT '',
+                    source TEXT NOT NULL DEFAULT '',
+                    -- When the next AUTOMATIC search may run: the interval's
+                    -- own end, or a transient failure's backoff, whichever is
+                    -- later (see the retry policy). Stored rather than derived
+                    -- so the wait is visible to the UI and survives a restart.
+                    retry_at REAL NOT NULL DEFAULT 0,
+                    -- Empty searches so far: the count `wishes_not_found_attempts`
+                    -- is compared against, kept apart from `attempts` because a
+                    -- transient failure must not spend a not-found attempt.
+                    not_found INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS wish_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -87,6 +116,21 @@ def _init():
                 );
                 """
             )
+            # Existing databases predate `source`: the column is additive, so
+            # an ALTER is all the migration this needs — and a database that
+            # already has it (a fresh _init created it above) is left alone.
+            cols = {r["name"] for r in
+                    c.execute("PRAGMA table_info(wishes)").fetchall()}
+            if "source" not in cols:
+                c.execute("ALTER TABLE wishes ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+            # Same rule for the retry policy's own two columns: an older
+            # database gets them as 0/0, i.e. "no backoff and no empty
+            # searches" — a wish that has been retried forever keeps being
+            # retried, exactly as it was before this existed.
+            if "retry_at" not in cols:
+                c.execute("ALTER TABLE wishes ADD COLUMN retry_at REAL NOT NULL DEFAULT 0")
+            if "not_found" not in cols:
+                c.execute("ALTER TABLE wishes ADD COLUMN not_found INTEGER NOT NULL DEFAULT 0")
 
 
 # --------------------------------------------------------------------------- #
@@ -125,6 +169,19 @@ def _row(r):
     else:
         d["queries"] = []
     d.pop("quotes", None)
+    # A wish whose album is a FRAMEWORK album: the folder exists (it is in the
+    # library, listed as pending) but no audio has arrived yet. Derived from the
+    # marker rather than stored, so the two can never disagree — the import
+    # that fills the folder clears the marker and this flips by itself. One
+    # stat per row, and there are only ever a handful of wishes.
+    d["pending"] = False
+    path = str(d.get("album_path") or "")
+    if path and os.path.isdir(path):
+        try:
+            from mlo.paths import load_pending
+            d["pending"] = bool(load_pending(path))
+        except Exception:
+            d["pending"] = False
     return d
 
 
@@ -145,24 +202,33 @@ def get_wish(wid):
 
 
 def add_wish(release_mbid, title="", artist="", year="", note="",
-             target_dir="", queries=None):
+             target_dir="", queries=None, source=""):
     release_mbid = str(release_mbid or "").strip()
     if not release_mbid:
         raise ValueError("release_mbid required")
+    source = str(source or "").strip().lower()
+    if source and source not in SOURCES:
+        source = ""
     now = time.time()
     with _lock:
         with _conn() as c:
             row = c.execute("SELECT * FROM wishes WHERE release_mbid=?",
                             (release_mbid,)).fetchone()
             if row:
+                if source and not row["source"]:
+                    # a wish saved before this was recorded: the caller that
+                    # asked for it now (a framework album) says what it is
+                    c.execute("UPDATE wishes SET source=? WHERE id=?",
+                              (source, row["id"]))
+                    return get_wish(row["id"])
                 return _row(row)  # already wished — idempotent
             cur = c.execute(
                 "INSERT INTO wishes (release_mbid, title, artist, year, status, note,"
-                " target_dir, quotes, added_at, updated_at)"
-                " VALUES (?,?,?,?,'wanted',?,?,?,?,?)",
+                " target_dir, quotes, added_at, updated_at, source)"
+                " VALUES (?,?,?,?,'wanted',?,?,?,?,?,?)",
                 (release_mbid, str(title or ""), str(artist or ""), str(year or ""),
                  str(note or ""), str(target_dir or ""),
-                 json.dumps(queries) if queries else "", now, now),
+                 json.dumps(queries) if queries else "", now, now, source),
             )
             wid = cur.lastrowid
     log("info", f"Wish added: {artist} — {title} ({release_mbid[:8]})")
@@ -170,7 +236,8 @@ def add_wish(release_mbid, title="", artist="", year="", note="",
 
 
 def update_wish(wid, fields):
-    allowed = {"note", "target_dir", "status", "queries", "title", "artist", "year"}
+    allowed = {"note", "target_dir", "status", "queries", "title", "artist", "year",
+               "album_path", "source"}
     sets, vals = [], []
     for k, v in (fields or {}).items():
         if k not in allowed:
@@ -178,6 +245,11 @@ def update_wish(wid, fields):
         if k == "queries":
             sets.append("quotes=?")
             vals.append(json.dumps(v) if v else "")
+        elif k == "source":
+            if str(v or "").lower() not in SOURCES:
+                continue
+            sets.append("source=?")
+            vals.append(str(v).lower())
         elif k == "status":
             if v not in STATUSES:
                 continue
@@ -231,14 +303,202 @@ def mark_imported(wid, album_path):
 
 
 def mark_failed(wid, error, attempts):
-    _mark(wid, status="failed", last_error=str(error or "")[:400], attempts=attempts)
+    """Give up on a wish — and announce that outcome, once.
+
+    This is the ONE place a wish is declared failed (`wishes_max_attempts` in
+    the worker is the only caller), so the notification lives here rather than
+    at the call sites: every path reaches it exactly once. A wish merely
+    re-marked `wanted` for another attempt stays silent on purpose — the user
+    asked to hear about the outcome, not about every try (see server/events.py).
+
+    Re-marking a wish that is ALREADY failed is not a new outcome and does not
+    repeat the frame.
+    """
+    err = str(error or "")
+    before = get_wish(wid) or {}
+    if not before:
+        return  # no such wish: there is nothing to mark and nothing to announce
+    if before.get("status") == "failed":
+        _mark(wid, status="failed", last_error=err[:400], attempts=attempts)
+        return
+    _mark(wid, status="failed", last_error=err[:400], attempts=attempts)
+    artist = str(before.get("artist") or "").strip()
+    title = str(before.get("title") or "").strip()
+    label = f"{artist} — {title}" if artist and title else (title or artist or "Wish")
+    # A notification must never be the reason wish bookkeeping fails.
+    try:
+        from server import events
+        events.emit("wish_failed", f"Wish failed: {label}",
+                    f"Gave up after {attempts} attempt(s): {err[:200]}",
+                    {"link": "/soulseek", "wish_id": wid,
+                     "release_mbid": str(before.get("release_mbid") or ""),
+                     "error": err[:300]})
+    except Exception:
+        pass
 
 
-def mark_wanted(wid, error="", attempts=None):
+def mark_not_found(wid, error, attempts=None):
+    """No usable copy exists on the network — the terminal end of a NOT-FOUND
+    acquisition, announced once as `wish_not_found`.
+
+    This is the outcome the user never used to hear: the search ran, found
+    nothing, and the row sat there being re-searched on a timer with no word
+    about it. A not-found wish is NOT retried automatically (see the retry
+    policy at the bottom of this module) — re-asking a network that already
+    answered costs an interval each time and changes nothing, while a manual
+    retry from the queue is one press and re-arms it (rearm()).
+
+    Re-marking a wish that is already `not_found` is not a new outcome and
+    does not repeat the frame, exactly like mark_failed.
+    """
+    err = str(error or "")
+    before = get_wish(wid) or {}
+    if not before:
+        return  # no such wish: nothing to mark and nothing to announce
+    fields = {"status": "not_found", "last_error": err[:400],
+              "not_found": int(before.get("not_found") or 0) + 1}
+    if attempts is not None:
+        fields["attempts"] = attempts
+    already = before.get("status") == "not_found"
+    _mark(wid, **fields)
+    log("warn", f"Wish not found: {before.get('artist')} — "
+                f"{before.get('title')} ({err[:120] or 'nothing usable'})")
+    if already:
+        return
+    artist = str(before.get("artist") or "").strip()
+    title = str(before.get("title") or "").strip()
+    label = f"{artist} — {title}" if artist and title else (title or artist or "Wish")
+    # A notification must never be the reason wish bookkeeping fails.
+    try:
+        from server import events
+        events.emit("wish_not_found", f"Nothing found: {label}",
+                    f"Searched {int(fields['not_found'])} time(s) and found no "
+                    f"usable copy — it is not searched again until you retry it "
+                    f"from the queue. {err[:160]}".strip(),
+                    {"link": "/soulseek", "wish_id": wid, "outcome": "not_found",
+                     "attempts": int(fields.get("attempts") or 0),
+                     "release_mbid": str(before.get("release_mbid") or ""),
+                     "error": err[:300]})
+    except Exception:
+        pass
+
+
+def mark_wanted(wid, error="", attempts=None, retry_at=None):
+    """Back in the queue for another automatic attempt.
+
+    *retry_at* is when the NEXT attempt may run: the worker passes the
+    backoff's own end after a transient failure, and 0 (the default) means
+    "as soon as the interval allows"."""
     fields = {"status": "wanted", "last_error": str(error or "")[:400]}
     if attempts is not None:
         fields["attempts"] = attempts
+    if retry_at is not None:
+        fields["retry_at"] = float(retry_at or 0)
     _mark(wid, **fields)
+
+
+# --------------------------------------------------------------------------- #
+# Retry policy — the ONE place an acquisition decides "again" or "done"
+# --------------------------------------------------------------------------- #
+# Outcomes are CLASSIFIED, never guessed from a status: a search that came back
+# with nothing usable is not a failure to try harder (the network does not have
+# it), while a refused/absent slskd, a MusicBrainz outage or a failed
+# verification is transient and worth another attempt. What that buys:
+#
+#   * not found — the download item is not retried AT ALL: the release is handed
+#                 to the wishlist, which is a standing request the user made
+#                 rather than a retry of a failure. After
+#                 `wishes_not_found_attempts` empty searches (default 3, 0 =
+#                 never give up) the WISH ends `not_found`: terminal, no
+#                 further automatic searches, announced once as
+#                 `wish_not_found`, re-armed only by a manual retry.
+#   * transient — retried with backoff (`wishes_retry_backoff_minutes`,
+#                 default 30, doubling per attempt, capped at a day, 0 = no
+#                 extra wait) up to `wishes_max_attempts` (0 = retry forever).
+#                 At the cap the wish ends `failed` — terminal, announced once
+#                 as `wish_failed` — and the row's retry re-arms it.
+#
+# The numbers are the user's (config keys with validators in mlo/config.py);
+# the policy itself lives here so the worker, the queue view and the CLI all
+# answer the same question the same way.
+_NOT_FOUND_HINTS = (
+    "no candidate folder", "nothing found", "nothing usable", "no usable",
+    "nothing was found", "no verified match", "not on soulseek", "no results",
+)
+
+
+def outcome_of(error):
+    """Classify why an acquisition did not land: ``"not_found"`` or
+    ``"transient"`` (see the policy above)."""
+    low = str(error or "").lower()
+    return "not_found" if any(h in low for h in _NOT_FOUND_HINTS) else "transient"
+
+
+def _int(cfg, key, default):
+    try:
+        return int((cfg or {}).get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def not_found_attempts(cfg):
+    """Empty searches a wish may have before it ends `not_found` (0 = never)."""
+    return max(0, _int(cfg, "wishes_not_found_attempts", 3))
+
+
+def max_attempts(cfg):
+    """Transient attempts a wish may burn before it ends `failed` (0 = forever)."""
+    return max(0, _int(cfg, "wishes_max_attempts", 0))
+
+
+def retry_delay(cfg, attempts):
+    """Seconds to wait before the next automatic attempt after a failure.
+
+    Doubling backoff from `wishes_retry_backoff_minutes`, capped at a day: a
+    peer that is down, or a MusicBrainz that is rate-limiting, should not be
+    hammered once per interval — and a week-long outage must not push the
+    retry out by weeks either."""
+    step = max(0, _int(cfg, "wishes_retry_backoff_minutes", 30)) * 60
+    if not step:
+        return 0.0
+    n = max(1, min(int(attempts or 1), 8))
+    return float(min(86400, step * (2 ** (n - 1))))
+
+
+def due_at(wish, cfg):
+    """When this wish may be searched again ON ITS OWN.
+
+    The interval's own end, or a pending transient backoff, whichever is
+    later — so a failure waits its backoff even on a tick that lands right
+    after it."""
+    interval = max(1, _int(cfg, "wishes_interval_hours", 6)) * 3600.0
+    if is_terminal(wish, cfg):
+        return float("inf")
+    return max(float(wish.get("last_search") or 0) + interval,
+               float(wish.get("retry_at") or 0))
+
+
+def is_terminal(wish, cfg):
+    """Will the worker search this wish again on its own? (See the policy.)
+
+    `imported`/`not_found` never are; `failed` is terminal once its attempt cap
+    has been spent, and with no cap configured it keeps being retried — which
+    is what `wishes_max_attempts: 0` has always meant."""
+    status = str((wish or {}).get("status") or "")
+    if status in TERMINAL_STATUSES:
+        return True
+    if status == "failed":
+        cap = max_attempts(cfg)
+        return bool(cap) and int(wish.get("attempts") or 0) >= cap
+    return False
+
+
+def rearm(wid):
+    """Undo a terminal outcome: the user asked for this wish to be searched
+    again. Manual retry is the ONLY way back from `not_found` / a spent
+    `failed` — which is exactly what makes those states terminal."""
+    _mark(wid, status="wanted", attempts=0, not_found=0, retry_at=0, last_error="")
+    return get_wish(wid)
 
 
 # --------------------------------------------------------------------------- #
@@ -259,6 +519,11 @@ def owned_mbids(cfg=None):
     owned = {}
     for artist in lib.get("artists", []):
         for alb in artist.get("albums", []):
+            if alb.get("pending"):
+                # A framework album carries the release id but holds NO audio:
+                # counting it as owned would refuse the very download that is
+                # meant to fill it ("already in your library").
+                continue
             meta = alb.get("meta") or {}
             for key in ("MUSICBRAINZ_ALBUMID", "MUSICBRAINZ_RELEASEGROUPID"):
                 val = str(meta.get(key) or "").strip().lower()

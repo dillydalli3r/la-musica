@@ -1,7 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
-import { Info } from "lucide-react";
+import { Github, Info } from "lucide-react";
 import { useState } from "react";
 import Modal from "./Modal";
+import { api } from "../api";
 import { useI18n } from "../lib/i18n";
 
 /** One credit row as the data file spells it. */
@@ -40,6 +41,29 @@ export function useCredits() {
  *  never pushes the navigation around. */
 const INLINE_SERVICES = 8;
 
+/** Where the project lives when the server cannot say (an install old enough
+ *  to predate `project_url`, or a version check that has not answered yet).
+ *  Kept here as the last resort so the link is never missing. */
+const REPO = "https://github.com/dillydalli3r/la-musica";
+
+/** The running server's version answer — the same query key ServerVersionNotice
+ *  uses, so both surfaces share one cached fetch. The project URLs come from
+ *  the server (server/version.py derives them from its REPO constant), which
+ *  is why the fallback above exists rather than a second hardcoded pair. */
+function useProject() {
+  const { data } = useQuery({
+    queryKey: ["version"],
+    queryFn: api.version,
+    staleTime: 3600_000,
+    retry: 0,
+  });
+  return {
+    url: data?.project_url || REPO,
+    issues: data?.issues_url || `${REPO}/issues`,
+    version: data?.version || "",
+  };
+}
+
 /** Bottom-left credit strip.
  *
  *  Everything this app does with music, it does with someone else's service,
@@ -53,6 +77,7 @@ const INLINE_SERVICES = 8;
 export default function CreditsFooter({ collapsed = false }: { collapsed?: boolean }) {
   const { t } = useI18n();
   const { data: groups = [] } = useCredits();
+  const { url, version } = useProject();
   const [open, setOpen] = useState(false);
   const services = groups.find((g) => g.title.startsWith("Services"))?.items ?? [];
   const inline = services.slice(0, INLINE_SERVICES);
@@ -60,6 +85,26 @@ export default function CreditsFooter({ collapsed = false }: { collapsed?: boole
 
   return (
     <div className={collapsed ? "px-2 pb-2" : "px-3 pb-2"}>
+      {/* The project's own corner. The app names every service it leans on, so
+          it should be able to point back at itself too — and the version is in
+          the label because "which build am I running" belongs with the link to
+          the build. Opens in a new tab like every other link out. */}
+      <a
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        title={t("credits.repo")}
+        className={`rounded-lg border border-transparent text-zinc-500 hover:text-white hover:bg-raise hover:border-border transition-colors ${
+          collapsed ? "mb-1 p-1.5 w-full flex justify-center" : "mb-1 inline-flex items-center gap-1.5 px-1.5 py-1 text-[10px]"
+        }`}
+      >
+        <Github className="h-3.5 w-3.5 shrink-0" />
+        {!collapsed && (
+          <span className="truncate">
+            {version ? `la musica ${version}` : "la musica"} · GitHub
+          </span>
+        )}
+      </a>
       {!collapsed && (
         <div className="text-[10px] leading-relaxed text-zinc-600">
           <div className="text-zinc-500">{t("credits.from")}</div>
@@ -104,6 +149,7 @@ export default function CreditsFooter({ collapsed = false }: { collapsed?: boole
  *  focus trap — the same as every other modal in the app). */
 function CreditsDialog({ groups, onClose }: { groups: CreditGroup[]; onClose: () => void }) {
   const { t } = useI18n();
+  const { url, issues, version } = useProject();
   return (
     <Modal
       onClose={onClose}
@@ -113,6 +159,36 @@ function CreditsDialog({ groups, onClose }: { groups: CreditGroup[]; onClose: ()
       width="max-w-3xl"
       bodyClass="px-4 py-4 space-y-4"
     >
+      {/* The project first: this dialog is where a user looks for "who made
+          this", and the answer is the repository — with the issue tracker
+          beside it, because the same list is where a bug report starts. */}
+      <section>
+        <h3 className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">{t("credits.project")}</h3>
+        <ul className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5">
+          <li>
+            <a
+              href={url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 text-[11px] text-zinc-400 hover:text-accent-soft"
+            >
+              <Github className="h-3.5 w-3.5 shrink-0" />
+              <span className="text-zinc-200">la musica{version ? ` ${version}` : ""}</span>
+              <span className="text-zinc-600"> · {t("credits.source")}</span>
+            </a>
+          </li>
+          <li>
+            <a
+              href={issues}
+              target="_blank"
+              rel="noreferrer"
+              className="text-[11px] text-zinc-400 hover:text-accent-soft"
+            >
+              <span className="text-zinc-200">{t("credits.issues")}</span>
+            </a>
+          </li>
+        </ul>
+      </section>
       {groups.map((g) => (
         <section key={g.title}>
           <h3 className="text-[10px] font-semibold uppercase tracking-widest text-zinc-500">{g.title}</h3>

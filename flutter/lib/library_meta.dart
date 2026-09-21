@@ -58,6 +58,17 @@ class TrackHit {
 /// The file name of a path, with its extension — the visible part of a path.
 String fileName(String path) => path.split(RegExp(r'[\\/]')).last;
 
+/// The library album a discovery row's path belongs to: the folder itself for
+/// an album, the album holding the file for a track. Null for a row the library
+/// does not have, and for an artist row — an artist folder is not an album, so
+/// its art comes from the provider instead.
+Album? discoverOwnedAlbum(LibraryIndex index, DiscoverItem item) {
+  if (!item.owned && !item.inLibrary) return null;
+  final path = item.path ?? '';
+  if (path.isEmpty) return null;
+  return index.albums[path] ?? index.track(path)?.album;
+}
+
 /// The row a path the library does not know still deserves: its file name as
 /// the title, and nothing else claimed about a track that is not there.
 Track looseTrack(String path) => Track(path: path, file: fileName(path));

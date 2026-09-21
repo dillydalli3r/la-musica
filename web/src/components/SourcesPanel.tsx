@@ -7,13 +7,21 @@ import type { SourceHealth, SourceKind, SourcesHealth } from "../types";
 
 /** The provider families, in the order the panel lists them. The rows
  *  themselves come from `/api/sources/health` — nothing here is a source
- *  list, so a provider added on the backend shows up on its own. */
+ *  list, so a provider added on the backend shows up on its own.
+ *
+ *  `credentials` is not a family of sources: those rows are the saved logins
+ *  the families above need, and they answer the narrower question a source row
+ *  cannot ("is this key ACCEPTED" — Discogs browses anonymously, so its own
+ *  row stays green with a discarded token). `SourceKind` has to name it or the
+ *  group would not be rendered at all. */
 const KIND_LABEL: Record<SourceKind, string> = {
   lyrics: "Lyrics providers — synced, free",
   advisory: "Advisory sources — release ratings & parental flags",
   genre: "Genre sources",
   metadata: "Metadata providers — images & descriptions",
   links: "Link sources — where the album's rating links come from",
+  discover: "Discover sources — genre browse & recommendations",
+  credentials: "API keys & logins — is each saved credential accepted?",
 };
 
 /** What each config key a source may need is called and where it is issued.
@@ -76,6 +84,20 @@ const rymLastOf = (row: SourceHealth): RymLast | undefined =>
 
 /** The config keys this panel can prompt for, in a stable order. */
 const KEY_NAMES = Object.keys(KEY_INFO);
+
+/** Keys a row needs that are NOT edited here — each setting has exactly one
+ *  control, and these live on the tab that owns them (the credential rows
+ *  name keys the panel never had to prompt for before). The chip says where
+ *  to set it, so a row that cannot be filled in here is not a dead end. */
+const KEY_HOME: Record<string, string> = {
+  acoustid_api_key: "Settings → Import",
+  soulseek_username: "the Soulseek tab",
+  soulseek_password: "the Soulseek tab",
+  ai_base_url: "Settings → AI",
+  ai_model: "Settings → AI",
+  ai_api_key: "Settings → AI",
+  auth_password_hash: "first-run setup, or Sign-in & security",
+};
 
 /** `needs` mixes config keys with installed tools (yt-dlp): only the keys get
  *  an input, the tools are a dependency note. */
@@ -248,7 +270,7 @@ export default function SourcesPanel({ only }: { only?: SourceKind } = {}) {
                     .filter((k) => !(k in KEY_INFO))
                     .map((k) => (
                       <span key={k} className="chip border border-white/15 bg-white/5 text-zinc-400">
-                        needs {k}
+                        {KEY_HOME[k] ? `set ${k} in ${KEY_HOME[k]}` : `needs ${k}`}
                       </span>
                     ))}
                   <span className="flex-1" />

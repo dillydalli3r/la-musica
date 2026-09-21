@@ -19,7 +19,8 @@ import traceback
 
 from mlo import (
     run_audit_library, run_auto_tagging, run_format_cues, run_format_lyrics,
-    run_grade_library, run_optimize_flacs, run_process_images,
+    run_grade_library, run_optimize_artist_images, run_optimize_flacs,
+    run_process_images,
 )
 from mlo import stats as mlo_stats
 from mlo.loudness import run_calc_dr_replaygain
@@ -197,6 +198,10 @@ RUNNERS: dict[int, tuple[str, "callable"]] = {
     # 18 gives back: this library's lyrics go to LRCLIB for recordings the
     # database does not have yet. Off = `lrclib_auto_publish` is off.
     18: ("Publish lyrics (LRCLIB)", _optional("mlo.lyrics_publish", "run_publish_lyrics")),
+    # 19 re-fits the artist images already in the library to the configured
+    # aspect/size (mlo.artistdata's own runner — the same policy the fetch and
+    # the grading check use).
+    19: ("Optimize artist images", run_optimize_artist_images),
 }
 
 # The config key a script's own force flag lives under. `force` may be keyed by

@@ -1,6 +1,6 @@
 # la musica
 
-**v3.2.0** — a self-hosted app that *manages, optimizes, audits, grades and
+**v3.3.0** — a self-hosted app that *manages, optimizes, audits, grades and
 plays* your music library, from the browser, a desktop window or a phone.
 
 **la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a
@@ -12,7 +12,7 @@ client whose auto-importer verifies what it downloaded. All app state — config
 playlists, favourites, the beets library, the Soulseek config, measured loudness,
 caches — lives in one hidden `.mlo` folder inside your music directory.
 
-Release notes for this version are in `local/release-notes-3.2.0.md` (older ones
+Release notes for this version are in `local/release-notes-3.3.0.md` (older ones
 follow `local/release-notes-<version>.md`); the grading and optimization contract
 is in [`docs/OPTIMIZATION-GRADING-SPEC.md`](docs/OPTIMIZATION-GRADING-SPEC.md).
 
@@ -112,10 +112,20 @@ outdated tools in the background.
   `acoustid_api_key`, `ai_base_url` / `ai_api_key` / `ai_model` (script 17 and
   the genre ranking), `soulseek_username` / `soulseek_password`.
 - `GET /api/sources/health` lists every external source the app can ask (six
-  lyrics, six advisory, eleven genre, four metadata, one links — 28 rows) with
-  what each needs (`?probe=1` tests them). The RateYourMusic cookie is only
-  needed for the *scrape* fallback, because MusicBrainz states the RYM
-  album/artist page as a URL relation for well-known releases.
+  lyrics, six advisory, eleven genre, four metadata, ten discover, one links —
+  38 rows) with what each needs (`?probe=1` tests them). The RateYourMusic
+  cookie is only needed for the *scrape* fallback, because MusicBrainz states
+  the RYM album/artist page as a URL relation for well-known releases.
+- …and seven more rows of kind `credentials`: the saved logins themselves
+  (Discogs token, Last.fm key, Spotify client pair, AcoustID key, Soulseek
+  account, AI provider, this server's own password). Those ask the provider's
+  OWN credential endpoint — Discogs `/oauth/identity`, Last.fm
+  `chart.gettoptags`, Spotify `POST /api/token`, one AcoustID lookup — so a
+  REFUSED key is reported in the provider's words instead of leaving its
+  source row looking green (Discogs' browse endpoint answers anonymously, so a
+  discarded token used to leave no trace at all). `?kind=credentials` returns
+  them alone; Settings → Sources and the setup wizard show them as their own
+  group with a Test button.
 
 ## What the app does
 
@@ -134,6 +144,43 @@ upload/search, Wikipedia descriptions, manual tag editing, a lyrics editor, and 
 own PERFORMER/COMPOSER/… tags, and saying so). **More like this** and **Home**
 are computed locally from the library's own tags (genre and family, mood, energy,
 era, artist) — no provider, no model, no network.
+
+**LIBRARY → BROWSE** turns the library into a query: 120 fields (tags, ratings,
+grades, audit verdicts, technical facts, audio analysis, library/album/artist
+facts) with the operations each field declares, a value control per type, match
+all/any, a live "matches N tracks · M albums" count, sorting and grouping, and a
+facet rail that narrows with multi-select. The same engine evaluates **smart
+playlists** (`kind: smart` stores the filter, not the rows) and the rule editor
+in a playlist reads the same field catalogue — one list, no drift. A saved rule
+naming a field the catalogue no longer lists keeps its raw key and legacy ops, so
+nothing anyone saved is rewritten.
+
+**Ratings** are half stars in the UI and Picard's 0–10 in the store: click a
+star's left half for a half star, click the set value to clear, arrow keys nudge.
+They appear on library rows (both views), album rows, the album header average,
+the album/track page headers and the player bar, and the query engine compares
+in star space, so `rating >= 4` and the rating facet mean the same thing the
+stars show. `write_rating_tags` decides whether the file's own `RATING` tag is
+written too.
+
+### Discover, recommendations and watching
+
+**DISCOVER** browses genres across every configured provider (MusicBrainz,
+Deezer, iTunes, TheAudioDB, Last.fm, ListenBrainz, Discogs, Wikidata, Wikipedia,
+Spotify, RateYourMusic, Bandcamp) with a library/online/both scope and an
+albums/artists/tracks switch. Every row names its source, whether you already own
+it, and what else holds it; each source's outcome is shown as a chip — *0
+answered*, *skipped: needs a key*, *failed: the provider's own words* — never
+swallowed. Owned rows open the real page; everything else offers **Add to
+library**, which queues a wish and searches for its audio. **RECOMMENDED** takes a
+seed (the whole library, or one of its genres) and explains its basis on screen.
+
+**WATCHED ARTISTS** keeps a MusicBrainz artist under watch: policy (`new_only` /
+`backfill`), the release types worth taking, an allow/never list of specific
+releases, a per-cycle cap and auto-add. Each check queues a few release groups
+into the wish queue — never a discography — and the page reports real scheduling
+("last check 3h ago (12 total) · next in 34m", or plainly that nothing is
+scheduled yet). Watches inherit the whole acquisition chain below.
 
 ### Player
 
@@ -180,12 +227,12 @@ imports a verified copy, flipping the wish to **Imported**. *Import all complete
 imports every finished download **sequentially**, with cancel finishing the album
 in flight (`GET /api/soulseek/import-all/status`).
 
-### Optimization — the 18 scripts
+### Optimization — the 19 scripts
 
 Optimization → *Run All* executes `run_all_order`, shipped as **11 → 3 → 14 → 15
-→ 2 → 1 → 13 → 18 → 17 → 8 → 5 → 6 → 7 → 9 → 12 → 16 → 10 → 4** — everything that
-moves a file first, everything that reads it last. Every script also runs on its
-own, on a selection, or with its force flag from the *Re-run & overwrite* menu.
+→ 2 → 1 → 13 → 18 → 17 → 8 → 5 → 19 → 6 → 7 → 9 → 12 → 16 → 10 → 4** — everything
+that moves a file first, everything that reads it last. Every script also runs on
+its own, on a selection, or with its force flag from the *Re-run & overwrite* menu.
 
 | # | Script | What it does |
 | --- | --- | --- |
@@ -207,6 +254,7 @@ own, on a selection, or with its force flag from the *Re-run & overwrite* menu.
 | 16 | Mood & Energy | The mood classifier alone (`MOOD` + `ENERGY`) |
 | 17 | Lyrics transliterate (AI) | `TRANSLITERATION-<LANG>-LATN` / `TRANSLATION-<LANG>` tags and sidecars, re-synced at `lrc_sync_level` |
 | 18 | Publish lyrics (LRCLIB) | Submits this library's lyrics for recordings LRCLIB does not have (`lrclib_auto_publish`, `force_publish`) |
+| 19 | Optimize artist images | Crops `Artists/<Artist>/artist.*` to `artist_image_aspect`, downscales to `artist_image_target_size` (never upscales, and back to the size it recorded writing when a file was enlarged afterwards), re-encodes as `artist.jpg`/`artist.png` |
 
 Force flags, one per script: `force_lyrics`, `force_cue`, `force_tracklist`,
 `force_reencode_flac`, `force_reencode_images`, `force_audit`, `force_accurip`,
@@ -337,7 +385,7 @@ and the GHCR image.
 python -m mlo
 ```
 
-That is the classic console menu — scripts 1–18, Run All, the config editor and
+That is the classic console menu — scripts 1–19, Run All, the config editor and
 the dependency table. It is **not** stdlib-only: `mlo` imports `mutagen` for
 every tag operation, so run it from the same environment that has
 `server/requirements.txt` installed (script 14 additionally needs
@@ -450,7 +498,7 @@ Where the app stores what it fetches (all under `<music>/.mlo/`):
 | `GET /api/auth/status`, `POST /api/auth/setup` `…/login` `…/logout` `…/password` `…/revoke-all`, `GET …/sessions`, `GET/POST /api/auth/users`, `DELETE …/{name}` | the gate's state (`required`, `has_password`, `username`, `host`, `public_url`, `session_days`); first-run password, sign in (optional `username`), sign out, change, revoke everywhere, session count, user management |
 | `GET /api/library/layout` | read-only layout scan (misplaced audio, stray files, empty albums, `wrong_case`); `GET /api/home` and `GET /api/recommend` back the Home shelves and "More like this" |
 | `GET /api/album` `GET /api/artist` `GET /api/artist/artwork`, `GET /api/stream` `GET /api/videos/stream` `GET /api/videos/meta` `GET /api/videos/thumb` | entity details, stored artist image/description + provenance and the artist's own grade; audio/video streaming (Range; `?transcode=1`), codec probe, scrub frames |
-| `GET /api/tags` `POST /api/tags/bulk` `…/videos/tag`, `POST /api/run`, `POST /api/organize` | per-track tag read view; bulk tag surgery; video tag writes; run scripts 1–18; apply the naming script (dry-run supported) |
+| `GET /api/tags` `POST /api/tags/bulk` `…/videos/tag`, `POST /api/run`, `POST /api/organize` | per-track tag read view; bulk tag surgery; video tag writes; run scripts 1–19; apply the naming script (dry-run supported) |
 | `POST /api/export`, `GET /api/export/codecs` `…/drives` `…/defaults` | multi-format export plus its codec table, drives and saved defaults |
 | `GET/POST/PATCH/DELETE /api/wishes…`, `POST /api/wishes/{id}/search` `…/search-all` `…/reconcile` `…/import` | the wishlist and its worker |
 | `GET /api/sources/health` `…/{id}`, `GET /api/capabilities`, `GET /api/dependencies` | every external source with its `needs`/`configured` state (`?probe=1`); what this server can run; the tool table with installed/pinned/upstream versions |
@@ -471,7 +519,7 @@ python tools/smoke_api.py           # route smoke test against a running backend
 python tools/check_versions.py      # the release gate: every version string agrees
 ```
 
-- The 57 `tools/test_*.py` suites are standalone scripts (`python tools/test_x.py`;
+- The 84 `tools/test_*.py` suites are standalone scripts (`python tools/test_x.py`;
   `sys.exit(2)` means "skipped", e.g. a missing toolchain) and mostly run offline
   with providers stubbed. The frontend gate is `cd web && npx tsc -b && npx oxlint
   && npm run build`, plus `node tools/test_i18n.cjs` for the locale bundles.

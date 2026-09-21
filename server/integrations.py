@@ -20,6 +20,8 @@ import uuid
 
 import httpx
 
+from mlo import release_choice
+
 MB_BASE = "https://musicbrainz.org/ws/2"
 LRCLIB_BASE = "https://lrclib.net/api"
 USER_AGENT = "la-musica/2.0 (https://github.com/dillydalli3r/la-musica)"
@@ -189,12 +191,22 @@ def mb_get_cached(endpoint, params=None, timeout=30.0, retries=5):
     return data
 
 
+_DETECT_MISSES: dict = {}          # mbid -> when it last failed, for the TTL below
+_DETECT_MISS_TTL = 900.0           # a wrong paste is re-probed at most every 15 min
+
+
 def detect_mbid(mbid):
     """Which MusicBrainz entity kind does this MBID belong to?
 
     Tries a minimal lookup per browsable entity (cache-shared with the
     entity pages) and reports the first hit — lets the UI route a pasted
-    bare ID without the user picking a type."""
+    bare ID without the user picking a type. An ID that is not in MB costs
+    one request per entity kind, and the search box re-asks while the user
+    looks at the answer, so a miss is remembered for a while instead of
+    being probed four more times."""
+    key = str(mbid or "").lower()
+    if key and time.time() - _DETECT_MISSES.get(key, 0.0) < _DETECT_MISS_TTL:
+        raise LookupError("no MusicBrainz entity found for this ID")
     for entity in MB_ENTITIES:
         try:
             data = mb_get_cached(f"{entity}/{mbid}", {"fmt": "json"})
@@ -205,6 +217,10 @@ def detect_mbid(mbid):
             "id": data.get("id") or mbid,
             "title": data.get("title") or data.get("name") or "",
         }
+    if key:
+        if len(_DETECT_MISSES) > 200:
+            _DETECT_MISSES.clear()
+        _DETECT_MISSES[key] = time.time()
     raise LookupError("no MusicBrainz entity found for this ID")
 
 
@@ -215,8 +231,15 @@ def _browse_collect(endpoint, extra_params, list_key, count_key, limit=300, offs
     misrepresents a discography (one page can be all albums, the next all
     singles) and any date ordering would be a lie. This walks the pages
     (still 1 req/s) up to `limit` rows starting at `offset` so the caller
-    can sort and filter over an honest window. Returns (rows, total)."""
+    can sort and filter over an honest window. Returns (rows, total, served)
+    — `served` being the raw rows MusicBrainz handed back for this window,
+    which is what the next offset must follow.
+
+    Rows are de-duplicated by MBID (a browse page that repeats an entity
+    must not list it twice); paging stays MusicBrainz's own, which is why
+    the raw batch length advances `pos`, not the de-duplicated one."""
     items = []
+    seen = set()
     pos = offset
     total = None
     while pos < offset + limit:
@@ -224,15 +247,22 @@ def _browse_collect(endpoint, extra_params, list_key, count_key, limit=300, offs
             endpoint,
             {**extra_params, "limit": min(100, offset + limit - pos), "offset": pos, "fmt": "json"},
         )
-        batch = data.get(list_key) or []
+        batch = [r for r in (data.get(list_key) or []) if r.get("id")]
         total = data.get(count_key) or total
-        items.extend(batch)
+        for row in batch:
+            if row["id"] in seen:
+                continue
+            seen.add(row["id"])
+            items.append(row)
         pos += len(batch)
         if not batch or pos >= min(total or 0, offset + limit):
             break
     if total is None:
         total = len(items)
-    return items, total
+    # `pos - offset` is how many RAW rows MusicBrainz served for this window;
+    # the caller pages by that, so a de-duplicated row can never make the
+    # next request overlap the one before it.
+    return items, total, pos - offset
 
 
 def _mbid(value):
@@ -259,8 +289,13 @@ def _genres(node):
 # --------------------------------------------------------------------------- #
 def release_lookup(mbid):
     """Full release: media/discs, recordings, artist credits, genres and
-    labels (catalog numbers). Country comes from the release entity."""
-    data = mb_get(
+    labels (catalog numbers). Country comes from the release entity.
+
+    Through `mb_get_cached`: the release page, the import wizard's release
+    picker and the match step all read this same payload, and at 1 req/s a
+    second view of the same release must not cost a second request (the
+    cache is what MB's etiquette asks for — this call used to bypass it)."""
+    data = mb_get_cached(
         f"release/{mbid}",
         {"inc": "artists+recordings+media+release-groups+artist-credits+genres+labels+isrcs", "fmt": "json"},
     )
@@ -445,6 +480,10 @@ _ADVISORY_CACHE: dict = {}
 _ADVISORY_LOCK = threading.Lock()
 _ADVISORY_MISS = object()
 _SPOTIFY_TOKEN: dict = {}
+# Why Spotify last refused the client credentials: `{reason, at}`. The token
+# cache only ever holds a success, so without this a rejected client id/secret
+# left the sources silently skipped — see `spotify_last_error`.
+_SPOTIFY_LAST: dict = {}
 _ADVISORY_CACHE_MAX = 20000
 
 
@@ -465,14 +504,21 @@ def _advisory_json(url, params=None, headers=None, timeout=None, host=None):
 
 def _advisory_post(url, data=None, headers=None, timeout=None):
     """POST sibling of `_advisory_json` (only Spotify's token endpoint needs
-    one). None on any failure."""
+    one). -> `(body, error)`, where `error` is the endpoint's own refusal in
+    its own words ("" when it answered).
+
+    The body is returned even for a refusal: OAuth2 states a rejected client
+    IN the 400 body (`{"error": "invalid_client", "error_description": ...}`),
+    and a caller that could only see None could not tell a wrong client secret
+    from an unreachable host — which is exactly the difference a Test button
+    has to report."""
     try:
         r = httpx.post(url, data=data, headers=headers, timeout=timeout or 15.0)
         if r.status_code >= 400:
-            return None
-        return r.json()
-    except Exception:
-        return None
+            return None, f"HTTP {r.status_code}: {(r.text or '').strip()[:300]}"
+        return r.json(), ""
+    except Exception as e:
+        return None, f"no answer ({type(e).__name__}: {e})"
 
 
 def _advisory_cached(key, producer):
@@ -519,11 +565,29 @@ def _deezer_advisory(isrc, timeout=None):
     return None
 
 
+def _spotify_token_post(cid, secret, timeout=None):
+    """One `POST /api/token` with the client-credentials grant.
+
+    -> `(body, error)`; the ONE place the Basic header is built, so the token
+    the sources use and the token a Test button asks for cannot drift apart.
+    """
+    import base64
+    return _advisory_post(
+        _SPOTIFY_TOKEN_URL,
+        data={"grant_type": "client_credentials"},
+        headers={"Authorization": "Basic " + base64.b64encode(
+            f"{cid}:{secret}".encode("utf-8")).decode("ascii"),
+            "Content-Type": "application/x-www-form-urlencoded"},
+        timeout=timeout)
+
+
 def _spotify_token(cfg, timeout=None):
     """Client-credentials token, or None when Spotify is unconfigured/down.
 
     `spotify_client_id` + `spotify_client_secret` are optional; without them
-    this returns None and the route is skipped, never defaulted.
+    this returns None and the route is skipped, never defaulted. A REFUSED
+    client keeps its refusal in `_SPOTIFY_LAST` so the caller can report
+    Spotify's own words instead of an empty skip — see `spotify_last_error`.
     """
     cid = str((cfg or {}).get("spotify_client_id") or "").strip()
     secret = str((cfg or {}).get("spotify_client_secret") or "").strip()
@@ -533,22 +597,58 @@ def _spotify_token(cfg, timeout=None):
         token = _SPOTIFY_TOKEN.get("token")
         if token and _SPOTIFY_TOKEN.get("expires", 0) > time.time():
             return token
-    import base64
-    body = _advisory_post(
-        _SPOTIFY_TOKEN_URL,
-        data={"grant_type": "client_credentials"},
-        headers={"Authorization": "Basic " + base64.b64encode(
-            f"{cid}:{secret}".encode("utf-8")).decode("ascii"),
-            "Content-Type": "application/x-www-form-urlencoded"},
-        timeout=timeout)
+    body, error = _spotify_token_post(cid, secret, timeout=timeout)
     token = (body or {}).get("access_token")
     if not token:
+        _record_spotify_refusal(error or "no access_token in the answer")
         return None
     with _ADVISORY_LOCK:
         _SPOTIFY_TOKEN["token"] = token
         _SPOTIFY_TOKEN["expires"] = (
             time.time() + float((body or {}).get("expires_in") or 3600) - 60)
     return token
+
+
+def _record_spotify_refusal(reason):
+    with _ADVISORY_LOCK:
+        _SPOTIFY_LAST.update(reason=str(reason or ""), at=time.time())
+
+
+def spotify_last_error(since=None):
+    """Why Spotify last refused the client credentials, or "" — see
+    `spotify_check`. `since` filters out a refusal from an earlier run."""
+    with _ADVISORY_LOCK:
+        got = dict(_SPOTIFY_LAST)
+    if not got or (since and float(got.get("at") or 0) < float(since)):
+        return ""
+    return str(got.get("reason") or "")
+
+
+def spotify_check(cfg=None, timeout=None):
+    """Are the saved client credentials accepted? -> `{ok, checked, detail}`.
+
+    `POST /api/token` with the client-credentials grant IS the authentication
+    the sources then depend on, so this asks the same endpoint they do (through
+    the same `_spotify_token_post` seam). A rejected pair answers
+    `{"error": "invalid_client", …}` in a 400 body, which is reported
+    verbatim. Live by construction: the token cache is bypassed so a Test
+    after pasting a new secret asks Spotify again."""
+    cid = str((cfg or {}).get("spotify_client_id") or "").strip()
+    secret = str((cfg or {}).get("spotify_client_secret") or "").strip()
+    if not cid or not secret:
+        return {"ok": False, "checked": "",
+                "detail": "no spotify_client_id/spotify_client_secret is set"}
+    started = time.time()
+    body, error = _spotify_token_post(cid, secret, timeout=timeout)
+    token = str((body or {}).get("access_token") or "").strip()
+    if token:
+        return {"ok": True, "checked": "POST /api/token (client_credentials)",
+                "detail": "client credentials accepted — POST /api/token "
+                          "issued a token"}
+    _record_spotify_refusal(error or "no access_token in the answer")
+    return {"ok": False, "checked": "POST /api/token (client_credentials)",
+            "detail": "Spotify rejected the client credentials — "
+                      + (error or spotify_last_error(started))}
 
 
 def _spotify_advisory(isrc, cfg, timeout=None):
@@ -1177,7 +1277,7 @@ def release_advisories(mbid, sources=None, answers=None):
 
 def release_group_genres(rg_mbid):
     try:
-        data = mb_get(f"release-group/{rg_mbid}", {"inc": "genres", "fmt": "json"})
+        data = mb_get_cached(f"release-group/{rg_mbid}", {"inc": "genres", "fmt": "json"})
         return _genres(data)
     except Exception:
         return []
@@ -1185,7 +1285,7 @@ def release_group_genres(rg_mbid):
 
 def artist_genres(artist_mbid):
     try:
-        data = mb_get(f"artist/{artist_mbid}", {"inc": "genres", "fmt": "json"})
+        data = mb_get_cached(f"artist/{artist_mbid}", {"inc": "genres", "fmt": "json"})
         return _genres(data)
     except Exception:
         return []
@@ -4194,6 +4294,17 @@ def _credit(node):
     )
 
 
+def _credit_mbid(node):
+    """The first credited artist's MBID, or "" — search rows carry the
+    artist credit inline, so a row can link to its artist page without a
+    second request per row."""
+    for ac in node.get("artist-credit") or []:
+        aid = ((ac.get("artist") or {}).get("id")) if isinstance(ac, dict) else None
+        if aid:
+            return aid
+    return ""
+
+
 def _rg_types(node):
     """(primary_type, secondary_types) of a node's release group.
 
@@ -4240,38 +4351,111 @@ def _release_counts(node):
     return total, breakdown
 
 
+SEARCH_LIMIT_MAX = 100        # WS/2 search refuses limit > 100
+
+
+def _search_year(field, value):
+    """`date:` / `firstreleasedate:` clause for a year or a year range.
+
+    WS/2 indexes these as dates and answers a same-year range with that
+    year's entities (verified live: `date:[1999 TO 1999]` and `date:1999`
+    return the same count), so one spelling covers a bare year and the
+    "1990-1999" range the search box accepts."""
+    m = re.fullmatch(r"(\d{4})\s*(?:[-/]\s*(\d{4}))?", str(value or "").strip())
+    if not m:
+        return ""
+    start, end = m.group(1), m.group(2) or m.group(1)
+    return f"{field}:[{start} TO {end}]"
+
+
+def search_query(entity, query="", mode="free", primary_type="", secondary_type="",
+                 artist="", year="", label="", catno="", artist_id=""):
+    """The Lucene query `search_mb` runs for these inputs.
+
+    Every constraint is its own AND clause, because the index is the only
+    place "albums by this artist from 1999 on that label with that catalog
+    number" can be answered — filtering the returned rows afterwards cannot
+    (the rows that would match are not in the page). Returned to the client
+    so the browser can show the user the query behind a result list.
+    Field names and value spellings are MusicBrainz's own (release:
+    artist/label/catno/date/primarytype/secondarytype/arid; release-group:
+    firstreleasedate and no label/catno — a release group has neither)."""
+    clauses = []
+    q = str(query or "").strip()
+    if entity == "release" and mode == "catno":
+        q = f'catno:"{q}"'
+    elif entity == "release" and mode == "barcode":
+        q = f"barcode:{q}"
+    if q:
+        clauses.append(q)
+    # An explicit Cat # field is a clause of its own; when the mode already
+    # turned the same number into one, a second identical clause adds nothing.
+    if entity == "release" and catno:
+        same_as_query = (mode == "catno"
+                         and catno.strip().lower() == str(query or "").strip().lower())
+        if not same_as_query:
+            clauses.append(f'catno:"{catno.strip()}"')
+    if entity == "release" and label:
+        clauses.append(f'label:"{label.strip()}"')
+    if entity != "artist" and artist:
+        clauses.append(f'artist:"{artist.strip()}"')
+    if artist_id and entity in ("release-group", "release", "recording"):
+        clauses.append(f"arid:{artist_id}")
+    if entity in ("release", "release-group", "recording"):
+        # a release group carries the earliest release date; releases and
+        # recordings carry the date of the release they appear on
+        year_clause = _search_year(
+            "firstreleasedate" if entity == "release-group" else "date", year)
+        if year_clause:
+            clauses.append(year_clause)
+    if entity in ("release", "release-group"):
+        # quoted: several secondary types are multi-word ("Audio drama",
+        # "DJ-mix", "Field recording")
+        if primary_type:
+            clauses.append(f'primarytype:"{primary_type}"')
+        if secondary_type:
+            clauses.append(f'secondarytype:"{secondary_type}"')
+    return " AND ".join(clauses)
+
+
 def search_mb(entity, query, limit=100, mode="free", offset=0,
-              primary_type="", secondary_type=""):
+              primary_type="", secondary_type="", artist="", year="",
+              label="", catno="", artist_id=""):
     """Normalized MB search rows for the four browsable entities.
 
     mode="free" is the plain full-text search; for releases, mode="catno" /
     "barcode" search by catalog number / barcode (catalog numbers like
     'SRCS 8757' are how pressings are identified). primary_type /
     secondary_type narrow releases and release groups with MusicBrainz's own
-    type qualifiers — the only way to ask the index for "albums that are
-    soundtracks" instead of filtering the rows afterwards. Returns
-    {rows, total} — total is MusicBrainz's match count so the UI can offer
-    deeper paging (searches cap at 100 rows per request)."""
+    type qualifiers, and artist / year / label / catno are combinable
+    constraints (see `search_query`). The request carries ALL of them, so a
+    narrow query is answered by the index rather than by throwing rows away.
+
+    Returns {rows, total, offset, next, query}: `total` is MusicBrainz's
+    match count, `next` the offset of the following page (None at the end),
+    and `query` the Lucene query actually run. Rows keep MusicBrainz's own
+    relevance order, and are de-duplicated by MBID — the index repeats an
+    entity when a query matches it more than once (a multi-disc release), and
+    the same row twice in a table is a bug, not a second result."""
     if entity not in MB_ENTITIES:
         raise ValueError("entity must be artist, release-group, release or recording")
-    q = query
-    if entity == "release" and mode == "catno":
-        q = f'catno:"{query}"'
-    elif entity == "release" and mode == "barcode":
-        q = f"barcode:{query}"
-    if entity in ("release", "release-group"):
-        # quoted: several secondary types are multi-word ("Audio drama",
-        # "DJ-mix", "Field recording")
-        if primary_type:
-            q = f'{q} AND primarytype:"{primary_type}"'
-        if secondary_type:
-            q = f'{q} AND secondarytype:"{secondary_type}"'
+    # WS/2 rejects limit > 100 outright, so a caller asking for more would
+    # get an error page instead of a first page: clamp, and let `next` page.
+    limit = max(1, min(SEARCH_LIMIT_MAX, int(limit or SEARCH_LIMIT_MAX)))
+    offset = max(0, int(offset or 0))
+    q = search_query(entity, query, mode, primary_type, secondary_type,
+                     artist, year, label, catno, artist_id)
     data = mb_get_cached(entity, {"query": q, "limit": limit, "offset": offset, "fmt": "json"})
     # MB search responses use plural collection keys
     key = {"artist": "artists", "release-group": "release-groups",
            "release": "releases", "recording": "recordings"}[entity]
+    raw = [i for i in data.get(key, []) if i.get("id")]
     rows = []
-    for item in data.get(key, []):
+    seen = set()
+    for item in raw:
+        if item["id"] in seen:
+            continue
+        seen.add(item["id"])
         row = {
             "id": item.get("id"),
             "score": item.get("score"),
@@ -4292,6 +4476,7 @@ def search_mb(entity, query, limit=100, mode="free", offset=0,
         elif entity == "release-group":
             row.update({
                 "artist": _credit(item),
+                "artist_mbid": _credit_mbid(item),
                 "primary_type": item.get("primary-type") or "",
                 "secondary_types": [s for s in (item.get("secondary-types") or [])],
                 "first_release_date": item.get("first-release-date") or "",
@@ -4309,6 +4494,7 @@ def search_mb(entity, query, limit=100, mode="free", offset=0,
             rg_primary, rg_secondary = _rg_types(item)
             row.update({
                 "artist": _credit(item),
+                "artist_mbid": _credit_mbid(item),
                 "date": item.get("date") or "",
                 "country": item.get("country") or "",
                 "status": item.get("status") or "",
@@ -4321,11 +4507,19 @@ def search_mb(entity, query, limit=100, mode="free", offset=0,
         else:  # recording
             row.update({
                 "artist": _credit(item),
+                "artist_mbid": _credit_mbid(item),
                 "length": item.get("length"),
                 "first_release_date": item.get("first-release-date") or "",
             })
         rows.append(row)
-    return {"rows": rows, "total": data.get("count") or len(rows)}
+    total = data.get("count") or len(rows)
+    # Paging follows the offsets MusicBrainz itself served (the raw slice),
+    # never the de-duplicated count, or a dropped duplicate would shift the
+    # next page and skip a row.
+    nxt = offset + len(raw)
+    return {"rows": rows, "total": total, "offset": offset, "query": q,
+            "next": nxt if raw and nxt < total else None,
+            "duplicates": len(raw) - len(rows)}
 
 
 def artist_identity(mbid):
@@ -4351,21 +4545,51 @@ def artist_identity(mbid):
     }
 
 
-def artist_release_groups(mbid, limit=100, offset=0):
+def artist_release_groups(mbid, limit=100, offset=0, primary_type="", secondary_type=""):
     """One page of an artist's release groups, oldest first.
 
     The discography comes from the *browse* endpoint (release-group?artist=…)
     rather than a lookup's inc= subquery — lookups silently cap the related
     list. It has NO server-side sort, so a single arbitrary 100-row slice
     misrepresents a discography: `_browse_collect` walks the pages (still
-    1 req/s) up to `limit` rows so the caller sorts an honest window."""
-    rgs, total = _browse_collect(
+    1 req/s) up to `limit` rows so the caller sorts an honest window.
+
+    With a TYPE filter the list comes from the search index instead
+    (`arid:` + `primarytype:`/`secondarytype:`): browse cannot filter by type
+    at all, and filtering the loaded window is what made an artist page claim
+    no albums for an artist whose albums sat beyond the first page. The index
+    filters and counts on the server, so the chips and the "N of M" line are
+    about the whole discography, not about what happened to be loaded."""
+    if primary_type or secondary_type:
+        page = search_mb("release-group", "", limit, "free", offset,
+                         primary_type=primary_type, secondary_type=secondary_type,
+                         artist_id=mbid)
+        return {
+            "total": page["total"],
+            "offset": offset,
+            "next": page["next"],
+            "release_groups": sorted(
+                (
+                    {
+                        "id": rg.get("id"),
+                        "title": rg.get("title"),
+                        "primary_type": rg.get("primary_type") or "",
+                        "secondary_types": rg.get("secondary_types") or [],
+                        "first_release_date": rg.get("first_release_date") or "",
+                    }
+                    for rg in page["rows"]
+                ),
+                key=lambda g: g.get("first_release_date") or "9999",
+            ),
+        }
+    rgs, total, served = _browse_collect(
         "release-group", {"artist": mbid}, "release-groups", "release-group-count",
         limit=limit, offset=offset,
     )
     return {
         "total": total,
         "offset": offset,
+        "next": (offset + served) if 0 < total and offset + served < total else None,
         "release_groups": [
             {
                 "id": rg.get("id"),
@@ -4382,141 +4606,82 @@ def artist_release_groups(mbid, limit=100, offset=0):
     }
 
 
-def artist_browse(mbid, limit=300, offset=0):
+def artist_browse(mbid, limit=300, offset=0, primary_type="", secondary_type=""):
     """Identity + a page of release groups together — the auto-import path
-    wants both at once, the artist page does not (see artist_identity)."""
-    return {**artist_identity(mbid), **artist_release_groups(mbid, limit, offset)}
+    wants both at once, the artist page does not (see artist_identity). The
+    type filter is the page's own (see artist_release_groups)."""
+    return {**artist_identity(mbid),
+            **artist_release_groups(mbid, limit, offset, primary_type, secondary_type)}
 
 
-def _release_policy():
-    """(avoid_promo, medium_order, require_country) from config, safe defaults."""
-    from mlo.config import DEFAULT_CONFIG, load_config
-    try:
-        cfg = load_config()
-    except Exception:
-        cfg = {}
-    avoid = bool(cfg.get("auto_import_avoid_promo", True))
-    country = bool(cfg.get("auto_import_require_country", True))
-    order = cfg.get("auto_import_medium_order") or DEFAULT_CONFIG["auto_import_medium_order"]
-    return avoid, [str(x).strip().lower() for x in order if str(x).strip()], country
+def _release_cfg(cfg=None):
+    """The config the release-choice policy reads, safe defaults on a CLI.
 
-
-# MusicBrainz release statuses that must never be auto-picked while
-# avoid-promo is on: a promo/bootleg/pseudo edition is not the album.
-_PROMO_STATUSES = {"promotion", "bootleg", "pseudo-release", "pseudo release"}
-# Withdrawn/expired/cancelled editions still exist on MusicBrainz, but the
-# label pulled them: they sort below a plain release and above a promo.
-_NEGATIVE_STATUSES = {"withdrawn", "expired", "cancelled", "canceled"}
-
-
-def _medium_names(rel):
-    """Format names a release carries ('CD', 'Digital Media')."""
-    media = rel.get("media")
-    if media:
-        return [str(m.get("format") or "") for m in media if isinstance(m, dict)]
-    fmts = rel.get("formats")
-    if isinstance(fmts, list):
-        return [str(f) for f in fmts]
-    out = []
-    for part in str(fmts or "").split(" + "):
-        part = part.strip()
-        if "×" in part:
-            part = part.split("×", 1)[-1]
-        if part:
-            out.append(part)
-    return out
-
-
-def release_medium_rank(rel, medium_order):
-    """Index of the release's best medium in the preference order.
-
-    Unknown formats rank after every configured one but still sort among
-    themselves by date."""
-    names = [n.lower() for n in _medium_names(rel)]
-    best = len(medium_order)
-    for n in names:
-        for i, pref in enumerate(medium_order):
-            if pref and (n == pref or pref in n):
-                best = min(best, i)
-    return best
-
-
-def _date_rank(date):
-    """(year, precision) for the edition sort — the earlier and the FULLER
-    date wins.
-
-    The album folder is named after the release's own date ("[Album]
-    1980-10-01 - 1983-09-13 - …"), so an edition MusicBrainz dates only to the
-    year leaves the folder with a year for good. Comparing the date STRING
-    put "1983" before "1983-09-13" (a prefix sorts first), which preferred
-    exactly the edition that cannot fill the folder in. The year stays the
-    primary term — an earlier pressing still wins — and precision breaks the
-    tie: full date, then year-month, then year, then an edition with no date
-    at all.
+    `mlo.release_choice` ranks the payloads it is handed against a config
+    dict and nothing else, so the ONE config load the policy ever needs lives
+    here, next to the MusicBrainz access that consumes the ranking.
     """
-    text = str(date or "").strip()
-    if not text:
-        return (9999, 3)
-    year = text.split("-")[0]
+    if isinstance(cfg, dict):
+        return cfg
+    from mlo.config import load_config
     try:
-        y = int(year)
-    except ValueError:
-        return (9999, 3)
-    return (y, {10: 0, 7: 1}.get(len(text), 2))
+        return load_config()
+    except Exception:
+        return {}
 
 
-def release_choice_key(rel, avoid_promo=True, medium_order=None):
-    """Sort key: Official first, then medium preference, then earliest date.
+def _release_group_node(release_group):
+    """The release-group fields `mlo.release_choice` reads.
 
-    Negative traits are counted against a release instead of being invisible
-    to the sort: `official` ranks 0, a release whose status MusicBrainz does
-    not state ranks 1, a withdrawn/expired/cancelled edition ranks 2, and a
-    promotional/bootleg/pseudo edition ranks 3 (`pick_releases` drops those
-    entirely while avoid-promo is on). An edition carrying a RELEASECOUNTRY
-    beats one that does not, whichever status the two share. The date term
-    prefers the earlier edition, and among editions of the same year the one
-    that states its date in full (see `_date_rank`)."""
-    status = str(rel.get("status") or "").strip().lower()
-    if status == "official":
-        rank = 0
-    elif status in _PROMO_STATUSES and avoid_promo:
-        rank = 3
-    elif status in _NEGATIVE_STATUSES:
-        rank = 2
-    else:
-        rank = 1
-    date = rel.get("date") or ""
-    return (rank, 0 if str(rel.get("country") or "").strip() else 1,
-            release_medium_rank(rel, medium_order or []),
-            _date_rank(date), date or "9999")
+    An absent page (a caller that only holds editions) reads as "no group
+    facts": the policy then measures editions against the fullest one offered
+    and takes the earliest edition as the original.
+    """
+    node = release_group if isinstance(release_group, dict) else {}
+    return {
+        "title": node.get("title"),
+        "first_release_date": node.get("first_release_date"),
+        "primary_type": node.get("primary_type"),
+        "secondary_types": node.get("secondary_types"),
+        "track_count": node.get("track_count"),
+    }
+
+
+def ranked_releases(release_group, releases, cfg=None, **kw):
+    """`mlo.release_choice.rank_releases` against this app's config.
+
+    The ONE entry point the server uses, so the policy module never sees a
+    None config and the "which key, which default" question is answered in
+    mlo.config alone.
+    """
+    return release_choice.rank_releases(_release_group_node(release_group),
+                                        releases, _release_cfg(cfg), **kw)
+
+
+def _best_release(release_group, releases, cfg=None, **kw):
+    """(release payload, candidate) for the policy's pick, or (None, None)."""
+    rows = list(releases or [])
+    ranked = ranked_releases(release_group, rows, cfg, strict=True, **kw)
+    best = release_choice.pick(ranked, strict=True)
+    return (rows[best.index], best) if best else (None, None)
 
 
 def pick_releases(releases, cfg=None):
-    """Releases ordered by the auto-import release policy (best first).
+    """The ELIGIBLE releases of *releases*, best first, as the payloads they
+    came in as.
 
-    The ineligible are dropped rather than ranked so no auto-import path can
-    queue one: promotional / bootleg / pseudo editions while mlo.config
-    `auto_import_avoid_promo` is on, and editions with no RELEASECOUNTRY while
-    `auto_import_require_country` is on."""
-    if cfg is None:
-        avoid, order, country = _release_policy()
-    else:
-        avoid = bool(cfg.get("auto_import_avoid_promo", True))
-        country = bool(cfg.get("auto_import_require_country", True))
-        order = [str(x).strip().lower()
-                 for x in (cfg.get("auto_import_medium_order") or []) if str(x).strip()]
-
-    def usable(rel):
-        status = str(rel.get("status") or "").strip().lower()
-        if avoid and status in _PROMO_STATUSES:
-            return False
-        if country and not str(rel.get("country") or "").strip():
-            return False
-        return True
-
-    kept = [r for r in (releases or []) if usable(r)]
-    kept.sort(key=lambda r: release_choice_key(r, avoid, order))
-    return kept
+    Strict mode of the one release-choice policy (`mlo.release_choice`): a
+    promotional/bootleg/pseudo edition is dropped while
+    `auto_import_avoid_promo` is on, and an edition with no RELEASECOUNTRY
+    while `auto_import_require_country` is on, so no unattended download can
+    queue one. The ranking itself — status, medium, track count, date,
+    original-vs-reissue, plain title, preferred country — lives there and
+    nowhere else (this used to be `release_choice_key`/`release_medium_rank`/
+    `_date_rank` here: one policy now).
+    """
+    rows = list(releases or [])
+    ranked = ranked_releases(None, rows, cfg, strict=True)
+    return [rows[c.index] for c in ranked if c.eligible and c.type_ok]
 
 
 def pick_release(releases, cfg=None):
@@ -4552,7 +4717,7 @@ def resolve_release(mbid):
         raise
     except Exception:
         return None, None
-    best = pick_release(rg.get("releases") or []) if rg.get("id") else None
+    best, _pick = _best_release(rg, rg.get("releases") or []) if rg.get("id") else (None, None)
     if not best or not best.get("id"):
         return None, rid
     try:
@@ -4573,25 +4738,46 @@ _NO_EDITION = ("no edition eligible for auto-import (promotional/bootleg "
 BULK_MAX_GROUPS = 50
 
 
-def group_targets(rg_mbid, mode):
-    """([{mbid,title}], error) — the release ids of a release group to queue.
+def no_edition_reason(ranked):
+    """Why the strict policy refused every edition of a group, in words.
 
-    Ordered by the auto-import policy (Official, then medium preference, then
-    earliest date); `mode` "best" keeps only the best edition, "all" keeps
-    every eligible edition. `error` is a readable reason and never an
-    exception, so one unusable group cannot abort a whole discography."""
+    The policy's own first eligibility sentence when it has one — so a caller
+    (and the watch's `last_error`) reads "no release country …" or "release
+    group type is not the type asked for" rather than a generic refusal.
+    """
+    if not ranked:
+        return "MusicBrainz lists no edition of this release group"
+    refused = next((c for c in ranked if not c.eligible), None)
+    detail = refused.reasons[0] if refused and refused.reasons else ""
+    return f"no eligible edition for auto-import ({detail})" if detail else _NO_EDITION
+
+
+def group_targets(rg_mbid, mode, *, types=None, primary_type="", secondary_type=""):
+    """([{mbid,title,score,reasons}], error) — the releases of a group to queue.
+
+    Ranked by the one release-choice policy in strict mode (see
+    `pick_releases`); `mode` "best" keeps only the pick, "all" every eligible
+    edition, best first. `types` / `primary_type` / `secondary_type` restrict
+    the pick to the release-group type the caller is after — a watch's own
+    type filter — so a watch for albums can never queue a single. `error` is a
+    readable reason and never an exception, so one unusable group cannot abort
+    a whole discography."""
     try:
         rg = release_group_browse(rg_mbid, limit=100, offset=0)
     except Exception as e:
         return [], f"MusicBrainz release-group lookup failed: {e}"
     if not rg.get("id"):
         return [], "not a MusicBrainz release group"
-    rows = pick_releases(rg.get("releases") or [])
+    ranked = ranked_releases(rg, rg.get("releases") or [], strict=True,
+                             wanted_types=types, primary_type=primary_type,
+                             secondary_type=secondary_type)
+    rows = [c for c in ranked if c.eligible and c.type_ok]
     if not rows:
-        return [], _NO_EDITION
+        return [], no_edition_reason(ranked)
     if mode != "all":
         rows = rows[:1]
-    return [{"mbid": r.get("id"), "title": r.get("title") or ""} for r in rows], None
+    return [{"mbid": c.release_mbid, "title": c.title, "score": c.score,
+             "reasons": list(c.reasons)} for c in rows], None
 
 
 def _kind_for(mbid):
@@ -4609,6 +4795,10 @@ def auto_import_targets(mbid, kind=None, mode="best"):
     group to its best (or every eligible) edition, an artist to one best
     release per release group it does not already own. A MusicBrainz outage
     raises MusicBrainzError — reported per item, never as "does not exist".
+
+    A user's own edition choice does NOT come through here: the route resolves
+    it (`server.api_add._group_edition_targets`) so the group-membership check
+    sits with the request that named both ids.
     """
     mode = "all" if str(mode or "").lower() == "all" else "best"
     kind = str(kind or "auto").strip().lower()
@@ -4676,14 +4866,22 @@ def release_group_browse(mbid, limit=300, offset=0):
         f"release-group/{mbid}",
         {"inc": "artist-credits+genres", "fmt": "json"},
     )
-    rel_rows, total = _browse_collect(
+    rel_rows, total, served = _browse_collect(
         "release", {"release-group": mbid, "inc": "media"}, "releases", "release-count",
         limit=limit, offset=offset,
     )
     releases = []
-    avoid, medium_order, _require_country = _release_policy()
-    for r in sorted(rel_rows,
-                    key=lambda r: release_choice_key(r, avoid, medium_order)):
+    # The editions are listed in the policy's own order (mlo.release_choice),
+    # so the first row is the edition auto-import would take — and the sort is
+    # deliberately NOT strict: a promo or a country-less edition still belongs
+    # on the page, ranked where the policy puts it.
+    for cand in ranked_releases(
+            {"title": data.get("title"),
+             "first_release_date": data.get("first-release-date"),
+             "primary_type": data.get("primary-type"),
+             "secondary_types": data.get("secondary-types")},
+            rel_rows):
+        r = rel_rows[cand.index]
         track_count, track_breakdown = _release_counts(r)
         releases.append({
             "id": r.get("id"),
@@ -4691,12 +4889,15 @@ def release_group_browse(mbid, limit=300, offset=0):
             "date": r.get("date") or "",
             "country": r.get("country") or "",
             "status": r.get("status") or "",
+            "disambiguation": r.get("disambiguation") or "",
             "medium": r.get("format") or "",
             "formats": _media_summary(r),
             "disc_count": len(r.get("media") or []),
             "track_count": track_count,
             "track_breakdown": track_breakdown,
             "barcode": r.get("barcode") or "",
+            "score": cand.score,
+            "reasons": list(cand.reasons),
         })
     return {
         "id": data.get("id"),
@@ -4712,6 +4913,7 @@ def release_group_browse(mbid, limit=300, offset=0):
         "first_release_date": data.get("first-release-date") or "",
         "total": total,
         "offset": offset,
+        "next": (offset + served) if 0 < total and offset + served < total else None,
         "releases": releases,
     }
 
@@ -4723,14 +4925,20 @@ def recording_browse(mbid, limit=300, offset=0):
         f"recording/{mbid}",
         {"inc": "artist-credits+isrcs+genres", "fmt": "json"},
     )
-    rel_rows, total = _browse_collect(
+    rel_rows, total, served = _browse_collect(
         "release",
         {"recording": mbid, "inc": "media+artist-credits+release-groups"},
         "releases", "release-count",
         limit=limit, offset=offset,
     )
     releases = []
-    for r in sorted(rel_rows, key=lambda r: r.get("date") or "9999"):
+    # Policy order (mlo.release_choice), so the first row is the release
+    # "Add to library" would take and a caller that falls back to `rows[0]`
+    # falls back to the pick, never to an arbitrary edition. No group payload
+    # is in hand here, so the policy's "original" is the earliest release
+    # carrying this recording.
+    for cand in ranked_releases(None, rel_rows):
+        r = rel_rows[cand.index]
         track_count, track_breakdown = _release_counts(r)
         rg_primary, rg_secondary = _rg_types(r)
         releases.append({
@@ -4765,6 +4973,7 @@ def recording_browse(mbid, limit=300, offset=0):
         "isrcs": [v for v in (_isrc(i) for i in data.get("isrcs") or []) if v],
         "total": total,
         "offset": offset,
+        "next": (offset + served) if 0 < total and offset + served < total else None,
         "releases": releases,
     }
 

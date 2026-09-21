@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { Save, Play, Disc3, ListPlus, ListStart, ListMusic, ShieldCheck, ImageUp, Clapperboard, Search, FolderOpen, Users } from "lucide-react";
+import { Save, Play, Disc3, ListPlus, ListStart, ListMusic, ShieldCheck, ImageUp, Clapperboard, Search, FolderOpen, Users, Info } from "lucide-react";
 import { api } from "../api";
 import { fmtTech, fmtDuration, isVideoFile } from "../lib/fmt";
 import { uncacheTrack } from "../lib/mediaCache";
@@ -17,10 +17,12 @@ import LyricsManagerModal from "../components/LyricsManagerModal";
 import LyricsEditorModal from "./../components/LyricsEditorModal";
 import OverflowMenu from "../components/OverflowMenu";
 import PageHeader from "../components/PageHeader";
+import StarRating from "../components/StarRating";
+import { ratingOf, useRatings, useSetRating } from "../lib/ratings";
 import TagActionsMenu from "../components/TagActionsMenu";
 import Modal from "../components/Modal";
 import MoreLikeThis from "../components/MoreLikeThis";
-import { CreditsPanel, creditTagsFrom } from "../components/TrackDetails";
+import TrackDetails, { CreditsPanel, creditTagsFrom } from "../components/TrackDetails";
 import { failedChecksOf, invalidValueReason, isExcessTag, tagInfoOf, tagLabel, tagTooltip, useTagRegistry } from "../lib/tags";
 
 export default function TrackPage() {
@@ -62,6 +64,8 @@ export default function TrackPage() {
   const [coverBusy, setCoverBusy] = useState(false);
   const [videoOpen, setVideoOpen] = useState(false);
   const [creditsOpen, setCreditsOpen] = useState(false);
+  // This track's own details modal — TrackDetails renders the stored readout.
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const coverInput = useRef<HTMLInputElement>(null);
 
   const tags: Record<string, string> = {};
@@ -83,6 +87,9 @@ export default function TrackPage() {
         action={{ label: "Back to the library", to: "/library" }}
       />
     );
+  const { data: ratingsData } = useRatings();
+  const { setRating, pending } = useSetRating();
+
   if (isLoading || !data) return <PageLoading label="Loading track…" />;
 
   const fileName = realPath.split("/").pop() ?? realPath;
@@ -137,6 +144,10 @@ export default function TrackPage() {
     qc.invalidateQueries({ queryKey: ["track-tags", decoded] });
     qc.invalidateQueries({ queryKey: ["album", albumDir] });
   };
+
+  // The page's own rating state: one GET /api/ratings for the whole page,
+  // and the same optimistic setter the rows use.
+  const ratings = ratingsData?.ratings;
 
   const queueTrack = {
     path: realPath, file: fileName, albumPath: albumDir,
@@ -254,6 +265,16 @@ export default function TrackPage() {
         title={tags.TITLE ?? fileName}
         subtitle={
           <>
+        {/* the track's own star rating — large, with the numeric value
+            beside it, so it reads as a fact about this file */}
+        <StarRating
+          size="lg"
+          showValue
+          label="Track rating"
+          value={ratingOf(ratings, realPath)}
+          onChange={(v) => setRating(realPath, v)}
+          pending={pending(realPath)}
+        />
             <Link to={tags.MUSICBRAINZ_ALBUMID ? `/album/mb:${tags.MUSICBRAINZ_ALBUMID}` : `/album/${encodeURIComponent(albumDir)}`} className="hover:text-accent-soft">
               {tags.ALBUM || albumDir.split("/").pop()}
             </Link>
@@ -308,6 +329,8 @@ export default function TrackPage() {
                 {
                   title: "Track",
                   items: [
+                    { label: "Details", icon: Info, onClick: () => setDetailsOpen(true), disabled: !track,
+                      title: "Stored tags, technical readout, failed checks and the AudioAuditor verdict for this track" },
                     { label: "Credits", icon: Users, onClick: () => setCreditsOpen(true) },
                     { label: "Watch video", icon: Clapperboard, hidden: !isVideo, onClick: () => setVideoOpen(true) },
                     { label: "Open album folder", icon: FolderOpen, onClick: openFolder },
@@ -535,6 +558,10 @@ export default function TrackPage() {
             tags={creditTagsFrom(tags as Record<string, unknown>)}
           />
         </Modal>
+      )}
+
+      {detailsOpen && track && (
+        <TrackDetails track={track} albumPath={albumDir} onClose={() => setDetailsOpen(false)} />
       )}
 
       {editorOpen && (

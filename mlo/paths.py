@@ -649,6 +649,62 @@ def save_expected_tracks(album_dir, release_id, tracks):
         return False
 
 
+# A FRAMEWORK album: the folder "Add to library" creates the moment the user
+# asks for a MusicBrainz release, before any audio exists. It holds the
+# release's own tracklist (the manifest above), the release-group cover and
+# this marker, which is what every reader keys on: the library scan lists the
+# folder as PENDING while it is here, and the import that fills the folder
+# clears it. Same dotfile treatment as the manifest, so grading never reads it
+# as library content or as stray artwork.
+PENDING_FILE = ".mlo_pending.json"
+
+
+def _pending_path(album_dir):
+    return os.path.join(album_dir, PENDING_FILE)
+
+
+def load_pending(album_dir):
+    """The framework marker as a dict, or None when the folder is not one."""
+    try:
+        with open(_pending_path(album_dir), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def save_pending(album_dir, info):
+    """Atomically write the framework marker; a falsy *info* clears it."""
+    if not info:
+        return clear_pending(album_dir)
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".mlo_pending_", suffix=".tmp", dir=album_dir)
+    except OSError:
+        return False
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(dict(info, version=1), fh, indent=1)
+        os.replace(tmp, _pending_path(album_dir))
+        return True
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def clear_pending(album_dir):
+    """Remove the framework marker; True when the folder holds none after."""
+    try:
+        os.remove(_pending_path(album_dir))
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 # Windows codes a move retries instead of giving up on: 32 (sharing
 # violation — something still holds the file) and 33 (lock violation).
 _LOCK_WINERRORS = (32, 33)
@@ -710,6 +766,35 @@ def _discard(path, is_dir):
             os.remove(path)
     except OSError:
         pass
+
+
+def fsync_dir(path):
+    """Best-effort durable directory entry after an os.replace.
+
+    On POSIX the rename itself only survives a power cut once the parent
+    directory is fsynced. Windows has no such call — ``os.O_DIRECTORY`` does
+    not exist there, so the ``os.open(dir, os.O_DIRECTORY)`` every caller
+    used raised AttributeError per written file, which the blanket ``except
+    Exception`` around it swallowed: one failed call each time, and the
+    durability step the code reads as performed. Returns True when the
+    directory really was synced.
+    """
+    flags = getattr(os, "O_DIRECTORY", None)
+    if flags is None:
+        return False
+    fd = None
+    try:
+        fd = os.open(path or ".", flags)
+        os.fsync(fd)
+        return True
+    except OSError:
+        return False
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def _copy_across_volumes(src, dst, step):

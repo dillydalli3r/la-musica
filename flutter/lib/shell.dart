@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 
 import 'api.dart';
+import 'open_external.dart';
 import 'pages/album.dart';
 import 'pages/artist.dart';
 import 'pages/connect.dart';
+import 'pages/discover.dart';
 import 'pages/favorites.dart';
 import 'pages/home.dart';
 import 'pages/in_progress.dart';
@@ -11,6 +13,8 @@ import 'pages/library.dart';
 import 'pages/login.dart';
 import 'pages/playlist_detail.dart';
 import 'pages/playlists.dart';
+import 'pages/recommended.dart';
+import 'project.dart';
 import 'pages/settings.dart';
 import 'pages/track.dart';
 import 'state.dart';
@@ -28,6 +32,13 @@ const List<NavGroup> navGroups = [
     NavEntry('Library', Icons.library_music_outlined, Icons.library_music),
     NavEntry('Playlists', Icons.queue_music_outlined, Icons.queue_music),
     NavEntry('Favorites', Icons.favorite_border, Icons.favorite),
+  ]),
+  // The online half of the library: browse genres across the providers, and
+  // the recommendations they feed. Both pages talk the same REST surface the
+  // web client does, so the two front ends answer the same questions.
+  NavGroup('Discover', [
+    NavEntry('Genres', Icons.sell_outlined, Icons.sell),
+    NavEntry('Recommended', Icons.auto_awesome_outlined, Icons.auto_awesome),
   ]),
   NavGroup('Maintain', [
     NavEntry(
@@ -58,6 +69,8 @@ const List<String> tabLabels = [
   'Library',
   'Playlists',
   'Favorites',
+  'Genres',
+  'Recommended',
   'In progress',
   'Settings',
 ];
@@ -69,6 +82,8 @@ Widget pageFor(String label, {String? argument}) => switch (label) {
   'Library' => const LibraryPage(),
   'Playlists' => const PlaylistsPage(),
   'Favorites' => const FavoritesPage(),
+  'Genres' => const DiscoverPage(),
+  'Recommended' => const RecommendedPage(),
   'In progress' => const InProgressPage(),
   'Settings' => const SettingsPage(),
   'Album' => AlbumPage(albumPath: argument ?? ''),
@@ -162,6 +177,15 @@ class AppShell extends StatelessWidget {
                       },
                     ),
                 ],
+                // Same link as the wide rail's footer button: the drawer is
+                // the rail on a phone, so it carries the same tail.
+                const Divider(height: 24),
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.code),
+                  title: const Text('la musica on GitHub'),
+                  onTap: () => openExternal(projectRepo),
+                ),
               ],
             ),
           ),
@@ -187,6 +211,23 @@ class AppShell extends StatelessWidget {
                   label: Text(entry.label),
                 ),
             ],
+            // The project's own corner, below the pages: a client that credits
+            // every service it leans on should be able to point back at itself.
+            // `Expanded` pushes it to the bottom edge of the rail instead of
+            // letting it hug the last destination.
+            trailing: Expanded(
+              child: Align(
+                alignment: Alignment.bottomCenter,
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: IconButton(
+                    tooltip: 'la musica on GitHub',
+                    onPressed: () => openExternal(projectRepo),
+                    icon: const Icon(Icons.code, size: 20),
+                  ),
+                ),
+              ),
+            ),
           ),
           const VerticalDivider(width: 1),
           Expanded(child: body),

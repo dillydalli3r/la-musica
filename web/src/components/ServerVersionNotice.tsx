@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { X } from "lucide-react";
+import { Github, X } from "lucide-react";
 import { api } from "../api";
 import { useI18n } from "../lib/i18n";
 
@@ -28,12 +28,41 @@ export default function ServerVersionNotice() {
 
   if (!data?.version) return null;
   const offer = data.update_available && !!data.latest && data.latest !== dismissed;
+  const revision = data.build?.revision ?? "";
+  const built = (data.build?.built ?? "").slice(0, 10);
+  const inImage = !!data.build?.container;
 
   return (
     <div className="space-y-1">
-      <div className="font-mono text-[11px] text-zinc-400 break-all">
-        {t("settings.server_version", { version: data.version })}
+      <div className="flex items-baseline gap-2">
+        <span className="font-mono text-[11px] text-zinc-400 break-all">
+          {t("settings.server_version", { version: data.version })}
+        </span>
+        {/* Right where the version is read: the repository it came from. */}
+        {data.project_url && (
+          <a
+            className="inline-flex items-center gap-1 text-[11px] text-zinc-500 hover:text-accent-soft shrink-0"
+            href={data.project_url}
+            target="_blank"
+            rel="noreferrer"
+            title={t("credits.repo")}
+          >
+            <Github className="h-3 w-3 shrink-0" />
+            {t("credits.source")}
+          </a>
+        )}
       </div>
+      {/* The image's own identity, when the build baked one in. Without it a
+          user cannot tell "the updater is broken" from "the image really is
+          the newest one" — the running version string looks the same either
+          way until watchtower replaces the image. */}
+      {inImage && revision && (
+        <div className="font-mono text-[10px] text-zinc-600 break-all">
+          {built
+            ? t("settings.image_build", { revision, built })
+            : t("settings.image_build_no_date", { revision })}
+        </div>
+      )}
       {offer && (
         <div className="flex items-start gap-2 rounded-md border border-amber-900/60 bg-amber-950/30 px-2.5 py-1.5">
           <span className="flex-1 text-[11px] text-amber-200/90 leading-relaxed">
@@ -64,6 +93,15 @@ export default function ServerVersionNotice() {
           >
             <X className="h-3.5 w-3.5" />
           </button>
+        </div>
+      )}
+      {/* A Docker install updates ITSELF, and the question that follows is
+          "so why has nothing happened?". This says how the mechanism works and
+          how to check on it right now, so the honest answer ("the image really
+          is current") is readable without reading watchtower's log. */}
+      {inImage && (
+        <div className="text-[10px] leading-relaxed text-zinc-600">
+          {t("settings.updater_auto")}
         </div>
       )}
     </div>

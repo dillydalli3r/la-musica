@@ -5,10 +5,15 @@ paths and delegates to :mod:`server.imports`, so the engine never sees an HTTP
 type. The wizard and the React pages depend on these exact paths and field
 names:
 
-    POST /api/import/acoustid         {paths: [str]}
-         -> {available, note, albums: [{path, release_group_id,
+    POST /api/import/acoustid         {paths: [str], apply?: bool, staged?: bool}
+         -> {available, note, ok, code, albums: [{path, release_group_id,
              release_group_title, release_group_type, artists, score,
-             matched, total, recordings}]}
+             matched, total, recordings, tagged, status, code, reason,
+             conflict, conflicts, skips, failures}]}
+         `status` is "matched" | "no_match" | "skipped" | "error" per album:
+         a fingerprint or lookup that FAILED is an "error" with its `reason`,
+         never a "no_match", and `conflicts` is where the audio disagrees with
+         the album's tags. `note` carries the first failure's sentence.
 
     POST /api/import/finish           {paths: [str], force?: {script_id: bool}}
          -> {albums: [{path, scripts, chain, errors}]}
@@ -21,6 +26,16 @@ names:
 
     POST /api/import/scripts/preview  {paths?: [str]}
          -> {chain: [ids], labels: {id: label}, count: n}
+
+    GET  /api/import/prompts          -> {prompts: [{album, album_name, at,
+                                          mode, reason, link, families: [...]}]}
+
+    POST /api/import/prompts/dismiss  {path, staged?}
+         -> {ok: bool}
+
+Every route that IMPORTS answers 409 with ``manual_import_enabled``'s
+sentence while that switch is off (``_require_manual``); the read-only ones
+(the prompts list, the script preview, the bulk job's status) keep answering.
 
 Path containment mirrors ``server.main._in_music_folder`` — imported inside
 the handler on purpose, since main imports this module to mount the router.
@@ -105,6 +120,24 @@ def _guard(paths, staged=False):
             raise HTTPException(400, f"path outside music folder: {p}")
 
 
+def _require_manual():
+    """Refuse an import action while `manual_import_enabled` is off.
+
+    The switch covers the wizard and every route that IMPORTS something — a
+    script chain, a bulk run, a fingerprinting pass. Off, each of them answers
+    409 with the same sentence naming the setting, so the UI can say why
+    instead of offering a button that comes back refused. A user who turned it
+    off wants the automatic pipeline (or nothing) to import; the routes that
+    only READ or DISMISS (``/api/import/prompts``, ``scripts/preview``, the
+    bulk job's status) keep answering, so the queue can still say what waits.
+    """
+    from mlo import import_policy
+    from mlo.config import load_config
+
+    if not import_policy.manual_import_enabled(load_config()):
+        raise HTTPException(409, import_policy.MANUAL_OFF_NOTE)
+
+
 @router.post("/api/import/acoustid")
 def import_acoustid(req: AcoustidRequest):
     """Fingerprint albums with AcoustID and report their release groups.
@@ -112,6 +145,7 @@ def import_acoustid(req: AcoustidRequest):
     `apply: true` also writes the accepted match's identity tags into the
     files (`ACOUSTID_ID`, `ACOUSTID_FINGERPRINT`).
     """
+    _require_manual()
     _cap(len(req.paths), MAX_PATHS, "paths")
     _guard(req.paths, req.staged)
     return imports.acoustid_match(req.paths, apply=bool(req.apply))
@@ -120,6 +154,7 @@ def import_acoustid(req: AcoustidRequest):
 @router.post("/api/import/finish")
 def import_finish(req: FinishRequest):
     """Run the configured import chain over each album folder, synchronously."""
+    _require_manual()
     _cap(len(req.paths), MAX_PATHS, "paths")
     _guard(req.paths, req.staged)
     return {"albums": [imports.finish_album(p, force=req.force)
@@ -129,6 +164,7 @@ def import_finish(req: FinishRequest):
 @router.post("/api/import/bulk")
 def import_bulk(req: BulkRequest):
     """Queue albums (staging folders or library folders) for import."""
+    _require_manual()
     _cap(len(req.items), MAX_ITEMS, "items")
     _guard([item.path for item in req.items])
     items = [{"path": item.path, "move": item.move, "release": item.release}
@@ -152,3 +188,35 @@ def import_scripts_preview(req: PreviewRequest = PreviewRequest()):
     return {"chain": chain,
             "labels": {sid: RUNNERS[sid][0] for sid in chain if sid in RUNNERS},
             "count": len(chain)}
+
+
+class DismissRequest(BaseModel):
+    path: str
+    staged: bool = False  # the wizard's album folder, wherever the user put it
+
+
+@router.get("/api/import/prompts")
+def import_prompts():
+    """Albums an import could not finish, and where each one is decided.
+
+    Raised by ``server.imports.finish_album`` (see
+    :mod:`server.import_autonomy`); every entry carries the wizard ``link``
+    that lands on the album at the first step needing a decision. The wizard
+    lists them, and this is what a client-side prompt surface reads too.
+    """
+    from mlo.config import load_config
+    from server import import_autonomy
+    return {"prompts": import_autonomy.prompts(load_config())}
+
+
+@router.post("/api/import/prompts/dismiss")
+def import_prompt_dismiss(req: DismissRequest):
+    """Stop asking about this album (the user answered, or does not want to).
+
+    Dismissing is not "resolved": the next import of the same album recomputes
+    the gaps and raises the prompt again if the family is still missing.
+    """
+    from mlo.config import load_config
+    from server import import_autonomy
+    _guard([req.path], req.staged)
+    return {"ok": import_autonomy.clear(req.path, load_config())}

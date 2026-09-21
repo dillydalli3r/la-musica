@@ -56,6 +56,10 @@ FAMILIES = (
     ("audio", "Audio"),
     ("lyrics", "Lyrics"),
     ("provenance", "Provenance"),
+    # What the LISTENER said, not what the app measured or concluded: a rating
+    # is an opinion, and grouping it with any measurement would imply it can be
+    # graded, recomputed or overwritten by a pass. Nothing does.
+    ("opinion", "Your opinion"),
 )
 
 TAG_FAMILY = {
@@ -102,6 +106,8 @@ TAG_FAMILY = {
     "LOG_CRC": "provenance", "LOG_GRADE": "provenance",
     "ENCODER_PROGRAM": "provenance", "ENCODER_QUALITY": "provenance",
     "ENCODER_VERSION": "provenance",
+    # The listener's own stars — see FAMILIES above.
+    "RATING": "opinion",
 }
 
 # A tag added to TAG_MAP without a family above lands here instead of in a
@@ -187,6 +193,9 @@ TAG_INFO = {
     "ENCODER_PROGRAM": ("Encoder program", "Which encoder produced the file (FLAC only)."),
     "ENCODER_QUALITY": ("Encoder quality", "Encoder setting the file was produced with."),
     "ENCODER_VERSION": ("Encoder version", "Version of that encoder."),
+    "RATING": ("Rating", "Your own stars — 0-5 with halves — stored in the file as Picard's RATING, "
+                          "0-100 (one half-star = 10). An opinion, so nothing grades it; the app keeps "
+                          "its own copy and heals it after a rename."),
 }
 
 # --------------------------------------------------------------------------- #
@@ -236,6 +245,9 @@ TAG_WRITER = {
     "ENCODER_PROGRAM": _script(3),
     "ENCODER_QUALITY": _script(3),
     "ENCODER_VERSION": _script(3),
+    # The ratings API (server.ratings) is the only writer, and it writes on the
+    # click itself — no script pass touches an opinion.
+    "RATING": "the ratings API (server.ratings) — the star you clicked",
 }
 DEFAULT_WRITER = _RELEASE_WRITER
 
@@ -255,6 +267,21 @@ _TAG_ENUM = {
     "INTEGRITY": ("OK", "FAIL"),
     "LOG_CRC": ("OK", "MISMATCH"),
 }
+
+# Open value RANGES — a scale rather than a closed set of answers, so a client
+# can mark a value outside it as the anomaly without owning the scale. The
+# RATING scale is Picard's own (server.ratings converts it to half-stars); a
+# tag with no entry here states its range in its meaning line instead.
+_TAG_RANGE = {
+    "RATING": (0, 100),
+}
+
+
+def _range_for(tag: str):
+    lo_hi = _TAG_RANGE.get(tag)
+    return [lo_hi[0], lo_hi[1]] if lo_hi else None
+
+
 def _enum_for(tag: str):
     if tag in _TAG_ENUM:
         return list(_TAG_ENUM[tag])
@@ -595,6 +622,9 @@ def _build():
             "issue_codes": _issue_codes(key),
             "write_gate": _write_gate(key),
             "enum": _enum_for(key),
+            # The open scale (RATING's 0-100), or None for a tag whose values
+            # are words or free text.
+            "range": _range_for(key),
         })
 
     checks = _checks()

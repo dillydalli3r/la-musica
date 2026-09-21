@@ -191,7 +191,7 @@ const CHECK_DESC: Record<string, string> = {
   grade_check_cd_cue: "Every CD disc needs a .cue sheet.",
   grade_check_cd_format: "CD tracks must be FLAC (lossless).",
   grade_check_crc: "Every track must be covered by a per-track CRC in its own disc's .log, and that CRC must match the CRC of the track's decoded audio — coverage alone is not enough (issue codes CRC / CRC_MISMATCH).",
-  grade_check_artist_image: "The artist folder must hold an artist.jpg / artist.png (issue code ARTIST_IMAGE_MISSING).",
+  grade_check_artist_image: "The artist folder must hold an artist.jpg / artist.png that decodes, matches the configured artist_image_aspect (±2%) and stays under the artist_image_target_size ceiling (issue codes ARTIST_IMAGE_MISSING / _CORRUPT / _FORMAT / _OVERSIZED / _ASPECT / _UPSCALED). An image below the target is reported as a note and passes — nothing here upscales. Script 19 (Optimize artist images) fixes every one of them.",
   grade_check_artist_description: "The artist folder must hold a non-blank description.txt (issue code ARTIST_DESCRIPTION_MISSING).",
   grade_check_audit: "Tracks must carry an AUDIT tag (run Audit Library). Off by default so unaudited libraries aren't auto-failed.",
   grade_check_log_checksum: "The rip .log's own EAC SHA256 must verify. A log that does not verify — or that states no checksum while 'verify log checksum' is on — fails grading (issue code LOG_CHECKSUM), independently of the audit tag. XLD and older EAC logs that carry no checksum concept pass.",

@@ -18,6 +18,10 @@ dependencies:
   # first frame of audio (see playback.dart), which every platform supports.
   just_audio: ^0.9.42
   cupertino_icons: ^1.0.8
+  # `package:web` is what the web build uses to open a link in the browser
+  # (lib/open_external_web.dart). Already in the lock file through Flutter's
+  # own plugins, so this adds no resolution step and no platform channel.
+  web: ^1.1.0
 
 dev_dependencies:
   flutter_test:

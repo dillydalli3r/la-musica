@@ -39,7 +39,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .audio import AudioFile
 from .discs import album_discs, _disc_pattern_for, _disc_expected_name, CUE_FILE_RE
-from .paths import AUDIO_EXTS
+from .paths import AUDIO_EXTS, fsync_dir
 from .stats import (is_audio_file, _collect_targets, new_stats,
                     _make_pbar, _pbar_skip, _pbar_update, worker_count)
 from .subproc import run_tool
@@ -752,14 +752,7 @@ def run_generate_accurip(config):
                     except Exception:
                         pass
                 os.replace(tmp, accurip_path)
-                try:
-                    d_fd = os.open(album_dir, os.O_DIRECTORY)
-                    try:
-                        os.fsync(d_fd)
-                    finally:
-                        os.close(d_fd)
-                except Exception:
-                    pass
+                fsync_dir(album_dir)
                 stats["modified_count"] += 1
                 stats["total_scanned"] += 1
                 # Log short summary – parse status for nice output

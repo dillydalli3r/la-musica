@@ -382,7 +382,11 @@ try:
 
     _rg_calls.clear()
     _rows, _skipped = _auto_targets(_OWNED_GROUP, "release_group", "best")
-    assert _rows == [{"mbid": MBID_RELEASE, "title": "Some Album"}], _rows
+    # The policy's rows carry the chosen edition's score and its reasons next
+    # to the identity (the watch reports them), so the identity is what is
+    # compared here.
+    assert [(r["mbid"], r["title"]) for r in _rows] == \
+        [(MBID_RELEASE, "Some Album")], _rows
     assert _skipped == [], _skipped
     assert _rg_calls == [_OWNED_GROUP], _rg_calls
 finally:
@@ -417,7 +421,20 @@ _CATNO_PAYLOAD = {
 }
 
 _saved_mb_get = intg.httpx.get
+
+
+def _drop_mb_cache():
+    """release_lookup reads through mb_get_cached (a release page must not
+    re-hit MusicBrainz at 1 req/s), so three DIFFERENT payloads for the same
+    release id are only distinguishable with the cache cleared between them —
+    a test artifact of replaying one MBID, not a behaviour to pin."""
+    with intg._BROWSE_LOCK:
+        intg._BROWSE_CACHE.clear()
+        intg._INFLIGHT.clear()
+
+
 try:
+    _drop_mb_cache()
     _patch_mb_transport([_Resp(200, dict(_CATNO_PAYLOAD))])
     _rel = intg.release_lookup(MBID_RELEASE)
     assert _rel["catalog_numbers"] == ["CAT-1", "CAT-2"], _rel["catalog_numbers"]
@@ -425,6 +442,7 @@ try:
     assert _rel["label"] == "First Label", _rel["label"]
 
     # no label-info at all (and none of the labels named): both keys still there
+    _drop_mb_cache()
     _patch_mb_transport([_Resp(200, {"id": MBID_RELEASE, "title": "No Labels",
                                      "media": []})])
     _rel = intg.release_lookup(MBID_RELEASE)
@@ -432,6 +450,7 @@ try:
     assert _rel["catalog_number"] == "", repr(_rel["catalog_number"])
 
     # every label-info entry blank: still an empty list, not [""]
+    _drop_mb_cache()
     _patch_mb_transport([_Resp(200, {"id": MBID_RELEASE, "title": "Blank Labels",
                                      "media": [],
                                      "label-info": [{"catalog-number": " "},

@@ -26,10 +26,18 @@ self.addEventListener("install", () => {
  *  socket carries, so the same wording reaches the user, with the app closed.
  */
 self.addEventListener("push", (event) => {
-  let frame = { title: "la musica", body: "" };
+  let frame = { title: "la musica", body: "", url: "/" };
   try {
     const data = event.data ? event.data.json() : null;
-    if (data) frame = { title: data.title || frame.title, body: data.body || "" };
+    if (data) {
+      frame = {
+        title: data.title || frame.title,
+        body: data.body || "",
+        // Same click-through as the page's own notifications: the frame names
+        // the route it is about (server/events.py sets `link`).
+        url: data.link || data.url || (data.data || {}).link || "/",
+      };
+    }
   } catch {
     if (event.data) frame.body = event.data.text();
   }
@@ -39,21 +47,35 @@ self.addEventListener("push", (event) => {
       icon: "/icon.png",
       badge: "/icon.png",
       tag: "mlo-push",
+      data: { url: frame.url },
     })
   );
 });
 
-/** Clicking a notification focuses the app instead of opening a second copy —
- *  or opens one when none is running. */
+/** Clicking a notification focuses the app and follows the route the frame
+ *  named — the album or the page the outcome is about (the page passes it as
+ *  `data.url` in showNotification options) — or opens the app when none is
+ *  running. */
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
+  const target = (event.notification.data || {}).url || "/";
   event.waitUntil(
     (async () => {
       const all = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
       for (const client of all) {
+        // A client that can navigate is sent to the subject even when it is
+        // already showing the app: the user clicked a notification about THAT
+        // album, so focusing the last page they left would be the wrong answer.
+        if ("navigate" in client) {
+          try {
+            await client.navigate(target);
+          } catch {
+            /* a client mid-teardown: focusing it is still the right thing */
+          }
+        }
         if ("focus" in client) return client.focus();
       }
-      if (self.clients.openWindow) return self.clients.openWindow("/");
+      if (self.clients.openWindow) return self.clients.openWindow(target);
       return undefined;
     })()
   );

@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ListMusic, Play, Plus, Upload } from "lucide-react";
+import { ListFilter, ListMusic, Play, Plus, Upload } from "lucide-react";
 import { api } from "../api";
 import { toast, useStore } from "../store";
 import { EmptyState, PageLoading } from "../components/Badges";
@@ -15,6 +15,7 @@ import type { Playlist } from "../types";
 
 export default function PlaylistsPage() {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const { playNow } = useStore();
   const { data: playlists, isLoading } = useQuery({ queryKey: ["playlists"], queryFn: api.playlists });
   const { data: lib } = useQuery({ queryKey: ["library"], queryFn: api.library });
@@ -57,14 +58,28 @@ export default function PlaylistsPage() {
     [allPaths, trackMeta]
   );
 
+  // One name field, two buttons: a manual playlist is a list you fill by hand,
+  // a smart one is a RULE you write — so creating a smart playlist drops the
+  // user straight into its rule editor (`?rules=1`) instead of an empty page
+  // with nothing to look at. The starter filter is deliberately empty: no rule
+  // means "everything", and the first rule the user adds is what makes it
+  // theirs.
   const create = useMutation({
-    mutationFn: async () => {
-      if (!newName.trim()) return;
-      const p = await api.createPlaylist(newName.trim(), "manual");
+    mutationFn: async (kind: "manual" | "smart") => {
+      const name = newName.trim();
+      if (!name) return undefined;
+      const p = await api.createPlaylist(
+        name,
+        kind,
+        kind === "smart" ? { conditions: [], match: "all" } : undefined
+      );
       setNewName("");
       return p;
     },
-    onSuccess: () => refresh(),
+    onSuccess: (p) => {
+      refresh();
+      if (p?.kind === "smart") navigate(`/playlist/${p.id}?rules=1`);
+    },
   });
 
   const importM3u8 = async (file: File) => {
@@ -127,10 +142,18 @@ export default function PlaylistsPage() {
               placeholder="New playlist name…"
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && create.mutate()}
+              onKeyDown={(e) => e.key === "Enter" && create.mutate("manual")}
             />
-            <button className="btn-primary tap" onClick={() => create.mutate()} disabled={!newName.trim()}>
+            <button className="btn-primary tap" onClick={() => create.mutate("manual")} disabled={!newName.trim()}>
               <Plus className="h-4 w-4" /> Create
+            </button>
+            <button
+              className="btn-ghost tap"
+              onClick={() => create.mutate("smart")}
+              disabled={!newName.trim()}
+              title="Create a playlist from rules (genre, year, grade, advisory, …) instead of a hand-picked list"
+            >
+              <ListFilter className="h-4 w-4" /> Smart
             </button>
             <input
               ref={fileRef}
@@ -164,7 +187,10 @@ export default function PlaylistsPage() {
       />
 
       {manual.length === 0 && smart.length === 0 && (
-        <EmptyState title="No playlists yet" hint="Create a manual playlist, or import an .m3u8 file." />
+        <EmptyState
+          title="No playlists yet"
+          hint="Create a manual playlist, create a smart one from rules, or import an .m3u8 file."
+        />
       )}
 
       {/* playlists render exactly like albums in the library grid: same card

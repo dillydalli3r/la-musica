@@ -135,6 +135,16 @@ export interface Album {
   expected_release_id?: string | null;
   /** True when at least one expected track is absent. */
   partial?: boolean;
+  /** A FRAMEWORK album: "Add to library" created this folder before its audio
+   *  arrived, so it is listed with `track_count` 0, `tracks` empty and the
+   *  release's tracklist in `expected_tracks` (every entry missing). The album
+   *  page must say it is pending rather than complete, and the placeholder
+   *  cover is the only artwork it has until the import writes a real one. */
+  pending?: boolean;
+  /** What the album is waiting for ("a verified Soulseek download"). */
+  pending_reason?: string;
+  /** The wish searching for its audio (the queue row it belongs to). */
+  wish_id?: number | null;
   /** The album folder's stored description (see mlo/artistdata). The library
    *  payload only reports whether one exists; the album page carries the text. */
   artwork?: AlbumArtwork;
@@ -425,10 +435,18 @@ export interface MBSearchRow {
 }
 
 /** A page of search rows plus MusicBrainz's match count — the browser pages
- *  100 rows at a time by passing `offset` back. */
+ *  100 rows at a time by following `next` (the offset of the following page,
+ *  null at the end; rows MusicBrainz repeated are already de-duplicated, which
+ *  is why the next offset is the server's answer and not a row count). */
 export interface MBSearchRows {
   rows: MBSearchRow[];
   total: number;
+  /** Offset of this page. */
+  offset?: number;
+  /** Offset of the next page, or null/absent at the end. */
+  next?: number | null;
+  /** The Lucene query the index was asked — shown to the user. */
+  query?: string;
 }
 
 /** One edition row of a release-group or recording page. */
@@ -470,6 +488,8 @@ export interface MBArtistBrowse {
   tags?: string[];
   total?: number;
   offset?: number;
+  /** Offset of the next page of the discography, or null at the end. */
+  next?: number | null;
   release_groups: MBReleaseGroupRow[];
 }
 
@@ -486,7 +506,64 @@ export interface MBReleaseGroupBrowse {
   first_release_date?: string;
   total?: number;
   offset?: number;
+  /** Offset of the next page, or null at the end. */
+  next?: number | null;
   releases: MBReleaseRow[];
+}
+
+/** One edition in the release-choice policy's ranking (server/release_choice.py).
+ *  Every field here is MusicBrainz's own answer: `media` is the list of medium
+ *  formats, `track_count` the number of tracks the release carries. */
+export interface MBReleaseChoiceEdition {
+  release_mbid: string;
+  title: string;
+  date?: string;
+  country?: string;
+  status?: string;
+  media?: string[];
+  track_count?: number;
+  disambiguation?: string;
+  /** 0..1, higher = better; candidates arrive sorted by it. */
+  score: number;
+  /** False when the policy would never download this edition on its own (an
+   *  unofficial release beside an official one, or one short of the group).
+   *  It is still listed — and can still be forced, which the reasons then say. */
+  eligible?: boolean;
+  /** Human sentences naming the facts that decided its rank. */
+  reasons: string[];
+}
+
+/** The release group a choice was made for — the `track_count` is what
+ *  completeness is measured against, and the type is the kind that was asked
+ *  for (the caller's primary/secondary filter, or the group's own). */
+export interface MBReleaseChoiceGroup {
+  title: string;
+  first_release_date?: string;
+  primary_type?: string;
+  secondary_types?: string[];
+  track_count?: number;
+}
+
+/** The policy that ranked the candidates, as configured — the same knobs the
+ *  auto-import path reads, plus `rules` in prose. */
+export interface MBReleaseChoicePolicy {
+  medium_order: string[];
+  /** `prefer_release_country`; "" = no country preference. */
+  preferred_country: string;
+  prefer_original_edition: boolean;
+  status_order: string[];
+  rules: string[];
+}
+
+/** `GET /api/mb/release-choice` — which edition the download policy will
+ *  fetch, why, and the ranked alternatives. `chosen` is null when nothing is
+ *  eligible; `candidates` then still ranks what exists, with `eligible: false`. */
+export interface MBReleaseChoicePayload {
+  release_group_mbid: string;
+  release_group: MBReleaseChoiceGroup;
+  chosen: MBReleaseChoiceEdition | null;
+  candidates: MBReleaseChoiceEdition[];
+  policy: MBReleaseChoicePolicy;
 }
 
 /** A recording page: identity + the releases carrying it. */
@@ -501,6 +578,8 @@ export interface MBRecordingBrowse {
   isrcs?: string[];
   total?: number;
   offset?: number;
+  /** Offset of the next page, or null at the end. */
+  next?: number | null;
   releases: MBReleaseRow[];
 }
 
@@ -523,11 +602,18 @@ export interface Wish {
   title: string;
   artist: string;
   year: string;
-  status: "wanted" | "searching" | "imported" | "failed" | "available";
+  /** `not_found` is terminal: the searches came back empty
+   *  `wishes_not_found_attempts` times, so the worker stops searching it and
+   *  the row waits for the user's own retry (server/wishes' retry policy). */
+  status: "wanted" | "searching" | "imported" | "failed" | "available" | "not_found";
   note: string;
   target_dir: string;
   queries: string[];
   attempts: number;
+  /** Empty searches so far, and when the next AUTOMATIC one may run (0 = none
+   *  will: a terminal row is re-armed only by the queue's retry). */
+  not_found: number;
+  retry_at: number;
   added_at: number;
   updated_at: number;
   last_search: number;
@@ -672,6 +758,9 @@ export interface ArtistGradeIssue {
   code: string;
   label: string;
   where?: string;
+  /** The numbers the check judged ("1600x1600: longest side 1600px, 400px over
+   *  the configured 1200px target"), for the chip's tooltip. */
+  reason?: string;
 }
 
 /** Artist-level grading: only what applies to an artist folder (image and
@@ -684,6 +773,9 @@ export interface ArtistGrade {
   pct?: number | null;
   pass?: boolean;
   issues?: ArtistGradeIssue[];
+  /** Informational only — an artist image below the configured target size is
+   *  accepted, so it is reported here and never fails the check. */
+  notes?: ArtistGradeIssue[];
   artwork?: { image: boolean; image_file: string | null; description: boolean };
   error?: string;
 }
@@ -786,13 +878,48 @@ export interface AcoustidAlbumMatch {
    *  the request asked to apply the match. */
   tagged?: number;
   recordings?: AcoustidRecording[];
+  /** This album's own verdict: "matched", "no_match", "skipped" (nothing
+   *  fingerprintable) or "error" (the fingerprint or the lookup failed). A
+   *  failed lookup is never reported as "no match". */
+  status?: "matched" | "no_match" | "skipped" | "error" | string;
+  /** Machine code behind the verdict (mlo.acoustid's code vocabulary). */
+  code?: string | null;
+  /** The sentence to show for the verdict, why it is not "matched". */
+  reason?: string | null;
+  /** Tag-vs-fingerprint disagreement, when the album's own tags claim another
+   *  release group. Nothing is overwritten on the strength of it. */
+  conflict?: boolean | null;
+  conflicts?: AcoustidConflict[];
+  /** Tracks that could not be fingerprinted, and ones whose lookup failed. */
+  skips?: AcoustidTrackProblem[];
+  failures?: AcoustidTrackProblem[];
+}
+
+/** One tag-vs-fingerprint disagreement (`conflicts`). */
+export interface AcoustidConflict {
+  kind: "release_group" | "title" | "artist" | string;
+  reason: string;
+  fingerprint?: string | string[] | null;
+  tags?: string | string[] | null;
+}
+
+/** One track behind a `skips` / `failures` count. */
+export interface AcoustidTrackProblem {
+  path: string;
+  code?: string | null;
+  reason?: string | null;
 }
 
 export interface AcoustidMatch {
   /** False when no API key is configured or fpcalc is not installed. */
   available: boolean;
-  /** Human reason when unavailable ("no API key", "fpcalc not installed"). */
+  /** Human reason when unavailable ("no API key", "fpcalc not installed"), or
+   *  the first failed album's sentence when every album was checked. */
   note: string;
+  /** False when any album's lookup failed — a per-album `status` says which. */
+  ok?: boolean;
+  /** Machine code behind `ok` (mlo.acoustid's OK when everything worked). */
+  code?: string | null;
   albums: AcoustidAlbumMatch[];
 }
 
@@ -830,6 +957,72 @@ export interface ImportScriptsPreview {
   count: number;
 }
 
+/** One family an import could not finish by itself — the wizard's own steps
+ *  are the families (mlo/import_policy.FAMILIES owns the list and the order).
+ *  `state` is "decision" when the pipeline left it to the user and "unsourced"
+ *  when every configured source was asked and none could supply it. */
+export interface ImportFamilyGap {
+  id: string;
+  label: string;
+  step: string;
+  state: "decision" | "unsourced" | string;
+  fields: string[];
+  codes: string[];
+  note?: string;
+}
+
+/** The autonomy block of a finished import (server/imports.finish_album):
+ *  `stopped` is the family a review handed the album over at, `missing` is
+ *  what the grader still fails it for, and `prompt` is the entry raised for
+ *  the user when there was anything to report. */
+export interface ImportAutonomy {
+  mode: "automatic" | "review" | string;
+  stopped: string | null;
+  missing: Record<string, ImportFamilyGap>;
+  prompt: ImportPrompt | null;
+}
+
+/** One album waiting on the user (GET /api/import/prompts). `link` is the
+ *  wizard URL that lands on the album at the first step needing a decision. */
+export interface ImportPrompt {
+  id?: string;
+  album: string;
+  album_name: string;
+  at: number;
+  mode: string;
+  reason: "missing" | "stopped" | string;
+  link: string;
+  families: ImportFamilyGap[];
+}
+
+/** One album POST /api/library/add created (or found already there): the
+ *  framework album on disk. `created` is false for a folder that was already
+ *  a real album; `wish_id` is the queue entry searching for its audio. */
+export interface LibraryAddAlbum {
+  album_path: string;
+  title: string;
+  artist: string;
+  year: string;
+  release_id: string;
+  release_group_id: string;
+  wish_id: number | null;
+  cover?: string | null;
+  created: boolean;
+  already_in_library: boolean;
+}
+
+/** The "Add to library" answer. `background` is true for an artist's
+ *  discography, which is prepared off-request (the albums appear as they are
+ *  created and are announced on the event channel). */
+export interface LibraryAddResult {
+  ok: boolean;
+  background?: boolean;
+  note?: string;
+  albums: LibraryAddAlbum[];
+  skipped: { mbid?: string; reason?: string }[];
+  errors: { mbid?: string; reason?: string }[];
+}
+
 /** One entry of `/api/run`'s (and the import chain's) per-script report. */
 export interface ScriptRunResult {
   id: number;
@@ -847,7 +1040,14 @@ export interface ScriptRunResult {
  * ---------------------------------------------------------------------- */
 
 /** The provider families the backend reports on (`server.sources_health.KINDS`). */
-export type SourceKind = "lyrics" | "advisory" | "genre" | "metadata" | "links";
+export type SourceKind =
+  | "lyrics"
+  | "advisory"
+  | "genre"
+  | "metadata"
+  | "links"
+  | "discover"
+  | "credentials";
 
 /** One provider row. `needs` are config keys this source reads; `configured`
  *  says whether they are all set, and `status`/`detail`/`ms` come from the

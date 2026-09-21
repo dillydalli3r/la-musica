@@ -348,12 +348,12 @@ def generate_yaml(cfg=None):
         f"        key: {api_key}",
         "        role: readwrite",
     ]
-    if username:
-        lines += [
-            "authentication:",
-            f"  username: {_yq(username)}",
-            f"  password: {_yq(password)}",
-        ]
+    # The Soulseek network account is written ONCE, under `soulseek:` below —
+    # that is the only place slskd reads it (docs/config.md documents
+    # `authentication` solely under `web:` and `metrics:`; a top-level block
+    # was never part of the schema). A second, top-level `authentication:`
+    # block used to be written here as well, which nothing read and which
+    # invited the reader to think the pair was configured there.
     # Transfer slots + speed limits live under `transfers` in slskd; the old
     # `soulseek.global_upload_limit` / `global_download_limit` keys do not
     # exist in slskd 0.26 and were silently ignored (the limits never

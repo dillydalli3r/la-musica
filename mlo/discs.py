@@ -31,7 +31,7 @@ import threading
 
 from .audio import AudioFile
 from .config import should_write_audio_tag
-from .paths import AUDIO_EXTS
+from .paths import AUDIO_EXTS, fsync_dir
 from .stats import is_audio_file
 from .subproc import run_tool
 
@@ -1082,14 +1082,7 @@ def _fix_cue_filenames_locked(album_dir, log_fn, config):
                     except Exception:
                         pass
                 os.replace(tmp, path)
-                try:
-                    d_fd = os.open(os.path.dirname(path) or ".", os.O_DIRECTORY)
-                    try:
-                        os.fsync(d_fd)
-                    finally:
-                        os.close(d_fd)
-                except Exception:
-                    pass
+                fsync_dir(os.path.dirname(path))
             except OSError as e:
                 notes.append(f"{cue}: write failed ({e})")
     if log_fn and notes:

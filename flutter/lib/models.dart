@@ -344,6 +344,246 @@ class Recommendation {
   );
 }
 
+List<String> _strings(dynamic v) {
+  if (v is! List) return const [];
+  return [
+    for (final value in v)
+      if (value != null && value.toString().isNotEmpty) value.toString(),
+  ];
+}
+
+/// One genre the discovery pages can browse (`GET /api/discover/genres`): the
+/// counts each scope contributed and the providers that named it — `library`
+/// whenever the user's own files carry the genre.
+class DiscoverGenre {
+  DiscoverGenre({
+    required this.name,
+    this.trackCount = 0,
+    this.albumCount = 0,
+    this.artistCount = 0,
+    this.sources = const [],
+  });
+
+  final String name;
+  final int trackCount;
+  final int albumCount;
+  final int artistCount;
+  final List<String> sources;
+
+  /// What the genre list sorts and counts on. An online-only genre has no
+  /// tracks, so its albums and artists are all there is to count.
+  int get weight => trackCount + albumCount + artistCount;
+
+  bool get fromLibrary => sources.contains('library');
+
+  /// "42 tracks · 7 albums · 3 artists", with the zero parts left out — a
+  /// count the scope did not produce is not shown as a zero the client made up.
+  String get counts => [
+    if (trackCount > 0) '$trackCount track${trackCount == 1 ? '' : 's'}',
+    if (albumCount > 0) '$albumCount album${albumCount == 1 ? '' : 's'}',
+    if (artistCount > 0) '$artistCount artist${artistCount == 1 ? '' : 's'}',
+  ].join(' · ');
+
+  factory DiscoverGenre.fromJson(Map<String, dynamic> json) => DiscoverGenre(
+    name: json['name']?.toString() ?? '',
+    trackCount: _int(json['track_count']) ?? 0,
+    albumCount: _int(json['album_count']) ?? 0,
+    artistCount: _int(json['artist_count']) ?? 0,
+    sources: _strings(json['sources']),
+  );
+}
+
+/// One discovery row (`GET /api/discover/genre` and `/api/discover/recommended`):
+/// what a provider suggests and what the library already has, in one shape.
+/// `owned`/`inLibrary` say the library has it and `path` is set only then, so a
+/// row either opens in the library or offers to add the release, never both.
+class DiscoverItem {
+  DiscoverItem({
+    required this.kind,
+    required this.title,
+    this.artist,
+    this.year,
+    this.source,
+    this.sourceLabel,
+    this.coverUrl,
+    this.pageUrl,
+    this.mbid,
+    this.releaseGroupMbid,
+    this.path,
+    this.owned = false,
+    this.inLibrary = false,
+    this.reason,
+    this.alsoFrom = const [],
+    this.tracks = const [],
+  });
+
+  final String kind; // "album" | "artist" | "track"
+  final String title;
+  final String? artist;
+  final String? year;
+  final String? source;
+  final String? sourceLabel;
+  final String? coverUrl;
+  final String? pageUrl;
+  final String? mbid;
+  final String? releaseGroupMbid;
+
+  /// The library path of the row's own album/artist/track — set only when the
+  /// library has it.
+  final String? path;
+  final bool owned;
+  final bool inLibrary;
+  final String? reason;
+
+  /// The other providers that had the same result. A row honest about its
+  /// provenance is one the user can weigh.
+  final List<String> alsoFrom;
+
+  /// The album's track titles, when the provider gave them.
+  final List<String> tracks;
+
+  /// The provider named the way it names itself — a user must never be shown a
+  /// bare internal id.
+  String get sourceName => sourceLabel ?? source ?? '';
+
+  /// The MBID an add is made with: the release group where the row has one
+  /// (the app wishes for groups, not single editions), else the row's own id.
+  String? get addMbid {
+    final group = releaseGroupMbid;
+    if (group != null && group.isNotEmpty) return group;
+    final id = mbid;
+    return (id != null && id.isNotEmpty) ? id : null;
+  }
+
+  /// The `kind` `POST /api/library/add` takes for this row.
+  String get wishKind => switch (kind) {
+    'artist' => 'artist',
+    'track' => 'recording',
+    // An album row without a release group is left for the server to identify
+    // rather than guessed at into the wrong entity type.
+    _ => releaseGroupMbid == null ? 'auto' : 'release_group',
+  };
+
+  factory DiscoverItem.fromJson(Map<String, dynamic> json) => DiscoverItem(
+    kind: json['kind']?.toString() ?? 'album',
+    title: _str(json['title']) ?? _str(json['name']) ?? '',
+    artist: _str(json['artist']),
+    year: _str(json['year']),
+    source: _str(json['source']),
+    sourceLabel: _str(json['source_label']),
+    coverUrl: _str(json['cover_url']),
+    pageUrl: _str(json['page_url']),
+    mbid: _str(json['mbid']),
+    releaseGroupMbid: _str(json['release_group_mbid']),
+    path: _str(json['path']),
+    owned: json['owned'] == true,
+    inLibrary: json['in_library'] == true,
+    reason: _str(json['reason']),
+    alsoFrom: _strings(json['also_from']),
+    tracks: _strings(json['tracks']),
+  );
+}
+
+/// `GET /api/discover/genres`. [notes] carries one line per asked source — ""
+/// when it answered, "skipped: …" or "failed: …" when it did not — so a page
+/// can name the providers that went dark instead of quietly showing fewer.
+class DiscoverGenresResult {
+  DiscoverGenresResult({
+    this.genres = const [],
+    this.sourcesAsked = const [],
+    this.notes = const {},
+  });
+
+  final List<DiscoverGenre> genres;
+  final List<String> sourcesAsked;
+  final Map<String, String> notes;
+
+  factory DiscoverGenresResult.fromJson(Map<String, dynamic> json) {
+    final raw = json['genres'];
+    return DiscoverGenresResult(
+      genres: raw is List
+          ? raw
+                .whereType<Map>()
+                .map(
+                  (g) => DiscoverGenre.fromJson(Map<String, dynamic>.from(g)),
+                )
+                .toList()
+          : const [],
+      sourcesAsked: _strings(json['sources_asked']),
+      notes: _stringMap(json['notes']),
+    );
+  }
+}
+
+/// `GET /api/discover/genre`: one genre's albums, artists or tracks, from one
+/// source or all of them.
+class DiscoverGenreResult {
+  DiscoverGenreResult({
+    this.genre = '',
+    this.kind = 'albums',
+    this.source = 'all',
+    this.items = const [],
+    this.sourcesAsked = const [],
+    this.notes = const {},
+    this.nextOffset,
+  });
+
+  final String genre;
+  final String kind;
+  final String source;
+  final List<DiscoverItem> items;
+  final List<String> sourcesAsked;
+  final Map<String, String> notes;
+  final int? nextOffset;
+
+  /// Whether there is another page to ask for. A server that omits the cursor
+  /// still gets asked again while it keeps filling the request, and a page
+  /// that comes back empty ends the paging by itself.
+  bool hasMore(int limit) => nextOffset != null || items.length >= limit;
+
+  factory DiscoverGenreResult.fromJson(Map<String, dynamic> json) =>
+      DiscoverGenreResult(
+        genre: json['genre']?.toString() ?? '',
+        kind: json['kind']?.toString() ?? 'albums',
+        source: json['source']?.toString() ?? 'all',
+        items: _discoverItems(json['items']),
+        sourcesAsked: _strings(json['sources_asked']),
+        notes: _stringMap(json['notes']),
+        nextOffset: _int(json['next_offset']),
+      );
+}
+
+/// `GET /api/discover/recommended`. [basis] is the server's own sentence about
+/// why these rows were picked — shown as it stands, never re-worded here.
+class DiscoverRecommendedResult {
+  DiscoverRecommendedResult({
+    this.items = const [],
+    this.sourcesAsked = const [],
+    this.notes = const {},
+    this.basis,
+  });
+
+  final List<DiscoverItem> items;
+  final List<String> sourcesAsked;
+  final Map<String, String> notes;
+  final String? basis;
+
+  factory DiscoverRecommendedResult.fromJson(Map<String, dynamic> json) =>
+      DiscoverRecommendedResult(
+        items: _discoverItems(json['items']),
+        sourcesAsked: _strings(json['sources_asked']),
+        notes: _stringMap(json['notes']),
+        basis: _str(json['basis']),
+      );
+}
+
+List<DiscoverItem> _discoverItems(dynamic raw) => raw is List
+    ? raw
+          .whereType<Map>()
+          .map((r) => DiscoverItem.fromJson(Map<String, dynamic>.from(r)))
+          .toList()
+    : const [];
+
 /// One job's self-reported progress: the line it publishes and, when it knows
 /// them, the parts done and total — the registry's `progress` object.
 class JobProgress {
@@ -358,6 +598,88 @@ class JobProgress {
     done: _double(json['done']),
     total: _double(json['total']),
   );
+}
+
+/// One folder's share of the storage snapshot: bytes and file count, or null
+/// when the folder does not exist.
+class StorageFolder {
+  const StorageFolder({
+    this.path,
+    this.bytes = 0,
+    this.files = 0,
+    this.audioBytes,
+    this.sidecarBytes,
+  });
+
+  final String? path;
+  final int bytes;
+  final int files;
+  final int? audioBytes;
+  final int? sidecarBytes;
+
+  factory StorageFolder.fromJson(Map<String, dynamic> json) => StorageFolder(
+    path: _str(json['path']),
+    bytes: _int(json['bytes']) ?? 0,
+    files: _int(json['files']) ?? 0,
+    audioBytes: _int(json['audio_bytes']),
+    sidecarBytes: _int(json['sidecar_bytes']),
+  );
+}
+
+/// `GET /api/storage`: the library's volume, the app's own state, the trash and
+/// the transfers. Any figure the OS refused to give is null — the UI says
+/// "unknown" rather than showing a zero it made up.
+class StorageInfo {
+  const StorageInfo({
+    this.mount,
+    this.label,
+    this.totalBytes,
+    this.freeBytes,
+    this.usedBytes,
+    this.percentUsed,
+    this.library,
+    this.appData,
+    this.trash,
+    this.downloadBytes,
+    this.downloadStagingBytes,
+    this.skippedCount = 0,
+  });
+
+  final String? mount;
+  final String? label;
+  final int? totalBytes;
+  final int? freeBytes;
+  final int? usedBytes;
+  final double? percentUsed;
+  final StorageFolder? library;
+  final StorageFolder? appData;
+  final StorageFolder? trash;
+  final int? downloadBytes;
+  final int? downloadStagingBytes;
+  final int skippedCount;
+
+  factory StorageInfo.fromJson(Map<String, dynamic> json) {
+    StorageFolder? folder(dynamic value) => value is Map
+        ? StorageFolder.fromJson(value.cast<String, dynamic>())
+        : null;
+    final downloads = json['downloads'];
+    return StorageInfo(
+      mount: _str(json['mount']),
+      label: _str(json['label']),
+      totalBytes: _int(json['total_bytes']),
+      freeBytes: _int(json['free_bytes']),
+      usedBytes: _int(json['used_bytes']),
+      percentUsed: _double(json['percent_used']),
+      library: folder(json['library']),
+      appData: folder(json['app_data']),
+      trash: folder(json['trash']),
+      downloadBytes: downloads is Map ? _int(downloads['bytes']) : null,
+      downloadStagingBytes: downloads is Map
+          ? _int(downloads['staging_bytes'])
+          : null,
+      skippedCount: _int(json['skipped_count']) ?? 0,
+    );
+  }
 }
 
 /// The in-flight job registry (`GET /api/jobs/locks`): what is holding which

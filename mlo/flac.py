@@ -463,11 +463,28 @@ def _convert_lossless_source(args):
         if codec == "flac":
             if metaflac_exe:
                 try:
-                    parts = ["PADDING", "CUESHEET", "APPLICATION", "SEEKTABLE"]
+                    # The same block policy the FLAC optimizer applies:
+                    # PADDING and SEEKTABLE follow their settings. Stripping
+                    # both unconditionally left a converted file violating
+                    # add_seektables / flac_no_padding, so the next run had to
+                    # touch it again (and never matched the encoder marker's
+                    # own claim about the file).
+                    parts = ["CUESHEET", "APPLICATION"]
+                    if config.get("flac_no_padding", True):
+                        parts.append("PADDING")
+                    if not config.get("add_seektables", False):
+                        parts.append("SEEKTABLE")
                     run_tool([metaflac_exe, "--dont-use-padding", "--remove",
                               "--block-type=" + ",".join(parts), tmp],
                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                              text=True)
+                    if config.get("add_seektables", False):
+                        # ffmpeg's FLAC muxer writes no seektable at all, so
+                        # when the setting asks for one it has to be added —
+                        # 10 s spacing is what flac.exe uses itself.
+                        run_tool([metaflac_exe, "--add-seekpoint=10s", tmp],
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.PIPE, text=True)
                 except Exception:
                     pass
             try:

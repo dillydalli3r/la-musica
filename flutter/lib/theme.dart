@@ -1,16 +1,28 @@
 import 'package:flutter/material.dart';
 
 /// The app's two themes, in the flat "monochrome" language the React UI uses:
-/// near-black surfaces with a single accent in dark, paper white with the same
-/// accent in light. Both are generated from one seed so a colour change lands
-/// in both at once, and the dark theme is the default — the app is a library
-/// browser that people leave open while music plays.
+/// near-black surfaces with a white accent in dark, paper white with a
+/// near-black accent in light. The dark theme is the default — the app is a
+/// library browser that people leave open while music plays.
+///
+/// BLACK & WHITE IS THE DEFAULT, and it is the same default the web client
+/// ships (web/src/index.css: `--accent: 255 255 255`). The accent carries no
+/// hue at all: in dark it is white with near-black contrast text, in light it
+/// is near-black with white contrast text. An earlier build seeded both themes
+/// from one indigo (`#6366f1`), which is where the purple rails, pills and
+/// cover placeholders came from.
 ///
 /// Colours mirror `web/src/index.css`'s tokens so the two front ends read as
-/// one product: `bg` #09090b, `raise` #18181b, `border` #27272a, `accent`
-/// #6366f1, muted text #71717a.
+/// one product: `bg` #09090b, `raise` #18181b, `border` #27272a, accent as
+/// above, muted text #71717a.
 class AppTheme {
-  static const Color accent = Color(0xFF6366F1);
+  /// Dark: the accent is white, text on it is near-black (the inverse of the
+  /// near-black app bar it sits on).
+  static const Color accentDark = Color(0xFFFFFFFF);
+  static const Color onAccentDark = Color(0xFF09090B);
+  /// Light: the accent is near-black, text on it is white.
+  static const Color accentLight = Color(0xFF18181B);
+  static const Color onAccentLight = Color(0xFFFFFFFF);
   static const Color _bgDark = Color(0xFF09090B);
   static const Color _raiseDark = Color(0xFF18181B);
   static const Color _borderDark = Color(0xFF27272A);
@@ -19,8 +31,8 @@ class AppTheme {
     brightness: Brightness.dark,
     scheme: const ColorScheme.dark(
       surface: _bgDark,
-      primary: accent,
-      onPrimary: Colors.white,
+      primary: accentDark,
+      onPrimary: onAccentDark,
       surfaceContainerHighest: _raiseDark,
       outline: _borderDark,
     ),
@@ -33,8 +45,8 @@ class AppTheme {
     brightness: Brightness.light,
     scheme: const ColorScheme.light(
       surface: Color(0xFFFAFAFA),
-      primary: accent,
-      onPrimary: Colors.white,
+      primary: accentLight,
+      onPrimary: onAccentLight,
       surfaceContainerHighest: Colors.white,
       outline: Color(0xFFE4E4E7),
     ),
@@ -82,10 +94,10 @@ class AppTheme {
       ),
       navigationRailTheme: NavigationRailThemeData(
         backgroundColor: scaffold,
-        indicatorColor: accent.withValues(alpha: 0.16),
-        selectedIconTheme: const IconThemeData(color: accent, size: 20),
+        indicatorColor: scheme.primary.withValues(alpha: 0.16),
+        selectedIconTheme: IconThemeData(color: scheme.primary, size: 20),
         unselectedIconTheme: IconThemeData(color: muted, size: 20),
-        selectedLabelTextStyle: const TextStyle(color: accent, fontSize: 11),
+        selectedLabelTextStyle: TextStyle(color: scheme.primary, fontSize: 11),
         unselectedLabelTextStyle: TextStyle(color: muted, fontSize: 11),
       ),
       textTheme: const TextTheme().apply(
@@ -112,12 +124,12 @@ class AppTheme {
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(8),
-          borderSide: const BorderSide(color: accent),
+          borderSide: BorderSide(color: scheme.primary),
         ),
       ),
       filledButtonTheme: FilledButtonThemeData(
         style: FilledButton.styleFrom(
-          backgroundColor: accent,
+          backgroundColor: scheme.primary,
           foregroundColor: Colors.white,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),

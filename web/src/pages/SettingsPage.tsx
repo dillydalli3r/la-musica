@@ -65,7 +65,9 @@ const CFG_DEFAULTS: Record<string, unknown> = {
   youtube_max_height: 0,
   auto_import_avoid_promo: true,
   auto_import_require_country: true,
-  auto_import_medium_order: ["CD", "Digital Media", "Vinyl", "Cassette", "Other"],
+  prefer_release_country: "",
+  prefer_original_edition: true,
+  auto_import_medium_order: ["CD", "Vinyl", "Cassette", "Other", "Digital Media"],
   cover_auto_fetch: true,
   cover_review: true,
 };
@@ -669,6 +671,10 @@ export default function SettingsPage() {
         { k: "write_log_grade", label: "Write LOG_GRADE scores", type: "bool" },
         { k: "write_replaygain_tags", label: "Write ReplayGain tags", type: "bool" },
         { k: "write_dynamic_range_tags", label: "Write DR tags", type: "bool" },
+        { k: "write_rating_tags", label: "Write RATING tags (your stars)", type: "bool",
+          help: "Rating a track also writes RATING (0-100, Picard's scale: one half-star = 10) into the file, "
+                + "and clearing a rating removes the tag. Off, ratings stay in the app only. Keeping it on is what "
+                + "makes an imported Picard-rated library and this app agree." },
         { k: "normalize_media_source", label: "Normalize MEDIA / SOURCE", type: "bool" },
         { k: "strip_source_on_cd", label: "Strip SOURCE on CD rips", type: "bool" },
         { k: "fill_empty_source", label: "Fill empty SOURCE on digital", type: "bool" },
@@ -783,8 +789,16 @@ export default function SettingsPage() {
           help: "A MusicBrainz release without RELEASECOUNTRY is usually an unsorted import, and the CD query templates are built from that field — such editions are skipped, and a group whose only editions lack one is reported as ineligible instead.",
         },
         {
+          k: "prefer_release_country", label: "Preferred release country (ISO code, blank = none)", type: "text",
+          help: "The spelling MusicBrainz publishes on the release, e.g. US or GB. A tie-breaker only: it never outranks status, medium, track count or the original-edition rule.",
+        },
+        {
+          k: "prefer_original_edition", label: "Prefer the original (explicit) edition over a clean or edited one", type: "bool",
+          help: "MusicBrainz states this in the release title or its disambiguation comment. Off, a clean edition is ranked on the other rules like any other — a clean edition may carry altered audio.",
+        },
+        {
           k: "auto_import_medium_order", label: "Medium preference (comma-separated, best first)", type: "csv",
-          help: "Editions are chosen by this media order first, then by earliest release date — and among editions of the same year the one that states the full date, since the album folder is named after it. Blank = the built-in order (CD, Digital Media, Vinyl, Cassette, Other).",
+          help: "Editions are ranked by this media order first, then by how close the edition is to the release group's original date; a format not named here ranks after every configured one. Blank = the built-in order (CD, Vinyl, Cassette, Other, Digital Media) — CD first, other physical media next, digital last.",
         },
       ],
     },
@@ -794,8 +808,20 @@ export default function SettingsPage() {
         "Releases saved to the library without downloading them. The background worker re-searches Soulseek for every open wish on the interval below and imports a release the moment a verified match appears.",
       fields: [
         { k: "wishes_enabled", label: "Run the wishes worker", type: "bool" },
+        {
+          k: "soulseek_search_concurrency", label: "Releases searched / downloaded at once", type: "number", min: 1, max: 8,
+          help: "The wishes worker fills up to this many wishes per pass, and a bulk auto-import run keeps this many jobs in flight. The transfers themselves are still capped by slskd's own download slots (Settings → Soulseek), so raising this only uses the queue harder, it does not open more connections than slskd allows.",
+        },
         { k: "wishes_interval_hours", label: "Search interval (hours)", type: "number", min: 1, max: 168 },
         { k: "wishes_max_attempts", label: "Max attempts per wish (0 = forever)", type: "number", min: 0, max: 1000 },
+        {
+          k: "wishes_not_found_attempts", label: "Empty searches before a wish is 'not found' (0 = never give up)", type: "number", min: 0, max: 1000,
+          help: "A search that finds nothing is not a failure to try harder: it spends one of these. When they are used up the wish ends as 'not found' — terminal, announced once, and searched again only when you press retry on its queue row (or Search on the wish). The album is still unfillable by hand: importing it yourself resolves the wish on the next reconcile.",
+        },
+        {
+          k: "wishes_retry_backoff_minutes", label: "Wait before retrying a failed wish (minutes, doubles per attempt)", type: "number", min: 0, max: 1440,
+          help: "A TRANSIENT failure — slskd refused or absent, a MusicBrainz outage, a download that failed verification — waits this long before the next attempt, doubling each time (capped at 24 h). 0 retries on the next interval instead.",
+        },
         { k: "wishes_auto_import", label: "Auto-import when a verified match is found", type: "bool" },
       ],
     },
@@ -847,7 +873,14 @@ export default function SettingsPage() {
         { k: "metadata_auto_fetch", label: "Fetch artist image / descriptions on import", type: "bool" },
         { k: "metadata_review", label: "Review metadata candidates before writing them", type: "bool" },
         { k: "artist_image_enabled", label: "Fetch artist images", type: "bool" },
-        { k: "artist_image_crop", label: "Crop artist images to a square", type: "bool" },
+        { k: "artist_image_crop", label: "Crop artist images to the configured aspect", type: "bool" },
+        // The Settings page's own CfgField text member carries no pattern pair
+        // (only configMeta's does, and the wizard is what consumes it), so this
+        // row keeps the shape in its help text instead.
+        {
+          k: "artist_image_aspect", label: "Artist image aspect (W:H)", type: "text",
+          help: "Width:height, e.g. 1:1 (square), 4:5, 16:9. The shape artist images are stored in: the fetch crops to it, grading fails an image further than 2% from it, and script 19 (Optimize artist images) crops the ones already in the library back to it.",
+        },
         { k: "artist_image_target_size", label: "Artist image max size (px, 0 = keep native size)", type: "number", min: 0, max: 4000 },
         { k: "artist_description_enabled", label: "Fetch artist descriptions", type: "bool" },
         { k: "album_description_enabled", label: "Fetch album descriptions", type: "bool" },
@@ -858,6 +891,27 @@ export default function SettingsPage() {
       blurb:
         "What happens after an album lands in the library (Soulseek downloads, Drag & drop, Finish import). The script chain below runs in order; leaving it blank runs the built-in chain: dedupe → sort → tag → covers → lyrics → audit → ReplayGain → AccurateRip. AcoustID fingerprints the audio to identify the exact release — it needs a free application key from acoustid.org; without one, matching falls back to title/artist/genre against MusicBrainz.",
       fields: [
+        {
+          k: "auto_acquisition_enabled", label: "Automatic acquisition (searching and downloading on their own)", type: "bool",
+          help: "Off, nothing the app starts by itself searches or downloads: the wishes worker stops its passes, an artist watch queues nothing, and \"Add to library\" records the album and its wish without starting a download. What you asked for is still recorded and a check says the switch is off rather than \"nothing found\" — the wish's own Search now, the wizard and the Soulseek page still work, because those are you acting, not the app.",
+        },
+        {
+          k: "manual_import_enabled", label: "Manual importing (the wizard and POST /api/import/*)", type: "bool",
+          help: "Off, the import wizard and every importing /api/import/* route refuse with a sentence naming this setting instead of importing — the wizard shows that sentence where its steps would be. The automatic pipeline still imports what it downloads; only the paths you drive by hand are turned off.",
+        },
+        {
+          k: "import_autonomy", label: "Import autonomy", type: "select",
+          options: [
+            ["automatic", "Automatic — decide everything the sources can answer (default)"],
+            ["review", "Review — stop at each step that needs a decision"],
+          ],
+          help: "Automatic runs the whole chain and only comes back to you for what nothing could supply: the album is imported either way and whatever it still lacks is reported as ONE prompt — a notification plus an entry the Import page lists — naming the families and linking to the album at the step where each decision is made. Review is the wizard's own behaviour applied to an import: it stops before the first step that needs a decision (a family the album is still missing) and hands the album over instead of deciding past it.",
+        },
+        {
+          k: "import_review_families", label: "Decide by hand, even when automatic", type: "multi",
+          options: [["links", "Links"], ["cover", "Cover art"], ["genres", "Genres"], ["lyrics", "Lyrics"], ["advisory", "Advisory"]],
+          help: "Families an import must never decide for you, whatever the mode above. A cover kept here has its candidates staged instead of writing the first hit; the links and advisory fetches are skipped; lyrics drop out of the chain. The rest of the import stays automatic, and the album's prompt names that family as waiting for you rather than as unsourced.",
+        },
         { k: "import_auto_scripts", label: "Run the script chain after import", type: "bool" },
         {
           k: "import_scripts", label: "Import script ids (e.g. 1, 3, 5, 7 — blank = built-in chain)", type: "text",
@@ -866,6 +920,10 @@ export default function SettingsPage() {
         { k: "import_acoustid", label: "Fingerprint with AcoustID", type: "bool" },
         { k: "acoustid_enabled", label: "AcoustID enabled", type: "bool" },
         { k: "acoustid_api_key", label: "AcoustID application key (free, acoustid.org)", type: "password" },
+        {
+          k: "acoustid_fpcalc_path", label: "fpcalc path (blank = bundled/next to the app)", type: "text",
+          help: "AcoustID fingerprints audio by running Chromaprint's fpcalc. The app looks for it next to itself and on PATH by default; point this at the binary when it lives somewhere else (a manual install, a package manager's prefix). A path that does not run is reported as \"could not answer\" on the AcoustID step rather than as a no-match — the check is unverified, not rejected.",
+        },
         { k: "acoustid_min_score", label: "Minimum AcoustID match score", type: "number", min: 0, max: 1, step: 0.05 },
       ],
     },

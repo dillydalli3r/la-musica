@@ -28,7 +28,7 @@ from .lyrics_providers import lrclib_fetch, lrclib_publish
 from .paths import AUDIO_EXTS
 from .stats import (
     is_audio_file, new_stats, _collect_targets, _find_albums,
-    _make_pbar, _pbar_skip, _pbar_update,
+    _make_pbar, _pbar_skip, _pbar_update, worker_count,
 )
 from .ui import print_header, log, c, Color
 
@@ -158,30 +158,54 @@ def run_publish_lyrics(config):
 
     counts = {"ok": 0, "skip": 0, "fail": 0}
     pbar = _make_pbar(total=len(files), desc="Publish lyrics")
+
+    def _finish(path, got):
+        """Book one track's result on the runner thread (workers share no
+        state but the throttle inside the provider layer)."""
+        status = got["status"]
+        if status == "ok":
+            stats["published"] += 1
+            stats["modified_count"] += 1
+            _pbar_update(pbar, counts, "ok")
+            return
+        stats["total_scanned"] += 1
+        stats["unchanged_count"] += 1
+        if status == "failed":
+            stats["rejected"] += 1
+            stats["error_count"] += 1
+            if len(stats["errors"]) < 25:
+                stats["errors"].append(
+                    f"{os.path.basename(path)}: {got['reason']}")
+            _pbar_update(pbar, counts, "fail")
+            return
+        if got["reason"] == "LRCLIB already has it":
+            stats["already_known"] += 1
+        elif got["reason"] == "no lyrics stored":
+            stats["no_lyrics"] += 1
+        _pbar_skip(pbar, counts)
+
+    # Bounded parallelism: every track is its own existence check plus its own
+    # submission, and the provider layer throttles request starts globally
+    # while the request itself runs outside the lock (mlo.lyrics_providers.
+    # _request), so lanes overlap the network wait instead of paying it once
+    # per track.
+    workers = worker_count(config, default=4, maximum=8, items=len(files))
     try:
-        for path in files:
-            got = publish_one(path, config, force=force)
-            status = got["status"]
-            if status == "ok":
-                stats["published"] += 1
-                stats["modified_count"] += 1
-                _pbar_update(pbar, counts, "ok")
-                continue
-            stats["total_scanned"] += 1
-            stats["unchanged_count"] += 1
-            if status == "failed":
-                stats["rejected"] += 1
-                stats["error_count"] += 1
-                if len(stats["errors"]) < 25:
-                    stats["errors"].append(
-                        f"{os.path.basename(path)}: {got['reason']}")
-                _pbar_update(pbar, counts, "fail")
-                continue
-            if got["reason"] == "LRCLIB already has it":
-                stats["already_known"] += 1
-            elif got["reason"] == "no lyrics stored":
-                stats["no_lyrics"] += 1
-            _pbar_skip(pbar, counts)
+        if len(files) == 1 or workers == 1:
+            for path in files:
+                _finish(path, publish_one(path, config, force=force))
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futures = {ex.submit(publish_one, p, config, force): p
+                           for p in files}
+                for fut in as_completed(futures):
+                    path = futures[fut]
+                    try:
+                        got = fut.result()
+                    except Exception as e:      # a worker must never kill the run
+                        got = {"status": "failed", "reason": str(e)}
+                    _finish(path, got)
     finally:
         try:
             pbar.close()

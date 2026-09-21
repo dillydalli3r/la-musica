@@ -8,6 +8,7 @@ import '../state.dart';
 import '../theme.dart';
 import '../widgets/player_bar.dart';
 import '../widgets/shelves.dart';
+import '../widgets/storage_card.dart';
 
 /// Home: what the library IS (counts, grade, audit) and three shelves the
 /// React home page opens on — Recently added, Best graded, Rediscover — plus
@@ -61,6 +62,7 @@ class HomePage extends StatelessWidget {
             style: const TextStyle(fontSize: 12, color: Color(0xFFF87171)),
           ),
         ],
+        const StorageCard(),
         AlbumShelf(
           title: 'Recently added',
           albums: recent.take(12).toList(),
