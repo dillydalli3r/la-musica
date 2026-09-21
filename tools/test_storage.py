@@ -45,6 +45,15 @@ ALBUM_A = os.path.join(MUSIC, "Artists", "Artist One", "Album A")
 ALBUM_B = os.path.join(MUSIC, "Artists", "Artist Two", "Album B")
 BAD = os.path.join(MUSIC, "Artists", "Unreadable")
 
+# The app's own tools folder (`mlo.paths.DEPS_DIR`) is whatever the machine
+# has: 1.2 GB of downloaded tools on a dev box, a symlinked toolchain on CI
+# (whose links the walk reports as unreadable folders — the card would then
+# warn about them), nothing at all in a fresh clone. The snapshot reports it
+# and folds it into `app_total`, so the test pins it at a fixture of its own:
+# the same assertions have to answer the same thing on every machine.
+DEPS = os.path.join(ROOT, "deps")
+api_storage.DEPS_DIR = DEPS
+
 
 def make(path, size):
     """Write *size* bytes at *path* and return the byte count, so the expected
@@ -74,6 +83,8 @@ APP_DATA += make(os.path.join(MUSIC, ".mlo", "data", "artcache", "cover.bin"), 2
 TRASH = make(os.path.join(MUSIC, ".mlo", "trash", "default", "old.flac"), 333)
 DONE = make(os.path.join(MUSIC, ".mlo", "downloads", "done.flac"), 444)
 STAGED = make(os.path.join(MUSIC, ".mlo", "incomplete", "part.flac"), 555)
+# The app's tools, outside the music folder (see DEPS above).
+DEPS_BYTES = make(os.path.join(DEPS, "ffmpeg", "ffmpeg.exe"), 777)
 
 CFG = {"music_folder": MUSIC, "soulseek_download_dir": ""}
 
@@ -148,6 +159,19 @@ assert snap["downloads"]["bytes"] == DONE + STAGED, snap["downloads"]
 assert snap["downloads"]["staging_bytes"] == STAGED, snap["downloads"]
 assert snap["downloads"]["staging_files"] == 1, snap["downloads"]
 assert len(snap["downloads"]["roots"]) == 2, snap["downloads"]
+# The app's own tools, measured where they live (outside the music folder).
+assert snap["dependencies"]["bytes"] == DEPS_BYTES, snap["dependencies"]
+assert snap["dependencies"]["files"] == 1, snap["dependencies"]
+# The app's OWN footprint is one figure: its state, the bin, the transfers and
+# its tools. The library above is the user's music and is deliberately not in
+# it — that is the whole point of the statistic.
+assert snap["app_total"]["bytes"] == (
+    APP_DATA + TRASH + DONE + STAGED + DEPS_BYTES), snap["app_total"]
+assert snap["app_total"]["files"] == 6, snap["app_total"]   # 2 state, 1 bin, 2 transfers, 1 tool
+assert snap["app_total"]["measured"] is True, snap["app_total"]
+# ...and a footprint with NOTHING readable says so instead of answering a 0
+# that reads as "the app uses no space".
+assert api_storage._sum_rows([None, None]) == {"bytes": 0, "files": 0, "measured": False}
 
 # --------------------------------------------------------------------------- #
 # 2) The unreadable directory: reported, not raised
