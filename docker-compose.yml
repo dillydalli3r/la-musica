@@ -41,9 +41,9 @@
 
 # The compose project name is PINNED. It is derived from the FOLDER name
 # otherwise, and this repo's folder has already been renamed once (la-musica ->
-# MusicLibraryOptimizer): that silently started a second project whose
-# `musiclibraryoptimizer_lamusica-dependencies` volume was empty, while the real
-# installs (beets, librosa, yt-dlp) sat in
+# MusicLibraryOptimizer -> back to la-musica): the middle name silently started a
+# second project whose `musiclibraryoptimizer_lamusica-dependencies` volume was
+# empty, while the real installs (beets, librosa, yt-dlp) sat in
 # `la-musica_lamusica-dependencies`. With the name pinned, the volumes and the
 # network follow the app, not the directory you happen to run compose from.
 name: la-musica
