@@ -1093,7 +1093,21 @@ class DepsInstallRequest(BaseModel):
 
 @app.post("/api/dependencies/install")
 def dependencies_install(req: DepsInstallRequest):
-    """Install/update external tools from their pinned GitHub releases."""
+    """Install or update external tools, one key at a time.
+
+    A requested tool that is behind gets the NEWEST release its own publisher
+    has — GitHub, PyPI or windows.php.net — and the reviewed pin only when
+    nothing newer can be seen (see fetchdeps.install_dependency). That is what
+    lets one row's Install button do what its Update chip promised; the pin
+    stays the target of a first install on a machine that cannot reach the
+    check.
+
+    Every result also carries `row`: that tool's Dependencies row as it reads
+    AFTER the install, so a pressed row settles in place instead of the page
+    needing a second round trip to find out what happened. The other result
+    keys (`key`, `name`, `ok`, `version`, `changed`, `error`, `restarted`) are
+    unchanged.
+    """
     from mlo import fetchdeps
     from server import soulseek as slsk
 
@@ -1192,6 +1206,18 @@ def dependencies_install(req: DepsInstallRequest):
         fetchdeps.refresh_tool_cache()
     except Exception:
         pass
+    # Each result carries its row as the table would show it NOW, so a row
+    # pressed on its own settles in place instead of the page waiting a whole
+    # round trip to learn that it worked. One row list for the whole response,
+    # after the cache refresh, so every row in it is post-install.
+    try:
+        rows = {row["key"]: row for row in fetchdeps.dependency_rows()}
+    except Exception:
+        rows = {}
+    for result in results:
+        row = rows.get(result["key"])
+        if row:
+            result["row"] = row
     return {"results": results}
 
 
@@ -2061,6 +2087,14 @@ def _cover_metrics(path):
 
     The same PIL read /api/cover/info does, but from the file: the write has
     already invalidated the byte cache this early in the request.
+
+    The warning is the whole of the enforcement on this path: a cover the USER
+    applies — an upload, or a pick from the finder's own list — is written
+    whatever its size, and the reply says what is wrong with it. Refusing is
+    deliberate only in the AUTONOMOUS path (`server.imports.run_cover_step`),
+    which must not put a below-minimum image in the library without anyone
+    asking for it; the finder's list shows below-floor rows for a hand apply
+    precisely because the user may know better.
     """
     out = {"width": None, "height": None, "megapixels": None, "warning": None}
     try:
@@ -2114,7 +2148,8 @@ async def cover_search(artist: str = Query(""), album: str = Query(""),
                        sources: Optional[str] = Query(None),
                        country: Optional[str] = Query(None),
                        release_group_mbid: Optional[str] = Query(None),
-                       release_mbid: Optional[str] = Query(None)):
+                       release_mbid: Optional[str] = Query(None),
+                       tracks: Optional[int] = Query(None, ge=1, le=1000)):
     """Album covers for artist/album, RANKED by the one cover policy.
 
     Sources: covers.musichoarders.xyz (aggregates Apple Music, Deezer, Qobuz,
@@ -2125,11 +2160,20 @@ async def cover_search(artist: str = Query(""), album: str = Query(""),
     per-source report (used / empty / error / skipped, with the reason), so a
     query that found nothing says what was tried and what was never asked.
 
+    The search VERIFIES what it finds: `artist`/`album` (and `tracks`, when the
+    caller knows how many the album has) are the identity each row's own
+    release is checked against, so a karaoke, tribute or other-album row that
+    answers to the same names is rejected rather than ranked — and pinned at
+    the bottom of `results` with its rejection, where the finder still offers
+    it for a hand apply. `identity` in the reply states what was checked
+    against.
+
     `results` are `mlo.cover_choice`'s ranked candidates — best first, each row
     carrying the image's real pixel size, container and byte count as measured
     from the file, whether it is the release's own cover or a group stand-in,
     the reasons that put it where it is, and `rejected` when it cannot be the
-    automatic pick (below the cover target, undecodable, an empty answer) —
+    automatic pick (below the cover target, never measured while that target is
+    the minimum, undecodable, an empty answer, another album's release) —
     with `chosen` (the winner) and `notes` alongside, so the finder's first
     row is first for a stated reason.
 
@@ -2152,10 +2196,13 @@ async def cover_search(artist: str = Query(""), album: str = Query(""),
         raise HTTPException(502, f"cover search failed: {e}")
     payload = cover_choice.cover_payload(
         found.get("results") or [], cfg, sources=found.get("sources"),
-        provider=found.get("provider"))
+        provider=found.get("provider"),
+        identity={"artist": artist.strip(), "album": album.strip(),
+                  "tracks": tracks})
     return {"provider": found.get("provider"),
             "results": payload["candidates"],
             "chosen": payload["chosen"],
+            "identity": payload["identity"],
             "notes": payload["notes"],
             "policy": payload["policy"],
             "candidate_count": payload["candidate_count"],
@@ -6419,7 +6466,18 @@ def _run_genre_chain(paths, limit=None, progress=None, sources=None, staged=Fals
             "genre_count": cap,
             "trimmed": trimmed,
             "trimmed_files": trimmed_files,
-            "trimmed_genres": chain.get("per_track_trimmed") or {},
+            # The chain files a track's dropped genres under a (disc, position)
+            # TUPLE. A tuple key cannot survive FastAPI's jsonable_encoder: it
+            # re-encodes the key to a list and then explodes on the unhashable
+            # key (`TypeError: unhashable type: 'list'`) — OUTSIDE the handler,
+            # so the route answered a plain-text 500 with no detail every time
+            # the cap dropped a genre, which is every real MusicBrainz/RYM
+            # import. The report therefore uses the app's own "disc:position"
+            # key, the same string every other per-track map in the chain
+            # already uses.
+            "trimmed_genres": {intg._genre_track_key(disc, position): dropped
+                               for (disc, position), dropped in
+                               (chain.get("per_track_trimmed") or {}).items()},
             # Where each file's genres came from, in the order that
             # contributed, plus the tier that answered (track/album/artist),
             # and what the chain did with the sources it did not need.
@@ -6485,6 +6543,7 @@ class AdvisoryFetchRequest(BaseModel):
     paths: Optional[List[str]] = None           # audio files or album folders
     release_mbid: Optional[str] = None          # a MusicBrainz release id/URL
     staged: bool = False                        # the wizard's staged album
+    force: bool = False                         # re-rate files that already carry 0/1/2
 
 @app.post("/api/mb/advisory/fetch")
 def mb_advisory_fetch(req: AdvisoryFetchRequest):
@@ -6497,20 +6556,34 @@ def mb_advisory_fetch(req: AdvisoryFetchRequest):
     exact-title song search), merged by `integrations.merge_advisory`: 1 when
     any source states explicit, else 0 — an unstated advisory is written as 0,
     and `answers` is what shows whether any source actually spoke. A `cleaned`
-    Apple entry states nothing and is never written, an existing valid 0/1/2
-    is never overwritten, and a value equal to the merged one is not
-    rewritten. ALBUMITUNESADVISORY is derived from the per-track values for
-    every album folder the call touched (script 8's rule, `albums`).
+    Apple entry states nothing and is never written. A provider that stated 0
+    is not final: when the track's own words carry explicit language, the
+    lyrics stages escalate it to 1 and the reported source names the signal
+    ("lyrics-scan (escalated)"), never the provider it overruled.
 
-    Returns {updated, values, sources, answers, albums, album_updated, gated}:
-    `values` maps the file path (paths mode) or "disc:position" (release mode)
-    to the merged rating, `sources` maps the same keys to the provider that
-    stated it, `answers` maps them to what every source said ({source: 0|1}),
-    `albums` maps each album folder to the ALBUMITUNESADVISORY derived from
-    those values, `album_updated` counts the album-tag writes and `gated` the
-    files the ADVISORY write gate refused. `skipped` carries the reason (no
-    `updated`, no `values`) when that gate refused EVERY file, so a caller
-    never reports a silent no-op as "nothing was found"."""
+    An existing valid 0/1/2 is echoed, not re-asked, and the echo carries its
+    provenance (`sources[path] = "existing-tag"`, `status[path] = "existing"`)
+    so a readout can say the value came from the file and nobody was asked.
+    `force: true` is the re-rate: those files are asked and what the sources
+    state IS written (the write gate still applies). Only evidence lowers a
+    rating — a value invented by `advisory_fallback` never overwrites one — and
+    a value equal to the merged one is not rewritten. ALBUMITUNESADVISORY is
+    derived from the per-track values for every album folder the call touched
+    (script 8's rule, `albums`).
+
+    Returns {updated, values, sources, answers, albums, album_updated, gated,
+    status}: `values` maps the file path (paths mode) or "disc:position"
+    (release mode) to the merged rating, `sources` maps the same keys to the
+    provider that stated it ("existing-tag" for an echoed file value),
+    `answers` maps them to what every source said ({source: 0|1}), `status`
+    says what happened to each path's value this run — `written`, `unchanged`,
+    `existing` or `gated` — so `updated == 0` is never read as a re-rate that
+    found nothing, `albums` maps each album folder to the
+    ALBUMITUNESADVISORY derived from those values, `album_updated` counts the
+    album-tag writes and `gated` the files the ADVISORY write gate refused.
+    `skipped` carries the reason (no `updated`, no `values`) when that gate
+    refused EVERY file, so a caller never reports a silent no-op as "nothing
+    was found"."""
     from server import imports as imports_mod
 
     if not req.paths and not req.release_mbid:
@@ -6518,6 +6591,7 @@ def mb_advisory_fetch(req: AdvisoryFetchRequest):
     values = {}
     sources = {}
     answers = {}
+    status = {}
     albums = {}
     updated = 0
     album_updated = 0
@@ -6535,7 +6609,8 @@ def mb_advisory_fetch(req: AdvisoryFetchRequest):
             raise HTTPException(502, f"MusicBrainz release lookup failed: {e}")
     if req.paths:
         _tag_paths_guard(req.paths, req.staged)
-        result = imports_mod.fetch_advisories(req.paths, load_config())
+        result = imports_mod.fetch_advisories(req.paths, load_config(),
+                                              force=req.force)
         updated = int(result.get("updated") or 0)
         album_updated = int(result.get("album_updated") or 0)
         gated = int(result.get("gated") or 0)
@@ -6544,9 +6619,10 @@ def mb_advisory_fetch(req: AdvisoryFetchRequest):
         values.update(result.get("values") or {})
         sources.update(result.get("sources") or {})
         answers.update(result.get("answers") or {})
+        status.update(result.get("status") or {})
         albums.update(result.get("albums") or {})
     return {"updated": updated, "values": values, "sources": sources,
-            "answers": answers, "albums": albums,
+            "answers": answers, "status": status, "albums": albums,
             "album_updated": album_updated, "gated": gated,
             "album_gated": album_gated, "skipped": skipped}
 

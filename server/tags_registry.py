@@ -148,7 +148,7 @@ TAG_INFO = {
     "ORIGINALYEAR": ("Original year", "Four-digit year of that original release."),
     "RELEASETYPE": ("Release type", "Album / single / EP / live… — the folder layout the organizer writes."),
     "RELEASESTATUS": ("Release status", "Official / promotion / bootleg…"),
-    "RELEASECOUNTRY": ("Country", "Country of the release."),
+    "RELEASECOUNTRY": ("Country", "A LIST: every country the release came out in, \"; \"-joined ISO codes — the first value is the release's first (earliest) release event."),
     "CATALOGNUMBER": ("Catalog #", "Label catalogue number of the release."),
     "BARCODE": ("Barcode", "The release's barcode."),
     "SCRIPT": ("Script", "Writing system of the release's language (Latn, Jpan, …)."),

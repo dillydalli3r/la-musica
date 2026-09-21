@@ -302,6 +302,8 @@ export default {
   "cover.best_pick_use": "Usar a melhor opção",
   "cover.no_pick": "Nenhum candidato alcança o tamanho da capa — escolha uma manualmente.",
   "cover.pick_reason": "Por que esta",
+  "cover.checked_against": "Conferido contra {identity}",
+  "cover.all_rejected": "{count} candidato(s) foram rejeitados — cada linha diz por quê, e qualquer um deles ainda pode ser aplicado à mão.",
   "cover.source_notes": "O que cada fonte fez",
   "cover.searching": "Buscando fontes de capas…",
   "cover.answered": "Buscado: {terms}",

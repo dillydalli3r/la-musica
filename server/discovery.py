@@ -1287,9 +1287,45 @@ def audiodb_album(artist, album, timeout=None):
 
 
 # --------------------------------------------------------------------------- #
-# Spotify (artist genres — the chain's last resort)
+# Spotify (artist genres — the chain's last resort — and the artist-level
+# entity routes: an artist's albums and top tracks are what Spotify honestly
+# states about a page, since it publishes no related-artist feed)
 # --------------------------------------------------------------------------- #
 SPOTIFY_API = "https://api.spotify.com/v1"
+
+
+def _spotify_artist_hit(name, cfg=None, timeout=None):
+    """The ONE artist search behind every artist-level Spotify source.
+
+    One request, and the one rule that makes its hit an identity: the hit's own
+    name is the name asked for — a search hit is a candidate, not an identity,
+    so a same-named act cannot ride in on the term. Returns the artist OBJECT
+    (its id, genres, images), or None without credentials / on no honest hit.
+
+    Empty without `spotify_client_id`/`spotify_client_secret`: the source is
+    skipped entirely, never defaulted."""
+    text = str(name or "").strip()
+    token = integrations._spotify_token(cfg, timeout=timeout)
+    if not text or not token:
+        return None
+    data = _json(f"{SPOTIFY_API}/search",
+                 {"q": text, "type": "artist", "limit": 1},
+                 headers={"Authorization": f"Bearer {token}"},
+                 timeout=timeout, host="api.spotify.com")
+    want = _norm(text)
+    for item in ((data or {}).get("artists") or {}).get("items") or []:
+        if _norm(item.get("name")) == want:
+            return item
+    return None
+
+
+def _spotify_market(cfg=None):
+    """Spotify's `market`: the app's own region setting, in the uppercase ISO
+    3166-1 alpha-2 form the Web API takes (the same `cover_country` key is
+    lowercase for the cover storefronts). Anything that is not a two-letter
+    region is not a market Spotify knows, so the US storefront answers."""
+    code = str((cfg or {}).get("cover_country") or "").strip().upper()
+    return code if len(code) == 2 else "US"
 
 
 def spotify_artist_genres(artist, cfg=None, timeout=None):
@@ -1305,20 +1341,97 @@ def spotify_artist_genres(artist, cfg=None, timeout=None):
     Empty without `spotify_client_id`/`spotify_client_secret`: the source is
     skipped entirely, never defaulted.
     """
-    name = str(artist or "").strip()
+    hit = _spotify_artist_hit(artist, cfg=cfg, timeout=timeout)
+    return [str(g).strip() for g in (hit or {}).get("genres") or []
+            if str(g).strip()]
+
+
+def spotify_artist_albums(artist, limit=25, cfg=None, timeout=None):
+    """A NAMED artist's albums — Spotify's one honest answer about an entity.
+
+    Spotify publishes no related-artist feed to apps created after 2024-11-27
+    (`/artists/{id}/related-artists` and `/recommendations` are on the list of
+    endpoints Spotify closed to them), so what this route can state about a
+    page is "more from THIS artist": the artist NAMED here, resolved through
+    the same name-matched search `spotify_artist_genres` uses. It is never a
+    similarity claim. `include_groups=album` leaves singles and compilations
+    out on Spotify's side — the line Deezer's entity bridge draws with
+    `albums_only`; filtering the page here instead would answer with a shorter
+    shelf than the artist has. Empty without credentials, like every Spotify
+    wrapper."""
     token = integrations._spotify_token(cfg, timeout=timeout)
-    if not name or not token:
+    if not token:
         return []
-    data = _json(f"{SPOTIFY_API}/search",
-                 {"q": name, "type": "artist", "limit": 1},
+    hit = _spotify_artist_hit(artist, cfg=cfg, timeout=timeout)
+    ident = str((hit or {}).get("id") or "")
+    if not ident:
+        return []
+    data = _json(f"{SPOTIFY_API}/artists/{ident}/albums",
+                 {"include_groups": "album", "market": _spotify_market(cfg),
+                  "limit": max(1, min(50, int(limit)))},
                  headers={"Authorization": f"Bearer {token}"},
                  timeout=timeout, host="api.spotify.com")
-    want = _norm(name)
-    for item in ((data or {}).get("artists") or {}).get("items") or []:
-        if _norm(item.get("name")) != want:
-            continue
-        return [str(g).strip() for g in item.get("genres") or [] if str(g).strip()]
-    return []
+    rows = []
+    for item in (data or {}).get("items") or []:
+        images = item.get("images") or []
+        artists = item.get("artists") or []
+        rows.append({
+            "kind": "album",
+            "title": item.get("name") or "",
+            "artist": (((artists[0] or {}).get("name") if artists else "")
+                       or hit.get("name") or ""),
+            "spotify_id": item.get("id"),
+            "cover": (images[0] or {}).get("url") if images else None,
+            "year": (item.get("release_date") or "")[:4],
+            "release_date": item.get("release_date") or "",
+            "track_count": _int(item.get("total_tracks")),
+            "record_type": item.get("album_type") or "",
+            "link": (item.get("external_urls") or {}).get("spotify"),
+            "source": "spotify",
+        })
+    return rows
+
+
+def spotify_artist_top_tracks(artist, limit=25, cfg=None, timeout=None):
+    """A NAMED artist's most popular tracks (`/artists/{id}/top-tracks`).
+
+    The track shelf's "more from this artist", and not a similarity feed for
+    the same reason `spotify_artist_albums` is not one. `market` is required
+    — the ranking IS the market's — so the app's region setting is sent rather
+    than a storefront hardcoded here. Rows carry Spotify's own `popularity`
+    (0-100), which is the provider's number and orders them."""
+    token = integrations._spotify_token(cfg, timeout=timeout)
+    if not token:
+        return []
+    hit = _spotify_artist_hit(artist, cfg=cfg, timeout=timeout)
+    ident = str((hit or {}).get("id") or "")
+    if not ident:
+        return []
+    data = _json(f"{SPOTIFY_API}/artists/{ident}/top-tracks",
+                 {"market": _spotify_market(cfg),
+                  "limit": max(1, min(50, int(limit)))},
+                 headers={"Authorization": f"Bearer {token}"},
+                 timeout=timeout, host="api.spotify.com")
+    rows = []
+    for item in (data or {}).get("tracks") or []:
+        album = item.get("album") or {}
+        images = album.get("images") or []
+        artists = item.get("artists") or []
+        rows.append({
+            "kind": "track",
+            "title": item.get("name") or "",
+            "artist": ", ".join(a.get("name") for a in artists if a.get("name"))
+                      or (hit.get("name") or ""),
+            "spotify_id": item.get("id"),
+            "album": album.get("name") or "",
+            "cover": (images[0] or {}).get("url") if images else None,
+            "duration": _int(item.get("duration_ms")),
+            "popularity": _int(item.get("popularity")) or 0,
+            "isrc": ((item.get("external_ids") or {}).get("isrc") or ""),
+            "link": (item.get("external_urls") or {}).get("spotify"),
+            "source": "spotify",
+        })
+    return rows
 
 
 # --------------------------------------------------------------------------- #
@@ -2106,6 +2219,22 @@ def musicbrainz_genre_list(pages=2):
 SEARCH_LIMIT = 100
 
 
+def _mb_recording_row(row):
+    """MusicBrainz recording search row → the shared discovery row shape."""
+    mbid = row.get("id")
+    return {
+        "kind": "track",
+        "title": row.get("title") or "",
+        "artist": row.get("artist") or "",
+        "mbid": mbid,
+        "year": (row.get("first_release_date") or "")[:4],
+        "duration": _int(row.get("length")),
+        "score": _int(row.get("score")),
+        "link": f"https://musicbrainz.org/recording/{mbid}" if mbid else None,
+        "source": "musicbrainz",
+    }
+
+
 def musicbrainz_tag_search(kind, genre, limit=25, offset=0):
     """MusicBrainz's tag (= genre) search for ONE entity kind.
 
@@ -2145,17 +2274,26 @@ def musicbrainz_tag_search(kind, genre, limit=25, offset=0):
                 "source": "musicbrainz",
             })
         else:
-            rows.append({
-                "kind": "track",
-                "title": row.get("title") or "",
-                "artist": row.get("artist") or "",
-                "mbid": mbid,
-                "year": (row.get("first_release_date") or "")[:4],
-                "duration": _int(row.get("length")),
-                "score": _int(row.get("score")),
-                "link": f"https://musicbrainz.org/recording/{mbid}" if mbid else None,
-                "source": "musicbrainz",
-            })
+            rows.append(_mb_recording_row(row))
+    return {"rows": rows, "total": _int((result or {}).get("total"))}
+
+
+def musicbrainz_artist_recordings(artist_mbid, limit=25):
+    """An artist's recordings, from MusicBrainz's own index (`arid:<id>`).
+
+    The "more from this artist" browse for a TRACK shelf. A release-group
+    browse cannot answer it — a release group is not a track — so the same
+    question goes to the recording index, which filters by artist id on
+    MusicBrainz's side (`search_mb`'s `artist_id` becomes the `arid:` clause).
+    One request, no paging: this is one labelled row beside the artist's own
+    records, not a crawl of a discography."""
+    mbid = str(artist_mbid or "").strip().lower()
+    if not mbid:
+        return {"rows": [], "total": None}
+    result = integrations.search_mb("recording", "",
+                                    limit=max(1, min(SEARCH_LIMIT, int(limit))),
+                                    offset=0, artist_id=mbid)
+    rows = [_mb_recording_row(row) for row in (result or {}).get("rows") or []]
     return {"rows": rows, "total": _int((result or {}).get("total"))}
 
 

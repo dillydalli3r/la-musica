@@ -613,6 +613,13 @@ table td {
   pointer-events: none;
   background: radial-gradient(ellipse 125% 100% at 50% 45%, transparent 46%, rgb(9 9 11 / 0.42) 100%);
 }
+/* Lyrics legibility: the fullscreen player's backdrop is a light additive
+   color field, and white/grey text over a bright cover washes out. A tight
+   dark shadow under every glyph keeps the line readable without dimming the
+   ambience (the pane's own scrim is the other half of the fix). */
+.np-shade {
+  text-shadow: 0 1px 2px rgb(0 0 0 / 0.55), 0 0 8px rgb(0 0 0 / 0.35);
+}
 /* gentle breathing on the artwork glow */
 @keyframes glow-pulse {
   0%, 100% { opacity: 0.55; transform: scale(1); }
@@ -704,22 +711,17 @@ table td {
   50% { box-shadow: 0 0 0 5px rgb(239 68 68 / 0); }
 }
 
-/* The notification tray's bell tips when the tray is opened: the click has to
-   look like it did something even before the panel paints. It hangs from its
-   own top (a pendulum, not a spin), and the element is remounted per click
-   (React `key`), so opening it again replays the swing instead of hanging
-   still. 0.5 s of swing over a 0.15 s fade — the icon leads, the panel
-   follows. */
-@keyframes bell-swing {
-  0%   { transform: rotate(0deg); }
-  25%  { transform: rotate(-14deg); }
-  55%  { transform: rotate(11deg); }
-  80%  { transform: rotate(-5deg); }
-  100% { transform: rotate(0deg); }
+/* The notification tray's bell shows the tray is open WITHOUT moving: the
+   glyph stays exactly where it is and only its brightness pulses. An earlier
+   version swung it on its own top, which reads as the icon shifting under the
+   cursor (the report this replaces); a state change is opacity and brightness,
+   never position. */
+@keyframes bell-open {
+  0%, 100% { opacity: 1; filter: brightness(1.25); }
+  50%      { opacity: 0.6; filter: brightness(1); }
 }
-.bell-swing {
-  transform-origin: 50% 10%;
-  animation: bell-swing 0.5s var(--ease-motion);
+.bell-open {
+  animation: bell-open 1.1s ease-in-out infinite;
 }
 
 @keyframes fade-in {

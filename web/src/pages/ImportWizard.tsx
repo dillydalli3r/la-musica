@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   UploadCloud, ExternalLink, Check, ChevronLeft, ChevronRight, ChevronDown, Wand2,
   Plus, Trash2, Disc3, FolderOpen, X, Search, Loader2, Image as ImageIcon, AlertTriangle,
-  Languages,
+  Languages, RotateCcw,
 } from "lucide-react";
 import { api, answerSources, replyFor, IN_MOBILE_SHELL } from "../api";
 import type { AdvisoryFetchResult, MetadataFetchItem, MetadataItemKind } from "../api";
@@ -19,8 +19,9 @@ import PageHeader from "../components/PageHeader";
 import { useI18n } from "../lib/i18n";
 import MetadataReviewModal from "../components/MetadataReviewModal";
 import type {
-  AcoustidAlbumMatch, AcoustidMatch, CoverResult, ImportBulkJob, ImportPrompt,
-  ImportScriptsPreview, LyricsAutoResult, MBRelease, MatchSuggestion, ScriptRunResult, Track,
+  AcoustidAlbumMatch, AcoustidMatch, AcoustidSubmitResult, AcoustidWrite, CoverResult,
+  ImportBulkJob, ImportPrompt, ImportScriptsPreview, LyricsAutoResult, MBRelease, MatchSuggestion,
+  ScriptRunResult, Track,
 } from "../types";
 import { SCRIPTS, DEFAULT_RUN_ALL, SCRIPT_LABEL, isScriptId } from "../lib/scripts";
 import { fmtCounts, fmtSteps } from "../lib/fmt";
@@ -437,6 +438,12 @@ export default function ImportWizard() {
   const queueMode = uploaded.length > 1 || albums.length > 1;
   const [acoustid, setAcoustid] = useState<AcoustidMatch | null>(null);
   const [acoustidBusy, setAcoustidBusy] = useState(false);
+  // Albums whose accepted match was WRITTEN into the files (ACOUSTID_ID +
+  // ACOUSTID_FINGERPRINT). Only those can be submitted to AcoustID — the
+  // submission reads the pair back off the files — so the block offers the
+  // action per applied row and nothing else. Cleared by a new fingerprint run,
+  // whose rows have not been applied yet.
+  const [acoustidApplied, setAcoustidApplied] = useState<Record<string, true>>({});
   const [matchAllBusy, setMatchAllBusy] = useState(false);
   // Per-track results of the last lyrics auto-import (provider per track).
   const [lyrResults, setLyrResults] = useState<Record<string, LyricsAutoResult>>({});
@@ -1356,6 +1363,9 @@ export default function ImportWizard() {
     try {
       const res = await api.importAcoustid(paths, false, staged);
       setAcoustid(res);
+      // A fresh run's rows carry no accepted match yet, so no row may offer
+      // the submission the ids alone make possible.
+      setAcoustidApplied({});
       if (!res.available) toast(`Fingerprinting unavailable — ${res.note}`);
     } catch (e) {
       toast.error(String(e));
@@ -1400,15 +1410,28 @@ export default function ImportWizard() {
       setReleaseId(rid);
       await pickRelease(rid, row.path);
       // Accepting the match: keep the fingerprint on the album, so the
-      // on-disk check agrees with what was just matched.
+      // on-disk check agrees with what was just matched. The row the wizard
+      // was SHOWN goes with it: the server writes straight from that payload
+      // (no fpcalc, no lookup — a transient network failure on this second
+      // pass used to turn a displayed match into zero tags).
       try {
-        const applied = await api.importAcoustid([row.path], true, staged);
-        const tagged = applied.albums?.find((a) => a.path === row.path)?.tagged ?? 0;
-        toast(
-          tagged
-            ? `Identity tags written to ${tagged} track(s)`
-            : "AcoustID identity tags not written — the files carry none of the tag families it targets"
-        );
+        const applied = await api.importAcoustid([row.path], true, staged, row);
+        const appliedRow = applied.albums?.find((a) => a.path === row.path);
+        const tagged = appliedRow?.tagged ?? 0;
+        // The failed writes are the answer that matters when nothing (or not
+        // everything) went in. "0 tagged" alone used to read as "the files
+        // carry none of the tag families it targets" — a .wv album is a real
+        // match no writer can touch, and the server names it per file.
+        const problems = (appliedRow?.writes ?? []).filter((w) => !w.ok);
+        if (problems.length) {
+          const total = (appliedRow?.writes ?? []).length || problems.length;
+          toast.error(
+            `AcoustID identity tags written to ${tagged} of ${total} track(s) — ${writeProblems(problems)}`
+          );
+        } else {
+          toast(`Identity tags written to ${tagged} track(s)`);
+        }
+        if (tagged) setAcoustidApplied((m) => ({ ...m, [row.path]: true }));
       } catch (e) {
         toast(`Matched, but the AcoustID identity tags failed: ${e}`);
       }
@@ -1418,6 +1441,45 @@ export default function ImportWizard() {
       setAct(null);
       setAcoustidBusy(false);
       setFetchStatus(null);
+    }
+  };
+
+  /** "Submit to AcoustID" — publish the fingerprint/id pair the ACCEPTED match
+   *  wrote into the files to AcoustID's public database. Nothing is
+   *  fingerprinted again and nothing is written locally (mlo.acoustid.
+   *  submit_fingerprints reads the pair back off the files), and the reply is
+   *  the service's own: how many it took, or the sentence it refused with
+   *  (no `acoustid_user_key`, or the key refused) — never a generic "failed".
+   *  The block only offers this for a row whose ids are on the files, which is
+   *  what makes the press mean something. */
+  const submitAcoustidRelease = async (
+    row: AcoustidAlbumMatch
+  ): Promise<AcoustidSubmitReply> => {
+    setAcoustidBusy(true);
+    setAct({ label: "Publishing these fingerprints to AcoustID…" });
+    try {
+      const result = await api.importAcoustidSubmit([row.path], staged);
+      if (!result.available) {
+        toast.error(`AcoustID refused the submission — ${result.note}`);
+      } else if (result.submitted) {
+        toast.success(
+          `AcoustID accepted ${result.submitted} of ${result.tracks.total} fingerprint(s)` +
+            (result.tracks.skipped ? ` · ${result.tracks.skipped} skipped` : "")
+        );
+      } else {
+        toast.error(
+          `AcoustID took no fingerprint — ${result.note || `${result.tracks.skipped} track(s) had nothing to submit`}`
+        );
+      }
+      return { ok: true, result };
+    } catch (e) {
+      // The sentence the route refused with, verbatim: 409 while manual
+      // importing is off, 400 without the confirm the client always sends.
+      toast.error(String(e));
+      return { ok: false, error: String(e) };
+    } finally {
+      setAct(null);
+      setAcoustidBusy(false);
     }
   };
 
@@ -1503,7 +1565,13 @@ export default function ImportWizard() {
         DISCTOTAL: release?.medium_count ? String(release.medium_count) : null,
         MEDIA: mediumFormat,
         RELEASETYPE: release?.release_type || null,
-        RELEASECOUNTRY: release?.country || null,
+        // The release's WHOLE event set, "; "-joined — the one spelling the
+        // backend writes and the badges read back (`releaseCountries`). `country`
+        // alone is MusicBrainz's FIRST event: writing it claimed a release that
+        // came out in several countries came out in one of them.
+        RELEASECOUNTRY:
+          (release?.countries ?? []).map((c) => c.code).filter(Boolean).join("; ")
+          || release?.country || null,
         CATALOGNUMBER: release?.catalog_number || null,
         LABEL: release?.label || null,
       };
@@ -1917,32 +1985,59 @@ export default function ImportWizard() {
       return;
     }
     setBusy(true);
-    setAct({
-      label:
-        targets.length === 1
-          ? `Fetching lyrics for ${displayTitle(targets[0])}…`
-          : `Fetching lyrics for ${targets.length} track(s)…`,
-    });
     try {
-      const res = await api.lyricsAuto(targets, false, staged);
-      setLyrResults((m) => {
-        const next = { ...m };
-        for (const r of res.results) next[r.path] = r;
-        return next;
-      });
-      const byProvider = new Map<string, number>();
-      for (const r of res.results) {
-        if (r.status === "ok" && r.provider_label)
-          byProvider.set(r.provider_label, (byProvider.get(r.provider_label) ?? 0) + 1);
+      // Chunked and COUNTED. One POST for the whole album left the strip
+      // indeterminate, and because the server writes each track as it goes,
+      // the row kept reading "Fetching lyrics for 16 track(s)…" long after
+      // the lyrics were on disk (the report this fixes). Eight at a time
+      // keeps each request short and lets the bar say where the batch is.
+      const CHUNK = 8;
+      let ok = 0;
+      let skipped = 0;
+      let failed = 0;
+      const byProvider: Record<string, number> = {};
+      for (let i = 0; i < targets.length; i += CHUNK) {
+        const slice = targets.slice(i, i + CHUNK);
+        setAct({
+          label:
+            targets.length === 1
+              ? `Fetching lyrics for ${displayTitle(targets[0])}…`
+              : `Fetching lyrics — ${i}/${targets.length}…`,
+          done: i,
+          total: targets.length,
+        });
+        const res = await api.lyricsAuto(slice, false, staged);
+        ok += res.ok;
+        skipped += res.skipped;
+        failed += res.failed;
+        for (const r of res.results) {
+          if (r.status === "ok" && r.provider_label)
+            byProvider[r.provider_label] = (byProvider[r.provider_label] ?? 0) + 1;
+        }
+        // The rows tick as each chunk lands: the per-track marks are what
+        // this step is for, and they come from the fetch itself.
+        setLyrResults((m) => {
+          const next = { ...m };
+          for (const r of res.results) next[r.path] = r;
+          return next;
+        });
       }
-      const got = [...byProvider].map(([label, n]) => `${label} ${n}`).join(", ");
+      // The fetch is over — the lyrics are on disk. What follows is a second
+      // server pass (the folder is re-read and re-graded); it wears its own
+      // label so the strip can never claim it is still fetching.
+      setAct({
+        label: "Reading the album back after the fetch…",
+        done: targets.length,
+        total: targets.length,
+      });
+      const got = Object.entries(byProvider).map(([label, n]) => `${label} ${n}`).join(", ");
       const rest = [
-        res.skipped ? `${res.skipped} Skipped` : "",
-        res.failed ? `${res.failed} Failed` : "",
+        skipped ? `${skipped} Skipped` : "",
+        failed ? `${failed} Failed` : "",
       ].filter(Boolean).join(", ");
       toast(
-        res.ok
-          ? `Lyrics written for ${res.ok} track(s)${got ? ` — ${got}` : ""}${rest ? ` (${rest})` : ""}`
+        ok
+          ? `Lyrics written for ${ok} track(s)${got ? ` — ${got}` : ""}${rest ? ` (${rest})` : ""}`
           : `No new lyrics found${rest ? ` — ${rest}` : ""}`
       );
       qc.invalidateQueries({ queryKey: ["library"] });
@@ -2084,9 +2179,15 @@ export default function ImportWizard() {
    *  album page's Check button uses (`/api/mb/advisory/fetch`): the server
    *  keys Apple's explicit-edition album route on the folder's track count,
    *  so a per-track loop would degrade the answers it can get. The reply's
-   *  per-track `values`/`sources`/`answers` are the outcome rows below, and a
-   *  failure is shown rather than swallowed. */
-  const fetchAdvisoryAll = async () => {
+   *  per-track `values`/`sources`/`answers`/`status` are the outcome rows
+   *  below, and a failure is shown rather than swallowed.
+
+   *  `force` is the re-rate: the server echoes a file that already carries a
+   *  valid 0/1/2 instead of asking anyone, and `force` asks anyway and writes
+   *  what the sources state — the ONLY route that can lower a rating (a 0 an
+   *  earlier run invented outlives every provider that later knew better), so
+   *  it is only ever reached through the confirmed button below. */
+  const fetchAdvisoryAll = async (force = false) => {
     const targets = stepTracks.map((t) => t.path);
     if (!targets.length) {
       toast("No tracks to fetch an advisory for");
@@ -2094,9 +2195,13 @@ export default function ImportWizard() {
     }
     setBusy(true);
     setAdvError(null);
-    setAct({ label: `Asking the advisory sources for ${targets.length} track(s)…` });
+    setAct({
+      label: force
+        ? `Re-rating ${targets.length} track(s) — asking the sources anyway…`
+        : `Asking the advisory sources for ${targets.length} track(s)…`,
+    });
     try {
-      const res = await api.mbAdvisoryFetch({ paths: targets, staged });
+      const res = await api.mbAdvisoryFetch({ paths: targets, staged, force });
       setAdvReply(res);
       // The server wrote what it found — mirror it into the step's buttons so
       // they show the fetched value, not the pre-fetch tag.
@@ -2109,11 +2214,10 @@ export default function ImportWizard() {
         return next;
       });
       const answered = targets.filter((p) => replyFor(res.answers, p)).length;
-      toast(
-        res.skipped
-          ? `Nothing written — ${res.skipped}`
-          : `${advisoryOutcome(res)} — ${answered} of ${targets.length} track(s) had a source answer`
-      );
+      // `advisoryOutcome` leads, not a bare count: a reply that wrote nothing
+      // says WHY (already rated, re-checked and unchanged, or gated) instead of
+      // reading like a re-rate that found nothing.
+      toast(`${advisoryOutcome(res)} — ${answered} of ${targets.length} track(s) had a source answer`);
       qc.invalidateQueries({ queryKey: ["library"] });
       qc.invalidateQueries({ queryKey: ["album"] });
     } catch (e) {
@@ -2123,6 +2227,22 @@ export default function ImportWizard() {
       setAct(null);
       setBusy(false);
     }
+  };
+
+  /** The re-rate, behind a confirmation: it asks for tracks the server would
+   *  otherwise leave alone and can LOWER a rating, which is not something a
+   *  stray click may do. */
+  const reRateAdvisoryAll = () => {
+    if (!stepTracks.length) return;
+    if (
+      !window.confirm(
+        `Re-rate ITUNESADVISORY for ${stepTracks.length} track(s) and write what the sources state?\n\n` +
+          "This asks even for files that already carry a value, and a source's answer can lower a rating (1 → 0). " +
+          "The album tag ALBUMITUNESADVISORY is derived from the new values."
+      )
+    )
+      return;
+    void fetchAdvisoryAll(true);
   };
 
   const applyAdvisoryToAll = (v: string) => {
@@ -2709,8 +2829,10 @@ const finish = async () => {
             queue
             canMatchAll={!!(releaseId || extractMbid(mbLink))}
             matchAllBusy={matchAllBusy}
+            applied={acoustidApplied}
             onRun={runAcoustid}
             onUse={useAcoustidRelease}
+            onSubmit={submitAcoustidRelease}
             onMatchAll={matchQueueToRelease}
           />
         </div>
@@ -2900,8 +3022,10 @@ const finish = async () => {
                 queue={false}
                 canMatchAll={false}
                 matchAllBusy={false}
+                applied={acoustidApplied}
                 onRun={runAcoustid}
                 onUse={useAcoustidRelease}
+                onSubmit={submitAcoustidRelease}
                 onMatchAll={matchQueueToRelease}
               />
             )}
@@ -3472,6 +3596,13 @@ const finish = async () => {
                 releaseGroupMbid={release?.release_group_id ?? undefined}
                 releaseMbid={releaseId || undefined}
                 tracks={coverSel.size ? selectedCoverFiles() : undefined}
+                // The release this album is being matched to states its own
+                // tracklist, so the search verifies a candidate's release
+                // against it: a karaoke or other-album row can carry the same
+                // artist and title, and only the count tells them apart. The
+                // folder's own file count is NOT used — a partial rip of the
+                // matched release would then contradict the right cover.
+                trackCount={release?.media?.length || undefined}
                 initialResults={coverSearch.results}
                 initialProvider={coverSearch.provider}
                 initialChosen={stagedCovers.data?.chosen ?? null}
@@ -3934,15 +4065,23 @@ const finish = async () => {
               <div className="flex items-center gap-2 flex-wrap">
                 <button
                   className="btn-ghost !py-1 text-xs tap"
-                  onClick={fetchAdvisoryAll}
+                  onClick={() => fetchAdvisoryAll(false)}
                   disabled={busy || !stepTracks.length}
-                  title="Ask the configured advisory sources (Deezer / Spotify by ISRC, Apple) for every track and write what they state"
+                  title="Ask the configured advisory sources (Deezer / Spotify by ISRC, Apple) for every track and write what they state. A track that already carries a value keeps it — use Re-rate to ask anyway."
                 >
                   <CloudDownloadIcon /> Auto-import advisory for all tracks
                 </button>
+                <button
+                  className="btn-ghost !py-1 text-xs tap"
+                  onClick={reRateAdvisoryAll}
+                  disabled={busy || !stepTracks.length}
+                  title="Ask the sources again even for tracks that already carry a value, and write what they state — the only way a rating can go down"
+                >
+                  <RotateCcw className="h-3 w-3" /> Re-rate…
+                </button>
                 <span className="text-[11px] text-zinc-500">
                   Asks the same sources the album page's Check does, for all {stepTracks.length} track(s) at once.
-                  {advReply ? ` ${advReply.updated} value(s) written.` : ""}
+                  {advReply ? ` ${advisoryOutcome(advReply)}` : ""}
                 </span>
               </div>
               {advError && (
@@ -3956,10 +4095,15 @@ const finish = async () => {
                     <div key={t.path} className="flex items-center gap-2 text-[11px]">
                       <TrackNoBadge disc={discNoOf(t.path)} track={trackNoOf(t.path)} />
                       <span className="flex-1 truncate text-zinc-400">{displayTitle(t.path)}</span>
-                      <span className="text-zinc-300" title="what the sources said, and who said it">
+                      {/* The line carries what happened to THIS track's value
+                          (`status`): a re-check the sources agreed with and a
+                          gate refusal are not a write, and a bare "0 written"
+                          would blur all three. */}
+                      <span className="text-zinc-300" title="what the sources said, who said it, and what this run did with the value">
                         {advisoryLine(
                           replyFor(advReply.values, t.path),
-                          answerSources(replyFor(advReply.answers, t.path), replyFor(advReply.sources, t.path))
+                          answerSources(replyFor(advReply.answers, t.path), replyFor(advReply.sources, t.path)),
+                          replyFor(advReply.status, t.path)
                         )}
                       </span>
                     </div>
@@ -4254,11 +4398,67 @@ function ScriptChainNote({ preview }: { preview?: ImportScriptsPreview }) {
   );
 }
 
+/** What one Submit-to-AcoustID press answered: the database's own reply, or
+ *  the sentence the route refused with (409 while manual importing is off,
+ *  400 without the confirm the client sends) — never a generic "failed". */
+type AcoustidSubmitReply = { ok: true; result: AcoustidSubmitResult } | { ok: false; error: string };
+
+/** The reply of one submission, in the service's own words: how many
+ *  fingerprints it accepted, or the sentence it refused with — the two are
+ *  never collapsed into a generic "failed". */
+function SubmitReplyText({ reply }: { reply: AcoustidSubmitReply }) {
+  if (!reply.ok) return <span className="text-red-300">{reply.error}</span>;
+  const r = reply.result;
+  if (!r.available) {
+    return (
+      <span className="text-amber-300">
+        AcoustID refused the submission — {r.note}
+        {r.code ? ` (${r.code})` : ""}. It is the USER key that submits: set it in{" "}
+        <b className="text-amber-100">Settings → Import</b>.
+      </span>
+    );
+  }
+  return (
+    <>
+      AcoustID accepted <b className="text-zinc-300">{r.submitted}</b> of {r.tracks.total} fingerprint(s)
+      {r.tracks.skipped
+        ? ` · ${r.tracks.skipped} skipped (${(r.skips ?? [])
+            .slice(0, 2)
+            .map((s) => s.reason || s.code)
+            .join("; ")})`
+        : ""}
+      .
+    </>
+  );
+}
+
+/** One line naming the tracks whose identity tags did NOT go in, from the
+ *  server's own write codes (`writes`). Three names plus a count: a toast is
+ *  one line, and the point is to say what failed, not to list forty files —
+ *  `unsupported container: .wv (03 - track.wv)` is the shape, with the
+ *  extension the server itself refuses (`mlo.acoustid.write_tags`). */
+function writeProblems(problems: AcoustidWrite[]): string {
+  const named = problems.slice(0, 3).map((w) => {
+    const base = w.path.split(/[\\/]/).pop() ?? w.path;
+    if (w.code === "unsupported_container") {
+      const ext = base.includes(".") ? base.slice(base.lastIndexOf(".")).toLowerCase() : base;
+      return `unsupported container: ${ext} (${base})`;
+    }
+    return `${(w.code ?? "write failed").replace(/_/g, " ")} (${base})`;
+  });
+  const rest = problems.length - named.length;
+  return `${named.join(", ")}${rest > 0 ? ` and ${rest} more` : ""}`;
+}
+
 /** AcoustID stage: fingerprint the staged audio and name the release group it
  *  really is. "Use this release" hands the result back to the wizard's own
- *  release fetch + auto-match flow — there is no second tag writer. */
+ *  release fetch + auto-match flow — there is no second tag writer. Accepting
+ *  it also writes the identity pair onto the files, and THAT is what makes the
+ *  second action possible: "Submit to AcoustID" publishes the pair the files
+ *  carry, so it is offered per applied row only. */
 function AcoustidBlock({
-  match, busy, queue, canMatchAll, matchAllBusy, onRun, onUse, onMatchAll,
+  match, busy, queue, canMatchAll, matchAllBusy, applied, onRun, onUse, onSubmit,
+  onMatchAll,
 }: {
   match: AcoustidMatch | null;
   busy: boolean;
@@ -4266,10 +4466,36 @@ function AcoustidBlock({
   queue: boolean;
   canMatchAll: boolean;
   matchAllBusy: boolean;
+  /** Album paths whose accepted match was written into the files. */
+  applied: Record<string, true>;
   onRun: () => void;
   onUse: (row: AcoustidAlbumMatch) => void;
+  /** Publish this row's already-tagged fingerprints to AcoustID. */
+  onSubmit: (row: AcoustidAlbumMatch) => Promise<AcoustidSubmitReply>;
   onMatchAll: () => void;
 }) {
+  // Which row is armed for the public submission (two presses, like the
+  // LRCLIB publish panel: publishing to AcoustID is outward-facing, so one
+  // click must never do it by accident) and what the database answered.
+  const [arm, setArm] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState<string | null>(null);
+  const [replies, setReplies] = useState<Record<string, AcoustidSubmitReply>>({});
+
+  const submit = async (row: AcoustidAlbumMatch) => {
+    if (arm !== row.path) {
+      setArm(row.path);
+      // The arm cancels itself, so a press that was not meant as a submission
+      // cannot be completed by a later, unrelated click.
+      window.setTimeout(() => setArm((a) => (a === row.path ? null : a)), 4000);
+      return;
+    }
+    setArm(null);
+    setSubmitting(row.path);
+    const reply = await onSubmit(row);
+    setReplies((r) => ({ ...r, [row.path]: reply }));
+    setSubmitting(null);
+  };
+
   return (
     <div className="panel p-4 space-y-2">
       <div className="flex items-center gap-2 flex-wrap">
@@ -4360,6 +4586,38 @@ function AcoustidBlock({
                   >
                     Use this release
                   </button>
+                  {/* Beside it: the ids are on the files (this row was
+                      applied), so the fingerprints can be published. Two
+                      presses, with the second one labelled — AcoustID's
+                      database is public. */}
+                  {applied[row.path] && (
+                    <button
+                      className={`btn-ghost !py-0.5 text-[11px] tap ${arm === row.path ? "!bg-red-600 !text-white" : ""}`}
+                      onClick={() => submit(row)}
+                      disabled={busy || submitting === row.path}
+                      title={
+                        arm === row.path
+                          ? "Publishes the ACOUSTID_FINGERPRINT/ID pair already on these files to AcoustID's public database — press again to confirm"
+                          : "Publish the fingerprint and recording id already on these files to AcoustID's public database (nothing is re-fingerprinted)"
+                      }
+                    >
+                      {submitting === row.path ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <UploadCloud className="h-3.5 w-3.5" />
+                      )}
+                      {arm === row.path ? "Confirm — publishes publicly" : "Submit to AcoustID"}
+                    </button>
+                  )}
+                  {arm === row.path && (
+                    <button
+                      className="btn-ghost !py-0.5 text-[11px] tap"
+                      onClick={() => setArm(null)}
+                      title="Leave the fingerprints unpublished"
+                    >
+                      <X className="h-3 w-3" /> Cancel
+                    </button>
+                  )}
                 </>
               ) : row.status === "error" ? (
                 // A lookup that FAILED is not a lookup that found nothing: the
@@ -4380,6 +4638,15 @@ function AcoustidBlock({
                 <span className="text-zinc-500">
                   {row.reason || `No release group matched ${row.total} track(s)`} — search by title or paste
                   a release link below.
+                </span>
+              )}
+              {/* Reply of the last submission for this row — the service's own
+                  answer, in its own words. A refusal (no user key, or one it
+                  rejects) is NOT a generic failure: Settings → Import is where
+                  the key lives, so the sentence names it. */}
+              {replies[row.path] && (
+                <span className="basis-full text-[11px] text-zinc-500">
+                  <SubmitReplyText reply={replies[row.path]} />
                 </span>
               )}
             </div>

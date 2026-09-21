@@ -13,7 +13,9 @@ REPORTS, what a script WRITES):
     again over a whole library.
   * `AudioFile.set_tag` applies it, so an import, a wizard write, a script and
     a manual edit land the same. A multi-line value (lyrics) is NEVER collapsed
-    or case-changed — the whitespace inside it is the text.
+    or case-changed — the whitespace inside it is the text. A LIST — several
+    answers for one field, like a release's countries — is written as repeated
+    container fields, canonicalised per value and read back "; "-joined.
   * the grader: `grade_check_tag_case` fails a track whose canonical-cased tag
     is spelled another way, costing exactly ONE grade point per track (issue
     code TAG_CASE), and `grade_check_tag_spaces` now also fails a run of two or
@@ -200,6 +202,22 @@ ok(got.get_tag("RELEASECOUNTRY") == "US" and got.get_tag("SCRIPT") == "Latn",
 ok(got.get_tag("TITLE") == "Song Name",
    f"internal spacing is collapsed on write ({got.get_tag('TITLE')!r})")
 ok(got.get_tag("LABEL") == "4AD", "a free-text value is trimmed, never re-cased")
+
+# A LIST is the app's spelling for a tag that holds several answers: one
+# repeated container field per value, read back "; "-joined. RELEASECOUNTRY
+# carries every country a release came out in this way (issue #18), and each
+# code takes its own canonical casing.
+af = AudioFile(track)
+af.set_tag("RELEASECOUNTRY", ["us", "ca", "xe"])
+af.defer_save(False)
+got = AudioFile(track)
+ok(got.get_tag("RELEASECOUNTRY") == "US; CA; XE",
+   "a country list is written canonical per code and read back joined "
+   f"({got.get_tag('RELEASECOUNTRY')!r})")
+from mutagen.flac import FLAC                                       # noqa: E402
+
+ok(FLAC(track)["releasecountry"] == ["US", "CA", "XE"],
+   "…as repeated fields on disk, not one 'US; CA; XE' value")
 
 # Free text keeps its case; a multi-line value is not collapsed.
 af = AudioFile(track)

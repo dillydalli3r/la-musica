@@ -202,6 +202,337 @@ finally:
     (fetchdeps._existing_install, fetchdeps.installed_versions,
      fetchdeps.get_latest_release, fetchdeps._download) = real
 
+# --------------------------------------------------------------------------- #
+# 6. A pip tool behind its upstream release actually updates
+# --------------------------------------------------------------------------- #
+# librosa/beets/yt-dlp could never move: _install_pip_package returned "already
+# installed" whenever a folder existed at all, installed the hardcoded pin when
+# one did not, and installed_versions() reported the pin for any folder — so the
+# row said Update, the press answered "nothing to do", and a successful install
+# could not even be seen. This walks the whole loop with pip itself stubbed (no
+# package is fetched from PyPI) inside a temp .dependencies.
+import contextlib  # noqa: E402
+import threading  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+import mlo.tools as tools_mod  # noqa: E402
+
+
+def sandbox_deps(deps_dir):
+    """Point every install/detection path at a temp .dependencies folder."""
+    real = (fetchdeps.DEPS_DIR, tools_mod.DEPS_DIR)
+    fetchdeps.DEPS_DIR = tools_mod.DEPS_DIR = deps_dir
+    tools_mod._TOOLS_CACHE = None
+    return real
+
+
+def restore_deps(real):
+    fetchdeps.DEPS_DIR, tools_mod.DEPS_DIR = real
+    tools_mod._TOOLS_CACHE = None
+
+
+@contextlib.contextmanager
+def upstream_cache(entries=None):
+    """A private upstream cache for one block: the process-wide one holds
+    whatever a live background pass has already fetched."""
+    real = dict(fetchdeps._upstream_cache)
+    fetchdeps._upstream_cache.clear()
+    fetchdeps._upstream_cache.update(entries or {})
+    try:
+        yield
+    finally:
+        fetchdeps._upstream_cache.clear()
+        fetchdeps._upstream_cache.update(real)
+
+
+def rows_with(installed, upstream):
+    """The Dependencies rows for a stubbed world: {key: version} installed,
+    {key: version} upstream — never the tools this host happens to have."""
+    real = (fetchdeps.detect_all_tools, fetchdeps.installed_versions,
+            fetchdeps.upstream_versions)
+    fetchdeps.detect_all_tools = lambda: {
+        key: {"version": version, "oxipng_exe": "x"} for key, version in installed.items()}
+    fetchdeps.installed_versions = lambda: dict(installed)
+    fetchdeps.upstream_versions = lambda refresh=False, block=False: {
+        key: {"version": version, "checked_at": 0.0, "error": None}
+        for key, version in upstream.items()}
+    try:
+        return {row["key"]: row for row in fetchdeps.dependency_rows()}
+    finally:
+        (fetchdeps.detect_all_tools, fetchdeps.installed_versions,
+         fetchdeps.upstream_versions) = real
+
+
+def vendor_pip_pkg(deps_dir, key, version):
+    """A folder shaped the way `pip install --target` leaves one, dist-info
+    included: that metadata is what detection reads the version from."""
+    top = tools_mod.PIP_IMPORT_NAMES.get(key, key)
+    root = os.path.join(deps_dir, f"{key} v{version}")
+    os.makedirs(os.path.join(root, top), exist_ok=True)
+    open(os.path.join(root, top, "__init__.py"), "w").close()
+    dist = os.path.join(root, f"{key.replace('-', '_')}-{version}.dist-info")
+    os.makedirs(dist, exist_ok=True)
+    open(os.path.join(dist, "METADATA"), "w").close()
+    return root
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    vendor_pip_pkg(tmp, "librosa", "0.11.0")
+    real = (sandbox_deps(tmp), fetchdeps._api_json, fetchdeps.run_tool)
+    seen = {}
+
+    def _api(url, headers=None):
+        if url == "https://pypi.org/pypi/librosa/json":
+            return {"info": {"version": "0.12.0"}}
+        raise AssertionError(f"unexpected URL {url}")
+
+    def _pip(cmd, **kw):
+        seen["cmd"] = list(cmd)
+        # pip itself is replaced, but it writes the package for real: the
+        # assertions below read a folder rather than a stub's answer.
+        vendor_pip_pkg(tmp, "librosa", seen["cmd"][-1].split("==")[-1])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    fetchdeps._api_json = _api
+    fetchdeps.run_tool = _pip
+    try:
+        with upstream_cache({}):
+            def librosa_row():
+                """The librosa row as the page paints it, with the upstream
+                answer the probe would have given. Everything else is real:
+                detection, the installed version, the state logic."""
+                real_up = fetchdeps.upstream_versions
+                fetchdeps.upstream_versions = lambda refresh=False, block=False: (
+                    {"librosa": {"version": "0.12.0", "checked_at": 0.0, "error": None}})
+                try:
+                    return next(r for r in fetchdeps.dependency_rows()
+                                if r["key"] == "librosa")
+                finally:
+                    fetchdeps.upstream_versions = real_up
+
+            before = fetchdeps.installed_versions().get("librosa")
+            check(f"a vendored pip package reports its real version (got {before!r})",
+                  before == "0.11.0")
+
+            row_before = librosa_row()
+            got = fetchdeps.install_dependency("librosa", log=lambda m: None)
+            row_after = librosa_row()
+            after = fetchdeps.installed_versions().get("librosa")
+            print(f"  librosa row before: state={row_before['state']} "
+                  f"installed={row_before['installed_version']} "
+                  f"available={row_before['upstream_version']}")
+            print(f"  librosa row after:  state={row_after['state']} "
+                  f"installed={row_after['installed_version']} "
+                  f"available={row_after['upstream_version']}")
+
+        check(f"a pip tool behind upstream installs the upstream version (got {got!r})",
+              got == "0.12.0")
+        check(f"...asking pip for that exact version, not the pin ({seen.get('cmd')})",
+              seen.get("cmd", [""])[-1] == "librosa==0.12.0")
+        check("...into a folder stamped with it",
+              os.path.isfile(os.path.join(tmp, "librosa v0.12.0", "librosa", "__init__.py")))
+        check("...pruning the version it replaced",
+              not os.path.isdir(os.path.join(tmp, "librosa v0.11.0")))
+        check(f"...and reporting what is now installed (got {after!r})", after == "0.12.0")
+        check("the row read Update before the press",
+              row_before["state"] == "update" and row_before["update_available"] is True)
+        check("...and Ready after it, at the new version",
+              row_after["state"] == "ok" and row_after["installed_version"] == "0.12.0")
+    finally:
+        fetchdeps._api_json, fetchdeps.run_tool = real[1], real[2]
+        restore_deps(real[0])
+
+
+# --------------------------------------------------------------------------- #
+# 7. A PATH copy at the pin updates; a copy newer than upstream is untouched
+# --------------------------------------------------------------------------- #
+# "Already installed" is what the DETECTOR says, PATH included. Deciding it
+# from a .dependencies folder alone meant a copy on PATH at the pin made the
+# press "reinstall" the pin (changed: false, chip survives), and a copy NEWER
+# than the pin was walked DOWN into .dependencies. oxipng is the key here
+# because this host can install it natively on every platform the suite runs on.
+if fetchdeps.installable("oxipng"):
+    patterns = fetchdeps._asset_patterns("oxipng")
+    asset = ("oxipng-10.2.1-x86_64-pc-windows-msvc.zip"
+             if any(p.endswith(r"\.zip$") for p in patterns)
+             else "oxipng-10.2.1-x86_64-unknown-linux-musl.tar.gz")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        real = (sandbox_deps(tmp), fetchdeps._existing_install,
+                fetchdeps.installed_versions, fetchdeps.get_latest_release,
+                fetchdeps._download, fetchdeps._extract_archive,
+                fetchdeps._locate_binaries)
+        seen = {}
+
+        def _download(url, dest, progress=None):
+            seen.setdefault("urls", []).append(url)
+            with open(dest, "wb") as fh:
+                fh.write(b"x" * 8192)
+
+        def _extract(archive, dest_dir, log):
+            payload = os.path.join(dest_dir, "payload")
+            os.makedirs(payload, exist_ok=True)
+            open(os.path.join(payload, "oxipng.exe"), "wb").close()
+
+        def _refuse(*a, **k):
+            raise AssertionError("a copy that is not behind was re-downloaded")
+
+        fetchdeps._existing_install = lambda prefix, markers: None
+        fetchdeps.installed_versions = lambda: {"oxipng": "10.2.0"}
+        fetchdeps.get_latest_release = lambda key, upstream=False: {
+            "version": "10.2.1" if upstream else "10.2.0",
+            "assets": [asset], "urls": {asset: "https://example.invalid/" + asset}}
+        fetchdeps._download, fetchdeps._extract_archive = _download, _extract
+        fetchdeps._locate_binaries = lambda root, key: os.path.join(root, "payload")
+        try:
+            got = fetchdeps.install_dependency("oxipng", log=lambda m: None)
+            check(f"a PATH copy at the pin installs the newest release (got {got!r})",
+                  got == "10.2.1")
+            check(f"...from the newest release, not the pin ({seen.get('urls')})",
+                  seen.get("urls") == ["https://example.invalid/" + asset])
+            check("...into a folder stamped with the new version",
+                  os.path.isfile(os.path.join(tmp, "oxipng v10.2.1", "oxipng.exe")))
+
+            # A copy NEWER than the newest release (a hand-pulled build, or a
+            # release upstream yanked): an update must leave it alone.
+            seen.clear()
+            fetchdeps.installed_versions = lambda: {"oxipng": "10.2.2"}
+            fetchdeps._download = _refuse
+            try:
+                got = fetchdeps.install_dependency("oxipng", log=lambda m: None)
+                check(f"a copy newer than the newest release is left alone (got {got!r})",
+                      got == "10.2.2")
+                check("...and nothing was downloaded for it", not seen.get("urls"))
+            except AssertionError as e:
+                check(f"a copy newer than the newest release is left alone ({e})", False)
+        finally:
+            (fetchdeps._existing_install, fetchdeps.installed_versions,
+             fetchdeps.get_latest_release, fetchdeps._download,
+             fetchdeps._extract_archive, fetchdeps._locate_binaries) = real[1:]
+            restore_deps(real[0])
+else:
+    print("  (no oxipng build for this host — skipping the PATH-copy checks)")
+
+
+# --------------------------------------------------------------------------- #
+# 8. beets, librosa and php report an AVAILABLE version at all
+# --------------------------------------------------------------------------- #
+# Three of the fifteen rows had no probe: their AVAILABLE column was empty and
+# no update could ever be offered for them. None of the three publishes GitHub
+# releases, so the probe reads PyPI's JSON (beets, librosa) and windows.php.net's
+# release index (php). The HTTP client is stubbed with the shape each API really
+# returns (checked against the live endpoints).
+PHP_INDEX = {
+    "8.1": {"version": "8.1.34",
+            "nts-vs16-x64": {"zip": {"path": "php-8.1.34-nts-Win32-vs16-x64.zip"}}},
+    "8.3": {"version": "8.3.33",
+            "nts-vs16-x64": {"zip": {"path": "php-8.3.33-nts-Win32-vs16-x64.zip"}}},
+    # 8.4 and 8.5 publish vs17 builds only — a php that needs the VC++ 2022
+    # redistributable — so they are not an update this app can install.
+    "8.4": {"version": "8.4.25",
+            "nts-vs17-x64": {"zip": {"path": "php-8.4.25-nts-Win32-vs17-x64.zip"}}},
+}
+PYPI_NEWEST = {"librosa": "1.0.0", "beets": "2.14.1"}
+
+real = (fetchdeps._api_json, dict(fetchdeps._php_build_cache))
+fetchdeps._php_build_cache.update(at=0.0, version=None, url=None)
+
+
+def _api(url, headers=None):
+    if url.startswith("https://pypi.org/pypi/"):
+        return {"info": {"version": PYPI_NEWEST[url.split("/")[4]]}}
+    if url == fetchdeps.PHP_RELEASES_URL:
+        return PHP_INDEX
+    raise AssertionError(f"unexpected URL {url}")
+
+
+fetchdeps._api_json = _api
+try:
+    for key in ("librosa", "beets"):
+        got = fetchdeps._probe_version(key)
+        check(f"{key}'s probe reads its newest release from PyPI (got {got!r})",
+              got == PYPI_NEWEST[key])
+    got = fetchdeps._probe_version("php")
+    check(f"php's probe reads windows.php.net and skips the vs17-only series "
+          f"(got {got!r})", got == "8.3.33")
+    check(f"php's install URL is upstream's own file name "
+          f"({fetchdeps.php_zip_url('8.3.33')})",
+          fetchdeps.php_zip_url("8.3.33")
+          == "https://windows.php.net/downloads/releases/php-8.3.33-nts-Win32-vs16-x64.zip")
+    check("...while the pinned build keeps its archived URL",
+          fetchdeps.php_zip_url(fetchdeps.PINNED["php"]["version"]) == fetchdeps.PHP_ZIP_URL)
+
+    rows = rows_with({"librosa": "0.11.0", "beets": "2.4.0", "php": "8.1.28"},
+                     {"librosa": "1.0.0", "beets": "2.14.1", "php": "8.3.33"})
+    for key in ("librosa", "beets", "php"):
+        row = rows[key]
+        check(f"{key} has a real AVAILABLE column ({row['upstream_version']!r})",
+              bool(row["upstream_version"]))
+        check(f"{key} behind upstream counts as an update",
+              row["update_available"] is True)
+        check(f"{key} reads Update where this host can install it "
+              f"({row['state']} / {row['install_kind']})",
+              row["state"] == ("update" if row["install_kind"] == "deps" else "ok"))
+finally:
+    fetchdeps._api_json = real[0]
+    fetchdeps._php_build_cache.update(real[1])
+
+
+# --------------------------------------------------------------------------- #
+# 9. Two installs of one tool cannot collide
+# --------------------------------------------------------------------------- #
+# Every row installs on its own now, so a second press of one row — or the
+# auto-update pass landing on a tool a user is installing — must not unpack a
+# second download into the folder the first is writing. It is refused, in words
+# the caller can show.
+with tempfile.TemporaryDirectory() as tmp:
+    real = (sandbox_deps(tmp), fetchdeps._api_json, fetchdeps.run_tool)
+    busy = threading.Event()      # set from INSIDE pip: the lock is held
+    done = threading.Event()
+    outcome = {}
+
+    def _api(url, headers=None):
+        return {"info": {"version": "0.12.0"}}
+
+    def _slow_pip(cmd, **kw):
+        busy.set()
+        done.wait(30)
+        vendor_pip_pkg(tmp, "librosa", list(cmd)[-1].split("==")[-1])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    fetchdeps._api_json = _api
+    fetchdeps.run_tool = _slow_pip
+
+    def _first_install():
+        try:
+            outcome["version"] = fetchdeps.install_dependency("librosa", log=lambda m: None)
+        except Exception as e:      # noqa: BLE001 - reported, never raised here
+            outcome["error"] = e
+
+    try:
+        with upstream_cache({}):
+            first = threading.Thread(target=_first_install, daemon=True)
+            first.start()
+            busy.wait(30)
+            check("the first install holds its tool's lock", fetchdeps.installing("librosa") is True)
+            try:
+                fetchdeps.install_dependency("librosa", log=lambda m: None)
+                check("a second install of the same tool is refused", False)
+            except RuntimeError as e:
+                check(f"a second install of the same tool is refused ({e})",
+                      "already being installed" in str(e))
+            done.set()
+            first.join(60)
+            check(f"the first install finishes normally (got {outcome.get('version')!r}, "
+                  f"{outcome.get('error')})", outcome.get("version") == "0.12.0")
+            check("...and the tool is free again afterwards",
+                  fetchdeps.installing("librosa") is False)
+    finally:
+        done.set()
+        fetchdeps._api_json, fetchdeps.run_tool = real[1], real[2]
+        restore_deps(real[0])
+
+
 if FAILURES:
     print(f"{len(FAILURES)} failure(s)")
     sys.exit(1)

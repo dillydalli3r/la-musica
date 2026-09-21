@@ -1,6 +1,6 @@
 # la musica
 
-**v3.5.0** — a self-hosted app that *manages, optimizes, audits, grades and
+**v3.6.0** — a self-hosted app that *manages, optimizes, audits, grades and
 plays* your music library, from the browser, a desktop window or a phone.
 
 **la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a
@@ -12,7 +12,7 @@ client whose auto-importer verifies what it downloaded. All app state — config
 playlists, favourites, the beets library, the Soulseek config, measured loudness,
 caches — lives in one hidden `.mlo` folder inside your music directory.
 
-Release notes for this version are in `local/release-notes-3.5.0.md` (older ones
+Release notes for this version are in `local/release-notes-3.6.0.md` (older ones
 follow `local/release-notes-<version>.md`); the grading and optimization contract
 is in [`docs/OPTIMIZATION-GRADING-SPEC.md`](docs/OPTIMIZATION-GRADING-SPEC.md).
 
@@ -90,8 +90,16 @@ fifteen tools — `ffmpeg`, `flac`, `libjxl`, `libjpeg-turbo` (`jpegtran`),
 `slskd`, `yt-dlp` — and shows each one's installed, pinned and upstream version.
 Per platform a row is `deps` (the installer fetches it), `system` (a distro
 package — `apt: flac`, no Install button) or `unsupported` (no build here, with
-the reason). `dependencies_auto_update` (off by default) installs missing or
-outdated tools in the background.
+the reason). Every `deps` row has its own **Install** / **Update** button, and
+the page-level **Update all** presses every missing or outdated row at once.
+A press fetches the NEWEST release the tool's own publisher has — GitHub,
+PyPI for the pip packages (`librosa`, `beets`, `yt-dlp` on Linux) and
+windows.php.net for `php` — while the pinned version is what a FIRST install
+fetches when no upstream answer is reachable; a row already at the newest known
+version is a no-op, and a copy newer than upstream is never downgraded (a
+PATH-installed `ffmpeg` from scoop is updated into the app's own toolchain
+folder, not in place). `dependencies_auto_update` (off by default) installs
+missing or outdated tools in the background.
 
 ### Configuration & credentials
 
@@ -109,8 +117,10 @@ outdated tools in the background.
 - Credentials live in that same `config.json` **in clear** — it is your server's
   file. All optional: `spotify_client_id` / `spotify_client_secret` (advisory and
   genre by ISRC), `discogs_token`, `lastfm_api_key`, `rym_cookie`,
-  `acoustid_api_key`, `ai_base_url` / `ai_api_key` / `ai_model` (script 17 and
-  the genre ranking), `soulseek_username` / `soulseek_password`.
+  `acoustid_api_key` (lookups) plus `acoustid_user_key` (submitting fingerprints
+  to AcoustID — a different key from the same account), `ai_base_url` /
+  `ai_api_key` / `ai_model` (script 17 and the genre ranking),
+  `soulseek_username` / `soulseek_password`.
 - `GET /api/sources/health` lists every external source the app can ask (six
   lyrics, six advisory, eleven genre, four metadata, ten discover, one links —
   38 rows) with what each needs (`?probe=1` tests them). The RateYourMusic
@@ -149,7 +159,12 @@ releases, recordings) with *Auto-import* and wishlist actions. Entity pages carr
 grading and auditing detail, MusicBrainz + RateYourMusic links, cover
 upload/search, Wikipedia descriptions, manual tag editing, a lyrics editor, and a
 **Credits** view built from MusicBrainz `artist-rels` (falling back to the file's
-own PERFORMER/COMPOSER/… tags, and saying so). **Recommended (Local)** and
+own PERFORMER/COMPOSER/… tags, and saying so). The cover finder ranks every
+candidate with the album's OWN identity — a karaoke/tribute row, another artist's
+release or a different album can no longer win, an image whose size was never
+measured cannot beat the `cover_target_size` floor, and the autonomous Covers
+step refuses to store a below-target cover (`cover_review` off = take the best
+automatically). **Recommended (Local)** and
 **Home** are computed locally from the library's own tags (genre and family,
 mood, energy, era, artist) — no provider, no model, no network.
 
@@ -181,10 +196,16 @@ it, and what else holds it; each source's outcome is shown as a chip — *0
 answered*, *skipped: needs a key*, *failed: the provider's own words* — never
 swallowed. Owned rows open the real page; everything else offers **Add to
 library**, which queues a wish and searches for its audio. **RECOMMENDED
-(ONLINE)** takes a seed (the whole library, or one of its genres) and explains
-its basis on screen — the online half of the pair of shelves an album, artist or
-track page shows, whose **RECOMMENDED (LOCAL)** half is scored from the library's
-own tags.
+(ONLINE)** takes a seed (the whole library, one of its genres, or the album /
+artist / track page it sits on) and explains its basis on screen — the online
+half of the pair of shelves an album, artist or track page shows, whose
+**RECOMMENDED (LOCAL)** half is scored from the library's own tags. On an
+entity shelf MusicBrainz answers through the entity's OWN genres
+(`genre: shoegaze (MusicBrainz)`, and `more release groups by …` for the
+artist's catalogue), Spotify adds the artist's albums and top tracks when its
+credentials are saved, Apple's keyless search and Deezer's similar-artist feed
+stand beside them — and a source that truly has nothing to say is reported in
+its own words, never hidden.
 
 **WATCHED ARTISTS** keeps a MusicBrainz artist under watch: policy (`new_only` /
 `backfill`), the release types worth taking, an allow/never list of specific
@@ -200,7 +221,10 @@ timer, ReplayGain, visualizer, app-wide volume) plus a fullscreen player with
 animated karaoke lyrics. The fullscreen view is a two-column layout on a wide
 window (cover + controls, lyrics beside it) and a scrolling single column on a
 narrow or heavily zoomed one, where the lyrics pane keeps a real minimum height
-instead of being squeezed under the fold. ReplayGain is applied through the WebAudio gain stage in
+instead of being squeezed under the fold. The lyrics pane carries its own scrim
+(and every line a tight text shadow) because the backdrop is a light additive
+color field: over a white cover the old 2 px blur at 60 % made the text
+unreadable, which is what the dim is tuned for now. ReplayGain is applied through the WebAudio gain stage in
 **track**, **album** or **off** mode (`replaygain_mode`) with a preamp
 (`replaygain_preamp_db`, ±24 dB); a file without ReplayGain tags is measured on
 the fly with ffmpeg's EBU R128 meter when `replaygain_analyze_missing` is on
@@ -215,7 +239,14 @@ fragmented MP4 (`GET /api/videos/stream?transcode=1`), and the keyboard shortcut
 Drag & drop uploads, a watched import folder, staged `.mlo/downloads` or the
 Soulseek paths, all through one pipeline (`server/imports.py`). **AcoustID
 fingerprint matching** tells you which release the *audio* is, not what the tags
-claim (needs `acoustid_api_key` and `fpcalc`). The wizard's eight steps are **Select & separate → Links → Match → Covers →
+claim (needs `acoustid_api_key` and `fpcalc`). Accepting a match writes the
+Picard-compatible pair `ACOUSTID_ID` + `ACOUSTID_FINGERPRINT` in one save and
+reads it back to prove it landed; a container the app cannot tag is named per
+file instead of failing silently, and a single identified track is enough to
+decide an album. The wizard's **Submit to AcoustID** action then publishes the
+pair the files already carry to AcoustID's database — a two-press confirm, and
+it needs `acoustid_user_key` (a *user* key from the same account; the
+application key can only look up). The wizard's eight steps are **Select & separate → Links → Match → Covers →
 Genres → Lyrics → Advisory → Finish**, and *Finish* can run the import chain or
 the whole `run_all_order` over that album. The **import script chain** then runs (default `import_scripts`, i.e.
 `DEFAULT_CHAIN`: 11 → 3 → 14 → 15 → 2 → 1 → 13 → 18 → 8 → 5 → 6 → 7 → 9 → 12 →
@@ -229,10 +260,19 @@ MusicBrainz holds for its recording), Apple's explicit-edition album route and
 Apple's exact-title song search — merged so explicit anywhere wins, and derives
 `ALBUMITUNESADVISORY` from the per-track values with script 8's own rule (the
 *Fetch advisory rating* action derives it too, so a manual fetch never leaves
-the album tag stale). Each track's value names the provider behind it; a track no
-source could state anything about is not invented — `mlo/advisory.py` decides
-(instrumental → configured AI → the multilingual lyrics scan → `advisory_fallback`)
-and reports the stage it used. The two tags answer to their own switches:
+the album tag stale). Per source the STRONGEST answer wins — every ISRC is
+asked, so a later pressing's explicit answer is not lost to an earlier clean
+one — and a provider-stated 0 can still be escalated to 1 by the word-reading
+stages (the configured AI, then the multilingual scan), whose source says so
+(`lyrics-scan (escalated)`). Each track's value names the provider behind it;
+a track no source could state anything about is not invented — `mlo/advisory.py`
+decides (instrumental → configured AI → the multilingual lyrics scan →
+`advisory_fallback`) and reports the stage it used. A routine fetch never
+re-asks a track that already holds 0/1/2: it reports the value back with its
+provenance — `the file's own tag, not re-checked` — and the wizard's
+*re-check* (the `force` request) is the one action that asks the providers
+again; even then an invented fallback never overwrites a stored rating. The two
+tags answer to their own switches:
 `advisory_auto_fetch` for the per-track rating, *Auto Album Advisory*
 (`auto_advisory`) for the album tag script 8 derives.
 
@@ -242,8 +282,17 @@ A managed slskd instance (autostart, shares = the music folder, a share rescan
 scheduled whenever the library changes), with search & download UI, a live status
 dot, share browsing, bulk and whole-user downloads, transfer-level clearing and
 staging management (`GET /api/soulseek/staging`). The **auto-importer** searches
-each release by its most specific trait (a CD by its catalog number,
-`soulseek_auto_cd_queries`; Digital Media by `artist album year`), gates a CD
+each release by what can only point at THAT release: a physical pressing (CD
+included) is searched by its catalog number and barcode
+(`soulseek_auto_physical_queries`) and, when it states neither, by its label and
+country — never by a broad artist/title/album query, which drowns the result
+list in other pressings. Digital Media may be searched broadly
+(`soulseek_auto_digital_queries`, `artist album year`); `soulseek_auto_cd_queries`
+still overrides the physical default for a CD a user sets it for. Search terms
+are stripped of the punctuation and typographic marks no share folder carries
+(full-width `！`, quotes, brackets) while non-Latin script is kept, and a release
+whose titles are in another locale opens extra searches using its MusicBrainz
+aliases in the configured `beets_locale` (`ぴーなた` → `pinata`). It gates a CD
 candidate on its rip log *before* requesting any album byte
 (`soulseek_auto_log_min_score`, default 100), ranks candidates towards the copy
 that arrives fastest, verifies completeness (`soulseek_auto_complete_ratio`) and
@@ -324,7 +373,11 @@ manual edit — and re-applied over a whole library by **Format all** (script 10
 the tags whose value set is closed (`MEDIA`, `SOURCE`, `RELEASETYPE`,
 `RELEASESTATUS`, `AUDIT`, `RELEASECOUNTRY`, `SCRIPT`, `MOOD`) are spelled the way
 the app stores them, spacing is collapsed, and a value the vocabulary does not
-know is left alone rather than coerced. `grade_check_tag_case` and
+know is left alone rather than coerced. `RELEASECOUNTRY` holds EVERY country the
+release's own events state (`US; CA; XE`), earliest event first, as repeated
+container fields — a file already carrying one of them is completed rather than
+left short, and the album badge, the queue rows and the naming script's
+first-value rule all read that one form. `grade_check_tag_case` and
 `grade_check_tag_spaces` fail what those writers would have fixed; free text
 (`TITLE`, `ALBUM`, `ARTIST`, `LABEL`, the lyrics) is never touched, which is what
 keeps `AC/DC` and `k.d. lang` intact. Genres are stored broad-first too:

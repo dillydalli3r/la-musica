@@ -176,11 +176,32 @@ export default function TagActionsMenu({
                 label: "Fetch advisory rating",
                 icon: BadgeInfo,
                 disabled: !paths.length && !releaseMbid,
-                title: "Look the ITUNESADVISORY value up and write it",
+                title: "Look the ITUNESADVISORY value up and write it — a file that already carries a value is kept, and the answer says so",
                 onClick: () =>
                   run(() => api.mbAdvisoryFetch({ paths, release_mbid: releaseMbid }), (r) =>
                     advisoryOutcome(r)
                   ),
+              },
+              {
+                // The re-rate is its own entry, not a modifier: it asks even
+                // for files that already carry a 0/1/2 and what the sources
+                // state IS written — the only way a rating can go down — so it
+                // is confirmed before it runs.
+                label: "Re-rate advisory (ask anyway)…",
+                icon: RefreshCw,
+                disabled: !paths.length,
+                title: "Ask the advisory sources again for files that already carry a value, and write what they state — a source's answer can lower a rating",
+                onClick: () => {
+                  const n = paths.length;
+                  if (
+                    !window.confirm(
+                      `Re-rate ITUNESADVISORY for ${n} file(s) and write what the sources state?\n\n` +
+                        "This asks even for files that already carry a value, and a source's answer can lower a rating (1 → 0)."
+                    )
+                  )
+                    return;
+                  void run(() => api.mbAdvisoryFetch({ paths, force: true }), (r) => advisoryOutcome(r));
+                },
               },
               {
                 label: "Check instrumental",

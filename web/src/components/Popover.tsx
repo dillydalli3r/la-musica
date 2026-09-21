@@ -115,8 +115,14 @@ export default function Popover({
       {fixed ? (
         <>
           {/* The in-place marker the panel is positioned from: the caller's
-              own wrapper, measured instead of assumed. */}
-          <span ref={anchorRef} className="inline-block w-0 h-0" aria-hidden="true" />
+              own wrapper, measured instead of assumed. It is a BLOCK box of
+              zero size, not an inline one: an inline-block on the text
+              baseline adds a line box (~24 px at the app's line-height), which
+              grew the notification bell's 36 px wrapper to 60 px the moment the
+              tray opened — the bar centers that wrapper, so the whole button
+              (and its icon) jumped 12 px up under the cursor. A block box
+              contributes its own height, which is zero. */}
+          <span ref={anchorRef} className="block w-0 h-0" aria-hidden="true" />
           {portaled && createPortal(panel, document.body)}
         </>
       ) : (

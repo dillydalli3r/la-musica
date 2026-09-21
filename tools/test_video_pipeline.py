@@ -181,7 +181,8 @@ def main():
     check("Linux install goes through pip, not a phantom binary",
           "yt-dlp" in fetchdeps.PIP_ON_LINUX
           and "yt-dlp" not in fetchdeps.LINUX_PACKAGES
-          and fetchdeps.PIP_PACKAGES["yt-dlp"].startswith("yt-dlp=="))
+          and fetchdeps.PIP_PACKAGES["yt-dlp"] == "yt-dlp"
+          and bool(fetchdeps.PINNED["yt-dlp"]["version"]))
 
     print(f"\n{'PASS' if not FAIL else 'FAIL'} — {FAIL} problem(s)")
     return 1 if FAIL else 0

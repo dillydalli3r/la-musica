@@ -5,15 +5,29 @@ paths and delegates to :mod:`server.imports`, so the engine never sees an HTTP
 type. The wizard and the React pages depend on these exact paths and field
 names:
 
-    POST /api/import/acoustid         {paths: [str], apply?: bool, staged?: bool}
+    POST /api/import/acoustid         {paths: [str], apply?: bool, staged?: bool,
+                                       match?: {release_group_id, recordings:
+                                       [{path, recording_id, fingerprint}]}}
          -> {available, note, ok, code, albums: [{path, release_group_id,
              release_group_title, release_group_type, artists, score,
-             matched, total, recordings, tagged, status, code, reason,
+             matched, total, recordings, tagged, writes, status, code, reason,
              conflict, conflicts, skips, failures}]}
          `status` is "matched" | "no_match" | "skipped" | "error" per album:
          a fingerprint or lookup that FAILED is an "error" with its `reason`,
          never a "no_match", and `conflicts` is where the audio disagrees with
          the album's tags. `note` carries the first failure's sentence.
+         `apply` writes the match into the files; passing the row the
+         apply=false pass returned as `match` writes from it without a second
+         fpcalc/lookup, and `writes` answers per track ({path, ok, code,
+         reason}) so a container this app cannot tag is named, not silent.
+
+    POST /api/import/acoustid/submit  {paths: [str], staged?: bool, confirm: bool}
+         -> {available, note, ok, code, submitted, failed, skips,
+             submissions, tracks}
+         Publishes the ACOUSTID_FINGERPRINT/ID pair the files already carry to
+         AcoustID (nothing is written locally). `confirm` is required — it is
+         a public, outward-facing submission — and a refused `acoustid_user_key`
+         answers in the service's own words.
 
     POST /api/import/finish           {paths: [str], force?: {script_id: bool}}
          -> {albums: [{path, scripts, chain, errors}]}
@@ -56,6 +70,21 @@ class AcoustidRequest(BaseModel):
     # ACOUSTID_FINGERPRINT (what the wizard sends when the user accepts).
     apply: bool = False
     staged: bool = False  # the wizard's album folder, wherever the user put it
+    # The row the apply=False pass already answered with (release group +
+    # `recordings`: path, recording id, fingerprint). With it the apply pass
+    # writes straight from that payload instead of re-running fpcalc and the
+    # lookups — a transient failure on the second pass used to turn a displayed
+    # match into zero tags.
+    match: Optional[dict] = None
+
+
+class AcoustidSubmitRequest(BaseModel):
+    paths: List[str] = []
+    staged: bool = False  # the wizard's album folder, wherever the user put it
+    # Publishing to AcoustID is outward-facing and PUBLIC: the caller has to
+    # say so explicitly (the two-press pattern the LRCLIB publish panel uses).
+    # Without it there is no network call at all.
+    confirm: bool = False
 
 
 class FinishRequest(BaseModel):
@@ -143,12 +172,49 @@ def import_acoustid(req: AcoustidRequest):
     """Fingerprint albums with AcoustID and report their release groups.
 
     `apply: true` also writes the accepted match's identity tags into the
-    files (`ACOUSTID_ID`, `ACOUSTID_FINGERPRINT`).
+    files (`ACOUSTID_ID`, `ACOUSTID_FINGERPRINT`); with `match` (the row the
+    apply=False pass returned) it writes straight from that payload and runs no
+    fpcalc and no lookup at all.
+    """
+    _require_manual()
+    supplied = req.match if isinstance(req.match, dict) else None
+    _cap(len(req.paths), MAX_PATHS, "paths")
+    # The supplied match's recordings are WRITTEN TO, so they are guarded like
+    # every other path this route touches.
+    _guard(list(req.paths) + _matched_paths(supplied), req.staged)
+    return imports.acoustid_match(req.paths, apply=bool(req.apply),
+                                  match=supplied)
+
+
+@router.post("/api/import/acoustid/submit")
+def import_acoustid_submit(req: AcoustidSubmitRequest):
+    """Give AcoustID the fingerprints the files in these albums already carry.
+
+    The one outward-facing route of the AcoustID path: it submits to a public
+    database and writes NOTHING locally (the `ACOUSTID_ID` /
+    `ACOUSTID_FINGERPRINT` pair is read back off the files with `get_tag`).
+    `confirm: true` is required — the UI asks on a second, explicitly-labelled
+    press — and without it this route makes no request at all. `acoustid_user_key`
+    is the credential that makes it work; a key AcoustID refuses comes back in
+    its own words.
     """
     _require_manual()
     _cap(len(req.paths), MAX_PATHS, "paths")
     _guard(req.paths, req.staged)
-    return imports.acoustid_match(req.paths, apply=bool(req.apply))
+    if not req.confirm:
+        raise HTTPException(
+            400, "submitting to AcoustID publishes to a public database — "
+                 "send confirm: true to go ahead")
+    return imports.acoustid_submit(req.paths)
+
+
+def _matched_paths(match):
+    """Every path a supplied match would write to (for the folder guard)."""
+    out = []
+    for rec in (match or {}).get("recordings") or []:
+        if isinstance(rec, dict) and str(rec.get("path") or "").strip():
+            out.append(rec["path"])
+    return out
 
 
 @router.post("/api/import/finish")

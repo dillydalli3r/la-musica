@@ -584,8 +584,16 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
   }, [job]);
 
   // Only the no_results prompt carries `waited`; the lossy card has no timing.
+  // It is the REAL seconds this job's searches took (`soulseek_auto`'s
+  // `_search_seconds`), never the configured ceiling — and 0 when a search
+  // ended on its first poll, or when the job browsed a folder and never
+  // searched at all. The old wording rendered nothing for 0, which read as if
+  // the search had taken no time; sub-second now says so, and a prompt with no
+  // query behind it (the browsed-folder path) says that instead of a duration
+  // for a search that never ran.
   const waited = job?.confirm?.waited ?? 0;
-  const waitedTxt = waited >= 90 ? `${Math.round(waited / 60)} min` : waited >= 1 ? `${Math.round(waited)}s` : "";
+  const searched = (job?.confirm?.queries ?? []).length > 0;
+  const waitedTxt = waited >= 90 ? `${Math.round(waited / 60)} min` : waited >= 1 ? `${Math.round(waited)}s` : "under a second";
 
   const r = job?.release;
   // The wizard needs the folder it should tag; staging_path is the fallback an
@@ -685,7 +693,7 @@ function AutoPanel({ initialMbid }: { initialMbid?: string }) {
             // schedule with no further input. Decline is the only way to stop.
             <div className="mt-2 rounded-lg border border-amber-700/60 bg-amber-950/30 p-2.5">
               <div className="text-xs font-semibold text-amber-300 mb-1">
-                Nothing usable found{waitedTxt ? ` in ${waitedTxt}` : ""}
+                Nothing usable found{searched ? ` in ${waitedTxt}` : " — this job never searched a query"}
               </div>
               <div className="text-[11px] text-zinc-400 mb-2">
                 Every candidate this search turned up was rejected or incomplete. Moving the
@@ -1509,7 +1517,12 @@ function ReleaseChips({ r }: { r?: SlskReleaseIdentity }) {
   if (!r) return null;
   const catalog = (r.catalog_number ?? "").trim();
   const media = (r.media ?? []).filter((m) => m && m.trim());
-  const when = [r.country, r.date].filter(Boolean).join(" ");
+  // The release's WHOLE event set when the server resolved one (`countries`),
+  // never MusicBrainz's first event alone: a release out in five countries is
+  // not a release out in the first of them. A payload predating the field
+  // (a job's own compact summary) states the singular `country` only.
+  const countries = (r.countries?.length ? r.countries : [r.country]).filter(Boolean).join(", ");
+  const when = [countries, r.date].filter(Boolean).join(" ");
   const status = (r.status ?? "").trim();
   const paragraph = [
     catalog,

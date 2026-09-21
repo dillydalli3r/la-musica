@@ -123,13 +123,58 @@ export function advisoryLabel(value: string | number | null | undefined): string
   return ADVISORY_LABELS[String(value ?? "").trim()] ?? "unknown";
 }
 
-/** "1 (explicit) · deezer-isrc, apple-album" — one line: the value and the
- *  providers behind it. A value nobody stated reads "unknown", and provenance
- *  that was never reported reads "source unknown": neither is guessed. */
-export function advisoryLine(value: string | number | null | undefined, sources: string[]): string {
+/** The advisory source ids in a reader's words. The server reports WHICH stage
+ *  spoke — a provider, the lyrics scan ("lyrics-scan", "(escalated)" when it
+ *  overruled a provider that said 0), the ladder's last resort ("fallback") or
+ *  "existing-tag" for a value echoed off the file. Those ids are the server's
+ *  vocabulary, not a user's: a bare "existing-tag" said nothing about the fact
+ *  that nobody was asked at all. An id this map does not know keeps the
+ *  server's own spelling — it is evidence, never a guess to prettify. */
+const ADVISORY_SOURCE_WORDS: Record<string, string> = {
+  "existing-tag": "the file's own tag, not re-checked",
+  "deezer-isrc": "Deezer (ISRC)",
+  "spotify-isrc": "Spotify (ISRC)",
+  "apple-album": "Apple (album editions)",
+  "itunes-song": "iTunes (song search)",
+  "discogs-parental": "Discogs (parental advisory)",
+  "youtube-age": "YouTube (age gate)",
+  "lyrics-scan": "the lyrics word scan",
+  "lyrics-scan (escalated)": "the lyrics word scan, overruling a provider that stated 0",
+  "ai-lyrics": "the AI's read of the lyrics",
+  "ai-lyrics (escalated)": "the AI's read of the lyrics, overruling a provider that stated 0",
+  instrumental: "the track is instrumental",
+  fallback: "the configured fallback — nothing stated a value",
+};
+
+/** What the reply's per-path `status` adds to a line, for the two states the
+ *  value's own provenance does not already say. `written` needs no words (the
+ *  value and the source that stated it are the whole story) and `existing` is
+ *  spelled out by the "existing-tag" source above; what a reader cannot see
+ *  otherwise is a re-check the sources AGREED with, and a write the gate
+ *  refused. */
+const ADVISORY_STATUS_SUFFIX: Record<string, string> = {
+  unchanged: "re-checked — the sources state what the file already carries",
+  gated: "left alone — writing ITUNESADVISORY is off for this file type",
+};
+
+/** "1 (explicit) · deezer-isrc, apple-album" — one line: the value, the
+ *  providers behind it, and (when the caller passes it) what the run that
+ *  answered DID with this file's value. A value nobody stated reads "unknown",
+ *  and "source unknown" is reserved for a reply that truly reported no
+ *  provenance: a value echoed off the file reads "the file's own tag, not
+ *  re-checked", which says WHO decided it (the user, or an earlier run)
+ *  instead of implying a source answered and its answer was lost. */
+export function advisoryLine(
+  value: string | number | null | undefined,
+  sources: string[],
+  status?: string | null
+): string {
   const v = String(value ?? "").trim();
-  const list = sources.length ? sources.join(", ") : "source unknown";
-  return `${v ? `${v} (${advisoryLabel(v)})` : "unknown"} · ${list}`;
+  const list = sources.length
+    ? sources.map((s) => ADVISORY_SOURCE_WORDS[s] ?? s).join(", ")
+    : "source unknown";
+  const state = status ? ADVISORY_STATUS_SUFFIX[status] : "";
+  return `${v ? `${v} (${advisoryLabel(v)})` : "unknown"} · ${list}${state ? ` · ${state}` : ""}`;
 }
 
 /** "instrumental · lyrics-present" — INSTRUMENTAL is 0/1 only; anything else
@@ -143,7 +188,14 @@ export function instrumentalLine(value: string | number | null | undefined, sour
 /** What one advisory fetch amounts to, in the words every surface reports it
  *  with: the per-track values it wrote, the album tag it DERIVED from them,
  *  and — when the write gate refused files — that, instead of a bare "0
- *  re-rated" that reads like a silent success. */
+ *  re-rated" that reads like a silent success.
+ *
+ *  The reply's own `status` map is what makes `updated == 0` legible: a fetch
+ *  that wrote nothing did one of THREE different things per track — echoed a
+ *  value the file already carried without asking anyone (`existing`), asked and
+ *  found the sources agreeing with what is stored (`unchanged`), or had the
+ *  write gate refuse it (`gated`) — and each is a different thing to tell a
+ *  user. Nothing-written is never rendered as success. */
 export function advisoryOutcome(reply: AdvisoryFetchResult | null | undefined): string {
   if (!reply) return "no reply";
   // A reply that wrote NOTHING is the one case where the server's own reason
@@ -151,13 +203,29 @@ export function advisoryOutcome(reply: AdvisoryFetchResult | null | undefined): 
   if (reply.skipped && !reply.updated && !reply.album_updated) {
     return `nothing written — ${reply.skipped}`;
   }
-  const parts = [`${reply.updated ?? 0} track(s) re-rated`];
+  const statuses = Object.values(reply.status ?? {});
+  const howMany = (state: string) => statuses.filter((s) => s === state).length;
+  const existing = howMany("existing");
+  const unchanged = howMany("unchanged");
+  const gated = howMany("gated");
+  const parts: string[] = [];
+  if (reply.updated) parts.push(`${reply.updated} track(s) re-rated`);
+  if (existing) {
+    parts.push(`${existing} track(s) already rated — the file's own value was kept and no source`
+      + ` was asked (Re-rate asks anyway)`);
+  }
+  if (unchanged) {
+    parts.push(`${unchanged} track(s) re-checked — the sources state what the file already carries`);
+  }
+  if (gated) parts.push(`${gated} left alone — writing ITUNESADVISORY is off for their file type`);
+  // No status at all (a server predating the map) still must not print a bare
+  // "0 re-rated": what is knowable is that nothing was written.
+  if (!parts.length) parts.push("nothing written — the reply reported no per-track outcome");
   if (reply.album_updated) {
     const values = Object.values(reply.albums ?? {}).map(String);
     parts.push(`album tag ${values.filter((v, i) => values.indexOf(v) === i).join("/")}`
       + ` on ${reply.album_updated} track(s)`);
   }
-  if (reply.gated) parts.push(`${reply.gated} left alone — writing ITUNESADVISORY is off for their file type`);
   // The album tag answers to its own switch (script 8's derivation), so a
   // fetch can rate every track and still leave the album tag refused.
   if (reply.album_gated) {

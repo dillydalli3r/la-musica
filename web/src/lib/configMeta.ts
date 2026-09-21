@@ -355,10 +355,11 @@ export const CONFIG_GROUPS: CfgGroup[] = [
     },
     {
       title: "Auto-import (MusicBrainz → Soulseek)",
-      blurb: "Search terms are templates of release fields (artist album year date country catalognumber barcode label). CD rips are found by catalog number, digital media by title + year; every disc's .log must reach the score threshold before the album downloads.",
+      blurb: "Search terms are templates of release fields (artist album year date country catalognumber barcode label). Physical pressings — CDs included — are found by their catalog number and barcode, digital media by title + year; every disc's .log must reach the score threshold before the album downloads.",
       fields: [
-        { k: "soulseek_auto_cd_queries", label: "CD query templates (; separated)", type: "text", help: "A CD is searched by its catalog number alone by default — the one trait rip folder names carry. Add templates (semicolon-separated) to widen the search; a release with no catalog number falls back to artist + album + year automatically." },
-        { k: "soulseek_auto_digital_queries", label: "Digital query templates (; separated)", type: "text" },
+        { k: "soulseek_auto_physical_queries", label: "Physical query templates (; separated)", type: "text", help: "A physical pressing — a CD included — is searched by its catalog number and barcode by default, the traits that name the exact pressing. Add templates (semicolon-separated) to widen the search; a pressing that states neither falls back to its label and country, never to an artist/title query (which asks the network for every other pressing of the album)." },
+        { k: "soulseek_auto_cd_queries", label: "CD query templates (; separated)", type: "text", help: "Wins for a CD you set it for: this CD is searched by these templates instead of the physical ones above. Blank follows the physical defaults (catalog number + barcode) — the shipped default here (the catalog number alone) was a catalog-number-only search, which the physical default already covers." },
+        { k: "soulseek_auto_digital_queries", label: "Digital query templates (; separated)", type: "text", help: "Digital Media is searched by these — artist, album and year by default — because it carries no pressing trait to be identified by." },
         { k: "soulseek_auto_log_min_score", label: "Min .log score (0–100)", type: "number", min: 0, max: 100 },
         { k: "soulseek_auto_complete_ratio", label: "Required track completeness (0.5–1)", type: "number", min: 0.5, max: 1, step: 0.05 },
         { k: "soulseek_auto_search_wait", label: "Fallback search window (seconds of quiet on a rare album)", type: "number", min: 5, max: 300 },
@@ -437,6 +438,10 @@ export const CONFIG_GROUPS: CfgGroup[] = [
         { k: "import_acoustid", label: "Fingerprint with AcoustID", type: "bool" },
         { k: "acoustid_enabled", label: "AcoustID enabled", type: "bool" },
         { k: "acoustid_api_key", label: "AcoustID application key (free, acoustid.org)", type: "password" },
+        {
+          k: "acoustid_user_key", label: "AcoustID user key (fingerprint submissions)", type: "password",
+          help: "The USER key of your own acoustid.org account (AcoustID → your account → API keys), which is a different key from the application key above. It is needed ONLY to submit fingerprints — the wizard's Submit to AcoustID publishes the ACOUSTID_FINGERPRINT/ID pair a matched album carries to AcoustID's public database, and AcoustID refuses that submission in its own words while this is blank or wrong. Looking a release up never uses it: the application key alone can do that.",
+        },
         { k: "acoustid_min_score", label: "Minimum AcoustID match score", type: "number", min: 0, max: 1, step: 0.05 },
         { k: "acoustid_fpcalc_path", label: "fpcalc path (blank = the bundled one)", type: "text", help: "Only needed when AcoustID should use a fingerprint tool outside the dependencies folder." },
       ],

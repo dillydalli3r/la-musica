@@ -474,6 +474,46 @@ try:
     inside = api_imports.import_acoustid(
         api_imports.AcoustidRequest(paths=[os.path.join(LIB, "Album One")]))
     assert inside["available"] is False and inside["note"], inside
+    # The supplied-match form of the same route: its recordings are path-guarded
+    # like everything else this route touches.
+    try:
+        api_imports.import_acoustid(api_imports.AcoustidRequest(
+            paths=[os.path.join(LIB, "Album One")], apply=True,
+            match={"release_group_id": "rg", "recordings": [
+                {"path": os.path.join(ROOT, "x.flac"), "recording_id": "r",
+                 "fingerprint": "AQAB"}]}))
+    except HTTPException as e:
+        assert e.status_code == 400 and "outside music folder" in e.detail, e
+    else:
+        raise AssertionError("a supplied match wrote outside the music folder")
+
+    # Submitting to AcoustID is outward-facing: no confirm, no call at all.
+    _submits = []
+    _real_submit = imports.acoustid_submit
+    imports.acoustid_submit = lambda paths, cfg=None: (
+        _submits.append(list(paths)) or {"stub": True})
+    try:
+        try:
+            api_imports.import_acoustid_submit(api_imports.AcoustidSubmitRequest(
+                paths=[os.path.join(LIB, "Album One")]))
+        except HTTPException as e:
+            assert e.status_code == 400 and "confirm" in e.detail, e
+        else:
+            raise AssertionError("an unconfirmed AcoustID submission went ahead")
+        assert _submits == [], _submits
+        got = api_imports.import_acoustid_submit(api_imports.AcoustidSubmitRequest(
+            paths=[os.path.join(LIB, "Album One")], confirm=True))
+        assert got == {"stub": True}, got
+        assert _submits == [[os.path.join(LIB, "Album One")]], _submits
+        try:
+            api_imports.import_acoustid_submit(api_imports.AcoustidSubmitRequest(
+                paths=[os.path.join(ROOT, "x")], confirm=True))
+        except HTTPException as e:
+            assert e.status_code == 400 and "outside music folder" in e.detail, e
+        else:
+            raise AssertionError("submit accepted a path outside the music folder")
+    finally:
+        imports.acoustid_submit = _real_submit
     try:
         api_imports.import_finish(api_imports.FinishRequest(paths=[os.path.join(ROOT, "x")]))
     except HTTPException as e:
@@ -547,6 +587,18 @@ class _FakeAudio:
         return True
 
 
+def _joined(value):
+    """A tag value the way a READER sees it.
+
+    A writer may hand over a LIST (mlo.audio.set_tag stores repeated fields and
+    get_tag joins them with "; ") or an already joined string — the same value
+    either way, which is what this asserts.
+    """
+    if isinstance(value, (list, tuple)):
+        return "; ".join(str(v) for v in value)
+    return str(value or "")
+
+
 _real_audiofile, _real_chain = _audio.AudioFile, _intg.genre_chain
 _real_resolve_advisory = _intg.resolve_advisory_route
 _audio.AudioFile = _FakeAudio
@@ -562,6 +614,13 @@ try:
         "release": {"release_mbid": "rel-1", "release_group_id": "rg-1",
                     "title": "Stamp", "artists": [{"name": "A", "mbid": "art-1"}],
                     "advisory": 1,
+                    # The pressing's own events: the singular `country` is only
+                    # the FIRST of them, so the stamped tag has to come from
+                    # this list (issue #18).
+                    "country": "GB",
+                    "countries": [{"code": "GB", "date": "1994-05-06"},
+                                  {"code": "US", "date": "1994-05-20"},
+                                  {"code": "XE", "date": "1994-06-01"}],
                     "media": [{"disc": 1, "position": 1, "title": "One", "recording_mbid": "rec-1"},
                               {"disc": 1, "position": 2, "title": "Two", "recording_mbid": "rec-2"}]},
     }], CFG)
@@ -578,6 +637,12 @@ try:
         assert tags["GENRE"], tags
     assert _written["01 - track.wav"]["MUSICBRAINZ_TRACKID"] == "rec-1", _written["01 - track.wav"]
     assert _written["02 - track.wav"]["MUSICBRAINZ_TRACKID"] == "rec-2", _written["02 - track.wav"]
+    # The release's whole country list is stamped, not its singular `country`
+    # (MusicBrainz's first event): every country the pressing came out in,
+    # ";"-joined, first value first — the same value mlo.autotag's own pass
+    # writes and the same one the album badge reads.
+    for _name, tags in _written.items():
+        assert _joined(tags.get("RELEASECOUNTRY")) == "GB; US; XE", (_name, tags)
     # The list goes in as REPEATED GENRE fields, not one "; "-joined value:
     # the grader counts the values a file carries, so a joined string would
     # read as one genre and fail the per-track count check. The names are

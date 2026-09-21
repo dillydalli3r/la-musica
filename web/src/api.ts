@@ -1,5 +1,7 @@
 import type {
+  AcoustidAlbumMatch,
   AcoustidMatch,
+  AcoustidSubmitResult,
   ArtistArtwork,
   ArtistArtworkDescription,
   ArtistArtworkImage,
@@ -911,6 +913,13 @@ export interface AdvisoryFetchResult {
   gated?: number;
   /** Album tags the per-filetype/derivation gate refused (see `gated`). */
   album_gated?: number;
+  /** What happened to each reported value THIS run: `written` (the tag now
+   *  holds what this run wrote), `unchanged` (the sources were asked and state
+   *  what the file already carries), `existing` (the file's own valid 0/1/2 was
+   *  echoed — nobody was asked) or `gated` (the write gate refused it). This is
+   *  what stops `updated == 0` from reading as "the sources answered nothing":
+   *  a fetch that rated nothing because nothing needed rating says so here. */
+  status?: Record<string, "written" | "unchanged" | "existing" | "gated">;
   skipped?: string;
 }
 
@@ -946,14 +955,17 @@ export function answerSources(
 
 /** Run both per-track checks on one selection. The legs are independent: an
  *  endpoint a server does not have must not hide the other leg's values, so a
- *  failed leg arrives as null with its message in `errors`. */
-export async function checkTrackValues(paths: string[]): Promise<{
+ *  failed leg arrives as null with its message in `errors`. `force` is the
+ *  advisory RE-RATE (the only route that can lower a rating): every file is
+ *  asked and what the sources state is written, including ones already
+ *  carrying a 0/1/2 — an explicit, confirmed action, never the default. */
+export async function checkTrackValues(paths: string[], force = false): Promise<{
   adv: AdvisoryFetchResult | null;
   inst: InstrumentalFetchResult | null;
   errors: string[];
 }> {
   const [adv, inst] = await Promise.all([
-    api.mbAdvisoryFetch({ paths }).catch((e) => e as Error),
+    api.mbAdvisoryFetch({ paths, force }).catch((e) => e as Error),
     api.instrumentalFetch(paths).catch((e) => e as Error),
   ]);
   const errors: string[] = [];
@@ -2070,7 +2082,9 @@ export const api = {
         key: string;
         name: string;
         installed_version?: string;
-        /** The pinned release the installer fetches (the reviewed version). */
+        /** The reviewed pinned release this app installs on a FIRST install.
+         *  An installed copy takes the NEWEST release upstream has instead
+         *  (`upstream_version`) — mlo.fetchdeps._install_one. */
         latest_version?: string;
         detected_version?: string;
         path?: string | null;
@@ -2713,14 +2727,42 @@ export const api = {
   // ----------------------------------------------------------------- //
   /** Fingerprint an album (folder or track paths) and return the MusicBrainz
    *  release group the audio actually is. `apply` also writes the accepted
-   *  match's identity tags (ACOUSTID_ID / ACOUSTID_FINGERPRINT) into the files. */
-  importAcoustid: (paths: string[], apply = false, staged = false) =>
+   *  match's identity tags (ACOUSTID_ID / ACOUSTID_FINGERPRINT) into the files.
+   *
+   *  `match` is the ROW the apply=false pass answered with (release group +
+   *  `recordings`): the server writes straight from that payload, so accepting
+   *  a displayed match runs no fpcalc and no lookup — the second pass used to
+   *  fingerprint and look up a release it had already been shown, and one
+   *  transient network failure there turned the match into zero tags. */
+  importAcoustid: (
+    paths: string[],
+    apply = false,
+    staged = false,
+    match?: AcoustidAlbumMatch
+  ) =>
     json<AcoustidMatch>(
       `${API}/import/acoustid`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ paths, apply, staged }),
+        body: JSON.stringify({ paths, apply, staged, match }),
+      },
+      600000
+    ),
+  /** Publish to AcoustID's public database the fingerprint/id pair the files
+   *  already carry (POST /api/import/acoustid/submit). Outward-facing and
+   *  public, so `confirm: true` is sent from the UI's second, explicitly
+   *  labelled press; the ids come off the files (nothing is re-fingerprinted,
+   *  nothing is written locally). A refusal — no `acoustid_user_key`, or the
+   *  one it was given refused — comes back as `available: false` with the
+   *  service's own `note`/`code`. */
+  importAcoustidSubmit: (paths: string[], staged = false) =>
+    json<AcoustidSubmitResult>(
+      `${API}/import/acoustid/submit`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paths, staged, confirm: true }),
       },
       600000
     ),
@@ -2827,8 +2869,10 @@ export const api = {
   /** Fetch the advisory rating (ITUNESADVISORY) for one release or a set of
    *  tracks — the values land in `values` and are written to `paths`, and
    *  `answers` reports every provider that had something to say (the UI's
-   *  provenance). */
-  mbAdvisoryFetch: (body: { paths?: string[]; release_mbid?: string; staged?: boolean }) =>
+   *  provenance). A file that already carries a valid 0/1/2 is ECHOED, not
+   *  re-asked; `force: true` is the re-rate that asks anyway — the only route
+   *  that can lower a rating, so it is an explicit action, never the default. */
+  mbAdvisoryFetch: (body: { paths?: string[]; release_mbid?: string; staged?: boolean; force?: boolean }) =>
     json<AdvisoryFetchResult>(`${API}/mb/advisory/fetch`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

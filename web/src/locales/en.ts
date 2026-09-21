@@ -327,6 +327,8 @@ export default {
   "cover.best_pick_use": "Use the best pick",
   "cover.no_pick": "No candidate reaches the cover target — pick one by hand.",
   "cover.pick_reason": "Why this one",
+  "cover.checked_against": "Checked against {identity}",
+  "cover.all_rejected": "{count} candidate(s) were rejected — each row says why, and any of them can still be applied by hand.",
   "cover.source_notes": "What each source did",
   "cover.searching": "Searching cover sources…",
   "cover.answered": "Searched {terms}",

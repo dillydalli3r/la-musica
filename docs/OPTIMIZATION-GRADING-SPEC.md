@@ -358,13 +358,15 @@ The default writer of everything else is *Beets tagging (14) · import*.
 | `AUDIOAUDITOR_OVERRIDE` | provenance | the track editor (manual) | `grade_check_audit` (wins over every derived verdict) |
 | `LYRICS`, `UNSYNCEDLYRICS` | lyrics | Fetch lyrics (13) · lyrics editor | `grade_check_lyrics`, `_lyrics_format` |
 | `TRANSLITERATION`, `TRANSLATION` | lyrics | Lyrics transliterate (AI) (17) | `grade_check_xlit_transliteration`, `_xlit_translation`, `_lyrics_lang_tags` |
-| `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | provenance | Beets tagging (14) · import (fingerprint match) | `grade_check_acoustid` |
+| `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | provenance | the import wizard's AcoustID apply (fingerprint match) — the PAIR in one save, verified by re-read | `grade_check_acoustid` |
 | `ENCODER_PROGRAM`, `ENCODER_QUALITY`, `ENCODER_VERSION` | provenance | Optimize FLACs (3) | `grade_check_encoder` |
 | `MUSICBRAINZ_*`, `RATEYOURMUSIC_*`, `RELEASETYPE`, `CATALOGNUMBER`, `LABEL`, `BARCODE`, `ISRC`, `WORK`, `MOVEMENT`, … | release | Beets tagging (14) · import · MusicBrainz writes | `grade_check_album_tags`, `grade_check_mb_links`, `grade_check_rym_links`, `grade_check_naming` |
 
 Notes that are easy to get wrong: `MEDIA`/`SOURCE` belong to script 1, not to
-script 8; `ACOUSTID_*` come from the import/fingerprint path (script 14's beets
-pass), not from script 6; `ENCODER_*` are written by the FLAC optimizer (3) and,
+script 8; `ACOUSTID_*` are written ONLY by the wizard's AcoustID apply — the
+fingerprint/recording pair goes in with one save and is read back to prove it
+landed, and a container the app cannot tag is reported per file — nothing in the
+script chain writes them; `ENCODER_*` are written by the FLAC optimizer (3) and,
 for images, by Process images (5).
 
 A tag's VALUE is normalised on the way in as well (§7.6): the eight tags with a
@@ -380,6 +382,16 @@ import step, the wizard and the *Fetch advisory rating* action) and
 `ALBUMITUNESADVISORY` to script 8's *Auto Album Advisory* derivation
 (`mlo/config.py::_TAG_WRITE_SWITCH`). The advisory fetch derives the album tag
 too, with script 8's own rule, so a manual fetch never leaves it stale.
+
+A fetch reports its provenance per track, and never invents one: per source the
+STRONGEST answer wins (every ISRC the file or MusicBrainz states is asked, so a
+later pressing's explicit answer is not lost to an earlier clean one), a
+provider-stated 0 stays escalateable to 1 by the word-reading stages (the
+configured AI, then the multilingual scan — the source says `(escalated)`), and
+a track that already holds 0/1/2 is echoed back UNCHANGED with
+`sources = ["existing-tag"]` unless the caller asks for a re-rate (`force`).
+Even a forced re-rate rewrites only with evidence: the invented
+`advisory_fallback` never overwrites a stored rating.
 
 ---
 
@@ -495,6 +507,15 @@ too, with script 8's own rule, so a manual fetch never leaves it stale.
 - **R56** — per-track sidecar covers are graded under the same rules
   (`grade_check_sidecar_cover`), and any image that is neither the album cover
   nor a track sidecar fails `grade_check_extra_images`.
+- **R56b** — cover CHOICE (`mlo/cover_choice.py`, the one policy the finder, the
+  autonomous Covers step and Add-to-library all rank with) verifies every
+  candidate against the album's OWN identity: a row whose stated artist/title
+  contradicts the album is rejected (a karaoke/tribute or another album's
+  release cannot win), a row stating a different track count is demoted, and —
+  while `cover_resize_enabled` puts `cover_target_size` in force — an image
+  whose size was never measured cannot be picked and the autonomous step refuses
+  to store a below-target cover. A manual apply stays warning-only: the user
+  picked that exact image.
 
 ### 7.6 Tag value spelling and spacing
 
@@ -506,7 +527,11 @@ too, with script 8's own rule, so a manual fetch never leaves it stale.
   initial capital). A value the vocabulary does NOT know — a mood a person
   typed, a `SOURCE` that is really a video id, a release type MusicBrainz has
   since added — is returned unchanged rather than coerced into a wrong answer,
-  which is what makes the rule idempotent.
+  which is what makes the rule idempotent. A multi-value tag is canonicalised
+  per part and written as REPEATED container fields (`; `-joined on read):
+  `RELEASECOUNTRY` carries every country the release's own events state, earliest
+  first, and a file already holding one of them is completed rather than left
+  short.
 - **R58** — free text is untouched, byte for byte: `TITLE`, `ALBUM`, `ARTIST`,
   `ALBUMARTIST`, `LABEL`, `COMMENT` and the lyrics are somebody's words, and
   "AC/DC" and "k.d. lang" must survive a tag write. Only the tags in

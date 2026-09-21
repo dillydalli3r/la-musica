@@ -16,35 +16,47 @@
  *  set of staged candidates that was empty. One builder and one state function
  *  are what make those impossible rather than unlikely. */
 
-import type { CoverResult } from "../types";
+import type { CoverResult, CoverSearchIdentity, TrackTags } from "../types";
 
 /** The album's identity: the names the page holds and the MusicBrainz ids it
  *  knows. A release id when the album has one, its release group otherwise,
  *  and the artist/album tags in every case — the name-based sources are asked
  *  regardless, and only the ids decide what the Cover Art Archive can be asked
- *  about (its release's own front cover first, then the group's stand-in). */
+ *  about (its release's own front cover first, then the group's stand-in).
+ *
+ *  `tracks` is the album's OWN track count, the third fact the server verifies
+ *  a candidate against (mlo/cover_choice rule 2): a karaoke or other-album row
+ *  can answer to the same artist and title, and a row whose own release states
+ *  a different track count is then a different release. `null` = this screen
+ *  does not know it, and the search verifies what the names and ids can. */
 export interface CoverIdentity {
   artist: string;
   album: string;
   releaseGroupMbid: string;
   releaseMbid: string;
+  tracks: number | null;
 }
 
 const clean = (v: string | null | undefined): string => (v ?? "").trim();
 
 /** Trim every part and drop the blanks: a whitespace-only tag is a MISSING
- *  tag, not a search term. */
+ *  tag, not a search term. A track count is kept only when it is a real one
+ *  (a whole number of tracks) — 0, a negative or a fraction is a caller that
+ *  does not know, never a count to send. */
 export function coverIdentity(input: {
   artist?: string | null;
   album?: string | null;
   releaseGroupMbid?: string | null;
   releaseMbid?: string | null;
+  tracks?: number | null;
 }): CoverIdentity {
+  const tracks = Number(input.tracks ?? 0);
   return {
     artist: clean(input.artist),
     album: clean(input.album),
     releaseGroupMbid: clean(input.releaseGroupMbid),
     releaseMbid: clean(input.releaseMbid),
+    tracks: Number.isFinite(tracks) && tracks >= 1 ? Math.trunc(tracks) : null,
   };
 }
 
@@ -74,9 +86,14 @@ export function coverQuery(
  *  them are omitted when empty). `api.coverSearch` sends exactly this string,
  *  and it is also the key the app's offline copy files an answer under (see
  *  `offlineCache.cacheKey`: path + query), so an answer can never be read back
- *  for a different question. */
+ *  for a different question.
+ *
+ *  `tracks` rides only when the caller knows the count: the parameter is
+ *  additive (a server that does not take it answers exactly as before), and
+ *  sending a guess would make the verification reject the real cover. */
 export function coverSearchPath(q: CoverQuery): string {
   const p = new URLSearchParams({ artist: q.artist, album: q.album });
+  if (q.tracks) p.set("tracks", String(q.tracks));
   if (q.sources.length) p.set("sources", q.sources.join(","));
   if (q.country) p.set("country", q.country);
   if (q.releaseGroupMbid) p.set("release_group_mbid", q.releaseGroupMbid);
@@ -176,12 +193,52 @@ export interface CoverAnswer {
   provider: string | null;
   chosen: CoverResult | null;
   notes: string[];
+  /** What the server VERIFIED the rows against — its own echo of the artist,
+   *  album and (when the query carried one) track count. `null` for an answer
+   *  that never went to the server (candidates the import staged) and for a
+   *  reply from a server predating the field: what a row was judged by is then
+   *  simply not known, and the finder says nothing about it. */
+  identity: CoverSearchIdentity | null;
   /** Set when the answer came out of the app's offline copy instead of the
    *  server — `at` is that copy's write time, null when the service worker
    *  answered and the copy's own age is unknown. `null` means the server
    *  answered: an answer from disk is not a fresh zero-result, and the finder
    *  says which it is showing. */
   cached: { at: number | null } | null;
+}
+
+/** The album's own track count, read the way the SERVER reads it — the number
+ *  the cover check is actually given (`server.imports._album_track_count`):
+ *  the recorded release manifest first, else the files' own
+ *  TRACKTOTAL/TOTALTRACKS tag, off the same five files the server reads.
+ *
+ *  A folder's FILE count is deliberately not used: a partial import, or one
+ *  disc of a set, would contradict every correct release — the exact opposite
+ *  of what this number is for — and the check would then reject the right
+ *  cover. An album that states no count answers null, and nothing is verified
+ *  against a count. */
+export function coverAlbumTrackCount(album: {
+  expected_tracks?: readonly unknown[] | null;
+  tracks?: readonly { tags?: TrackTags | null }[] | null;
+} | null | undefined): number | null {
+  const expected = album?.expected_tracks?.length ?? 0;
+  if (expected > 0) return expected;
+  for (const t of (album?.tracks ?? []).slice(0, 5)) {
+    for (const key of ["TRACKTOTAL", "TOTALTRACKS"] as const) {
+      const n = parseInt(String(t?.tags?.[key] ?? "").trim(), 10);
+      if (Number.isFinite(n) && n > 0) return n;
+    }
+  }
+  return null;
+}
+
+/** What the rows of an answer were checked against, in one line: the artist and
+ *  the album, and the track count when the search carried one (the server
+ *  compares each candidate's own release with all three — see
+ *  mlo/cover_choice rule 2). */
+export function coverCheckedAgainst(i: CoverSearchIdentity): string {
+  const names = [i.artist, i.album].filter(Boolean).join(" — ");
+  return i.tracks ? `${names} (${i.tracks} tracks)` : names;
 }
 
 export type CoverSearchPhase =

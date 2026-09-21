@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Image, Loader2, RefreshCw, ExternalLink, Check } from "lucide-react";
 import { api, offlineFallback } from "../api";
 import { useI18n } from "../lib/i18n";
 import {
   autoCoverSearch,
+  coverAlbumTrackCount,
+  coverCheckedAgainst,
   coverIdentity,
   coverIdentityKey,
   coverQuery,
@@ -14,7 +17,7 @@ import {
   type CoverQuery,
 } from "../lib/coverSearch";
 import { toast } from "../store";
-import type { CoverResult, CoverSourceCatalog } from "../types";
+import type { CoverResult, CoverSourceCatalog, TrackTags } from "../types";
 import Modal from "./Modal";
 
 const SOURCE_NAMES: Record<string, string> = {
@@ -78,8 +81,14 @@ interface Props {
   onClose: () => void;
   onApplied?: () => void;
   /** Audio filenames in the album folder: apply the chosen image to THESE
-   *  tracks (one file, many tracks) instead of the album cover. */
+   *  tracks (one file, many tracks) instead of the album cover. A selection,
+   *  so it is never the album's own track count. */
   tracks?: string[];
+  /** How many tracks the album has, when the caller knows — the third fact the
+   *  server checks a candidate's own release against (`tracks=` in the search;
+   *  a karaoke or other-album row can carry the same artist and title). Omit it
+   *  and nothing is verified against a count. */
+  trackCount?: number;
   /** The album's MusicBrainz release-group MBID, when the page knows it — the
    *  identity the Cover Art Archive is asked about for the group's stand-in.
    *  Without it that fallback can only answer for artist/album. */
@@ -101,12 +110,25 @@ interface Props {
   initialNotes?: string[];
 }
 
-export default function CoverSearchModal({ albumPath, artist, album, onClose, onApplied, tracks, releaseGroupMbid, releaseMbid, initialResults, initialProvider, initialChosen, initialNotes }: Props) {
+export default function CoverSearchModal({ albumPath, artist, album, onClose, onApplied, tracks, trackCount, releaseGroupMbid, releaseMbid, initialResults, initialProvider, initialChosen, initialNotes }: Props) {
   const { t } = useI18n();
+  const qc = useQueryClient();
+  // The album's own track count for the identity check. The wizard states the
+  // release it is importing; an album page passes none, but its own payload is
+  // already in the app's cache under the folder this finder was opened for —
+  // reading it costs no request, and it is read the way the SERVER reads it
+  // (the recorded manifest, else the files' TRACKTOTAL tag; never the folder's
+  // file count, which a partial import would make contradict the right cover).
+  // A miss leaves the count unknown and nothing is verified against one.
+  const cachedAlbum = qc.getQueryData<{
+    expected_tracks?: readonly unknown[];
+    tracks?: readonly { tags?: TrackTags | null }[];
+  }>(["album", albumPath]);
+  const albumTracks = trackCount ?? coverAlbumTrackCount(cachedAlbum);
   // The album's identity as the page that opened the finder knows it: the
   // artist and album tags it holds, plus whichever MusicBrainz ids it was
   // given. A release id when there is one, its release group otherwise.
-  const identity = coverIdentity({ artist, album, releaseGroupMbid, releaseMbid });
+  const identity = coverIdentity({ artist, album, releaseGroupMbid, releaseMbid, tracks: albumTracks });
   const [qArtist, setQArtist] = useState(identity.artist);
   const [qAlbum, setQAlbum] = useState(identity.album);
   // The fields follow the album's own tags until the user edits them: a page
@@ -125,6 +147,10 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
           provider: initialProvider ?? null,
           chosen: initialChosen ?? null,
           notes: initialNotes ?? [],
+          // Staged candidates never went through a search of ours, so what the
+          // import checked them against is not in this reply: said to be
+          // unknown rather than restated as if we had verified it.
+          identity: null,
           cached: null,
         }
       : null
@@ -212,7 +238,7 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
   // states are mutually exclusive, so "none found" can only ever be a real
   // zero-candidate answer, and a spinner or an error is never dressed as one.
   const queryNow = coverQuery(
-    coverIdentity({ artist: qArtist, album: qAlbum, releaseGroupMbid, releaseMbid }),
+    coverIdentity({ artist: qArtist, album: qAlbum, releaseGroupMbid, releaseMbid, tracks: albumTracks }),
     { sources: srcSel, country }
   );
   const phase = coverSearchPhase({ query: queryNow, loading, error, answer, lastQuery });
@@ -268,6 +294,9 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
         provider: r.provider ?? null,
         chosen: r.chosen ?? null,
         notes: r.notes ?? [],
+        // What the server says it verified the rows against — its own words,
+        // not ours restated: it is the answer to "why was this row rejected".
+        identity: r.identity ?? null,
         // An answer the offline copy supplied is recorded as such: a real
         // answer, but not a fresh one, and the finder says which.
         cached: cached && (cached.key === key || cached.key.endsWith(key)) ? { at: cached.at } : null,
@@ -704,6 +733,24 @@ export default function CoverSearchModal({ albumPath, artist, album, onClose, on
             {outcome.chosen && (
               <div className="text-[11px] text-zinc-400">
                 {t("cover.pick_reason")}: {candidateReason(outcome.chosen)}
+              </div>
+            )}
+            {/* What every row on this screen was VERIFIED against — the
+                server's own echo, so a row rejected two lines below ("a
+                different artist's release") can be read against the identity
+                it contradicts rather than taken on faith. */}
+            {outcome.identity && (outcome.identity.artist || outcome.identity.album) && (
+              <div className="text-[11px] text-zinc-500">
+                {t("cover.checked_against", { identity: coverCheckedAgainst(outcome.identity) })}
+              </div>
+            )}
+            {/* Every row rejected: the pick is empty and the rows are still
+                listed (each carrying why), which without this line reads as
+                "the search is still deciding". They stay selectable — the
+                manual apply is warning-only on purpose. */}
+            {!outcome.chosen && outcome.results.length > 0 && (
+              <div className="text-[11px] text-amber-400/90">
+                {t("cover.all_rejected", { count: outcome.results.length })}
               </div>
             )}
             {outcome.notes.length > 0 && (

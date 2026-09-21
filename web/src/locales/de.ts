@@ -302,6 +302,8 @@ export default {
   "cover.best_pick_use": "Beste Wahl verwenden",
   "cover.no_pick": "Kein Kandidat erreicht die Cover-Zielgröße — wähle eines von Hand.",
   "cover.pick_reason": "Warum dieses",
+  "cover.checked_against": "Geprüft gegen {identity}",
+  "cover.all_rejected": "{count} Kandidat(en) wurden abgelehnt — jede Zeile nennt den Grund, und jeder davon lässt sich weiterhin von Hand anwenden.",
   "cover.source_notes": "Was jede Quelle getan hat",
   "cover.searching": "Cover-Quellen werden durchsucht…",
   "cover.answered": "Gesucht: {terms}",

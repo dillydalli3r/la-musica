@@ -96,6 +96,12 @@ eq(report["minimum"], 1200, "the minimum IS that target (the floor the grader en
 eq(report["sources"], list(cc.DEFAULT_SOURCE_ORDER),
    "an empty cover_sources means the shipped default order")
 ok(len(report["rules"]) >= 8, "the policy reports its rules in prose", report["rules"])
+# The score is a positional encoding with one bucket per tier: a rule added
+# without raising the base would silently overflow the tier above it.
+eq(len(cc._TIER_NAMES), cc._SCORE_BASE,
+   "the tier tuple has exactly one slot per score bucket")
+ok(all(n in cc._TIER_LABELS for n in cc._TIER_NAMES),
+   "and every tier has a label a tie-break sentence can name", cc._TIER_NAMES)
 eq(cc.policy_config({"cover_sources": ["deezer", "qobuz"]})["cover_sources"],
    ["deezer", "qobuz"], "a configured order wins wholesale")
 eq(cc.policy_config({"cover_resize_enabled": False})["cover_minimum"], 0,
@@ -138,14 +144,142 @@ has(" ".join(by_url(ranked, smaller["big"]).reasons), "nothing is upscaled",
 eq(cc.policy_config(no_floor)["cover_minimum"], 0,
    "with resize off, the target is a preference and not a floor")
 
+# An image nobody measured cannot be the automatic pick while a floor is
+# configured: the policy has no evidence it reaches the minimum, so it is
+# rejected — listed last with its reason, and still applicable by hand.
 unknown = cand("spotify", None, width=None, height=None, format=None, bytes=None)
 chosen, ranked, notes = cc.choose_covers([unknown, at_target], CFG)
-eq(chosen.url, at_target["big"], "an unmeasured image is neither rewarded nor rejected")
+eq(chosen.url, at_target["big"], "an unmeasured image is never the automatic pick")
+unmeasured = by_url(ranked, unknown["big"])
+ok(unmeasured.rejected != "", "it is rejected rather than ranked below", unmeasured)
+has(unmeasured.rejected, "never measured",
+    "and the rejection says the image was never measured")
+has(unmeasured.rejected, "1200×1200 minimum",
+    "and names the minimum it cannot be shown to reach")
+eq(ranked[-1].url, unknown["big"], "it is still reported, with the reason")
+eq([c.url for c in ranked], [at_target["big"], unknown["big"]],
+   "and the usable candidate is the one left to pick")
+# With NO floor there is nothing it can fall short of: the row is ranked on
+# the facts it does have, and an unknown size is neither rewarded nor blamed.
+chosen, ranked, notes = cc.choose_covers([unknown, at_target], no_floor)
+eq(chosen.url, at_target["big"], "with no floor an unmeasured image is not rejected")
 has(" ".join(by_url(ranked, unknown["big"]).reasons), "size unknown",
     "and it says the size was never probed")
 
 # --------------------------------------------------------------------------- #
-# 3. the release's own cover beats a release-group stand-in
+# 3. identity: the candidate has to BE this album
+# --------------------------------------------------------------------------- #
+# What a real meta-search answers with, for "Radiohead — OK Computer": the
+# album itself across the stores, plus karaoke, tribute, 8-bit and
+# other-album rows that carry the same names (measured on a live COV query —
+# 113 rows, 54 of them another artist's, 12 more another album by Radiohead).
+print("\nidentity")
+IDENT = {"artist": "Radiohead", "album": "OK Computer", "tracks": 12}
+real = cand("tidal", 1200, artist="Radiohead", title="OK Computer", tracks=12)
+karaoke = cand("qobuz", 1200, artist="Molotov Cocktail Piano",
+               title="MCP Performs Radiohead: OK Computer", tracks=11)
+
+# The control: with no album to check against — which is exactly what the
+# policy did before this rule existed — the karaoke row WINS, because qobuz
+# outranks tidal in the configured source order.
+blind = cc.choose_covers([karaoke, real], CFG)[0]
+eq(blind.url, karaoke["big"], "without an identity the preferred source's karaoke row wins")
+chosen, ranked, notes = cc.choose_covers([karaoke, real], CFG, identity=IDENT)
+eq(chosen.url, real["big"], "with the album's identity it cannot win")
+karaoke_row = by_url(ranked, karaoke["big"])
+ok(karaoke_row.rejected != "", "the karaoke row is rejected, not merely outranked", karaoke_row)
+has(karaoke_row.rejected, "a different artist's release",
+    "and the rejection names the artist it states")
+has(karaoke_row.rejected, "Molotov Cocktail Piano", "by its own name")
+
+# Another album by the SAME artist is the same wrongness: a name search answers
+# with the artist's whole catalogue.
+other_album = cand("tidal", 2000, artist="Radiohead", title="Kid A", tracks=11)
+chosen, ranked, notes = cc.choose_covers([other_album, real], CFG, identity=IDENT)
+eq(chosen.url, real["big"], "another album by the same artist never wins either")
+other_row = by_url(ranked, other_album["big"])
+ok(other_row.rejected != "", "and it is rejected too", other_row)
+has(other_row.rejected, "a different album", "with the album it names")
+has(other_row.rejected, "Kid A", "named as the source stated it")
+
+# The right names with a different tracklist is an EDITION (a reissue, a
+# compilation): ranked below a matching row, never rejected — its artwork is
+# usually the album's own.
+reissue = cand("qobuz", 1200, artist="Radiohead",
+               title="OK Computer OKNOTOK 1997 2017", tracks=23)
+chosen, ranked, notes = cc.choose_covers([reissue, real], CFG, identity=IDENT)
+eq(chosen.url, real["big"], "the edition whose tracklist matches wins")
+has(chosen.reasons[-1], "album-identity check",
+    "the deciding sentence names the identity tier it won on")
+reissue_row = by_url(ranked, reissue["big"])
+eq(reissue_row.rejected, "", "a reissue is not rejected for its tracklist")
+has(" ".join(reissue_row.reasons), "23 track(s)",
+    "and its reason says how many tracks it states")
+
+# A row that states nothing is NOT punished for it: it cannot be checked, so it
+# sits in the middle — and it still beats a row that contradicts the album.
+silent = cand("deezer", 1200, artist=None, title=None, tracks=None)
+chosen, ranked, notes = cc.choose_covers([silent], CFG, identity=IDENT)
+ok(chosen is not None and not chosen.rejected, "a row that states nothing is not rejected")
+has(" ".join(chosen.reasons), "cannot be checked",
+    "and its reason says it could not be checked")
+chosen, ranked, notes = cc.choose_covers([karaoke, silent], CFG, identity=IDENT)
+eq(chosen.url, silent["big"], "uncheckable ranks above contradicted")
+eq(cc.policy_config(CFG)["cover_minimum"], 1200, "the floor is still the target here")
+
+# A provider's own spelling of the RIGHT release is never thrown out for the
+# spelling: accents, translated titles and a joined artist credit all match.
+spellings = [
+    ("Radiohead", "OK Computer OKNOTOK 1997 2017"),
+    ("Radiohead, レディオヘッド*", "Ok. Компьютер (OK Computer)"),
+    ("radiohead", "ok computer"),
+]
+for artist, title in spellings:
+    row = cand("discogs", 1400, artist=artist, title=title, tracks=None)
+    chosen, _, _ = cc.choose_covers([row], CFG, identity=IDENT)
+    ok(chosen is not None, f"a correct release spelled {artist!r} / {title!r} is kept")
+
+# The comparison is word-bounded, not a substring: a one-letter artist name
+# would otherwise be "contained in" every name that has that letter.
+eq(cc._same_name("a", "radiohead"), False,
+   "a one-letter name is not a match for a longer one")
+eq(cc._same_name("t", "ok computer"), False,
+   "and neither is a one-letter album title")
+eq(cc._same_name("radiohead", "radiohead レディオヘッド"), True,
+   "a longer credit of the same artist still matches")
+eq(cc._same_name("ok computer", "ok computer oknotok 1997 2017"), True,
+   "a reissue's longer title still matches")
+eq(cc._same_name("", "radiohead"), False, "an unstated name matches nothing")
+eq(cc._same_name("radiohead", ""), False, "and neither does an unknown album")
+
+# With no album identity at all (an untagged folder searched by name) nothing
+# is verified rather than everything being rejected.
+chosen, ranked, notes = cc.choose_covers([karaoke, real], CFG)
+ok(chosen is not None and not any(c.rejected for c in ranked),
+   "an album with no identity rejects nothing")
+chosen, ranked, notes = cc.choose_covers([karaoke, real], CFG, identity={})
+ok(chosen is not None and not any(c.rejected for c in ranked),
+   "and neither does an empty one")
+
+# The comparison key is the app's OWN fold, not a second opinion about when two
+# names are the same string (server/discovery.py:norm).
+from server import discovery  # noqa: E402
+for name in ("Radiohead", "OK Computer OKNOTOK 1997 2017", "Störagéd", "Björk",
+             "Radiohead, レディオヘッド*", "Ok. Компьютер (OK Computer)",
+             "KARAOKE", "", None):
+    eq(cc._fold(name), discovery.norm(name),
+       f"the policy folds {name!r} exactly as the app's own normalizer does")
+
+# The payload says what the rows were checked against.
+payload = cc.cover_payload([real], CFG, identity=IDENT)
+eq(payload["identity"], {"artist": "Radiohead", "album": "OK Computer", "tracks": 12},
+   "the payload carries the identity the pick was verified with")
+eq(cc.cover_payload([real], CFG)["identity"],
+   {"artist": "", "album": "", "tracks": None},
+   "and says so plainly when nothing was verified")
+
+# --------------------------------------------------------------------------- #
+# 4. the release's own cover beats a release-group stand-in
 # --------------------------------------------------------------------------- #
 print("\nrelease vs stand-in")
 own = cand("coverartarchive", 1200, big=CAA_RELEASE, front=True, kind="front",
@@ -165,7 +299,7 @@ eq(intg.cover_url_labels("https://cdn.test/x.jpg"), (None, None),
    "a store CDN URL states neither")
 
 # --------------------------------------------------------------------------- #
-# 4. front beats back, format, aspect and the provider's own order
+# 5. front beats back, format, aspect and the provider's own order
 # --------------------------------------------------------------------------- #
 print("\nthe late tiers")
 back = cand("deezer", 1200, kind="back", front=False)
@@ -214,7 +348,7 @@ eq(first.url, a["big"], "the provider's first answer settles an otherwise exact 
 has(first.reasons[-1], "provider's own order", "and the deciding sentence says so")
 
 # --------------------------------------------------------------------------- #
-# 5. rejections: the floor is named, and nothing is silently dropped
+# 6. rejections: the floor is named, and nothing is silently dropped
 # --------------------------------------------------------------------------- #
 print("\nrejections")
 tiny = cand("deezer", 400, front=True, kind="front")
@@ -258,7 +392,7 @@ ok(all(c.score == 0.0 for c in ranked), "a rejected candidate scores zero")
 eq(cc.pick(ranked), None, "pick() finds nothing when everything is rejected")
 
 # --------------------------------------------------------------------------- #
-# 6. upscaled and thumbnail candidates
+# 7. upscaled and thumbnail candidates
 # --------------------------------------------------------------------------- #
 print("\nthumbnails")
 # A 250px thumbnail request that answers 1200x1200: the pixels were invented
@@ -292,7 +426,7 @@ eq(cc.url_size_hint("https://cdn.test/plain.jpg"), None,
    "a URL that states no size is not guessed at")
 
 # --------------------------------------------------------------------------- #
-# 7. the notes: what every source did, and the winner's own report
+# 8. the notes: what every source did, and the winner's own report
 # --------------------------------------------------------------------------- #
 print("\nnotes")
 sources = [
@@ -317,7 +451,7 @@ has("\n".join(notes), "1 candidate(s) could be a cover",
     "the kept/rejected counts are stated")
 
 # --------------------------------------------------------------------------- #
-# 8. the payload the surfaces share, and determinism
+# 9. the payload the surfaces share, and determinism
 # --------------------------------------------------------------------------- #
 print("\npayload")
 payload = cc.cover_payload([huge, at_target, tiny], CFG, sources=sources,

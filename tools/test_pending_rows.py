@@ -22,6 +22,11 @@ pins the payloads, because that is what every surface draws from:
   * the clear path (`pending_albums.clear_if_filled`, what the import runs)
     ends it: the row renders as a normal album again.
 
+The naming preview (`pending_albums.release_tags`) is checked the same way: its
+RELEASECOUNTRY carries every country the release states, ";"-joined with
+MusicBrainz's own first event first, so the folder the preview names is the
+folder the stamped tags name.
+
 No network and no real library: the music folder is a temp directory, the Cover
 Art Archive is stubbed at the art cache's own seam, and the release comes from
 the same fixture `tools/test_add_to_library.py` uses.
@@ -77,6 +82,7 @@ if REAL:
 from fastapi import FastAPI                                    # noqa: E402
 from fastapi.testclient import TestClient                      # noqa: E402
 
+from mlo import naming                                         # noqa: E402
 from mlo.config import load_config                             # noqa: E402
 from server import api_query as aq                             # noqa: E402
 from server import artcache, pending_albums, tagcache, wishes   # noqa: E402
@@ -326,6 +332,32 @@ ok(find(home_rows(home_payload, "pending"), folder) is None,
    "home: it has left the waiting shelf")
 ok(find(home_rows(home_payload, "recent"), folder) is not None,
    "home: it is still where its album belongs")
+
+# --------------------------------------------------------------------------- #
+# 4. the naming preview's RELEASECOUNTRY: every country, first event first
+# --------------------------------------------------------------------------- #
+print("\nthe naming preview's country")
+tags = pending_albums.release_tags(RELEASE)
+eq(tags.get("RELEASECOUNTRY"), "GB",
+   "a release with one country previews that code")
+# The same release out in three countries: the preview carries all of them,
+# ";"-joined exactly as the tags will be stamped (server.soulseek_auto's own
+# stamper writes the same value), so the folder previewed here is the folder
+# the tags name.
+MULTI = dict(RELEASE, countries=[{"code": "GB", "date": "1997-05-06"},
+                                 {"code": "US", "date": "1997-05-20"},
+                                 {"code": "XE", "date": "1997-06-01"}])
+multi_tags = pending_albums.release_tags(MULTI)
+eq(multi_tags.get("RELEASECOUNTRY"), "GB; US; XE",
+   "a multi-country release previews every code, '; '-joined")
+ok(multi_tags["RELEASECOUNTRY"].split("; ")[0] == RELEASE["country"],
+   "…with MusicBrainz's own first event first — what the naming script reads "
+   "(mlo.naming._first_multi, spec R33)")
+eq(naming.track_variables(multi_tags).get("releasecountry"), "GB",
+   "the naming variable is that first code, not the list")
+eq(pending_albums.folder_for_release(MULTI, CFG),
+   pending_albums.folder_for_release(RELEASE, CFG),
+   "…so the folder preview does not move when a release gains countries")
 
 print()
 if FAILED:

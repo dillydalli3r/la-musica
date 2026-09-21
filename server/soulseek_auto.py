@@ -49,7 +49,15 @@ import traceback
 import unicodedata
 from urllib.parse import quote
 
-from mlo.config import load_config
+from mlo.config import DEFAULT_CONFIG, load_config
+# The medium accessor of the ONE release-choice policy: a release dict from any
+# payload (browse row, normalized row, full lookup) answers with its formats,
+# which is what decides whether a release is digital or a pressing.
+from mlo.release_choice import media_formats
+# The app's own multi-value separator: RELEASECOUNTRY is written "; "-joined
+# (mlo.audio joins repeated fields with it, mlo.naming._first_multi reads the
+# first entry back), so the writer and the reader cannot disagree.
+from mlo.tagtext import _LIST_SEP
 
 # --------------------------------------------------------------------------- #
 # Job state
@@ -760,6 +768,68 @@ def _norm_text(s):
     return re.sub(r"\s+", " ", s).strip()
 
 
+# NFKD (above) folds the FULL-WIDTH forms of ASCII punctuation onto their ASCII
+# selves — ！ -> !, ／ -> /, １２３ -> 123 — but leaves the typographic forms
+# alone, so a title spelled with a curly apostrophe or an en dash must still
+# produce the SAME search text as one spelled with ASCII. The quote forms fold
+# onto their ASCII selves (which the keep-set below then decides about), the
+# dash forms onto "-", and the separators CJK pages write between names (、 ・ ·)
+# onto a space.
+_SEARCH_FOLD = str.maketrans({
+    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'",
+    "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"',
+    "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-",
+    "\u2014": "-", "\u2015": "-", "\u2212": "-", "\u301c": "-", "\uff5e": "-",
+    "\u3001": " ", "\u30fb": " ", "\u00b7": " ",
+})
+
+# The punctuation a share folder name DOES carry and a search should keep: the
+# hyphen of a catalog number ("WPCL-1234" — mangling it searches for a number
+# the peer does not have), the dot and underscore of a file name, and the
+# apostrophe and ampersand of a title. Everything else outside letters, digits
+# and spaces becomes a SPACE: quotes, brackets, slashes, "! ? *", emoji and the
+# like are what a MusicBrainz title has and a share folder name is not allowed
+# to — but they separate words ("Album (Remastered)", "Live/2"), and deleting
+# them outright would search for "Album" + "Remastered" glued into one term no
+# share carries.
+_SEARCH_KEEP = "-_.&'"
+
+
+# A combining mark is an ACCENT when it sits on a Latin letter — "é" is "e"
+# plus one, and folding it away is what makes a title's two spellings one
+# query — and a LETTER of its own on any other base: NFKD splits the Japanese
+# voiced kana the same way ("ぴ" is "ひ" plus the semi-voiced mark), so dropping
+# that mark would search for a different artist entirely.
+_ACCENT_BASE_RE = re.compile(r"[A-Za-z]")
+
+
+def _search_text(s):
+    """The text slskd should be handed for ONE rendered query.
+
+    soulseek.search POSTs `searchText` verbatim, so a title's punctuation
+    reaches the network as typed. Letters and digits of EVERY script are kept —
+    a Japanese or Cyrillic title is as searchable as an English one, which is
+    why the filename normalisation that deletes CJK (server.discovery.norm) is
+    deliberately NOT reused here, and why the accent-folding above stops at the
+    Latin letters `_norm_text` folds everywhere. A term that was nothing but
+    punctuation ("!!!") would vanish altogether, so the plain normalized text
+    is the fallback rather than an empty query.
+    """
+    text = unicodedata.normalize("NFKD", str(s or ""))
+    kept = []
+    for ch in text:
+        if (unicodedata.combining(ch) and kept
+                and _ACCENT_BASE_RE.fullmatch(kept[-1])):
+            continue                 # an accent on a Latin letter: folded away
+        kept.append(ch)
+    # NFC puts the marks that survived back onto their base (ひ + ゜ -> ぴ), so
+    # the term is one character per letter again and survives the keep-set.
+    text = unicodedata.normalize("NFC", "".join(kept)).translate(_SEARCH_FOLD)
+    out = "".join(ch if (ch.isalnum() or ch == " " or ch in _SEARCH_KEEP) else " "
+                  for ch in text)
+    return re.sub(r"\s+", " ", out).strip() or text
+
+
 # A release can carry several catalog numbers (one per label/pressing). Each is
 # searched as its OWN query — the caller runs every returned query as a
 # separate search and merges the responses — but a release with a dozen numbers
@@ -787,53 +857,304 @@ def _catalog_numbers(release):
 def _expand_template(tpl, fields, catalogs):
     """Render one template. A template naming `catalognumber` yields one query
     per catalog number (so `["catalognumber"]` on a two-number CD is two
-    queries); any other template yields exactly one, as it always has."""
+    queries); any other template yields exactly one, as it always has. Every
+    rendered query goes through `_search_text`, so the single place a query is
+    assembled is also the single place it is cleaned."""
     names = [f.strip().lower() for f in str(tpl).split()]
     if "catalognumber" not in names:
-        q = _norm_text(" ".join(p for p in (fields.get(f, "") for f in names) if p))
+        q = _search_text(" ".join(p for p in (fields.get(f, "") for f in names) if p))
         return [q] if q else []
     out = []
     for cn in catalogs:
         parts = [cn if f == "catalognumber" else fields.get(f, "") for f in names]
-        q = _norm_text(" ".join(p for p in parts if p))
+        q = _search_text(" ".join(p for p in parts if p))
         if q and q not in out:
             out.append(q)
     return out
 
 
-def release_queries(release, cfg):
+# --------------------------------------------------------------------------- #
+# Which templates search which kind of release
+# --------------------------------------------------------------------------- #
+# The one medium in mlo.tagtext.MEDIA_VALUES that is not a physical carrier: a
+# release made ENTIRELY of it has no pressing trait to search by, and the broad
+# artist/album/year wording is all it has. Everything else the vocabulary names
+# (CD, CD-R, SHM-CD, Blu-spec CD, Vinyl, Cassette, SACD, DVD-Audio, …) IS a
+# pressing, and a pressing is searched by what identifies THAT pressing.
+_DIGITAL_MEDIA = "Digital Media"
+
+# A CD is physical like every other pressing, but it owns a settings key of its
+# own — the one every CD was searched with until the physical key existed. A
+# config that really sets it keeps using it (`_templates_for`).
+_CD_QUERIES_KEY = "soulseek_auto_cd_queries"
+_PHYSICAL_QUERIES_KEY = "soulseek_auto_physical_queries"
+_DIGITAL_QUERIES_KEY = "soulseek_auto_digital_queries"
+
+
+def _is_digital(release):
+    """True when every STATED medium of the release is Digital Media.
+
+    mlo.release_choice.media_formats reads the format out of whichever payload
+    the caller holds (a browse row, a normalized row, a full release lookup),
+    so the split holds on every path into the job. An empty or unknown medium
+    list is NOT digital: a release whose format nobody stated must not be
+    handed the broad query a real digital release earns.
+    """
+    formats = [str(f).strip() for f in media_formats(release)]
+    return bool(formats) and all(f == _DIGITAL_MEDIA for f in formats)
+
+
+def _templates(cfg, key, default):
+    """One configured template list: a ";"-separated string is accepted (the
+    settings UI edits the list as one line), blanks are dropped, and an unset
+    or empty value falls back to `default` ([] when it has none)."""
+    value = cfg.get(key)
+    if isinstance(value, str):
+        value = [t for t in value.split(";") if t.strip()]
+    if not isinstance(value, (list, tuple)):
+        return list(default or [])
+    out = [str(t).strip() for t in value if str(t).strip()]
+    return out or list(default or [])
+
+
+def _templates_for(cfg, digital, is_cd):
+    """The configured templates this release's kind is searched with.
+
+    Digital media — and only digital media — keeps the broad wording: it has no
+    pressing trait. A physical release is searched by the traits unique to its
+    pressing (`soulseek_auto_physical_queries`: catalog number and barcode),
+    except a CD whose `soulseek_auto_cd_queries` a config actually sets: that
+    key is what a CD was searched with before this one existed, and a user who
+    widened or narrowed it made a decision the new default must not silently
+    overwrite. Its SHIPPED default (the catalog number alone) is not such a
+    decision, so an untouched install follows the physical default.
+    """
+    if digital:
+        return _templates(cfg, _DIGITAL_QUERIES_KEY, ["artist album year"])
+    if is_cd:
+        cd = _templates(cfg, _CD_QUERIES_KEY, None)
+        if cd and cd != list(DEFAULT_CONFIG[_CD_QUERIES_KEY]):
+            return cd
+    return _templates(cfg, _PHYSICAL_QUERIES_KEY, ["catalognumber", "barcode"])
+
+
+def _pressing_fallback(fields, digital):
+    """The one query a physical pressing with no catalog number/barcode gets.
+
+    NEVER the artist/title wording: that is the query that asks the network for
+    every other pressing of the same album, which is what made a CD job take a
+    WEB rip instead of the pressing it was asked for. The label, the country
+    and the year are what a folder of THAT pressing carries. A release stating
+    neither a label nor a country has nothing left to identify it by, so it
+    gets no query at all — the caller reports "nothing to search by" instead of
+    searching blind.
+    """
+    if digital:
+        return []
+    used = [(name, fields[name]) for name in ("label", "country", "year")
+            if fields[name]]
+    if not any(fields[name] for name in ("label", "country")):
+        return []
+    q = _search_text(" ".join(v for _n, v in used))
+    if not q:
+        return []
+    _log("this pressing has no catalog number or barcode — searching by its "
+         f"{' + '.join(n for n, _v in used)} (“{q}”) instead")
+    return [q]
+
+
+# --------------------------------------------------------------------------- #
+# MusicBrainz aliases: the other name a release is filed under
+# --------------------------------------------------------------------------- #
+# The scripts whose names are not Latin (CJK, Hangul, Kana, Cyrillic, Greek,
+# Hebrew, Arabic, Devanagari, Thai) and the locales whose own names ARE Latin.
+# This is the beets plugin's own pair — server/beets/mloplugin._NON_LATIN_RE /
+# _LATIN_LOCALES, which ask the same question for the TAGS — restated here
+# because that module imports beets, an OPTIONAL external tool (it is not in
+# server/requirements.txt; fetchdeps installs it at runtime), while the search
+# side has to work without it. The two rules answer ONE question — "can a
+# MusicBrainz alias translate this name into the reader's locale?" — so they
+# must stay equal.
+_NON_LATIN_RE = re.compile(
+    "[\u0370-\u03ff\u0400-\u04ff\u0590-\u05ff\u0600-\u06ff\u0900-\u097f"
+    "\u0e00-\u0e7f\u1100-\u11ff\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff"
+    "\uf900-\ufaff\uac00-\ud7af]")
+_LATIN_LOCALES = {
+    "en", "de", "fr", "es", "it", "pt", "nl", "sv", "no", "da", "fi", "is",
+    "pl", "cs", "sk", "hu", "ro", "tr", "vi", "id", "ms", "tl", "hr", "sl",
+    "lt", "lv", "et", "ca", "gl", "eu", "af", "sq",
+}
+
+
+def _alias_needed(value, locale):
+    """False when a locale alias lookup cannot change `value` anyway.
+
+    A name already written in the reader's locale's script has nothing to
+    translate, and the lookup costs one of MusicBrainz' rate-limited requests —
+    so a Latin-script library asks MusicBrainz nothing at all.
+    """
+    if not value:
+        return False
+    if (str(locale or "en").split("-")[0].lower() in _LATIN_LOCALES
+            and not _NON_LATIN_RE.search(str(value))):
+        return False
+    return True
+
+
+def _mb_aliases(entity, mbid):
+    """MusicBrainz' aliases for one entity — [] when there is nothing to ask,
+    when MusicBrainz holds none, or when it cannot answer.
+
+    Through `integrations.mb_get_cached`: cached, single-flight and rate-limited
+    like every other MusicBrainz read, so a release page showing the same entity
+    costs no second request. An alias never fails a job — the configured
+    templates are already in hand.
+    """
+    if not mbid:
+        return []
+    from server import integrations as intg
+    try:
+        data = intg.mb_get_cached(f"{entity}/{mbid}", {"inc": "aliases", "fmt": "json"})
+    except Exception as e:
+        _log(f"  MusicBrainz alias lookup failed for {entity}/{mbid}: {e}")
+        return []
+    return [a for a in ((data or {}).get("aliases") or []) if isinstance(a, dict)]
+
+
+def _alias_name(aliases, value, locale):
+    """The alias that translates `value` for a reader in `locale`, "" if none.
+
+    The locale's own aliases win, a primary one first (Picard's own
+    preference). When that locale has none and the value is written in another
+    script, any Latin-script alias beats nothing: an artist's page carries the
+    romanized name under whatever locale tag the editor happened to use, "en"
+    as often as not.
+    """
+    want = str(locale or "").strip().lower()
+    raw = str(value or "").strip()
+
+    def in_locale(only_primary):
+        out = []
+        for a in aliases:
+            name = str(a.get("name") or "").strip()
+            if not name or name == raw:
+                continue
+            if str(a.get("locale") or "").strip().lower() != want:
+                continue
+            if only_primary and not a.get("primary"):
+                continue
+            out.append(name)
+        return out
+
+    for group in (in_locale(True), in_locale(False)):
+        if group:
+            return group[0]
+    if raw and _NON_LATIN_RE.search(raw):
+        for a in aliases:
+            name = str(a.get("name") or "").strip()
+            if name and not _NON_LATIN_RE.search(name):
+                return name
+    return ""
+
+
+def _alias_queries(release, cfg, templates, fields, catalogs, queries):
+    """Extra queries rendered from the release's MusicBrainz aliases.
+
+    A release MusicBrainz files under a translated name is unfindable on
+    Soulseek under the name the release itself carries: the folders on the
+    network are named with the ALIAS (a Japanese artist's romanized name, say)
+    while every configured template looks for the original. Two lookups answer
+    it, both through the cached client — the artist's aliases (`artists[].mbid`)
+    and the release group's (`release_group_id`) — and a name already in the
+    reader's script costs no request at all (`_alias_needed`).
+
+    The extra queries are the SAME templates rendered with the alias in place of
+    the artist, and of the album when the release group carries an alias title;
+    they are capped at `_MAX_CATALOG_QUERIES` like the catalog expansion, and
+    they are built BEFORE the job offers the wish list — a wish replays the
+    queries it was stored with (server/wishes_worker), so an alias query that
+    arrived later would never be searched again.
+    """
+    locale = str(cfg.get("beets_locale") or "en").strip()
+    artists = release.get("artists") or [{}]
+    artist_mbid = (artists[0].get("mbid") if artists else "") or ""
+    alias_artist = ""
+    if _alias_needed(fields["artist"], locale):
+        alias_artist = _alias_name(_mb_aliases("artist", artist_mbid),
+                                   fields["artist"], locale)
+    alias_album = ""
+    if _alias_needed(fields["album"], locale):
+        alias_album = _alias_name(
+            _mb_aliases("release-group", release.get("release_group_id")),
+            fields["album"], locale)
+    if not (alias_artist or alias_album):
+        return []
+    named = alias_artist or fields["artist"]
+    _log(f"MusicBrainz also files this release under “{named}”"
+         f"{' / “' + alias_album + '”' if alias_album else ''} ({locale}) — "
+         f"searching that name too")
+    alt = dict(fields)
+    if alias_artist:
+        alt["artist"] = alias_artist
+    if alias_album:
+        alt["album"] = alias_album
+    out = []
+    for tpl in templates:
+        for q in _expand_template(tpl, alt, catalogs):
+            if q not in queries and q not in out:
+                out.append(q)
+                if len(out) >= _MAX_CATALOG_QUERIES:
+                    return out
+    return out
+
+
+def release_queries(release, cfg, templates=None):
     """Search queries from the release's traits, in configured priority order.
 
     Each template is a space-separated list of field names; supported fields:
     artist, album, year, date, country, catalognumber, barcode, label.
-    A CD defaults to its catalog number alone (the trait rip folders actually
-    carry, and the one search that does not drag in every other pressing);
-    digital media, which has no catalog number, to "artist album year".
 
-    A CD whose release carries NO catalog number would otherwise have nothing
-    to search for at all, so it falls back to the digital template instead of
-    failing the job — one search, and the caller logs which one it was.
+    DIGITAL media (every stated medium is "Digital Media") is searched by
+    `soulseek_auto_digital_queries` — "artist album year" by default — because
+    it has no pressing trait to be identified by. A PHYSICAL release is searched
+    by `soulseek_auto_physical_queries` (catalog number and barcode by default),
+    the traits that name the exact pressing, and falls back to its label and
+    country when MusicBrainz states neither of the first two — never to an
+    artist/title query, which asks the network for every other pressing of the
+    same album.
 
     A release carrying several catalog numbers (one per label/pressing) yields
     one query per number for every template that names `catalognumber`, capped
-    at `_MAX_CATALOG_QUERIES`.
-    """
-    is_cd = "CD" in (release.get("medium_formats") or [])
-    key = "soulseek_auto_cd_queries" if is_cd else "soulseek_auto_digital_queries"
-    templates = cfg.get(key) or []
-    if isinstance(templates, str):
-        templates = [templates]
-    if not templates:
-        templates = ["catalognumber"] if is_cd else ["artist album year"]
+    at `_MAX_CATALOG_QUERIES` — the same cap the MusicBrainz alias queries
+    (`_alias_queries`) stop at.
 
+    `templates` renders an explicit set instead of the configured one: the job's
+    own stored queries, and its broad second pass. Those are queries a caller
+    already decided, so they are rendered exactly as given and expand no
+    aliases.
+    """
+    formats = [str(f).strip() for f in media_formats(release)]
+    digital = _is_digital(release)
+    explicit = templates is not None
+    if explicit:
+        if isinstance(templates, str):
+            templates = [templates]
+        templates = [str(t).strip() for t in templates if str(t).strip()]
+    if not explicit:
+        templates = _templates_for(cfg, digital, "CD" in formats)
+
+    # The RAW spellings: `_expand_template` is the one place a query is
+    # assembled, and `_search_text` normalizes there — running `_norm_text`
+    # first would fold Japanese voicing marks ("ぴ" -> "ひ") long before the
+    # sanitizer could tell an accent from a letter.
     fields = {
-        "artist": _norm_text((release.get("artists") or [{}])[0].get("name", "")),
-        "album": _norm_text(release.get("title", "")),
+        "artist": str((release.get("artists") or [{}])[0].get("name") or ""),
+        "album": str(release.get("title") or ""),
         "year": str(release.get("date") or "")[:4],
         "date": str(release.get("date") or ""),
         "country": str(release.get("country") or ""),
         "barcode": str(release.get("barcode") or ""),
-        "label": _norm_text(release.get("label", "")),
+        "label": str(release.get("label") or ""),
     }
     catalogs = _catalog_numbers(release)
     queries = []
@@ -841,18 +1162,10 @@ def release_queries(release, cfg):
         for q in _expand_template(tpl, fields, catalogs):
             if q not in queries:
                 queries.append(q)
-    if not queries and is_cd:
-        # The catalog-number template resolved to nothing (MusicBrainz has no
-        # CATALOGNUMBER for this release). `catalognumber` is the default for a
-        # reason, but a release with none would have no search at all — one
-        # broader query beats a job that cannot start, and the fallback is
-        # logged so it is never a silent change of plan.
-        fallback = _norm_text(" ".join(p for p in
-                                      (fields["artist"], fields["album"], fields["year"]) if p))
-        if fallback:
-            _log("this release has no catalog number — searching by "
-                 f"“{fallback}” instead")
-            queries.append(fallback)
+    if not queries:
+        queries.extend(_pressing_fallback(fields, digital))
+    if not explicit:
+        queries.extend(_alias_queries(release, cfg, templates, fields, catalogs, queries))
     return queries
 
 
@@ -1274,7 +1587,12 @@ def _search_queries(slsk, queries, wait_s, usable=None, response_limit=0):
     Returns (results, errors, skipped): results = [(query, response DTO)] for
     the searches that reached a terminal state, errors = one line per query
     that failed or never terminated, skipped = how many queries were still
-    running when a usable candidate ended the wait."""
+    running when a usable candidate ended the wait.
+
+    How long the wait REALLY was is kept for the caller on this thread
+    (`_search_seconds`) — this function is the one place that knows when the
+    wait ended, and the number it measures is what the job reports, instead of
+    the configured ceiling it used to be mistaken for."""
     started = time.time()
     deadline = started + wait_s + _SEARCH_GRACE_S
     display = " · ".join(queries)
@@ -1327,7 +1645,16 @@ def _search_queries(slsk, queries, wait_s, usable=None, response_limit=0):
             errors.append(f"Soulseek search failed ({err}) for “{q}”")
         else:
             results.append((q, res))
+    _tl.search_seconds = time.time() - started
     return results, errors, skipped
+
+
+def _search_seconds():
+    """How long the last `_search_queries` call on THIS thread really took.
+
+    0.0 when this thread never searched (a browsed folder, a stubbed search),
+    which is the truthful answer there: nothing was waited out."""
+    return float(getattr(_tl, "search_seconds", 0.0) or 0.0)
 
 
 def _remote_rel(remote_path):
@@ -2257,6 +2584,34 @@ def _mb_release_type(rel):
     return "; ".join(out)
 
 
+def _release_country_tag(release):
+    """Every ISO code the pressing was released in, "; "-joined.
+
+    MusicBrainz keeps a release's events as a LIST (`release['countries']`,
+    server.integrations.release_countries — each entry's own `code`), while
+    the entity's singular `country` is only the FIRST of them: a worldwide
+    digital reissue of a CD carries both, and a tag written from the singular
+    loses one. The singular leads the list — it is the country the rest of the
+    app already stamps (autotag, the pending rows) and the FIRST value of a
+    multi-value field is the one the naming script reads back for
+    $releasecountry, so the album folder must not depend on which of two
+    same-day events MusicBrainz' own area names happen to sort first. An event
+    without a code (a historic area) states no country and is skipped; a
+    release dict carrying no list at all falls back to the singular key, which
+    is then all there is.
+    """
+    codes = []
+    for event in (release.get("countries") or []):
+        code = str((event or {}).get("code") or "").strip()
+        if code and code not in codes:
+            codes.append(code)
+    singular = str(release.get("country") or "").strip()
+    if singular in codes:
+        codes.remove(singular)
+        codes.insert(0, singular)
+    return _LIST_SEP.join(codes) or singular
+
+
 def _stamp_mb_tags(album_dir, release):
     """Write the exact MusicBrainz release identity into the tags so beets /
     grading work with the release that drove the search.
@@ -2287,8 +2642,12 @@ def _stamp_mb_tags(album_dir, release):
         "DATE": release.get("date", ""),
         "ORIGINALDATE": release.get("originaldate", ""),
         # canonical spelling: mlo.audio maps RELEASECOUNTRY, and the naming
-        # script's $releasecountry reads it (COUNTRY is a raw container key)
-        "RELEASECOUNTRY": release.get("country", ""),
+        # script's $releasecountry reads it (COUNTRY is a raw container key).
+        # EVERY country of the pressing, not MusicBrainz' first release event:
+        # the singular `country` is one event of the list, and the app's own
+        # tag layer writes/reads a multi-value field "; "-joined (mlo.tagtext
+        # _LIST_SEP, mlo.naming._first_multi picks the first for the path).
+        "RELEASECOUNTRY": _release_country_tag(release),
         "RELEASESTATUS": release.get("status", ""),
         "RELEASETYPE": _mb_release_type(release),
     }
@@ -2552,6 +2911,11 @@ def _reject(username, folder, reason):
 def _ask_to_wish(release, queries, waited, cfg, confirm_lossy):
     """Park the job on the "add to wishes?" prompt; add the wish if accepted.
 
+    `waited` is the seconds the job's searches REALLY took (`_search_seconds`,
+    every window summed), never the configured ceiling they were allowed: the
+    prompt used to report `soulseek_auto_search_wait + _SEARCH_GRACE_S` as if
+    the search had spent it.
+
     A job that ends with nothing imported used to leave the user a bare error
     and nothing else, even though the background wishes worker keeps searching
     for any release in the wish list — with these very queries. So the two
@@ -2755,6 +3119,10 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                     "edition of it is ineligible for auto-import")
             release_mbid = rid
         is_cd = "CD" in (release.get("medium_formats") or [])
+        # DIGITAL decides whether the broad `artist album year` second pass may
+        # run at all (see the search block below): a pressing is searched by
+        # what identifies the pressing and nothing else, found or not.
+        digital = _is_digital(release)
         label = (f"{(release.get('artists') or [{}])[0].get('name') or ''} — "
                  f"{release.get('title') or ''}").strip(" —")
         with _lock:
@@ -2813,7 +3181,10 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
         # The queries this job searched with and the window it waited out are
         # reported by the wish prompt, and the candidate loop below can reach
         # both on EITHER path (a browsed-folder grab searches with nothing).
-        queries_built, search_wait = [], 0
+        # `searched_s` accumulates what each `_search_queries` window really
+        # spent (the configured one and, on a digital release, the broader
+        # second pass) — the number both wish offers publish as `waited`.
+        queries_built, search_wait, searched_s = [], 0, 0.0
         if username and target_dir:
             _stage("searching", f"Browsing {username}…")
             _log(f"Manual entry: {username} · {target_dir}")
@@ -2859,9 +3230,10 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 queries_built = release_queries(release, cfg)
             if not queries_built:
                 raise RuntimeError(
-                    "Nothing to search by: this release has neither a catalog "
-                    "number nor an artist + title that a query template can "
-                    "use. Add one in Settings → Auto-import.")
+                    "Nothing to search by: this release has no trait the "
+                    "configured query templates can use — a pressing needs a "
+                    "catalog number, a barcode or a label + country. Add a "
+                    "template in Settings → Auto-import.")
             # How long a search may run, and how many peers it needs before it
             # is worth scoring. The window is QUIET time (slskd ends a search
             # when the network stops answering) and the response limit ends it
@@ -2888,6 +3260,7 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
             results, search_failed, skipped = _search_queries(
                 slsk, queries_built, search_wait, usable=_usable,
                 response_limit=response_limit)
+            searched_s += _search_seconds()
             _job_search_done()
             for line in search_failed:
                 # a query slskd errored on is not "no results": it is reported
@@ -2895,8 +3268,13 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 _log(f"  ✕ {line}")
             responses = [f for _q, res in results for f in (res.get("responses") or [])]
             candidates = find_candidates(responses, release, cfg)
+            # The seconds this window really took, not the ceiling the line above
+            # advertises: a usable folder (or a quiet network) ends a search long
+            # before `search_wait + _SEARCH_GRACE_S`, and the wish prompt reports
+            # this same measured number.
             _log(f"  {len(candidates)} candidate folder(s) from {len(responses)} "
-                 f"result file(s) across {len(results)} search(es)")
+                 f"result file(s) across {len(results)} search(es) in "
+                 f"{int(searched_s)}s")
             candidates.sort(key=_rank)
             best = [c for c in candidates if c["complete"] and c["lossless"]]
             if best and skipped:
@@ -2905,21 +3283,31 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                      f"remaining {skipped} query template(s) were not waited out")
 
             # ---- ONE broader query, run after the configured one(s) -----------
-            # A release whose configured templates name it too precisely (a CD
-            # searched by catalog number, whose Soulseek copies are all WEB
-            # rips that never carry one) answered with hundreds of files and no
-            # usable folder. This is not a return of the removed templates: it
-            # fires only as a SECOND attempt, sequentially, when the first
-            # produced nothing usable, and never runs alongside it (a competing
-            # window would only cost the user another search).
+            # A DIGITAL release whose configured templates name it too
+            # precisely answered with hundreds of files and no usable folder.
+            # This is not a return of the removed templates: it fires only as a
+            # SECOND attempt, sequentially, when the first produced nothing
+            # usable, and never runs alongside it (a competing window would
+            # only cost the user another search).
+            #
+            # DIGITAL ONLY, because "artist album year" is exactly what a
+            # physical release must never be searched with: it asks the network
+            # for every other pressing of the same album, and a CD job that ran
+            # it took a WEB rip instead of the pressing its catalog number
+            # named. A pressing gets its own templates and nothing else, found
+            # or not — see release_queries and _pressing_fallback.
             all_responses = list(responses)
-            broad = [q for q in _build_from_templates(["artist album year"], release)
-                     if q not in queries_built]
+            broad = []
+            if digital:
+                broad = [q for q in _build_from_templates(["artist album year"], release)
+                         if q not in queries_built]
             if not best and broad:
                 _log(f"No usable folder from the configured template(s) — one broader "
                      f"search: “{'” · “'.join(broad)}”")
                 fb_results, fb_failed, _fb_skipped = _search_queries(
                     slsk, broad, search_wait, response_limit=response_limit)
+                fb_s = _search_seconds()
+                searched_s += fb_s
                 _job_search_done()
                 for line in fb_failed:
                     _log(f"  ✕ {line}")
@@ -2929,8 +3317,8 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 candidates.extend(find_candidates(fb_responses, release, cfg))
                 candidates.sort(key=_rank)
                 best = [c for c in candidates if c["complete"] and c["lossless"]]
-                _log(f"  broader query: {len(fb_responses)} result file(s), "
-                     f"{len(candidates)} candidate folder(s) in total")
+                _log(f"  broader query: {len(fb_responses)} result file(s) in "
+                     f"{int(fb_s)}s, {len(candidates)} candidate folder(s) in total")
 
             # ---- a complete lossless copy that simply has no rip log ----------
             # (CD only.) The CD gate needs one .log + one .cue per disc, so a
@@ -3013,14 +3401,16 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
                 # job used, so nothing is lost by parking the job — the user
                 # only decides whether it is worth watching for.
                 #
-                # How long a search runs is decided in ONE place —
+                # The window a search may run for is decided in ONE place —
                 # soulseek_auto_search_wait (the requested window) plus
                 # _SEARCH_GRACE_S (the tail slskd needs to hand back responses
-                # once a search ended) — and this prompt fires exactly when that
-                # window has just ended with nothing usable. `waited` reports
-                # that same cap to the UI instead of a second, competing timer.
-                wished = _ask_to_wish(release, queries_built,
-                                      search_wait + _SEARCH_GRACE_S, cfg, confirm_lossy)
+                # once a search ended) — and those are CEILINGS: a usable
+                # folder, or a network that went quiet, ends the wait long
+                # before them. `waited` reports the seconds the search really
+                # took (`_search_seconds`, both passes summed), never the cap:
+                # the prompt used to announce 55s about searches that had ended
+                # in two, which is a duration nobody waited.
+                wished = _ask_to_wish(release, queries_built, searched_s, cfg, confirm_lossy)
                 if _cancelled():
                     return _finish("cancelled")
                 if wished:
@@ -3268,9 +3658,9 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
         # died on this bare error with the release forgotten again. Same offer
         # as the no-usable-folder dead end (_ask_to_wish): the release goes into
         # the wish list — with the queries this job already searched with — and
-        # the background worker keeps looking for it.
-        wished = _ask_to_wish(release, queries_built,
-                              search_wait + _SEARCH_GRACE_S, cfg, confirm_lossy)
+        # the background worker keeps looking for it. The offer carries the
+        # seconds the searches REALLY took, like the other dead end.
+        wished = _ask_to_wish(release, queries_built, searched_s, cfg, confirm_lossy)
         if _cancelled():
             return _finish("cancelled")
         if wished:
@@ -3294,10 +3684,11 @@ def _run(release_mbid=None, release=None, queries=None, username=None,
 
 
 def _build_from_templates(templates, release):
-    return release_queries({"**": None, **release,
-                            "medium_formats": release.get("medium_formats")},
-                           {"soulseek_auto_cd_queries": templates,
-                            "soulseek_auto_digital_queries": templates})
+    """Render the caller's OWN templates for one release: the queries a job was
+    handed (a wish replays what it stored) and its broad second pass. They are
+    rendered exactly as given — no configured set is consulted, and no
+    MusicBrainz alias is expanded: those are queries somebody already decided."""
+    return release_queries(release, {}, templates=templates)
 
 
 def _stamp_media(album_dir, media, cfg):

@@ -1107,12 +1107,51 @@ def merge_advisory(answers, fallback=None):
          something (the import's advisory step) run the rest of the ladder
          first: see `mlo.advisory.decide_advisory`, and `advisory_fallback`
          for the last resort.
+
+    The same rank settles ONE source's several answers before this runs
+    (`_strongest_advisory`, which `resolve_advisory_route` applies as each
+    answer arrives): a source asked once per pressing states "explicit" for
+    the same track its other answer calls clean, and ask order must not
+    decide which of the two counts.
     """
     values = {_advisory_int(v) for v in (answers or {}).values()}
     for value in (1, 0, 2):
         if value in values:
             return value
     return fallback
+
+
+def _strongest_advisory(current, answer):
+    """The stronger of one source's two answers — 1 beats 0 beats 2.
+
+    A source can answer more than once for the SAME track: Deezer and Spotify
+    are asked once per ISRC the file states, plus every ISRC MusicBrainz holds
+    for its recording. A recording whose pressings disagree would otherwise be
+    settled by ASK ORDER — the first pressing's clean answer would suppress a
+    later pressing's explicit one, and a track Deezer itself flags explicit
+    would be written 0. The rank is `merge_advisory`'s own (explicit anywhere
+    wins, then a stated clean, then a clean edition), applied to one source's
+    answers instead of to the whole map.
+    """
+    current, answer = _advisory_int(current), _advisory_int(answer)
+    if current is None:
+        return answer
+    if answer is None:
+        return current
+    for value in (1, 0, 2):
+        if value in (current, answer):
+            return value
+    return current
+
+
+def _record_advisory(answers, answer):
+    """Record one source's ``(value, source)`` answer, keeping its strongest.
+
+    The one place an answer enters the per-source map, so "which of a source's
+    several answers counts" is answered once — see `_strongest_advisory`.
+    """
+    key, value = answer[1], answer[0]
+    answers[key] = _strongest_advisory(answers.get(key), value)
 
 
 def _winning_source(answers, value):
@@ -1285,8 +1324,11 @@ def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
          track and stay silent when their input is absent.
 
     `answers` is the per-source map in ask order, `source` the first source
-    that stated the merged value, `checked` every route that was asked. The
-    merge itself is `merge_advisory` — one rule, one place — so `value` is
+    that stated the merged value, `checked` every route that was asked. A
+    source asked more than once — one ISRC per pressing is the normal case —
+    contributes its STRONGEST answer (`_strongest_advisory`), so the later
+    pressing's explicit flag cannot lose to the earlier one's clean answer.
+    The merge itself is `merge_advisory` — one rule, one place — so `value` is
     1, 0, 2, or None, and None (an empty `answers`) is the only signal that
     nobody stated anything: the caller decides what to do about that
     (`mlo.advisory.decide_advisory` is that decision, used by the import).
@@ -1312,13 +1354,13 @@ def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
         answer = _advisory_cached(("deezer-isrc", code.upper()),
                                   lambda c=code: _deezer_advisory(c))
         if answer is not None:
-            answers.setdefault(answer[1], answer[0])
+            _record_advisory(answers, answer)
         if spotify_on:
             checked.append("spotify-isrc")
             answer = _advisory_cached(("spotify-isrc", code.upper()),
                                       lambda c=code: _spotify_advisory(c, cfg))
             if answer is not None:
-                answers.setdefault(answer[1], answer[0])
+                _record_advisory(answers, answer)
     if artist and album:
         checked.append("apple-album")
         key = ("apple-album", _norm_compare(artist), _norm_compare(album),
@@ -1326,14 +1368,14 @@ def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
         answer = _advisory_cached(key, lambda: _apple_album_advisory(
             artist, album, title, disc, track, track_count, cfg=cfg))
         if answer is not None:
-            answers.setdefault(answer[1], answer[0])
+            _record_advisory(answers, answer)
     if title:
         checked.append("itunes-song")
         key = ("itunes-song", _norm_compare(artist), _norm_compare(title))
         answer = _advisory_cached(key,
                                   lambda: _itunes_song_advisory(title, artist))
         if answer is not None:
-            answers.setdefault(answer[1], answer[0])
+            _record_advisory(answers, answer)
     # The last two are extra EXPLICIT-only signals, both album/edition level
     # and both silent when their input is missing: a Discogs Parental
     # Advisory sticker (a configured token only), and YouTube's own 18+ gate
@@ -1344,14 +1386,14 @@ def resolve_advisory_route(isrc="", recording_mbid="", title="", artist="",
         answer = _advisory_cached(
             key, lambda: _discogs_parental_advisory(artist, album, cfg))
         if answer is not None:
-            answers.setdefault(answer[1], answer[0])
+            _record_advisory(answers, answer)
     video = str(youtube_id or "").strip() or youtube_video_id(tags)
     if video:
         checked.append("youtube-age")
         answer = _advisory_cached(("youtube-age", video),
                                   lambda: youtube_age_advisory(video, cfg))
         if answer is not None:
-            answers.setdefault(answer[1], answer[0])
+            _record_advisory(answers, answer)
     value = merge_advisory(answers)
     return {"value": value, "source": _winning_source(answers, value),
             "checked": checked, "answers": answers}
@@ -1387,6 +1429,12 @@ def release_advisories(mbid, sources=None, answers=None):
     `sources` (optional) is filled with the source that stated each value and
     `answers` (optional) with the whole per-track `{source: 0|1}` map, so a
     caller can report provenance alongside the value.
+
+    Every ISRC the release states for a track is asked, not just the first:
+    MusicBrainz lists one per pressing, and the route's own contract (and
+    `_isrc_codes`) is that all of them are put to the ISRC sources. Taking
+    `isrcs[0]` alone let a clean first pressing hide the explicit second one —
+    the same miss the file's own ISRC tag had.
     """
     release = release_lookup(mbid)
     fallback_artist = next((a.get("name") for a in release.get("artists") or []
@@ -1396,7 +1444,7 @@ def release_advisories(mbid, sources=None, answers=None):
     for t in release.get("media") or []:
         key = f"{int(t.get('disc') or 1)}:{int(t.get('position') or 0)}"
         route = resolve_advisory_route(
-            isrc=(t.get("isrcs") or [""])[0],
+            isrc=t.get("isrcs") or "",
             recording_mbid=t.get("recording_mbid") or "",
             title=t.get("title") or "",
             artist=t.get("artist_credit") or fallback_artist,
@@ -1425,6 +1473,22 @@ def release_group_genres(rg_mbid):
 def artist_genres(artist_mbid):
     try:
         data = mb_get_cached(f"artist/{artist_mbid}", {"inc": "genres", "fmt": "json"})
+        return _genres(data)
+    except Exception:
+        return []
+
+
+def recording_genres(recording_mbid):
+    """A recording's OWN genres — the track-level sibling of `artist_genres`.
+
+    MusicBrainz states genres on the recording entity too, and a track page
+    has a recording id in hand, so this asks about the track itself rather than
+    its artist. Most recordings state none (genres are voted at artist and
+    release-group level far more often), so a caller reads an empty list as
+    "nothing stated HERE" and falls back to the artist.
+    """
+    try:
+        data = mb_get_cached(f"recording/{recording_mbid}", {"inc": "genres", "fmt": "json"})
         return _genres(data)
     except Exception:
         return []
@@ -6089,6 +6153,12 @@ def _cov_results(artist, album, limit, timeout, src_ids, ctry):
     this very order (COV's own relevance is the last tiebreak the cover policy
     reads), and the front/stand-in labels are read from the URL's own shape
     where CAA URLs state it.
+
+    Each row keeps its event's own `releaseInfo` — the title, artist and track
+    count of the release that source matched — because a name search answers
+    with OTHER releases too (karaoke, tribute, 8-bit, another album by the same
+    artist), and that block is what says which release a cover belongs to.
+    `mlo.cover_choice`'s album-identity rule is what reads it.
     """
     body = {"country": ctry, "sources": src_ids}
     if artist:
@@ -6343,7 +6413,15 @@ def _artwork_big(url):
 
 
 def _name_rank(name, want):
-    """0 when *name* is exactly *want* (folded), else 1 — sorting only."""
+    """0 when *name* is exactly *want* (folded), else 1 — sorting only.
+
+    Whether a row is THIS album is not decided here: a search is allowed to
+    answer with a tribute, a karaoke or an 8-bit release carrying the same
+    names, and `mlo.cover_choice`'s album-identity rule rejects such a row
+    (with its own stated artist/title/tracks, which is why every row carries
+    them). Sorting only means exactly that — a name that does not match does
+    not hide the row, it puts it later.
+    """
     return 0 if (want and _norm_compare(name) == want) else 1
 
 
@@ -6404,7 +6482,9 @@ def _deezer_covers(artist, album, limit, timeout=30.0):
     Rows are ORDERED, never dropped: a tribute/karaoke album that carries the
     same title is a bad first hit, not a reason to hide the real covers. The
     matched album's own artwork is a front cover of THAT album (not a group
-    stand-in), which is what `release_cover` says.
+    stand-in), which is what `release_cover` says — and every row keeps the
+    matched album's own title/artist/`nb_tracks`, so `mlo.cover_choice` can
+    reject a row whose release is not the album being covered.
     """
     term = " ".join(x for x in (f'artist:"{artist}"' if artist else "",
                                 f'album:"{album}"' if album else "") if x)

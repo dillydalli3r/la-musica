@@ -61,6 +61,12 @@ export interface TrackTags {
   SOURCE?: string | null;
   TRACKNUMBER?: string | null;
   DISCNUMBER?: string | null;
+  /** The release's own track total, as the file states it — the second source
+   *  `server.imports._album_track_count` reads for the album's identity (a
+   *  folder's FILE count is not it: a partial import would contradict every
+   *  correct release). */
+  TRACKTOTAL?: string | null;
+  TOTALTRACKS?: string | null;
   MUSICBRAINZ_ALBUMID?: string | null;
   MUSICBRAINZ_ALBUMARTISTID?: string | null;
   MUSICBRAINZ_ARTISTID?: string | null;
@@ -350,6 +356,17 @@ export interface CoverChoicePolicy {
   rules: string[];
 }
 
+/** The album a cover reply's rows were CHECKED against — what the server echoes
+ *  back after verifying each candidate's own release (mlo/cover_choice rule 2).
+ *  It is the request's own `artist`/`album`/`tracks`, so the finder can say
+ *  what a row had to BE; `tracks` is null when the caller stated no track
+ *  count, i.e. nothing was verified against one. */
+export interface CoverSearchIdentity {
+  artist: string;
+  album: string;
+  tracks: number | null;
+}
+
 /** `/api/cover/search` — `results` are the policy's RANKED candidates (best
  *  first, each carrying its reasons), `chosen` is the winner (null when none
  *  could be one) and `notes` states what every source did — including a source
@@ -362,6 +379,9 @@ export interface CoverSearch {
   policy?: CoverChoicePolicy;
   candidate_count?: number;
   rejected_count?: number;
+  /** The identity the rows were verified against (see `CoverSearchIdentity`).
+   *  Additive: an older server answers without it. */
+  identity?: CoverSearchIdentity;
 }
 
 /** Response of the cover write endpoints (`/api/cover`, `/api/cover/fromurl`):
@@ -760,7 +780,15 @@ export interface SlskReleaseIdentity {
   title: string;
   artist: string;
   date: string;
+  /** MusicBrainz's FIRST release event — the singular code `country` has
+   *  always been. `countries` below is the release's whole event set. */
   country: string;
+  /** Every country the release came out in, in MusicBrainz's own event order
+   *  (first = `country`). It is what an import writes to RELEASECOUNTRY as a
+   *  "; "-joined list — a release out in several countries is not one that
+   *  came out in the first of them. Optional: a payload from a server or a job
+   *  summary predating the field states only the singular one. */
+  countries?: string[];
   status: string;
   media: string[];
   track_count: number;
@@ -1123,6 +1151,51 @@ export interface AcoustidAlbumMatch {
   /** Tracks that could not be fingerprinted, and ones whose lookup failed. */
   skips?: AcoustidTrackProblem[];
   failures?: AcoustidTrackProblem[];
+  /** Every track's own tag-write outcome, present when the request applied the
+   *  match (mlo.acoustid.write_tags). `tagged` alone was the silent lie: an
+   *  album of .wv files is a real match nothing can be written to, and "0
+   *  tagged" said the files carried none of the tag families instead. */
+  writes?: AcoustidWrite[];
+}
+
+/** One track's identity-tag write (`writes` above).
+ *
+ *  `code` is the write vocabulary (unsupported_container / unreadable_file /
+ *  no_recording_id / no_fingerprint / write_failed / verify_failed), `reason`
+ *  is the sentence the server wrote for it (the unsupported one names the
+ *  extension), and `output` names the file that now holds the pair when a
+ *  video container was remuxed (which can change the extension). */
+export interface AcoustidWrite {
+  path: string;
+  ok: boolean;
+  code?: string | null;
+  reason?: string | null;
+  output?: string | null;
+}
+
+/** POST /api/import/acoustid/submit — the AcoustID database's own answer to
+ *  publishing what the files already carry (nothing is written locally).
+ *
+ *  `available: false` is a refusal: no user key configured, or the key
+ *  AcoustID refused, in the service's own words (`note`, `code`). `submitted`
+ *  counts what it accepted (each with its submission id and status), `skips`
+ *  names the files there was nothing to submit for, and `tracks` accounts for
+ *  every file the paths resolved to. */
+export interface AcoustidSubmitResult {
+  available: boolean;
+  note: string;
+  ok: boolean;
+  code?: string | null;
+  submitted: number;
+  failed: number;
+  skips: AcoustidTrackProblem[];
+  submissions: {
+    path: string;
+    index: number;
+    id?: string | null;
+    status?: string | null;
+  }[];
+  tracks: { total: number; submitted: number; skipped: number };
 }
 
 /** One tag-vs-fingerprint disagreement (`conflicts`). */

@@ -184,6 +184,93 @@ ITUNES_ALBUMS = {"results": [
      "collectionViewUrl": "https://music.apple.com/album/3"},
 ]}
 
+# --------------------------------------------------------------------------- #
+# MusicBrainz's own answers. Its tag search is the whole entity capability, so
+# the fixtures below are what an entity shelf is built from: the genres it
+# states per entity (a release group states three, to show the per-request cap;
+# an artist states one; a recording states one), the tag search per kind, the
+# artist's release-group browse and the recordings it files under the artist.
+# --------------------------------------------------------------------------- #
+RG_PYGMALION = "33333333-3333-3333-3333-333333333333"
+RG_JUST_FOR_A_DAY = "99999999-9999-9999-9999-999999999999"
+TRACK_MACHINE_GUN = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+TRACK_SOON = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+ARTIST_RIDE = "88888888-8888-8888-8888-888888888888"
+ARTIST_MBV = "66666666-6666-6666-6666-666666666666"
+
+# What MusicBrainz states per entity. An entity with NO entry states no genres
+# at all, which is a skip with its own sentence — and the reason an album or a
+# track seed falls back to its artist's genres.
+MB_GENRES = {
+    ARTIST_SLOWDIVE: ["shoegaze"],
+    RG_SOUVLAKI: ["shoegaze", "dream pop", "ambient"],
+    TRACK_ALISON: ["dream pop"],
+}
+# MusicBrainz's tag search per entity kind. The ARTIST search names the seed
+# back — MusicBrainz's tag index does not know which artist the page is about —
+# so the shelf has to drop it, and it names one artist no other feed names.
+MB_TAG = {
+    "artist": [
+        {"id": ARTIST_SLOWDIVE, "score": 100, "title": "Slowdive",
+         "country": "GB", "disambiguation": ""},
+        {"id": ARTIST_RIDE, "score": 82, "title": "Ride", "country": "GB",
+         "disambiguation": ""},
+    ],
+    "release-group": [
+        {"id": RG_JUST_FOR_A_DAY, "score": 91, "title": "Just For A Day",
+         "artist": "Slowdive", "artist_mbid": ARTIST_SLOWDIVE,
+         "first_release_date": "1991-09-02", "primary_type": "Album",
+         "secondary_types": []},
+    ],
+    "recording": [
+        {"id": TRACK_SOON, "score": 77, "title": "Soon",
+         "artist": "My Bloody Valentine", "artist_mbid": ARTIST_MBV,
+         "first_release_date": "1990-11-05", "length": 400000},
+    ],
+}
+# The artist's own records, through the release-group browse (`artist=`). The
+# keys are the ones the browse really answers with (measured live against
+# MusicBrainz: `primary_type`/`first_release_date`, oldest first).
+MB_RELEASE_GROUPS = {ARTIST_SLOWDIVE: [
+    {"id": RG_SOUVLAKI, "title": "Souvlaki", "primary_type": "Album",
+     "secondary_types": [], "first_release_date": "1993-06-01"},
+    {"id": RG_PYGMALION, "title": "Pygmalion", "primary_type": "Album",
+     "secondary_types": [], "first_release_date": "1995-02-06"},
+]}
+# …and the recordings its index files under the artist (`arid:`).
+MB_ARTIST_RECORDINGS = {ARTIST_SLOWDIVE: [
+    {"id": TRACK_ALISON, "score": 100, "title": "Alison", "artist": "Slowdive",
+     "artist_mbid": ARTIST_SLOWDIVE, "first_release_date": "1993-06-01",
+     "length": 220000},
+    {"id": TRACK_MACHINE_GUN, "score": 100, "title": "Machine Gun",
+     "artist": "Slowdive", "artist_mbid": ARTIST_SLOWDIVE,
+     "first_release_date": "1993-06-01", "length": 195000},
+]}
+
+# Spotify's artist-level entity routes: the search hit IS the artist (the same
+# one request `spotify_artist_genres` reads), then its albums and top tracks.
+SPOTIFY_ARTIST = {"artists": {"items": [
+    {"id": "sp-slowdive", "name": "Slowdive", "genres": ["shoegaze"]},
+]}}
+SPOTIFY_ALBUMS = {"items": [
+    {"id": "sp-souvlaki", "name": "Souvlaki", "album_type": "album",
+     "release_date": "1993-06-01", "total_tracks": 10,
+     "artists": [{"name": "Slowdive"}],
+     "images": [{"url": "https://i.scdn.co/souvlaki.jpg"}],
+     "external_urls": {"spotify": "https://open.spotify.com/album/sp-souvlaki"}},
+    {"id": "sp-pygmalion", "name": "Pygmalion", "album_type": "album",
+     "release_date": "1995-02-06", "total_tracks": 10,
+     "artists": [{"name": "Slowdive"}], "images": [],
+     "external_urls": {"spotify": "https://open.spotify.com/album/sp-pygmalion"}},
+]}
+SPOTIFY_TOP = {"tracks": [
+    {"id": "sp-alison", "name": "Alison", "duration_ms": 220000,
+     "popularity": 55, "artists": [{"name": "Slowdive"}],
+     "album": {"name": "Souvlaki", "images": [{"url": "https://i.scdn.co/s.jpg"}]},
+     "external_ids": {"isrc": "GBAAA9300001"},
+     "external_urls": {"spotify": "https://open.spotify.com/track/sp-alison"}},
+]}
+
 
 def deezer_answer(url, params):
     """One Deezer endpoint's own JSON, or None for a route the stub does not
@@ -221,6 +308,20 @@ def lastfm_answer(url, params):
     return {}
 
 
+def spotify_answer(url, params):
+    """Spotify's artist-level routes: the search hit (which counts only when
+    its own name is the name asked for), the artist's albums and its top
+    tracks."""
+    if url.endswith("/search"):
+        return SPOTIFY_ARTIST if str(params.get("q") or "") == "Slowdive" \
+            else {"artists": {"items": []}}
+    if url.endswith("/albums"):
+        return SPOTIFY_ALBUMS
+    if url.endswith("/top-tracks"):
+        return SPOTIFY_TOP
+    return None
+
+
 def route(url, params):
     """Every stubbed provider, by URL — the transport seam's own router."""
     if "api.deezer.com" in url:
@@ -231,6 +332,8 @@ def route(url, params):
         return ITUNES_ALBUMS
     if "ws.audioscrobbler.com" in url:
         return lastfm_answer(url, params)
+    if "api.spotify.com" in url:
+        return spotify_answer(url, params)
     return None
 
 
@@ -242,17 +345,38 @@ def stub_json():
 
 
 def stub_mb(search=None):
-    """The MusicBrainz seams: the genre search (the library-seeded path and
-    MusicBrainz's own abstention both read it) and the artist-name resolve
-    ListenBrainz needs when a page carries no id."""
+    """The MusicBrainz seams, in the three places the shelf reads them.
+
+    `search_mb` is the index: the entity tag searches, the artist's recordings
+    (`arid:`) and the library-seeded path all come through it. `mb_get_cached`
+    is the cached entity lookup the genres come from (`artist/{id}`,
+    `release-group/{id}`, `recording/{id}`) AND the release-group browse that
+    answers with an artist's records — one stub, because that is one seam. The
+    name resolve ListenBrainz needs when a page carries no id is the third. A
+    case may pass its own `search` (the library-seeded path does)."""
     def fake_search(entity, query, limit=100, mode="free", offset=0, **kw):
-        CALLS.append(("search_mb", entity, query))
-        return search(entity, query, limit, offset) if callable(search) \
-            else (search or {"rows": [], "total": 0})
+        artist_id = str(kw.get("artist_id") or "")
+        CALLS.append(("search_mb", entity,
+                      query or ("arid:%s" % artist_id if artist_id else ""),
+                      limit))
+        if callable(search):
+            return search(entity, query, limit, offset)
+        if search:
+            return search
+        rows = MB_ARTIST_RECORDINGS.get(artist_id, []) if artist_id \
+            else MB_TAG.get(entity, [])
+        return {"rows": rows, "total": len(rows), "offset": offset,
+                "next": None, "query": query}
     intg.search_mb = fake_search
 
     def fake_cached(endpoint, params=None, **kw):
-        return None
+        CALLS.append(("mb_get_cached", endpoint, dict(params or {})))
+        params = params or {}
+        if endpoint == "release-group" and params.get("artist"):
+            rows = MB_RELEASE_GROUPS.get(params["artist"], [])
+            return {"release-groups": rows, "release-group-count": len(rows)}
+        genres = MB_GENRES.get(str(endpoint).rsplit("/", 1)[-1], [])
+        return {"genres": [{"name": name} for name in genres]}
     intg.mb_get_cached = fake_cached
 
     def fake_resolve(name, cfg=None, timeout=None):
@@ -271,6 +395,9 @@ def fresh(search=None):
     discovery._CACHE.clear()
     discovery._HOST_WARNED.clear()
     CFG.pop("lastfm_api_key", None)
+    CFG.pop("spotify_client_id", None)
+    CFG.pop("spotify_client_secret", None)
+    CFG.pop("cover_country", None)
     # A case that patches a provider WRAPPER (to raise) puts the real one back
     # here: the module attribute would otherwise leak into every later case.
     discovery.deezer_related_artists = REAL_DEEZER_RELATED
@@ -337,11 +464,20 @@ ok(artist["items"] and all(set(row) == ROW_KEYS for row in artist["items"]),
 ok(all(row["source"] and row["reason"] for row in artist["items"]),
    f"every row names its provider and the reason it is here "
    f"({sorted({(r['source'], r['reason']) for r in artist['items']})})")
-ok(set(titles) == {"Lush", "Cocteau Twins", "my bloody valentine", "Broadcast"},
-   f"Deezer's related feed and ListenBrainz' similar artists both contribute ({titles})")
+ok(set(titles) == {"Lush", "Cocteau Twins", "my bloody valentine", "Broadcast",
+                   "Ride"},
+   f"Deezer's related feed, ListenBrainz' similar artists and MusicBrainz's tag "
+   f"search all contribute ({titles})")
 ok(by_title(artist)["Lush"]["reason"] == "sounds like Slowdive (Deezer)"
    and by_title(artist)["Broadcast"]["reason"] == "sounds like Slowdive (ListenBrainz)",
    "each row's reason names the source that stated the relationship")
+ok(by_title(artist)["Ride"]["reason"] == "genre: shoegaze (MusicBrainz)"
+   and by_title(artist)["Ride"]["source"] == "musicbrainz",
+   f"MusicBrainz answers an entity shelf with the entity's OWN genre, through "
+   f"the same tag search the genre shelves use "
+   f"({by_title(artist)['Ride']['reason']})")
+ok("Slowdive" not in titles,
+   "the seed itself is not its own neighbour, however the tag search names it")
 ok(by_title(artist)["Lush"]["score"] == 12994.0
    and by_title(artist)["Broadcast"]["score"] == 987.0,
    "the provider's own number rides along as `score`")
@@ -351,13 +487,23 @@ ok(artist["sources_asked"] == ["musicbrainz", "deezer", "lastfm", "listenbrainz"
    f"only the sources that can recommend artists are asked ({artist['sources_asked']})")
 ok(artist["notes"]["lastfm"] == "skipped: no lastfm_api_key",
    f"a source without its key is skipped by name ({artist['notes']['lastfm']})")
-ok(artist["notes"]["musicbrainz"].startswith("skipped: MusicBrainz publishes no similar-entity"),
-   f"a source with no entity feed says what it does instead "
-   f"({artist['notes']['musicbrainz']})")
+ok("musicbrainz" not in artist["notes"],
+   "MusicBrainz answered about the entity, so it carries no note")
 ok("deezer" not in artist["notes"] and "listenbrainz" not in artist["notes"],
    "a source that answered carries no note")
 ok(all(row["owned"] is False and row["path"] is None for row in artist["items"]),
    "an artist the library does not hold links nowhere")
+
+# An entity that states NO genres is a skip in MusicBrainz's own words — the
+# blanket "no similar-entity feed" sentence is gone, because the feed exists.
+fresh()
+bare = seed_rows(seed_kind="artist", seed_mbid=ARTIST_LUSH, seed_name="Lush",
+                 kind="artists")
+ok(bare["notes"]["musicbrainz"] == 'skipped: MusicBrainz states no genres for "Lush"',
+   f"an entity MusicBrainz states no genres for says so "
+   f"({bare['notes']['musicbrainz']})")
+ok(not [c for c in CALLS if c[0] == "search_mb" and "tag:" in c[2]],
+   "…and no tag search is asked on its behalf")
 
 # The same artist from two sources is ONE row: the preferred source's reason
 # is kept, the id a later source stated is not lost, and it is listed as such.
@@ -380,7 +526,7 @@ failed = seed_rows(seed_kind="artist", seed_mbid=ARTIST_SLOWDIVE,
                    seed_name="Slowdive", kind="artists")
 ok(failed["notes"]["deezer"] == 'failed: Deezer refused: 403 "Quota exceeded"',
    f"a refusing provider is reported in its own words ({failed['notes']['deezer']})")
-ok(sorted(r["title"] for r in failed["items"]) == ["Broadcast", "Lush"],
+ok(sorted(r["title"] for r in failed["items"]) == ["Broadcast", "Lush", "Ride"],
    "…and the sources that DID answer still fill the shelf")
 
 # --------------------------------------------------------------------------- #
@@ -394,6 +540,13 @@ ok(by_name["basis"] == "artist: Slowdive (by name)"
    f"a page whose tags carry no id still seeds by name ({by_name['basis']})")
 ok(("resolve_artist_mbid", "Slowdive") in CALLS,
    "the MBID-native feed is fed the name resolved through MusicBrainz")
+fresh()
+no_id_track = seed_rows(seed_kind="track", seed_name="Alison",
+                        seed_artist="Slowdive", kind="tracks")
+ok(no_id_track["items"] and "musicbrainz" not in no_id_track["notes"]
+   and any(c[0] == "search_mb" and "tag:" in c[2] for c in CALLS),
+   "a track page carrying no recording id still gets MusicBrainz's genre rows, "
+   "read off the artist its name resolves to")
 fresh()
 unresolved = seed_rows(seed_kind="artist", seed_name="Nobody At All",
                        kind="artists")
@@ -424,13 +577,33 @@ ok(albums["Souvlaki"]["owned"] is True
    and albums["Souvlaki"]["tracks"] == ["Alison", "Machine Gun"],
    f"a row the library OWNS is kept and carries its library path "
    f"({albums['Souvlaki']['owned']}, {albums['Souvlaki']['path']})")
-ok(albums["Pygmalion"]["source"] == "deezer"
-   and albums["Pygmalion"]["reason"] == "more from Slowdive (Deezer)",
-   f"the seed's own artist contributes the records it is missing "
+ok(albums["Pygmalion"]["source"] == "musicbrainz"
+   and albums["Pygmalion"]["reason"] == "more release groups by Slowdive (MusicBrainz)",
+   f"MusicBrainz's browse request states the artist's own records, and says "
+   f"exactly that — never that they are similar "
    f"({albums['Pygmalion']['reason']})")
 ok(albums["Pygmalion"]["owned"] is False and albums["Pygmalion"]["path"] is None
    and albums["Pygmalion"]["in_library"] is True,
    "an unowned row by an artist the library collects has no path, only the weaker flag")
+ok("deezer" in albums["Pygmalion"]["also_from"]
+   and albums["Pygmalion"]["score"] == 120000.0,
+   f"the seed's own artist from Deezer is ONE row with MusicBrainz's, and "
+   f"Deezer's own number survives the merge ({albums['Pygmalion']})")
+ok(albums["Just For A Day"]["reason"] == "genre: shoegaze (MusicBrainz)"
+   and albums["Just For A Day"]["mbid"] == RG_JUST_FOR_A_DAY,
+   f"…and the release-group tag search adds what the artist's neighbours do "
+   f"not hold ({albums['Just For A Day']['reason']})")
+ok(len([c for c in CALLS if c[0] == "search_mb" and "tag:" in c[2]])
+   == discover.ENTITY_GENRES,
+   f"the entity states three genres and MusicBrainz — one request per second — "
+   f"is asked about {discover.ENTITY_GENRES}")
+ok(all(c[3] == discover.ENTITY_GENRE_ROWS
+       for c in CALLS if c[0] == "search_mb" and "tag:" in c[2])
+   and [c[2]["limit"] for c in CALLS if c[0] == "mb_get_cached"
+        and c[1] == "release-group"][-1] == discover.ENTITY_BROWSE_ROWS,
+   f"…with bounded windows, so MusicBrainz's rows cannot BE the shelf it leads "
+   f"({discover.ENTITY_GENRE_ROWS} per genre, "
+   f"{discover.ENTITY_BROWSE_ROWS} for the browse)")
 ok(len([r for r in album["items"] if r["title"] == "Souvlaki"]) == 1
    and "itunes" in albums["Souvlaki"]["also_from"],
    f"Deezer and Apple naming one album is ONE row ({albums['Souvlaki']['also_from']})")
@@ -441,7 +614,8 @@ ok(album["basis"] == "album: Slowdive — Souvlaki (%s)" % RG_SOUVLAKI,
 ok(album["notes"]["lastfm"] == "skipped: no lastfm_api_key"
    and album["notes"]["listenbrainz"].startswith("skipped: ListenBrainz's Labs feed")
    and album["notes"]["discogs"].startswith("skipped: Discogs browses by style")
-   and album["notes"]["spotify"].startswith("skipped: no spotify_client_id"),
+   and album["notes"]["spotify"].startswith("skipped: no spotify_client_id")
+   and "musicbrainz" not in album["notes"],
    f"every source that cannot answer says why ({sorted(album['notes'])})")
 fan_out = [c for c in CALLS if c[1].endswith("/albums")]
 ok(len(fan_out) == discover.RELATED_FANOUT + 1,
@@ -461,17 +635,39 @@ fresh()
 unkeyed = seed_rows(seed_kind="track", seed_mbid=TRACK_ALISON, seed_name="Alison",
                     seed_artist="Slowdive", kind="tracks")
 tracks = by_title(unkeyed)
-ok(set(tracks) == {"Sweetness and Light", "Alison", "Machine Gun"},
-   f"Deezer's related-top-tracks bridge fills the shelf unkeyed ({sorted(tracks)})")
+ok(set(tracks) == {"Sweetness and Light", "Alison", "Machine Gun", "Soon"},
+   f"Deezer's related-top-tracks bridge and MusicBrainz's two track answers "
+   f"fill the shelf unkeyed ({sorted(tracks)})")
 ok(tracks["Alison"]["owned"] is True
    and tracks["Alison"]["path"] == "C:/Music/Slowdive/Souvlaki/01 Alison.flac",
    f"a track the library holds keeps its FILE path ({tracks['Alison']['path']})")
 ok(tracks["Sweetness and Light"]["owned"] is False
    and tracks["Sweetness and Light"]["path"] is None,
    "a track it does not hold links nowhere")
+ok(tracks["Alison"]["source"] == "musicbrainz"
+   and tracks["Alison"]["reason"] == "more recordings by Slowdive (MusicBrainz)"
+   and "deezer" in tracks["Alison"]["also_from"],
+   f"the recordings MusicBrainz files under the artist are a labelled row of "
+   f"their own, one row with Deezer's ({tracks['Alison']['reason']})")
+ok(tracks["Soon"]["reason"] == "genre: dream pop (MusicBrainz)",
+   f"the recording's OWN genre drives the tag search, not its artist's "
+   f"({tracks['Soon']['reason']})")
 ok(unkeyed["notes"]["lastfm"] == "skipped: no lastfm_api_key"
-   and unkeyed["notes"]["listenbrainz"].startswith("skipped: ListenBrainz's Labs feed"),
+   and unkeyed["notes"]["listenbrainz"].startswith("skipped: ListenBrainz's Labs feed")
+   and "musicbrainz" not in unkeyed["notes"],
    "the keyed source and the artist-only feed both say why they abstained")
+
+# A recording that states no genres of its own falls back to its artist's — the
+# page still gets its genre rows rather than a blanket skip.
+fresh()
+fallback = seed_rows(seed_kind="track", seed_mbid=TRACK_MACHINE_GUN,
+                     seed_name="Machine Gun", seed_artist="Slowdive", kind="tracks")
+ok(any(c[0] == "mb_get_cached" and c[1] == "recording/%s" % TRACK_MACHINE_GUN
+       for c in CALLS)
+   and ("mb_get_cached", "artist/%s" % ARTIST_SLOWDIVE) in
+       [(c[0], c[1]) for c in CALLS]
+   and "musicbrainz" not in fallback["notes"],
+   "a recording stating no genres of its own falls back to its artist's")
 
 CFG["lastfm_api_key"] = "a-key"
 keyed = seed_rows(seed_kind="track", seed_mbid=TRACK_ALISON, seed_name="Alison",
@@ -482,16 +678,102 @@ ok(keyed_rows["Vapour Trail"]["source"] == "lastfm"
    and keyed_rows["Vapour Trail"]["score"] == 0.92,
    f"a keyed Last.fm answers a track seed with its own match "
    f"({keyed_rows['Vapour Trail']['score']})")
-ok(keyed_rows["Machine Gun"]["source"] == "deezer"
-   and "lastfm" in keyed_rows["Machine Gun"]["also_from"]
+ok(keyed_rows["Machine Gun"]["source"] == "musicbrainz"
+   and sorted(keyed_rows["Machine Gun"]["also_from"]) == ["deezer", "lastfm"]
    and len([r for r in keyed["items"] if r["title"] == "Machine Gun"]) == 1,
-   "the same track from two sources is one row with the other named")
+   "the same track from three sources is one row with the others named")
 ok("lastfm" not in keyed["notes"],
    "a keyed source that answered carries no note")
 CFG.pop("lastfm_api_key", None)
 
 # --------------------------------------------------------------------------- #
-# 6) The merge rule itself: an mbid is an identity, and a reason is never lost
+# 6) Spotify on an entity shelf: a NAMED artist's albums and top tracks — never
+#    a similarity feed (its own related-artists/recommendations endpoints are
+#    closed to apps created after 2024-11-27), and never a hit whose name is
+#    not the name asked for
+# --------------------------------------------------------------------------- #
+print("== Spotify on an entity shelf ==")
+ok(discover.BY_ID["spotify"]["entity_kinds"] == ("albums", "tracks")
+   and discover.BY_ID["spotify"]["rec_kinds"] == ("albums",)
+   and discover.BY_ID["itunes"]["entity_kinds"] == ("albums",),
+   f"the registry separates what a source recommends for a GENRE from what it "
+   f"can say about an ENTITY "
+   f"({discover.BY_ID['spotify']['rec_kinds']} vs "
+   f"{discover.BY_ID['spotify']['entity_kinds']})")
+fresh()
+CFG["spotify_client_id"] = "an-id"
+CFG["spotify_client_secret"] = "a-secret"
+intg._spotify_token = lambda cfg=None, timeout=None: "a-token"
+spotify_albums = seed_rows(seed_kind="album", seed_mbid=RG_SOUVLAKI,
+                           seed_name="Souvlaki", seed_artist="Slowdive",
+                           kind="albums")
+albums = by_title(spotify_albums)
+ok("spotify" not in spotify_albums["notes"]
+   and "spotify" in albums["Pygmalion"]["also_from"],
+   f"a configured Spotify answers an album shelf with the artist's own "
+   f"records ({albums['Pygmalion']['also_from']})")
+calls = [c for c in CALLS if c[0] == "json" and "api.spotify.com" in c[1]]
+ok([c[1] for c in calls] == ["https://api.spotify.com/v1/search",
+                             "https://api.spotify.com/v1/artists/sp-slowdive/albums"],
+   f"one artist search, then that artist's albums ({[c[1] for c in calls]})")
+ok(calls[-1][2].get("include_groups") == "album"
+   and calls[-1][2].get("market") == "US",
+   f"singles are left out on Spotify's side, and the app's own region setting "
+   f"is the market ({calls[-1][2]})")
+fresh()
+CFG["spotify_client_id"] = "an-id"
+CFG["spotify_client_secret"] = "a-secret"
+CFG["cover_country"] = "gb"
+intg._spotify_token = lambda cfg=None, timeout=None: "a-token"
+seed_rows(seed_kind="album", seed_mbid=RG_SOUVLAKI, seed_name="Souvlaki",
+          seed_artist="Slowdive", kind="albums")
+ok([c for c in CALLS if c[0] == "json" and c[1].endswith("/albums")
+    and "api.spotify.com" in c[1]][-1][2]["market"] == "GB",
+   "the configured region is sent as an upper-case market code")
+CFG.pop("cover_country", None)
+
+fresh()
+CFG["spotify_client_id"] = "an-id"
+CFG["spotify_client_secret"] = "a-secret"
+intg._spotify_token = lambda cfg=None, timeout=None: "a-token"
+spotify_tracks = seed_rows(seed_kind="track", seed_mbid=TRACK_ALISON,
+                           seed_name="Alison", seed_artist="Slowdive",
+                           kind="tracks")
+tracks = by_title(spotify_tracks)
+ok([c[1] for c in CALLS if c[0] == "json" and "api.spotify.com" in c[1]]
+   == ["https://api.spotify.com/v1/search",
+       "https://api.spotify.com/v1/artists/sp-slowdive/top-tracks"]
+   and "spotify" in tracks["Alison"]["also_from"],
+   f"a track shelf reads the artist's top tracks — its own popularity rides "
+   f"along as the score ({tracks['Alison']['also_from']})")
+
+fresh()
+CFG["spotify_client_id"] = "an-id"
+CFG["spotify_client_secret"] = "a-secret"
+intg._spotify_token = lambda cfg=None, timeout=None: "a-token"
+artist_shelf = seed_rows(seed_kind="artist", seed_mbid=ARTIST_SLOWDIVE,
+                         seed_name="Slowdive", kind="artists")
+ok("spotify" not in artist_shelf["sources_asked"]
+   and "itunes" not in artist_shelf["sources_asked"],
+   f"an ARTIST shelf is left to the sources that publish a related feed "
+   f"({artist_shelf['sources_asked']})")
+
+fresh()
+CFG["spotify_client_id"] = "an-id"
+CFG["spotify_client_secret"] = "a-secret"
+intg._spotify_token = lambda cfg=None, timeout=None: "a-token"
+unknown = seed_rows(seed_kind="album", seed_mbid=RG_SOUVLAKI, seed_name="Souvlaki",
+                    seed_artist="Lush", kind="albums")
+ok(unknown["notes"]["spotify"] == 'skipped: Spotify knows no artist called "Lush"'
+   and not [c for c in CALLS if c[0] == "json" and "api.spotify.com" in c[1]
+            and not c[1].endswith("/search")],
+   f"a search hit whose own name is not the name asked for is no hit at all "
+   f"({unknown['notes']['spotify']})")
+CFG.pop("spotify_client_id", None)
+CFG.pop("spotify_client_secret", None)
+
+# --------------------------------------------------------------------------- #
+# 7) The merge rule itself: an mbid is an identity, and a reason is never lost
 # --------------------------------------------------------------------------- #
 print("== merging two sources ==")
 shared = [

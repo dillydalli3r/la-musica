@@ -302,6 +302,8 @@ export default {
   "cover.best_pick_use": "Utiliser le meilleur choix",
   "cover.no_pick": "Aucune image n'atteint la taille de pochette — choisissez-en une à la main.",
   "cover.pick_reason": "Pourquoi celle-ci",
+  "cover.checked_against": "Vérifié par rapport à {identity}",
+  "cover.all_rejected": "{count} candidat(s) ont été rejetés — chaque ligne dit pourquoi, et n'importe lequel peut encore être appliqué à la main.",
   "cover.source_notes": "Ce que chaque source a fait",
   "cover.searching": "Recherche des sources de pochettes…",
   "cover.answered": "Recherché : {terms}",

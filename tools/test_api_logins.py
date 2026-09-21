@@ -172,6 +172,7 @@ def point_at_providers():
     intg._SPOTIFY_TOKEN_URL = cap.base + "/api/token"
     intg._SPOTIFY_SEARCH = cap.base + "/v1/search"
     ac.API_URL = cap.base + "/v2/lookup"
+    ac.SUBMIT_API_URL = cap.base + "/v2/submit"
     # Provider etiquette intervals (1 req/s for the crowdsourced APIs) would
     # only make this file slow; nothing here is about being polite.
     discovery._HOST_WAIT.clear()
@@ -500,6 +501,64 @@ check("acoustid: the credential row for a rejected key is a fail",
 
 
 # --------------------------------------------------------------------------- #
+# 5b. AcoustID user key — acoustid_user_key (submissions)
+# --------------------------------------------------------------------------- #
+# A DIFFERENT credential: the application key can only look up, and only a
+# submission proves the user key, so the wire that has to carry it is
+# /v2/submit (client + user as separate fields).
+print("== AcoustID: acoustid_user_key ==")
+AU_CFG = {"acoustid_enabled": True, "acoustid_api_key": "ac-stored-key-321",
+          "acoustid_user_key": "ac-user-key-654"}
+SUBMITTED = {"status": "ok",
+             "submissions": [{"index": 0, "id": 12345, "status": "pending"}]}
+
+cap.clear()
+cap.route("POST", "/v2/submit", SUBMITTED)
+got = ac.verify_user_key(AU_CFG)
+req = cap.one("POST", "/v2/submit")
+form = urllib.parse.parse_qs(req["body"])
+check("acoustid-user: the USER key travels as the `user` form field, beside the "
+      "application key as `client`",
+      form.get("user") == ["ac-user-key-654"]
+      and form.get("client") == ["ac-stored-key-321"], req["body"][:120])
+check("acoustid-user: the probe is one fingerprint-only submission (source 3)",
+      bool(form.get("fingerprint.0", [""])[0]) and form.get("source.0") == ["3"]
+      and not any(k.startswith("mbid") for k in form), req["body"][:120])
+check("acoustid-user: an accepted key is ok, the submission being its proof",
+      got["ok"] is True and got["id"] == 12345 and got["status"] == "pending",
+      str(got))
+st, detail = cc.check("acoustid-user", AU_CFG)
+check("acoustid-user: the credential row reports the accepted user key",
+      st == "ok" and "accepted" in detail, f"{st}: {detail}")
+
+cap.clear()
+got = ac.verify_user_key({"acoustid_enabled": True,
+                          "acoustid_api_key": "ac-stored-key-321"})
+check("acoustid-user: no user key is 'not configured' and sends nothing",
+      got["ok"] is False and got["code"] == ac.NO_USER_KEY and not cap.sent(),
+      str(got))
+check("acoustid-user: the credential row says skipped with the module's own note",
+      cc.check("acoustid-user", {"acoustid_enabled": True,
+                                 "acoustid_api_key": "k"})[0] == "skipped",
+      str(cc.check("acoustid-user", {"acoustid_enabled": True,
+                                     "acoustid_api_key": "k"})))
+
+cap.clear()
+cap.route("POST", "/v2/submit",
+          {"status": "error",
+           "error": {"code": 8, "message": "invalid user API key"}},
+          status=400)
+got = ac.verify_user_key(AU_CFG)
+check("acoustid-user: a refused user key reports the service's sentence verbatim",
+      got["ok"] is False and got["code"] == ac.LOOKUP_FAILED
+      and "HTTP 400" in got["reason"] and "invalid user API key" in got["reason"],
+      str(got))
+st, detail = cc.check("acoustid-user", AU_CFG)
+check("acoustid-user: the credential row for a refused key is a fail",
+      st == "fail" and "invalid user API key" in detail, f"{st}: {detail}")
+
+
+# --------------------------------------------------------------------------- #
 # 6. Soulseek — soulseek_username + soulseek_password
 # --------------------------------------------------------------------------- #
 print("== Soulseek: soulseek_username + soulseek_password ==")
@@ -684,6 +743,7 @@ BAD_CFG = {
     "lastfm_api_key": "lf-stored-key-789",
     "spotify_client_id": "cid-stored", "spotify_client_secret": "sec-stored",
     "acoustid_enabled": True, "acoustid_api_key": "ac-stored-key-321",
+    "acoustid_user_key": "ac-user-key-654",
     "ai_base_url": cap.base + "/v1", "ai_model": "gpt-test",
     "ai_api_key": "sk-stored-value-123", "ai_effort": "minimal",
     "soulseek_username": "night-owl", "soulseek_password": "pw",
@@ -761,6 +821,10 @@ try:
     cap.route("POST", "/v2/lookup",
               {"status": "error", "error": {"code": 4, "message": "invalid API key"}},
               status=400)
+    cap.route("POST", "/v2/submit",
+              {"status": "error",
+               "error": {"code": 8, "message": "invalid user API key"}},
+              status=400)
     cap.route("POST", "/v1/chat/completions", {"error": {"message": "bad key"}},
               status=401)
     intg._SPOTIFY_TOKEN.clear()
@@ -770,7 +834,7 @@ try:
 
     rows = {r["id"]: r for r in
             sh.health_payload(BAD_CFG, kind="credentials", probe=True)["sources"]}
-    for cid in ("discogs", "lastfm", "spotify", "acoustid", "ai"):
+    for cid in ("discogs", "lastfm", "spotify", "acoustid", "acoustid-user", "ai"):
         row = rows[cid]
         check(f"payload: a rejected {cid} credential is never an ok row",
               row["status"] == "fail", f"{row['status']}: {row['detail']}")
@@ -798,11 +862,13 @@ rows = {r["id"]: r for r in
         sh.health_payload({}, kind="credentials", probe=True)["sources"]}
 check("payload: an unconfigured install is skipped, not failed",
       all(rows[cid]["status"] == "skipped"
-          for cid in ("discogs", "lastfm", "spotify", "acoustid", "soulseek", "ai")),
+          for cid in ("discogs", "lastfm", "spotify", "acoustid",
+                      "acoustid-user", "soulseek", "ai")),
       str({k: v["status"] for k, v in rows.items()}))
 check("payload: and each says which key it wants",
       all(rows[cid]["detail"].startswith("needs ")
-          for cid in ("discogs", "lastfm", "spotify", "acoustid", "soulseek", "ai")),
+          for cid in ("discogs", "lastfm", "spotify", "acoustid",
+                      "acoustid-user", "soulseek", "ai")),
       str({k: v["detail"] for k, v in rows.items()}))
 check("payload: probing an unconfigured credential sends no request at all",
       not cap.sent(), str([(r["method"], r["path"]) for r in cap.sent()]))

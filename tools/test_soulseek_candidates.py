@@ -305,6 +305,12 @@ try:
     assert errors == [] and skipped == 0, (errors, skipped)
     assert slsk.polls_made >= 3, slsk.polls_made
     assert clock.now < 6, f"a finished search still waited out its window (t={clock.now}s)"
+    # ...and the seconds it really spent are on record for the job (`waited` in
+    # the wish prompt): two InProgress polls x the poll cadence, NEVER the 6s
+    # window the search was allowed — the number the prompt used to publish.
+    assert soulseek_auto._search_seconds() == 2 * soulseek_auto._SEARCH_POLL_S, \
+        soulseek_auto._search_seconds()
+    assert soulseek_auto._search_seconds() < 6, soulseek_auto._search_seconds()
     # slskd hands searchTimeout to Soulseek.NET as MILLISECONDS: 6 s -> 6000.
     # A seconds-style 6 ends the search almost immediately and returns nothing.
     assert slsk.timeouts == [6000], slsk.timeouts
@@ -315,6 +321,12 @@ try:
         FakeSlsk([PENDING]), ["never-done"], wait_s=2)
     assert results == [] and skipped == 0, (results, skipped)
     assert any("never-done" in e and "did not finish" in e for e in errors), errors
+    # A search that really DID run out its window reports that whole elapsed
+    # time (`waited`): the measured number is only "short" when the search
+    # really ended early, which is what makes it trustworthy.
+    assert soulseek_auto._search_seconds() == clock.now, soulseek_auto._search_seconds()
+    assert soulseek_auto._search_seconds() > 2 + soulseek_auto._SEARCH_GRACE_S - 1, \
+        soulseek_auto._search_seconds()
 
     # 5. An Errored search is reported as an error, not an empty result set.
     clock.now = 0.0
@@ -1008,7 +1020,11 @@ def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSls
         verified, imported = [], []
         calls = []
         prompts = []
-        soulseek_auto.time = FakeClock()
+        # The clock the job runs on: every sleep advances it, so the seconds the
+        # job MEASURES (`_search_seconds`, the wish prompt's `waited`) are
+        # readable from the test instead of being wall time.
+        clock = FakeClock()
+        soulseek_auto.time = clock
         soulseek_auto._job.clear()
         soulseek_auto._job.update({"state": "running", "stage": "", "release": None,
                                    "log": [], "attempts": [], "result": None,
@@ -1106,6 +1122,7 @@ def run_job(release, rows, cfg=None, scores=None, queries=None, stub_cls=AutoSls
         run.calls = calls
         run.ddir = ddir
         run.stub = stub
+        run.clock = clock
         return run
     finally:
         # Quiesce before restoring: cancel whatever is still parked, then wait
@@ -1445,10 +1462,12 @@ try:
         # the release's title, exactly what the search was issued with)
         assert run.prompt["queries"] == ["Job Album"], run.prompt
         assert run.prompt["formats"] == [] and run.prompt["candidates"] == [], run.prompt
-        # one timer only: the prompt reports the same cap the search advertised
-        # (the 5s window this config asks for + the 45s grace tail), never a
-        # second, competing countdown
-        assert run.prompt["waited"] == 50, run.prompt
+        # MEASURED, not advertised: this slskd double answers on the first poll,
+        # so the search really took no time at all and the prompt says so. The
+        # prompt used to publish the CEILING (the 5s window this config asks for
+        # + the 45s grace tail = 50) as if the search had spent it.
+        assert run.prompt["waited"] == 0, run.prompt
+        assert run.prompt["waited"] == int(run.clock.now), run.prompt
         assert run.job["state"] == "done", run.job["state"]
         result = run.job["result"]
         assert result["wished"] is True and isinstance(result["wish_id"], int), result
@@ -1496,24 +1515,150 @@ finally:
     wishes_store._initialized = _saved_wish_init
     shutil.rmtree(_wish_dir, ignore_errors=True)
 
+
 # --------------------------------------------------------------------------- #
-# Search shape: a CD goes out with its catalog number ALONE (the trait rip
-# folders carry; broader templates dragged in every other pressing), the
-# response limit reaches slskd, and a search still running when the window
-# closes is cancelled instead of left occupying slskd's search slots.
+# The duration the wish offer reports is MEASURED, not the cap it was allowed.
+# A search ends the moment it is terminal (or a usable folder appears), so the
+# configured window plus the grace tail — the number the prompt used to publish
+# — is a ceiling the wait rarely reaches. The fake clock moves only when the
+# poll loop sleeps, so the seconds asserted here are the loop's own.
+# --------------------------------------------------------------------------- #
+class LazySearch(AutoSlsk):
+    """AutoSlsk whose searches stay InProgress for the first `pending` polls;
+    the next one is terminal. One poll per tick, one `_SEARCH_POLL_S` sleep per
+    tick — so `pending` polls are `pending * 0.75` seconds of waiting."""
+
+    def __init__(self, ddir, rows, pending=4):
+        super().__init__(ddir, rows)
+        self.pending = pending
+
+    def search_results(self, sid):
+        if self.pending > 0:
+            self.pending -= 1
+            return {"state": "InProgress", "isComplete": False, "responses": []}
+        return super().search_results(sid)
+
+
+run = run_job(JOB_RELEASE, [], stub_cls=LazySearch, confirm_lossy=True, answer=False)
+assert run.prompt and run.prompt["reason"] == "no_results", run.prompt
+assert run.prompt["waited"] == 3, run.prompt       # 4 polls x 0.75s, floored
+assert run.prompt["waited"] == int(run.clock.now), (run.prompt, run.clock.now)
+# …and the 5s + 45s ceiling the SAME prompt used to report is nowhere in it:
+# the search was terminal on the fifth poll, long before any of it elapsed.
+assert JOB_CFG["soulseek_auto_search_wait"] + 45 != run.prompt["waited"], run.prompt
+# The job's own log carries the same measured seconds, so the line that
+# advertises the ceiling is not the only duration a reader sees.
+assert any("search(es) in 3s" in e["msg"] for e in run.job["log"]), \
+    [e["msg"] for e in run.job["log"]]
+
+
+# --------------------------------------------------------------------------- #
+# Search shape: a PHYSICAL release goes out with the traits of its pressing
+# ALONE (the catalog number and the barcode — broader templates drag in every
+# other pressing), DIGITAL media keeps the broad wording it has no alternative
+# to, the response limit reaches slskd, and a search still running when the
+# window closes is cancelled instead of left occupying slskd's search slots.
 # --------------------------------------------------------------------------- #
 assert soulseek_auto.release_queries(JOB_RELEASE, {}) == ["CAT-1"], \
     soulseek_auto.release_queries(JOB_RELEASE, {})
-# …and a release with no catalog number is not left unsearchable: it falls back
-# to the digital wording rather than failing the job outright.
-assert soulseek_auto.release_queries(dict(JOB_RELEASE, catalog_number=""), {}) == \
-    ["Job Artist Job Album 1996"]
+# A pressing states its BARCODE too, and that is the other trait unique to it:
+# the two go out as two queries, in template order.
+assert soulseek_auto.release_queries(
+    dict(JOB_RELEASE, barcode="4571694676537"), {}) == \
+    ["CAT-1", "4571694676537"]
+# A physical release MusicBrainz states NO catalog number and no barcode for
+# falls back to its label and country — never to the artist/title wording,
+# which is the query that asks the network for every other pressing of the same
+# album (and made a CD job take a WEB rip).
+assert soulseek_auto.release_queries(
+    dict(JOB_RELEASE, catalog_number="", label="Nippon Columbia", country="JP"), {}) == \
+    ["Nippon Columbia JP 1996"]
+# …and a pressing stating neither label nor country has nothing left to
+# identify it by: no query at all (the job reports "nothing to search by")
+# rather than one that searches for a different release.
+assert soulseek_auto.release_queries(
+    dict(JOB_RELEASE, catalog_number="", country=""), {}) == []
+assert soulseek_auto.release_queries(
+    dict(JOB_RELEASE, catalog_number="", barcode="", label="EMI", country="GB"), {}) == \
+    ["EMI GB 1996"]
+# DIGITAL media is the one kind that keeps the broad wording: it has no
+# pressing trait to be identified by.
 assert soulseek_auto.release_queries(
     dict(JOB_RELEASE, medium_formats=["Digital Media"], catalog_number=""), {}) == \
     ["Job Artist Job Album 1996"]
+# The physical/digital split reads the medium through mlo.release_choice
+# .media_formats: every physical carrier is a PRESSING, an empty or unknown
+# medium list counts as one, and only "all Digital Media" is digital.
+assert soulseek_auto._is_digital({"medium_formats": ["Digital Media"]}) is True
+assert soulseek_auto._is_digital({"medium_formats": ["CD", "DVD"]}) is False
+assert soulseek_auto._is_digital({"medium_formats": ["12\" Vinyl"]}) is False
+assert soulseek_auto._is_digital({"medium_formats": []}) is False
+assert soulseek_auto._is_digital({}) is False
+assert soulseek_auto._is_digital({"medium": "Digital Media"}) is True
+for _medium in ("Vinyl", "Cassette", "SACD", "CD-R", "SHM-CD", "Blu-spec CD",
+                "12\" Vinyl", "DVD-Audio"):
+    assert soulseek_auto.release_queries(
+        dict(JOB_RELEASE, medium_formats=[_medium], catalog_number="", barcode=""),
+        {}) == ["GB 1996"], _medium      # a pressing: label + country, no title
+    assert soulseek_auto.release_queries(
+        dict(JOB_RELEASE, medium_formats=[_medium]), {}) == ["CAT-1"], _medium
 # A configured template list still wins over the default.
 assert soulseek_auto.release_queries(
     JOB_RELEASE, {"soulseek_auto_cd_queries": ["artist album"]}) == ["Job Artist Job Album"]
+# …and the physical key does the same for EVERY pressing, so a widened vinyl
+# search is one setting, not a code change.
+assert soulseek_auto.release_queries(
+    dict(JOB_RELEASE, medium_formats=["Vinyl"]),
+    {"soulseek_auto_physical_queries": ["artist album catalognumber"]}) == \
+    ["Job Artist Job Album CAT-1"]
+assert soulseek_auto.release_queries(
+    dict(JOB_RELEASE, medium_formats=["Vinyl"]),
+    {"soulseek_auto_physical_queries": "catalognumber; barcode"}) == ["CAT-1"]
+# The legacy CD key only wins when a config really SET it: its shipped default
+# (the catalog number alone) is not a decision, so an untouched install follows
+# the physical default — which adds the barcode — instead.
+assert soulseek_auto.release_queries(
+    dict(JOB_RELEASE, barcode="4571694676537"),
+    {"soulseek_auto_cd_queries": ["catalognumber"]}) == ["CAT-1", "4571694676537"]
+assert soulseek_auto.release_queries(
+    dict(JOB_RELEASE, barcode="4571694676537"),
+    {"soulseek_auto_cd_queries": ["catalognumber", "barcode"]}) == \
+    ["CAT-1", "4571694676537"]
+# …and it is the CD's key alone: a vinyl ignores it.
+assert soulseek_auto.release_queries(
+    dict(JOB_RELEASE, medium_formats=["Vinyl"], catalog_number="", barcode=""),
+    {"soulseek_auto_cd_queries": ["artist album"]}) == ["GB 1996"]
+
+# The physical key is a SHIPPED default like the other two query keys: the
+# settings UI edits a template list as one ";"-separated line, an empty/blank
+# list falls back to the shipped one, and a saved config holding a list a
+# physical release was already searched with before this key existed (the CD
+# key's default, the digital key's old defaults — the fall-through this key
+# ends) was never a decision about it, so it follows the shipped default too.
+from mlo import config as mlo_config     # noqa: E402
+
+assert mlo_config.DEFAULT_CONFIG["soulseek_auto_physical_queries"] == \
+    ["catalognumber", "barcode"], mlo_config.DEFAULT_CONFIG["soulseek_auto_physical_queries"]
+for _saved, _want in (
+        ("catalognumber; barcode", ["catalognumber", "barcode"]),
+        ([], ["catalognumber", "barcode"]),
+        (["  "], ["catalognumber", "barcode"]),
+        (None, ["catalognumber", "barcode"]),
+        (["catalognumber"], ["catalognumber", "barcode"]),
+        (["artist album year", "artist album"], ["catalognumber", "barcode"]),
+        (["catalognumber", "artist album catalognumber", "artist album"],
+         ["catalognumber", "barcode"]),
+        (["label country year"], ["label country year"]),
+        (["catalognumber", "barcode", "label", "country", "year", "date", "artist",
+          "album"], ["catalognumber", "barcode", "label", "country", "year", "date"])):
+    assert mlo_config.normalize_config(
+        {"soulseek_auto_physical_queries": _saved})["soulseek_auto_physical_queries"] == \
+        _want, _saved
+# the CD and digital keys keep their own values — the new key did not become a
+# second home for them
+assert mlo_config.normalize_config({})["soulseek_auto_cd_queries"] == ["catalognumber"]
+assert mlo_config.normalize_config({})["soulseek_auto_digital_queries"] == \
+    ["artist album year"]
 
 # A CD carrying SEVERAL catalog numbers (one per label/pressing) is searched
 # for EACH number as its own query, in MusicBrainz order — searching only the
@@ -1539,10 +1684,10 @@ assert soulseek_auto.release_queries(
 assert soulseek_auto.release_queries(
     dict(JOB_RELEASE, catalog_numbers=[f"C{i}" for i in range(1, 8)]), {}) == \
     ["C1", "C2", "C3", "C4"]
-# an EMPTY plural key still means "no catalog number" -> the fallback query
+# an EMPTY plural key still means "no catalog number or barcode" -> the
+# pressing fallback (its label and country), never the artist/title wording
 assert soulseek_auto.release_queries(
-    dict(JOB_RELEASE, catalog_numbers=[], catalog_number=""), {}) == \
-    ["Job Artist Job Album 1996"]
+    dict(JOB_RELEASE, catalog_numbers=[], catalog_number=""), {}) == ["GB 1996"]
 # the plural key wins over the singular; a singular-only payload still works
 assert soulseek_auto.release_queries(
     dict(JOB_RELEASE, catalog_numbers=["NEW"], catalog_number="OLD"), {}) == ["NEW"]
@@ -1552,6 +1697,225 @@ assert soulseek_auto.release_queries(
 for _tpl in (["catalognumber"], ["artist album catalognumber"], ["artist album"]):
     assert soulseek_auto._build_from_templates(_tpl, TWO_CAT) == \
         soulseek_auto.release_queries(TWO_CAT, {"soulseek_auto_cd_queries": _tpl}), _tpl
+
+# --------------------------------------------------------------------------- #
+# Search text: what reaches slskd is what a SHARE FOLDER NAME can carry. slskd
+# POSTs `searchText` verbatim, so a MusicBrainz title's punctuation used to go
+# to the network as typed — and the full-width forms a Japanese title uses are
+# exactly what NFKD folds onto ASCII punctuation, which is then dropped.
+# --------------------------------------------------------------------------- #
+_s = soulseek_auto._search_text
+# The full-width "！" of a real MusicBrainz title folds to "!" and goes; the
+# letters of every script stay, voicing marks and all ("ぴ" must NOT be folded
+# to "ひ" the way an accent is).
+assert _s("ぴーなた") == "ぴーなた", _s("ぴーなた")
+assert _s("アンタに言ってんの！") == "アンタに言ってんの", _s("アンタに言ってんの！")
+assert _s("Мумий Тролль — Точно Ртуть!") == "Мумий Тролль - Точно Ртуть"
+assert _s("ヴィヴァルディ・四季") == "ヴィヴァルディ 四季", _s("ヴィヴァルディ・四季")
+# quotes, brackets, slashes, "? *", emoji and typographic dashes: dropped, but
+# as WORD breaks — "Album(Remastered)" and "Live/2" are two words, and gluing
+# them into "AlbumRemastered"/"Live2" would search for a term no share carries.
+assert _s('AC/DC “Live” – Album') == "AC DC Live - Album", _s('AC/DC “Live” – Album')
+assert _s("Album(Remastered)") == "Album Remastered", _s("Album(Remastered)")
+assert _s("Live/2 🎵") == "Live 2", _s("Live/2 🎵")
+assert _s("a\nb\tc") == "a b c", _s("a\nb\tc")
+# Accents fold onto the plain letter in Latin text (either spelling of a title
+# must produce one query), and the punctuation a share DOES carry is kept: the
+# hyphen inside a catalog number above all.
+assert _s("Björk – Motörhead") == "Bjork - Motorhead", _s("Björk – Motörhead")
+assert _s("Don’t Stop (Remastered)") == "Don't Stop Remastered"
+assert _s("WPCL-1234") == "WPCL-1234" and _s("k.d. lang") == "k.d. lang"
+# A term that was ALL punctuation keeps its plain normalized text: an empty
+# query would silently drop that field from the search entirely.
+assert _s("!!!") == "!!!" and _s("") == "" and _s(None) == ""
+
+# …and the rendered query is clean: the release the issue was filed about
+# (88bf1693-2cde-48e3-9a40-cc928ad283f6) is DIGITAL, so it searches its title
+# and year — with the full-width "!" gone and the kana intact.
+CJK_RELEASE = {
+    "id": "88bf1693-2cde-48e3-9a40-cc928ad283f6",
+    "title": "アンタに言ってんの！", "date": "2026-07-29",
+    "medium_formats": ["Digital Media"], "country": "JP",
+    "catalog_number": "", "barcode": "4571694676537",
+    "release_group_id": "b4c0b0f2-0000-4000-8000-000000000000",
+    "artists": [{"name": "ぴーなた", "mbid": "aaaaaaaa-0000-4000-8000-000000000001"}],
+}
+assert soulseek_auto.release_queries(CJK_RELEASE, {}) == \
+    ["ぴーなた アンタに言ってんの 2026"], \
+    soulseek_auto.release_queries(CJK_RELEASE, {})
+
+# --------------------------------------------------------------------------- #
+# MusicBrainz aliases: a release MusicBrainz files under a translated name is
+# unfindable on Soulseek under the name it carries — the folders there are
+# named with the ALIAS. The extra queries are the SAME templates with the alias
+# in place of the artist (and of the album, when the release group has one),
+# built from the ids the release already carries, and they must exist BEFORE
+# the wish offer because a wish replays the queries it is stored with.
+# --------------------------------------------------------------------------- #
+from server import integrations as _intg   # noqa: E402
+
+_real_mb_cached = _intg.mb_get_cached
+_mb_calls = []
+
+
+def _fake_mb_cached(endpoint, params=None, timeout=30.0, retries=5):
+    _mb_calls.append(endpoint)
+    if endpoint.startswith("artist/"):
+        return {"aliases": [
+            {"name": "ピナタ", "locale": "ja", "primary": True},
+            {"name": "pinata", "locale": "en", "primary": True},
+            {"name": "Pinata", "locale": "en", "primary": False}]}
+    if endpoint.startswith("release-group/"):
+        return {"aliases": [{"name": "What I'm Telling You", "locale": "en",
+                             "primary": True},
+                            {"name": "アンタに言ってんの", "locale": "ja"}]}
+    return {}
+
+
+try:
+    _intg.mb_get_cached = _fake_mb_cached
+    _mb_calls.clear()
+    _q = soulseek_auto.release_queries(CJK_RELEASE, {"beets_locale": "en"})
+    # the alias-artist query is the template with `pinata` in the artist slot,
+    # and the alias TITLE replaces the album: MusicBrainz' own English name for
+    # the release group is what an English share folder carries.
+    assert _q == ["ぴーなた アンタに言ってんの 2026",
+                  "pinata What I'm Telling You 2026"], _q
+    # the ids the release ALREADY carries are what was asked about — the cached
+    # client, one request per entity
+    assert _mb_calls == [
+        f"artist/{CJK_RELEASE['artists'][0]['mbid']}",
+        f"release-group/{CJK_RELEASE['release_group_id']}"], _mb_calls
+    # the reader's locale decides WHICH alias: a ja reader is served the ja
+    # spelling of the artist (a different one — katakana against hiragana), and
+    # the ja alias TITLE is the title itself, so no second query is added for it
+    _mb_calls.clear()
+    _ja = soulseek_auto.release_queries(CJK_RELEASE, {"beets_locale": "ja"})
+    assert _ja == ["ぴーなた アンタに言ってんの 2026",
+                   "ピナタ アンタに言ってんの 2026"], _ja
+    # A NAME ALREADY IN THE READER'S SCRIPT COSTS NO REQUEST AT ALL: "Job
+    # Artist" has nothing to translate, so a Latin-script library asks
+    # MusicBrainz nothing (this is the beets plugin's own rule).
+    _mb_calls.clear()
+    assert soulseek_auto.release_queries(JOB_RELEASE, {}) == ["CAT-1"], _mb_calls
+    assert _mb_calls == [], _mb_calls
+    # A release with no MusicBrainz ids has nothing to ask about either.
+    _mb_calls.clear()
+    assert soulseek_auto.release_queries(
+        dict(CJK_RELEASE, release_group_id=None,
+             artists=[{"name": "ぴーなた", "mbid": ""}]), {}) == \
+        ["ぴーなた アンタに言ってんの 2026"], _mb_calls
+    assert _mb_calls == [], _mb_calls
+    # An alias lookup that fails NEVER costs the release its search: the
+    # configured templates are already in hand.
+    def _boom(endpoint, params=None, timeout=30.0, retries=5):
+        raise RuntimeError("MusicBrainz is busy")
+    _intg.mb_get_cached = _boom
+    assert soulseek_auto.release_queries(CJK_RELEASE, {}) == \
+        ["ぴーなた アンタに言ってんの 2026"], "a failed alias lookup lost the search"
+    # …and the alias queries are CAPPED like the catalog expansion, so a
+    # release with many aliases (or many templates) cannot flood the network.
+    def _many(endpoint, params=None, timeout=30.0, retries=5):
+        if endpoint.startswith("artist/"):
+            return {"aliases": [{"name": f"alias{i}", "locale": "en", "primary": i == 0}
+                                for i in range(9)]}
+        return {"aliases": [{"name": f"title{i}", "locale": "en"} for i in range(9)]}
+    _intg.mb_get_cached = _many
+    _capped = soulseek_auto.release_queries(
+        CJK_RELEASE,
+        {"beets_locale": "en",
+         "soulseek_auto_digital_queries": ["artist album year", "album", "artist",
+                                           "album year", "artist year"]})
+    _alias_extra = [q for q in _capped if "alias0" in q or "title0" in q]
+    assert len(_alias_extra) == soulseek_auto._MAX_CATALOG_QUERIES, _capped
+    assert "alias0 2026" not in _capped, _capped   # the 5th template never rendered
+
+    # …and a JOB really searches with them: the alias query is one of the
+    # queries POSTed to slskd, which is what makes a wish created from this job
+    # replay it (a wish stores the queries the job searched with).
+    _intg.mb_get_cached = _fake_mb_cached
+    _cjk_digital = dict(DIGITAL_RELEASE, id=CJK_RELEASE["id"],
+                        title=CJK_RELEASE["title"], date=CJK_RELEASE["date"],
+                        country=CJK_RELEASE["country"],
+                        barcode=CJK_RELEASE["barcode"],
+                        catalog_number=CJK_RELEASE["catalog_number"],
+                        release_group_id=CJK_RELEASE["release_group_id"],
+                        artists=CJK_RELEASE["artists"])
+    run = run_job(_cjk_digital, DIGITAL_ROWS, queries=[])
+    assert run.imported, run.job["result"]
+    assert [q for q, _t, _l in run.stub.searches] == [
+        "ぴーなた アンタに言ってんの 2026",
+        "pinata What I'm Telling You 2026"], run.stub.searches
+finally:
+    _intg.mb_get_cached = _real_mb_cached
+
+# --------------------------------------------------------------------------- #
+# RELEASECOUNTRY carries the release's WHOLE set of countries, not the singular
+# `country` MusicBrainz puts first (issue #18's write side, folded in here): a
+# worldwide reissue of a pressing is filed under both, and a tag written from
+# the singular loses one. The singular still leads the value — it is what every
+# other writer stamps and the FIRST entry is what the naming script reads back.
+# --------------------------------------------------------------------------- #
+assert soulseek_auto._release_country_tag({"country": "GB"}) == "GB"
+assert soulseek_auto._release_country_tag(
+    {"country": "GB", "countries": []}) == "GB"
+# an event that states no code (a historic area) contributes nothing, and the
+# singular is moved to the front so mlo.naming._first_multi keeps reading it
+assert soulseek_auto._release_country_tag(
+    {"country": "US", "countries": [
+        {"code": "JP", "country": "Japan"},
+        {"code": "", "country": "Europe"},
+        {"code": "US", "country": "United States"}]}) == "US; JP"
+assert soulseek_auto._release_country_tag(
+    {"countries": [{"code": "US", "country": "United States"}]}) == "US"
+# a code repeated by two events is written once
+assert soulseek_auto._release_country_tag(
+    {"country": "DE", "countries": [{"code": "DE"}, {"code": "DE"}]}) == "DE"
+
+from mlo import audio as mlo_audio     # noqa: E402
+
+
+class RecorderAudio:
+    """`mlo.audio.AudioFile` stand-in: records every tag the stamping writes,
+    so "what lands in RELEASECOUNTRY" is answerable without a real encoder.
+    Written once (on disk) through the app's own tag layer in production."""
+
+    written = {}
+
+    def __init__(self, path):
+        self.path = path
+        self.audio = object()      # not None: the file "can be read"
+        self.tags = {}
+
+    def get_tag(self, name):
+        return self.tags.get(name, "")
+
+    def set_tag(self, name, value):
+        self.tags[name] = str(value).strip()
+        RecorderAudio.written.setdefault(os.path.basename(self.path), {})[name] = \
+            str(value).strip()
+        return True
+
+
+_stamp_dir = tempfile.mkdtemp(prefix="mlo-stamp-")
+try:
+    put_file(_stamp_dir, "01 - Alpha.flac")
+    put_file(_stamp_dir, "02 - Beta.flac")
+    _wb_release = dict(JOB_RELEASE, country="US", countries=[
+        {"code": "JP", "country": "Japan", "date": "2026-07-29"},
+        {"code": "US", "country": "United States", "date": "2026-07-29"}])
+    with Patch(mlo_audio, AudioFile=RecorderAudio):
+        _n = soulseek_auto._stamp_mb_tags(_stamp_dir, _wb_release)
+    assert _n == 2, _n
+    _tags = RecorderAudio.written["01 - Alpha.flac"]
+    assert _tags["RELEASECOUNTRY"] == "US; JP", _tags["RELEASECOUNTRY"]
+    # the rest of the identity still lands, so the whole set replaced the
+    # singular inside the stamp rather than the stamp itself
+    assert _tags["MUSICBRAINZ_ALBUMID"] == JOB_RELEASE["id"], _tags
+    assert _tags["DATE"] == "1996" and _tags["CATALOGNUMBER"] == "CAT-1", _tags
+    assert _tags["TITLE"] == "Alpha", _tags      # the per-track tags still run
+finally:
+    shutil.rmtree(_stamp_dir, ignore_errors=True)
 
 # --------------------------------------------------------------------------- #
 # A wish stores the queries it was created with, but an EMPTY list must not pin
@@ -2072,32 +2436,52 @@ def per_query(scripts):
     return lambda ddir, rows: PerQuerySlsk(ddir, scripts)
 
 
-# (a) nothing usable from the configured template: exactly ONE broader
-#     `artist album year` query runs AFTER it (the job's own search journal
-#     shows one query, then the other — never two windows at once), and the CD
-#     rip it finds imports with no prompt at all.
-run = run_job(JOB_RELEASE, ONE_DISC_ROWS + WEBRIP_ROWS,
-              stub_cls=per_query([[], ONE_DISC_ROWS]))
+# (a) NOTHING usable from the configured template on a DIGITAL release: exactly
+#     ONE broader `artist album year` query runs AFTER it (the job's own search
+#     journal shows one query, then the other — never two windows at once), and
+#     the copy it finds imports with no prompt at all.
+run = run_job(DIGITAL_RELEASE, WEBRIP_ROWS,
+              stub_cls=per_query([[], WEBRIP_ROWS]))
 assert run.imported, run.job["result"]
 assert [q for q, _t, _l in run.stub.searches] == ["Job Album", BROAD_QUERY], run.stub.searches
 assert [t for _q, t, _l in run.stub.searches] == [5000, 5000], run.stub.searches
 assert [l for _q, _t, l in run.stub.searches] == [25, 25], run.stub.searches
 assert run.prompt is None, run.prompt
+# ...and both windows report how long they REALLY took (this double answers on
+# its first poll), not the ceiling the announcement line carries.
+assert any("search(es) in 0s" in e["msg"] for e in run.job["log"]), \
+    [e["msg"] for e in run.job["log"]]
+assert any("broader query: 2 result file(s) in 0s" in e["msg"] for e in run.job["log"]), \
+    [e["msg"] for e in run.job["log"]]
 
-# (b) a gate-passing candidate from the FIRST query means the fallback never
-#     runs: one search, no broader window, and no prompt — the release had a
-#     real rip, so the log gate it came with is the one that stands.
+# (a2) ...and a PHYSICAL release never runs it ALL: the very same scripting that
+#      just rescued the digital release finds nothing here, because the broad
+#      query is never issued. "artist album year" asks the network for every
+#      other pressing of the same album, so a pressing is searched by what
+#      identifies THE PRESSING and by nothing else — a perfect copy the broad
+#      wording would have found is not the release this job was asked for.
 run = run_job(JOB_RELEASE, ONE_DISC_ROWS + WEBRIP_ROWS,
-              stub_cls=per_query([ONE_DISC_ROWS, []]))
+              stub_cls=per_query([[], ONE_DISC_ROWS]))
+assert [q for q, _t, _l in run.stub.searches] == ["Job Album"], run.stub.searches
+assert run.job["state"] == "error", run.job
+assert run.job["result"]["error"] == NO_RESULT_MSG, run.job["result"]
+assert (run.enqueued, run.imported) == ([], []), (run.enqueued, run.imported)
+assert not any("one broader" in e["msg"] for e in run.job["log"]), \
+    [e["msg"] for e in run.job["log"]]
+
+# (b) a candidate from the FIRST query means the fallback never runs: one
+#     search, no broader window, and no prompt — the release had a good copy,
+#     so the template it came from is the one that stands.
+run = run_job(DIGITAL_RELEASE, WEBRIP_ROWS, stub_cls=per_query([WEBRIP_ROWS, []]))
 assert run.imported, run.job["result"]
 assert [q for q, _t, _l in run.stub.searches] == ["Job Album"], run.stub.searches
 assert not any("one broader" in e["msg"] for e in run.job["log"]), \
     [e["msg"] for e in run.job["log"]]
 
-# (c) the fallback finds no CD rip either, but a complete lossless WEB rip of
+# (c) the configured query finds no CD rip, but a complete lossless WEB rip of
 #     the same tracklist exists: the job parks on the CD-vs-Digital decision
 #     and shows the folders it would take.
-run = run_job(JOB_RELEASE, WEBRIP_ROWS, stub_cls=per_query([[], WEBRIP_ROWS]),
+run = run_job(JOB_RELEASE, WEBRIP_ROWS, stub_cls=per_query([WEBRIP_ROWS]),
               confirm_lossy=True, answer=True)
 assert run.prompt and run.prompt["reason"] == "no_logs", run.prompt
 assert run.prompt["media"] == "Digital Media", run.prompt
@@ -2137,7 +2521,7 @@ try:
         # `error` instead of parking on its offer — the reason this suite flaked
         # on CI while passing on a developer machine.
         wishes_store._initialized = False
-        run = run_job(JOB_RELEASE, DECLINE_ROWS, stub_cls=per_query([[], DECLINE_ROWS]),
+        run = run_job(JOB_RELEASE, DECLINE_ROWS, stub_cls=per_query([DECLINE_ROWS]),
                       confirm_lossy=True, answer=[False, True])
         assert [p["reason"] for p in run.prompts] == ["no_logs", "no_results"], run.prompts
         assert run.job["state"] == "done", run.job
@@ -2155,7 +2539,7 @@ finally:
 # (e) ...and with the wish prompt off, the same decline falls through to the
 #     error the CD path always raised: nothing is downloaded (not even the
 #     complete MP3 rip that IS downloadable), and no second question is asked.
-run = run_job(JOB_RELEASE, DECLINE_ROWS, stub_cls=per_query([[], DECLINE_ROWS]),
+run = run_job(JOB_RELEASE, DECLINE_ROWS, stub_cls=per_query([DECLINE_ROWS]),
               confirm_lossy=True, answer=False,
               cfg=dict(JOB_CFG, soulseek_auto_wish_prompt=False))
 assert [p["reason"] for p in run.prompts] == ["no_logs"], run.prompts

@@ -1236,7 +1236,12 @@ JOB_RESULT = {"updated": 2, "genres": ["Shoegaze"],
               "order": ["rateyourmusic", "listenbrainz", "musicbrainz"],
               "skipped": {"rateyourmusic": "skipped: no rym_cookie"},
               "level_counts": {"track": 1, "album": 1, "artist": 0},
-              "per_track_trimmed": {}, "trimmed": []}
+              # The chain keys this by (disc, position) TUPLES. A tuple key
+              # used to blow up FastAPI's jsonable_encoder (plain-text 500 on
+              # every import that trimmed a genre), so the route must render
+              # it with the app's own "disc:position" string key.
+              "per_track_trimmed": {(1, 1): ["Shoegaze", "Dream Pop"]},
+              "trimmed": []}
 _asked = []
 _real_genre_chain = intg.genre_chain
 
@@ -1281,6 +1286,10 @@ try:
                              "sources", "levels", "per_source_counts", "asked",
                              "stopped_after", "skipped", "level_counts",
                              "trimmed_files", "trimmed_genres"}, sorted(body)
+        # The trimmed map reaches the caller keyed by "disc:position", never
+        # by the chain's own (disc, position) tuple — the pre-fix route
+        # answered a plain-text 500 here instead of this body.
+        assert body["trimmed_genres"] == {"1:1": ["Shoegaze", "Dream Pop"]}, body
 
     # No `sources` at all still means every configured source, in order.
     every = _client.post("/api/genres/import", json={"paths": [JOB_ALBUM]})

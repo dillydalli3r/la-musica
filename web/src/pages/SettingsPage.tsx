@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, Save, RotateCcw, LayoutGrid, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, Wand2, X, FolderOpen } from "lucide-react";
+import { Bell, Save, RotateCcw, LayoutGrid, Settings as SettingsIcon, Check, Eye, EyeOff, ChevronDown, ChevronUp, Wand2, X, FolderOpen, Loader2 } from "lucide-react";
 import { api, deviceUnavailable, unavailableFeatures } from "../api";
 import ConfirmButton from "../components/ConfirmButton";
 import FolderPicker from "../components/FolderPicker";
@@ -772,10 +772,17 @@ export default function SettingsPage() {
       blurb: "Search terms are templates of release fields (artist album year date country catalognumber barcode label). CD rips are found by catalog number, digital media by title + year; every disc's .log must reach the score threshold before the album downloads.",
       fields: [
         {
-          k: "soulseek_auto_cd_queries", label: "CD query templates (; separated)", type: "text",
-          help: "A CD is searched by its catalog number alone by default — the one trait rip folder names carry. Add templates (semicolon-separated) to widen the search; a release with no catalog number falls back to artist + album + year automatically.",
+          k: "soulseek_auto_physical_queries", label: "Physical query templates (; separated)", type: "text",
+          help: "A physical pressing — a CD included — is searched by its catalog number and barcode by default, the traits that name the exact pressing. Add templates (semicolon-separated) to widen the search; a pressing that states neither falls back to its label and country, never to an artist/title query (which asks the network for every other pressing of the album).",
         },
-        { k: "soulseek_auto_digital_queries", label: "Digital query templates (; separated)", type: "text" },
+        {
+          k: "soulseek_auto_cd_queries", label: "CD query templates (; separated)", type: "text",
+          help: "Wins for a CD you set it for: this CD is searched by these templates instead of the physical ones above. Blank follows the physical defaults (catalog number + barcode) — the shipped default here (the catalog number alone) was a catalog-number-only search, which the physical default already covers.",
+        },
+        {
+          k: "soulseek_auto_digital_queries", label: "Digital query templates (; separated)", type: "text",
+          help: "Digital Media is searched by these — artist, album and year by default — because it carries no pressing trait to be identified by.",
+        },
         { k: "soulseek_auto_log_min_score", label: "Min .log score (0–100)", type: "number", min: 0, max: 100 },
         { k: "soulseek_auto_complete_ratio", label: "Required track completeness (0.5–1)", type: "number", min: 0.5, max: 1, step: 0.05 },
         { k: "soulseek_auto_search_wait", label: "Fallback search window (seconds of quiet on a rare album)", type: "number", min: 5, max: 300 },
@@ -920,6 +927,10 @@ export default function SettingsPage() {
         { k: "import_acoustid", label: "Fingerprint with AcoustID", type: "bool" },
         { k: "acoustid_enabled", label: "AcoustID enabled", type: "bool" },
         { k: "acoustid_api_key", label: "AcoustID application key (free, acoustid.org)", type: "password" },
+        {
+          k: "acoustid_user_key", label: "AcoustID user key (fingerprint submissions)", type: "password",
+          help: "The USER key of your own acoustid.org account (AcoustID → your account → API keys), a different key from the application one above. It is needed ONLY to submit fingerprints: the wizard's Submit to AcoustID publishes the ACOUSTID_FINGERPRINT/ID pair a matched album carries to AcoustID's public database, and a blank or refused key comes back in AcoustID's own words. Looking a release up never uses it — the application key alone can do that.",
+        },
         {
           k: "acoustid_fpcalc_path", label: "fpcalc path (blank = bundled/next to the app)", type: "text",
           help: "AcoustID fingerprints audio by running Chromaprint's fpcalc. The app looks for it next to itself and on PATH by default; point this at the binary when it lives somewhere else (a manual install, a package manager's prefix). A path that does not run is reported as \"could not answer\" on the AcoustID step rather than as a no-match — the check is unverified, not rejected.",
@@ -1419,13 +1430,23 @@ export default function SettingsPage() {
     staleTime: 5 * 60 * 1000,
   });
   const [depsBusy, setDepsBusy] = useState(false);
+  // The dependency row whose own Install/Update press is in flight. The
+  // page-level button settles the table through `depsBusy` + `refetchDeps()`
+  // (the same mechanism a row press uses); this only decides which row spins.
+  const [depBusyKey, setDepBusyKey] = useState<string | null>(null);
   // Why no external tool can run here, or null when the backend can start
   // one. One measurement for the whole table (see api.deviceUnavailable).
   const deviceReason = deviceUnavailable(caps);
   const unavailable = unavailableFeatures(caps);
 
-  const installDeps = async (keys?: string[]) => {
+  /** `keys` undefined = everything missing or behind (the page button);
+   *  `keys` = [one tool] from that row's own button. `pressed` is the row that
+   *  asked, so it carries the spinner — the settling is the same either way:
+   *  this `depsBusy` flag plus `refetchDeps()`, never a state the server has
+   *  not answered yet. */
+  const installDeps = async (keys?: string[], pressed?: string) => {
     setDepsBusy(true);
+    setDepBusyKey(pressed ?? null);
     try {
       const r = await api.installDependencies(keys);
       const failed = r.results.filter((x) => !x.ok);
@@ -1436,8 +1457,17 @@ export default function SettingsPage() {
       toast.error(String(e));
     } finally {
       setDepsBusy(false);
+      setDepBusyKey(null);
     }
   };
+
+  // The rows this tab's page-level button can act on — only what this host can
+  // FETCH (see the Dependencies page): a Windows-only tool on Linux, or one
+  // the host already provides as a distro package, has nothing to download and
+  // is counted as work anywhere.
+  const depTools = deps?.tools ?? [];
+  const depMissing = depTools.filter((t) => t.state === "missing" && t.installable !== false);
+  const depUpdates = depTools.filter((t) => t.state === "update" && t.installable !== false);
 
   // Which scripts the saved import chain runs (blank import_scripts = built-in).
   const { data: chainPreview } = useQuery({
@@ -1974,21 +2004,23 @@ export default function SettingsPage() {
                   <button className="btn-ghost !py-1 text-xs tap" onClick={() => refetchDeps()} disabled={depsBusy}>
                     Refresh
                   </button>
-                  <button
-                    className="btn-ghost !py-1 text-xs tap"
-                    onClick={() => installDeps(deps?.tools.filter((t) => t.state === "missing" && t.installable !== false).map((t) => t.key))}
-                    disabled={depsBusy || !!deviceReason}
-                    title={deviceReason ?? undefined}
-                  >
-                    Install missing
-                  </button>
+                  {/* ONE page-level button, and the same words as the
+                      Dependencies page: the press installs what is missing AND
+                      takes the newest release for what is behind, so an update
+                      waiting makes it "Update all". The counts are in the
+                      title/aria-label — the label has no room for them. */}
                   <button
                     className="btn-primary !py-1 text-xs min-h-10 md:min-h-0"
                     onClick={() => installDeps()}
-                    disabled={depsBusy || !!deviceReason}
-                    title={deviceReason ?? undefined}
+                    disabled={depsBusy || !!deviceReason || (depMissing.length === 0 && depUpdates.length === 0)}
+                    title={
+                      deviceReason ??
+                      `Installs the ${depMissing.length} missing tool(s) and updates the ${depUpdates.length} behind; an installed tool takes the newest release upstream has, and one already at it is left alone`
+                    }
+                    aria-label={`${depUpdates.length ? "Update all" : "Install all"}: ${depMissing.length} missing, ${depUpdates.length} update(s)`}
                   >
-                    {depsBusy ? "Installing…" : "Install / update all"}
+                    {depsBusy && !depBusyKey ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                    {depsBusy && !depBusyKey ? "Installing…" : depUpdates.length ? "Update all" : "Install all"}
                   </button>
                 </div>
               </div>
@@ -2015,14 +2047,15 @@ export default function SettingsPage() {
                       <th className="th">Status</th>
                       <th className="th">Installed</th>
                       <th className="th">Latest</th>
-                      <th className="th" title="Newest release upstream has published. The installer still fetches the reviewed version in Latest.">
+                      <th className="th" title="Newest release upstream has published. An installed tool takes exactly that one when you press Update — the reviewed pin in Latest is what a FIRST install fetches.">
                         Available
                       </th>
                       <th className="th">Path</th>
+                      <th className="th">Action</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {(deps?.tools ?? []).map((t) => (
+                    {depTools.map((t) => (
                       <tr key={t.key} className="table-row cursor-default">
                         <td className="td font-medium">{t.name}</td>
                         <td className="td">
@@ -2061,15 +2094,40 @@ export default function SettingsPage() {
                           {t.upstream_version ?? (deps?.checking ? "checking…" : "—")}
                         </td>
                         <td className="td text-zinc-500 truncate max-w-[280px]">{t.path ?? "—"}</td>
+                        {/* The row's own Install/Update, mirroring the chip
+                            beside it: a tool this device cannot install gets no
+                            button, and the row's own note/install_note is the
+                            hover text, so the button cannot promise more than
+                            the row it belongs to. */}
+                        <td className="td">
+                          {(t.state === "missing" || t.state === "update") && (
+                            <button
+                              className="btn-ghost !py-0.5 text-[11px] tap"
+                              onClick={() => installDeps([t.key], t.key)}
+                              disabled={depsBusy || !!deviceReason || t.installable === false}
+                              title={
+                                deviceReason ??
+                                (t.state === "update"
+                                  ? t.note ?? (t.upstream_version ? `Upstream: ${t.upstream_version}` : undefined)
+                                  : t.install_note ?? t.note ?? undefined)
+                              }
+                            >
+                              {depBusyKey === t.key ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                              {t.state === "update" ? "Update" : "Install"}
+                            </button>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
               <div className="text-[10px] text-zinc-600">
-                Install downloads the pinned release from GitHub into the dependencies folder; PATH-installed tools
-                (scoop etc.) are shown as ready. <span className="text-zinc-500">Available</span> is what upstream has
-                published — Install fetches Latest, the reviewed pin.
+                Install downloads from the tool's GitHub releases into the dependencies folder; PATH-installed
+                tools (scoop etc.) are shown as ready. An INSTALLED tool takes the newest release{" "}
+                <span className="text-zinc-500">Available</span> names, and a row already at that version is a
+                no-op — nothing is downloaded. Only a FIRST install takes the reviewed pinned version in{" "}
+                <span className="text-zinc-500">Latest</span>.
                 {deps?.note && <span className="text-amber-500"> Upstream check: {deps.note}</span>}
               </div>
             </div>

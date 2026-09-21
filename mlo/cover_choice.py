@@ -24,34 +24,51 @@ was MEASURED from rather than what its name suggests:
                     release-group stand-in (the Cover Art Archive asked about
                     the group answers with some release's image), None unknown
     rank            the provider's own order for it (0 = its first answer)
+    title / artist  the SOURCE's own statement about which release the image
+                    belongs to (COV's `releaseInfo`, Deezer's and iTunes' own
+                    album objects), and what the row says about it
+    tracks          how many tracks that stated release has, or None
+
+`identity=` is the OTHER side of that last pair: the album being covered (its
+artist, its title, its track count), which rule 2 reads and the payload hands
+back so a caller can see what a candidate set was judged against.
 
 The rules, in the order they decide. Each is a tier weighted so heavily that
 no lower tier can ever outvote a higher one, which is why the score IS the
-order (the same positional encoding `mlo.release_choice` uses, base 8):
+order (the same positional encoding `mlo.release_choice` uses, base 9):
 
 1. release   the RELEASE's own front cover beats a release-group stand-in.
              Unknown (a name-searched row that states neither) sits between.
-2. kind      the front cover beats the back/other images a provider labels.
-3. size      the larger decoded SHORTER side up to the configured target
+2. identity  the row's own release must BE this album. The artist and the
+             title it states are compared with the album's own — a row that
+             contradicts them (a karaoke or tribute album carrying the same
+             title, another album by the same artist) is REJECTED, not merely
+             outranked, and a row with the right names but a different track
+             count (a reissue, a compilation — the artwork is usually the
+             same) ranks below one whose tracklist matches. A row that states
+             nothing is not punished for it: it cannot be checked, so it sits
+             in the middle like every other unknown in this policy.
+3. kind      the front cover beats the back/other images a provider labels.
+4. size      the larger decoded SHORTER side up to the configured target
              (`cover_target_size`), and no credit past it: a file already at
              the target beats a 3000px one that is only ever downscaled, and
              nothing is rewarded for being enlarged. An UNKNOWN size is
              neither rewarded nor blamed. This is the same law the image
              rules use elsewhere in this app — undersized is acceptable
              (nothing is ever upscaled), oversized is the problem.
-4. source    the configured `cover_sources` order (the shipped default is
+5. source    the configured `cover_sources` order (the shipped default is
              `DEFAULT_SOURCE_ORDER`); a source the order does not name ranks
              after every configured one.
-5. format    JPEG (the library's own cover format, `cover_jpeg_quality`) beats
+6. format    JPEG (the library's own cover format, `cover_jpeg_quality`) beats
              WebP/PNG/other, which are re-encoded when written.
-6. square    the configured cover aspect — a non-square image is centre-cropped
+7. square    the configured cover aspect — a non-square image is centre-cropped
              by the writer, so it loses pixels; the threshold is the same
              `cover_crop_threshold` / `grader_strict_square_threshold` pair the
              grader judges with.
-7. quality   an obviously re-compressed thumbnail, and above all an UPSCALED
+8. quality   an obviously re-compressed thumbnail, and above all an UPSCALED
              one (a URL that asks a CDN for 250px and answers 1000x1000 has
              invented its extra pixels), ranks below a clean full-size image.
-8. rank      the provider's own order — the last tiebreak, and nothing else.
+9. rank      the provider's own order — the last tiebreak, and nothing else.
 
 Rejection is separate from ranking, and a rejected candidate is still REPORTED
 with the reason it was rejected (never silently dropped, and never silently
@@ -61,9 +78,16 @@ substituted by a worse one):
 * no image URL at all,
 * an empty answer (0 bytes),
 * bytes that are not a decodable JPEG/PNG/WebP image,
+* a row whose own release contradicts the album — a different artist, or a
+  different album by the same artist (rule 2): the wrong album's art must
+  never be the automatic pick, however big or pretty it is,
 * a shorter side below the FLOOR — the same number `server.main._cover_metrics`
   calls "the minimum" and the grader enforces: `cover_target_size` while
-  `cover_resize_enabled` is on, and no floor at all when it is 0.
+  `cover_resize_enabled` is on, and no floor at all when it is 0. That floor
+  covers an UNKNOWN size too: while one is configured, a row whose image was
+  never measured (the probe failed, the row is past `COVER_PROBE_LIMIT`, the
+  host is not public) has no evidence it can reach the floor, so it is listed
+  and can be applied by hand but is never the automatic pick.
 
 The floor removes a candidate from the AUTOMATIC pick only: it stays in the
 ranked list, with its own reason, and a user can still apply it by hand. So an
@@ -80,6 +104,7 @@ nothing, refused, or was skipped and why: a missing key is stated, never
 worked around) and why nothing could be chosen when nothing could.
 """
 import re
+import unicodedata
 from dataclasses import dataclass, field, replace
 from typing import Mapping, Optional, Sequence
 
@@ -96,15 +121,18 @@ CANDIDATE_LIMIT = 20
 DEFAULT_SOURCE_ORDER = ("qobuz", "applemusic", "tidal", "bandcamp", "deezer",
                         "spotify", "itunes", "discogs", "musicbrainz")
 
-# The scoring is a positional encoding of the tier tuple, base 8, most
+# The scoring is a positional encoding of the tier tuple, base 9, most
 # significant tier first — a bigger score IS a better pick and no lower tier
-# can outvote a higher one (see mlo.release_choice, which this mirrors).
-_SCORE_BASE = 8
-_TIER_NAMES = ("release", "kind", "size", "source", "format", "square",
-               "quality", "rank")
+# can outvote a higher one (see mlo.release_choice, which this mirrors). The
+# base is the number of tiers, so a new rule raises it and the three tuples
+# below together — never one of them alone.
+_SCORE_BASE = 9
+_TIER_NAMES = ("release", "identity", "kind", "size", "source", "format",
+               "square", "quality", "rank")
 # What a tie-break sentence calls each tier.
 _TIER_LABELS = {
     "release": "the release's own cover",
+    "identity": "the album-identity check",
     "kind": "the front-vs-other type",
     "size": "the image size",
     "source": "the configured source order",
@@ -145,6 +173,10 @@ _SHIPPED_TARGET = 1200
 
 _RULES = (
     "the release's own front cover beats a release-group stand-in",
+    "a candidate has to BE this album: a row whose own release names another "
+    "artist or another album is rejected, a row whose tracklist disagrees "
+    "ranks below one that matches, and a row that states nothing about its "
+    "release is neither rewarded nor blamed for it",
     "a front cover beats the back/other images a provider labels",
     "the larger decoded side wins up to the configured target — an oversized "
     "or upscaled file is never rewarded over a clean one at the target size",
@@ -156,7 +188,8 @@ _RULES = (
     "a clean full-size image",
     "the provider's own order only ever breaks a tie",
     "a candidate below the cover target (the minimum server.main._cover_metrics "
-    "reports and the grader enforces) is rejected, not silently ranked last",
+    "reports and the grader enforces) is rejected, not silently ranked last — "
+    "and so is one whose size was never measured while that minimum is set",
 )
 
 
@@ -324,20 +357,136 @@ class _Context:
     minimum: int
     square_threshold: float
     enforce_square: bool
+    # The album being covered, as `identity=` handed it over: what the rows are
+    # checked against (rule 2). All three may be unknown — an album with no
+    # tags and no marker is searched for by whatever it has, and nothing is
+    # then verified rather than everything being rejected.
+    artist: str = ""
+    album: str = ""
+    tracks: Optional[int] = None
 
 
 def _url_of(row):
     return str(row.get("big") or row.get("small") or "").strip()
 
 
-def _rejection(row, url, side, ctx):
+def _fold(text):
+    """The app's comparison key for a title or an artist.
+
+    `server.discovery.norm`'s own fold — NFKD, the combining marks dropped,
+    case folded, anything that is not a letter or a digit collapsed to a space
+    — repeated here because this module is the engine's policy and imports no
+    server code (the same reason `mlo.lyrics_providers` carries its own). The
+    two must agree, or the app would have two opinions about when two names are
+    the same string; `tools/test_cover_choice.py` checks them against each
+    other for exactly that reason.
+    """
+    folded = "".join(ch for ch in unicodedata.normalize("NFKD", str(text or ""))
+                     if not unicodedata.combining(ch))
+    return re.sub(r"[^a-z0-9]+", " ", folded.casefold()).strip()
+
+
+def _same_name(a, b):
+    """Whether two FOLDED names are the same release's.
+
+    Equality, or one being a whole PHRASE of the other — a provider spells a
+    credit its own way ("Radiohead, レディオヘッド*"), a reissue spells its title
+    its own way ("OK Computer OKNOTOK 1997 2017"), and a correct row thrown out
+    for the spelling is the one failure this comparison must not have. The
+    comparison is word-bounded rather than a bare substring: an artist really
+    called "A" (or an album called "T") would otherwise match every name that
+    happens to contain that letter. Containment can still be generous — it
+    accepts an artist credit that merely mentions the real one — which is why
+    the track count is read too; a clearly different artist or album, the case
+    that rejects, matches neither way.
+    """
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    short, long = (a, b) if len(a) <= len(b) else (b, a)
+    return f" {short} " in f" {long} "
+
+
+def _identity_verdict(row, ctx):
+    """The row's own release against THIS album: ``(verdict, reason)``.
+
+    A name search answers with the album AND with everything that is called
+    like it: a karaoke or tribute album carrying the same title, an 8-bit
+    rendition, another album by the same artist, a compilation. The row says
+    which release it is (COV's `releaseInfo`, Deezer's and iTunes' own album
+    objects), so it can be checked instead of hoped about:
+
+    ``"same"``     the row's release states this album's artist and title (and
+                   a track count that agrees, or none);
+    ``"unknown"``  it states too little to tell — a source that says nothing
+                   is NOT punished for it, it sits in the middle the way every
+                   other unknown in this policy does;
+    ``"count"``    the right artist and title but a different tracklist: a
+                   different edition (a reissue, a compilation), whose artwork
+                   is usually the same — ranked below a matching row, never
+                   rejected;
+    ``"other"``    it states something that CONTRADICTS the album — a
+                   different artist, or a different album by the same artist.
+                   `_rejection` turns this into a rejection: the wrong album's
+                   art must never be the automatic pick.
+
+    Only fields BOTH sides state are compared, so a half-known album (its
+    artist off the folder name, say) cannot condemn a row over a name it never
+    really had.
+    """
+    want_artist, want_album = _fold(ctx.artist), _fold(ctx.album)
+    if not want_artist and not want_album:
+        return "same", ""                 # no identity to check a row against
+    got_artist = _fold(row.get("artist"))
+    got_album = _fold(row.get("title"))
+    if got_artist and want_artist and not _same_name(got_artist, want_artist):
+        return "other", (f"the source's own release says “{row.get('artist')}”, "
+                         f"not “{ctx.artist}” — a different artist's release")
+    if got_album and want_album and not _same_name(got_album, want_album):
+        return "other", (f"the source's own release is “{row.get('title')}”, "
+                         f"not “{ctx.album}” — a different album")
+    tracks = _int(row.get("tracks"))
+    if tracks and ctx.tracks and tracks != ctx.tracks:
+        return "count", (f"the source's release has {tracks} track(s) where "
+                         f"this album has {ctx.tracks} — a different edition, so "
+                         f"it ranks below one whose tracklist matches")
+    stated = [str(row.get(k)).strip() for k in ("artist", "title")
+              if str(row.get(k) or "").strip()]
+    checked = [got for got, want in ((got_artist, want_artist),
+                                     (got_album, want_album)) if got and want]
+    if not checked:
+        return "unknown", ("the source states no artist or title — the row "
+                           "cannot be checked against this album")
+    return "same", "the source's own release: " + " — ".join(stated)
+
+
+def _identity_level(verdict, why):
+    """(level, reason) for rule 2 — how well the row's own release matches.
+
+    `why` is the sentence `_identity_verdict` produced, so the winner's facts
+    and every loser's reason say what the row IS, not merely that it was
+    checked.
+    """
+    if verdict == "same":
+        return 1.0, why
+    if verdict == "count":
+        return 0.2, why
+    return 0.6, why               # "unknown": it cannot be checked at all
+
+
+def _rejection(row, url, side, ctx, identity="same", identity_why=""):
     """Why this candidate cannot be a cover at all, or "" when it can.
 
     Checked before anything is scored: a candidate the finder itself failed on
     (a provider error), one with no URL to write, one the probe found nothing
-    at all behind, one whose bytes are not an image this app can decode, and
-    one below the floor — the target the write path and the grader both call
-    the minimum, which nothing here may quietly step around.
+    at all behind, one whose bytes are not an image this app can decode, one
+    whose own release CONTRADICTS the album (`identity` "other" — a karaoke,
+    tribute or other-album row), and one below the floor — the target the write
+    path and the grader both call the minimum, which nothing here may quietly
+    step around. That floor covers an UNKNOWN size as well: while one is
+    configured, a row whose image was never measured has no evidence it can
+    reach it, so it may be listed and applied by hand but never picked here.
 
     The two probe verdicts (0 bytes, bytes that are not an image) only ever
     REJECT a candidate the probe is the only evidence about: a provider that
@@ -362,10 +511,17 @@ def _rejection(row, url, side, ctx):
         if nbytes and not _format_of(row):
             return (f"{nbytes} bytes that are not a JPEG/PNG/WebP image — the "
                     f"URL did not answer with cover art")
-    if side is not None and ctx.minimum > 0 and side < ctx.minimum:
-        return (f"{side}×{side} is below the minimum {ctx.minimum}×"
-                f"{ctx.minimum} — nothing is ever upscaled, so it can never "
-                f"reach the cover target")
+    if identity == "other":
+        return f"{identity_why} — it is not this album's cover"
+    if ctx.minimum > 0:
+        if side is None:
+            return (f"the image was never measured, and this library's "
+                    f"{ctx.minimum}×{ctx.minimum} minimum means nothing "
+                    f"unmeasured can be shown to reach it")
+        if side < ctx.minimum:
+            return (f"{side}×{side} is below the minimum {ctx.minimum}×"
+                    f"{ctx.minimum} — nothing is ever upscaled, so it can never "
+                    f"reach the cover target")
     return ""
 
 
@@ -381,7 +537,7 @@ def _release_level(row):
 
 
 def _kind_level(row):
-    """(level, reason) for rule 2 — front beats the types a provider labels."""
+    """(level, reason) for rule 3 — front beats the types a provider labels."""
     kind = str(row.get("kind") or "").strip().lower()
     front = row.get("front")
     if front is None and kind:
@@ -394,7 +550,7 @@ def _kind_level(row):
 
 
 def _size_level(size, ctx):
-    """(level, reason) for rule 3 — bigger up to the target, never past it.
+    """(level, reason) for rule 4 — bigger up to the target, never past it.
 
     The shorter side is what is measured: the writer centre-crops to a square,
     so the shorter side is the one that survives. Below the target the level
@@ -429,7 +585,7 @@ def _size_level(size, ctx):
 
 
 def _source_level(source, ctx):
-    """(level, reason) for rule 4 — the configured source order."""
+    """(level, reason) for rule 5 — the configured source order."""
     if source in ctx.order:
         i = ctx.order.index(source)
         return ((len(ctx.order) - i) / len(ctx.order),
@@ -438,7 +594,7 @@ def _source_level(source, ctx):
 
 
 def _format_level(row):
-    """(level, reason) for rule 5 — the container the cover will be stored in."""
+    """(level, reason) for rule 6 — the container the cover will be stored in."""
     fmt = _format_of(row)
     if fmt == "jpeg":
         return 1.0, "JPEG — the library's own cover format"
@@ -456,7 +612,7 @@ def _format_level(row):
 
 
 def _square_level(row, ctx, size):
-    """(level, reason) for rule 6 — the aspect the writer would have to crop."""
+    """(level, reason) for rule 7 — the aspect the writer would have to crop."""
     if not ctx.enforce_square:
         return 1.0, ""
     if not size or not size[1]:
@@ -476,7 +632,7 @@ def _square_level(row, ctx, size):
 
 
 def _quality_level(row, size, ctx):
-    """(level, reason) for rule 7 — a re-compressed or upscaled thumbnail.
+    """(level, reason) for rule 8 — a re-compressed or upscaled thumbnail.
 
     Two things are judged, both from what the URL asks the CDN for versus what
     the URL actually answers with:
@@ -504,10 +660,11 @@ def _quality_level(row, size, ctx):
 
 
 def _rank_level(rank):
-    """(level, reason) for rule 8 — the provider's own order, bucket by bucket.
+    """(level, reason) for rule 9 — the provider's own order, bucket by bucket.
 
-    Quantised to the same 0..7 the score is written in, so "the first row a
-    provider listed" is a full tier and the eighth is a zero — never more.
+    Quantised to the same buckets the score is written in (0.._SCORE_BASE-1),
+    so "the first row a provider listed" is a full tier and the last bucket is
+    a zero — never more.
     """
     r = max(0, int(rank or 0))
     return (1.0 - min(r, _SCORE_BASE - 1) / (_SCORE_BASE - 1),
@@ -525,7 +682,8 @@ def _evaluate(row, ctx, index):
     rank = row.get("rank")
     rank = index if rank is None else max(0, int(rank))
 
-    rejected = _rejection(row, url, side, ctx)
+    identity, identity_why = _identity_verdict(row, ctx)
+    rejected = _rejection(row, url, side, ctx, identity, identity_why)
     if rejected:
         return None, Candidate(
             source=source, url=url, small=str(row.get("small") or ""),
@@ -540,6 +698,9 @@ def _evaluate(row, ctx, index):
     reasons = []
     level_release, why = _release_level(row)
     reasons.append(why)
+    level_identity, why = _identity_level(identity, identity_why)
+    if why:
+        reasons.append(why)
     level_kind, why = _kind_level(row)
     reasons.append(why)
     level_size, why = _size_level(size, ctx)
@@ -566,8 +727,8 @@ def _evaluate(row, ctx, index):
         front=row.get("front"), kind=str(row.get("kind") or ""),
         release_cover=row.get("release_cover"), rank=rank, index=index,
         side=side, reasons=tuple(reasons))
-    return ((level_release, level_kind, level_size, level_source, level_format,
-             level_square, level_quality, level_rank), cand)
+    return ((level_release, level_identity, level_kind, level_size, level_source,
+             level_format, level_square, level_quality, level_rank), cand)
 
 
 def _score(levels):
@@ -609,8 +770,14 @@ def _lost_reason(levels, winner_levels, winner):
             f"order kept")
 
 
-def rank_covers(rows, cfg=None):
+def rank_covers(rows, cfg=None, *, identity=None):
     """Every candidate of *rows*, scored and ranked best first.
+
+    `identity` is the album the rows are being ranked FOR (``{"artist",
+    "album", "tracks"}``); rule 2 checks each row's own release against it, so
+    a karaoke or other-album row is rejected instead of outranking the real
+    cover. Without it nothing is verified — the picks then rest on what the
+    finder said about the images alone.
 
     Rejected candidates are ranked too — at the END, each carrying the sentence
     that rejected it — because "no cover" must never be the silent answer to
@@ -618,7 +785,7 @@ def rank_covers(rows, cfg=None):
     then by the order the candidates arrived in, so identical inputs always
     rank identically.
     """
-    ctx = _context(cfg)
+    ctx = _context(cfg, identity)
     scored, rejected = [], []
     for i, row in enumerate(rows or []):
         if not isinstance(row, Mapping):
@@ -643,13 +810,17 @@ def rank_covers(rows, cfg=None):
     return out
 
 
-def _context(cfg=None):
+def _context(cfg=None, identity=None):
     conf = policy_config(cfg)
+    ident = identity if isinstance(identity, Mapping) else {}
     return _Context(order=tuple(conf["cover_sources"]),
                     target=int(conf["cover_target_size"] or 0),
                     minimum=int(conf["cover_minimum"] or 0),
                     square_threshold=float(conf["cover_square_threshold"] or 0.0),
-                    enforce_square=bool(conf["cover_enforce_square"]))
+                    enforce_square=bool(conf["cover_enforce_square"]),
+                    artist=str(ident.get("artist") or "").strip(),
+                    album=str(ident.get("album") or "").strip(),
+                    tracks=_int(ident.get("tracks")))
 
 
 def pick(ranked):
@@ -690,7 +861,7 @@ def source_notes(sources):
     return out
 
 
-def choose_covers(rows, cfg=None, *, sources=None):
+def choose_covers(rows, cfg=None, *, sources=None, identity=None):
     """The best cover of *rows*: ``(chosen, ranked, notes)``.
 
     `chosen` is None when nothing could be a cover at all (every candidate
@@ -698,9 +869,9 @@ def choose_covers(rows, cfg=None, *, sources=None):
     `ranked` is every candidate best-first, the winner's reasons ending in the
     sentence that says why it won and every loser's in the one that says why it
     lost. `notes` is what the sources did plus why nothing was chosen — see
-    `source_notes`.
+    `source_notes`. `identity` is the album rule 2 checks the rows against.
     """
-    ranked = rank_covers(rows, cfg)
+    ranked = rank_covers(rows, cfg, identity=identity)
     chosen = pick(ranked)
     notes = source_notes(sources)
     kept = [c for c in ranked if not c.rejected]
@@ -717,11 +888,19 @@ def choose_covers(rows, cfg=None, *, sources=None):
     return chosen, ranked, notes
 
 
-def cover_payload(rows, cfg=None, *, sources=None, provider=None):
-    """The cover-choice body: the pick, the ranked candidates, the notes and
-    the policy — one place, so the cover step, the API route and the tests all
-    describe a pick the same way."""
-    chosen, ranked, notes = choose_covers(rows, cfg, sources=sources)
+def cover_payload(rows, cfg=None, *, sources=None, provider=None, identity=None):
+    """The cover-choice body: the pick, the ranked candidates, the notes, the
+    policy and the identity they were checked against — one place, so the cover
+    step, the API route and the tests all describe a pick the same way.
+
+    ``identity`` echoes the album the rows were ranked for (its artist, its
+    album name, its track count), so a staged record or a search response says
+    what a candidate had to BE — and an empty one means the rows were ranked on
+    what the finder said about the images, with nothing to verify them against.
+    """
+    chosen, ranked, notes = choose_covers(rows, cfg, sources=sources,
+                                          identity=identity)
+    ident = identity if isinstance(identity, Mapping) else {}
     return {
         "chosen": chosen.to_dict() if chosen is not None else None,
         "candidates": [c.to_dict() for c in ranked[:CANDIDATE_LIMIT]],
@@ -730,4 +909,7 @@ def cover_payload(rows, cfg=None, *, sources=None, provider=None):
         "notes": notes,
         "provider": provider,
         "policy": policy_report(cfg),
+        "identity": {"artist": str(ident.get("artist") or ""),
+                     "album": str(ident.get("album") or ""),
+                     "tracks": _int(ident.get("tracks"))},
     }

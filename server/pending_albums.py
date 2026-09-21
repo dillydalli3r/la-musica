@@ -72,6 +72,30 @@ def _artist_of(release):
     return (artists[0].get("name") if artists else "") or ""
 
 
+def _release_country_tag(release):
+    """The RELEASECOUNTRY value the import will stamp for *release*.
+
+    Every country the release states, ";"-joined — the app's spelling for a tag
+    holding several answers (mlo.tagtext._LIST_SEP), and the same value
+    server.soulseek_auto._stamp_mb_tags writes. MusicBrainz's own first event
+    comes FIRST, because the naming script reads the first value
+    (mlo.naming._first_multi, spec R33): the folder previewed here is the
+    folder the stamped tags name. `countries` is what release_lookup returns
+    ({code, date, …} per release event); the singular `country` is only its
+    first entry, and is what a payload stating no events has to offer.
+    """
+    codes = []
+    first = str(release.get("country") or "").strip()
+    if first:
+        codes.append(first)
+    for event in release.get("countries") or []:
+        code = str((event.get("code") if isinstance(event, dict) else event)
+                   or "").strip()
+        if code and code.upper() not in {c.upper() for c in codes}:
+            codes.append(code)
+    return "; ".join(codes)
+
+
 def release_tags(release, track=None):
     """The tags the import will stamp for *release* (+ one track), as a dict.
 
@@ -101,7 +125,7 @@ def release_tags(release, track=None):
         "RELEASESTATUS": release.get("status") or "",
         "DATE": release.get("date") or "",
         "ORIGINALDATE": release.get("originaldate") or "",
-        "RELEASECOUNTRY": release.get("country") or "",
+        "RELEASECOUNTRY": _release_country_tag(release),
         "MEDIA": release.get("medium") or "",
         "CATALOGNUMBER": release.get("catalog_number") or "",
         "LABEL": release.get("label") or "",

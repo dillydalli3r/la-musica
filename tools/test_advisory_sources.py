@@ -28,7 +28,12 @@ What this pins, with the HTTP layer stubbed (no network at all):
   * a provider value is only written when a source stated it; when none did,
     `fetch_advisories` runs the ladder in mlo.advisory (instrumental → AI →
     lyrics scan → `advisory_fallback`) and reports which stage answered;
-  * an existing valid 0/1/2 is reported, never overwritten;
+  * an existing valid 0/1/2 is ECHOED, never overwritten behind the user's
+    back, and the echo says what it is (`sources` = "existing-tag", `status` =
+    "existing") instead of showing a value with no provenance; `force=True`
+    re-rates it, and even then only evidence may lower a stored rating;
+  * one source asked once per pressing keeps its STRONGEST answer, so a later
+    pressing's explicit flag cannot lose to an earlier one's clean answer;
   * RateYourMusic sends the full Chrome header set and carries the configured
     `rym_cookie` in a cookie jar (so RYM's own Set-Cookie can join it, after
     one warm-up navigation per paste), treats a blocked/challenge answer as
@@ -221,10 +226,20 @@ def apple(**ctx):
 
 # the five explicit tracks answer 1, the other eleven answer 0 — read off the
 # EXPLICIT edition, by the file's own disc/track position
+rated = {}
 for n, name in enumerate(TRACK_NAMES, 1):
     route, _ = apple(title=name, disc=1, track=n)
     want = 1 if n in EXPLICIT_TRACKS else 0
     assert route["value"] == want and route["source"] == "apple-album", (n, route)
+    rated[n] = route["value"]
+# the whole album in one place, so "which of the 16 end explicit, and from
+# whom" is a pinned answer and not a matter of counting rows by eye: exactly
+# the five Apple flags on the explicit edition, every one attributed to it
+assert len(rated) == 16 and sorted(rated) == list(range(1, 17)), rated
+assert {n for n, v in rated.items() if v == 1} == EXPLICIT_TRACKS == {4, 6, 7, 8, 12}
+assert {name: rated[n] for n, name in enumerate(TRACK_NAMES, 1) if rated[n] == 1} \
+    == {"Boom!": 1, "A.D.D. (American Dream Denial)": 1, "Mr. Jack": 1,
+        "I-E-A-I-A-I-O": 1, "F**k the System": 1}
 
 # ... and that is the edition that was read: artist search → artist id, then
 # the artist's album list, and the clean edition is never looked up
@@ -556,21 +571,28 @@ try:
     # 0 by default) is what a track with no value gets, and it says so: the
     # stage is reported in `sources`, while `answers` stays empty because no
     # PROVIDER stated anything. The track already carrying a valid 2 is
-    # reported, not rewritten.
+    # reported, not rewritten — and the echo carries its OWN provenance (the
+    # file's tag) plus a status saying nobody was asked, so the readout can
+    # tell "a source stated this" from "the file did, and this run did not
+    # look" instead of showing a value with no source at all.
     clear()
     stub_http({})
     out = imports.fetch_advisories([ALBUM], {"advisory_auto_fetch": True})
     assert out["updated"] == 2, out
     assert out["values"] == {FILES[0]: 0, FILES[1]: 2, FILES[2]: 0}, out
-    assert out["sources"] == {FILES[0]: "fallback", FILES[2]: "fallback"}, out
+    assert out["sources"] == {FILES[0]: "fallback", FILES[1]: "existing-tag",
+                              FILES[2]: "fallback"}, out
+    assert out["status"] == {FILES[0]: "written", FILES[1]: "existing",
+                             FILES[2]: "written"}, out
     assert out["answers"] == {} and out["hits"] == {}, out
     assert FakeAudio.written[FILES[0]]["ITUNESADVISORY"] == "0", FakeAudio.written
     assert FakeAudio.written[FILES[1]]["ITUNESADVISORY"] == "2", FakeAudio.written
     assert FakeAudio.written[FILES[2]]["ITUNESADVISORY"] == "0", FakeAudio.written
 
     # Deezer answers for the first track only: that one is written with its
-    # source AND its provenance map, the user's existing 2 is reported but
-    # never overwritten, and the track nobody answered for still merges to 0
+    # source AND its provenance map, the user's existing 2 is echoed with the
+    # file's own provenance (never overwritten, never counted as a write), and
+    # the track nobody answered for still merges to 0
     for path in FILES:
         FakeAudio.written[path].pop("ITUNESADVISORY", None)
     FakeAudio.written[FILES[1]]["ITUNESADVISORY"] = "2"
@@ -584,13 +606,60 @@ try:
     assert out["updated"] == 2, out
     assert out["values"] == {FILES[0]: 1, FILES[1]: 2, FILES[2]: 0}, out
     assert out["sources"] == {FILES[0]: "deezer-isrc",
+                              FILES[1]: "existing-tag",
                               FILES[2]: "fallback"}, out
+    assert out["status"] == {FILES[0]: "written", FILES[1]: "existing",
+                             FILES[2]: "written"}, out
     assert out["answers"] == {FILES[0]: {"deezer-isrc": 1}}, out
     assert FakeAudio.written[FILES[0]]["ITUNESADVISORY"] == "1", FakeAudio.written
     assert FakeAudio.written[FILES[1]]["ITUNESADVISORY"] == "2", FakeAudio.written
     assert FakeAudio.written[FILES[2]]["ITUNESADVISORY"] == "0", FakeAudio.written
     # the existing valid value was never looked up or rewritten
     assert len(gets(calls, "api.deezer.com")) == 2, calls
+
+    # ----------------------------------------------------------------------- #
+    # 6b) force: the re-rate — a pre-rated file IS asked, and the sources'
+    #     answer is written. Without it a 0 that an earlier run invented (the
+    #     fallback writes 0 for a track nobody rated) outlived every provider
+    #     that later knew better, which is exactly how an explicit track kept
+    #     reading "0 (not explicit)".
+    # ----------------------------------------------------------------------- #
+    FakeAudio.written[FILES[1]]["ITUNESADVISORY"] = "0"     # the invented 0
+    clear()
+    calls = stub_http({"api.deezer.com/track/isrc:USUM71000001":
+                       {"explicit_lyrics": True, "explicit_content_lyrics": 1},
+                       "api.deezer.com": {"error": {"type": "DataException"}},
+                       "itunes.apple.com/search": {"results": []},
+                       "itunes.apple.com/lookup": {"results": []}})
+    out = imports.fetch_advisories([ALBUM], {"advisory_auto_fetch": True},
+                                   force=True)
+    assert gets(calls, "api.deezer.com/track/isrc:USUM71000001"), calls
+    assert out["values"][FILES[1]] == 1, out
+    assert out["sources"][FILES[1]] == "deezer-isrc", out
+    assert out["status"][FILES[1]] == "written", out
+    assert out["answers"][FILES[1]] == {"deezer-isrc": 1}, out
+    assert out["updated"] == 1, out
+    assert FakeAudio.written[FILES[1]]["ITUNESADVISORY"] == "1", FakeAudio.written
+    # FILES[0] and FILES[2] already read 1 and 0 and Deezer does not hold
+    # their ISRCs: a re-rate asked, heard nothing, and left them alone
+    assert out["status"][FILES[0]] == "unchanged", out
+    assert out["sources"][FILES[0]] == "existing-tag", out
+
+    # ... and a re-rate only ever rewrites EVIDENCE: with nobody stating
+    # anything anywhere, the invented `advisory_fallback` does NOT overwrite
+    # the stored rating — the file keeps its 1, the run says nothing changed
+    # (updated 0 with `status` describing every file, so "0 value(s) written"
+    # can never be read as a silent re-rate that found nothing)
+    clear()
+    stub_http({})
+    out = imports.fetch_advisories([ALBUM], {"advisory_auto_fetch": True},
+                                   force=True)
+    assert out["updated"] == 0, out
+    assert out["values"][FILES[1]] == 1, out
+    assert out["status"][FILES[1]] == "unchanged", out
+    assert out["sources"][FILES[1]] == "existing-tag", out
+    assert set(out["status"].values()) == {"unchanged"}, out
+    assert FakeAudio.written[FILES[1]]["ITUNESADVISORY"] == "1", FakeAudio.written
 
     # advisory_auto_fetch off → nothing at all
     out = imports.fetch_advisories([ALBUM], {"advisory_auto_fetch": False})
@@ -817,5 +886,79 @@ try:
             if "q" in c[2]] == ["isrc:AAA11111111", "isrc:BBB22222222"], calls
 finally:
     intg.recording_isrcs = _real_recording_isrcs
+
+# --------------------------------------------------------------------------- #
+# 10) One source, several pressings: its STRONGEST answer is the source's
+# --------------------------------------------------------------------------- #
+# The two ISRCs of one recording (two pressings; `ISRC` above is the
+# single-code case the rest of this file asks about).
+PRESSING_A, PRESSING_B = ISRC, "USSM10213523"
+# Apple answers nothing here, so only the Deezer legs can state anything.
+NO_APPLE = {"itunes.apple.com/search": {"results": []},
+            "itunes.apple.com/lookup": {"results": []}}
+# A file may state several ISRCs for the same recording, and every one of them
+# is asked. Ask order must not decide the answer: the first pressing's clean
+# answer used to be kept (`setdefault`) and the second pressing's explicit one
+# dropped, so a track Deezer itself flags explicit was written 0. The rank is
+# `merge_advisory`'s own, applied per source: 1 > 0 > 2.
+assert intg._strongest_advisory(None, 0) == 0
+assert intg._strongest_advisory(None, None) is None
+assert intg._strongest_advisory(0, None) == 0
+assert intg._strongest_advisory(0, 1) == 1 and intg._strongest_advisory(1, 0) == 1
+assert intg._strongest_advisory(2, 0) == 0 and intg._strongest_advisory(0, 2) == 0
+assert intg._strongest_advisory(2, 1) == 1 and intg._strongest_advisory(1, 2) == 1
+assert intg._strongest_advisory(2, 2) == 2
+
+DZ = {
+    "api.deezer.com/track/isrc:" + PRESSING_A: DZ_CLEAN,
+    "api.deezer.com/track/isrc:" + PRESSING_B: {
+        "explicit_lyrics": True, "explicit_content_lyrics": 1},
+    "api.deezer.com": {"error": {"type": "DataException"}},
+}
+clear()
+calls = stub_http(dict(NO_APPLE, **DZ))
+route = intg.resolve_advisory_route(isrc=[PRESSING_A, PRESSING_B], cfg=CFG)
+assert route["value"] == 1 and route["source"] == "deezer-isrc", route
+assert route["answers"] == {"deezer-isrc": 1}, route
+assert len(gets(calls, "api.deezer.com")) == 2, calls
+
+# ... and the other way round says exactly the same thing: the rule is the
+# rank, not which pressing the file happened to name first
+clear()
+stub_http(dict(NO_APPLE, **DZ))
+route = intg.resolve_advisory_route(isrc=[PRESSING_B, PRESSING_A], cfg=CFG)
+assert route["value"] == 1 and route["answers"] == {"deezer-isrc": 1}, route
+
+# a source that only ever says clean still answers 0 — the strongest rule is
+# not "invent an explicit"
+clear()
+stub_http(dict(NO_APPLE, **{
+    "api.deezer.com/track/isrc:" + PRESSING_A: DZ_CLEAN,
+    "api.deezer.com/track/isrc:" + PRESSING_B: DZ_CLEAN,
+    "api.deezer.com": {"error": {"type": "DataException"}}}))
+route = intg.resolve_advisory_route(isrc=[PRESSING_A, PRESSING_B], cfg=CFG)
+assert route["value"] == 0 and route["answers"] == {"deezer-isrc": 0}, route
+
+# the release path reports the same provenance: `release_advisories` fills the
+# caller's `sources`/`answers` maps from this route, keyed by "disc:position" —
+# and it asks every ISRC MusicBrainz lists for the track, so a clean first
+# pressing cannot hide the explicit second one
+_real_release_lookup = intg.release_lookup
+intg.release_lookup = lambda mbid: {
+    "title": APPLE_ALBUM, "artists": [{"name": ARTIST}],
+    "media": [{"disc": 1, "position": 1, "title": "Boom!",
+               "recording_mbid": "", "artist_credit": ARTIST,
+               "isrcs": [PRESSING_A, PRESSING_B]}]}
+try:
+    clear()
+    stub_http(dict(NO_APPLE, **DZ))
+    release_sources, release_answers = {}, {}
+    values = intg.release_advisories("rel-1", sources=release_sources,
+                                     answers=release_answers)
+    assert values == {"1:1": 1}, values
+    assert release_sources == {"1:1": "deezer-isrc"}, release_sources
+    assert release_answers == {"1:1": {"deezer-isrc": 1}}, release_answers
+finally:
+    intg.release_lookup = _real_release_lookup
 
 print("advisory sources: all assertions passed")

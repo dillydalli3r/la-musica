@@ -924,6 +924,12 @@ DEFAULT_CONFIG = {
     "import_acoustid": True,
     "acoustid_enabled": True,
     "acoustid_api_key": "",
+    # SUBMITTING to AcoustID is a second credential, not a second app key: the
+    # application key (`acoustid_api_key`) can only look up, and the user key is
+    # the one acoustid.org shows a signed-in person. It is what
+    # POST /api/import/acoustid/submit publishes with, and it is never needed
+    # for matching.
+    "acoustid_user_key": "",
     # The override mlo/acoustid.py already honours; without a default (and so
     # without a Settings field) the documented escape hatch could not be set.
     "acoustid_fpcalc_path": "",
@@ -957,12 +963,20 @@ DEFAULT_CONFIG = {
     # Auto-import (MusicBrainz release → Soulseek). Each template is a
     # space-separated list of release fields: artist album year date country
     # catalognumber barcode label.
-    # Query templates per release kind. A CD is identified by its catalog
-    # number and nothing else — that is the one trait that appears in rip
-    # folder names, and searching for anything broader drowns the result list
-    # in other pressings. Digital Media has no catalog number, so it uses the
-    # most specific trait it does have. Add templates (Settings → Auto-import)
-    # to widen a search again.
+    # Query templates per release kind. A PHYSICAL release — CD, vinyl,
+    # cassette, SACD, SHM-CD, CD-R, Blu-spec CD: every medium mlo.tagtext
+    # .MEDIA_VALUES names except Digital Media — is searched by the traits that
+    # identify THAT pressing: the catalog number and the barcode are what rip
+    # folders carry, and neither of them asks the network for every other
+    # pressing of the same album the way artist/title does. A pressing with
+    # neither falls back to its label and country. Digital Media has no
+    # pressing trait at all, so it keeps the broader `artist album year`
+    # wording. Add templates (Settings → Auto-import) to widen a search again.
+    # `soulseek_auto_cd_queries` is the key the physical one grew out of: a CD
+    # is a physical release, so a config that still sets that key keeps using
+    # its templates (its own shipped default is superseded — it named the
+    # catalog number alone, which the physical default already covers).
+    "soulseek_auto_physical_queries": ["catalognumber", "barcode"],
     "soulseek_auto_cd_queries": ["catalognumber"],
     "soulseek_auto_digital_queries": ["artist album year"],
     # Every disc's .log must score at least this (Logchecker 0-100) before
@@ -1161,7 +1175,11 @@ DEFAULT_CONFIG = {
     # ISRC when configured below, Apple's explicit-edition album route and
     # Apple's song search — merged so an explicit statement anywhere wins and
     # anything else is 0. MusicBrainz supplies the ISRCs when the file has
-    # none. An existing 0/1/2 is never overwritten (the user's edit wins).
+    # none. An existing 0/1/2 is never overwritten by a ROUTINE pass (the
+    # user's edit wins); an explicit re-rate (`force`, the wizard/settings
+    # "re-check" action) asks the providers again and rewrites only with
+    # evidence — the invented `advisory_fallback` never overwrites a stored
+    # rating.
     "advisory_auto_fetch": True,
     # What happens when NO source states an advisory — the ladder in
     # `mlo.advisory`: an instrumental is 0 (`auto_zero_advisory_for_instrumental`),
@@ -1576,7 +1594,8 @@ def normalize_config(user=None) -> dict:
         cfg["soulseek_auto_complete_ratio"] = max(0.5, min(1.0, ratio))
     except (TypeError, ValueError):
         cfg["soulseek_auto_complete_ratio"] = 1.0
-    for k in ("soulseek_auto_cd_queries", "soulseek_auto_digital_queries"):
+    for k in ("soulseek_auto_physical_queries", "soulseek_auto_cd_queries",
+              "soulseek_auto_digital_queries"):
         v = cfg.get(k)
         if isinstance(v, str):
             # the settings UI edits templates as one ";"-separated line
@@ -1649,9 +1668,17 @@ def normalize_config(user=None) -> dict:
         cfg["auto_zero_advisory_for_instrumental"] = True
 
     # Auto-import query templates: the old shipped defaults narrow to the
-    # catalog-number-only (CD) / artist-album-year (digital) wording.
+    # catalog-number-only (CD) / artist-album-year (digital) wording. The
+    # physical key is newer than any of them, so the lists a physical release
+    # WAS searched with before it existed — a CD by the cd key, every other
+    # pressing by the digital one, which is exactly the fall-through the
+    # physical key ends — are no more a decision about it than the others are:
+    # a config holding one of them follows the shipped default.
+    legacy_physical = (["catalognumber"], *LEGACY_DEFAULT_DIGITAL_QUERIES,
+                       *LEGACY_DEFAULT_CD_QUERIES)
     for key, legacy in (("soulseek_auto_cd_queries", LEGACY_DEFAULT_CD_QUERIES),
-                        ("soulseek_auto_digital_queries", LEGACY_DEFAULT_DIGITAL_QUERIES)):
+                        ("soulseek_auto_digital_queries", LEGACY_DEFAULT_DIGITAL_QUERIES),
+                        ("soulseek_auto_physical_queries", legacy_physical)):
         stored = cfg.get(key)
         if isinstance(stored, str):
             stored = [t for t in stored.replace("\n", ";").split(";") if t.strip()]

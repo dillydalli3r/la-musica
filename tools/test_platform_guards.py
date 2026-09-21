@@ -522,8 +522,9 @@ with simulated_platform("posix"):
 # --------------------------------------------------------------------------- #
 # Platform-independent installer invariants
 # --------------------------------------------------------------------------- #
-check("yt-dlp's Linux install is the pip package",
-      fetchdeps.PIP_PACKAGES.get("yt-dlp", "").startswith("yt-dlp=="))
+check("yt-dlp's Linux install is the pip package, with its version in PINNED",
+      fetchdeps.PIP_PACKAGES.get("yt-dlp") == "yt-dlp"
+      and bool(fetchdeps.PINNED["yt-dlp"]["version"]))
 check("yt-dlp is pip-on-Linux, not a distro package",
       "yt-dlp" in fetchdeps.PIP_ON_LINUX
       and "yt-dlp" not in fetchdeps.LINUX_PACKAGES)

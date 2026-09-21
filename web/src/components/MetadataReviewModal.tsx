@@ -69,10 +69,13 @@ export default function MetadataReviewModal({
   // it is fetched on demand and never inferred from the stored tag.
   const [checked, setChecked] = useState<null | { adv?: AdvisoryFetchResult; inst?: InstrumentalFetchResult }>(null);
   const [checking, setChecking] = useState(false);
-  const checkPerTrack = async () => {
+  /** `force` is the advisory re-rate: the server echoes a file that already
+   *  carries a valid 0/1/2, and forcing asks anyway and writes what the sources
+   *  state — the only route that can lower a rating. */
+  const checkPerTrack = async (force = false) => {
     setChecking(true);
     try {
-      const { adv, inst, errors } = await checkTrackValues(paths);
+      const { adv, inst, errors } = await checkTrackValues(paths, force);
       setChecked({ adv: adv ?? undefined, inst: inst ?? undefined });
       if (errors.length) toast.error(errors.join(" · "));
       else toast(`Checked — ${advisoryOutcome(adv)}, ${inst?.updated ?? 0} instrumental value(s) written`);
@@ -80,6 +83,18 @@ export default function MetadataReviewModal({
     } finally {
       setChecking(false);
     }
+  };
+  /** The re-rate, behind a confirmation: it can LOWER a rating, so a stray
+   *  click must not reach it. */
+  const reRatePerTrack = () => {
+    if (
+      !window.confirm(
+        `Re-rate ITUNESADVISORY for ${paths.length} track(s)?\n\n` +
+          "This asks even for files that already carry a value, and a source's answer can lower a rating (1 → 0)."
+      )
+    )
+      return;
+    void checkPerTrack(true);
   };
 
   const run = async (key: string, fn: () => Promise<unknown>, done: string) => {
@@ -273,12 +288,20 @@ export default function MetadataReviewModal({
                 </span>
                 <button
                   className="btn-ghost !py-0.5 !px-1.5 ml-auto normal-case tracking-normal text-[10px] font-normal"
-                  onClick={checkPerTrack}
+                  onClick={() => checkPerTrack(false)}
                   disabled={checking}
-                  title="Ask the configured sources for each track's advisory + INSTRUMENTAL and write what they state"
+                  title="Ask the configured sources for each track's advisory + INSTRUMENTAL and write what they state. A track that already carries a value keeps it — Re-rate asks anyway."
                 >
                   {checking ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
                   Check
+                </button>
+                <button
+                  className="btn-ghost !py-0.5 !px-1.5 normal-case tracking-normal text-[10px] font-normal"
+                  onClick={reRatePerTrack}
+                  disabled={checking}
+                  title="Ask the advisory sources again even for tracks that already carry a value, and write what they state — the only way a rating can go down"
+                >
+                  Re-rate…
                 </button>
               </div>
               {checked ? (
@@ -298,9 +321,14 @@ export default function MetadataReviewModal({
                             {p.split(/[\\/]/).pop()}
                           </td>
                           <td className="px-2 py-1 text-zinc-300">
+                            {/* The value's provenance and what this run did
+                                with it both live in the reply: a re-check the
+                                sources agreed with and a gate refusal are not
+                                writes, and the number alone cannot say so. */}
                             {advisoryLine(
                               replyFor(checked.adv?.values, p),
-                              answerSources(replyFor(checked.adv?.answers, p), replyFor(checked.adv?.sources, p))
+                              answerSources(replyFor(checked.adv?.answers, p), replyFor(checked.adv?.sources, p)),
+                              replyFor(checked.adv?.status, p)
                             )}
                           </td>
                           <td className="px-2 py-1 text-zinc-300">

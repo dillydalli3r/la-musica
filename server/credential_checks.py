@@ -22,6 +22,7 @@ cheapest call each provider answers for a credential alone is the one used:
   Last.fm   chart.gettoptags            — a chart, so nothing else has to exist
   Spotify   POST /api/token             — the grant the sources themselves need
   AcoustID  one lookup with a probe fingerprint (mlo.acoustid.verify_key)
+  AcoustID  one probe SUBMISSION per user key (mlo.acoustid.verify_user_key)
   Soulseek  slskd's own live state + the daemon's recorded verdict
   Login     what this server's own gate would accept
 
@@ -53,6 +54,13 @@ CREDENTIALS = (
      "needs": ["spotify_client_id", "spotify_client_secret"], "free": True},
     {"id": "acoustid", "label": "AcoustID application key",
      "needs": ["acoustid_api_key"], "free": True},
+    # A separate credential: the application key looks up, the USER key is the
+    # only thing that can submit, and a wrong one is refused by the service
+    # itself. There is no lookup that proves it — the probe has to be a real
+    # submission (mlo.acoustid.verify_user_key sends the 30 s tone probe as a
+    # fingerprint-only entry, so nothing in it can attach wrong metadata).
+    {"id": "acoustid-user", "label": "AcoustID user key (fingerprint submissions)",
+     "needs": ["acoustid_user_key"], "free": True},
     {"id": "soulseek", "label": "Soulseek account",
      "needs": ["soulseek_username", "soulseek_password"], "free": True},
     {"id": "ai", "label": "AI provider (lyric translation)",
@@ -135,6 +143,36 @@ def _check_acoustid(cfg):
     # `lookup_failed` and `bad_response` are the service refusing or not
     # answering; `reason` is already its own sentence.
     return "fail", reason or f"AcoustID check failed ({code})"
+
+
+def _check_acoustid_user(cfg):
+    """Is the ACOUSTID user key accepted? Proved by one probe submission.
+
+    The application key has a lookup that proves it (`_check_acoustid`); the
+    user key can only be proved by submitting something, because that is the
+    only operation it takes part in. `mlo.acoustid.verify_user_key` submits the
+    probe fingerprint as a FINGERPRINT-ONLY entry (no mbid, no title, no
+    artist), so the check cannot attach wrong metadata to any recording, and
+    the service's own answer decides: an accepted key comes back with the
+    submission's id and status, a refused one with its sentence ("invalid user
+    API key (code 8)") verbatim."""
+    from mlo import acoustid
+
+    got = acoustid.verify_user_key(cfg) or {}
+    code = str(got.get("code") or "")
+    reason = str(got.get("reason") or "")
+    if got.get("ok"):
+        return "ok", (f"user key accepted — AcoustID took the probe submission "
+                      f"(id {got.get('id')}, {got.get('status') or 'pending'})")
+    if code == acoustid.NO_USER_KEY:
+        return "skipped", reason or "no acoustid_user_key is set"
+    if code in (acoustid.NO_API_KEY, acoustid.DISABLED):
+        # Submitting needs the application key too: without it there is
+        # nothing to ask with, and that row already reports it.
+        return "skipped", reason or f"AcoustID cannot submit ({code})"
+    # `lookup_failed` and `bad_response` are the service refusing or not
+    # answering; `reason` is already its own sentence.
+    return "fail", reason or f"AcoustID submission check failed ({code})"
 
 
 # --------------------------------------------------------------------------- #
@@ -228,6 +266,7 @@ _CHECKS = {
     "lastfm": _check_lastfm,
     "spotify": _check_spotify,
     "acoustid": _check_acoustid,
+    "acoustid-user": _check_acoustid_user,
     "soulseek": _check_soulseek,
     "login": _check_login,
 }

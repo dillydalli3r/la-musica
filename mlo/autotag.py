@@ -208,6 +208,10 @@ _RELEASE_TAGS = (
     # the release's FIRST catalog number: a release can carry one per
     # label/pressing and a tag holds a single value
     ("CATALOGNUMBER", "catalog_number"),
+    # Every country the release states, not this key's singular value: the
+    # value comes from _release_country_codes, which reads the whole event
+    # list (`countries`) with MusicBrainz's `country` first. See the country
+    # section above — this is the one tag written as a LIST.
     ("RELEASECOUNTRY", "country"),
     ("RELEASETYPE", "release_type"),
     # The two dates the naming script puts in the album folder: the release's
@@ -245,6 +249,79 @@ _RELEASE_INC = ("artists+recordings+media+release-groups+artist-credits"
                 "+genres+labels+isrcs")
 
 
+# ----------------------------------------------------------------------
+# The release's countries — the ONE tag written as a LIST
+# ----------------------------------------------------------------------
+# MusicBrainz states a release's events (one per country the pressing appeared
+# in) AND a singular `country`, which is only the FIRST of them. Every writer
+# here used to copy that singular value, so an album out in three countries
+# could never say so and every badge showed one code. RELEASECOUNTRY now holds
+# the whole set, joined with mlo.tagtext._LIST_SEP when read back, with
+# MusicBrainz's own first event FIRST: the naming script reads the first value
+# (mlo.naming._first_multi, spec R33), so the album folder is named exactly as
+# it was named before this tag could hold a list.
+_COUNTRY_SPLIT = re.compile(r"\s*[;,/]\s*")
+
+
+def _country_codes(value):
+    """The country codes a stored RELEASECOUNTRY holds, in order, deduped.
+
+    The app's own writers join repeated values with "; " and other taggers use
+    ", " or " / "; the badge reads those same three separators
+    (web/src/components/Badges.tsx `releaseCountries`), so one value is the
+    same list wherever it is shown.
+    """
+    codes = []
+    for part in _COUNTRY_SPLIT.split(str(value or "")):
+        code = part.strip()
+        if code and code.upper() not in {c.upper() for c in codes}:
+            codes.append(code)
+    return codes
+
+
+def _release_country_codes(release):
+    """Every country code *release* states — the value RELEASECOUNTRY is
+    written as. [] when the release states none, which writes nothing.
+
+    The singular `country` FIRST, then the rest of `countries` in
+    `release_countries`' own (date, name) order: the first value is the code
+    MusicBrainz calls the release's country and the one every writer stored
+    before this tag could hold a list, so the naming script reads what it
+    always read. An event MusicBrainz left without an area code contributes
+    nothing — a missing code is absent, never invented.
+    """
+    codes = _country_codes(release.get("country"))
+    for event in release.get("countries") or []:
+        code = str((event.get("code") if isinstance(event, dict) else event)
+                   or "").strip()
+        if code and code.upper() not in {c.upper() for c in codes}:
+            codes.append(code)
+    return codes
+
+
+def _country_upgrade(have, codes):
+    """The value a RELEASECOUNTRY tag should hold, or "" to leave it alone.
+
+    The ONE tag this stage may WIDEN instead of merely filling: a file tagged
+    "US" before this tag could hold a list would otherwise keep one code
+    forever while the release states US, CA and XE. The file's value is
+    replaced by the release's whole set only when every code it holds is one
+    the release states AND the release states at least one more (a strict
+    subset). A country the release does NOT state is somebody else's answer and
+    keeps its value, and a value that already is the release's set has nothing
+    to gain.
+    """
+    have_codes = _country_codes(have)
+    if not have_codes:
+        return ""
+    stated = {c.upper() for c in codes}
+    if any(c.upper() not in stated for c in have_codes):
+        return ""                      # never downgrade a value we did not state
+    if len(codes) <= len(have_codes):
+        return ""                      # already the release's whole set
+    return list(codes)
+
+
 def _cached_release(mbid):
     """`release_lookup`'s payload for *mbid* over the app's CACHED MB access.
 
@@ -258,7 +335,11 @@ def _cached_release(mbid):
     if not mbid:
         return None
     try:
-        from server.integrations import mb_get_cached
+        # `release_countries` is the server's ONE reader of a release's own
+        # events (it names the area and marks the configured preference);
+        # importing it here rather than re-parsing them keeps the tag this
+        # stage writes and the countries the pages show from ever disagreeing.
+        from server.integrations import mb_get_cached, release_countries
     except Exception:
         return None
     try:
@@ -314,6 +395,11 @@ def _cached_release(mbid):
         "label": label,
         "catalog_number": catalogs[0] if catalogs else "",
         "country": str(data.get("country") or ""),
+        # EVERY country this pressing appeared in, with its date: MusicBrainz's
+        # singular `country` above is only the release's FIRST event, so a
+        # release out in several countries states one code there and all of
+        # them here. The RELEASECOUNTRY tag is written from THIS list.
+        "countries": release_countries(data),
         # the release's own status ("Official", "Bootleg", …) — the same
         # field the importer's stamper writes as RELEASESTATUS
         "status": str(data.get("status") or ""),
@@ -354,12 +440,26 @@ def _track_position(af, path):
 
 def _slot_open(af, tag):
     """Whether *tag* still has something to gain from MusicBrainz: it is
-    EMPTY, or it is a DATE that stops short of the day ("1980" → the full
-    "1980-10-01" the album folder should spell)."""
+    EMPTY, it is a DATE that stops short of the day ("1980" → the full
+    "1980-10-01" the album folder should spell), or it is a RELEASECOUNTRY
+    holding a SINGLE code.
+
+    A country is the one slot whose value the release can WIDEN rather than
+    merely fill (see _country_upgrade), and a single code cannot be told apart
+    from a strict subset of the release's own events without asking about the
+    release: "US" alone may be all MusicBrainz states, or the first event of a
+    release that is also out in CA and XE. A tag already holding several codes
+    is the app's own list form and can gain nothing, so an album carrying one
+    is the ONLY country case that costs a request.
+    """
     value = str(af.get_tag(tag) or "").strip()
     if not value:
         return True
-    return tag in _DATE_TAGS and date_is_partial(value)
+    if tag in _DATE_TAGS:
+        return date_is_partial(value)
+    if tag == "RELEASECOUNTRY":
+        return len(_country_codes(value)) < 2
+    return False
 
 
 def _fill_release_tags(info, config, album_dir):
@@ -375,12 +475,15 @@ def _fill_release_tags(info, config, album_dir):
 
     A tag that already holds a value is never touched — another pressing's
     label, or ids another tagger wrote, are the album's own business — with
-    ONE exception: DATE and ORIGINALDATE are SHARPENED to MusicBrainz's
+    TWO exceptions. DATE and ORIGINALDATE are SHARPENED to MusicBrainz's
     spelling when the tag holds a coarser form of the same date ("1980" →
-    "1980-10-01", see fuller_date). Those two name the album folder, so a
-    year-only value would otherwise keep it a year forever. Returns
-    (written, note) — the album's report line, including the "nothing
-    written" cases.
+    "1980-10-01", see fuller_date): those two name the album folder, so a
+    year-only value would otherwise keep it a year forever. RELEASECOUNTRY is
+    WIDENED to the release's whole country set when the value it holds is a
+    strict subset of it ("US" → "US; CA; XE", see _country_upgrade): the tag
+    holds a LIST and a file written before it could would otherwise keep the
+    release's first event forever. Returns (written, note) — the album's
+    report line, including the "nothing written" cases.
     """
     manifest = load_expected_tracks(album_dir)
     mbid = ""
@@ -397,9 +500,12 @@ def _fill_release_tags(info, config, album_dir):
 
     # Prescan: an album that already carries every tag this stage could write
     # is finished, so it never costs a request. A library-wide run must not
-    # ask MusicBrainz about albums that are already complete. A date that
-    # stops short of the day is NOT complete: MusicBrainz may spell the same
-    # date in full, and the album folder is named after it.
+    # ask MusicBrainz about albums that are already complete. Two slots are
+    # never "complete" as they stand: a date that stops short of the day
+    # (MusicBrainz may spell the same date in full, and the album folder is
+    # named after it) and a RELEASECOUNTRY holding one code (it may be the
+    # first event of a release out in several countries — the one case where
+    # the request is what tells the two apart).
     slots = [tag for tag, _key in _RELEASE_TAGS] + list(_PER_TRACK_TAGS)
     if not any(_slot_open(d["af"], tag) for d in info for tag in slots):
         return 0, "release tags: nothing to fill"
@@ -408,9 +514,17 @@ def _fill_release_tags(info, config, album_dir):
     if not release:
         return 0, "release tags: MusicBrainz had no answer"
 
-    values = [(tag, str(release.get(key) or "").strip())
-              for tag, key in _RELEASE_TAGS + _EXTRA_RELEASE_TAGS]
-    values = [(tag, value) for tag, value in values if value]
+    values = []
+    for tag, key in _RELEASE_TAGS + _EXTRA_RELEASE_TAGS:
+        # RELEASECOUNTRY is the one tag whose value is a LIST — every country
+        # the release states, its own first event first. set_tag writes a list
+        # as repeated fields (Vorbis comments, an ID3 text list, one MP4 atom
+        # per value) and get_tag reads them back "; "-joined, which is the
+        # same value the importer's own stamper writes.
+        value = (_release_country_codes(release) if tag == "RELEASECOUNTRY"
+                 else str(release.get(key) or "").strip())
+        if value:
+            values.append((tag, value))
 
     # recording id per (disc, position): the manifest wins — its release_id is
     # the one the album was matched against
@@ -455,11 +569,18 @@ def _fill_release_tags(info, config, album_dir):
                     have = str(af.get_tag(tag) or "").strip()
                     if have:
                         # A tag that already holds a value is never overwritten.
-                        # The one exception is a DATE MusicBrainz spells more
+                        # Two exceptions. A DATE MusicBrainz spells more
                         # precisely: the album folder is named after it, so a
                         # bare year would otherwise pin the folder there for
-                        # good. fuller_date can only add detail.
-                        value = fuller_date(have, value)
+                        # good — fuller_date can only add detail. And a
+                        # RELEASECOUNTRY holding a strict subset of the
+                        # release's countries, which gains the rest —
+                        # _country_upgrade only ever widens, so a country the
+                        # release does not state survives it.
+                        if tag == "RELEASECOUNTRY":
+                            value = _country_upgrade(have, value)
+                        else:
+                            value = fuller_date(have, value)
                         if not value:
                             continue
                     if not str(value or "").strip():
@@ -506,6 +627,9 @@ def run_auto_tagging(config):
         "medium + missing MBIDs (release id, release-group id, artist ids, "
         "per-track recording id) filled from the cached release — only where "
         "a tag is EMPTY")
+    log("  RELEASECOUNTRY: every country the release states, \"; \"-joined "
+        "(the tag holds a LIST, MusicBrainz's first event first) — a file "
+        "holding one of them gains the rest")
     log("  DATE / ORIGINALDATE (the album folder's two dates): filled when "
         "empty, and sharpened to MusicBrainz's full date when the tag holds "
         "only a year or a year-month of the same date")

@@ -91,6 +91,7 @@ const KEY_NAMES = Object.keys(KEY_INFO);
  *  to set it, so a row that cannot be filled in here is not a dead end. */
 const KEY_HOME: Record<string, string> = {
   acoustid_api_key: "Settings → Import",
+  acoustid_user_key: "Settings → Import",
   soulseek_username: "the Soulseek tab",
   soulseek_password: "the Soulseek tab",
   ai_base_url: "Settings → AI",

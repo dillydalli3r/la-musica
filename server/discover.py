@@ -34,7 +34,10 @@ every external source that can speak about genres:
 
 `SOURCES` below is the ONE place a source is described: its label, what it can
 answer for which kind, whether it publishes a genre list or a recommendation
-feed, which kinds it charts and for which windows, and the credential it needs.
+feed, which kinds it recommends for a genre seed (`rec_kinds`) and for ONE
+entity (`entity_kinds` — the same list unless its entity answer is not a genre
+search), which kinds it charts and for which windows, and the credential it
+needs.
 The endpoints are driven from it, so a source added there cannot be half-wired —
 and `sources_health` reads it so the Sources panel probes exactly the same set.
 
@@ -107,12 +110,27 @@ SEED_KINDS = ("artist", "album", "track")
 # every wrapper underneath is TTL-cached and throttled anyway.
 RELATED_FANOUT = 3
 RELATED_ROWS = 8
+# How many of an ENTITY's own genres MusicBrainz is asked about, how many rows
+# each of those tag searches may contribute, and how much of the artist's own
+# records the browse contributes. The numbers are deliberately small: a shelf
+# is about a dozen rows wide and MusicBrainz's rows LEAD it (registry order), so
+# an unbounded tag search would BE the shelf and crowd out the sources that
+# state a relationship with the page. MusicBrainz also answers one request per
+# second — an entity shelf is a starting point, not a crawl. `RELATED_ROWS // 2`
+# is half a bridge: the artist's own records sit BESIDE the genre rows here, not
+# instead of them.
+ENTITY_GENRES = 2
+ENTITY_GENRE_ROWS = 2
+ENTITY_BROWSE_ROWS = RELATED_ROWS // 2
 
 
-def _source(sid, label, note, kinds=(), *, rec_kinds=(), genres=False, needs=(),
-            charts=(), chart_periods=()):
+def _source(sid, label, note, kinds=(), *, rec_kinds=(), entity_kinds=None,
+            genres=False, needs=(), charts=(), chart_periods=()):
     return {"id": sid, "label": label, "note": note, "kinds": tuple(kinds),
-            "rec_kinds": tuple(rec_kinds), "genres": bool(genres),
+            "rec_kinds": tuple(rec_kinds),
+            "entity_kinds": tuple(rec_kinds if entity_kinds is None
+                                  else entity_kinds),
+            "genres": bool(genres),
             "needs": tuple(needs), "charts": tuple(charts),
             "chart_periods": tuple(chart_periods)}
 
@@ -120,15 +138,22 @@ def _source(sid, label, note, kinds=(), *, rec_kinds=(), genres=False, needs=(),
 # Registry order IS the preference order: the first source that named a row
 # keeps it (`source`), the rest land in `also_from`, and the same order sorts
 # the page. `kinds` is what the source can LIST for a genre; `rec_kinds` is
-# what it can RECOMMEND (ListenBrainz has no genre filter at all, so it lists
-# nothing but still recommends through its similar-artists feed and charts);
+# what it can RECOMMEND for a GENRE seed (ListenBrainz has no genre filter at
+# all, so it lists nothing but still recommends through its similar-artists
+# feed and charts); `entity_kinds` is what it can say about ONE ENTITY — the
+# page a shelf sits on — and only differs where a source's entity answer is
+# NOT a genre search: Spotify's genre search serves albums only, while its
+# artist-level albums and top tracks answer an album and a track page, and
+# neither Apple nor Spotify publishes a related-ARTIST feed at all;
 # `charts` is what it can RANK for the Charts page, with the windows it really
 # publishes in `chart_periods` — a source is asked for a period it does not
 # have ONLY to be reported as unsupported, never to be handed all-time instead.
 SOURCES = (
     _source("musicbrainz", "MusicBrainz",
             "Genre (tag) search over release groups, artists and recordings, "
-            "and the genre vocabulary itself.",
+            "and the genre vocabulary itself. It publishes no similar-entity "
+            "feed, so an entity shelf reads the entity's own genres and asks "
+            "that same search, plus the artist's own records.",
             KINDS, rec_kinds=KINDS, genres=True),
     _source("deezer", "Deezer",
             "Its own genre charts (albums, tracks), artists-by-genre for "
@@ -138,7 +163,9 @@ SOURCES = (
             charts=KINDS, chart_periods=("all",)),
     _source("itunes", "iTunes",
             "Apple's genreIndex album search, and its most-played songs feed — "
-            "a rolling chart Apple refreshes daily and dates nowhere.",
+            "a rolling chart Apple refreshes daily and dates nowhere. Its "
+            "keyless search also answers an artist's own albums for an entity "
+            "shelf; Apple publishes no related-artist feed.",
             ("albums",), rec_kinds=("albums",),
             charts=("tracks",), chart_periods=("all",)),
     _source("audiodb", "TheAudioDB",
@@ -169,8 +196,13 @@ SOURCES = (
             "Summarises an artist or an album — a description source, never a "
             "list."),
     _source("spotify", "Spotify",
-            "Album search filtered by Spotify's own genre names.",
+            "Album search filtered by Spotify's own genre names, and — for an "
+            "entity shelf — a NAMED artist's albums and top tracks. Spotify's "
+            "related-artists and recommendations endpoints are closed to apps "
+            "created after 2024-11-27 (its own announcement), so it states no "
+            "similarity.",
             ("albums",), rec_kinds=("albums",),
+            entity_kinds=("albums", "tracks"),
             needs=("spotify_client_id", "spotify_client_secret")),
     # RateYourMusic is here for its CHARTS only: it publishes no genre list and
     # no recommendation feed, and its genre reading lives in the import chain
@@ -242,7 +274,9 @@ def catalogue(cfg=None):
         "sources": [{
             "id": spec["id"], "label": spec["label"], "note": spec["note"],
             "genres": spec["genres"], "kinds": list(spec["kinds"]),
-            "rec_kinds": list(spec["rec_kinds"]), "needs": list(spec["needs"]),
+            "rec_kinds": list(spec["rec_kinds"]),
+            "entity_kinds": list(spec["entity_kinds"]),
+            "needs": list(spec["needs"]),
             "charts": list(spec["charts"]),
             "chart_periods": list(spec["chart_periods"]),
             "missing": missing_keys(spec, cfg), "ready": can_run(spec, cfg),
@@ -899,14 +933,12 @@ def _recommend_rows(sid, kind, cfg, genres, artists, limit, seed):
 # What a source that CANNOT answer about an entity says instead: one honest
 # sentence each, kept beside the registry so a reader of `notes` learns the
 # provider's own limit instead of guessing from an empty list. A source that
-# declares no `rec_kinds` is never asked at all; anything not named here and
-# not handled below falls through to the generic sentence.
+# declares no entity capability is never asked at all; anything not named here
+# and not handled below falls through to the generic sentence. MusicBrainz and
+# Spotify used to be listed here and are implemented instead — a note is for a
+# source that HAS no such feed, not for one nobody wrote the call for.
 _ENTITY_NOTES = {
-    "musicbrainz": ("MusicBrainz publishes no similar-entity feed — its "
-                    "recommendations are genre (tag) searches"),
     "discogs": "Discogs browses by style, and publishes no similar-entity feed",
-    "spotify": ("Spotify publishes no similar-entity feed — its album search "
-                "filters by its own genre names"),
 }
 
 
@@ -985,6 +1017,68 @@ def _entity_rows(sid, kind, cfg, seed, limit):
                 found = []
             take(found, why_of(name))
 
+    if sid == "musicbrainz":
+        # MusicBrainz's own promise, and the only thing it can honestly say
+        # about a page: its tag (= genre) search. The genres are the ENTITY's
+        # own, read off MusicBrainz — the artist's for an artist seed, the
+        # release group's for an album seed, the recording's for a track seed —
+        # falling back to the artist when the entity itself states none (most
+        # recordings do, which is why `recording_genres` reads empty as
+        # "nothing stated HERE").
+        artist_mbid = (seed["mbid"] if seed["kind"] == "artist" else "") \
+            or discovery.resolve_artist_mbid(by, cfg)
+        if seed["kind"] == "artist":
+            genres = integrations.artist_genres(artist_mbid) if artist_mbid else []
+        elif seed["kind"] == "album":
+            genres = (integrations.release_group_genres(seed["mbid"])
+                      if seed["mbid"] else [])
+            genres = genres or (integrations.artist_genres(artist_mbid)
+                                if artist_mbid else [])
+        else:
+            genres = (integrations.recording_genres(seed["mbid"])
+                      if seed["mbid"] else [])
+            genres = genres or (integrations.artist_genres(artist_mbid)
+                                if artist_mbid else [])
+        genres = [str(g).strip() for g in genres if str(g).strip()][:ENTITY_GENRES]
+        if not genres:
+            raise _Skip('MusicBrainz states no genres for "%s"' % by)
+        for genre in genres:
+            found = discovery.musicbrainz_tag_search(kind, genre,
+                                                     limit=ENTITY_GENRE_ROWS)["rows"]
+            if kind == "artists":
+                # The seed is not its own neighbour: a tag search for the
+                # entity's genre names it back, and it is dropped by identity
+                # and by name — a page carrying no id has only the name.
+                want = discovery.norm(by)
+                found = [row for row in found
+                         if str(row.get("mbid") or "") != artist_mbid
+                         and discovery.norm(row.get("title")) != want]
+            take(found, "genre: %s (MusicBrainz)" % genre)
+        # Then the browse request itself: "more from this artist" is the
+        # artist's own records, which is NOT a similarity claim, and its own
+        # reason says exactly that. An album shelf reads the release-group
+        # browse (`artist_release_groups`, the same request the artist page
+        # uses for a discography); a track shelf reads the recordings
+        # MusicBrainz files under that artist, because a release group is not
+        # a track. Capped like every other bridge — one page of a discography,
+        # not a crawl.
+        if kind == "albums" and artist_mbid:
+            got = integrations.artist_release_groups(artist_mbid,
+                                                     limit=ENTITY_BROWSE_ROWS)
+            take([discovery.mb_album_row({
+                "id": group.get("id"), "title": group.get("title"),
+                "artist": by,
+                "first_release_date": group.get("first_release_date"),
+                "primary_type": group.get("primary_type"),
+                "secondary_types": group.get("secondary_types"),
+            }) for group in got.get("release_groups") or [] if group.get("id")],
+                "more release groups by %s (MusicBrainz)" % by)
+        elif kind == "tracks" and artist_mbid:
+            take(discovery.musicbrainz_artist_recordings(
+                artist_mbid, limit=ENTITY_BROWSE_ROWS)["rows"],
+                "more recordings by %s (MusicBrainz)" % by)
+        return rows
+
     if sid == "deezer":
         if kind == "artists":
             take(discovery.deezer_related_artists(by, limit),
@@ -1005,6 +1099,13 @@ def _entity_rows(sid, kind, cfg, seed, limit):
         return rows
 
     if sid == "itunes":
+        # An ARTIST shelf is deliberately NOT wired here even though Apple's
+        # keyless search can answer `entity=musicArtist`: a search for the
+        # page's own name returns the page's artist back plus its homonyms, and
+        # once the seed is dropped the row left standing is a different act
+        # wearing the same name — the exact thing the album filter below
+        # defends against. Apple states no artist similarity anywhere in this
+        # API, so the shelf is left to the sources that do.
         if kind != "albums":
             raise _Skip("Apple's search answers album rows about a NAMED "
                         "artist — it publishes no similar-entity feed")
@@ -1050,6 +1151,29 @@ def _entity_rows(sid, kind, cfg, seed, limit):
              "sounds like %s (ListenBrainz)" % by)
         return rows
 
+    if sid == "spotify":
+        # Spotify's entity route is NOT a similarity feed — `/related-artists`
+        # and `/recommendations` are closed to apps created after 2024-11-27
+        # (Spotify's own announcement) — so what it states about a page is
+        # "more from the artist NAMED here", the same honest use Deezer's and
+        # Apple's own-artist bridges make. An artist shelf is left to the
+        # sources that DO publish a related feed (this source is not asked
+        # about one: see `entity_kinds`).
+        if kind == "albums":
+            found = discovery.spotify_artist_albums(by, limit, cfg=cfg)
+            if not found:
+                raise _Skip('Spotify knows no artist called "%s"' % by)
+            take(found, "more from %s (Spotify)" % by)
+        elif kind == "tracks":
+            found = discovery.spotify_artist_top_tracks(by, limit, cfg=cfg)
+            if not found:
+                raise _Skip('Spotify knows no artist called "%s"' % by)
+            take(found, "more from %s (Spotify)" % by)
+        else:
+            raise _Skip("Spotify publishes no similar-artist feed — it states "
+                        "an artist's own albums and top tracks")
+        return rows
+
     raise _Skip(_ENTITY_NOTES.get(sid) or "no entity recommendations from this source")
 
 
@@ -1091,7 +1215,7 @@ def recommended_payload(cfg=None, seed="library", kind="albums", limit=20, lib=N
                     "notes": {"recommended": "skipped: %s" % why}}
         rows = []
         for spec in SOURCES:
-            if kind not in spec["rec_kinds"]:
+            if kind not in spec["entity_kinds"]:
                 continue
             asked.ask(spec["id"])
             if not can_run(spec, cfg):

@@ -273,7 +273,8 @@ def _detect_system_tools():
     # package - server/youtube.py imports the module instead.
     vendored_ytdlp = python_pkg_path("yt-dlp")
     if vendored_ytdlp:
-        tools["yt-dlp"] = {"version": None, "ytdlp_exe": None,
+        tools["yt-dlp"] = {"version": python_pkg_version("yt-dlp"),
+                           "ytdlp_exe": None,
                            "python_path": vendored_ytdlp}
     else:
         ytdlp = shutil.which("yt-dlp")
@@ -530,23 +531,94 @@ def detect_all_tools():
     return _store_tools_cache(tools, sig)
 
 
+def _pkg_dist_version(folder, pkg):
+    """The version pip recorded in *folder*, or None.
+
+    `pip install --target` writes `<name>-<version>.dist-info/` beside every
+    package it installs, and a vendored folder holds MANY of them — librosa's
+    folder also carries numpy's and scipy's — so the name decides which one is
+    this tool's. pip's own metadata outranks the folder name because it is what
+    actually runs when the folder is put on sys.path.
+    """
+    if not os.path.isdir(folder):
+        return None
+    # Distribution names are normalised ("yt-dlp" -> "yt_dlp") and lowercased.
+    norm = re.sub(r"[-_.]+", "_", pkg).lower()
+    rx = re.compile(rf"^{re.escape(norm)}-(.+)\.dist-info$")
+    try:
+        entries = os.listdir(folder)
+    except OSError:
+        return None
+    for entry in entries:
+        m = rx.match(entry.lower())
+        if m and os.path.isdir(os.path.join(folder, entry)):
+            return m.group(1)
+    return None
+
+
+def _pkg_folder_version(entry, pkg):
+    """The version in a vendored folder's own name (`librosa v0.12.0`)."""
+    m = re.match(rf"^{re.escape(pkg)}\s+v(.+)$", entry, re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def _version_sort_key(version):
+    """Comparable tuple for a version label; a folder with no version sorts
+    lowest (empty tuple), which is what the plain name it carries deserves."""
+    if not version:
+        return ()
+    return tuple(int(p) if p.isdigit() else 0 for p in re.split(r"[._\-+]", version))
+
+
+def _pip_pkg_dirs(pkg):
+    """[(version, dir)] for every vendored install of *pkg* under DEPS_DIR."""
+    if not os.path.isdir(DEPS_DIR):
+        return []
+    top = PIP_IMPORT_NAMES.get(pkg, pkg)
+    try:
+        entries = os.listdir(DEPS_DIR)
+    except OSError:
+        return []
+    out = []
+    for entry in entries:
+        full = os.path.join(DEPS_DIR, entry)
+        if not (os.path.isdir(full) and entry.lower().startswith(pkg.lower())):
+            continue
+        if not os.path.isfile(os.path.join(full, top, "__init__.py")):
+            continue
+        out.append((_pkg_dist_version(full, pkg) or _pkg_folder_version(entry, pkg),
+                    full))
+    return out
+
+
 def python_pkg_path(pkg):
     """Vendored pip-package dir for *pkg* ('librosa', 'beets', 'yt-dlp').
 
     Layout is '.dependencies/<pkg> vX.Y' (see fetchdeps.PIP_PACKAGES); the
     import name can differ from the pip name (yt-dlp -> yt_dlp), hence
     PIP_IMPORT_NAMES.
+
+    The NEWEST version wins. An update installs a new `vX.Y` folder beside the
+    old one, and before this the first `sorted()` entry won — i.e. the oldest,
+    so the app kept importing the version an update had just replaced and the
+    Dependencies row kept reporting it.
     """
-    if not os.path.isdir(DEPS_DIR):
+    dirs = _pip_pkg_dirs(pkg)
+    if not dirs:
         return None
-    top = PIP_IMPORT_NAMES.get(pkg, pkg)
-    try:
-        for entry in sorted(os.listdir(DEPS_DIR)):
-            full = os.path.join(DEPS_DIR, entry)
-            if (os.path.isdir(full) and entry.lower().startswith(pkg.lower())
-                    and os.path.isfile(os.path.join(full, top, "__init__.py"))):
-                return full
-    except OSError:
-        pass
-    return None
+    return max(dirs, key=lambda item: _version_sort_key(item[0]))[1]
+
+
+def python_pkg_version(pkg):
+    """Installed version of the vendored pip package *pkg*, or None.
+
+    Answered from pip's `.dist-info` metadata (falling back to the install
+    folder's name) so nothing has to import the package — the Dependencies
+    table asks this on every refresh, and beets/librosa are heavy imports.
+    """
+    dirs = _pip_pkg_dirs(pkg)
+    if not dirs:
+        return None
+    version, _folder = max(dirs, key=lambda item: _version_sort_key(item[0]))
+    return version or None
 

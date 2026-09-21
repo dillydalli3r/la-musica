@@ -56,7 +56,12 @@ import urllib.request
 
 from .paths import DEPS_DIR
 from .subproc import run_tool
-from .tools import detect_all_tools, python_pkg_path
+from .tools import (
+    PIP_IMPORT_NAMES,
+    detect_all_tools,
+    python_pkg_path,
+    python_pkg_version,
+)
 
 DISPLAY_NAMES = {
     "flac": "FLAC",
@@ -228,11 +233,21 @@ LINUX_PACKAGES = {
 # Vendored pure-Python tools: installed with `pip install --target` into a
 # versioned .dependencies folder instead of shipping binaries. They are
 # imported by prepending the folder to sys.path (see tools.python_pkg_path).
+#
+# The pip NAME only. The version lives in PINNED (and in the version-stamped
+# folder name), because the same number written twice is one number that can
+# drift: `librosa==0.11.0` here against PINNED's 0.11.0 was two places to edit
+# per bump, and the row read the folder while the installer read this string.
 PIP_PACKAGES = {
-    "librosa": "librosa==0.11.0",
-    "beets": "beets==2.4.0",
-    "yt-dlp": "yt-dlp==2026.8.19",
+    "librosa": "librosa",
+    "beets": "beets",
+    "yt-dlp": "yt-dlp",
 }
+
+# Pip packages whose releases GitHub does not carry, so their newest version
+# comes from PyPI's JSON API instead (yt-dlp IS in REPOS and stays a GitHub
+# check). Derived, never a second list to keep in sync with the one above.
+PYPI_PROBES = {key for key in PIP_PACKAGES if key not in REPOS}
 
 # Tools of which only the Windows build is vendored as a binary: on Linux the
 # same program is installed as the pip package above (yt-dlp has no Linux
@@ -572,15 +587,35 @@ PINNED = {
     },
 }
 
-# PHP for Windows (needed for Logchecker phar) — not on GitHub, direct from windows.php.net
+# PHP for Windows (needed for Logchecker phar) — not on GitHub, direct from
+# windows.php.net. The pinned build is the archived 8.1.28 zip; anything newer
+# is named by the release index below.
 PHP_ZIP_URL = (
     "https://windows.php.net/downloads/releases/archives/php-8.1.28-nts-Win32-vs16-x64.zip"
 )
+
+# windows.php.net's own release index: one JSON object per released SERIES
+# ("8.1": {"version": "8.1.34", "nts-vs16-x64": {"zip": {"path": …}}, …}). It is
+# the only place that knows which Windows builds exist — php publishes no
+# GitHub releases — and its `path` is upstream's own name for the zip. The
+# request 302s to downloads.php.net/~windows/, which urllib follows.
+PHP_RELEASES_URL = "https://windows.php.net/downloads/releases/releases.json"
+# The one build variant this app installs: 64-bit, non-thread-safe, VS16. VS16
+# is deliberate — those zips run on any supported Windows, while the vs17 builds
+# (PHP 8.4 and 8.5 publish no vs16) need the VC++ 2022 redistributable on the
+# host, so offering them as an update would offer a php that cannot start.
+PHP_VARIANT = "nts-vs16-x64"
+_PHP_RELEASE_URL = "https://windows.php.net/downloads/releases/{name}"
+_PHP_ARCHIVE_URL = "https://windows.php.net/downloads/releases/archives/{name}"
 
 _HEADERS = {
     "User-Agent": "la-musica/2.1",
     "Accept": "application/vnd.github+json",
 }
+
+# The same client for the non-GitHub probes (PyPI, windows.php.net), which do
+# not speak GitHub's media type.
+_JSON_HEADERS = {"User-Agent": _HEADERS["User-Agent"]}
 
 _release_cache = {}
 
@@ -588,8 +623,8 @@ _release_cache = {}
 # ----------------------------------------------------------------------
 # GitHub API
 # ----------------------------------------------------------------------
-def _api_json(url):
-    req = urllib.request.Request(url, headers=_HEADERS)
+def _api_json(url, headers=None):
+    req = urllib.request.Request(url, headers=headers or _HEADERS)
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -658,7 +693,7 @@ def _release(key, upstream=False):
 
 
 def latest_versions():
-    """{tool key: version the installer would fetch} for every tracked tool.
+    """{tool key: reviewed target version} for every tracked tool.
 
     Keyed by DISPLAY_NAMES - the exact set `server.main` /api/dependencies
     serves - so every row the UI can show has an entry. No network needed.
@@ -667,8 +702,12 @@ def latest_versions():
     what the installer fetches there (the native builds in LINUX_BINARIES, the
     pip packages), the distro package for the rest (LINUX_PACKAGES), and None
     for a tool with no build at all - the UI shows "unknown" rather than a
-    version nobody can install. install_kind() decides which of those applies,
-    so this column agrees with what pressing Install would actually do.
+    version nobody can install. install_kind() decides which of those applies.
+
+    This is the REVIEWED release, and it is what a first install on a machine
+    that cannot reach the upstream check fetches; a tool that is already
+    installed takes the newest release its publisher has instead (see
+    install_dependency), which is what the row's `upstream_version` names.
     """
     out = {}
     for key in DISPLAY_NAMES:
@@ -686,8 +725,10 @@ def latest_versions():
 # Live upstream versions
 # ----------------------------------------------------------------------
 # How long an upstream answer stays usable. GitHub's anonymous API allows 60
-# requests/hour; one request per GitHub-published tool (12) every 30 minutes is
-# 24/hour, so a full pass has headroom and a page load never hammers the API.
+# requests/hour; a full pass is one request per probed tool (15: the 12 GitHub
+# repos every 30 minutes, i.e. 24/hour, plus PyPI's two and windows.php.net's
+# one, which are not GitHub's to rate-limit), so a page load never hammers the
+# API and the GitHub budget keeps its headroom.
 UPSTREAM_TTL_S = 30 * 60
 
 # {key: {"version": str|None, "checked_at": float, "error": str|None}}
@@ -766,14 +807,86 @@ def newer_version(candidate, current):
     return pa + [0] * (n - len(pa)) > pb + [0] * (n - len(pb))
 
 
-def _upstream_keys():
-    """Tools whose newest release a GitHub API call can answer.
+def _upstream_source(key):
+    """Which publisher answers *key*'s newest version, or None.
 
-    Only repos in REPOS: php (windows.php.net) and the two PyPI packages
-    publish elsewhere, so their rows keep the pinned target and report no
-    upstream version at all.
+    GitHub for the repos in REPOS, PyPI for the packages GitHub does not carry,
+    and windows.php.net for php. A None here is a tool with no upstream check
+    at all: its row keeps the pinned target and says so (dependency_rows).
     """
-    return [key for key in DISPLAY_NAMES if key in REPOS]
+    if key in REPOS:
+        return "GitHub"
+    if key in PYPI_PROBES:
+        return "PyPI"
+    if key == "php":
+        return "windows.php.net"
+    return None
+
+
+def _upstream_keys():
+    """Tools whose newest release a probe can answer (see _upstream_source)."""
+    return [key for key in DISPLAY_NAMES if _upstream_source(key)]
+
+
+_php_build_cache = {"at": 0.0, "version": None, "url": None}
+_php_build_lock = threading.Lock()
+
+
+def php_upstream_build(force=False):
+    """(version, url) of the newest PHP for Windows this app can install.
+
+    windows.php.net's release index is the only source: php has no GitHub
+    releases, and upstream's `path` is the name of the file rather than one
+    this app guesses. Only the x64 non-thread-safe VS16 build is eligible (the
+    layout the pin uses) — 8.4 and 8.5 publish vs17 zips only, and offering one
+    of those as an update would offer a php that will not start on a host
+    without the VC++ 2022 redistributable. Cached for the upstream TTL so the
+    row's check and the install it leads to share one fetch; (None, None) on
+    any failure, which every caller reads as "unknown".
+    """
+    now = time.time()
+    with _php_build_lock:
+        cached = dict(_php_build_cache)
+    if not force and cached["version"] and now - cached["at"] < UPSTREAM_TTL_S:
+        return cached["version"], cached["url"]
+    version = url = None
+    try:
+        data = _api_json(PHP_RELEASES_URL, headers=_JSON_HEADERS)
+        for entry in (data or {}).values():
+            if not isinstance(entry, dict):
+                continue
+            zip_path = (((entry.get(PHP_VARIANT) or {}).get("zip")) or {}).get("path")
+            label = _version_label(entry.get("version"))
+            if not label or not zip_path:
+                continue
+            if version is None or newer_version(label, version):
+                version = label
+                url = _PHP_RELEASE_URL.format(name=zip_path)
+    except Exception:
+        version = url = None
+    with _php_build_lock:
+        _php_build_cache.update(at=now, version=version, url=url)
+    return version, url
+
+
+def php_zip_url(version):
+    """Download URL of the x64 NTS VS16 zip of PHP *version*.
+
+    The pin is the archived zip the app has always fetched. Anything else takes
+    the release index's own path when it knows that version (the file upstream
+    itself publishes), and falls back to the archives' naming convention — they
+    keep every released patch, so a version the index has moved past is still
+    fetchable.
+    """
+    label = _version_label(version)
+    if not label:
+        return PHP_ZIP_URL
+    if same_version(label, PINNED["php"]["version"]):
+        return PHP_ZIP_URL
+    known_version, known_url = php_upstream_build()
+    if known_url and same_version(known_version, label):
+        return known_url
+    return _PHP_ARCHIVE_URL.format(name=f"php-{label}-nts-Win32-vs16-x64.zip")
 
 
 def _fetch_upstream(key):
@@ -786,6 +899,51 @@ def _fetch_upstream(key):
     data = _api_json(
         f"https://api.github.com/repos/{REPOS[key]}/releases/latest")
     return _version_label(data.get("tag_name"))
+
+
+def _probe_version(key):
+    """Newest version of *key* from whichever publisher releases it."""
+    source = _upstream_source(key)
+    if source == "PyPI":
+        data = _api_json(f"https://pypi.org/pypi/{PIP_PACKAGES[key]}/json",
+                         headers=_JSON_HEADERS)
+        return _version_label((data.get("info") or {}).get("version"))
+    if source == "windows.php.net":
+        return php_upstream_build()[0]
+    return _fetch_upstream(key)
+
+
+def _known_upstream_version(key):
+    """Newest version known for *key*: the check cache, else the probe itself.
+
+    The cache is what the table's background pass fills (30-minute TTL, one
+    pass per page load). An INSTALL is a deliberate act, so a tool the cache
+    has no answer for yet is probed here and now instead of installing the pin
+    over a release upstream has long replaced — the press that changed nothing
+    this whole issue is about. Any failure is "unknown" and the caller falls
+    back to the reviewed pin, which an offline machine can still fetch.
+    """
+    entry = _upstream_cache.get(key)
+    if entry and entry.get("version"):
+        return entry["version"]
+    if not _upstream_source(key):
+        return None
+    try:
+        version = _probe_version(key)
+    except Exception:
+        return None
+    if not version:
+        return None
+    with _upstream_lock:
+        _upstream_cache[key] = {"version": version, "checked_at": time.time(),
+                                "error": None}
+    return version
+
+
+def _install_target(key):
+    """The version an install of *key* should fetch: the newest release this
+    app can see, else the reviewed pin (see _known_upstream_version)."""
+    return _known_upstream_version(key) or PINNED[key]["version"]
 
 
 def _refresh_upstream(keys=None):
@@ -801,7 +959,7 @@ def _refresh_upstream(keys=None):
     for key in keys:
         previous = _upstream_cache.get(key) or {}
         try:
-            entry = {"version": _fetch_upstream(key), "checked_at": time.time(),
+            entry = {"version": _probe_version(key), "checked_at": time.time(),
                      "error": None}
         except Exception as e:
             last_error = f"{type(e).__name__}: {e}"[:200]
@@ -852,9 +1010,9 @@ def _kick_upstream(keys, force=False):
 
 
 def upstream_versions(refresh=False, block=False):
-    """{key: {"version", "checked_at", "error"}} for GitHub-published tools.
+    """{key: {"version", "checked_at", "error"}} for every probed tool.
 
-    Never blocks a caller on GitHub: by default a stale (or `refresh=True`
+    Never blocks a caller on the network: by default a stale (or `refresh=True`
     forced) cache is re-fetched by a background thread while the caller gets
     what is already known. `block=True` fetches inline - the CLI prints its
     table once and has nobody to return to.
@@ -881,16 +1039,17 @@ def dependency_rows(refresh=False, block=False):
 
     Three versions per tool, deliberately NOT merged:
       installed_version  what is on disk / on PATH
-      latest_version     the pinned target `install_dependency` fetches; the
-                         reviewed release on purpose (see PINNED)
-      upstream_version   what GitHub's newest release actually is (None while
-                         unknown / not a GitHub tool)
+      latest_version     the reviewed pinned target (see PINNED) — the version
+                         a FIRST install on a machine that cannot reach the
+                         upstream check fetches
+      upstream_version   the newest release the tool's own publisher lists
+                         (GitHub, PyPI, windows.php.net — see
+                         _upstream_source), None while unknown
 
     `state` is derived from the LIVE upstream value: `ok` (installed ==
     upstream), `update` (upstream known and different), `missing`, `error`
-    (that tool's check failed). Rows with no upstream at all (the PyPI
-    packages, php) fall back to the pinned pair, which is the only answer
-    available for them.
+    (that tool's check failed). Rows for a tool with no upstream probe at all
+    fall back to the pinned pair, which is the only answer available for them.
     """
     tools = detect_all_tools()
     installed = installed_versions()
@@ -934,8 +1093,9 @@ def dependency_rows(refresh=False, block=False):
         elif system_row and update_available:
             note = (f"the system package provides {have}; upstream ships {uv} — "
                     f"upgrade it with your package manager")
-        elif key not in REPOS:
-            note = "no GitHub releases — only the pinned target is installable"
+        elif _upstream_source(key) is None:
+            note = ("no upstream check for this tool — only the pinned target "
+                    "is installable")
         elif entry and not uv:
             note = "upstream has no versioned release (rolling build)"
         else:
@@ -982,12 +1142,25 @@ def dependencies_payload(refresh=False):
 
 
 def installed_versions():
-    """{tool key: installed version} for currently detected tools only."""
+    """{tool key: installed version} for currently detected tools only.
+
+    A vendored pip package reports what its folder ACTUALLY holds
+    (tools.python_pkg_version — pip's own `.dist-info`, falling back to the
+    version in the folder name) rather than PINNED. Reporting the pin for every
+    folder that merely existed made INSTALLED a copy of the target: an upstream
+    release following the pin never looked like an update, and the installer's
+    own "already installed" short-circuit was fed by the same number, so a pip
+    tool could never move.
+
+    Only a folder neither pip's metadata nor its own name can date — one no
+    install of this app wrote — falls back to the pin, because reporting
+    nothing at all would read as "missing" for a package that is right there.
+    """
     tools = detect_all_tools()
     out = {key: info["version"] for key, info in tools.items()}
     for key in PIP_PACKAGES:
         if pip_package_path(key):
-            out[key] = PINNED[key]["version"]
+            out[key] = python_pkg_version(key) or PINNED[key]["version"]
     return out
 
 
@@ -1390,45 +1563,76 @@ def _install_pip_package(key, log=print, progress=None):
 
     Keeps the running interpreter's site-packages untouched (portable
     installs) and mirrors the versioned-folder layout of binary tools.
+
+    The version installed is the newest release this app can see (PyPI for
+    beets/librosa, GitHub for yt-dlp — see _install_target), and the reviewed
+    pin only when nothing can be seen. The old code installed the pin and
+    returned "already installed" whenever a folder existed at all, so a pip
+    tool could never update: the row said Update, the press said nothing to do,
+    and the version never moved.
     """
-    pin = PINNED[key]
-    version = pin["version"]
+    name = PIP_PACKAGES[key]
     display = DISPLAY_NAMES[key]
-    dest_dir = os.path.join(DEPS_DIR, f"{key} v{version}")
-    if pip_package_path(key):
-        log(f"{display} v{version} already installed")
-        return version
-    log(f"Downloading {display} v{version} (pip) …")
+    installed = python_pkg_version(key)
+    target = _install_target(key)
+    if installed and not newer_version(target, installed):
+        # Nothing to do: the folder already holds the target, or one NEWER than
+        # anything upstream publishes — an update must never walk a copy back.
+        log(f"{display} is already at v{installed} — nothing to install")
+        return installed
+    dest_dir = os.path.join(DEPS_DIR, f"{key} v{target}")
+    log(f"Downloading {display} v{target} (pip) …")
     cmd = [
         _pip_python(), "-m", "pip", "install",
+        # --upgrade, deliberately: without it pip answers "Requirement already
+        # satisfied" for a version it finds ANYWHERE it looks — the running
+        # interpreter's site-packages, or a folder from an interrupted install
+        # — and writes nothing into the target, so the install "succeeds" with
+        # no package in the folder it was told to fill.
+        "--upgrade",
         "--target", dest_dir, "--no-cache-dir",
         "--progress-bar", "off", "--disable-pip-version-check",
-        PIP_PACKAGES[key],
+        f"{name}=={target}",
     ]
     proc = run_tool(cmd, capture_output=True, text=True,
                     encoding="utf-8", errors="replace", timeout=1800)
-    if proc.returncode != 0 or not pip_package_path(key):
+    top = PIP_IMPORT_NAMES.get(key, key)
+    # The folder this install wrote, not "some folder for this package": an
+    # older install still on disk would answer a lookup the wrong way round.
+    landed = os.path.isfile(os.path.join(dest_dir, top, "__init__.py"))
+    if proc.returncode != 0 or not landed:
         shutil.rmtree(dest_dir, ignore_errors=True)
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()
         raise RuntimeError(
             f"pip install failed for {display}: {tail[-1] if tail else 'unknown error'}")
     _remove_older_versions(key, os.path.basename(dest_dir))
-    log(f"Installed {display} v{version} -> {dest_dir}")
-    return version
+    log(f"Installed {display} v{target} -> {dest_dir}")
+    return target
 
 
 def _install_php(log=print, progress=None):
-    """Download PHP for Windows (needed for Logchecker phar)."""
-    pin = PINNED["php"]
-    version = pin["version"]
+    """Download PHP for Windows (needed for Logchecker phar).
+
+    The newest build windows.php.net publishes in the x64 NTS VS16 layout the
+    pin uses (see php_upstream_build), the pinned 8.1.28 archive when that
+    index cannot be read — and nothing at all when the copy on disk is already
+    the newest, or newer than it. Same rule as every other tool: an existing
+    copy takes the newest release, a first install falls back to the pin.
+    """
     display = DISPLAY_NAMES["php"]
+    installed = installed_versions().get("php")
+    version = _install_target("php")
+    if installed and not newer_version(version, installed):
+        log(f"{display} is already at v{installed} — nothing to install")
+        return installed
+    zip_url = php_zip_url(version)
     log(f"Downloading {display} v{version} (php zip) …")
     dest_dir = os.path.join(DEPS_DIR, f"php v{version}")
     fd, tmp_zip = tempfile.mkstemp(suffix=".zip")
     os.close(fd)
     workdir = tempfile.mkdtemp(prefix="mlo_php_")
     try:
-        _download(PHP_ZIP_URL, tmp_zip, progress)
+        _download(zip_url, tmp_zip, progress)
         log(f"Extracting PHP v{version} …")
         _extract_archive(tmp_zip, workdir, log)
         src = _locate_binaries(workdir, "php")
@@ -1471,16 +1675,57 @@ def _install_php(log=print, progress=None):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+# One install at a time PER TOOL. Every row can now be installed on its own
+# (the page's per-row button), so two presses of one row — or a press landing
+# while the auto-update pass is running the same tool — would unpack two
+# downloads into one folder and prune each other's files. A second press is
+# REFUSED rather than queued: a queue's second entry would re-download what the
+# first just installed, and the honest answer to "it is being installed right
+# now" is to say so.
+_install_locks = {}
+_install_locks_guard = threading.Lock()
+
+
+def install_lock(key):
+    """The lock guarding installs of *key* (created on first use)."""
+    with _install_locks_guard:
+        lock = _install_locks.get(key)
+        if lock is None:
+            lock = _install_locks[key] = threading.Lock()
+        return lock
+
+
+def installing(key):
+    """True while an install of *key* is in flight in this process."""
+    with _install_locks_guard:
+        lock = _install_locks.get(key)
+    return bool(lock is not None and lock.locked())
+
+
 def install_dependency(key, log=print, progress=None):
     """Download and install the latest release of a tool.
 
     Returns the installed version string. Raises on any failure.
     """
     _require_installable(key)
+    lock = install_lock(key)
+    if not lock.acquire(blocking=False):
+        raise RuntimeError(
+            f"{DISPLAY_NAMES.get(key, key)} is already being installed — "
+            f"wait for that install to finish")
+    try:
+        return _install_one(key, log=log, progress=progress)
+    finally:
+        lock.release()
+
+
+def _install_one(key, log=print, progress=None):
+    """The install itself, with the per-tool lock already held."""
     if key == "php":
         return _install_php(log=log, progress=progress)
     # Vendored pip packages — plus the tools whose Linux install IS the pip
     # package (PIP_ON_LINUX): on Windows those take the pinned .exe below.
+    # Both carry their own target/version handling (see _install_target).
     if key in PIP_PACKAGES and (key not in PIP_ON_LINUX
                                 or host_platform() != "windows"):
         return _install_pip_package(key, log=log, progress=progress)
@@ -1498,18 +1743,28 @@ def install_dependency(key, log=print, progress=None):
     # something known-good rather than failing.
     prefix = INSTALL_PREFIX[key]
     wanted = markers(key)
-    upstream = bool(_existing_install(prefix, wanted))
+    installed = installed_versions().get(key)
+    # "Already there" is what the DETECTOR says, PATH included — not only a
+    # .dependencies folder. A copy the user installed with scoop/apt is a copy
+    # the table calls Ready-or-Update, and an Install press on such a row used
+    # to take the pin (no folder of ours = "first install"): the press
+    # re-downloaded the version already on PATH, reported changed: false, and
+    # the Update chip survived. A PATH copy NEWER than the pin was worse — it
+    # was "updated" downwards into .dependencies.
+    upstream = bool(installed or _existing_install(prefix, wanted))
     rel = _release(key, upstream)
     version = rel["version"]
 
-    # An install exists to replace a copy that is behind, and there is nothing
-    # behind when the folder already carries the newest release's version.
-    # Without this, "Install / update all" re-fetched slskd's 118 MB on every
-    # press with nothing to show for it.
-    if upstream and same_version(version, installed_versions().get(key)):
-        log(f"{DISPLAY_NAMES[key]} is already at the newest release "
-            f"({version}) — nothing to install")
-        return version
+    # An install exists to replace a copy that is behind. There is nothing
+    # behind when the installed version already IS the target (without this,
+    # "Install / update all" re-fetched slskd's 118 MB on every press), and
+    # nothing to gain when the copy is NEWER than the target — a hand-pulled
+    # release, or upstream yanking one — where installing would be a downgrade.
+    if upstream and installed:
+        if same_version(version, installed) or newer_version(installed, version):
+            log(f"{DISPLAY_NAMES[key]} is already at v{installed} — "
+                f"nothing to install")
+            return installed
 
     asset = pick_asset(key, upstream)
 
@@ -1520,6 +1775,11 @@ def install_dependency(key, log=print, progress=None):
         rel = _release(key)
         version = rel["version"]
         asset = pick_asset(key)
+        # The fallback is the pin, so it can be what is installed already.
+        if installed and not newer_version(version, installed):
+            log(f"{DISPLAY_NAMES[key]} is already at v{installed} — "
+                f"nothing to install")
+            return installed
 
     if not asset:
         raise RuntimeError(

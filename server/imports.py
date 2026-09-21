@@ -490,8 +490,21 @@ _ACOUSTID_ROW = {"release_group_id": None, "release_group_title": None,
                  "release_group_type": None, "artists": [], "score": None,
                  "matched": 0, "total": 0, "recordings": []}
 
+# The provenance a value the file ALREADY carried is reported with when this
+# run did not ask anyone about it (`force=False`). `sources` is normally "who
+# stated this value"; an echoed value was stated by the file's own tag, and
+# saying so is what keeps the readout from showing "source unknown" beside a
+# 0 that a provider may well disagree with.
+EXISTING_TAG = "existing-tag"
 
-def fetch_advisories(paths, cfg=None):
+# `status[path]` — what this run did to the value it reports for *path*.
+STATUS_WRITTEN = "written"       # the tag now holds what this run wrote
+STATUS_UNCHANGED = "unchanged"   # decided, and the tag already read that
+STATUS_EXISTING = "existing"     # echoed, nobody was asked this run
+STATUS_GATED = "gated"           # the write gate refused the file
+
+
+def fetch_advisories(paths, cfg=None, force=False):
     """Resolve and write ITUNESADVISORY for these albums / tracks.
 
     Each track is identified by EVERY ISRC its own tag states — a file may
@@ -510,8 +523,21 @@ def fetch_advisories(paths, cfg=None):
     (when one is set up and `advisory_ai_classify` is on), then the
     multilingual lyrics word scan, and finally `advisory_fallback` decides
     what an unstated advisory becomes (0 by default, 2, or nothing at all).
-    A file that already carries a valid 0/1/2 is left alone (the user's manual
-    edit wins) and a value equal to the decided one is not rewritten.
+    A file that already carries a valid 0/1/2 is ECHOED, not re-asked — a
+    rating the user or an earlier run settled is not overruled behind their
+    back — and the echo carries its provenance: `sources[path]` reads
+    "existing-tag" and `status[path]` "existing". Leaving `sources` empty put
+    "source unknown" in the readout beside a value, which reads as "a source
+    answered and the answer was lost" when the truth is "nobody was asked".
+
+    `force=True` is the re-rate: such a file is asked anyway and what the
+    sources state IS written (the write gate still applies, the album tag
+    still derives as below). It is the way out of a value that an earlier run
+    invented — the fallback writes 0 for a track nobody rated, and that 0 then
+    outlived every provider that later knew better. Only EVIDENCE lowers a
+    stored rating: a decided value that is that INVENTED `advisory_fallback`
+    leaves an existing 0/1/2 standing, still reported as the file's own tag.
+    A decided value equal to the one stored is decided, not rewritten.
 
     ALBUMITUNESADVISORY is DERIVED here for every album folder the call
     touched, from the per-track values by script 8's own rule
@@ -524,16 +550,22 @@ def fetch_advisories(paths, cfg=None):
 
     Returns ``{"updated": n, "values": {path: 0|1|2}, "sources": {path:
     provider}, "answers": {path: {source: 0|1}}, "hits": {path: [word, ...]},
-    "albums": {folder: 0|1|2}, "album_updated": n, "gated": n}``
+    "albums": {folder: 0|1|2}, "album_updated": n, "gated": n, "status":
+    {path: "written"|"unchanged"|"existing"|"gated"}}``
     — `updated`/`values`/`sources`/`answers`/`hits` are the per-track writes
     (`sources` is who stated each value — "instrumental", "ai-lyrics",
     "lyrics-scan" and "fallback" included, so a value NOBODY stated is
     distinguishable from one a provider stated: the ladder's stage is named,
-    `answers` stays empty), `hits` is the words the scan matched,
-    `albums`/`album_updated` are the album tag derived from them, and `gated`
-    counts the files the ADVISORY write gate refused. When it refused EVERY
-    file, `skipped` carries the reason instead of an empty result that would
-    read as "nobody stated anything".
+    `answers` stays empty — and "existing-tag" when the reported value is the
+    file's own), `hits` is the words the scan matched, `albums`/
+    `album_updated` are the album tag derived from them, and `gated` counts
+    the files the ADVISORY write gate refused. `status` says what happened to
+    each reported value THIS run — `written` (the tag now holds what this run
+    wrote), `unchanged` (decided, and the tag already read it), `existing`
+    (echoed without asking anyone: `force=False` on a file that had a value)
+    or `gated` — so `updated == 0` can never be read as a re-rate that found
+    nothing. When the gate refused EVERY file, `skipped` carries the reason
+    instead of an empty result that would read as "nobody stated anything".
     """
     from mlo.audio import AudioFile
     from mlo.config import should_write_audio_tag
@@ -542,6 +574,7 @@ def fetch_advisories(paths, cfg=None):
     cfg = cfg or load_config()
     if not cfg.get("advisory_auto_fetch", True):
         return {"updated": 0, "values": {}, "sources": {}, "answers": {},
+                "hits": {}, "status": {},
                 "skipped": "advisory_auto_fetch is off"}
     targets = []
     for p in paths or []:
@@ -564,17 +597,27 @@ def fetch_advisories(paths, cfg=None):
     sources = {}
     answers = {}
     hits = {}
+    status = {}
     for path in targets:
         try:
             af = AudioFile(path)
             if af.audio is None:
                 continue
             current = str(af.get_tag("ITUNESADVISORY") or "").strip()
-            if current in ("0", "1", "2"):
+            if current in ("0", "1", "2") and not force:
+                # Echo it, WITH its provenance: the value is the file's own
+                # tag, this run asked nobody about it, and `status` says
+                # exactly that. Reporting a value with no source at all
+                # rendered as "source unknown" — which reads as "a source
+                # answered and we lost it" when the truth is "nobody was
+                # asked" (`force` is what asks).
                 values[path] = int(current)
+                sources[path] = EXISTING_TAG
+                status[path] = STATUS_EXISTING
                 continue
             if not should_write_audio_tag(cfg, "ITUNESADVISORY", filepath=path):
                 gated += 1
+                status[path] = STATUS_GATED
                 continue
             route = intg.resolve_advisory_route(
                 # The file's own tag, as stored: every ISRC on it is asked.
@@ -592,15 +635,25 @@ def fetch_advisories(paths, cfg=None):
             # instrumental is 0, the AI judges the lyrics when one is
             # configured, the word scan is the fallback, and
             # `advisory_fallback` is the last resort. None means "write
-            # nothing", which is a legitimate answer ("none").
+            # nothing", which is a legitimate answer ("none"). A provider's
+            # own 0 is not final either: the ladder escalates it to 1 when the
+            # words say explicit (mlo.advisory).
             decision = advisory.decide_advisory(
                 cfg, value=route.get("value"), source=route.get("source") or "",
-                answers=route.get("answers") or {}, path=path, af=af)
+                path=path, af=af)
             value = decision.get("value")
             if value is None:
                 continue
-            if str(value) != current and af.set_tag("ITUNESADVISORY", str(value)):
-                updated += 1
+            if decision.get("fallback") and current in ("0", "1", "2"):
+                # A re-rate (`force`) of a file that already carries a value,
+                # for which NOBODY stated anything: the ladder's answer is the
+                # INVENTED `advisory_fallback`, and an invented value must not
+                # overwrite a real one — the stored rating stands, reported as
+                # the file's own. Only evidence lowers a rating.
+                values[path] = int(current)
+                sources[path] = EXISTING_TAG
+                status[path] = STATUS_UNCHANGED
+                continue
             values[path] = int(value)
             if decision.get("source"):
                 sources[path] = decision["source"]
@@ -608,6 +661,15 @@ def fetch_advisories(paths, cfg=None):
                 answers[path] = route["answers"]
             if decision.get("hits"):
                 hits[path] = decision["hits"]
+            if str(value) == current:
+                status[path] = STATUS_UNCHANGED
+            elif af.set_tag("ITUNESADVISORY", str(value)):
+                updated += 1
+                status[path] = STATUS_WRITTEN
+            else:
+                # `set_tag` refused: the file still reads what it did, and a
+                # write that did not happen is not counted as one.
+                status[path] = STATUS_UNCHANGED
         except Exception:
             continue
 
@@ -619,7 +681,8 @@ def fetch_advisories(paths, cfg=None):
         # anything", and a caller cannot act on a lie. Nothing was looked up
         # and nothing was written, so there is no album tag to derive either.
         return {"updated": 0, "values": {}, "sources": {}, "answers": {},
-                "hits": {}, "albums": {}, "album_updated": 0, "gated": gated,
+                "hits": {}, "status": status, "albums": {}, "album_updated": 0,
+                "gated": gated,
                 "skipped": (f"{gated} track(s) not rated: writing "
                             "ITUNESADVISORY is off for their file type "
                             "(auto_advisory / audio_tag_writes['ADVISORY'])")}
@@ -663,7 +726,7 @@ def fetch_advisories(paths, cfg=None):
     if updated or album_updated:
         _invalidate_caches()
     out = {"updated": updated, "values": values, "sources": sources,
-           "answers": answers, "hits": hits, "albums": albums,
+           "answers": answers, "hits": hits, "status": status, "albums": albums,
            "album_updated": album_updated, "gated": gated,
            "album_gated": album_gated}
     if album_gated and not album_updated:
@@ -1013,6 +1076,69 @@ def _album_cover_present(album_dir):
         return False
 
 
+def _album_track_count(album_dir):
+    """How many tracks this album says it has, or None when it does not say.
+
+    This is the third of the three facts a cover candidate is VERIFIED against
+    (`mlo.cover_choice` rule 2): a row whose own release has a different
+    tracklist is a different edition (a reissue, a compilation), and its
+    artwork is only a candidate for this album, not the answer. Two sources,
+    both the album's OWN statement of its tracklist:
+
+    * the recorded release manifest (`mlo.paths.load_expected_tracks` — the
+      release's own tracklist, written by the add path, the import and script
+      15), which is the release's own count even while the folder is still
+      filling up;
+    * the files' own TRACKTOTAL/TOTALTRACKS tags, read off the same five files
+      (and for the same reason) `_tag_candidate` reads.
+
+    A folder's FILE COUNT is deliberately not used: a partial import or one
+    disc of a set would contradict every correct release, which is the
+    opposite of what this number is for. Nothing claiming a count leaves the
+    check neutral — the row is neither rewarded nor blamed for it.
+    """
+    try:
+        from mlo.paths import load_expected_tracks
+        rows = (load_expected_tracks(album_dir) or {}).get("tracks") or []
+    except Exception:
+        rows = []
+    if rows:
+        return len(rows)
+    from mlo.audio import AudioFile
+
+    for path in _audio_files(album_dir)[:5]:
+        try:
+            af = AudioFile(path)
+            if af.audio is None:
+                continue
+            for key in ("TRACKTOTAL", "TOTALTRACKS"):
+                try:
+                    n = int(str(af.get_tag(key) or "").strip())
+                except (TypeError, ValueError):
+                    continue
+                if n > 0:
+                    return n
+        except Exception:
+            continue
+    return None
+
+
+def _cover_side(candidate):
+    """The shorter side a chosen candidate was measured at, or None.
+
+    `width`/`height` are what the image's own header bytes said (the finder
+    probes them, `mlo.cover_choice` ranks on them) — and `None` means the image
+    was never measured, which is not the same thing as "big enough".
+    """
+    row = candidate if isinstance(candidate, dict) else {}
+    try:
+        w = int(row.get("width") or 0)
+        h = int(row.get("height") or 0)
+    except (TypeError, ValueError):
+        return None
+    return min(w, h) if (w > 0 and h > 0) else None
+
+
 def cover_candidates(album_dir, cfg=None, *, limit=None):
     """The ranked cover candidates for one album, or None with nothing to ask.
 
@@ -1024,9 +1150,13 @@ def cover_candidates(album_dir, cfg=None, *, limit=None):
 
     The album's identity decides who is asked — the release's own id and its
     release group go to the Cover Art Archive by identity, the names go to the
-    meta-search — and the result is `mlo.cover_choice.cover_payload`'s body
-    (chosen, ranked candidates, notes, policy) plus the identity used, so a
-    caller can record it (`stage_cover_candidates`) or show it as it is.
+    meta-search — and it is also what the candidates are CHECKED against
+    (`mlo.cover_choice` rule 2): a name search answers with karaoke, tribute
+    and other-album rows too, and a row whose own release names another artist
+    or another album is rejected rather than ranked. The result is
+    `mlo.cover_choice.cover_payload`'s body (chosen, ranked candidates, notes,
+    policy, the identity they were checked against) plus the identity used, so
+    a caller can record it (`stage_cover_candidates`) or show it as it is.
     """
     from mlo import cover_choice
     from server import integrations as intg
@@ -1040,9 +1170,12 @@ def cover_candidates(album_dir, cfg=None, *, limit=None):
         artist, album, limit=limit or COVER_REVIEW_LIMIT,
         timeout=COVER_FETCH_TIMEOUT, cfg=cfg,
         release_group_mbid=rg, release_mbid=album_id)
+    identity = {"artist": artist, "album": album,
+                "tracks": _album_track_count(album_dir)}
     payload = cover_choice.cover_payload(
         found.get("results") or [], cfg,
-        sources=found.get("sources"), provider=found.get("provider"))
+        sources=found.get("sources"), provider=found.get("provider"),
+        identity=identity)
     payload["artist"] = artist
     payload["album"] = album
     payload["album_id"] = album_id
@@ -1057,7 +1190,10 @@ def stage_cover_candidates(album_dir, payload, cfg=None):
     there, the winner recorded as ``chosen``, every alternative behind it with
     the reason it lost, and the finder's notes — including any source that was
     skipped (a source needing a key says so rather than being worked around).
-    Other keys of a staged entry (the metadata step's own candidates) are kept.
+    The identity the candidates were checked against is recorded too, so the
+    screen can say what a candidate had to be (and why a karaoke or
+    other-album row sits at the bottom with its rejection). Other keys of a
+    staged entry (the metadata step's own candidates) are kept.
     """
     cfg = cfg or load_config()
     ranked = payload.get("candidates") or []
@@ -1080,6 +1216,7 @@ def stage_cover_candidates(album_dir, payload, cfg=None):
         # record is never orphaned by a rename.
         "album_id": payload.get("album_id"),
         "release_group": payload.get("release_group"),
+        "identity": payload.get("identity") or {},
         "provider": payload.get("provider"),
         "staged_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "results": ranked,
@@ -1115,6 +1252,17 @@ def run_cover_step(album_dir, cfg=None):
     picks one and the UI writes it through ``POST /api/cover/fromurl``. With it
     off the winner is applied here, exactly as before.
 
+    The floor is re-checked HERE, at the write, and not only where the winner
+    was picked: `mlo.cover_choice` already refuses a candidate below the
+    library's minimum (and one whose size was never measured while that minimum
+    is set), so a below-minimum image can only arrive here if that ranking is
+    ever wrong — and the file this step writes is the one that stays in the
+    library and the grader then flags. Nothing is downloaded or stored when it
+    does not clear the floor, and the note says so. A hand-applied cover
+    (``POST /api/cover/fromurl``) is deliberately NOT gated: the user picked
+    that exact image, and the picker lists below-floor rows for exactly that
+    reason (`server.main._cover_metrics` reports the shortfall as a warning).
+
     Never fatal, and never silent about a cover it could not get: the result is
     ``{"fetched", "applied", "source", "note", "staged", "candidates",
     "choice", "notes"}`` — the same shape `run_metadata_step` hands back to
@@ -1146,6 +1294,19 @@ def run_cover_step(album_dir, cfg=None):
             out["note"] = ("no cover found" if not payload.get("candidates") else
                            "no candidate could be used — "
                            + ((payload.get("notes") or [""])[-1]))
+            return out
+        # The WRITE gate (see the docstring): the floor is the same number the
+        # pick was ranked with — `policy_config` is where `cover_minimum` is
+        # derived, so this reads it from its one definition rather than from
+        # the payload the ranking left behind.
+        from mlo import cover_choice
+        floor = int(cover_choice.policy_config(cfg).get("cover_minimum") or 0)
+        side = _cover_side(chosen)
+        if floor and (side is None or side < floor):
+            measured = (f"{side}×{side} px, measured from the image itself"
+                        if side is not None else "size never measured")
+            out["note"] = (f"the chosen cover ({measured}) is below the minimum "
+                           f"{floor}×{floor} — nothing was written")
             return out
         url = str(chosen.get("big") or "")
         artist = payload.get("artist") or ""
@@ -1291,15 +1452,16 @@ def prefetch_album(album_dir, cfg=None):
     return out
 
 
-def acoustid_match(paths, cfg=None, progress=None, apply=False, expect=None):
+def acoustid_match(paths, cfg=None, progress=None, apply=False, expect=None,
+                   match=None):
     """Which release group the audio in these albums really is (AcoustID).
 
     Album folders or track paths; the tracks of each folder are fingerprinted
     and voted on as one album (see ``mlo.acoustid.match_release``). Returns
     ``{"available", "note", "ok", "code", "albums": [{"path",
     "release_group_id", "release_group_title", "release_group_type", "artists",
-    "score", "matched", "total", "recordings", "tagged", "status", "code",
-    "reason", "conflict", "conflicts", "skips", "failures"}]}``.
+    "score", "matched", "total", "recordings", "tagged", "writes", "status",
+    "code", "reason", "conflict", "conflicts", "skips", "failures"}]}``.
 
     ``available`` False with a human-readable ``note`` when no key/fpcalc is
     configured, and never an exception. Each row always carries its own
@@ -1319,10 +1481,22 @@ def acoustid_match(paths, cfg=None, progress=None, apply=False, expect=None):
 
     With *apply* the accepted match is also written into the files
     (`ACOUSTID_ID` + `ACOUSTID_FINGERPRINT`, the tags Picard writes and the
-    opt-in grading check reads) and ``tagged`` reports how many went in — the
-    wizard passes apply=True when the user accepts the match, which is the
-    only moment "this is really that release" is a statement the app can act
-    on. Fingerprints come from the lookup, so applying costs no extra fpcalc.
+    opt-in grading check reads), ``tagged`` reports how many went in and
+    ``writes`` carries every track's own outcome (``mlo.acoustid.write_tags``:
+    ``{path, ok, code, reason}``) — an album of .wv files is a real match that
+    cannot be tagged, and "0 tagged" without the reason was exactly the silent
+    answer that hid it. The wizard passes apply=True when the user accepts the
+    match, which is the only moment "this is really that release" is a
+    statement the app can act on.
+
+    *match* is that same row handed BACK: the release group and the per-path
+    recording ids (+ fingerprints) the apply=False pass already returned. With
+    it (and *apply*) nothing is fingerprinted and nothing is looked up — the
+    wizard's accept step used to re-run fpcalc and the whole lookup for a
+    result it had already been shown, so one transient network failure turned a
+    displayed match into zero tags. The recordings of a supplied match are
+    written straight from the payload, and a path outside these albums is
+    ignored.
     """
     cfg = cfg or load_config()
     try:
@@ -1337,39 +1511,50 @@ def acoustid_match(paths, cfg=None, progress=None, apply=False, expect=None):
         if album and album not in albums:
             albums.append(album)
 
-    if not acoustid.available(cfg):
+    supplied = _supplied_match(match) if apply else None
+    if supplied is None and not acoustid.available(cfg):
         return {"available": False,
                 "note": acoustid.acoustid_enabled_note(cfg) or "AcoustID unavailable",
                 "albums": [], "ok": False, "code": acoustid.check(cfg)["code"]}
 
     rows = []
     for album in albums:
-        row = {"path": album, "tagged": 0, **_ACOUSTID_ROW}
-        try:
-            tracks = _audio_files(album)[:acoustid.MAX_TRACKS]
-        except Exception:
-            traceback.print_exc()
-            tracks = []
-        try:
-            report = acoustid.match_release(
-                cfg, tracks, progress=progress,
-                expect=expect if isinstance(expect, dict) else _tag_candidate(album))
-        except Exception as e:
-            traceback.print_exc()
-            report = acoustid.error_report(f"AcoustID check failed: {e}",
-                                           total=len(tracks))
+        row = {"path": album, "tagged": 0, "writes": [], **_ACOUSTID_ROW}
+        candidate = (expect if isinstance(expect, dict)
+                     else _tag_candidate(album))
+        if supplied is not None:
+            # Applying a match the caller was ALREADY shown: no fpcalc, no
+            # lookup, no network (see the docstring).
+            report = _supplied_report(supplied, album, candidate)
+        else:
+            try:
+                tracks = _audio_files(album)[:acoustid.MAX_TRACKS]
+            except Exception:
+                traceback.print_exc()
+                tracks = []
+            try:
+                report = acoustid.match_release(cfg, tracks, progress=progress,
+                                                expect=candidate)
+            except Exception as e:
+                traceback.print_exc()
+                report = acoustid.error_report(f"AcoustID check failed: {e}",
+                                               total=len(tracks))
         match = report.get("match")
         if match:
             row.update({k: match.get(k) for k in _ACOUSTID_ROW})
             row["path"] = album
             if apply:
-                tagged = 0
-                for rec in match.get("recordings") or []:
-                    if acoustid.write_tags(rec.get("path"), rec.get("recording_id"),
-                                           rec.get("fingerprint"), cfg):
-                        tagged += 1
-                row["tagged"] = tagged
-                if tagged:
+                # Every track's own outcome, not a bare count: an unsupported
+                # container or a failed write is a fact the UI has to be able
+                # to say instead of "the files carry none of the tag families
+                # it targets".
+                writes = [acoustid.write_tags(rec.get("path"),
+                                              rec.get("recording_id"),
+                                              rec.get("fingerprint"), cfg)
+                          for rec in match.get("recordings") or []]
+                row["writes"] = writes
+                row["tagged"] = sum(1 for w in writes if w.get("ok"))
+                if row["tagged"]:
                     tagcache.invalidate_all()
         for key in ("status", "code", "reason", "conflict", "conflicts",
                     "skips", "failures"):
@@ -1383,6 +1568,191 @@ def acoustid_match(paths, cfg=None, progress=None, apply=False, expect=None):
             "ok": not errors,
             "code": errors[0].get("code") if errors else acoustid.OK,
             "albums": rows}
+
+
+def _supplied_match(match):
+    """A caller's own match payload, normalized — or None when unusable.
+
+    The shape is the album row `acoustid_match` itself answers with: the
+    release-group fields plus `recordings` (each with `path`, `recording_id`
+    and `fingerprint`). Anything without a usable recording list is not a
+    match, and the caller falls back to a real fingerprint run rather than
+    being told a write happened from an empty payload.
+    """
+    if not isinstance(match, dict):
+        return None
+    recs = []
+    for rec in match.get("recordings") or []:
+        if not isinstance(rec, dict) or not str(rec.get("path") or "").strip():
+            continue
+        recs.append({"path": os.path.normpath(str(rec["path"])),
+                     "recording_id": str(rec.get("recording_id") or ""),
+                     "fingerprint": str(rec.get("fingerprint") or ""),
+                     "title": rec.get("title") or "",
+                     "score": rec.get("score")})
+    if not recs:
+        return None
+    out = {"recordings": recs}
+    for key in ("release_group_id", "release_group_title",
+                "release_group_type", "score", "matched", "total"):
+        if match.get(key) is not None:
+            out[key] = match[key]
+    out["artists"] = [str(a) for a in (match.get("artists") or []) if str(a).strip()]
+    return out
+
+
+def _supplied_report(supplied, album, expect):
+    """The report for one album of a supplied match (`_supplied_match`).
+
+    Only the recordings that live in THIS album are written (a match may span
+    several folders of one queue), and the cross-check runs exactly as the
+    fingerprint pass ran it, so the apply reply's row is the same row the
+    wizard already showed — plus what the writes did.
+    """
+    from mlo import acoustid
+
+    recs = [dict(r) for r in supplied["recordings"] if _album_dir(r["path"]) == album]
+    total = int(supplied.get("total") or len(recs))
+    match = {
+        "release_group_id": supplied.get("release_group_id"),
+        "release_group_title": supplied.get("release_group_title"),
+        "release_group_type": supplied.get("release_group_type"),
+        "artists": supplied.get("artists") or [],
+        "score": supplied.get("score"),
+        "matched": len(recs),
+        "total": total,
+        "recordings": recs,
+    }
+    conflicts = acoustid.cross_check(match, expect)
+    return acoustid.report("matched",
+                           acoustid.CONFLICT if conflicts else acoustid.OK,
+                           "" if recs else
+                           "the supplied match carries no track of this album",
+                           match=match, conflicts=conflicts,
+                           total=total, fingerprinted=len(recs))
+
+
+def acoustid_submit(paths, cfg=None):
+    """Give AcoustID the fingerprints these files already carry.
+
+    Album folders or track paths. The fingerprint and the recording id are read
+    back OFF THE FILES (`ACOUSTID_FINGERPRINT` / `ACOUSTID_ID`, the pair
+    accepting a match wrote) and never recomputed: the tag is the identity the
+    user accepted, and re-fingerprinting would submit something the library
+    does not claim to be. Nothing is written here — this is the one
+    outward-facing step of the AcoustID path, and it owns no tag and no file,
+    exactly like the LRCLIB publish.
+
+    The duration comes from the file's own tech (AcoustID needs one and it is
+    not part of the fingerprint); a track whose duration cannot be read is
+    SKIPPED with its own reason rather than submitted with a guess. Returns
+    ``{"available", "note", "ok", "code", "submitted", "failed", "skips",
+    "submissions", "tracks"}``: ``submitted`` counts what the service accepted
+    (each with its submission id and status), and a refused user key comes back
+    in ``note`` with the service's own sentence. Never raises.
+    """
+    cfg = cfg or load_config()
+    try:
+        from mlo import acoustid
+    except ImportError as e:                      # pragma: no cover - stripped backend
+        return {"available": False, "note": f"acoustid unavailable: {e}",
+                "ok": False, "code": "unavailable", "submitted": 0,
+                "failed": 0, "skips": [], "submissions": [],
+                "tracks": {"total": 0, "submitted": 0, "skipped": 0}}
+
+    files = []
+    for p in paths or []:
+        try:
+            found = _audio_files(_album_dir(p))
+        except Exception:
+            traceback.print_exc()
+            found = []
+        for f in found:
+            if f not in files:
+                files.append(f)
+
+    chk = acoustid.check_submit(cfg)
+    if not chk["available"]:
+        return {"available": False, "note": chk["reason"], "ok": False,
+                "code": chk["code"], "submitted": 0, "failed": len(files),
+                "skips": [], "submissions": [],
+                "tracks": {"total": len(files), "submitted": 0, "skipped": 0}}
+
+    # Every file answers something: an item to submit, or a skip naming what it
+    # lacks (no AcoustID pair, an unreadable container). A file that vanishes
+    # from both lists would make `tracks.total` a number nobody can account for.
+    items, skips = [], []
+    for f in files:
+        item, skip = _submit_item(f)
+        if skip:
+            skips.append(skip)
+        elif item:
+            items.append(item)
+    res = acoustid.submit_fingerprints(cfg, items)
+    skips.extend(res["skips"])
+    return {"available": True,
+            "note": res["reason"] if not res["ok"] else "",
+            "ok": bool(res["ok"]),
+            "code": res["code"],
+            "submitted": res["submitted"],
+            "failed": res["failed"],
+            "skips": skips,
+            "submissions": res["submissions"],
+            "tracks": {"total": len(files), "submitted": res["submitted"],
+                       "skipped": len(skips)}}
+
+
+def _submit_item(path):
+    """(item, skip) for one file: exactly one of the two is set.
+
+    Reads only — `get_tag` for the pair and the text metadata, `tech` for the
+    duration — so submitting never touches the file it describes. A file with
+    no `ACOUSTID_FINGERPRINT` is a SKIP with that reason: there is nothing to
+    give AcoustID, and inventing one would submit audio the library never
+    claimed.
+    """
+    from mlo.audio import AudioFile
+
+    try:
+        af = AudioFile(path)
+        if af.audio is None:
+            return None, {"path": path, "code": "unreadable_file",
+                          "reason": (f"cannot read {os.path.basename(path)}: "
+                                     f"{af.error or 'no tag reader for this file'}")}
+        fingerprint = str(af.get_tag("ACOUSTID_FINGERPRINT") or "").strip()
+        if not fingerprint:
+            return None, {"path": path, "code": "no_fingerprint",
+                          "reason": "no ACOUSTID_FINGERPRINT tag to submit"}
+        # Duration: mutagen's stream info for audio, ffprobe's for a video
+        # container (a VideoHandle carries no `info`). AcoustID requires one and
+        # it is not part of the fingerprint, so a file that cannot state its
+        # own length is SKIPPED rather than submitted with a guess.
+        info = getattr(getattr(af, "audio", None), "info", None)
+        duration = 0.0
+        for value in (getattr(info, "length", None), (af.tech or {}).get("length")):
+            try:
+                duration = float(value or 0)
+            except (TypeError, ValueError):
+                duration = 0.0
+            if duration > 0:
+                break
+        item = {"path": path, "fingerprint": fingerprint,
+                "duration": duration,
+                "recording_id": str(af.get_tag("ACOUSTID_ID") or "").strip(),
+                "track": str(af.get_tag("TITLE") or "").strip(),
+                "artist": str(af.get_tag("ARTIST") or "").strip(),
+                "album": str(af.get_tag("ALBUM") or "").strip(),
+                "album_artist": str(af.get_tag("ALBUMARTIST") or "").strip()}
+        for key, tag in (("year", "DATE"), ("track_no", "TRACKNUMBER"),
+                         ("disc_no", "DISCNUMBER")):
+            value = str(af.get_tag(tag) or "").strip()
+            if value:
+                item[key] = value.split("-")[0].strip() if key == "year" else value
+        return item, None
+    except Exception:
+        traceback.print_exc()
+        return None, {"path": path, "code": "unreadable_file",
+                      "reason": f"could not read {os.path.basename(path)}"}
 
 
 def _tag_candidate(album_dir):

@@ -67,6 +67,10 @@ export default function SetupPage() {
   // The folder step's picker; the dialog saves the choice as it closes.
   const [picker, setPicker] = useState(false);
   const [busy, setBusy] = useState(false);
+  // The dependency row whose own Install/Update press is in flight. The
+  // page-level button settles the table through `busy` + `refetchDeps()` (the
+  // same mechanism a row press uses), and this only decides which row spins.
+  const [busyDep, setBusyDep] = useState<string | null>(null);
   // The password form (panel "password"). Kept apart from the draft because it
   // is not a config key: the server hashes it through /api/auth/*, never
   // through /api/config.
@@ -101,12 +105,18 @@ export default function SetupPage() {
     staleTime: 5 * 60 * 1000,
   });
   const deviceReason = deviceUnavailable(caps);
-  // What the "Install N missing" button would install, so the wizard only
-  // offers it when there is something to install — and only what this host can
-  // actually fetch: a Windows-only tool on Linux, or one the image already
-  // provides as a distro package, has nothing to download (the row's
-  // `installable`), so counting it would offer a button that can only fail.
+  // What the page-level button's count and label are about, and only what this
+  // host can actually fetch: a Windows-only tool on Linux, or one the image
+  // already provides as a distro package, has nothing to download (the row's
+  // `installable`), so counting it would make the button promise work it can
+  // never do.
   const missing = (deps?.tools ?? []).filter((t) => t.state === "missing" && t.installable !== false);
+  // Rows behind upstream, the same rule as `missing`: a tool this host cannot
+  // install is not work the button can do. The page-level press takes these
+  // too (the server installs an installed copy's NEWEST release, not the pin),
+  // so the button's label has to say so — the wizard's step is where the
+  // screenshot for this was taken.
+  const updates = (deps?.tools ?? []).filter((t) => t.state === "update" && t.installable !== false);
 
   // Catalogues the pickers draw their options from. Fetched only once the
   // steps that need them are reachable, so the folder step costs one request.
@@ -198,8 +208,14 @@ export default function SetupPage() {
     return field.options;
   };
 
-  const installDeps = async (keys?: string[]) => {
+  /** `keys` undefined = everything missing or behind (the page button);
+   *  `keys` = [one tool] from that row's own button. `pressed` is the row that
+   *  asked, so it carries the spinner — the settling is the same either way:
+   *  this `busy` flag plus `refetchDeps()`, never a state the server has not
+   *  answered yet. */
+  const installDeps = async (keys?: string[], pressed?: string) => {
     setBusy(true);
+    setBusyDep(pressed ?? null);
     try {
       const r = await api.installDependencies(keys);
       const summary = installSummary(r.results);
@@ -210,6 +226,7 @@ export default function SetupPage() {
       toast.error(String(e));
     } finally {
       setBusy(false);
+      setBusyDep(null);
     }
   };
 
@@ -608,22 +625,24 @@ export default function SetupPage() {
                 <button className="btn-ghost !py-1 text-xs" onClick={() => refetchDeps()} disabled={busy}>
                   <RotateCcw className="h-3 w-3" /> Refresh
                 </button>
-                {/* Only offered when there IS something missing: with an empty
-                    list the press sent `keys: []`, which the server read as
-                    "every tool" and answered with a full reinstall of all
-                    sixteen. */}
-                {missing.length > 0 && (
-                  <button
-                    className="btn-ghost !py-1 text-xs"
-                    onClick={() => installDeps(missing.map((t) => t.key))}
-                    disabled={busy || !!deviceReason}
-                    title={deviceReason ?? undefined}
-                  >
-                    Install {missing.length} missing
-                  </button>
-                )}
-                <button className="btn-primary !py-1 text-xs" onClick={() => installDeps()} disabled={busy || !!deviceReason} title={deviceReason ?? undefined}>
-                  {busy ? "Installing…" : "Install all"}
+                {/* ONE page-level button: it installs the missing tools and
+                    updates the rows behind upstream on the same press (the
+                    server's key-less request takes both), so its label says
+                    which of the two is the bulk of the work waiting. The
+                    counts live in the title/aria-label, where a phone-width
+                    button label cannot carry them. */}
+                <button
+                  className="btn-primary !py-1 text-xs"
+                  onClick={() => installDeps()}
+                  disabled={busy || !!deviceReason || (missing.length === 0 && updates.length === 0)}
+                  title={
+                    deviceReason ??
+                    `Installs the ${missing.length} missing tool(s) and updates the ${updates.length} behind; an installed tool takes the newest release upstream has, and one already at it is left alone`
+                  }
+                  aria-label={`${updates.length ? "Update all" : "Install all"}: ${missing.length} missing, ${updates.length} update(s)`}
+                >
+                  {busy && !busyDep ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                  {busy && !busyDep ? "Installing…" : updates.length ? "Update all" : "Install all"}
                 </button>
               </div>
               {/* One honest line per surface: what this build can and cannot do,
@@ -643,9 +662,10 @@ export default function SetupPage() {
                       <th className="th">Tool</th>
                       <th className="th">Status</th>
                       <th className="th">Version</th>
-                      <th className="th" title="Newest release upstream has published. Install still fetches the reviewed pinned version.">
+                      <th className="th" title="Newest release upstream has published. An installed tool takes exactly that one when you press Update; only a first install fetches the reviewed pinned version.">
                         Available
                       </th>
+                      <th className="th">Action</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -694,6 +714,29 @@ export default function SetupPage() {
                             <span className="text-zinc-600 italic">checking…</span>
                           ) : (
                             "—"
+                          )}
+                        </td>
+                        {/* The row's own Install/Update, mirroring the chip
+                            beside it: a tool this device cannot install gets no
+                            button, and the row's own note/install_note is the
+                            hover text, so the button never promises more than
+                            the row it belongs to. */}
+                        <td className="td">
+                          {(t.state === "missing" || t.state === "update") && (
+                            <button
+                              className="btn-ghost !py-0.5 text-[11px] tap"
+                              onClick={() => installDeps([t.key], t.key)}
+                              disabled={busy || !!deviceReason || t.installable === false}
+                              title={
+                                deviceReason ??
+                                (t.state === "update"
+                                  ? t.note ?? (t.upstream_version ? `Upstream: ${t.upstream_version}` : undefined)
+                                  : t.install_note ?? t.note ?? undefined)
+                              }
+                            >
+                              {busyDep === t.key ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                              {t.state === "update" ? "Update" : "Install"}
+                            </button>
                           )}
                         </td>
                       </tr>

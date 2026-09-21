@@ -14,6 +14,18 @@ Verified against https://acoustid.org/webservice (2026-09-16):
                            "releasegroups": [{"id", "title", "type"}]}]}]}
     rate limit: 3 requests/second.
 
+Submissions are a second, independent operation (read 2026-09-21):
+
+    POST https://api.acoustid.org/v2/submit
+      client=<application API key>   (required - the same key as lookup)
+      user=<the USER key>            (required - a different key, per account)
+      duration.N=<seconds>  fingerprint.N=<fpcalc fingerprint>
+      mbid.N=<MusicBrainz recording>  track.N / artist.N / album.N /
+      albumartist.N / year.N / trackno.N / discno.N   (all optional)
+      source.N=1 (tagged) | 3 (fingerprint only)
+    -> {"status": "ok", "submissions": [{"index": n, "id": ..., "status": "pending"}]}
+    at most 100 fingerprints per call, processed asynchronously.
+
 The fingerprints themselves are produced by Chromaprint's `fpcalc`
 (github.com/acoustid/chromaprint, pinned in mlo/fetchdeps.py). No API key is
 hard-coded anywhere - it comes from config (`acoustid_api_key`).
@@ -27,7 +39,7 @@ Nothing here raises at a caller, and nothing here is silent. Every stage
 answers with ``{"ok": bool, "code": str, "reason": str, ...}``, where `code` is
 one of the CODES below and `reason` is the sentence a UI can show verbatim:
 
-    no_api_key / fpcalc_missing / no_tracks   what the config lacks
+    no_api_key / no_user_key / fpcalc_missing / no_tracks   what the config lacks
     not_audio / no_fingerprint / too_short    the file carries no fingerprintable audio (SKIPS)
     file_missing                              the path handed in is not a file
     fpcalc_failed                             fpcalc could not be run, or it failed on the file
@@ -35,6 +47,20 @@ one of the CODES below and `reason` is the sentence a UI can show verbatim:
     bad_response                              HTTP 200 whose body is not a usable AcoustID answer
     no_match                                  the service answered correctly and knew nothing
     conflict                                  the fingerprint and the tags name different releases
+
+A tag WRITE answers in the same shape and names its own causes (`write_tags`),
+because "0 tagged" on its own reads as "the files carry none of the tag
+families it targets" - which is what the wizard used to tell users about files
+it had just matched:
+
+    unsupported_container   .ape/.wv/.dsf/... have no tag writer at all (mlo.audio)
+    unreadable_file         the container has a writer but the file could not be read
+    no_recording_id / no_fingerprint   the PAIR is never split: a lone
+                            ACOUSTID_ID fails the grader's pair check, so a
+                            missing fingerprint is reported, never written
+                            around
+    write_failed / verify_failed   the writer refused, or the pair did not read
+                            back off the file afterwards
 
 A fingerprint that could not be taken (`fpcalc_failed`) and a lookup that
 could not be answered (`lookup_failed` / `bad_response`) are their OWN codes:
@@ -60,12 +86,26 @@ from .paths import DEPS_DIR
 from .subproc import run_tool
 
 API_URL = "https://api.acoustid.org/v2/lookup"
+# Submission is a SEPARATE endpoint and a separate credential: `client` is the
+# same application key, `user` is the key AcoustID hands a signed-in person.
+# An application key cannot submit anything, so a lookup-only config is a named
+# refusal here, never a broken request.
+SUBMIT_API_URL = "https://api.acoustid.org/v2/submit"
 _UA = "la-musica/2.1"
 _META = "recordings releasegroups compress"
 _FPCALC_TIMEOUT = 120
 _HTTP_TIMEOUT = 30
 # AcoustID allows 3 requests/second; stay just under it.
 _MIN_INTERVAL = 0.34
+# AcoustID takes at most this many fingerprints in one v2/submit call, so a
+# larger set is split into batches of this size (a submission carries its own
+# `index` back, which is how a batch's answers are matched to their tracks).
+MAX_SUBMIT = 100
+# `source.N` in a submission: 1 = the fingerprint came from a file whose tags
+# already named the recording, 3 = fingerprint only, no metadata. AcoustID's
+# own vocabulary (the tquery sources libmusicbrainz defines).
+SOURCE_TAGGED = 1
+SOURCE_FINGERPRINT = 3
 # A whole album is fingerprinted at most this far - the tail of a long album
 # adds no release-group evidence worth the extra lookups.
 MAX_TRACKS = 12
@@ -78,11 +118,15 @@ MIN_DURATION = 5.0
 OK = "ok"
 DISABLED = "disabled"
 NO_API_KEY = "no_api_key"
+# Submitting needs the USER key on top of the application key; a config with
+# only the latter can look up but can never give AcoustID anything back.
+NO_USER_KEY = "no_user_key"
 NO_FPCALC = "fpcalc_missing"
 NO_TRACKS = "no_tracks"
 NO_FILE = "file_missing"
 NOT_AUDIO = "not_audio"
 NO_FINGERPRINT = "no_fingerprint"
+NO_DURATION = "no_duration"
 TOO_SHORT = "too_short"
 FPCALC_FAILED = "fpcalc_failed"
 LOOKUP_FAILED = "lookup_failed"
@@ -91,9 +135,20 @@ NO_MATCH = "no_match"
 CONFLICT = "conflict"
 INTERNAL = "internal"
 
+# Tag-write outcomes (`write_tags`). They name the CAUSE, because "nothing was
+# written" on its own reads as "the file carries none of the tag families it
+# targets" - which is exactly what the wizard used to say for a .wv, a .dsf or
+# a write that failed.
+NO_RECORDING_ID = "no_recording_id"
+UNSUPPORTED = "unsupported_container"
+UNREADABLE = "unreadable_file"
+WRITE_FAILED = "write_failed"
+VERIFY_FAILED = "verify_failed"
+
 _NOTES = {
     DISABLED: "AcoustID disabled in settings",
     NO_API_KEY: "no API key",
+    NO_USER_KEY: "no user API key",
     NO_FPCALC: "fpcalc not installed",
     NO_TRACKS: "no audio files to fingerprint",
 }
@@ -283,23 +338,18 @@ def _service_error(data):
     return ""
 
 
-def _request(cfg, fp):
-    """One POST to the lookup endpoint.
+def _post(url, form, what):
+    """One form POST to an AcoustID endpoint -> {"ok", "code", "reason", "payload"}.
 
-    -> {"ok", "code", "reason", "results"}; `results` is the service's list
-    on success, and every transport, HTTP and body failure is a named code.
+    The transport half of both operations: build, throttle, send, decode, and
+    turn every transport/HTTP/body failure into a named code with `what`
+    ("lookup" / "submission") in the sentence. `payload` is the service's JSON
+    object on success — the caller validates the part of it its own operation
+    promises (`results` / `submissions`).
     """
-    key = str((cfg or {}).get("acoustid_api_key") or "").strip()
-    if not key:
-        return _result(False, NO_API_KEY, _NOTES[NO_API_KEY], results=[])
-    body = urllib.parse.urlencode({
-        "client": key,
-        "duration": int(round(float(fp.get("duration") or 0))),
-        "fingerprint": fp.get("fingerprint") or "",
-        "meta": _META,
-    }).encode("utf-8")
+    body = urllib.parse.urlencode(form).encode("utf-8")
     req = urllib.request.Request(
-        API_URL, data=body,
+        url, data=body,
         headers={"User-Agent": _UA,
                  "Content-Type": "application/x-www-form-urlencoded"},
     )
@@ -314,32 +364,53 @@ def _request(cfg, fp):
         except Exception:
             detail = ""
         return _result(False, LOOKUP_FAILED,
-                       f"AcoustID lookup failed: HTTP {e.code}"
+                       f"AcoustID {what} failed: HTTP {e.code}"
                        + (f" - {detail}" if detail else f" {_short(getattr(e, 'reason', ''))}"),
-                       results=[])
+                       payload=None)
     except (socket.timeout, TimeoutError):
         return _result(False, LOOKUP_FAILED,
-                       f"AcoustID lookup timed out after {_HTTP_TIMEOUT}s", results=[])
+                       f"AcoustID {what} timed out after {_HTTP_TIMEOUT}s",
+                       payload=None)
     except (urllib.error.URLError, OSError) as e:
         return _result(False, LOOKUP_FAILED,
-                       f"AcoustID lookup failed: {_short(e)}", results=[])
+                       f"AcoustID {what} failed: {_short(e)}", payload=None)
 
     try:
         payload = json.loads(bytes(raw).decode("utf-8", "replace"))
     except ValueError:
         return _result(False, BAD_RESPONSE,
                        f"AcoustID returned a body that is not JSON "
-                       f"({_short(raw)})", results=[])
+                       f"({_short(raw)})", payload=None)
     if not isinstance(payload, dict):
         return _result(False, BAD_RESPONSE,
-                       "AcoustID returned JSON that is not an object", results=[])
+                       "AcoustID returned JSON that is not an object", payload=None)
     if payload.get("status") != "ok":
         detail = _service_error(payload)
         return _result(False, BAD_RESPONSE,
                        "AcoustID answered with an error"
                        + (f": {detail}" if detail else f" (status {payload.get('status')!r})"),
-                       results=[])
-    results = payload.get("results")
+                       payload=None)
+    return _result(True, OK, "", payload=payload)
+
+
+def _request(cfg, fp):
+    """One POST to the lookup endpoint.
+
+    -> {"ok", "code", "reason", "results"}; `results` is the service's list
+    on success, and every transport, HTTP and body failure is a named code.
+    """
+    key = str((cfg or {}).get("acoustid_api_key") or "").strip()
+    if not key:
+        return _result(False, NO_API_KEY, _NOTES[NO_API_KEY], results=[])
+    got = _post(API_URL, {
+        "client": key,
+        "duration": int(round(float(fp.get("duration") or 0))),
+        "fingerprint": fp.get("fingerprint") or "",
+        "meta": _META,
+    }, "lookup")
+    if not got["ok"]:
+        return _result(False, got["code"], got["reason"], results=[])
+    results = got["payload"].get("results")
     if not isinstance(results, list):
         return _result(False, BAD_RESPONSE,
                        "AcoustID's response carried no result list", results=[])
@@ -471,22 +542,288 @@ def write_tags(path, recording_id, fingerprint=None, cfg=None):
     """Write the AcoustID identity tags for one accepted match.
 
     `ACOUSTID_ID` (the MusicBrainz recording) and `ACOUSTID_FINGERPRINT` are
-    what Picard writes, and what the opt-in grading check looks for. Returns
-    False when the file is unreadable or either write fails; never raises.
+    what Picard writes, and what the opt-in grading check looks for. The two go
+    in as ONE write (a second save would remux a video container twice), and
+    the PAIR is never split: the grader fails a file carrying one half alone
+    (`mlo.grader`), so a missing fingerprint is reported instead of an ID being
+    written by itself.
+
+    -> {"path", "ok", "code", "reason", "output"}. `ok` is only true once both
+    tags READ BACK off the file — a .wv, a .dsf or a .ape has no writer at all
+    (`AudioFile.kind is None`), and reporting that file as tagged is exactly
+    the silent lie this shape exists to end. `code` is one of the write codes
+    (unsupported_container / unreadable_file / no_recording_id /
+    no_fingerprint / write_failed / verify_failed), `reason` is the sentence a
+    UI shows verbatim, and `output` names the file that now holds the data when
+    a video container was remuxed (that can change the extension). Never
+    raises.
     """
-    if not recording_id:
-        return False
+    out = {"path": path, "ok": False, "code": INTERNAL, "reason": "",
+           "output": None}
+    if not str(recording_id or "").strip():
+        out.update(code=NO_RECORDING_ID,
+                   reason="no AcoustID recording id to write")
+        return out
+    if not str(fingerprint or "").strip():
+        out.update(code=NO_FINGERPRINT,
+                   reason=("refusing to write ACOUSTID_ID without "
+                           "ACOUSTID_FINGERPRINT (the fingerprint is missing)"))
+        return out
+    if not path or not os.path.isfile(path):
+        out.update(code=NO_FILE, reason=f"no such file: {path}")
+        return out
+    base = os.path.basename(str(path))
     try:
         from .audio import AudioFile
+
         af = AudioFile(path)
+        if af.kind is None:
+            # `server.soulseek_auto._AUDIO_EXTS` fingerprints a dozen formats
+            # (ape/wv/dsf/dff/alac/oga/mka/wma/shn/tta/mpc/mp2) that mlo.audio
+            # has no writer for: a match on one of those is real, and the tag
+            # can only ever be written by converting the file first.
+            out.update(code=UNSUPPORTED,
+                       reason=(f"unsupported container: {os.path.splitext(str(path))[1].lower()}"
+                               f" (this app cannot write tags to {base})"))
+            return out
         if af.audio is None:
-            return False
-        ok = bool(af.set_tag("ACOUSTID_ID", str(recording_id)))
-        if fingerprint:
-            ok = bool(af.set_tag("ACOUSTID_FINGERPRINT", str(fingerprint))) and ok
-        return ok
-    except Exception:
-        return False
+            out.update(code=UNREADABLE,
+                       reason=(f"cannot read {base}: "
+                               f"{af.error or 'no tag reader for this file'}"))
+            return out
+
+        tags = {"ACOUSTID_ID": str(recording_id),
+                "ACOUSTID_FINGERPRINT": str(fingerprint)}
+        if af.is_video:
+            # One ffmpeg stream copy for both tags; set_tag would rewrite the
+            # whole container once per tag.
+            ok = bool(af.set_video_tags(tags))
+        else:
+            # Batching, the mlo/audio.py way: defer_save(on) marks the writes
+            # dirty and defer_save(False) flushes them in a single container
+            # write, whose result is the thing reported.
+            af.defer_save(True)
+            ok = bool(af.set_tag("ACOUSTID_ID", tags["ACOUSTID_ID"]))
+            ok = bool(af.set_tag("ACOUSTID_FINGERPRINT",
+                                 tags["ACOUSTID_FINGERPRINT"])) and ok
+            ok = bool(af.defer_save(False)) and ok
+        if not ok:
+            out.update(code=WRITE_FAILED,
+                       reason=(f"could not write {base}: "
+                               f"{af.error or 'the tag writer refused'}"))
+            return out
+
+        # Read the pair BACK off the file: a writer that answered True and
+        # stored nothing (the other spelling of the tag, a container that
+        # dropped it) must not be reported as a tagged file.
+        got_id = str(af.get_tag("ACOUSTID_ID") or "").strip()
+        got_fp = str(af.get_tag("ACOUSTID_FINGERPRINT") or "").strip()
+        if got_id != tags["ACOUSTID_ID"] or got_fp != tags["ACOUSTID_FINGERPRINT"]:
+            out.update(
+                code=VERIFY_FAILED,
+                reason=(f"{base} does not carry the pair it was written: "
+                        f"ACOUSTID_ID={got_id or 'missing'}, ACOUSTID_FINGERPRINT="
+                        f"{('present' if got_fp else 'missing')}"))
+            return out
+        out.update(ok=True, code=OK, reason="",
+                   output=af.tag_output_path if af.container_changed else None)
+        return out
+    except Exception as e:
+        out.update(code=WRITE_FAILED, reason=f"could not write {base}: {e}")
+        return out
+
+
+# --------------------------------------------------------------------------- #
+# Submission (v2/submit)
+# --------------------------------------------------------------------------- #
+def check_submit(cfg=None):
+    """{"available", "code", "reason"} — why fingerprints can(not) be sent.
+
+    Submitting needs BOTH keys: `client` is the application key lookups already
+    use, `user` is the one AcoustID hands a signed-in person — a different key,
+    and the only thing that proves whose submission it is. `submit_fingerprints`
+    and `verify_user_key` both start here, so a missing key is a named answer
+    and never a request the service has to refuse.
+    """
+    cfg = cfg or {}
+    if not cfg.get("acoustid_enabled"):
+        return _result(False, DISABLED, _NOTES[DISABLED], available=False)
+    if not str(cfg.get("acoustid_api_key") or "").strip():
+        return _result(False, NO_API_KEY, _NOTES[NO_API_KEY], available=False)
+    if not str(cfg.get("acoustid_user_key") or "").strip():
+        return _result(False, NO_USER_KEY, _NOTES[NO_USER_KEY], available=False)
+    return _result(True, OK, "", available=True)
+
+
+def _submit_form(user, items):
+    """The indexed form fields for one batch of submissions.
+
+    Indices are per batch (0..n-1), which is the shape the service documents,
+    and its answer's `index` is therefore a position in this batch.
+    """
+    form = {"client": str(user["client"]), "user": str(user["user"])}
+    for n, item in enumerate(items):
+        form[f"duration.{n}"] = int(round(float(item.get("duration") or 0)))
+        form[f"fingerprint.{n}"] = str(item.get("fingerprint") or "")
+        mbid = str(item.get("mbid") or item.get("recording_id") or "").strip()
+        if mbid:
+            form[f"mbid.{n}"] = mbid
+        for key, field in (("track", "track"), ("artist", "artist"),
+                           ("album", "album"),
+                           ("album_artist", "albumartist"),
+                           ("year", "year"), ("track_no", "trackno"),
+                           ("disc_no", "discno")):
+            value = str(item.get(key) or "").strip()
+            if value:
+                form[f"{field}.{n}"] = value
+        # 1 = the fingerprint came from a file whose tags named the recording,
+        # 3 = fingerprint only. A source may be forced by the caller.
+        try:
+            source = int(item.get("source"))
+        except (TypeError, ValueError):
+            source = SOURCE_TAGGED if mbid else SOURCE_FINGERPRINT
+        form[f"source.{n}"] = source
+    return form
+
+
+def submit_fingerprints(cfg, items):
+    """Give AcoustID the fingerprints + metadata a set of tracks carries.
+
+    `items` are `{"path", "fingerprint", "duration", "recording_id"/"mbid",
+    "track", "artist", "album", "album_artist", "year", "track_no",
+    "disc_no"}` — everything but `path`/`fingerprint`/`duration` is optional,
+    and the caller reads them off the files (nothing is fingerprinted here).
+    A track without a fingerprint or without a duration is SKIPPED with its own
+    code and reason before any request: the service cannot store half an entry,
+    and a guessed duration would put a wrong one in a public database.
+
+    Batches of MAX_SUBMIT (AcoustID's own per-call limit) go out in order, and
+    the service's answer is reported as it gives it: `submitted` counts the
+    submissions it accepted (each with its id and status), a refused user key
+    is its own sentence ("invalid user API key (code 8)") carried verbatim, and
+    the first refused batch stops the rest — ten more batches cannot be
+    accepted by a key the first one was refused for.
+
+    -> {"ok", "code", "reason", "submitted", "failed", "skips", "submissions",
+        "batches"}. Never raises.
+    """
+    cfg = cfg or {}
+    items = [dict(item) for item in (items or []) if isinstance(item, dict)]
+    ready, skips = [], []
+    for item in items:
+        if not str(item.get("fingerprint") or "").strip():
+            skips.append({"path": item.get("path"), "code": NO_FINGERPRINT,
+                          "reason": "no fingerprint to submit"})
+            continue
+        try:
+            duration = float(item.get("duration") or 0)
+        except (TypeError, ValueError):
+            duration = 0.0
+        if duration <= 0:
+            skips.append({"path": item.get("path"), "code": NO_DURATION,
+                          "reason": "the track's duration is unknown, so its "
+                                    "fingerprint cannot be submitted"})
+            continue
+        item["duration"] = duration
+        ready.append(item)
+
+    chk = check_submit(cfg)
+    if not chk["available"]:
+        return _result(False, chk["code"], chk["reason"], submitted=0,
+                       failed=len(ready), skips=skips, submissions=[],
+                       batches=[])
+    if not ready:
+        return _result(False, NO_TRACKS,
+                       "no track carries a fingerprint to submit",
+                       submitted=0, failed=0, skips=skips, submissions=[],
+                       batches=[])
+
+    who = {"client": str(cfg.get("acoustid_api_key")).strip(),
+           "user": str(cfg.get("acoustid_user_key")).strip()}
+    accepted, batches, failed = [], [], 0
+    code, reason = OK, ""
+    for start in range(0, len(ready), MAX_SUBMIT):
+        batch = ready[start:start + MAX_SUBMIT]
+        got = _post(SUBMIT_API_URL, _submit_form(who, batch), "submission")
+        batches.append({"ok": got["ok"], "code": got["code"],
+                        "reason": got["reason"], "count": len(batch)})
+        if not got["ok"]:
+            code, reason = got["code"], got["reason"]
+            failed += len(ready) - start
+            break
+        submissions = got["payload"].get("submissions")
+        if not isinstance(submissions, list):
+            code, reason = (BAD_RESPONSE,
+                            "AcoustID answered ok but carried no submission list")
+            batches[-1].update(ok=False, code=code, reason=reason)
+            failed += len(ready) - start
+            break
+        answers = {}
+        for sub in submissions:
+            if not isinstance(sub, dict):
+                continue
+            try:
+                answers[int(sub.get("index", 0))] = sub
+            except (TypeError, ValueError):
+                continue
+        for i, item in enumerate(batch):
+            sub = answers.get(i)
+            if sub is None:
+                # The batch was accepted but this entry has no answer: report
+                # it as unwritten rather than as a tag that landed.
+                failed += 1
+                code, reason = (BAD_RESPONSE,
+                                f"AcoustID accepted the batch but answered for "
+                                f"{len(answers)} of {len(batch)} submissions")
+                accepted.append({"path": item.get("path"), "index": start + i,
+                                 "id": None, "status": None})
+                continue
+            accepted.append({"path": item.get("path"), "index": start + i,
+                             "id": sub.get("id"), "status": sub.get("status")})
+    landed = [row for row in accepted if row.get("id") is not None]
+    return _result(not failed and code == OK, code, reason,
+                   submitted=len(landed), failed=failed, skips=skips,
+                   submissions=landed, batches=batches)
+
+
+# The probe submission `verify_user_key` sends, when the caller has no
+# fingerprint of its own: PROBE_FINGERPRINT with no mbid, no title and no
+# artist (source 3, "fingerprint only"), so nothing in it can ever attach wrong
+# metadata to a recording — which is the one thing a credential probe must not
+# do. A fingerprint-only submission with no recording to point at is what
+# AcoustID's own unmatched queue is made of.
+def verify_user_key(cfg=None, fingerprint=None, duration=None):
+    """Does the live service accept this USER key? One probe submission.
+
+    A lookup proves the APPLICATION key; only a submission can prove the user
+    key, so the probe is the cheapest honest one: PROBE_FINGERPRINT submitted
+    as a fingerprint-only entry (source 3, no mbid, no title, no artist), which
+    cannot attach wrong metadata to any recording. A working key answers "ok"
+    with the submission AcoustID took (its id and status — "pending" is the
+    documented answer, submissions are processed asynchronously) and a refused
+    one answers with the service's own sentence ("HTTP 400 - invalid user API
+    key (code 8)") verbatim, which is the whole reason this exists.
+
+    -> {"ok", "code", "reason", "id", "status", "submitted"}: `ok` means the
+    KEY was ACCEPTED, `code` is no_user_key / no_api_key / disabled when the
+    config cannot try at all and lookup_failed / bad_response when the service
+    refused or mis-answered. Never raises.
+    """
+    chk = check_submit(cfg)
+    if not chk["available"]:
+        return _result(False, chk["code"], chk["reason"], submitted=0,
+                       id=None, status=None)
+    body = {"fingerprint": str(fingerprint or PROBE_FINGERPRINT),
+            "duration": float(duration or PROBE_DURATION),
+            "source": SOURCE_FINGERPRINT}
+    got = submit_fingerprints(cfg, [body])
+    if not got["ok"]:
+        return _result(False, got["code"], got["reason"],
+                       submitted=got.get("submitted") or 0, id=None,
+                       status=None)
+    first = (got.get("submissions") or [{}])[0]
+    return _result(True, OK, "", submitted=got.get("submitted") or 0,
+                   id=first.get("id"), status=first.get("status"))
 
 
 # --------------------------------------------------------------------------- #
@@ -522,14 +859,29 @@ def error_report(reason, code=INTERNAL, total=0):
     return report("error", code, reason, total=total)
 
 
+def _quorum(total):
+    """How many tracks of an album a release group must own to decide it.
+
+    `max(2, ceil(total * 0.4))` for a real album: one track out of twelve is a
+    comp track, not the album. A ONE-track album (a single, a one-track rip)
+    has no second track to corroborate anything, and the old floor made it
+    unmatchable BY CONSTRUCTION — AcoustID identified the only track and the
+    wizard still said "no match". So the rule is: half the album, at least two,
+    except when there is nothing to corroborate.
+    """
+    return 1 if total <= 1 else max(2, math.ceil(total * 0.4))
+
+
 def match_release(cfg, paths, progress=None, expect=None):
     """Modal release group across an album's tracks, and why it has none.
 
     Rule: a release group must own at least `max(2, ceil(total * 0.4))` of the
-    tracks attempted (`total`, capped at MAX_TRACKS) and their mean score must
-    reach `acoustid_min_score`. Single-track hits therefore never decide an
-    album. A track with no fingerprintable audio (a video container, a clip
-    under MIN_DURATION seconds, an empty fingerprint) is a SKIP with a reason;
+    tracks attempted (`total`, capped at MAX_TRACKS) — or that one track when
+    the album only has one — and their mean score must reach
+    `acoustid_min_score`. A single-track album therefore decides on its one
+    identified track; a single hit inside a larger album still never does. A
+    track with no fingerprintable audio (a video container, a clip under
+    MIN_DURATION seconds, an empty fingerprint) is a SKIP with a reason;
     a fingerprint or lookup that failed is a FAILURE with a reason, and the
     first transport failure ends the album's lookups (the service is down, the
     key is wrong or the rate limit hit - eleven more timeouts cannot help). A
@@ -590,7 +942,7 @@ def match_release(cfg, paths, progress=None, expect=None):
             except Exception:
                 pass
 
-    quorum = max(2, math.ceil(total * 0.4))
+    quorum = _quorum(total)
     best = None
     for gid, entry in groups.items():
         matched = len(entry["recordings"])

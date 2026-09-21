@@ -29,6 +29,17 @@ What this file holds, and why each assertion is here (see
     route and Apple's song search are asked), and a track NOBODY stated
     anything about is reported as such: `answers` empty, `sources` naming the
     ladder's stage — so a caller can tell "detected clean" from "nobody spoke".
+  * a value the file ALREADY carries is echoed with its provenance
+    (`sources` = "existing-tag") and a `status` saying it was not re-checked,
+    so the readout can never show a value beside "source unknown" again;
+    `force=True` is the re-rate that asks those files and writes what the
+    sources state — and even then an INVENTED fallback never overwrites a
+    stored rating. The endpoint that carries both (`POST
+    /api/mb/advisory/fetch`) is exercised here too: a dropped `force` or
+    `status` is a re-rate button that silently does nothing.
+  * ONE source asked once per pressing keeps its STRONGEST answer (1 > 0 > 2):
+    a clean answer for the first ISRC must not suppress an explicit answer for
+    a later one of the same track.
 
 Run:  python tools/test_advisory_pipeline.py
 """
@@ -124,6 +135,24 @@ stub_http(dict(NO_APPLE, **{
 }))
 assert intg.resolve_advisory_route(isrc=[FIRST_ISRC, SECOND_ISRC],
                                    cfg=CFG)["answers"] == {"deezer-isrc": 1}
+
+# ... and when Deezer holds BOTH pressings and they disagree, the source's
+# STRONGEST answer is the one that counts: the first pressing's clean answer
+# used to win by ask order (`setdefault`), so a track Deezer itself flags
+# explicit was written 0
+clear()
+calls = stub_http(dict(NO_APPLE, **{
+    "api.deezer.com/track/isrc:" + FIRST_ISRC: {
+        "explicit_lyrics": False, "explicit_content_lyrics": 0},
+    "api.deezer.com/track/isrc:" + SECOND_ISRC: {
+        "explicit_lyrics": True, "explicit_content_lyrics": 1},
+    "api.deezer.com": {"error": {"type": "DataException"}},
+}))
+route = intg.resolve_advisory_route(isrc=FIRST_ISRC + "; " + SECOND_ISRC,
+                                    cfg=CFG)
+assert route["value"] == 1 and route["source"] == "deezer-isrc", route
+assert route["answers"] == {"deezer-isrc": 1}, route
+assert len(gets(calls, "api.deezer.com")) == 2, calls
 
 # --------------------------------------------------------------------------- #
 # 2) A track with NO ISRC and NO MusicBrainz id: the name routes rate it
@@ -355,6 +384,44 @@ try:
                               FILES[3]: {"deezer-isrc": 0}}, out
     assert out["sources"][FILES[0]] == "deezer-isrc", out
     assert out["sources"][FILES[2]] == "fallback", out
+
+    # ----------------------------------------------------------------------- #
+    # 5b) The wizard's readout, end to end. A value already on the file is
+    #     ECHOED with its provenance and marked "not re-checked", and `force`
+    #     is the re-rate that asks and writes. The screenshot behind this
+    #     read "0 (not explicit) · source unknown" on every row with "0
+    #     value(s) written" — a 0 an earlier run's fallback had written, never
+    #     re-asked, with nobody's name on it.
+    # ----------------------------------------------------------------------- #
+    FakeAudio.written[FILES[1]]["ITUNESADVISORY"] = "0"    # the invented 0
+    clear()
+    stub_http(deezer_routes())      # Deezer states explicit for this ISRC
+    out = imports.fetch_advisories([ALBUM], dict(CFG, advisory_auto_fetch=True))
+    assert out["values"][FILES[1]] == 0, out        # echoed, nobody asked
+    assert out["sources"][FILES[1]] == "existing-tag", out
+    assert out["status"][FILES[1]] == "existing", out
+    assert out["updated"] == 0, out                 # nothing was written
+    assert out["answers"] == {}, out
+    assert set(out["sources"].values()) == {"existing-tag"}, out
+
+    # ... the re-rate asks the sources and writes what they state
+    clear()
+    calls = stub_http(deezer_routes())
+    out = imports.fetch_advisories([ALBUM], dict(CFG, advisory_auto_fetch=True),
+                                   force=True)
+    assert gets(calls, "api.deezer.com"), calls
+    assert out["values"][FILES[1]] == 1, out
+    assert out["sources"][FILES[1]] == "deezer-isrc", out
+    assert out["status"][FILES[1]] == "written", out
+    assert out["answers"][FILES[1]] == {"deezer-isrc": 1}, out
+    assert out["updated"] == 1, out
+    assert FakeAudio.written[FILES[1]]["ITUNESADVISORY"] == "1", FakeAudio.written
+    # the album tag follows the re-rated track up (any explicit → 1)
+    assert out["albums"] == {ALBUM: 1}, out
+    # ... while a track the re-rate could not improve keeps what it had and
+    # says so (its own 0 is still Deezer's 0, so nothing was rewritten)
+    assert out["status"][FILES[0]] == "unchanged", out
+    assert out["sources"][FILES[0]] == "deezer-isrc", out
 finally:
     mlo_audio.AudioFile = _real_audiofile
 
@@ -384,5 +451,66 @@ stub_http({"itunes.apple.com/search": {"results": [
 route = intg.resolve_advisory_route(title="Störagéd", artist="8-Bit Arcade",
                                     cfg=CFG)
 assert route["value"] == 0 and route["source"] == "itunes-song", route
+
+# --------------------------------------------------------------------------- #
+# 7) The ENDPOINT the wizard's re-rate control is built on: `force` reaches the
+#    fetch, and `status` comes back beside the values — so a surface can ask
+#    for a re-rate and tell an echoed value from one this run wrote. The wiring
+#    is the whole feature here: a dropped `force` is a button that silently
+#    does nothing, and a dropped `status` is "0 value(s) written" again.
+# --------------------------------------------------------------------------- #
+from fastapi.testclient import TestClient  # noqa: E402  (heavy import)
+
+from server import main as mlo_main  # noqa: E402
+
+HTTP_MUSIC = tempfile.mkdtemp(prefix="mlo_advisory_http_")
+HTTP_ALBUM = os.path.join(HTTP_MUSIC, "Artists", "An Artist", "2001 - An Album")
+os.makedirs(HTTP_ALBUM)
+# A real (if silent) MP3 frame sequence: the route opens these with mutagen and
+# writes the tag for real, so the reply is not the only evidence.
+_MP3_FRAME = bytes([0xFF, 0xFB, 0x90, 0x00]) + b"\x00" * 413
+HTTP_FILES = []
+for i in (1, 2):
+    path = os.path.join(HTTP_ALBUM, f"1-{i:02d} Track {i}.mp3")
+    with open(path, "wb") as fh:
+        fh.write(_MP3_FRAME * 40)
+    HTTP_FILES.append(path)
+
+_real_load_config = mlo_main.load_config
+mlo_main.load_config = lambda *a, **k: {"music_folder": HTTP_MUSIC,
+                                        "advisory_auto_fetch": True}
+_client = TestClient(mlo_main.app)     # no lifespan: no workers, no boot
+try:
+    # nobody states anything, so the ladder's fallback writes the 0 — the very
+    # run that left the screenshot's rows with a value and no source
+    clear()
+    stub_http({})
+    reply = _client.post("/api/mb/advisory/fetch",
+                         json={"paths": HTTP_FILES}).json()
+    assert reply["updated"] == 2, reply
+    assert set(reply["status"].values()) == {"written"}, reply
+    assert set(reply["sources"].values()) == {"fallback"}, reply
+    assert reply["albums"] == {HTTP_ALBUM: 0}, reply
+
+    # the second call asks nobody (the files carry a value now) and SAYS so
+    clear()
+    stub_http({})
+    reply = _client.post("/api/mb/advisory/fetch",
+                         json={"paths": HTTP_FILES}).json()
+    assert reply["updated"] == 0, reply
+    assert set(reply["status"].values()) == {"existing"}, reply
+    assert set(reply["sources"].values()) == {"existing-tag"}, reply
+    assert set(reply["values"].values()) == {0}, reply
+
+    # `force` reaches `fetch_advisories` and re-asks the files it echoed
+    clear()
+    stub_http({})
+    reply = _client.post("/api/mb/advisory/fetch",
+                         json={"paths": HTTP_FILES, "force": True}).json()
+    assert reply["updated"] == 0, reply
+    assert set(reply["status"].values()) == {"unchanged"}, reply
+    assert reply["albums"] == {HTTP_ALBUM: 0}, reply
+finally:
+    mlo_main.load_config = _real_load_config
 
 print("advisory pipeline: all assertions passed")

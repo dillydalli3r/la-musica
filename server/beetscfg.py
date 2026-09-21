@@ -149,8 +149,12 @@ def beets_available():
     """(version_label, plugin_dir) when vendored beets is installed."""
     if not pip_package_path("beets"):
         return None
-    from mlo.fetchdeps import PINNED
-    return PINNED["beets"]["version"]
+    from mlo.fetchdeps import PINNED, installed_versions
+    # The version of the folder that is actually on sys.path. The pin was
+    # reported for any folder that existed, so an updated beets kept telling
+    # the Beets page it was still 2.4.0; the pin stays the fallback for a
+    # folder neither pip's metadata nor its name can date.
+    return installed_versions().get("beets") or PINNED["beets"]["version"]
 
 
 def _python():

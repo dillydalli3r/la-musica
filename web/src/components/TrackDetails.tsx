@@ -115,10 +115,10 @@ export default function TrackDetails({
   const [checked, setChecked] = useState<null | { adv?: AdvisoryFetchResult; inst?: InstrumentalFetchResult }>(null);
   const [checking, setChecking] = useState(false);
   const qc = useQueryClient();
-  const checkPerTrack = async () => {
+  const checkPerTrack = async (force = false) => {
     setChecking(true);
     try {
-      const { adv, inst, errors } = await checkTrackValues([trackPath]);
+      const { adv, inst, errors } = await checkTrackValues([trackPath], force);
       setChecked({ adv: adv ?? undefined, inst: inst ?? undefined });
       if (errors.length) toast.error(errors.join(" · "));
       else toast(`Checked — ${advisoryOutcome(adv)}, ${inst?.updated ?? 0} instrumental value(s) written`);
@@ -128,9 +128,24 @@ export default function TrackDetails({
       setChecking(false);
     }
   };
+  /** The re-rate, behind a confirmation: it asks for a track the server would
+   *  otherwise echo back, and a source's answer can LOWER the rating. */
+  const reRateTrack = () => {
+    if (
+      !window.confirm(
+        `Re-rate ITUNESADVISORY for ${track.file}?\n\n` +
+          "This asks even though the file already carries a value, and a source's answer can lower it (1 → 0)."
+      )
+    )
+      return;
+    void checkPerTrack(true);
+  };
   const advisory = advisoryLine(
     replyFor(checked?.adv?.values, trackPath) ?? tags.ITUNESADVISORY,
-    answerSources(replyFor(checked?.adv?.answers, trackPath), replyFor(checked?.adv?.sources, trackPath))
+    answerSources(replyFor(checked?.adv?.answers, trackPath), replyFor(checked?.adv?.sources, trackPath)),
+    // What the run that answered did with THIS track's value: an echoed file
+    // and a fresh write are the same number on screen and different facts.
+    replyFor(checked?.adv?.status, trackPath)
   );
   const instrumental = instrumentalLine(
     replyFor(checked?.inst?.values, trackPath) ?? tags.INSTRUMENTAL,
@@ -150,15 +165,25 @@ export default function TrackDetails({
         icon={Info}
         title="Song info"
         action={
-          <button
-            className="btn-ghost !py-0.5 !px-1.5 text-[10px] font-normal"
-            onClick={checkPerTrack}
-            disabled={checking}
-            title="Ask the configured sources for this track's advisory + INSTRUMENTAL and write what they state"
-          >
-            {checking ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
-            Check advisory + instrumental
-          </button>
+          <span className="flex items-center gap-1">
+            <button
+              className="btn-ghost !py-0.5 !px-1.5 text-[10px] font-normal"
+              onClick={() => checkPerTrack(false)}
+              disabled={checking}
+              title="Ask the configured sources for this track's advisory + INSTRUMENTAL and write what they state. A track that already carries a value keeps it — Re-rate asks anyway."
+            >
+              {checking ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+              Check advisory + instrumental
+            </button>
+            <button
+              className="btn-ghost !py-0.5 !px-1.5 text-[10px] font-normal"
+              onClick={reRateTrack}
+              disabled={checking}
+              title="Ask the sources again even though this track carries a value, and write what they state — the only way its rating can go down"
+            >
+              Re-rate…
+            </button>
+          </span>
         }
       >
         {tech && <div className="text-[11px] font-mono text-zinc-500 mb-1.5">{tech}</div>}

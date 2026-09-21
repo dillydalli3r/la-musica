@@ -149,17 +149,18 @@ def _init():
 # notification), so no surface has to reconstruct a release's facts from
 # whatever spelling it happens to hold. The order is what identifies a
 # PRESSING: its catalog number and the medium it is on first, then where and
-# when it came out and how much it carries, then the edition's own
-# disambiguation and the status MusicBrainz states for it (Official /
-# Promotion / Bootleg / …).
+# when it came out — `country` as MusicBrainz's singular first release event
+# and `countries` as every one of them — and how much it carries, then the
+# edition's own disambiguation and the status MusicBrainz states for it
+# (Official / Promotion / Bootleg / …).
 #
 # EVERY key is always present. A fact the pipeline could not resolve is empty
 # and renders as absent — a MusicBrainz outage, or a wish whose release was
 # never looked up, leaves a row that still says what it does know and never a
 # row that fails to render.
-RELEASE_KEYS = ("id", "title", "artist", "date", "country", "status",
-                "media", "track_count", "disambiguation", "catalog_number",
-                "label")
+RELEASE_KEYS = ("id", "title", "artist", "date", "country", "countries",
+                "status", "media", "track_count", "disambiguation",
+                "catalog_number", "label")
 
 
 def release_identity(release, release_mbid=""):
@@ -193,12 +194,27 @@ def release_identity(release, release_mbid=""):
     if not catalog:
         numbers = rel.get("catalog_numbers") or []
         catalog = str(numbers[0] if numbers else "").strip()
+    # Every country the release came out in: `countries` is release_lookup's
+    # per-event list ({code, date, …}), and a payload stating only the singular
+    # country (a job's own compact summary) answers with that one code — a row
+    # that named one country claimed the release was out in one country. A
+    # payload that states neither answers with no countries at all.
+    country = str(rel.get("country") or "").strip()
+    countries = []
+    for event in rel.get("countries") or []:
+        code = str((event.get("code") if isinstance(event, dict) else event)
+                   or "").strip()
+        if code and code.upper() not in {c.upper() for c in countries}:
+            countries.append(code)
+    if not countries and country:
+        countries = [country]
     return {
         "id": release_choice.release_id(rel) or str(release_mbid or "").strip(),
         "title": str(rel.get("title") or "").strip(),
         "artist": artist,
         "date": str(rel.get("date") or "").strip(),
-        "country": str(rel.get("country") or "").strip(),
+        "country": country,
+        "countries": countries,
         "status": str(rel.get("status") or "").strip(),
         "media": media,
         "track_count": int(count or 0),

@@ -19,6 +19,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import wave
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -544,7 +545,12 @@ acoustid.lookup = stub_lookup({
 check("rows below min_score -> no_match",
       acoustid.match_release(cfg(), PATHS[:2])["status"] == "no_match")
 acoustid.lookup = stub_lookup({"01.flac": [cand_row(RG_A, "r1", "T1", 0.99)]})
-check("single track can never decide an album",
+res = acoustid.match_release(cfg(), PATHS[:1])
+check("a one-track album IS decided by its one identified track",
+      res["status"] == "matched" and res["match"]["release_group_id"] == RG_A
+      and (res["match"]["matched"], res["match"]["total"]) == (1, 1))
+acoustid.lookup = stub_lookup({"01.flac": [cand_row(RG_A, "r1", "T1", 0.10)]})
+check("…but only once that track clears min_score",
       acoustid.match_release(cfg(), PATHS[:1])["status"] == "no_match")
 
 # 12-file cap
@@ -557,6 +563,274 @@ acoustid.lookup = stub_lookup({os.path.basename(p): [cand_row(RG_A, "r", "T", 0.
 res = acoustid.match_release(cfg(), big)
 check("tracks capped at 12", res["match"]["total"] == acoustid.MAX_TRACKS == 12
       and res["match"]["matched"] == 12)
+
+# --------------------------------------------------------------------------- #
+# write_tags: ONE verdict per file, and the ID/FINGERPRINT pair is never split
+# --------------------------------------------------------------------------- #
+# A real container to write into: the PATHS above are fake FLAC magic, which
+# `AudioFile` refuses to read, and a WAV carries ID3 through the same writer.
+def make_wav(path, seconds=0.5):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(8000)
+        w.writeframes(b"\0\0" * int(8000 * seconds))
+    return path
+
+
+from mlo.audio import AudioFile  # noqa: E402
+
+WRITE_DIR = os.path.join(ALBUM, "write-tags")
+GOOD = make_wav(os.path.join(WRITE_DIR, "01 - track.wav"))
+LONE = make_wav(os.path.join(WRITE_DIR, "02 - track.wav"))
+WV = os.path.join(WRITE_DIR, "03 - track.wv")
+with open(WV, "wb") as fh:
+    fh.write(b"wvpk")                      # WavPack: fingerprinted, not taggable
+BROKEN = os.path.join(WRITE_DIR, "04 - track.flac")
+with open(BROKEN, "wb") as fh:
+    fh.write(b"fLaC")                      # FLAC magic with no stream behind it
+
+out = acoustid.write_tags(GOOD, "rec-1", "AQABFP")
+check("a writable file reports ok, with no reason",
+      out["ok"] is True and out["code"] == acoustid.OK and out["reason"] == ""
+      and out["path"] == GOOD)
+af = AudioFile(GOOD)
+check("and BOTH halves of the pair are on the file",
+      af.get_tag("ACOUSTID_ID") == "rec-1"
+      and af.get_tag("ACOUSTID_FINGERPRINT") == "AQABFP")
+out = acoustid.write_tags(LONE, "rec-2", None)
+check("a lone ID is refused by name, never written",
+      out["ok"] is False and out["code"] == acoustid.NO_FINGERPRINT
+      and "ACOUSTID_FINGERPRINT" in out["reason"])
+check("…so the grader's pair check cannot be manufactured here",
+      not str(AudioFile(LONE).get_tag("ACOUSTID_ID") or "").strip())
+out = acoustid.write_tags(WV, "rec-3", "AQABFP")
+check("an unsupported container is NAMED, not silently untagged",
+      out["ok"] is False and out["code"] == acoustid.UNSUPPORTED
+      and ".wv" in out["reason"] and "03 - track.wv" in out["reason"])
+check("an unreadable file is named",
+      acoustid.write_tags(BROKEN, "r", "f")["code"] == acoustid.UNREADABLE)
+check("a missing file is named",
+      acoustid.write_tags(os.path.join(WRITE_DIR, "gone.ape"), "r", "f")["code"]
+      == acoustid.NO_FILE)
+check("no recording id is named",
+      acoustid.write_tags(GOOD, "", "AQABFP")["code"] == acoustid.NO_RECORDING_ID)
+check("write_tags never raises at a caller",
+      acoustid.write_tags(None, "r", "f")["ok"] is False)
+
+# --------------------------------------------------------------------------- #
+# applying a match the caller ALREADY has: no fpcalc, no lookup
+# --------------------------------------------------------------------------- #
+from server import imports as imports_mod  # noqa: E402
+
+APPLY_DIR = os.path.join(ALBUM, "supplied-match")
+APPLY_TRACK = make_wav(os.path.join(APPLY_DIR, "01 - track.wav"))
+SUPPLIED = {
+    "path": APPLY_DIR, "release_group_id": RG_A,
+    "release_group_title": "Silent Shout", "release_group_type": "Album",
+    "artists": ["The Knife"], "score": 0.95, "matched": 1, "total": 1,
+    "recordings": [{"path": APPLY_TRACK, "recording_id": "rec-supplied",
+                    "fingerprint": "AQABSUPPLIED", "title": "Silent Shout",
+                    "score": 0.95}],
+}
+CALLS = []
+
+
+def counting_fpcalc(cfg=None):
+    CALLS.append("fpcalc")
+    return None
+
+
+def counting_lookup(cfg_, path):
+    CALLS.append("lookup")
+    raise AssertionError("a supplied match must not run a lookup")
+
+
+acoustid.fpcalc_path = counting_fpcalc
+acoustid.lookup = counting_lookup
+try:
+    res = imports_mod.acoustid_match([APPLY_DIR], cfg(), apply=True, match=SUPPLIED)
+finally:
+    acoustid.lookup = real_lookup
+row = res["albums"][0]
+check("applying the supplied match replays the match it was handed",
+      res["available"] is True and row["status"] == "matched"
+      and row["release_group_id"] == RG_A and row["matched"] == 1
+      and row["total"] == 1)
+check("…with NO fpcalc and NO lookup at all", CALLS == [])
+check("…and writes the pair", row["tagged"] == 1 and row["writes"][0]["ok"] is True)
+af = AudioFile(APPLY_TRACK)
+check("…which is now on the file",
+      af.get_tag("ACOUSTID_ID") == "rec-supplied"
+      and af.get_tag("ACOUSTID_FINGERPRINT") == "AQABSUPPLIED")
+
+# the album row says WHY nothing was tagged when the container cannot hold tags
+WV_DIR = os.path.join(ALBUM, "unsupported-album")
+WV_TRACK = os.path.join(WV_DIR, "01 - track.wv")
+os.makedirs(WV_DIR, exist_ok=True)
+with open(WV_TRACK, "wb") as fh:
+    fh.write(b"wvpk")
+res = imports_mod.acoustid_match(
+    [WV_DIR], cfg(), apply=True,
+    match=dict(SUPPLIED, recordings=[{"path": WV_TRACK, "recording_id": "r3",
+                                      "fingerprint": "AQAB"}]))
+row = res["albums"][0]
+check("a matched album of untaggable files reports 0 tagged AND the reason",
+      row["tagged"] == 0 and row["writes"][0]["code"] == acoustid.UNSUPPORTED
+      and ".wv" in row["writes"][0]["reason"])
+
+# the OLD request shape (no match payload) still fingerprints, and a payload
+# without a usable recording list falls back to it rather than writing nothing
+CALLS.clear()
+acoustid.fpcalc_path = lambda cfg=None: CALLS.append("fpcalc") or mine
+_inner = stub_lookup({os.path.basename(APPLY_TRACK):
+                      [cand_row(RG_A, "r1", "T", 0.95)]})
+
+
+def record_lookup(cfg_, path):
+    CALLS.append("lookup")
+    return _inner(cfg_, path)
+
+
+acoustid.lookup = record_lookup
+res = imports_mod.acoustid_match([APPLY_DIR], cfg(), apply=True,
+                                 match={"release_group_id": RG_A})
+check("a match payload without recordings is not a match (it fingerprints)",
+      "fpcalc" in CALLS and CALLS.count("lookup") == 1
+      and res["albums"][0]["tagged"] == 1)
+acoustid.lookup = real_lookup
+acoustid.fpcalc_path = lambda cfg=None: mine
+
+# --------------------------------------------------------------------------- #
+# submission (v2/submit): the params, the batching, a refused user key
+# --------------------------------------------------------------------------- #
+SUB_CFG = cfg(acoustid_user_key="ac-user-key-99")
+SUBMIT_ITEM = {"path": PATHS[0], "fingerprint": "AQABSUB", "duration": 289.4,
+               "recording_id": "rec-1", "track": "Silent Shout",
+               "artist": "The Knife", "album": "Silent Shout",
+               "album_artist": "The Knife", "year": "2006", "track_no": "1",
+               "disc_no": "1"}
+ACCEPT = {"status": "ok",
+          "submissions": [{"index": 0, "id": 123456789, "status": "pending"}]}
+
+
+def indexed(form, prefix):
+    return len([k for k in form if k.startswith(prefix + ".")])
+
+
+POSTED.clear()
+set_transport(urlopen(json.dumps(ACCEPT).encode()))
+res = acoustid.submit_fingerprints(SUB_CFG, [SUBMIT_ITEM])
+check("a submission reports what the service took",
+      res["ok"] is True and res["submitted"] == 1 and res["failed"] == 0
+      and res["reason"] == ""
+      and res["submissions"][0]["id"] == 123456789
+      and res["submissions"][0]["status"] == "pending"
+      and res["submissions"][0]["path"] == PATHS[0])
+sent = POSTED[0]
+check("…to the v2/submit endpoint", sent["url"] == acoustid.SUBMIT_API_URL)
+form = sent["form"]
+check("client is the application key and user is the USER key",
+      form["client"] == ["gh5HwBPwmAs"] and form["user"] == ["ac-user-key-99"])
+check("the indexed submission params travel together",
+      form["duration.0"] == ["289"] and form["fingerprint.0"] == ["AQABSUB"]
+      and form["mbid.0"] == ["rec-1"] and form["track.0"] == ["Silent Shout"]
+      and form["artist.0"] == ["The Knife"] and form["album.0"] == ["Silent Shout"]
+      and form["albumartist.0"] == ["The Knife"] and form["year.0"] == ["2006"]
+      and form["trackno.0"] == ["1"] and form["discno.0"] == ["1"])
+check("source 1 marks a fingerprint whose file named the recording",
+      form["source.0"] == ["1"])
+check("a lookup's `meta` has no place in a submission", "meta" not in form)
+
+POSTED.clear()
+set_transport(urlopen(json.dumps(ACCEPT).encode()))
+acoustid.submit_fingerprints(SUB_CFG, [dict(SUBMIT_ITEM, recording_id="")])
+check("a fingerprint-only entry is source 3, with no mbid",
+      POSTED[0]["form"]["source.0"] == ["3"]
+      and "mbid.0" not in POSTED[0]["form"])
+
+
+def batch_urlopen(req, timeout=None):
+    POSTED.append({"url": req.full_url,
+                   "form": urllib.parse.parse_qs((req.data or b"").decode()),
+                   "timeout": timeout, "ua": req.get_header("User-agent")})
+    n = indexed(POSTED[-1]["form"], "duration")
+    subs = [{"index": i, "id": 7000 + len(POSTED) * 1000 + i,
+             "status": "pending"} for i in range(n)]
+    return _Resp(json.dumps({"status": "ok", "submissions": subs}).encode())
+
+
+POSTED.clear()
+set_transport(batch_urlopen)
+many = [{"path": f"{i}.flac", "fingerprint": "AQAB", "duration": 10}
+        for i in range(acoustid.MAX_SUBMIT + 50)]
+res = acoustid.submit_fingerprints(SUB_CFG, many)
+check("AcoustID's own per-call limit is respected",
+      acoustid.MAX_SUBMIT == 100)
+check("150 tracks go out as 100 + 50",
+      len(POSTED) == 2
+      and indexed(POSTED[0]["form"], "duration") == 100
+      and indexed(POSTED[1]["form"], "duration") == 50)
+check("every batch's own answer is carried",
+      res["ok"] is True and res["submitted"] == 150 and res["failed"] == 0
+      and len(res["batches"]) == 2 and len(res["submissions"]) == 150)
+
+# a refused user key: the service's own sentence, and not one accepted item
+POSTED.clear()
+set_transport(urlopen(error=http_error(
+    400, b'{"status": "error", "error": {"code": 8, '
+         b'"message": "invalid user API key"}}')))
+res = acoustid.submit_fingerprints(SUB_CFG, [SUBMIT_ITEM])
+check("a refused user key is reported in the service's own words",
+      res["ok"] is False and res["code"] == acoustid.LOOKUP_FAILED
+      and "invalid user API key" in res["reason"] and "HTTP 400" in res["reason"])
+check("…and nothing is claimed as submitted",
+      res["submitted"] == 0 and res["failed"] == 1)
+
+POSTED.clear()
+set_transport(urlopen(json.dumps(ACCEPT).encode()))
+res = acoustid.submit_fingerprints(cfg(), [SUBMIT_ITEM])
+check("no user key -> a named refusal, and no request at all",
+      res["code"] == acoustid.NO_USER_KEY and res["reason"] == "no user API key"
+      and POSTED == [])
+check("check_submit names each missing half",
+      acoustid.check_submit(cfg(acoustid_api_key="",
+                                acoustid_user_key="u"))["code"] == acoustid.NO_API_KEY
+      and acoustid.check_submit(cfg(acoustid_enabled=False))["code"] == acoustid.DISABLED
+      and acoustid.check_submit(SUB_CFG)["available"] is True)
+
+POSTED.clear()
+res = acoustid.submit_fingerprints(
+    SUB_CFG, [{"path": "a.flac", "fingerprint": "", "duration": 5},
+              {"path": "b.flac", "fingerprint": "AQAB", "duration": 0}])
+check("a track with no fingerprint or no duration is skipped by name",
+      POSTED == [] and res["code"] == acoustid.NO_TRACKS
+      and [s["code"] for s in res["skips"]]
+      == [acoustid.NO_FINGERPRINT, acoustid.NO_DURATION])
+
+# verify_user_key: the probe is a real (fingerprint-only) submission
+POSTED.clear()
+set_transport(urlopen(json.dumps(ACCEPT).encode()))
+got = acoustid.verify_user_key(SUB_CFG)
+check("verify_user_key proves the USER key with a fingerprint-only probe",
+      got["ok"] is True and got["id"] == 123456789
+      and got["status"] == "pending" and got["submitted"] == 1
+      and POSTED[0]["url"] == acoustid.SUBMIT_API_URL
+      and POSTED[0]["form"]["fingerprint.0"] == [acoustid.PROBE_FINGERPRINT]
+      and POSTED[0]["form"]["source.0"] == ["3"]
+      and "mbid.0" not in POSTED[0]["form"])
+set_transport(urlopen(error=http_error(
+    400, b'{"status": "error", "error": {"code": 8, '
+         b'"message": "invalid user API key"}}')))
+got = acoustid.verify_user_key(SUB_CFG)
+check("verify_user_key returns the refusal verbatim",
+      got["ok"] is False and got["code"] == acoustid.LOOKUP_FAILED
+      and "invalid user API key" in got["reason"])
+POSTED.clear()
+got = acoustid.verify_user_key(cfg())
+check("verify_user_key without a user key asks nothing",
+      got["code"] == acoustid.NO_USER_KEY and POSTED == [])
 
 # --------------------------------------------------------------------------- #
 # cross-check: the fingerprint is verified against the TAGS, never trusted

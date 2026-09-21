@@ -139,14 +139,23 @@ def clear_caches():
 
 
 def cover_lines(count, source="itunes", big="https://img.test/a{}.jpg",
-                small="https://img.test/a{}-500.jpg", **extra):
+                small="https://img.test/a{}-500.jpg", release=None, **extra):
     """*count* streamed cover events, each with its OWN image URL (the probe
-    cache is per URL, so identical URLs would collapse into one request)."""
+    cache is per URL, so identical URLs would collapse into one request).
+
+    `release` is the event's `releaseInfo` — what the source says the cover's
+    own release is (COV really answers with the matched release's title, artist
+    and track count, and `mlo.cover_choice` checks them against the album being
+    covered). The default states NOTHING about the release, so a test that is
+    not about the identity check is not silently testing it; the flows that are
+    pass the album they were found for.
+    """
+    info = dict(release or {"title": None, "artist": None, "tracks": None,
+                            "url": "https://rel/"})
     return [json.dumps({"type": "cover", "source": source,
                         "bigCoverUrl": big.format(i),
                         "smallCoverUrl": small.format(i), **extra,
-                        "releaseInfo": {"title": "T", "artist": "A",
-                                        "tracks": 12, "url": "https://rel/"}})
+                        "releaseInfo": info})
             for i in range(count)]
 
 
@@ -155,6 +164,15 @@ def cover_lines(count, source="itunes", big="https://img.test/a{}.jpg",
 ROW_KEYS = {"source", "small", "big", "title", "artist", "tracks", "url",
             "width", "height", "format", "bytes", "front", "kind",
             "release_cover", "rank"}
+
+
+def release_of(artist, album, tracks=None):
+    """A `releaseInfo` block for `cover_lines`: the release the SOURCE says the
+    cover belongs to. Real rows carry the album they were found for; a test
+    that wants a karaoke or tribute answer passes that release's names instead.
+    """
+    return {"title": album, "artist": artist, "tracks": tracks,
+            "url": "https://rel/"}
 
 
 # --------------------------------------------------------------------------- #
@@ -664,7 +682,8 @@ intg.cover_search = recording_search
 staged_album = album("Radiohead/OK Computer", album_id="rel-1")
 clear_caches()
 stub_probe({})
-calls = stub_cov(cover_lines(20, width=1200, height=1200))
+calls = stub_cov(cover_lines(20, width=1200, height=1200,
+                             release=release_of("Radiohead", "OK Computer", 12)))
 stub_json({})
 out = imp.run_cover_step(staged_album, REVIEW_ON)
 # staged, NOT fetched, and the count is the review limit — not the finder's
@@ -692,9 +711,12 @@ assert os.listdir(staged_album) == ["01 - Airbag.flac"], os.listdir(staged_album
 review = json.load(open(REVIEW_FILE, encoding="utf-8"))
 covers = review[imp._review_key(staged_album)]["covers"]
 assert set(covers) == {"artist", "album", "album_id", "release_group",
-                       "provider", "staged_at", "results", "chosen", "notes",
-                       "policy"}, covers
+                       "identity", "provider", "staged_at", "results", "chosen",
+                       "notes", "policy"}, covers
 assert covers["artist"] == "Radiohead" and covers["album"] == "OK Computer"
+# what the candidates were checked against is recorded with them
+assert covers["identity"] == {"artist": "Radiohead", "album": "OK Computer",
+                              "tracks": None}, covers["identity"]
 assert covers["release_group"] == "" and covers["provider"] == "cov"
 # `album_id` is the release the album's tags name — the second identity the
 # lookup can fall back on when the import chain has moved the album.
@@ -709,7 +731,8 @@ first = covers["results"][0]
 assert {k: first[k] for k in ("source", "small", "big", "title", "artist",
                               "tracks", "url", "width", "height")} == {
     "source": "itunes", "small": "https://img.test/a0-500.jpg",
-    "big": "https://img.test/a0.jpg", "title": "T", "artist": "A", "tracks": 12,
+    "big": "https://img.test/a0.jpg", "title": "OK Computer",
+    "artist": "Radiohead", "tracks": 12,
     "url": "https://rel/", "width": 1200, "height": 1200}, first
 assert first["rejected"] is None and first["score"] > 0, first
 assert first["reasons"] and "1200px cover target" in " ".join(first["reasons"]), first
@@ -731,10 +754,81 @@ assert imp.staged_metadata(_moved, REVIEW_ON)["covers"]["provider"] == "cov", \
 assert imp.staged_metadata(staged_album, REVIEW_ON) == imp.staged_metadata(_moved, REVIEW_ON), \
     "the moved lookup returned a different record"
 
+# A name search answers with karaoke, tribute and 8-bit releases too — the
+# album's own identity is what tells them apart, and it reaches the pick from
+# the album folder (its tags) through `cover_candidates` into the policy. Here
+# EVERY row is another artist's release: the review says there is nothing to
+# pick rather than offering the wrong album's art as the best of what answered,
+# and each row keeps its own rejection for the manual list.
+karaoke_album = album("Radiohead/Kid A", title="Kid A")
+clear_caches()
+stub_cov(cover_lines(3, width=1400, height=1400,
+                     release=release_of("Vitamin String Quartet",
+                                        "Strung Out On Kid A", 10)))
+stub_json({})
+out = imp.run_cover_step(karaoke_album, REVIEW_ON)
+assert (out["staged"], out["candidates"], out["choice"]) == (True, 3, None), out
+assert "no cover to pick" in out["note"], out["note"]
+karaoke_entry = imp.staged_metadata(karaoke_album, REVIEW_ON)["covers"]
+assert karaoke_entry["identity"] == {"artist": "Radiohead", "album": "Kid A",
+                                     "tracks": None}, karaoke_entry["identity"]
+assert all(r["rejected"] for r in karaoke_entry["results"]), karaoke_entry["results"]
+assert all("a different artist's release" in r["rejected"]
+           for r in karaoke_entry["results"]), karaoke_entry["results"]
+# Nothing was written for the album either — a staged review never writes.
+assert os.listdir(karaoke_album) == ["01 - Airbag.flac"], os.listdir(karaoke_album)
+
+# The same query with the real album among the rows: the karaoke row is from
+# the PREFERRED source at the same size, so without the identity check it is
+# the pick — with it, the album's own cover is, and the loser says why.
+mixed_album = album("Radiohead/Amnesiac", title="Amnesiac")
+clear_caches()
+stub_cov(cover_lines(1, source="qobuz", width=1200, height=1200,
+                     big="https://img.test/k{}.jpg",
+                     release=release_of("Molotov Cocktail Piano",
+                                        "MCP Performs Radiohead: Amnesiac", 11))
+         + cover_lines(1, source="itunes", width=1200, height=1200,
+                       big="https://img.test/real{}.jpg",
+                       release=release_of("Radiohead", "Amnesiac", 11)))
+stub_json({})
+out = imp.run_cover_step(mixed_album, REVIEW_ON)
+assert out["choice"] and out["choice"]["big"] == "https://img.test/real0.jpg", out
+mixed_entry = imp.staged_metadata(mixed_album, REVIEW_ON)["covers"]
+assert out["source"] == "cov" and out["candidates"] == 2, out
+assert [r["source"] for r in mixed_entry["results"] if not r["rejected"]] == ["itunes"], \
+    mixed_entry["results"]
+assert mixed_entry["results"][-1]["rejected"] and \
+    "different artist" in mixed_entry["results"][-1]["rejected"], mixed_entry["results"]
+
+# The album's own TRACKLIST is the third fact a row is checked against: the
+# recorded release manifest (what the add path and the import write) says 12,
+# so the 23-track reissue ranks below the 12-track row of the same name.
+manifest_album = album("Radiohead/Hail to the Thief", title="Hail to the Thief")
+from mlo.paths import save_expected_tracks  # noqa: E402
+assert save_expected_tracks(manifest_album, "rel-htt",
+                            [{"disc": 1, "position": i, "title": f"T{i}"}
+                             for i in range(1, 13)]) is True
+clear_caches()
+stub_cov(cover_lines(1, source="qobuz", width=1200, height=1200,
+                     big="https://img.test/reissue{}.jpg",
+                     release=release_of("Radiohead",
+                                        "Hail to the Thief (Collector's Edition)", 23))
+         + cover_lines(1, source="itunes", width=1200, height=1200,
+                       big="https://img.test/htt{}.jpg",
+                       release=release_of("Radiohead", "Hail to the Thief", 12)))
+stub_json({})
+out = imp.run_cover_step(manifest_album, REVIEW_ON)
+assert out["choice"] and out["choice"]["big"] == "https://img.test/htt0.jpg", out
+htt_entry = imp.staged_metadata(manifest_album, REVIEW_ON)["covers"]
+assert htt_entry["identity"]["tracks"] == 12, htt_entry["identity"]
+assert "23 track(s)" in " ".join(htt_entry["results"][-1]["reasons"]), \
+    htt_entry["results"][-1]["reasons"]
+
 # The DEFAULT is the review: a config that says nothing about it stages too.
 default_album = album("Blur/Think Tank", artist="Blur", title="Think Tank")
 clear_caches()
-stub_cov(cover_lines(3, width=1000, height=1000))
+stub_cov(cover_lines(3, width=1000, height=1000,
+                     release=release_of("Blur", "Think Tank")))
 stub_json({})
 out = imp.run_cover_step(default_album, {"music_folder": MUSIC})
 assert (out["staged"], out["fetched"], out["candidates"]) == (True, False, 3), out
@@ -745,9 +839,11 @@ assert (out["staged"], out["fetched"], out["candidates"]) == (True, False, 3), o
 nowrite_album = album("Muse/Origin of Symmetry", artist="Muse",
                       title="Origin of Symmetry")
 clear_caches()
-lines = cover_lines(3, width=1400, height=1400)
+lines = cover_lines(3, width=1400, height=1400,
+                    release=release_of("Muse", "Origin of Symmetry"))
 lines.append(json.dumps({"type": "cover", "source": "itunes",
-                         "releaseInfo": {"title": "T", "artist": "A"}}))
+                         "releaseInfo": {"title": "Origin of Symmetry",
+                                          "artist": "Muse"}}))
 stub_cov(lines)
 stub_json({})
 out = imp.run_cover_step(nowrite_album, REVIEW_ON)
@@ -793,7 +889,8 @@ imp.stage_metadata(staged_album, {"artist": "Radiohead",
                                   "candidates": [{"url": "https://artist.test/x.jpg"}]},
                    REVIEW_ON)
 clear_caches()
-stub_cov(cover_lines(4, width=1000, height=1000))
+stub_cov(cover_lines(4, width=1000, height=1000,
+                     release=release_of("Radiohead", "OK Computer", 12)))
 stub_json({})
 out = imp.run_cover_step(staged_album, REVIEW_ON)
 entry = imp.staged_metadata(staged_album, REVIEW_ON)
@@ -830,7 +927,8 @@ srv_main._sniff_image_ext = lambda data, ctype=None: ".png"
 
 staged_before = copy.deepcopy(imp.staged_metadata(staged_album, REVIEW_ON))
 clear_caches()
-calls = stub_cov(cover_lines(5, width=1400, height=1400))
+calls = stub_cov(cover_lines(5, width=1400, height=1400,
+                             release=release_of("Radiohead", "OK Computer", 12)))
 stub_json({})
 out = imp.run_cover_step(staged_album, {"music_folder": MUSIC,
                                         "cover_review": False})
@@ -858,7 +956,8 @@ assert imp.staged_metadata(staged_album, REVIEW_ON) == staged_before, \
 # than quietly taking the smallest image the internet had. The candidates are
 # still returned, so a user can pick one by hand.
 clear_caches()
-calls = stub_cov(cover_lines(3, width=800, height=800))
+calls = stub_cov(cover_lines(3, width=800, height=800,
+                             release=release_of("Muse", "Origin of Symmetry")))
 stub_json({})
 fetched.clear()
 out = imp.run_cover_step(nowrite_album, {"music_folder": MUSIC,
@@ -868,6 +967,51 @@ assert "no candidate could be used" in out["note"], out["note"]
 assert "below the minimum 1200×1200" in out["note"], out["note"]
 assert fetched == [], fetched
 assert out["candidates"] == 3 and out["choice"] is None, out
+
+# ...and the floor holds at the WRITE too, not only where the winner was picked:
+# a chosen candidate below the library's minimum — or one whose size was never
+# measured while that minimum is set — is never downloaded and never stored,
+# whatever a future change to the ranking decides. The policy already refuses
+# both kinds, so this is the step's own guard against that ranking being wrong;
+# a stubbed candidate set stands in for the mistake, and the note names it.
+real_candidates = imp.cover_candidates
+gate_album = album("Muse/Absolution", artist="Muse", title="Absolution")
+
+
+def stub_candidates(chosen):
+    def fake(album_dir, cfg=None):
+        return {"chosen": chosen, "candidates": [chosen], "candidate_count": 1,
+                "notes": [], "provider": "cov", "artist": "Muse",
+                "album": "Absolution", "album_id": "", "release_group": "",
+                "policy": {}, "identity": {}}
+
+    imp.cover_candidates = fake
+
+
+fetched.clear()
+written.clear()
+stub_candidates({"source": "itunes", "big": "https://img.test/small.jpg",
+                 "width": 800, "height": 800, "reasons": ["the best of what answered"]})
+out = imp.run_cover_step(gate_album, {"music_folder": MUSIC, "cover_review": False})
+assert (out["fetched"], out["applied"]) == (False, {}), out
+assert fetched == [] and written == [], (fetched, written)
+assert "below the minimum 1200×1200" in out["note"], out["note"]
+
+stub_candidates({"source": "itunes", "big": "https://img.test/unmeasured.jpg",
+                 "width": None, "height": None, "reasons": []})
+out = imp.run_cover_step(gate_album, {"music_folder": MUSIC, "cover_review": False})
+assert (out["fetched"], out["applied"]) == (False, {}), out
+assert fetched == [] and written == [], (fetched, written)
+assert "size never measured" in out["note"], out["note"]
+
+# A candidate that DOES clear the floor still goes through the writer: the gate
+# is the floor, not a new refusal of everything.
+stub_candidates({"source": "itunes", "big": "https://img.test/at_target.jpg",
+                 "width": 1200, "height": 1200, "reasons": ["at the target"]})
+out = imp.run_cover_step(gate_album, {"music_folder": MUSIC, "cover_review": False})
+imp.cover_candidates = real_candidates
+assert out["fetched"] is True and fetched[-1]["url"] == "https://img.test/at_target.jpg", out
+assert written[-1]["album_dir"] == gate_album, written[-1]
 
 # `cover_auto_fetch` off: nothing is fetched, staged or written, with either
 # value of cover_review — the finder is not even asked.

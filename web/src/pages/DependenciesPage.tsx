@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { FolderOpen, RotateCcw, Wrench } from "lucide-react";
+import { FolderOpen, Loader2, RotateCcw, Wrench } from "lucide-react";
 import { api, deviceUnavailable, installSummary, unavailableFeatures } from "../api";
 import { toast } from "../store";
 import PageHeader from "../components/PageHeader";
@@ -33,6 +33,10 @@ type DepTool = {
  * folder, and pull updates in one click. */
 export default function DependenciesPage() {
   const [busy, setBusy] = useState(false);
+  // The row whose own Install/Update press is in flight. The page-level button
+  // settles the whole table through `busy` + a refetch (the same mechanism the
+  // per-row press uses), and this only decides which row shows the spinner.
+  const [busyKey, setBusyKey] = useState<string | null>(null);
   // Refresh asks the backend to re-check GitHub for THIS fetch only
   // (?refresh=1); the normal fetch answers from its 30-minute cache.
   const forceRef = useRef(false);
@@ -90,8 +94,16 @@ export default function DependenciesPage() {
     return p.replace(/\\/g, "/");
   };
 
-  const install = async (keys?: string[]) => {
+  /** One install request for the page button (`keys` undefined = everything
+   *  missing or behind) or for a single row (`keys` = [that tool]).
+   *
+   *  `pressed` is the row whose own button asked, so THAT row carries the
+   *  spinner; the settling is the same either way — the shared `busy` flag
+   *  plus the refetch below, so a row never shows a state the server has not
+   *  answered yet. */
+  const install = async (keys?: string[], pressed?: string) => {
     setBusy(true);
+    setBusyKey(pressed ?? null);
     try {
       const r = await api.installDependencies(keys);
       const summary = installSummary(r.results);
@@ -105,6 +117,7 @@ export default function DependenciesPage() {
       toast.error(String(e));
     } finally {
       setBusy(false);
+      setBusyKey(null);
     }
   };
 
@@ -128,25 +141,25 @@ export default function DependenciesPage() {
             <button className="btn-ghost !py-1 text-xs tap" onClick={refreshNow} disabled={busy || isLoading}>
               <RotateCcw className="h-3 w-3" /> Refresh
             </button>
-            {(missing.length > 0 || updates.length > 0) && (
-              <button
-                className="btn-ghost !py-1 text-xs tap"
-                onClick={() => install([...missing, ...updates].map((t) => t.key))}
-                disabled={busy || !!deviceReason}
-                title={deviceReason ?? undefined}
-              >
-                Install {missing.length + updates.length} ({missing.length} missing · {updates.length} updates)
-              </button>
-            )}
+            {/* ONE page-level button, and its label says what the press will
+                do to the majority of the work waiting: with an update behind
+                it, that is "Update all" (a row already installed takes the
+                NEWEST release upstream has, not the pin), and it still
+                installs the missing tools on that same press. The counts sit
+                in the title and the aria-label, and `busy` covers the whole
+                table — a second button for "missing only" would have been a
+                subset of this one. */}
             <button
               className="btn-primary !py-1 text-xs tap"
               onClick={() => install()}
-              disabled={busy || !!deviceReason}
+              disabled={busy || !!deviceReason || (missing.length === 0 && updates.length === 0)}
               title={deviceReason ?? (blocked.length
                 ? `Installs what is missing or behind — skips the ${blocked.length} tool(s) this host cannot install`
                 : "Installs what is missing or behind; anything already at the newest release is left alone")}
+              aria-label={`${updates.length ? "Update all" : "Install all"}: ${missing.length} missing, ${updates.length} update(s)`}
             >
-              {busy ? "Installing…" : "Install / update all"}
+              {busy && !busyKey ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+              {busy && !busyKey ? "Installing…" : updates.length ? "Update all" : "Install all"}
             </button>
           </>
         }
@@ -213,21 +226,22 @@ export default function DependenciesPage() {
               <th className="th">Tool</th>
               <th className="th">Status</th>
               <th className="th">Installed</th>
-              <th className="th" title="The version the installer fetches for this tool — on Linux a distro-provided tool shows its system package instead">
+              <th className="th" title="The version this app installs for a FIRST install — on Linux a distro-provided tool shows its system package instead">
                 Latest
               </th>
-              <th className="th" title="Newest release published upstream on GitHub. The installer still fetches the reviewed version in Latest.">
+              <th className="th" title="Newest release published upstream on GitHub. An installed tool takes that one when you press Update — the reviewed pin in Latest is what a FIRST install fetches.">
                 Available
               </th>
               {/* The only column that needs a width: its text is a shortened
                   path, and the longest token in it is the version-prefixed file
                   name ("…/AudioAuditor v2.0.0/AudioAuditorCLI.exe", measured
                   153 px at this column's 11 px mono). Six equal columns at the
-                  table's 46 rem floor leave it 123 px, which crushes that token;
-                  180 px is 153 + the cell's 24 px padding, rounded up. The other
-                  five columns share what is left, so from `md` up — where the
-                  table is wider than its floor — the layout is as it was. */}
+                  table's 46 rem floor left it 123 px, which crushes that token;
+                  180 px is 153 + the cell's 24 px padding, rounded up. It stays
+                  fixed as the Action column takes its width out of the flexible
+                  ones instead — a button is a short label, a path is not. */}
               <th className="th w-[180px]">Location</th>
+              <th className="th">Action</th>
             </tr>
           </thead>
           <tbody className="stagger">
@@ -282,6 +296,31 @@ export default function DependenciesPage() {
                 <td className="td text-[11px] text-zinc-600 font-mono truncate" title={t.path ?? ""}>
                   {t.path ? shortPath(t.path) : "—"}
                 </td>
+                {/* One row's own Install/Update, mirroring the chip beside it:
+                    a row this host cannot install gets no button (the chip and
+                    its title already say why), and the rest keep the row's own
+                    note as the hover text so the button cannot be more
+                    optimistic than the row it belongs to. */}
+                <td className="td">
+                  {(t.state === "missing" || t.state === "update") && (
+                    <button
+                      className="btn-ghost !py-0.5 text-[11px] tap"
+                      onClick={() => install([t.key], t.key)}
+                      disabled={busy || !!deviceReason || t.installable === false}
+                      title={
+                        deviceReason ??
+                        (t.state === "update"
+                          ? t.note ?? (t.upstream_version ? `Upstream: ${t.upstream_version}` : undefined)
+                          : t.install_note ?? t.note ?? undefined)
+                      }
+                    >
+                      {busyKey === t.key ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : null}
+                      {t.state === "update" ? "Update" : "Install"}
+                    </button>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -291,9 +330,10 @@ export default function DependenciesPage() {
 
       <div className="text-[10px] text-zinc-600">
         Install downloads from the tool's GitHub releases into the dependencies folder; PATH-installed tools
-        (scoop etc.) are shown as ready. A tool that is already installed takes the newest release{" "}
-        <span className="text-zinc-500">Available</span> names — that is what the Update chip offers. A first
-        install takes the reviewed pinned version instead.
+        (scoop etc.) are shown as ready. An INSTALLED tool takes the newest release{" "}
+        <span className="text-zinc-500">Available</span> names — that is what the Update chip and its button
+        offer — and a row already at that version is a no-op (nothing is downloaded). Only a FIRST install
+        takes the reviewed pinned version in <span className="text-zinc-500">Latest</span>.
         {deps?.note && <span className="text-amber-500"> Upstream check: {deps.note}</span>}
         {deps?.upstream_checked_at && (
           <span> Checked {new Date(deps.upstream_checked_at).toLocaleTimeString()}.</span>

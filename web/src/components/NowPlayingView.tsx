@@ -134,8 +134,10 @@ const INACTIVE_SCALE = { sm: 0.88, md: 0.84, lg: 0.8 } as const;
 
 /** Non-current synced lines read greyed-out (a slight blur + dim grey);
  * hover or keyboard focus reveals full detail. Plain-text lyrics are never
- * styled — only synced lines get the active/inactive treatment. */
-const LINE_BLUR = "np-line-blur blur-[2px] opacity-60 hover:blur-none hover:opacity-100 focus-within:blur-none focus-within:opacity-100 transition-[opacity,filter] duration-motion-base ease-motion";
+ * styled — only synced lines get the active/inactive treatment. The dim is
+ * deliberately mild (80 %, 1px): over the light additive ambience a 2px blur
+ * at 60 % made the line genuinely unreadable on a white cover. */
+const LINE_BLUR = "np-line-blur blur-[1px] opacity-80 hover:blur-none hover:opacity-100 focus-within:blur-none focus-within:opacity-100 transition-[opacity,filter] duration-motion-base ease-motion";
 
 /** The volume cluster is its own component because dragging the slider writes
  *  `vol` once per pointer step. Subscribed here, where the value is actually
@@ -700,8 +702,8 @@ export default function NowPlayingView(p: Props) {
           ref={(el) => {
             primaryRefs.current[i] = el;
           }}
-          className={`${size.active} leading-snug ${synced ? `${LINE_EASE} font-semibold` : ""} ${
-            isActive ? "text-white" : synced ? "text-zinc-500" : "text-zinc-200"
+          className={`${size.active} leading-snug np-shade ${synced ? `${LINE_EASE} font-semibold` : ""} ${
+            isActive ? "text-white" : synced ? "text-zinc-300" : "text-zinc-100"
           }`}
           style={
             synced
@@ -710,7 +712,7 @@ export default function NowPlayingView(p: Props) {
           }
         >
           {!replaced && isActive && karaoke && l.words?.length ? (
-            <KaraokeWords words={l.words} time={dispTime} />
+            <KaraokeWords words={l.words} time={dispTime} upcomingClass="text-white/75" />
           ) : primary}
           {trans && !transDup && (
             <div className={`${size.xlit} font-normal text-accent-soft/70 mt-0.5 leading-snug`}>{trans}</div>
@@ -1345,7 +1347,15 @@ export default function NowPlayingView(p: Props) {
             <div className="flex-1 min-h-[45vh] lg:min-h-0 w-full lg:h-full flex flex-col max-w-3xl lg:max-w-none lg:flex-none lg:w-[56%] lg:ml-auto">
               <div
                 ref={lyricsScrollRef}
-                className={`relative flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-5 no-scrollbar transition-opacity duration-300 ${
+                /* The pane carries its OWN scrim. The fullscreen backdrop is a
+                   light additive color field (cover blur + screen-blended
+                   orbs), where the only darkening was a 10 % wash in the
+                   vertical middle — so lyrics contrast depended on the cover,
+                   and a white one left them hard to read. bg-zinc-950/45 +
+                   backdrop blur is the same panel convention the sidebar
+                   lyrics already use (LyricsSidebar), scoped to the reading
+                   surface so the ambience still shows around it. */
+                className={`relative flex-1 min-h-0 overflow-y-auto overscroll-contain px-6 py-5 no-scrollbar rounded-2xl bg-zinc-950/45 backdrop-blur-md transition-opacity duration-300 ${
                   staleLyrics ? "opacity-50" : "opacity-100"
                 }`}
                 style={{ zoom: lyricZoom }}
@@ -1364,7 +1374,7 @@ export default function NowPlayingView(p: Props) {
                     <div style={{ height: LYRICS_PAD_BOTTOM }} />
                   </>
                 ) : (
-                  <div className="text-zinc-400 text-sm whitespace-pre-wrap leading-relaxed opacity-80">
+                  <div className="text-zinc-200 text-sm whitespace-pre-wrap leading-relaxed np-shade">
                     {lyricsText}
                   </div>
                 )}

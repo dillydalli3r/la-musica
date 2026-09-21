@@ -302,6 +302,8 @@ export default {
   "cover.best_pick_use": "最適な候補を使う",
   "cover.no_pick": "カバーの目標サイズに届く候補がありません — 手動で選んでください。",
   "cover.pick_reason": "この候補の理由",
+  "cover.checked_against": "{identity} と照合済み",
+  "cover.all_rejected": "{count} 件の候補が却下されました — 理由は各行にあり、いずれも手動で適用できます。",
   "cover.source_notes": "各ソースの結果",
   "cover.searching": "カバーソースを検索中…",
   "cover.answered": "検索条件: {terms}",

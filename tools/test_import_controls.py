@@ -369,6 +369,11 @@ OFF = cfg(manual_import_enabled=False)
 with PatchAll(wish_worker_env(OFF) + add_env(OFF)):
     for path, body in (("/api/import/finish", {"paths": []}),
                        ("/api/import/acoustid", {"paths": []}),
+                       # The submission route is outward-facing, so it has its
+                       # own confirm gate — but the manual switch is asked
+                       # FIRST: a user who turned manual importing off never
+                       # even reaches the confirmation.
+                       ("/api/import/acoustid/submit", {"paths": []}),
                        ("/api/import/bulk", {"items": []})):
         r = CLIENT.post(path, json=body)
         eq(r.status_code, 409, f"{path} refuses with 409")
@@ -414,6 +419,11 @@ with PatchAll(wish_worker_env(ON) + add_env(ON)):
     eq(r.json(), {"albums": []}, "and reports the albums it was given")
     eq(CLIENT.post("/api/import/acoustid", json={"paths": []}).status_code, 200,
        "acoustid still runs")
+    eq(CLIENT.post("/api/import/acoustid/submit", json={"paths": []}).status_code, 400,
+       "the AcoustID submission still needs its own explicit confirm")
+    eq(CLIENT.post("/api/import/acoustid/submit",
+                   json={"paths": [], "confirm": True}).status_code, 200,
+       "…and runs, keyless, once it is given")
     eq(CLIENT.post("/api/import/bulk", json={"items": []}).status_code, 200,
        "the bulk queue still takes work")
     r = CLIENT.post("/api/library/add", json={"mbid": RELEASE, "kind": "release"})

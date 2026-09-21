@@ -17,6 +17,9 @@ Pinned here, with no provider and no network:
   * LRC scaffolding — timestamps, section headers, metadata and credit lines —
     is what scan_lyrics strips, so a "[ti:Shitty Song]" is never the reason a
     track is called explicit;
+  * the same scan is what `mlo.advisory` escalates a provider's stated 0 with,
+    so the scaffolding cannot escalate either — and no words at all is no
+    escalation at all;
   * scan is case-insensitive, deduplicated, stable, and reports what it found
     in first-appearance order.
 
@@ -244,6 +247,28 @@ assert aw.scan_lyrics("[ti:Shitty Song]\n[ar:The Assholes]") == []
 assert aw.scan_lyrics("Lyrics: The Fucks\nla la la") == []
 # An empty lyric file is not a reason to call anything explicit.
 assert aw.scan_lyrics("") == [] and aw.scan("") == []
+
+print("advisory words: what the escalation may read")
+# `mlo.advisory` escalates a PROVIDER's stated 0 to 1 when the words say
+# explicit — and it reads those words through THIS scan, LRC stripping
+# included. So the scaffolding a lyrics file carries can never be the reason a
+# track is called explicit, while a term in the sung text is; and a track with
+# no words at all cannot be escalated.
+from mlo import advisory as advisory_mod  # noqa: E402  (after the lexicon)
+
+ESC_CFG = {"advisory_ai_classify": False, "advisory_lyrics_scan": True,
+           "advisory_fallback": "0"}
+esc = advisory_mod.decide_advisory(ESC_CFG, value=0, source="apple-album",
+                                   lyrics=LRC)
+assert esc == {"value": 0, "source": "apple-album", "stage": "sources",
+               "hits": [], "fallback": False}, esc
+esc = advisory_mod.decide_advisory(ESC_CFG, value=0, source="apple-album",
+                                   lyrics=LRC + "\n[00:31.00]what the fuck")
+assert esc["value"] == 1 and esc["source"] == "lyrics-scan (escalated)", esc
+assert esc["hits"] == ["fuck"], esc
+esc = advisory_mod.decide_advisory(ESC_CFG, value=0, source="apple-album",
+                                   lyrics="")
+assert esc["value"] == 0 and esc["source"] == "apple-album", esc
 
 print("advisory words: case, order and stability")
 assert aw.scan("FUCK") == ["fuck"]
