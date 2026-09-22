@@ -201,7 +201,7 @@ def stub_cover(album_dir, cfg):
     if not (ANSWERS.get(name) or {}).get("cover"):
         return {"fetched": False, "applied": {}, "source": None, "note": "no cover found",
                 "staged": False, "candidates": 0}
-    if cfg.get("cover_review", True):
+    if cfg.get("cover_review", False):
         # A cover the user asked to pick: the candidates are staged, nothing is
         # written — exactly what the real step does with cover_review on.
         return {"fetched": False, "applied": {}, "source": "stub", "staged": True,

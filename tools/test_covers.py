@@ -28,7 +28,7 @@ What this pins, with every HTTP seam stubbed (no network at all):
     saved defaults for that one search, validates ids against the catalogue,
     and never mutates the config;
   * the import cover step (`run_cover_step`) honours the shipped defaults:
-    `cover_review` ON (the default) STAGES the RANKED candidates — best first
+    `cover_review` ON STAGES the RANKED candidates — best first
     by `mlo.cover_choice`, each row with the reasons that put it there, the
     winner recorded as `chosen`, the finder's own per-source report as `notes`
     — in the metadata review file and writes no cover at all; OFF writes the
@@ -657,12 +657,14 @@ def album(name, artist="Radiohead", title="OK Computer", rg="", cover=False,
     return path
 
 
-# The shipped defaults, straight from the config schema: on, and an explicit
-# "off" round-trips instead of being defaulted back on.
-assert mlo_config.normalize_config({})["cover_review"] is True
+# The shipped defaults, straight from the config schema: the finder's winner is
+# WRITTEN during the import (the release-group cover ranks first as the
+# reference), and an explicit choice round-trips instead of being defaulted
+# back — staging the candidates for a pick is the opt-in.
+assert mlo_config.normalize_config({})["cover_review"] is False
 assert mlo_config.normalize_config({})["cover_auto_fetch"] is True
-assert mlo_config.normalize_config({"cover_review": False})["cover_review"] is False
-assert mlo_config.DEFAULT_CONFIG["cover_review"] is True
+assert mlo_config.normalize_config({"cover_review": True})["cover_review"] is True
+assert mlo_config.DEFAULT_CONFIG["cover_review"] is False
 assert mlo_config.DEFAULT_CONFIG["cover_auto_fetch"] is True
 # a review is a pick-one screen, so the step asks for a screenful
 assert imp.COVER_REVIEW_LIMIT == 12
@@ -827,14 +829,6 @@ assert htt_entry["identity"]["tracks"] == 12, htt_entry["identity"]
 assert "23 track(s)" in " ".join(htt_entry["results"][-1]["reasons"]), \
     htt_entry["results"][-1]["reasons"]
 
-# The DEFAULT is the review: a config that says nothing about it stages too.
-default_album = album("Blur/Think Tank", artist="Blur", title="Think Tank")
-clear_caches()
-stub_cov(cover_lines(3, width=1000, height=1000,
-                     release=release_of("Blur", "Think Tank")))
-stub_json({})
-out = imp.run_cover_step(default_album, {"music_folder": MUSIC})
-assert (out["staged"], out["fetched"], out["candidates"]) == (True, False, 3), out
 
 # A row with no image URL cannot be applied at all (`POST /api/cover/fromurl`
 # takes a URL), so the policy REJECTS it — and it is still reported, with the
@@ -954,6 +948,30 @@ assert written[0]["stem"] == "cover" and written[0]["data"] == png(600, 600), wr
 assert not os.path.exists(os.path.join(staged_album, "cover.png"))
 assert imp.staged_metadata(staged_album, REVIEW_ON) == staged_before, \
     imp.staged_metadata(staged_album, REVIEW_ON)
+
+# The DEFAULT is NO review: a config that says nothing about it writes the
+# finder's winner (the release-group cover ranks first as the reference), and
+# staging is what `cover_review` on asks for. Two albums, because the step
+# short-circuits on one that already carries a cover.
+default_album = album("Blur/Think Tank", artist="Blur", title="Think Tank")
+clear_caches()
+stub_cov(cover_lines(3, width=1200, height=1200,
+                     release=release_of("Blur", "Think Tank")))
+stub_json({})
+out = imp.run_cover_step(default_album, {"music_folder": MUSIC})
+assert out["staged"] is False, out
+assert out["applied"] == {"cover": os.path.join(default_album, "cover.png")}, out
+
+staged_album2 = album("Blur/13", artist="Blur", title="13")
+clear_caches()
+stub_cov(cover_lines(3, width=1200, height=1200,
+                     release=release_of("Blur", "13")))
+stub_json({})
+out = imp.run_cover_step(staged_album2, dict(REVIEW_ON, music_folder=MUSIC))
+assert (out["staged"], out["candidates"]) == (True, 3), out
+assert out["applied"] == {}, out
+assert not os.path.isfile(os.path.join(staged_album2, "cover.png")), \
+    "a reviewed cover writes nothing until it is picked"
 
 # Every candidate is below the cover target (the floor the write path and the
 # grader both call the minimum): the step writes NOTHING and says why, rather

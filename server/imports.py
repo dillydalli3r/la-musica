@@ -1321,7 +1321,8 @@ def run_cover_step(album_dir, cfg=None):
     format and aspect, with the provider's own order as the last tiebreak.
     Every source that refused, had nothing or was skipped says so in ``notes``.
 
-    With `cover_review` on (the default) the ranked candidates are STAGED —
+    With `cover_review` on the ranked candidates are STAGED instead (the import
+    writes the winner when it is off, which is the shipped default) —
     under ``entry["covers"]`` in the same review file the metadata step uses,
     other keys of the album's entry kept — and NOTHING is written; the user
     picks one and the UI writes it through ``POST /api/cover/fromurl``. With it
@@ -1358,7 +1359,7 @@ def run_cover_step(album_dir, cfg=None):
         if payload is None:
             out["note"] = "no artist/album tags to search by"
             return out
-        if bool(cfg.get("cover_review", True)):
+        if bool(cfg.get("cover_review", False)):
             return stage_cover_candidates(album_dir, payload, cfg)
         chosen = payload.get("chosen")
         out["notes"] = list(payload.get("notes") or [])
