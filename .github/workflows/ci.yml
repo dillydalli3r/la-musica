@@ -16,7 +16,13 @@ name: CI
 # passed.
 
 on:
+  # Branches only: release.yml CALLS this workflow for a tag, so a tag push
+  # would otherwise CI the same commit twice — once standalone and once through
+  # that call — and the two land in the same `ci-<ref>` concurrency group, so
+  # each cancels the other. Which one wins is a race, and losing it cancels the
+  # release's own CI jobs, which skips every job that waits on them.
   push:
+    tags-ignore: ["**"]
   pull_request:
   workflow_call:
 
