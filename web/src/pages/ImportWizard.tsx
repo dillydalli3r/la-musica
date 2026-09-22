@@ -1492,21 +1492,17 @@ export default function ImportWizard() {
       // already false for a song/other page, and an artist paste never lands
       // in this field at all.
       const albumLink = rymValid ? rymLink.trim() : undefined;
-      await api.importCommit(albumPath, mbLink || `https://musicbrainz.org/release/${rid}`, albumLink, staged);
       // The artist page is artist-level, so it goes on every track as
       // RATEYOURMUSIC_ARTIST — the same tag the artist page's editor writes.
       // Only a link the server confirmed as an ARTIST page is stored: a song
       // or album paste in this field would be a wrong artist link forever.
+      // It rides along with the album tags on the commit call, which is the
+      // step's ONE pass over the album: a second call to write it would
+      // rewrite every track again for a third tag (that used to be half of
+      // "Saving links…" on a real album, and it rewrote the whole file even
+      // when the tag was already correct).
       const artistLink = rymArtistValid ? rymArtistLink.trim() : "";
-      if (artistLink) {
-        if (!stepTracks.length) {
-          toast("Artist link needs the album's tracks — finish matching first");
-        } else {
-          const writes: Record<string, Record<string, string>> = {};
-          for (const t of stepTracks) (writes[t.path] ??= {}).RATEYOURMUSIC_ARTIST = artistLink;
-          await api.mbAssign(writes, staged);
-        }
-      }
+      await api.importCommit(albumPath, mbLink || `https://musicbrainz.org/release/${rid}`, albumLink, staged, artistLink || undefined);
       toast("Links saved to album");
       setStep(2);
     } catch (e) {

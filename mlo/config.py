@@ -1140,13 +1140,13 @@ DEFAULT_CONFIG = {
     # and the finder's provider chain (Cover Art Archive → Deezer → Apple) can
     # fill it in while the import is still running.
     "cover_auto_fetch": True,
-    # With cover_auto_fetch on, stage the candidates for the user to PICK
-    # instead of writing the first hit: a found cover is not necessarily the
-    # right cover (a compilation, a reissue, the wrong pressing all answer to
-    # the same names), and the one that gets written is what grading and the
-    # library are stuck with. Off = the old behaviour, the best candidate is
-    # saved during the import with no question asked.
-    "cover_review": True,
+    # With cover_auto_fetch on, the finder's winner is WRITTEN during the
+    # import (the artist/album's own MusicBrainz release-group cover ranks
+    # first as the reference, so the album's real art is normally what lands).
+    # On = stage the candidates for the user to pick instead, which is what a
+    # library that cannot tolerate a wrong pressing chooses — the album then
+    # waits with a "Needs you" row until someone decides.
+    "cover_review": False,
     # Explicit shared folders (empty = the library folder <music>/Artists).
     "soulseek_share_dirs": [],
     # Extra share filters — substrings/paths slskd must NOT share.

@@ -2084,6 +2084,15 @@ def _rym_cache_dir():
     return _data_cache_dir("rym_cache")
 
 
+# The NEGATIVE beside a cached page: "RYM has no such page" for this exact
+# path, written after a 404 (or the redirect to search/home a wrong slug gets)
+# and read back through `_rym_cache_read` like any other answer. A slug that
+# does not exist does not start existing, so the next album whose ladder
+# guesses the same candidate must not spend a request and a second of the
+# 1 req/s walk learning it again — it reads this instead and moves on.
+_RYM_MISS = "#mlo:rym-no-such-page"
+
+
 def _rym_cache_read(key, ttl):
     d = _rym_cache_dir()
     if not d:
@@ -2382,7 +2391,9 @@ def _rym_get(path, params=None, cfg=None, expect=None):
     ).hexdigest()
     hit = _rym_cache_read(key, RYM_CACHE_TTL)
     if hit is not None:
-        return hit
+        # A page, or the negative beside one (`_RYM_MISS`): the second is a
+        # 404 this ladder already paid for, and "no such page" is an answer.
+        return None if hit == _RYM_MISS else hit
     if _rym_blocked(cfg):
         # RYM refused an earlier request under this same cookie (a challenge,
         # a 403, no connection). The candidates left cannot do better, and
@@ -2407,10 +2418,16 @@ def _rym_get(path, params=None, cfg=None, expect=None):
         return None
     if r.status_code != 200:
         # 404 is a slug that does not exist, not a blocked source: the caller
-        # tries its next candidate instead of declaring RYM unreachable.
+        # tries its next candidate instead of declaring RYM unreachable. The
+        # negative is CACHED — "no such page" is an answer that does not get
+        # truer by being asked again, and the ladder spends several spellings
+        # per album at 1 req/s, so without this every album whose title has
+        # more than one word paid the same 404s on every run.
         if r.status_code != 404:
             _rym_unreachable(_rym_reason(cfg, r.status_code, tries=tried), cfg,
                              status=r.status_code, url=url)
+        else:
+            _rym_cache_write(key, _RYM_MISS)
         return None
     if not r.text:
         _rym_unreachable("empty response", cfg, status=r.status_code, url=url)
@@ -2422,6 +2439,11 @@ def _rym_get(path, params=None, cfg=None, expect=None):
     if expect is not None:
         final = urlsplit(str(getattr(r, "url", "") or "")).path
         if not final.startswith(expect):
+            # RYM answered 200 with a DIFFERENT page: a slug it does not know
+            # is served the search page (or the home page), which is the same
+            # statement as a 404 — "this path is not that page" — and is cached
+            # the same way, or the next run pays it again.
+            _rym_cache_write(key, _RYM_MISS)
             return None
     # A usable answer is also "the last response": the panel must not keep
     # showing a refusal RYM has since moved past. And WHICH route this was is

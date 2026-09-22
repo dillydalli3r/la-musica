@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from mlo import import_policy
 from mlo.config import DEFAULT_CONFIG, DEFAULT_RUN_ALL_ORDER, normalize_config
-from server import events, import_autonomy, imports, script_runners
+from server import events, import_autonomy, imports, integrations, script_runners
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FLAC_EXE = None
@@ -97,7 +97,8 @@ def set_tags(path, tags):
     f.save()
 
 
-def make_album(name, *, links, cover, advisory, cover_now=False, advisory_now=False):
+def make_album(name, *, links, cover, advisory, cover_now=False, advisory_now=False,
+               genre=True):
     """An album folder in the library with everything but cover/advisory set.
 
     `links` is what the album ARRIVED with; `cover`/`advisory` are what the
@@ -120,10 +121,11 @@ def make_album(name, *, links, cover, advisory, cover_now=False, advisory_now=Fa
             "ALBUM": name,
             "DATE": "2020-01-01",
             "TRACKNUMBER": str(i),
-            "GENRE": "Shoegaze",
             "INSTRUMENTAL": "0",
             "LYRICS": "la la la la",
         }
+        if genre:
+            tags["GENRE"] = "Shoegaze"
         if advisory_now:
             tags["ITUNESADVISORY"] = "0"
         if links:
@@ -145,7 +147,7 @@ _chain_calls = []
 _step_calls = []
 _real = {n: getattr(imports, n) for n in
          ("stamp_rym_links", "fetch_advisories", "fetch_instrumentals",
-          "run_metadata_step", "run_cover_step")}
+          "run_metadata_step", "run_cover_step", "_stamp_release")}
 _real_chain = script_runners.run_chain
 
 
@@ -211,6 +213,44 @@ def stub_cover(album_dir, cfg):
             "candidates": 0}
 
 
+_resolve_calls = []
+_real_resolve = integrations.resolve_release
+
+
+def stub_resolve(mbid):
+    """`integrations.resolve_release` — the release a stamped MBID names.
+
+    The genres step resolves the release itself when its caller did not hand
+    one over (the wizard and the bulk paths do not carry one), and the real call
+    is a MusicBrainz lookup; the test answers it here and records the id, so a
+    case can tell the two routes apart.
+    """
+    _resolve_calls.append(mbid)
+    return ({"id": mbid, "title": "Test Album",
+             "release_group_id": "22222222-2222-2222-2222-222222222222",
+             "artists": [{"name": "Test Artist"}]}, mbid)
+
+
+def stub_genres(album_dir, release, cfg):
+    """The genres family's own action (`imports._stamp_release`).
+
+    The ONE step that FETCHES a genre — recorded like the others so a test can
+    say whether the import asked for genres at all. It writes GENRE, which is
+    what the real step does with the chain's answer (and why the family is no
+    longer missing afterwards).
+    """
+    name = os.path.basename(album_dir)
+    _step_calls.append(("genres", name, dict(cfg)))
+    if not cfg.get("genre_autofill", True):
+        return (0, 0)
+    written = 0
+    for f in sorted(os.listdir(album_dir)):
+        if f.lower().endswith(".flac"):
+            set_tags(os.path.join(album_dir, f), {"GENRE": "Shoegaze"})
+            written += 1
+    return (written, 0)
+
+
 def stub_chain(cfg, ids, targets=None, force=None, progress=None, wait=True,
                timeout=None, final=None):
     _chain_calls.append({"name": os.path.basename((targets or [""])[0]),
@@ -221,9 +261,20 @@ def stub_chain(cfg, ids, targets=None, force=None, progress=None, wait=True,
 
 for _name, _fn in (("stamp_rym_links", stub_stamp), ("fetch_advisories", stub_advisory),
                    ("fetch_instrumentals", stub_instrumentals),
-                   ("run_metadata_step", stub_metadata), ("run_cover_step", stub_cover)):
+                   ("run_metadata_step", stub_metadata), ("run_cover_step", stub_cover),
+                   ("_stamp_release", stub_genres)):
     setattr(imports, _name, _fn)
+integrations.resolve_release = stub_resolve
 script_runners.run_chain = stub_chain
+
+
+def prompts_for(album):
+    """The prompts `prompts(CFG)` holds for ONE album (paths normalized as the
+    store normalizes them), so a count is about this album and not about every
+    case that ran before it."""
+    key = str(album).replace("\\", "/").lower()
+    return [p for p in import_autonomy.prompts(CFG)
+            if str(p.get("album") or "").replace("\\", "/").lower() == key]
 
 
 def chain_of(name):
@@ -293,6 +344,10 @@ ok(normalize_config({"import_review_families": "cover, bogus, cover"})["import_r
    == ["cover"], "the family list keeps known names, once, in wizard order")
 ok(import_policy.review_families({"import_review_families": ["lyrics"]}) == ("lyrics",),
    "a listed family is under review while the others stay automatic")
+ok(DEFAULT_CONFIG["cover_review"] is False,
+   "the cover pick is written by default (review is the opt-in, not the norm)")
+ok(DEFAULT_CONFIG["genre_autofill"] is True,
+   "the genres family decides for itself by default")
 
 print("== automatic: everything the sources can answer ==")
 full = make_album("Full Album", links=True, cover=True, advisory=True)
@@ -304,6 +359,36 @@ ok(chain_of("Full Album") == [4], "the configured chain ran end to end")
 ok([c for c in _step_calls if c[0] == "cover" and c[1] == "Full Album"],
    "the cover step was asked (the source answered)")
 ok(os.path.isfile(os.path.join(full, "cover.png")), "the cover it found is on disk")
+
+print("== automatic: the genres family fetches its own answer ==")
+# The one step that FETCHES a genre: without it an unattended import landed
+# with no genre at all and graded GENRE_MISSING however many sources it was
+# allowed to ask (script 8 trims and caps what is already there, it never
+# looks one up).
+bare = make_album("Bare Genre Album", links=True, cover=True, advisory=True, genre=False)
+_step_calls.clear()
+res = imports.finish_album(bare, CFG)
+ok([c for c in _step_calls if c[0] == "genres" and c[1] == "Bare Genre Album"],
+   "an import with no genre runs the genres step itself")
+ok(_resolve_calls and _resolve_calls[-1] == "11111111-1111-1111-1111-111111111111",
+   f"…resolving the release from the identity the album carries ({_resolve_calls[-1:]})")
+ok("genres" not in res["autonomy"]["missing"],
+   f"…and the family is not left missing ({res['autonomy']['missing']})")
+
+print("== automatic: a Genres family under review is left alone ==")
+held = dict(CFG, import_review_families=["genres"])
+bare2 = make_album("Held Genre Album", links=True, cover=True, advisory=True, genre=False)
+_step_calls.clear()
+res = imports.finish_album(bare2, held)
+ok(not [c for c in _step_calls if c[0] == "genres"],
+   "the import does not fetch genres for a family the user kept")
+ok("genres" in res["autonomy"]["missing"],
+   f"…and the gap names it, so the prompt can ({res['autonomy']['missing']})")
+held_entry = import_autonomy.for_album(bare2, held)
+ok(held_entry and [f["id"] for f in held_entry["families"]] == ["genres"],
+   "a held family is announced, not hidden")
+ok(held_entry and held_entry["families"][0]["state"] == "decision",
+   "and it is announced as awaiting a decision")
 
 print("== automatic: what no source could supply ==")
 gap = make_album("Gap Album", links=True, cover=False, advisory=False)
@@ -322,11 +407,11 @@ ok([f["id"] for f in entry["families"]] == ["cover", "advisory"],
 body = import_autonomy.body(entry)
 ok("Cover art" in body and "Advisory" in body, f"the notification names both ({body})")
 ok("cover art" in body.lower(), "and the field that is missing, not just the family")
-prompts = import_autonomy.prompts(CFG)
+prompts = prompts_for(gap)
 ok(len(prompts) == 1, f"exactly one prompt for the album ({len(prompts)})")
-raised = [e for e in events.recent() if e["event"] == "import_needs_data"]
-ok(len(raised) == 1 and raised[0]["data"]["album_path"] == gap.replace("\\", "/"),
-   f"exactly one notification, about this album ({len(raised)})")
+raised = [e for e in events.recent()
+          if e["event"] == "import_needs_data" and e["data"]["album_path"] == gap.replace("\\", "/")]
+ok(len(raised) == 1, f"exactly one notification, about this album ({len(raised)})")
 ok(raised[0]["data"]["families"] == ["cover", "advisory"], "carrying both families")
 
 print("== the prompt's link ==")
@@ -340,7 +425,7 @@ ok("missing=cover,advisory" in link, "and every missing family, in step order")
 
 print("== a second import of the same album ==")
 imports.finish_album(gap, CFG)
-ok(len(import_autonomy.prompts(CFG)) == 1, "still one prompt per album, not one per run")
+ok(len(prompts_for(gap)) == 1, "still one prompt per album, not one per run")
 
 print("== automatic, one family held back by hand ==")
 held = make_album("Held Cover Album", links=True, cover=True, advisory=True)
@@ -398,6 +483,7 @@ ok(13 not in (chain_of("Complete Album") or []),
 
 for _name, _fn in _real.items():
     setattr(imports, _name, _fn)
+integrations.resolve_release = _real_resolve
 script_runners.run_chain = _real_chain
 shutil.rmtree(TMP, ignore_errors=True)
 print(f"autonomous import: all {passed} assertions passed")

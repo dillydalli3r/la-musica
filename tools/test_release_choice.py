@@ -99,6 +99,58 @@ assert pick([rel("vinyl", fmt="Vinyl"),
                                          {"format": "CD", "track-count": 12}])],
             cfg=cfg()) == "cddvd"
 
+# 1b. BOX SETS: an edition that bundles video media, or disc after disc of the
+#     same album, sorts below the album's own CD/digital media. The medium order
+#     alone cannot see it — a deluxe box's BEST medium is still a CD — and the
+#     tier sits BELOW the medium rule, so a CD+DVD combo still beats a vinyl
+#     pressing (the audio is the point; the DVD just rides along).
+boxed = rel("box", fmt="CD", media=[{"format": "CD", "track-count": 12},
+                                    {"format": "DVD", "track-count": 4},
+                                    {"format": "Blu-ray", "track-count": 4}])
+plain = rel("plain", fmt="CD")
+assert pick([boxed, plain]) == "plain", order([boxed, plain])
+# the box's own reason names what it carries, so the panel can explain the pick
+ranked = rc.rank_releases(group(), [boxed, plain])
+box = [c for c in ranked if c.release_mbid == "box"][0]
+assert any("DVD" in r and "Blu-ray" in r and "box set" in r for r in box.reasons), box.reasons
+
+# a Blu-ray-only edition is the same statement
+assert pick([rel("bd", fmt="Blu-ray"), plain]) == "plain"
+# …and a video-only edition is still returned when it is ALL the group has
+only = rc.choose_release(group(), [rel("bd", fmt="Blu-ray")])
+assert only is not None and only.release_mbid == "bd", only
+assert any("box set" in r for r in only.reasons), only.reasons
+
+# DVD AUDIO is audio: it must not be read as a video medium
+assert not rc.is_video_format("DVD Audio") and not rc.is_video_format("HDCD")
+dvd_a = rc.rank_releases(group(), [rel("dvd-a", fmt="DVD Audio"),
+                                    rel("dig", fmt="Digital Media")])
+da = [c for c in dvd_a if c.release_mbid == "dvd-a"][0]
+assert not any("box set" in r for r in da.reasons), da.reasons
+assert any("one disc" in r for r in da.reasons), da.reasons
+# (it still loses to Digital Media here — "DVD Audio" is simply a label the
+# shipped medium order does not name, which is the PRE-EXISTING rule and not
+# this tier's business)
+assert pick([rel("dvd-a", fmt="DVD Audio"), rel("dig", fmt="Digital Media")]) == "dig"
+
+# many discs of the same album are a box set too, even without video
+multi = rel("multi", fmt="CD", media=[{"format": "CD", "track-count": 12}] * 5)
+assert pick([multi, plain]) == "plain", order([multi, plain])
+two = rel("two", fmt="CD", media=[{"format": "CD", "track-count": 6}] * 2)
+assert pick([two, plain]) == "plain", "a 2-disc edition still ranks below one disc"
+# …but a normal 2-disc album is returned when it is all the group has
+assert pick([two]) == "two"
+# …and the medium rule still outranks this one: a CD+DVD combo beats vinyl
+assert pick([rel("vinyl", fmt="Vinyl"), boxed]) == "box", order([rel("vinyl", fmt="Vinyl"), boxed])
+
+# the release group's OWN stated count is what an oversized edition is measured
+# against: 30 tracks for a group that says 12 loses to the 12
+over = rel("over", fmt="CD", tracks=30)
+assert pick([over, plain], group(track_count=12)) == "plain", order([over, plain])
+# with no stated count the fullest edition DEFINES the target, so it is not
+# penalised for being the fullest (the pre-existing rule, unchanged)
+assert pick([over, plain]) == "over", order([over, plain])
+
 # 2. Status: official beats an unstated status, which beats a
 #    withdrawn/expired edition, which beats a promotion, which beats a bootleg.
 rows = [rel("promo", status="Promotion"), rel("boot", status="Bootleg"),
@@ -309,7 +361,8 @@ assert body["policy"]["medium_order"] == cfg()["auto_import_medium_order"]
 assert body["policy"]["preferred_country"] == ""
 assert body["policy"]["prefer_original_edition"] is True
 assert body["policy"]["status_order"] == ["official", "promotion", "bootleg"]
-assert len(body["policy"]["rules"]) == 7, body["policy"]["rules"]
+assert len(body["policy"]["rules"]) == 8, body["policy"]["rules"]
+assert any("box set" in r for r in body["policy"]["rules"]), body["policy"]["rules"]
 
 # `prefer` is the user's own edition: it is the pick, and its reasons say the
 # user asked for it; an id this group does not carry is reported as no pick.

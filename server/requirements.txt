@@ -13,3 +13,11 @@ Pillow==12.3.0
 # absent here, which is why a Docker install could not measure DR at all: the
 # measurement needs numpy, and nothing installed it.
 numpy==2.5.2
+# Caps the math libraries' OWN thread pools. numpy's BLAS backend, OpenMP and
+# NumExpr each claim every core on their own, and the analysis scripts run 4-8
+# of them at once — the run's worker budget (mlo.stats.tool_threads) has to be
+# able to say "this many threads each", and the environment alone cannot: the
+# server has numpy imported long before a script starts, so the pool already
+# exists by then. mlo.stats.bound_numeric_threads applies it; a build without
+# it keeps the environment answer.
+threadpoolctl==3.6.0

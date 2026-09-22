@@ -23,7 +23,7 @@ from .config import should_write_audio_tag
 from .paths import AUDIO_EXTS
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _walk_files,
-    _collect_targets, is_audio_file, worker_count,
+    _collect_targets, is_audio_file, worker_count, bound_numeric_threads,
 )
 from .tools import python_pkg_path
 from .ui import print_header, log, c, Color
@@ -374,11 +374,21 @@ def run_analyze_audiometa(config):
     overwrite = config.get("audiometa_overwrite", False)
     min_seconds = int(config.get("audiometa_min_seconds", 10) or 10)
 
+    # The tag pre-pass opens ONE container per file to ask whether it needs the
+    # analysis; it used to run on the runner thread, so the whole library was
+    # parsed (and the lanes sat idle) before the first decode started. Every
+    # question is about its own file, so it is the same pool, one phase
+    # earlier; the handle it hands back is what the write pass reuses.
+    tracks = _track_paths(config)
+    scan_workers = worker_count(config, default=4, maximum=8, items=len(tracks))
     pending = {}
-    for p in _track_paths(config):
-        needed, af = _needs_analysis(p, force, overwrite)
-        if needed:
-            pending[p] = af
+    if tracks:
+        with ThreadPoolExecutor(max_workers=scan_workers) as ex:
+            for p, (needed, af) in zip(
+                    tracks, ex.map(lambda t: _needs_analysis(t, force, overwrite),
+                                   tracks)):
+                if needed:
+                    pending[p] = af
     if not pending:
         log("Nothing to analyze (all tracks already tagged).")
         return stats
@@ -386,6 +396,10 @@ def run_analyze_audiometa(config):
     notation = config.get("audiometa_key_notation", "musical")
     paths = sorted(pending)
     workers = worker_count(config, default=4, maximum=8, items=len(paths))
+    # Whole-file librosa decodes run in *workers* lanes, and each one's numpy
+    # is a multi-threaded pool of its own: uncapped, the step occupied
+    # workers × cores and the Worker threads setting bounded nothing (R79).
+    bound_numeric_threads(config, workers)
     counts = {"ok": 0, "skip": 0, "fail": 0}
     pbar = _make_pbar(len(paths), "Key & BPM", unit="file")
 

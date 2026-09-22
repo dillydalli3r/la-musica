@@ -256,6 +256,32 @@ try:
                           f"{BASE}/artist/the-beatles"], fake.calls
 
     # ----------------------------------------------------------------------- #
+    # the 404 the ladder paid for is REMEMBERED: the second lookup of the same
+    # spelling asks RYM nothing at all (a slug that does not exist does not
+    # start existing), and the pages that DID answer are served from the cache
+    # in the same call — so a re-run costs zero requests, not two per album
+    # ----------------------------------------------------------------------- #
+    # one cache dir for the whole case: `run` mints a fresh one per call when
+    # it is not given one, which is what makes every OTHER case cacheless
+    cache = tempfile.mkdtemp(prefix="mlo_rym_miss_")
+    fake = run({
+        "/release/album/the_beatles/abbey_road/": status(404),
+        "/release/album/the-beatles/abbey-road/":
+            ok(release_page("The Beatles", "Abbey Road")),
+        "/artist/the-beatles": ok(artist_page("The Beatles")),
+    }, cache=cache)
+    first = intg.rym_links("The Beatles", "Abbey Road", cfg=CFG)
+    assert first["album"] == f"{BASE}/release/album/the-beatles/abbey-road/", first
+    asked = list(fake.calls)
+    assert len(asked) == 3, asked          # the miss, the dash page, the artist
+    again = intg.rym_links("The Beatles", "Abbey Road", cfg=CFG)
+    assert again == first, again
+    assert fake.calls == asked, fake.calls   # not one request more
+    # …and the negative is an answer, never a page handed to a caller: the
+    # ladder still resolved the album from the dash spelling, not from "#mlo".
+    assert "#mlo" not in str(again), again
+
+    # ----------------------------------------------------------------------- #
     # 3) the legacy dash spelling resolves when the underscore one is not
     #    there, and the ARTIST ladder still carries the de-`the`-ed slug
     # ----------------------------------------------------------------------- #

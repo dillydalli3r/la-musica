@@ -473,16 +473,31 @@ def gaps(album_dir, cfg, steps=None):
     cfg = cfg or {}
     steps = steps or {}
     out = {}
+    review = set(review_families(cfg))
+    # A family the user kept for THEMSELVES is still a gap this report has to
+    # name: `mlo.config.tag_write_enabled` stops requiring a tag whose writer is
+    # switched off, so grading with the held family's own switch off hid exactly
+    # the decision the review exists to hand over — the Genres family held by
+    # hand produced no GENRE_MISSING and therefore no prompt at all. Only the
+    # GRADE is asked with those switches back on; no step runs, and the entry's
+    # `state` is `decision` either way (see `_entry`).
+    grade_cfg = dict(cfg)
+    for fid in review:
+        for key, off_value in (_BY_ID[fid].get("off") or {}).items():
+            if isinstance(off_value, bool):
+                grade_cfg[key] = not off_value
+            else:
+                grade_cfg[key] = off_value
 
     try:
         from .grader import _grade_album
-        res = _grade_album(album_dir, str(cfg.get("lyrics_format", "EMBEDDED")).upper(), cfg)
+        res = _grade_album(album_dir, str(grade_cfg.get("lyrics_format", "EMBEDDED")).upper(),
+                           grade_cfg)
     except Exception:
         res = None
     codes = set()
     for track in (res or {}).get("tracks") or []:
         codes.update(str(c) for c in (track.get("issues") or []))
-    review = set(review_families(cfg))
     for fid, names in _codes_by_family().items():
         hits = sorted(codes & set(names))
         if not hits:

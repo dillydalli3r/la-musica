@@ -401,3 +401,50 @@ def tool_threads(config=None, workers=1):
     """
     return max(1, thread_budget(config) // max(1, int(workers or 1)))
 
+
+# The math libraries a worker's analysis rides on: numpy's BLAS backend
+# (OpenBLAS/MKL/BLIS), OpenMP, NumExpr and Accelerate. Each has its own thread
+# pool, invisible to worker_count, and each reads exactly one of these at load.
+_NUMERIC_ENV = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+                "BLIS_NUM_THREADS")
+
+# The cap currently applied to the loaded pools, so a re-apply at the same
+# width is a no-op and the run does not re-limit every album.
+_NUMERIC_LIMIT = None
+
+
+def bound_numeric_threads(config=None, workers=1):
+    """Cap this process's math-library pools to ONE worker's thread share.
+
+    *workers* is the pool width the caller is about to fill, exactly as for
+    :func:`tool_threads`: the libraries are what each worker computes on, so
+    ``workers × cap`` is the run's total, not ``workers × cores`` — which is
+    what an un-capped librosa/numpy did to a 4-lane script 12 or 16 (R79).
+
+    Returns the cap. The environment is set first, because a library that has
+    not been imported yet reads it at load; the same cap is then applied to the
+    pools ALREADY loaded through threadpoolctl (a hard dependency of the
+    analysis path — see server/requirements.txt), because the server imports
+    numpy long before a script runs and the environment alone would change
+    nothing there. A build without threadpoolctl keeps the environment answer.
+    """
+    global _NUMERIC_LIMIT
+    cap = tool_threads(config, workers)
+    for name in _NUMERIC_ENV:
+        os.environ[name] = str(cap)
+    if _NUMERIC_LIMIT != cap:
+        try:
+            import threadpoolctl
+        except ImportError:
+            _NUMERIC_LIMIT = cap
+            return cap
+        try:
+            threadpoolctl.threadpool_limits(limits=cap)
+        except Exception:
+            # An ABI the limiter cannot read is still not a reason to abort a
+            # run: the pool keeps whatever it had, as before this existed.
+            pass
+        _NUMERIC_LIMIT = cap
+    return cap
+

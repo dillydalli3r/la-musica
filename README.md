@@ -196,8 +196,9 @@ own PERFORMER/COMPOSER/… tags, and saying so). The cover finder ranks every
 candidate with the album's OWN identity — a karaoke/tribute row, another artist's
 release or a different album can no longer win, an image whose size was never
 measured cannot beat the `cover_target_size` floor, and the autonomous Covers
-step refuses to store a below-target cover (`cover_review` off = take the best
-automatically). The album's reference cover is the **release group's**
+step refuses to store a below-target cover — and it WRITES the winner by default
+(the release-group reference ranks first among the candidates); `cover_review` on
+stages them instead, for a library that would rather pick by eye. The album's reference cover is the **release group's**
 (`coverartarchive.org/release-group/<rg>/front-500`) — the image the finder shows
 beside the candidates, the wizard's preview, and what a candidate is preferred
 against; one release's own sleeve is a single edition's art, not the album's.
@@ -365,7 +366,7 @@ blamed on a firewall), a self-connect through the public address (refused ⇒
 "unknown", because a router without NAT hairpinning refuses it while the port may
 still be open) and slskd's own signed-in state. A definite answer about the
 internet needs a probe from outside this network, which the app does not ship —
-and the panel says so. The **auto-importer** searches
+and the panel says so. Which EDITION is fetched is the release-choice policy's (`mlo/release_choice.py`), and it is the same policy the release-group page shows: official editions ahead of everything else, the configured medium order (CD, then the other physical media, digital last), the original ahead of a reissue — and a **box set below the album itself**, whether it is the DVD/Blu-ray bundle (media this library cannot use) or disc after disc of the same record, so a five-disc anniversary box no longer outranks the plain CD it contains. The **auto-importer** searches
 each release by what can only point at THAT release: a physical pressing (CD
 included) is searched by its catalog number and barcode
 (`soulseek_auto_physical_queries`) and, when it states neither, by its label and

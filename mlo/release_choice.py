@@ -91,11 +91,13 @@ _PROMO_STATUSES = frozenset({"promotion", "bootleg", "pseudo-release", "pseudo r
 # later one). The digits are the levels quantized to 0..7, which keeps the
 # score monotone in every tier while staying readable (0.8757).
 _SCORE_BASE = 8
-_TIER_NAMES = ("status", "medium", "tracks", "date", "edition", "disambiguation", "country")
+_TIER_NAMES = ("status", "medium", "set", "tracks", "date", "edition",
+               "disambiguation", "country")
 # What a tie-break sentence calls each tier (see _deciding_reason).
 _TIER_LABELS = {
     "status": "release status",
     "medium": "the medium order",
+    "set": "the box-set rule",
     "tracks": "the track count",
     "date": "the release date",
     "edition": "the clean/edited-edition rule",
@@ -113,6 +115,8 @@ _RULES = (
     "the configured medium order decides first: CD, then the other physical "
     "media, digital last",
     "a release short of the release group's own track count is penalised",
+    "a box set — an edition carrying DVD/Blu-ray media, or one disc after "
+    "another — sorts below the album's own CD/digital media",
     "the original edition beats a later reissue unless the later one is "
     "materially more complete",
     "prefer_release_country only ever breaks a tie",
@@ -451,6 +455,56 @@ def type_names(values):
     return out
 
 
+# The media that make an edition a BOX SET rather than the album. MusicBrainz
+# states these as medium formats, and they are the ones an audio library cannot
+# use: a DVD rip is a video file, a Blu-ray is 25 GB of the same, and both
+# arrive bundled with the album's CD in the deluxe/anniversary boxes that
+# otherwise answer to the same names as a plain CD.
+#
+# `DVD Audio` is deliberately NOT here: it is an audio medium (and the audio
+# exists nowhere else). The comparison is exact after folding case, hyphens and
+# spaces, plus the unambiguous substrings — so "Blu-ray" catches MusicBrainz's
+# "Blu-ray", "Blu-ray-R" and "BD-R", and "dvd" alone would have caught the
+# audio format this rule must not touch.
+_VIDEO_FORMATS = frozenset({
+    "dvd", "dvd-video", "dvdvideo", "bluray", "blurayr", "bdr", "hddvd",
+    "hddvd", "vhs", "vcd", "svcd", "videocd", "laserdisc", "umd", "betamax",
+    "ced", "video8", "hi8",
+})
+_VIDEO_SUBSTRINGS = ("blu-ray", "hd dvd", "hi8", "laserdisc", "vhs", "svcd", "vcd")
+
+
+def _norm_format(name):
+    """A medium format folded for comparison: case, hyphens and runs of space."""
+    return re.sub(r"[\s\-_]+", "", str(name or "").strip().lower())
+
+
+def is_video_format(name):
+    """Whether one MusicBrainz medium format names VIDEO media."""
+    folded = _norm_format(name)
+    if not folded:
+        return False
+    if folded in _VIDEO_FORMATS:
+        return True
+    # The substrings are matched on the folded spelling too ("blu-ray" folds to
+    # "bluray" above), so every form of the name is caught by the same test.
+    return any(sub.replace("-", "").replace(" ", "") in folded
+               for sub in _VIDEO_SUBSTRINGS)
+
+
+def video_formats(rel):
+    """The release's video media, in MusicBrainz's own spelling."""
+    return [f for f in media_formats(rel) if is_video_format(f)]
+
+
+def disc_count(rel):
+    """How many media the release holds (1 when MusicBrainz states none)."""
+    media = rel.get("media")
+    if isinstance(media, list) and media:
+        return len([m for m in media if isinstance(m, dict)])
+    return max(1, len(media_formats(rel)))
+
+
 def medium_rank(rel, order):
     """(index, label) of the release's best medium in *order*.
 
@@ -531,6 +585,27 @@ def _status_reason(status):
     return ladder.get(status, "MusicBrainz states no release status")
 
 
+def _set_level(rel):
+    """(level, reason) for the box-set tier — rule 3 in the module docstring.
+
+    A box set is not a bigger album: it is the album plus media this library
+    cannot use (a DVD, a Blu-ray) and, at its worst, four more discs of the
+    same record. Both signals score below an edition that holds just the
+    album, which is what makes a plain CD or digital release win before the
+    track-count and date rules ever see the box.
+    """
+    video = video_formats(rel)
+    if video:
+        return 0.0, ("carries " + ", ".join(sorted(set(video)))
+                     + " — a box set, not the album's own media")
+    discs = disc_count(rel)
+    if discs >= 3:
+        return 0.35, f"{discs} discs — a box set rather than the album"
+    if discs == 2:
+        return 0.8, "2 discs"
+    return 1.0, "one disc"
+
+
 def _evaluate(rel, ctx, index):
     """(levels, candidate) for one release — the whole policy, in one pass."""
     status = str(rel.get("status") or "").strip()
@@ -557,7 +632,11 @@ def _evaluate(rel, ctx, index):
     reasons.append(f"{label} — preferred medium (order {rank + 1})" if rank < len(ctx.order)
                    else f"{label or 'no medium stated'} — not in the configured medium order")
 
-    # 3. completeness ...
+    # 3. the set: what the edition actually HOLDS ...
+    level_set, set_reason = _set_level(rel)
+    reasons.append(set_reason)
+
+    # 4. completeness ...
     if count <= 0:
         level_tracks = 0.5
         reasons.append("no track count on MusicBrainz — not counted against it")
@@ -566,18 +645,29 @@ def _evaluate(rel, ctx, index):
         reasons.append(f"{count} tracks")
     else:
         level_tracks = min(1.0, count / ctx.expected)
-        if count >= ctx.expected:
+        if count > ctx.expected and ctx.expected_stated:
+            # The release group itself says how many tracks the album has, and
+            # this edition holds more: that is the bonus-disc half of a box set,
+            # scored below the album proper. Only a STATED count is trusted here
+            # — when the group states none, `expected` is the fullest edition
+            # offered (see `expected_tracks`), and penalising everything below
+            # the box would be the opposite of the rule.
+            level_tracks = max(0.1, ctx.expected / count)
+            reasons.append(f"{count} tracks — {ctx.expected} is the release "
+                           "group's own count, so this edition holds more than "
+                           "the album")
+        elif count >= ctx.expected:
             reasons.append(f"{count}/{ctx.expected} tracks of the release group")
         else:
             reasons.append(f"{count} of {ctx.expected} tracks — short of "
                            + ("the release group's own count" if ctx.expected_stated
                               else "the fullest edition offered"))
 
-    # 4. date ...
+    # 5. date ...
     level_date, date_reason = _release_date_level(date, ctx)
     reasons.append(date_reason)
 
-    # 5. edition kind ...
+    # 6. edition kind ...
     clean = bool(_CLEAN_RE.search(f"{title} {disambiguation}"))
     if clean and ctx.keep_original:
         level_edition = 0.0
@@ -587,12 +677,12 @@ def _evaluate(rel, ctx, index):
         if clean:
             reasons.append("clean edition — prefer_original_edition is off, so it is not penalised")
 
-    # 6. plain title ...
+    # 7. plain title ...
     level_plain = 0.0 if disambiguation else 1.0
     if disambiguation:
         reasons.append(f'MusicBrainz disambiguation "{disambiguation}"')
 
-    # 7. country (a tie-breaker, so it is the last tier) ...
+    # 8. country (a tie-breaker, so it is the last tier) ...
     if ctx.country:
         if country and country.lower() == ctx.country.lower():
             level_country = 1.0
@@ -629,8 +719,8 @@ def _evaluate(rel, ctx, index):
         disambiguation=disambiguation, reasons=tuple(reasons), eligible=eligible,
         index=index, type_ok=type_ok,
     )
-    return ((level_status, level_medium, level_tracks, level_date, level_edition,
-             level_plain, level_country), candidate)
+    return ((level_status, level_medium, level_set, level_tracks, level_date,
+             level_edition, level_plain, level_country), candidate)
 
 
 def _row_types(rel, ctx):

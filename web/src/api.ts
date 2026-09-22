@@ -2196,11 +2196,15 @@ export const api = {
       `${API}/import/ingest?source=${encodeURIComponent(source)}&target=${encodeURIComponent(target)}`,
       { method: "POST" }
     ),
-  importCommit: (targetDir: string, mbLink?: string, rymLink?: string, staged = false) =>
+  /** Store the album's MB/RYM links. `rymArtistLink` is the artist page the
+   *  wizard already confirmed as an artist (server-side kind check) — it is
+   *  stamped per track as RATEYOURMUSIC_ARTIST in the same container write as
+   *  the album tags, so the Links step costs one pass over the album. */
+  importCommit: (targetDir: string, mbLink?: string, rymLink?: string, staged = false, rymArtistLink?: string) =>
     json<{ ok: boolean; changed: number }>(`${API}/import/commit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target_dir: targetDir, mb_link: mbLink || null, rym_link: rymLink || null, staged }),
+      body: JSON.stringify({ target_dir: targetDir, mb_link: mbLink || null, rym_link: rymLink || null, rym_artist_link: rymArtistLink || null, staged }),
     }),
   /** Record the release's full tracklist on the album, so a PARTIAL import
    *  can grey out the tracks that never came in. Empty tracks clears it. */

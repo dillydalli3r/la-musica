@@ -71,7 +71,7 @@ const CFG_DEFAULTS: Record<string, unknown> = {
   prefer_original_edition: true,
   auto_import_medium_order: ["CD", "Vinyl", "Cassette", "Other", "Digital Media"],
   cover_auto_fetch: true,
-  cover_review: true,
+  cover_review: false,
 };
 
 type ProviderOption = { id: string; label: string; notes?: string; rank?: number };

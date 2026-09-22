@@ -494,10 +494,16 @@ class AssignTagsRequest(BaseModel):
 
 class ImportCommit(BaseModel):
     """Store MB/RYM links on an imported album. target_dir = album folder
-    name under music_folder, or an absolute path already inside it."""
+    name under music_folder, or an absolute path already inside it.
+
+    `rym_artist_link` is the artist-level page the wizard's Links step
+    confirmed (`/api/rym/validate` said "artist"): it lands on every track as
+    RATEYOURMUSIC_ARTIST in the SAME container write as the album tags, which
+    is what keeps that step to one rewrite per track."""
     target_dir: str
     mb_link: Optional[str] = None
     rym_link: Optional[str] = None
+    rym_artist_link: Optional[str] = None
     staged: bool = False  # the wizard's album folder, wherever the user put it
 
 
@@ -7345,6 +7351,9 @@ def import_commit(req: ImportCommit):
     """Store MB/RYM links on every track of a freshly imported album.
 
     target_dir: album folder name under the library (Artists).
+    All three links — the MB release, the album page and (when the wizard
+    confirmed it) the artist page — land in ONE pass over the album, one
+    container write per track.
     """
     cfg = load_config()
     folder = cfg.get("music_folder") or ""
@@ -7371,10 +7380,21 @@ def import_commit(req: ImportCommit):
     if rym:
         for p in changes:
             changes[p]["RATEYOURMUSIC_ALBUM"] = rym
+    # The artist page is artist-level, so it goes on every track as
+    # RATEYOURMUSIC_ARTIST — and it goes into the SAME per-track map as the two
+    # album tags above, so the deferral below still turns the whole step into
+    # ONE container write per track. Only a page RYM's own kind check calls an
+    # artist is stored: a song or album link here would be a wrong artist link
+    # forever (every later import stamps only what no tag already holds), and it
+    # is what the wizard's field validation confirmed before sending it.
+    artist = (req.rym_artist_link or "").strip()
+    if intg.rym_url_kind(artist) == "artist":
+        for p in changes:
+            changes[p]["RATEYOURMUSIC_ARTIST"] = artist
     # One AudioFile per track, and every tag for that track inside ONE
     # container write. Without the deferral each set_tag costs a whole-file
-    # copy + rewrite (mlo/atomic.rewrite_via), and this step writes up to two
-    # of them per track — it is the wizard's "Saving links…", so that
+    # copy + rewrite (mlo/atomic.rewrite_via), and this step stamps up to
+    # three tags per track — it is the wizard's "Saving links…", so that
     # difference is the step's whole duration on a real album. The files are
     # independent (rewrite_via writes its own temp beside its target and swaps
     # it in), so they also go through the pool every other per-file pass uses.

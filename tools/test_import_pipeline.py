@@ -200,7 +200,7 @@ DF_PATH = os.path.normpath(defer_album)
 _seen = {}
 _real_steps = {n: getattr(imports, n) for n in
                ("stamp_rym_links", "fetch_advisories", "fetch_instrumentals",
-                "run_metadata_step", "run_cover_step")}
+                "run_metadata_step", "run_cover_step", "_stamp_release")}
 _real_run_chain = script_runners.run_chain
 
 
@@ -218,6 +218,7 @@ try:
     imports.fetch_instrumentals = _spy("instrumental", {})
     imports.run_metadata_step = _spy("metadata", {})
     imports.run_cover_step = _spy("cover", {})
+    imports._stamp_release = _spy("genres", (0, 0))
     script_runners.run_chain = _spy("chain", [])
 
     full = imports.finish_album(defer_album, DF_CFG)
@@ -228,7 +229,11 @@ finally:
         setattr(imports, _n, _fn)
     script_runners.run_chain = _real_run_chain
 
-# the staging steps, both tag-writing fetches AND the chain: once each
+# the staging steps, both tag-writing fetches AND the chain: once each. The
+# genres family is NOT among them here, and that is the contract: its one
+# action is release-driven, and this fixture's files carry no MusicBrainz
+# identity to resolve a release from (tools/test_autonomous_import.py's album
+# has one and asserts the step runs there).
 assert default_seen == {"rym": 1, "metadata": 1, "cover": 1,
                         "advisory": 1, "instrumental": 1, "chain": 1}, default_seen
 assert default_args["rym"][0][0] == (DF_PATH, DF_CFG), default_args["rym"]
@@ -267,7 +272,22 @@ finally:
 _deadline = time.time() + 10
 while not _auto_calls and time.time() < _deadline:
     time.sleep(0.01)
-assert _auto_calls == [(DF_PATH, {})], _auto_calls
+assert _auto_calls == [(DF_PATH, {"release": None})], _auto_calls
+# a second call carries the release the auto-import just resolved: that is what
+# lets finish_album fetch genres without looking the identity up again
+_auto_calls.clear()
+imports.finish_album = _capture
+try:
+    _auto._start_import_chain(DF_PATH, DF_CFG, {"id": "rel-1"})
+    for t in threading.enumerate():
+        if t.name == "mlo-soulseek-import-chain":
+            t.join(30)
+finally:
+    imports.finish_album = _real_finish_album
+_deadline = time.time() + 10
+while not _auto_calls and time.time() < _deadline:
+    time.sleep(0.01)
+assert _auto_calls == [(DF_PATH, {"release": {"id": "rel-1"}})], _auto_calls
 
 # --------------------------------------------------------------------------- #
 # AcoustID: unusable says why, and says nothing about matching

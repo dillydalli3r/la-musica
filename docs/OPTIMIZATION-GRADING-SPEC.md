@@ -630,7 +630,13 @@ Even a forced re-rate rewrites only with evidence: the invented
   and the ones below are fallbacks rather than a second opinion. The surfaces
   offer ONE `Import genres` action with the source tray beside it: the tray
   lists every source the app knows, ticks the enabled ones, says what each one
-  provides, and carries the reset back to the shipped default.
+  provides, and carries the reset back to the shipped default. An IMPORT runs
+  this chain by itself (`server.imports.finish_album`'s genres step, whose
+  release is the one the import resolved — no script is needed for it, and
+  script 8 only trims what it wrote): the unattended download therefore lands
+  with the genres its sources can supply, and a Genres family the user kept for
+  themselves is both left alone AND reported as a gap, so the prompt still says
+  what is waiting.
 - **R40** — the family is *derived* from a curated 28-family table plus keyword
   rules, never asked of a model; a genre with no known family gets **no** family
   slot rather than a wrong one.

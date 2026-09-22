@@ -4541,7 +4541,7 @@ def _clear_downloads(slsk, ddir, found, cfg):
     return out
 
 
-def _start_import_chain(album_dir, cfg):
+def _start_import_chain(album_dir, cfg, release=None):
     """Finish the freshly imported album in the background: links, metadata,
     cover art — and the configured script chain.
 
@@ -4581,7 +4581,7 @@ def _start_import_chain(album_dir, cfg):
     def chain():
         _tl.jid = owner
         try:
-            result = imports.finish_album(album_dir, cfg)
+            result = imports.finish_album(album_dir, cfg, release=release)
             for err in result.get("errors") or []:
                 _log("  ! " + err)
             # The chain's own one-line report ("ran 12 of 14 scripts — 2
@@ -4781,7 +4781,7 @@ def _import(local_root, release, cfg, media):
     except Exception as e:
         organize_error = str(e)
 
-    _start_import_chain(album_path, cfg)
+    _start_import_chain(album_path, cfg, release)
     return {"album_path": album_path, "imported": True,
             "staging_path": dest, "organized": organized,
             "organize_error": organize_error}

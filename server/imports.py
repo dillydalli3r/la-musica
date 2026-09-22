@@ -142,7 +142,7 @@ def _invalidate_caches():
         pass
 
 
-def finish_album(album_dir, cfg=None, progress=None, force=None):
+def finish_album(album_dir, cfg=None, progress=None, force=None, release=None):
     """Run the configured chain over ONE album folder.
 
     The single call every import path makes after an album is on disk — the
@@ -177,12 +177,13 @@ def finish_album(album_dir, cfg=None, progress=None, force=None):
 
     The staged work is gated by its OWN keys, not by the chain switch:
     ``metadata_auto_fetch`` / ``cover_auto_fetch`` decide the artist image,
-    descriptions and cover art and ``rym_links_auto`` the links, so an import
-    with the chain switched off still does those (the unattended import has
-    fetched them since it existed, and turning the scripts off must not silently
-    take the cover art with it) — while ``advisory_auto_fetch`` /
-    ``instrumental_auto_fetch`` only run when a chain is configured to read what
-    they write.
+    descriptions and cover art, ``rym_links_auto`` the links and
+    ``genre_autofill`` the genres (the family's only fetcher — see the step
+    itself), so an import with the chain switched off still does those (the
+    unattended import has fetched them since it existed, and turning the
+    scripts off must not silently take the cover art with it) — while
+    ``advisory_auto_fetch`` / ``instrumental_auto_fetch`` only run when a chain
+    is configured to read what they write.
 
     WHAT IS LEFT is always reported, in both modes, by
     ``_report_gaps``: the album's ``autonomy`` block carries what it is still
@@ -262,6 +263,39 @@ def finish_album(album_dir, cfg=None, progress=None, force=None):
             print(f"[mlo] rateyourmusic: {rym['note']} — {os.path.basename(path)}")
     except Exception:
         traceback.print_exc()
+
+    # GENRES: the family's own automatic action — the same writer the wizard's
+    # Genres step and the bulk release stamp call (`_stamp_release`), and the
+    # ONLY thing that FETCHES a genre (script 8 trims and caps what is already
+    # there, `mlo/autotag.py`). Without this step an unattended import landed
+    # with no genre at all and graded GENRE_MISSING however many sources the
+    # chain was allowed to ask: the acquisition paths never reached the one
+    # automatic writer. `run_cfg`'s `genre_autofill` is False when the family is
+    # one the user kept for themselves (`import_policy.effective_config`), so a
+    # reviewed Genres family is left alone here exactly as it is by the wizard.
+    # Runs BEFORE the chain, because script 8 reads what this writes. Never
+    # fatal: a genre that cannot be resolved is a gap the report names.
+    if run_cfg.get("genre_autofill", True):
+        rel = release
+        if not rel and album_mbid:
+            # The identity the import just stamped is enough to ask for the
+            # release the genres belong to — a release-GROUP id resolves to its
+            # best edition through the same choice policy the wish path uses,
+            # and the lookup is cached. No identity at all skips the step.
+            try:
+                from server import integrations as intg
+                rel, _rid = intg.resolve_release(album_mbid)
+            except Exception:
+                rel = None
+        if rel:
+            try:
+                written, failed = _stamp_release(path, rel, run_cfg)
+                out["genres"] = {"written": written, "failed": failed}
+                if failed:
+                    out["errors"].append(
+                        f"{failed} track(s) took no genre (see the genre sources)")
+            except Exception:
+                traceback.print_exc()
 
     # Advisory BEFORE the chain: script 8 derives ALBUMITUNESADVISORY from the
     # per-track values, so writing ITUNESADVISORY afterwards would leave the

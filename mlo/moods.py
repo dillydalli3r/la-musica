@@ -69,7 +69,8 @@ from .audiometa import _detect_bpm, _detect_key, _ensure_librosa, _load_signal
 from .config import should_write_audio_tag
 from .paths import LIB_AUDIO_EXTS
 from .stats import (_collect_targets, _make_pbar, _pbar_skip, _pbar_update,
-                    _walk_files, new_stats, worker_count)
+                    _walk_files, new_stats, worker_count,
+                    bound_numeric_threads)
 from .ui import Color, c, log, print_header
 
 MOODS = ["happy", "energetic", "aggressive", "sad", "calm", "dreamy", "dark", "party"]
@@ -453,31 +454,42 @@ def _track_paths(config):
     return sorted(_walk_files(folder, LIB_AUDIO_EXTS))
 
 
-def needs_mood(path, config, force=False):
-    """True when *path* still needs a verdict (or the run forces one).
+def _needs_mood(path, config, force=False):
+    """``(needed, af)`` — whether *path* still needs a verdict, with the open
+    handle it was read through.
 
     The same short-circuit script 8 uses: the librosa decode is the expensive
     part, so an already-tagged track is left alone — except one that carries
     MOOD but predates ENERGY, which is analysed once more to backfill it
     (only while ENERGY writes are still on for its filetype).
+
+    The handle is handed back so the analysis pass reuses it: this question and
+    the GENRE read in _apply_one ask the same container for its tags, and
+    opening it twice parsed every analysed file for the same answers. None when
+    the file would not open (or when nothing is needed): the caller then lets
+    _apply_one open it, which reports the failure the same way it always did.
     """
     if force:
-        return True
+        return True, None
     try:
         af = AudioFile(path)
         if not str(af.get_tag("MOOD") or "").strip():
-            return True
+            return True, af
         if should_write_audio_tag(config, "ENERGY", filepath=path):
-            return not str(af.get_tag("ENERGY") or "").strip()
-        return False
+            return (not str(af.get_tag("ENERGY") or "").strip()), af
+        return False, None
     except Exception:
-        return True
+        return True, None
 
 
-def _apply_one(path, config):
-    """(changed, error) for one track — one handle, one classification."""
+def _apply_one(path, config, af=None):
+    """(changed, error) for one track — one handle, one classification.
+
+    *af* is the already-open handle from :func:`_needs_mood`, when there is
+    one; the MOOD/ENERGY write goes through it, exactly as before.
+    """
     try:
-        af = AudioFile(path)
+        af = af or AudioFile(path)
         genre = str(af.get_tag("GENRE") or "").strip()
         return bool(apply_mood_tags(af, path, config, genre=genre)), None
     except Exception as e:          # unreadable container: report, keep going
@@ -513,12 +525,32 @@ def run_detect_mood_energy(config):
     force = bool(config.get("force_mood", False))
     log(f"librosa v{version} · source={config.get('mood_source') or 'hybrid'}")
 
-    paths = [p for p in _track_paths(config) if needs_mood(p, config, force)]
-    if not paths:
+    # The tag pre-pass asks one container per track whether it needs the
+    # verdict, and it used to run on the runner thread with every lane idle;
+    # each question is about its own file, so it is the same pool one phase
+    # earlier. The handle it read through travels with the track and the
+    # analysis writes through it instead of opening the file again.
+    tracks = _track_paths(config)
+    scan_workers = worker_count(config, default=4, maximum=8, items=len(tracks))
+    pending = {}
+    if tracks:
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        with _TPE(max_workers=scan_workers) as ex:
+            for p, (needed, af) in zip(
+                    tracks, ex.map(lambda t: _needs_mood(t, config, force),
+                                   tracks)):
+                if needed:
+                    pending[p] = af
+    if not pending:
         log("Nothing to analyse (every track already carries MOOD/ENERGY).")
         return stats
+    paths = sorted(pending)
 
     workers = worker_count(config, default=4, maximum=8, items=len(paths))
+    # Each lane decodes a whole track through librosa, whose numpy is a
+    # multi-threaded pool of its own: uncapped, the step occupied
+    # workers × cores and the Worker threads setting bounded nothing (R79).
+    bound_numeric_threads(config, workers)
     counts = {"ok": 0, "skip": 0, "fail": 0}
     pbar = _make_pbar(len(paths), "Mood & Energy", unit="file")
 
@@ -541,11 +573,12 @@ def run_detect_mood_energy(config):
     try:
         if len(paths) == 1 or workers == 1:
             for path in paths:
-                _finish(path, *_apply_one(path, config))
+                _finish(path, *_apply_one(path, config, pending[path]))
         else:
             from concurrent.futures import ThreadPoolExecutor, as_completed
             with ThreadPoolExecutor(max_workers=workers) as ex:
-                futures = {ex.submit(_apply_one, p, config): p for p in paths}
+                futures = {ex.submit(_apply_one, p, config, pending[p]): p
+                           for p in paths}
                 for fut in as_completed(futures):
                     _finish(futures[fut], *fut.result())
     finally:
