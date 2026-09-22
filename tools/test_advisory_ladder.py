@@ -19,12 +19,12 @@ Issue #10, in one file:
 * when nobody stated anything, the ladder runs: instrumental → AI (fed the
   lyrics when the file has them) → lyrics word scan → `advisory_fallback`, and
   every answer carries the stage that produced it;
-* a provider's stated 0 is ESCALATEABLE: the stages that read the words run as
-  explicit-only signals, and one of them finding explicit language turns the 0
-  into 1 with a source that names it ("lyrics-scan (escalated)", "ai-lyrics
-  (escalated)") instead of leaving a provider credited with a rating it never
-  gave. The SCAN only ever goes 0 → 1, and a track with no words cannot be
-  escalated at all;
+* a provider's stated 0 is ESCALATEABLE BY THE SCAN: the explicit-only word
+  signal finding explicit language turns the 0 into 1 with a source that names
+  it ("lyrics-scan (escalated)") instead of leaving a provider credited with a
+  rating it never gave. The AI does NOT escalate (owner's rule: it is a backup,
+  never an opinion that overrules a source). The SCAN only ever goes 0 → 1, and
+  a track with no words cannot be escalated at all;
 * an AI that answers 3 (or something unparseable) is "cannot tell" and falls
   THROUGH the ladder — the value space this app stores is 0/1/2, so a stored 3
   would fail the grader on every track carrying one;
@@ -110,12 +110,14 @@ try:
         "and its 1 cannot outrank the provider's own 1, so the value AND the "
         "provenance stay the provider's")
 
-    # the answer it gave is recorded beside the providers', which is what lets
-    # the reply's provenance chips name it (the fetch's per-track `answers`)
+    # A provider stated something, so the model is NOT a source behind the
+    # value: the owner's rule is that the AI is a BACKUP, never an opinion that
+    # competes with the sources — recording it here would put its name on a
+    # provenance chip for a rating it did not give.
     track_answers = {}
     advisory.decide_advisory(cfg(), value=1, source="deezer-isrc",
                              answers=track_answers, lyrics="i dont give a fuck")
-    assert track_answers == {"ai-lyrics": 1}, track_answers
+    assert track_answers == {}, track_answers
 
     # a stated 2 with NO words to read: the AI's answer cannot outrank it — a
     # model shown "(none available)" has read nothing, and nothing is not the
@@ -136,8 +138,12 @@ try:
     calls.clear()
     out = advisory.decide_advisory(cfg(), value=0, source="apple-album",
                                    lyrics="i dont give a fuck")
-    assert out == {"value": 1, "source": "ai-lyrics (escalated)",
-                   "stage": "ai", "hits": [], "fallback": False}, out
+    # …and the escalation is the SCAN's, not the model's: the words are the
+    # evidence, and the model cannot overrule a stated 0 any more than it can
+    # a stated 1 or 2. The one call still happens (the model answers once per
+    # track, ready for the case where nobody stated anything).
+    assert out == {"value": 1, "source": "lyrics-scan (escalated)",
+                   "stage": "lyrics", "hits": ["fuck"], "fallback": False}, out
     assert len(calls) == 1, f"ONE call per track, not one per stage ({calls})"
 
     # no AI: the word scan is the signal, and the answer carries both things a
@@ -193,16 +199,17 @@ try:
                                    lyrics="shut the fuck up")
     assert out["source"] == "lyrics-scan (escalated)" and out["value"] == 1, out
 
-    # the AI answering 0 IS an answer — it agrees with the provider and the
-    # word list is not consulted over it (the ladder's own order: a model
-    # reading the words replaces the word list, it does not back it up)
+    # …and an AI answer does NOT settle a stated value at all any more: it is
+    # a backup, so the scan — the app's own evidence — still runs over a
+    # stated 0 and still escalates it. The model's "0" can no longer suppress
+    # the words that are actually there.
     ai_mod.ai_chat = lambda *a, **k: "0"
     out = advisory.decide_advisory(cfg(), value=0, source="deezer-isrc",
                                    lyrics="i dont give a fuck")
-    assert out == {"value": 0, "source": "deezer-isrc", "stage": "sources",
-                   "hits": [], "fallback": False}, out
+    assert out == {"value": 1, "source": "lyrics-scan (escalated)",
+                   "stage": "lyrics", "hits": ["fuck"], "fallback": False}, out
     assert advisory_words.scan_lyrics("i dont give a fuck"), \
-        "the lexicon WOULD have hit — the AI's answer is what settled it"
+        "the lexicon hit — which is the whole reason the scan still runs"
 
     # an AI 2 never outranks a stated 0 — that is the SAME rank, read the other
     # way — and because the AI's answer replaces the word list, the scan is not
@@ -211,8 +218,7 @@ try:
     ai_mod.ai_chat = lambda *a, **k: calls.append(k) or "2"
     out = advisory.decide_advisory(cfg(), value=0, source="deezer-isrc",
                                    lyrics="i dont give a fuck")
-    assert out == {"value": 0, "source": "deezer-isrc", "stage": "sources",
-                   "hits": [], "fallback": False}, out
+    assert out == {"value": 1, "source": "lyrics-scan (escalated)", "stage": "lyrics", "hits": ["fuck"], "fallback": False}, out
     assert len(calls) == 1, calls
 
     # ... while an AI 1 DOES outrank a clean edition's 2: as a source in the
@@ -222,8 +228,7 @@ try:
     ai_mod.ai_chat = lambda *a, **k: "1"
     out = advisory.decide_advisory(cfg(), value=2, source="apple-album",
                                    lyrics="i dont give a fuck")
-    assert out == {"value": 1, "source": "ai-lyrics", "stage": "ai",
-                   "hits": [], "fallback": False}, out
+    assert out == {"value": 2, "source": "apple-album", "stage": "sources", "hits": [], "fallback": False}, out
 
     # without a read of the words it outranks nothing, so a stated 0 still
     # stands: the call is made and its answer reported, but the provider's
@@ -233,8 +238,7 @@ try:
                                    answers=track_answers, lyrics="")
     assert out == {"value": 0, "source": "deezer-isrc", "stage": "sources",
                    "hits": [], "fallback": False}, out
-    assert track_answers == {"ai": 1}, track_answers
-
+    assert track_answers == {}, track_answers
     ai_mod.ai_chat = lambda *a, **k: calls.append(k) or "1"
     # the sections below measure the AI calls their OWN case makes
     calls.clear()

@@ -342,26 +342,17 @@ def _escalate_explicit(cfg, text) -> Optional[Dict]:
 def _stated(cfg, value, source, *, text, verdict) -> Dict:
     """What to write when a provider stated *value*, once the AI has spoken.
 
-    The AI is a source of its own (issue #28), so `merge_advisory`'s rank
-    decides between its answer and the providers' merged one: a stated 1 is out
-    of its reach (nothing outranks 1, so the value AND the provenance stay the
-    provider's own), an AI 1 outranks a stated 0 or a clean edition's 2, and an
-    AI 2 never outranks a stated 0. An answer that wins takes the provenance
-    with it — the stored digit is then not what the provider said.
+    The AI NEVER overrules a provider (the owner's rule): a value another
+    source stated is written as it stands, with that source's provenance. The
+    model is a BACKUP — asked once per track, used where no provider answered
+    (see `_word_stages`) — not a second opinion that can lower a rating the
+    sources already agreed on. Issue #28 made it a source competing by
+    `merge_advisory`'s rank (an AI 1 outranking a stated 0 or a clean edition's
+    2); that is the behaviour this function no longer implements.
 
-    Overruling a stated value takes a READ of the track's words: a model shown
-    "(none available)" has read nothing, and nothing is not the evidence it
-    takes to contradict a provider (the rule `_escalate_explicit` states for
-    the scan). Without words its answer is still reported — the reply's chips
-    name it — but the provider's value decides.
-
-    A stated 0 the AI did not answer over still falls through to the word scan,
-    the explicit-only signal for exactly that case — when the AI DID answer,
-    its answer replaces the scan rather than backing it up (the same order the
-    ladder keeps). Any other stated value is returned as it stands: the scan
-    never reads the words over a provider's stated 1 or 2 (it is about the 0
-    the providers systematically miss), and only the AI, as a source in the
-    merge, outranks those.
+    A stated 0 still falls through to the word scan (`_escalate_explicit`), the
+    explicit-only signal for exactly that case: the scan reads the track's own
+    words and is not the model. A stated 1 or 2 is returned as it stands.
     """
     value = int(value)
     if verdict is None:
@@ -369,15 +360,10 @@ def _stated(cfg, value, source, *, text, verdict) -> Dict:
             escalated = _escalate_explicit(cfg, text)
             if escalated is not None:
                 return escalated
-    elif text and _outranks(verdict["value"], value):
-        # `ESCALATED` is the wording the UI reads as "the words overruled a
-        # provider that stated 0" (web/src/components/Badges.tsx), so it is
-        # applied to that case; over a stated 2 the value is simply the AI's.
-        return {"value": int(verdict["value"]),
-                "source": str(verdict.get("source") or "")
-                          + (ESCALATED if value == 0 else ""),
-                "stage": verdict.get("stage") or STAGE_AI,
-                "hits": [], "fallback": False}
+    if value == 0:
+        escalated = _escalate_explicit(cfg, text)
+        if escalated is not None:
+            return escalated
     return {"value": value, "source": source or "",
             "stage": STAGE_SOURCES, "hits": [], "fallback": False}
 
@@ -415,11 +401,15 @@ def decide_advisory(cfg, *, value=None, source="", answers=None, path="", af=Non
 
     text = _lyrics_text(path, af, lyrics)
     verdict = _ai_verdict(cfg, af=af, lyrics=text)
-    if verdict is not None and answers is not None:
-        answers[str(verdict.get("source") or STAGE_AI)] = verdict["value"]
 
     if value is not None:
+        # A provider stated something: written as it stands, AI or not — and
+        # the model's answer is NOT recorded as a source behind it, because it
+        # is not one.
         return _stated(cfg, value, source, text=text, verdict=verdict)
+    if verdict is not None and answers is not None:
+        # No provider spoke, so the model's answer is what the reply reports.
+        answers[str(verdict.get("source") or STAGE_AI)] = verdict["value"]
 
     out = _word_stages(cfg, text=text, verdict=verdict)
     if out is not None:

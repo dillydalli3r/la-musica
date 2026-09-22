@@ -390,23 +390,25 @@ try:
         # matter how many stages wanted the answer (the escalation of a stated
         # 0 reuses the ladder's own call instead of paying for a second one)
         assert len(ai_calls) == len(FILES), ai_calls
-        # Chic 'N' Stu: Deezer stated 0, the AI READ the words and answered 1 —
-        # the rank gives the AI the value AND the provenance
+        # Chic 'N' Stu: Deezer stated 0 and the WORD SCAN found explicit
+        # language, so the scan owns the 1 and its provenance — the AI is a
+        # backup and no longer escalates a stated value (owner's rule)
         # Boom!: Deezer's own 1 survives the AI's 1, so the provider keeps it
         # Roulette: nobody stated anything — the AI's answer is the ladder's
-        # Silent Streamline: no words to read, so an AI 1 over Deezer's 0
-        # changes nothing (and the answer is not lost: it is in `answers`)
-        assert out["sources"] == {FILES[0]: "ai-lyrics (escalated)",
+        # Silent Streamline: no words to read, and the AI is a BACKUP — it
+        # neither overrules Deezer's 0 nor is reported as a source behind it
+        # (the reply's `answers` map names what spoke for the VALUE)
+        assert out["sources"] == {FILES[0]: "lyrics-scan (escalated)",
                                   FILES[1]: "deezer-isrc",
                                   FILES[2]: "ai",
                                   FILES[3]: "deezer-isrc"}, out
         assert out["values"] == {FILES[0]: 1, FILES[1]: 1, FILES[2]: 1,
                                  FILES[3]: 0}, out
         assert out["answers"] == {
-            FILES[0]: {"deezer-isrc": 0, "ai-lyrics": 1},
-            FILES[1]: {"deezer-isrc": 1, "ai": 1},
+            FILES[0]: {"deezer-isrc": 0},
+            FILES[1]: {"deezer-isrc": 1},
             FILES[2]: {"ai": 1},
-            FILES[3]: {"deezer-isrc": 0, "ai": 1}}, out
+            FILES[3]: {"deezer-isrc": 0}}, out
 
         # A file whose value this run ECHOES is asked about by NOBODY — the AI
         # included: there is no decision to inform, so nothing is paid for.
