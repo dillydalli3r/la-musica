@@ -46,9 +46,9 @@ if (!existsSync(path.join(webDir, "node_modules"))) {
 }
 
 const payload = JSON.parse(readFileSync(payloadPath, "utf8"));
-const { stage, later_stage: laterStage, frames } = payload;
-if (!stage || !laterStage || !Array.isArray(frames) || !frames.length) {
-  console.error("[chain-bar] the payload carries no stage frames or no run frames.");
+const { stage, later_stage: laterStage, frames, busy } = payload;
+if (!stage || !laterStage || !busy || !Array.isArray(frames) || !frames.length) {
+  console.error("[chain-bar] the payload carries no stage frames, no refusal sentence or no run frames.");
   process.exit(2);
 }
 
@@ -222,6 +222,28 @@ try {
         String(last.readout));
   check("and its bar is the run's own completion, not a stage's",
         last.width === "100%", String(last.width));
+
+  // ---- 4. a chain the server REFUSES: the album is held by another job -----
+  // `/api/import/finish` answers 409 with the claim's own sentence. Nothing
+  // failed there — another job is running the same chain — so the step's line
+  // has to read it as a refusal instead of claiming a broken chain.
+  await page.route("**/api/import/finish", (route) => route.fulfill({
+    status: 409, contentType: "application/json", body: JSON.stringify({ detail: busy }) }));
+  await page.reload();
+  await page.waitForSelector("text=Run the import chain", { timeout: 20000 });
+  await page.getByRole("button", { name: "Run the import chain" }).click();
+  await page.waitForTimeout(300);
+  const said = await page.evaluate(() => {
+    const el = [...document.querySelectorAll('[role="status"]')].find(
+      (e) => (e.textContent || "").includes("Import chain"));
+    return el ? (el.textContent || "").trim() : null;
+  });
+  check("a refused chain says the album is already being finished",
+        typeof said === "string" && said.includes("already being finished"), String(said));
+  check("and never reports it as a failed chain",
+        typeof said === "string" && !said.includes("failed"), String(said));
+  check("while the engine's own sentence is kept whole",
+        typeof said === "string" && said.includes(busy), String(said));
 } finally {
   await browser.close();
   await vite.close();

@@ -2578,6 +2578,22 @@ const [finishMsg, setFinishMsg] = useState<string | null>(null);
 // failing script is a row with its own error text, not just a count.
 const [runRows, setRunRows] = useState<RunRow[] | null>(null);
 
+/** Why a script action never reached the engine, in the engine's own words.
+ *
+ *  The commonest answer is not a failure at all: another job is already
+ *  finishing this album (a bulk import or a download running the same chain),
+ *  and both `/api/import/finish` and `/api/run` refuse with the claim's own
+ *  sentence (`job_locks.refusal`: "<album> is in use by Import Album (job-4) —
+ *  wait for it to finish, then retry"). Reading that as "the chain failed"
+ *  claimed a broken chain where nothing ran at all — and the per-script rows
+ *  are the report for a chain that DID run. */
+const startProblem = (what: string, e: unknown): string => {
+  const text = String(e);
+  return /is in use by .*wait for it to finish/i.test(text)
+    ? `${what}: already being finished — ${text}`
+    : `${what} failed — ${text}`;
+};
+
 /** A run's per-script results as report rows — the chain's own labels when it
  *  reports them, the wizard's script list otherwise. */
 const rowsFromResults = (results: ScriptRunResult[]): RunRow[] =>
@@ -2627,7 +2643,7 @@ const runTickedHere = async () => {
         : `Scripts: ${runAfterImportIds.length} finished on ${targets.length} album${targets.length > 1 ? "s" : ""}`
     );
   } catch (e) {
-    setFinishMsg(`Scripts failed — ${String(e)}`);
+    setFinishMsg(startProblem("Scripts", e));
     toast.error(String(e));
   } finally {
     setAct(null);
@@ -2710,7 +2726,7 @@ const runAllScripts = async () => {
     qc.invalidateQueries({ queryKey: ["album"] });
     qc.invalidateQueries({ queryKey: ["coverInfo", albumPath] });
   } catch (e) {
-    setFinishMsg(`Import chain failed — ${String(e)}`);
+    setFinishMsg(startProblem("Import chain", e));
     toast.error(String(e));
   } finally {
     setAct(null);

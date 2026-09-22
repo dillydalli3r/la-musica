@@ -111,7 +111,11 @@ assert frames[-1]["total"] == 2 and frames[-1]["done"] == 2, frames[-1]
 
 payload_path = os.path.join(ROOT, "chain-bar-frames.json")
 with open(payload_path, "w", encoding="utf-8") as fh:
-    json.dump({"stage": stage, "later_stage": later_stage, "frames": frames}, fh)
+    json.dump({"stage": stage, "later_stage": later_stage, "frames": frames,
+               # The sentence the claim itself raises when another job already
+               # holds the album — what `/api/import/finish` answers 409 with,
+               # and what the step's own line has to read as a refusal.
+               "busy": _jl.refusal(ALBUM, {"label": "Import Album", "job": "job-4"})}, fh)
 
 # The strip itself: node + Vite serve the real page on a scratch port, and the
 # frames above are pushed into the store it draws from. Exit 2 is this repo's
