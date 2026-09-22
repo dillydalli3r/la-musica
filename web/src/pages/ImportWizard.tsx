@@ -2578,6 +2578,14 @@ const [finishMsg, setFinishMsg] = useState<string | null>(null);
 // failing script is a row with its own error text, not just a count.
 const [runRows, setRunRows] = useState<RunRow[] | null>(null);
 
+/** Is this the sentence a claim raises (`job_locks.refusal`)? Then the album is
+ *  in use by another job: nothing ran here, and nothing is broken — which the
+ *  same words have to say wherever they arrive (a refused request, or one
+ *  album's entry in a batch reply). Named because three readers must agree on
+ *  it in lockstep: `startProblem`, and the two halves a batch reply's `errors`
+ *  are split into below. */
+const alreadyRunning = (text: string) => /is in use by .*wait for it to finish/i.test(text);
+
 /** Why a script action never reached the engine, in the engine's own words.
  *
  *  The commonest answer is not a failure at all: another job is already
@@ -2589,9 +2597,7 @@ const [runRows, setRunRows] = useState<RunRow[] | null>(null);
  *  are the report for a chain that DID run. */
 const startProblem = (what: string, e: unknown): string => {
   const text = String(e);
-  return /is in use by .*wait for it to finish/i.test(text)
-    ? `${what}: already being finished — ${text}`
-    : `${what} failed — ${text}`;
+  return alreadyRunning(text) ? `${what}: already being finished — ${text}` : `${what} failed — ${text}`;
 };
 
 /** A run's per-script results as report rows — the chain's own labels when it
@@ -2705,22 +2711,37 @@ const runAllScripts = async () => {
       }))
     );
     setRunRows(rows);
+    // An album another job is already finishing is not a script error. The
+    // reply keeps one entry per path, so that album's own claim sentence
+    // arrives in its `errors` while the free albums ran — and reporting it as
+    // an error said the chain broke on an album where nothing ran at all. The
+    // sentence names the album itself, exactly as the single-album press reads
+    // it (`startProblem`), so it needs no prefix here.
+    const busy = res.albums.flatMap((a) =>
+      a.errors.filter((e) => alreadyRunning(String(e))).map((e) => String(e))
+    );
     const errors = res.albums.flatMap((a) =>
-      a.errors.map((e) => `${baseName(a.path) || a.path}: ${String(e)}`)
+      a.errors.filter((e) => !alreadyRunning(String(e)))
+        .map((e) => `${baseName(a.path) || a.path}: ${String(e)}`)
     );
     const failed = rows.filter((r) => !r.ok && !r.skipped).length;
+    const busyLine = `already being finished on ${busy.length} album${busy.length > 1 ? "s" : ""} — ${busy.slice(0, 3).join("; ")}`;
     toast(
       errors.length || failed
         ? `Import chain finished with ${failed || errors.length} script error(s): ${errors.slice(0, 3).join("; ") || rows.find((r) => r.error)?.error}`
-        : `Import chain finished on ${targets.length} album(s) — progress shows at the top of the window`
+        : busy.length
+          ? `Import chain: ${busyLine}`
+          : `Import chain finished on ${targets.length} album(s) — progress shows at the top of the window`
     );
     setFinishMsg(
       errors.length
         ? `Import chain: ${errors.length} script error(s) — ${errors.slice(0, 3).join("; ")}`
-        : `Import chain finished on ${targets.length} album${targets.length > 1 ? "s" : ""}` +
-          (stillMissing.length
-            ? ` — still missing ${stillMissing.map((id) => FAMILY_LABEL[id]).join(", ")}`
-            : "")
+        : busy.length
+          ? `Import chain: ${busyLine}`
+          : `Import chain finished on ${targets.length} album${targets.length > 1 ? "s" : ""}` +
+            (stillMissing.length
+              ? ` — still missing ${stillMissing.map((id) => FAMILY_LABEL[id]).join(", ")}`
+              : "")
     );
     qc.invalidateQueries({ queryKey: ["library"] });
     qc.invalidateQueries({ queryKey: ["album"] });

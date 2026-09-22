@@ -244,6 +244,34 @@ try {
         typeof said === "string" && !said.includes("failed"), String(said));
   check("while the engine's own sentence is kept whole",
         typeof said === "string" && said.includes(busy), String(said));
+
+  // ---- 5. a BATCH press where one album is busy: not a script error --------
+  // The reply keeps one entry per path, so a multi-album press runs the free
+  // albums and hands the busy one back as an entry whose `errors` carry the
+  // claim's sentence. That album's line has to read as already being finished
+  // there too — never as a chain that broke.
+  // Every line the page shows about this chain — the step's own and the toast:
+  // a verdict written in one place and not the other is still a wrong verdict.
+  const albumLine = async () => page.evaluate(() => {
+    const els = [...document.querySelectorAll('[role="status"]')].filter(
+      (e) => (e.textContent || "").includes("Import chain"));
+    return els.map((e) => (e.textContent || "").trim()).join(" | ") || null;
+  });
+  await page.route("**/api/import/finish", (route) => route.fulfill({
+    status: 200, contentType: "application/json", body: JSON.stringify({
+      albums: [
+        { path: ALBUM, chain: [], scripts: [], errors: [], note: "" },
+        { path: `${ALBUM} (second)`, chain: [], scripts: [], errors: [busy], note: busy },
+      ] }) }));
+  await page.reload();
+  await page.waitForSelector("text=Run the import chain", { timeout: 20000 });
+  await page.getByRole("button", { name: "Run the import chain" }).click();
+  await page.waitForTimeout(300);
+  const batch = await albumLine();
+  check("a batch press with one album busy says it is already being finished",
+        typeof batch === "string" && batch.includes("already being finished"), String(batch));
+  check("and is never reported as a script error",
+        typeof batch === "string" && !batch.includes("script error"), String(batch));
 } finally {
   await browser.close();
   await vite.close();
