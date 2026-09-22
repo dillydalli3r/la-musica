@@ -1128,6 +1128,65 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   SAME setting is what translates non-Latin names for the Soulseek searches and
   the beets import.
 
+### 7.13 Disc rips: a DVD or Blu-ray structure is one title, not a pile of parts
+
+- **R88 — a disc structure is recognized, its feature is never guessed, and
+  what it produces is a bit-exact remux.** A folder holding `VIDEO_TS/` (or a
+  loose `VTS_nn_m.VOB` title set) is a DVD rip; a folder holding `BDMV/` (or a
+  `BDMV/STREAM/` directory) is a Blu-ray one; both are read by
+  `mlo/videodisc.py`, which knows the grammar and nothing else — the parts of a
+  title set are `VTS_nn_1.VOB`, `VTS_nn_2.VOB`, … and the part index starts at
+  1, because `VTS_nn_0.VOB` is the set's MENU and is never the feature. A
+  Blu-ray's titles are NOT its file names: the `.mpls` playlist says which clips
+  form which title and in what order, each play item carrying the clip's own in
+  and out time, and a playlist that cannot be parsed is refused rather than
+  guessed at — including when only SOME of a disc's playlists parse, because a
+  title the disc states and this code cannot read may be the feature. An `.iso`
+  is recognized only to say so: nothing in this app reads inside a disc image
+  (a Blu-ray one is usually AACS-encrypted), so it is asked about, never
+  opened. A single `.vob`/`.mpg`/`.m2ts` with no structure around it is an
+  ordinary video file and keeps the ordinary single-file path.
+
+- **The main feature is the longest title, and an unclear one is a QUESTION,
+  not a coin toss.** Durations come from the structure itself where it states
+  them (a Blu-ray's play items) and from one `ffprobe` per part for a DVD, so a
+  disc is picked without decoding a frame. The app refuses, and asks, when: the
+  structure is an `.iso`; a playlist or a part cannot be read; a usable title has
+  no measurable duration; the runner-up is within `max(30 s, 5%)` of the longest
+  (both durations are named in the question); or a Blu-ray playlist replays a
+  clip twice or plays only PART of one (the concat demuxer could not reproduce
+  that title, so the app asks instead of shipping something else). A refusal
+  touches nothing on disk. The question is stored as one row per album — the
+  same shape the wizard's family questions use, so the notification bell,
+  `GET /api/import/prompts` and the queue's "Needs you" row show it — and
+  `prompts` RE-DERIVES it from the structure itself, so it stands while the app
+  would still refuse and withdraws itself once the user has resolved the disc.
+
+- **The remux is the existing one, fed one input.** The chosen streams go into a
+  generated `ffconcat` list (system temp dir, absolute paths) and reach ffmpeg
+  as a single input, through the same `mlo.remux.remux_video` every other video
+  uses: video copied bit-exact, lossless audio to FLAC, lossy audio copied,
+  captions always mapped, chapters off, then the same ffprobe verification
+  (video present, audio/subtitle counts equal, duration within 0.5%) and the
+  same H.264 fallback gate (`video_reencode_incompatible`). Nothing is
+  re-encoded on its own, so script 11 never CREATES a compressed derivative of a
+  disc stream. The output is ONE MKV beside the structure, named after the
+  folder that holds it (`<Album>/<Album>.mkv` for `<Album>/VIDEO_TS/`), and the
+  consumed streams are removed only after that remux verified
+  (`video_remove_original`); other title sets' parts and the IFOs are left where
+  they are, and a re-run is idempotent (an existing MKV of the same duration is
+  the disc's, and its leftover streams are swept).
+
+- **The disc's own streams win over a derivative shipped beside them**
+  (`prefer_disc_streams`, ON, R85): the "700 MB rip" a release ships next to its
+  `VIDEO_TS` folder is left where it is, never remuxed as if it were the
+  feature, and never claimed to be a disc (that rule is unconditional — a lone
+  re-encode is an ordinary video file on the ordinary path). With the setting
+  OFF, the disc's special casing goes with it: those files take the ordinary
+  per-file path and the log says why. The layout agrees about all of this: a
+  confirmed structure is not reported as a stray folder, while a folder merely
+  NAMED `VIDEO_TS` still is.
+
 ## 8. Recommended runbook
 
 Nothing here is a substitute for the app's own Dependencies page: run it first

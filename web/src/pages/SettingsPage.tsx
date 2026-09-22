@@ -1156,7 +1156,7 @@ export default function SettingsPage() {
         },
         {
           k: "prefer_disc_streams", label: "Prefer a disc's own streams over a compressed re-encode", type: "bool",
-          help: "A BDRip/DVDRip/x264 release is a lossy derivative of the disc, and so is the 700 MB re-encode a rip sometimes ships beside its VIDEO_TS or BDMV folder. On (the default), an edition that names itself one ranks below the disc's own streams — a remux, a full disc — and a folder holding a disc structure beside a re-encode keeps the disc, never the derivative. Off, the other rules decide and the re-encode is treated like any other file.",
+          help: "A BDRip/DVDRip/x264 release is a lossy derivative of the disc, and so is the 700 MB re-encode a rip sometimes ships beside its VIDEO_TS or BDMV folder. On (the default), an edition that names itself one ranks below the disc's own streams — a remux, a full disc — and a folder holding a disc structure beside a re-encode is remuxed as the disc's own single title, with the derivative left where it is. Off, the disc handling goes with it: those files take the ordinary per-file path and nothing prefers the disc's streams — this one switch covers both the download and the file pipeline.",
         },
         {
           k: "auto_import_medium_order", label: "Medium preference (comma-separated, best first)", type: "csv",

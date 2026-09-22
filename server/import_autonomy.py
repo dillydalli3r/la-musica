@@ -20,6 +20,16 @@ AND re-derived when the prompts are READ (`missing_now`) — a family filled
 after the import (the wizard step the prompt links to, a cover search, a lyrics
 fetch) withdraws the prompt without another import ever running — plus whatever
 the user dismissed by hand.
+
+A second kind of entry lives in the same table, raised by the video remux
+instead of by an import: a DISC STRUCTURE (a DVD ``VIDEO_TS`` or Blu-ray
+``BDMV`` rip, ``mlo.videodisc``) whose main feature the app refuses to pick —
+two titles within a few percent, a playlist it cannot read, an ``.iso``.
+:func:`raise_video_prompt` stores it in the same shape (one "family" whose note
+names the candidates and their durations), so the same bell, the same API and
+the same queue row carry it, and :func:`prompts` re-derives it from the
+structure itself: the question is open while the app would still refuse to pick
+(`_video_still_needs`).
 """
 
 import json
@@ -30,6 +40,22 @@ import traceback
 from server import events
 
 _PROMPTS_NAME = "import_prompts.json"
+
+# The one "family" a VIDEO prompt carries. It is not a wizard step (no wizard
+# step decides which title of a disc rip is the feature), but it is the same
+# row shape, so the notification body, GET /api/import/prompts and the queue's
+# "Needs you" row render it without a second vocabulary. `kind` is what tells
+# the two prompt kinds apart in the stored table.
+#
+# honey: reusing the family row (rather than a second prompt table) is what
+# keeps one bell, one API and one queue row for "a person must decide this".
+# The cost is that `prompts` has to branch on `kind` for its re-derivation —
+# a family prompt is re-derived from the grader, this one from the structure
+# itself (`_video_still_needs`). A real wizard step for it would let the
+# branch go, if the UI ever grows one.
+VIDEO_KIND = "video"
+VIDEO_FAMILY = "video_disc"
+VIDEO_LABEL = "Main feature"
 
 
 def _path(cfg=None):
@@ -112,7 +138,10 @@ def _link(album, families):
 
 def title(entry):
     """The notification's headline: which album, and that it wants a person."""
-    return f"Import needs a decision: {entry.get('album_name') or 'album'}"
+    name = entry.get("album_name") or "album"
+    if entry.get("kind") == VIDEO_KIND:
+        return f"Which title is the main feature: {name}"
+    return f"Import needs a decision: {name}"
 
 
 def body(entry):
@@ -147,6 +176,15 @@ def prompts(cfg=None):
     live = {}
     for k, v in data.items():
         if not isinstance(v, dict) or not os.path.isdir(str(v.get("album") or "")):
+            continue
+        if v.get("kind") == VIDEO_KIND:
+            # A video prompt announces a disc structure the app could not pick
+            # a feature from, so THAT is its condition: still open while the
+            # structure is there and still refuses, withdrawn once the app can
+            # pick (or the structure is gone — the remux consumed its
+            # streams). Re-derived like a family gap, for the same reason.
+            if _video_still_needs(str(v.get("album") or ""), cfg):
+                live[k] = v
             continue
         named = _ids(v)
         now = missing_now(str(v.get("album") or ""), cfg) if named else None
@@ -206,6 +244,83 @@ def _forget_verified(album_dir):
     key = _key(album_dir)
     for k in [k for k in _verified if k[0] == key]:
         _verified.pop(k, None)
+    _video_asked.pop(key, None)
+
+
+# The video prompts' own memo, in the same shape and for the same reason as
+# `_verified` above: the answer costs an ffprobe of the structure's streams and
+# `prompts()` is polled. What a remembered answer is valid for is the STRUCTURE
+# itself (`_structure_stamp`) — not the folder's mtime, which Windows may not
+# have updated yet when the streams a remux consumed are deleted.
+_VIDEO_TTL_S = 60.0
+_video_asked = {}   # album key -> (structure stamp, still_open, at)
+
+
+def _structure_stamp(disc):
+    """What a disc structure IS, without probing one byte of media: the kind,
+    the structure, and every title's key, streams and their sizes/mtimes. Two
+    calls that see the same stamp would pick the same feature."""
+    rows = []
+    for t in disc.titles:
+        streams = []
+        for s in t.streams:
+            try:
+                e = os.stat(s)
+                streams.append((os.path.normcase(s), e.st_size, e.st_mtime_ns))
+            except OSError:
+                streams.append((os.path.normcase(s), None, None))
+        rows.append((t.key, tuple(streams), t.note))
+    return (disc.kind, os.path.normcase(disc.structure), tuple(rows))
+
+
+def _probe():
+    """``path -> seconds | None`` from the app's own ffprobe, or None when the
+    toolchain is missing — mlo.videodisc then refuses rather than guessing."""
+    from mlo.remux import _duration_probe
+    from mlo.tools import detect_all_tools
+
+    exe = (detect_all_tools().get("ffmpeg") or {}).get("ffprobe_exe")
+    return _duration_probe(exe) if exe else None
+
+
+def _video_still_needs(folder, cfg=None):
+    """Whether *folder* still holds a disc structure the app cannot pick from.
+
+    That is exactly what a video prompt announces, so it is what the prompt is
+    re-derived from: a folder that is no longer a disc structure (its streams
+    were remuxed and removed, or the image was mounted) answers False, and so
+    does a structure whose main feature CAN be picked now (the ambiguous title
+    is gone). An answer that cannot be derived at all keeps the prompt —
+    silence is not the same as answered, the rule `missing_now` follows too.
+    """
+    from mlo import videodisc
+
+    key = _key(folder)
+    probe = _probe()
+    try:
+        # The probe is what fills a DVD title's duration (a Blu-ray's comes
+        # from its playlist), and without durations there is nothing to
+        # compare — so recognition and the pick are asked together.
+        disc = (videodisc.recognize(folder, probe)
+                or videodisc.disc_image(folder))
+    except Exception:
+        traceback.print_exc()
+        return True
+    if disc is None:
+        _video_asked.pop(key, None)
+        return False
+    stamp = _structure_stamp(disc)
+    now = time.time()
+    hit = _video_asked.get(key)
+    if hit and hit[0] == stamp and now - hit[2] < _VIDEO_TTL_S:
+        return hit[1]
+    try:
+        still = videodisc.pick(disc, probe)[0] is None
+    except Exception:
+        traceback.print_exc()
+        still = True
+    _video_asked[key] = (stamp, still, now)
+    return still
 
 
 def _memo_key(album_dir, cfg):
@@ -335,3 +450,82 @@ def _ids(entry):
     """The missing family ids of a stored entry, in wizard order — what "the
     same gap" is compared by."""
     return [str(f.get("id") or "") for f in (entry or {}).get("families") or []]
+
+
+def _video_note(candidates, reason):
+    """The prompt's body: why the app will not choose, and what it could see."""
+    listing = "; ".join(str(c).strip() for c in (candidates or []) if str(c).strip())
+    if not listing:
+        return str(reason or "the disc structure could not be read")
+    return f"{reason} — candidates: {listing}" if reason else f"candidates: {listing}"
+
+
+def raise_video_prompt(folder, cfg, *, candidates=(), reason="", mode="automatic"):
+    """Store and announce "which title is the main feature?" for *folder*.
+
+    Raised by script 11 (``mlo.remux``) when a disc structure (VIDEO_TS /
+    BDMV) holds more than one plausible feature — or none it can read — and it
+    refuses to guess. Same table, same bus and same row shape as
+    :func:`raise_prompt`, so the notification bell, ``GET /api/import/prompts``
+    and the Soulseek queue's "Needs you" row all carry the question: the
+    single family's ``note`` names the candidates and their durations, which is
+    what the reader needs to answer it.
+
+    The SAME question (same reason, same candidates) is not repeated on the
+    next run: only a changed answer is news. Never raises — a remux that cannot
+    write a prompt still reports its own log line.
+    """
+    try:
+        album = os.path.normpath(str(folder))
+        note = _video_note(candidates, reason)
+        entry = {
+            "album": album.replace("\\", "/"),
+            "album_name": os.path.basename(album.rstrip("\\/")) or album,
+            "at": time.time(),
+            "mode": str(mode or "automatic"),
+            "reason": str(reason or "video"),
+            "kind": VIDEO_KIND,
+            # No wizard step decides this one, so the link is the wizard at the
+            # album (the album's own page) rather than a family's step.
+            "link": _link(album.replace("\\", "/"), []),
+            "families": [{
+                "id": VIDEO_FAMILY,
+                "label": VIDEO_LABEL,
+                "state": "decision",
+                "note": note,
+                "fields": [],
+                "codes": [],
+            }],
+        }
+        path = _path(cfg)
+        if not path:
+            return None
+        data = _load(path) if os.path.isfile(path) else {}
+        before = data.get(_key(album)) or {}
+        same = (before.get("kind") == VIDEO_KIND
+                and str(before.get("reason") or "") == entry["reason"]
+                and _video_note_of(before) == note)
+        data[_key(album)] = entry
+        _save(path, data)
+        # The next read re-derives whether the question is still open; this
+        # call is what just stored the answer it was raised from.
+        _forget_verified(album)
+        if not same:
+            events.emit("import_needs_data", title(entry), body(entry),
+                        {"link": entry["link"], "album_path": entry["album"],
+                         "reason": entry["reason"],
+                         "families": [VIDEO_FAMILY]},
+                        config=cfg)
+        return entry
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
+def _video_note_of(entry):
+    """The stored body of a video entry — what "the same question" is compared
+    by (the candidates and the reason, not the moment it was asked)."""
+    for f in (entry or {}).get("families") or []:
+        if str(f.get("id") or "") == VIDEO_FAMILY:
+            return str(f.get("note") or "")
+    return ""

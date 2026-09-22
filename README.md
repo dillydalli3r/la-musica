@@ -378,8 +378,10 @@ COMPRESSED derivative of a disc sorts below the disc's own streams too
 (`prefer_disc_streams`, on by default): an edition that names itself a BDRip,
 a DVDRip or an x264 re-encode ranks under a remux or a full disc of the same
 release group, and a folder holding a `VIDEO_TS`/`BDMV` structure beside a
-700 MB re-encode keeps the disc's feature, never the re-encode. Turn the
-setting off and the other rules decide, exactly as they did before it existed.
+700 MB re-encode is remuxed as the disc's own single title, the derivative
+left where it is. Turn the setting off and the disc handling goes with it —
+those files take the ordinary per-file path and the other rules decide, exactly
+as they did before any of this existed.
 **The original pressing wins the date, exactly**: an edition is scored by how
 close it sits to the release group's own first release date, the penalty for
 distance is strictly increasing in the gap — never flat, so two reissues a

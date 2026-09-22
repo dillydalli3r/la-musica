@@ -456,6 +456,20 @@ def is_video_file(path) -> bool:
     return os.path.splitext(str(path))[1].lower() in LIB_VIDEO_EXTS
 
 
+# Disc structure folders the library recognizes: a folder holding one of these
+# is a DVD-Video (VIDEO_TS) or Blu-ray (BDMV) rip rather than a stray folder,
+# and its streams are put back in playback order before the remux
+# (mlo.videodisc). This is the vocabulary the layout scan judges a folder by,
+# next to LIB_VIDEO_EXTS for files.
+LIB_VIDEO_DISC_DIRS = ("VIDEO_TS", "BDMV")
+LIB_VIDEO_DISC_NAMES = frozenset(d.upper() for d in LIB_VIDEO_DISC_DIRS)
+
+
+def is_video_disc_dir(path) -> bool:
+    """Whether *path* is one of the disc structure folders above."""
+    return os.path.basename(os.path.normpath(str(path))).upper() in LIB_VIDEO_DISC_NAMES
+
+
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".jxl")
 
 # All image types that Pillow can read and that we can convert to JPEG/PNG

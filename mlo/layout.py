@@ -86,6 +86,30 @@ def _is_audio(name):
     return ext in LIB_AUDIO_EXTS or ext in LIB_VIDEO_EXTS
 
 
+def _is_disc_structure(path):
+    """Whether *path* is a disc structure folder the app understands: a
+    ``VIDEO_TS`` (DVD-Video) or ``BDMV`` (Blu-ray) holding the files of one.
+
+    The name alone is not enough — an empty folder called ``VIDEO_TS`` is junk,
+    and reporting it is the layout's job — so the shape is confirmed by
+    mlo.videodisc, the same recognition the remux picks a feature with. What
+    the scan does with a confirmed structure is NOT report it: a rip's own
+    folder is the shape a disc comes in, not a stray folder.
+    """
+    from .paths import is_video_disc_dir
+
+    if not is_video_disc_dir(path):
+        return False
+    from . import videodisc
+
+    # honey: the NAME is not the answer — an empty folder called VIDEO_TS is
+    # junk and the layout's job is to say so, while a real rip's folder is the
+    # shape a disc comes in. Confirming the shape costs one listdir (and the
+    # playlist read only for a BDMV), and it is the same recognition the remux
+    # picks a feature with, so the two can never disagree about what a disc is.
+    return videodisc.recognize(path) is not None
+
+
 def _list(d):
     """``(entries, error)`` for *d* — an unreadable folder is not an empty one.
 
@@ -605,7 +629,11 @@ def scan_library(cfg=None, stats=None):
                 fp = os.path.join(ap, f)
                 opened()
                 if os.path.isdir(fp):
-                    if _DISC_RE.match(f):
+                    if _DISC_RE.match(f) or _is_disc_structure(fp):
+                        # A disc folder (CD1, Disc 2 …) and a disc STRUCTURE
+                        # (VIDEO_TS/BDMV, the shape a DVD/Blu-ray rip comes in)
+                        # are both the layout working as intended: the remux
+                        # turns the structure into one MKV (mlo.videodisc).
                         closed(skipped=True)
                     else:
                         issues.append(_issue(

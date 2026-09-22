@@ -32,16 +32,51 @@ normalizes every video file while keeping quality fully intact:
 * Inputs are every video container the library knows (VIDEO_EXTS, the same
   set /api/videos/scan lists) — including .mp4/.m4v, which are only rewritten
   when ``video_process_mp4`` is on because they already play and tag natively.
+* **Disc structures are recognized, not walked file by file** (mlo.videodisc).
+  A folder holding a ``VIDEO_TS`` (DVD-Video: ``VTS_nn_1.VOB``,
+  ``VTS_nn_2.VOB``, … — the title's program stream cut at 1 GB, part 0 being
+  the menu) or a ``BDMV/STREAM`` (Blu-ray: ``nnnnn.m2ts`` transport streams,
+  ordered by ``PLAYLIST/nnnnn.mpls``) is one disc, and its LONGEST title is
+  remuxed as ONE input: the chosen streams are written to a concat-demuxer
+  list and handed to ffmpeg as a single input (``-f concat -safe 0``), so the
+  streams are still COPIED, never re-encoded, and the verification, caption and
+  chapter rules above apply to the disc's product exactly as to a single file.
+  The streams that were consumed are removed after the verified remux, the same
+  way a single source file is (``video_remove_original``).
+* The disc's own streams win over a compressed derivative shipped beside them
+  (a "700 MB rip" next to the ``VIDEO_TS`` folder): the derivative is left
+  where it is, is never counted as the folder's feature, and the log says so.
+  ``prefer_disc_streams`` (on by default) is that preference — with it off,
+  disc structures are left to the ordinary per-file path and the log says why.
+  A re-encode with NO disc structure beside it is never claimed as a disc: it
+  takes the ordinary single-file path, with no disc treatment at all.
+* When the structure does not say which title is the feature — two titles
+  within 5 % of each other, a Blu-ray playlist that cannot be read or that
+  plays only part of a clip, a title set whose parts are not a 1…N run, or an
+  ``.iso`` (nothing here can read inside one) — the script picks NOTHING, says
+  why in the log, and raises the app's own prompt for that folder
+  (``server.import_autonomy``: the notification bell, GET /api/import/prompts
+  and the queue's "Needs you" row), whose body names the candidates and their
+  durations. Chapters are still NOT read from a disc: a DVD's live in its
+  IFO's program-chain table and a Blu-ray's in the ``.mpls`` PlayListMark
+  section, and neither is read here, so a disc structure's remux carries the
+  chapters its streams carry (a raw rip's: none) and none are invented. What
+  IS read of the playlist is its play items — which clips form which title, in
+  order, and how long each runs.
 
 Config keys: video_reencode_incompatible, video_lossy_audio_copy, video_crf,
-video_preset, video_flac_level, video_remove_original, video_process_mp4.
+video_preset, video_flac_level, video_remove_original, video_process_mp4,
+prefer_disc_streams.
 """
 
 import json
 import os
 import tempfile
 import threading
+import traceback
 
+from . import videodisc
+from .paths import LIB_VIDEO_DISC_NAMES
 from .stats import (
     _collect_targets,
     _make_pbar,
@@ -97,12 +132,35 @@ def _is_lossless_audio(codec):
     return name.startswith("pcm_") or name in LOSSLESS_AUDIO_CODECS
 
 
-def _ffprobe_json(ffprobe_exe, path, timeout=60):
-    """Probe a media file (format, streams and chapters), parsed JSON or None."""
+def _input_args(src, concat=False):
+    """ffmpeg's ``-i`` half of a command line, input flags included.
+
+    *concat* reads *src* as a concat-demuxer list file (mlo.videodisc writes
+    one for a disc structure's chosen streams) instead of as media: several
+    files then reach ffmpeg as ONE input, in the list's order, every stream
+    copied. ``-safe 0`` is what allows the absolute paths a library has.
+    """
+    # Regenerate input PTS — DVD-VR VOBs often carry pcm_dvd packets with
+    # unknown timestamps that abort the mux otherwise. Input flags must
+    # precede -i.
+    flags = ["-fflags", "+genpts"]
+    if concat:
+        flags += ["-f", "concat", "-safe", "0"]
+    return flags + ["-i", src]
+
+
+def _ffprobe_json(ffprobe_exe, path, timeout=60, concat=False):
+    """Probe a media file (format, streams and chapters), parsed JSON or None.
+
+    *concat* probes a concat list file (see :func:`_input_args`) — the same
+    probe ffprobe makes of the media, of the whole joined program.
+    """
     try:
         proc = run_tool(
             [ffprobe_exe, "-v", "error", "-print_format", "json",
-             "-show_format", "-show_streams", "-show_chapters", path],
+             "-show_format", "-show_streams", "-show_chapters"]
+            + (["-f", "concat", "-safe", "0"] if concat else [])
+            + [path],
             capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=timeout,
         )
@@ -247,7 +305,7 @@ def _ffmpeg_args(mode, cfg, acodecs=None):
     return cmd
 
 
-def remux_video(src, dest, ffmpeg_exe, ffprobe_exe, cfg):
+def remux_video(src, dest, ffmpeg_exe, ffprobe_exe, cfg, concat=False):
     """Remux one video file to MKV. Returns (ok, message).
 
     ``dest`` must not exist (callers pass a temp path); on success the
@@ -259,6 +317,11 @@ def remux_video(src, dest, ffmpeg_exe, ffprobe_exe, cfg):
     video codec a config-gated H.264 pass follows. Subtitle streams are
     always mapped and copied — the output is verified to carry the same
     caption streams as the source.
+
+    *concat* makes *src* a concat-demuxer list file (mlo.videodisc writes one
+    for a disc structure's chosen streams): the files it names reach ffmpeg as
+    ONE input, in order, with every stream still copied — a disc title is
+    remuxed by this same machinery, never by a second ffmpeg call beside it.
     """
     # Forward slashes: with backslash paths ffmpeg's VOB/VOB-VR demuxer can
     # expose phantom audio substreams (unknown codec parameters) that kill
@@ -267,7 +330,7 @@ def remux_video(src, dest, ffmpeg_exe, ffprobe_exe, cfg):
     dest = str(dest).replace("\\", "/")
     # ONE probe of the source: -show_chapters is already in the payload, so
     # asking ffprobe for the chapter list separately re-probed the same file.
-    src_probe = _ffprobe_json(ffprobe_exe, src)
+    src_probe = _ffprobe_json(ffprobe_exe, src, concat=concat)
     info = _streams_from(src_probe)
     if info is None:
         return False, "unreadable by ffprobe"
@@ -293,14 +356,13 @@ def remux_video(src, dest, ffmpeg_exe, ffprobe_exe, cfg):
     # precede -i. Only video/audio/subtitle streams are mapped — data
     # streams (DVD navigation packets) can't be carried by any muxer.
     # Subtitles are mapped unconditionally: captions are never removed.
-    input_flags = ["-fflags", "+genpts"]
     stream_maps = ["-map", "0:v", "-map", "0:a?", "-map", "0:s?"]
 
     last_err = ""
     src_chapters = _chapters_from(src_probe)
     for mode in ("2", "2s", "3") if allow_reencode else ("2", "2s"):
         cmd = ([ffmpeg_exe, "-y", "-v", "error", "-nostdin"]
-               + input_flags + ["-i", src] + stream_maps)
+               + _input_args(src, concat) + stream_maps)
         cmd += _ffmpeg_args(mode, cfg, acodecs)
         # Chapters are copied from the source explicitly (ffmpeg's default,
         # spelled out so a future option change can't silently drop them).
@@ -369,6 +431,128 @@ def _same_program(src, mkv, ffprobe_exe):
     return abs(da - db) <= max(1.0, 0.005 * da)
 
 
+def _duration_probe(ffprobe_exe):
+    """``path -> seconds | None`` — the probe mlo.videodisc asks its caller for."""
+    def probe(path):
+        info = _stream_info(path, ffprobe_exe)
+        return info[3] if info else None
+    return probe
+
+
+def _measures(path, seconds, ffprobe_exe):
+    """Whether *path* probes within 0.5 % / 1 s of *seconds*."""
+    info = _stream_info(path, ffprobe_exe)
+    d = info[3] if info else None
+    return bool(d) and abs(d - seconds) <= max(1.0, 0.005 * seconds)
+
+
+def _disc_owner(path):
+    """The folder whose disc structure *path* belongs to, or None.
+
+    A file belongs to a structure when it sits inside one (``VIDEO_TS/``,
+    ``BDMV/``, ``BDMV/STREAM/``) or is a loose title-set part
+    (``VTS_nn_m.VOB``) of the folder that holds the set. What is returned is
+    the folder mlo.videodisc recognizes — the structure's parent, which is
+    where the remuxed MKV goes.
+    """
+    d = os.path.dirname(path)
+    up = os.path.basename(d).upper()
+    if up in LIB_VIDEO_DISC_NAMES:
+        return os.path.dirname(d)
+    if up == "STREAM" and os.path.basename(os.path.dirname(d)).upper() == "BDMV":
+        return os.path.dirname(os.path.dirname(d))
+    if videodisc.VOB_RE.match(os.path.basename(path)):
+        return d
+    return None
+
+
+def _split_discs(files, probe, explicit=()):
+    """``(discs, derivatives, plain)`` for one run's file list.
+
+    *discs* is ``{folder: (Disc, (its files))}`` — ONE entry per structure,
+    however many of its files the walk found, because a structure is remuxed
+    ONCE, as one title.
+    *derivatives* is the video files that sit BESIDE a
+    structure (the "700 MB rip" a release ships next to its ``VIDEO_TS``
+    folder): the disc's own streams are the feature, so those files are left
+    where they are and never remuxed as if they were it. *plain* is everything
+    else — the ordinary single-file path, which is also where a file the user
+    NAMED (an explicit target) goes: asking for one file by hand is a request
+    the disc preference does not overrule.
+
+    honey: leaving the derivative untouched (rather than remuxing it too) is
+    the owner's rule — the disc's own streams win, so a re-encode beside them
+    is dead weight, not a second title. It is gated by `prefer_disc_streams`
+    in the caller; with that off this function is not called at all.
+    """
+    found, derivatives, plain = {}, [], []
+    seen = {}
+    for f in files:
+        if f.lower().endswith(videodisc.ISO_EXT):
+            # A disc image is a structure this app cannot read inside (and a
+            # Blu-ray one is usually encrypted): recognized so the app can say
+            # it must be mounted first, never so it can be remuxed.
+            disc = videodisc.recognize(f)
+            if disc is not None:
+                found.setdefault(os.path.normcase(f), [disc, []])[1].append(f)
+                continue
+        owner = _disc_owner(f)
+        if owner is not None:
+            key = os.path.normcase(owner)
+            if key not in seen:
+                seen[key] = videodisc.recognize(owner, probe)
+            if seen[key] is not None:
+                found.setdefault(key, [seen[key], []])[1].append(f)
+                continue
+        # Not inside a structure: a derivative when its own folder holds one.
+        d = os.path.dirname(f)
+        key = os.path.normcase(d)
+        if key not in seen:
+            seen[key] = videodisc.recognize(d, probe)
+        if seen[key] is not None and os.path.normcase(f) not in explicit:
+            derivatives.append(f)
+        else:
+            plain.append(f)
+    return {k: (v[0], tuple(v[1])) for k, v in found.items()}, derivatives, plain
+
+
+def _remove_streams(streams, stats):
+    """Remove the streams a verified disc remux consumed. Returns the count
+    that could NOT be removed — the same failure the single-file path reports."""
+    failed = 0
+    for s in streams:
+        try:
+            before = os.path.getsize(s)
+            with _DEST_LOCK:
+                os.remove(s)
+        except OSError:
+            failed += 1
+            continue
+        stats["removed_originals"] += 1
+        stats["total_bytes_removed"] += before
+    return failed
+
+
+def _ask_about_disc(disc, reason, config):
+    """Raise the app's own prompt for a folder whose feature cannot be picked.
+
+    The prompt is server state (``server.import_autonomy``): one entry in
+    ``import_prompts.json``, the ``import_needs_data`` event the notification
+    bell shows, ``GET /api/import/prompts`` and the queue's "Needs you" row —
+    its body naming the candidates and their durations. Imported lazily (mlo
+    must not import server at module level) and never fatal: a remux that
+    cannot write a prompt still reports its own log line.
+    """
+    try:
+        from server import import_autonomy
+
+        import_autonomy.raise_video_prompt(
+            disc.folder, config, candidates=videodisc.candidates(disc),
+            reason=reason)
+    except Exception:
+        traceback.print_exc()
+
+
 def run_remux_videos(config):
     """Script 11 — convert every video file in the target set to MKV."""
     stats = new_stats()
@@ -387,12 +571,15 @@ def run_remux_videos(config):
     reenc = bool(config.get("video_reencode_incompatible", True))
     remove_original = bool(config.get("video_remove_original", True))
     copy_lossy = bool(config.get("video_lossy_audio_copy", True))
+    prefer_disc = bool(config.get("prefer_disc_streams", True))
     log(
         f"ffmpeg: {ffmpeg}\n"
         f"streams: video copied · audio -> FLAC (lossless, level {config.get('video_flac_level', 8)})"
         f"{' · lossy sources (AC3/DTS/AAC…) copied as they are' if copy_lossy else ' · every stream re-encoded'} · "
         f"captions always kept · chapters kept · h264 fallback {'on' if reenc else 'off'} · "
-        f"originals: {'removed after verified remux' if remove_original else 'kept'}"
+        f"originals: {'removed after verified remux' if remove_original else 'kept'} · "
+        f"disc structures (VIDEO_TS/BDMV): "
+        f"{'the disc\'s own streams win over a compressed derivative' if prefer_disc else 'left to the per-file path (prefer_disc_streams off)'}"
     )
 
     folder = os.path.abspath(config["music_folder"] or os.getcwd())
@@ -402,10 +589,13 @@ def run_remux_videos(config):
     # library-wide pass is gated off by video_process_mp4 — that switch only
     # scopes what an unattended script 11 walk picks up by itself.
     exts = VIDEO_EXTS if targets else remux_input_exts(config)
+    # A disc image is not a video container: .iso is walked only while disc
+    # recognition is on, and only so the app can say it must be mounted first.
+    scan_exts = tuple(exts) + ((videodisc.ISO_EXT,) if prefer_disc else ())
     if targets:
-        files = _collect_targets(targets, exts)
+        files = _collect_targets(targets, scan_exts)
     else:
-        files = sorted(_walk_files(folder, exts))
+        files = sorted(_walk_files(folder, scan_exts))
 
     # Deduplicate case-insensitively (Windows) — selections can double-count.
     seen = {}
@@ -418,9 +608,33 @@ def run_remux_videos(config):
         return stats
     log(f"{len(files)} video file(s) found")
 
+    probe = _duration_probe(ffprobe)
+    if prefer_disc:
+        named = {os.path.normcase(t) for t in (targets or []) if os.path.isfile(t)}
+        disc_jobs, derivatives, files = _split_discs(files, probe, named)
+    else:
+        # The preference is the ONLY thing that gives a disc structure its own
+        # treatment: with it off, its files are ordinary video files again (and
+        # a compressed derivative beside one is treated like any other).
+        disc_jobs, derivatives = {}, []
+        log(c("prefer_disc_streams is off — disc structures (VIDEO_TS/BDMV) are "
+              "left to the ordinary per-file path, so nothing here prefers the "
+              "disc's own streams over a derivative", Color.YELLOW))
+    for f in derivatives:
+        log(f"  = {os.path.basename(f)}: beside a disc structure — left as it is "
+            f"(the disc's own streams are the feature)")
+    if disc_jobs:
+        log(f"{len(disc_jobs)} disc structure(s) recognized")
+
+    total = len(files) + sum(len(fs) for _, fs in disc_jobs.values())
+    if not total:
+        log("Nothing to remux (every video file belongs to a disc structure's "
+            "compressed derivative, or was left in place).")
+        return stats
+
     workers = worker_count(config, default=min(4, os.cpu_count() or 1),
-                           items=len(files))
-    pbar = _make_pbar(total=len(files), desc="Remuxing videos")
+                           items=total)
+    pbar = _make_pbar(total=total, desc="Remuxing videos")
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -478,18 +692,105 @@ def run_remux_videos(config):
             except OSError:
                 pass
 
+    def _plain_job(path):
+        """A single file's job, in the disc job's own result shape.
+
+        Both kinds run in one pool, so both return the same tuple —
+        ``consumed`` is how many of the run's files the job accounts for (the
+        progress bar counts files) and ``refused`` is only ever a disc's.
+        """
+        return ("file",) + _job(path) + (1, None)
+
+    def _disc_job(disc, disc_files):
+        """One disc structure: pick its main feature, remux it as ONE input.
+
+        Returns ``(kind, path, dest, msg, added, skipped, consumed, refused)``
+        — ``consumed`` is how many of the run's files this job accounts for
+        (the progress bar counts files), and ``refused`` is ``(disc, reason)``
+        when mlo.videodisc would not choose, so the caller logs the reason and
+        raises the app's prompt for the folder.
+
+        The remux itself is ``remux_video`` over a concat-demuxer list, so the
+        verification, caption and chapter rules are the single-file ones; the
+        streams the remux consumed are removed only after it verified.
+        """
+        first = sorted(disc_files)[0]
+        count = len(disc_files)
+        title, reason = videodisc.pick(disc, probe)
+        if title is None:
+            return "disc", first, None, reason, 0, False, count, (disc, reason)
+        existing = videodisc.output_stem(disc) + ".mkv"
+        if os.path.isfile(existing):
+            if remove_original and title.duration and _measures(existing, title.duration, ffprobe):
+                failed = _remove_streams(title.streams, stats)
+                if not failed:
+                    return ("disc", first, None, "already remuxed — stray original removed",
+                            0, True, count, None)
+                return ("disc", first, None,
+                        f"already remuxed (the disc's MKV exists); {failed} stream(s) "
+                        f"could not be removed", 0, False, count, None)
+            return ("disc", first, None, "already remuxed (the disc's MKV exists)",
+                    0, True, count, None)
+        list_path = None
+        fd, tmp = tempfile.mkstemp(
+            prefix=".remux_", suffix=".mkv", dir=os.path.dirname(first) or ".")
+        os.close(fd)
+        try:
+            # The list lives in the system temp dir: it names the streams by
+            # absolute path, so nothing in the library has to hold it.
+            fd, list_path = tempfile.mkstemp(prefix="mlo_disc_", suffix=".ffconcat")
+            os.close(fd)
+            videodisc.write_concat_list(title.streams, list_path)
+            ok, msg = remux_video(list_path, tmp, ffmpeg, ffprobe, config, concat=True)
+            if not ok:
+                return ("disc", first, None,
+                        f"disc title {title.key} ({title.parts} part(s)): {msg}",
+                        0, False, count, None)
+            with _DEST_LOCK:
+                dest = _unique_dest(videodisc.output_stem(disc))
+                os.replace(tmp, dest)
+            try:
+                added = os.path.getsize(dest)
+            except OSError:
+                added = 0
+        finally:
+            for p in (list_path, tmp):
+                try:
+                    if p and os.path.exists(p):
+                        os.remove(p)
+                except OSError:
+                    pass
+        label = f"{msg} [disc title {title.key}, {title.parts} part(s)]"
+        if remove_original:
+            failed = _remove_streams(title.streams, stats)
+            if failed:
+                return ("disc", first, dest,
+                        f"{label}; {failed} stream(s) could not be removed",
+                        added, False, count, None)
+        return "disc", first, dest, label, added, False, count, None
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_job, f) for f in files]
+        futures = [pool.submit(_plain_job, f) for f in files]
+        for disc, disc_files in disc_jobs.values():
+            futures.append(pool.submit(_disc_job, disc, disc_files))
         for fut in as_completed(futures):
             try:
-                path, dest, msg, added, skipped = fut.result()
+                kind, path, dest, msg, added, skipped, consumed, refused = fut.result()
             except Exception as e:
                 stats["error_count"] += 1
                 stats["errors"].append(str(e))
                 pbar.update(1)
                 continue
             name = os.path.basename(path)
-            if skipped:
+            if refused:
+                # Nothing was picked, so nothing was touched: the app asks
+                # instead of guessing (the notification bell, the prompts API
+                # and the queue's "Needs you" row).
+                asked, reason = refused
+                stats["skipped_count"] += 1
+                log(c(f"  ? {name}: no main feature — {reason}", Color.YELLOW))
+                _ask_about_disc(asked, reason, config)
+            elif skipped:
                 stats["skipped_count"] += 1
                 if msg == "already remuxed — stray original removed":
                     log(f"  - {name}: stray original removed (same-stem MKV verified)")
@@ -505,7 +806,12 @@ def run_remux_videos(config):
                 stats["converted"] += 1
                 stats["modified_count"] += 1
                 stats["total_bytes_added"] += added
-                if remove_original:
+                if kind == "disc":
+                    # The consumed streams were removed by the disc job itself
+                    # (only after the remux verified), so this is not the
+                    # single-file removal below.
+                    log(f"  + {name} -> {os.path.basename(dest)} ({msg})")
+                elif remove_original:
                     try:
                         before = os.path.getsize(path)
                         with _DEST_LOCK:
@@ -520,7 +826,7 @@ def run_remux_videos(config):
                               Color.YELLOW))
                 else:
                     log(f"  + {name} -> {os.path.basename(dest)} ({msg})")
-            pbar.update(1)
+            pbar.update(consumed)
 
     pbar.close()
     log(
