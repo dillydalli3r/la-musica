@@ -318,6 +318,12 @@ def job_stage(job):
     by this value and drop the row."""
     state = str(job.get("state") or "idle")
     if state == "done":
+        # The album is in the library, but the chain this import started (links,
+        # metadata, cover art, the configured scripts) may still be running on
+        # its own thread. "In your library" is not "finished": the queue says
+        # Importing — and the In progress group — until the chain is over.
+        if (job.get("chain") or {}).get("running"):
+            return "importing"
         return "completed"
     if state == "error":
         return "failed"
@@ -808,8 +814,12 @@ def _finish(state, result=None):
         claim = _job.get("_claim")
         _job["_claim"] = None
         if state == "done":
-            _job["stage"] = "Done"
-            _job["stage_key"] = "completed"
+            if (_job.get("chain") or {}).get("running"):
+                _job["stage"] = "Running the import chain…"
+                _job["stage_key"] = "importing"
+            else:
+                _job["stage"] = "Done"
+                _job["stage_key"] = "completed"
         elif state == "error":
             _job["stage_key"] = "failed"
         else:
@@ -5035,10 +5045,34 @@ def _start_import_chain(album_dir, cfg, release=None):
     # happens to be primary by then.
     owner = int(_job.get("id") or 0)
 
+    def chain_mark(running, text=""):
+        """Record the chain on the JOB (by id — `_run` has returned by now) so
+        `job_stage` can keep the row in the queue's In progress group, and say
+        which step it is on. Called from the chain's own progress hook."""
+        with _lock:
+            job = _jobs.get(owner) or _job
+            job.setdefault("chain", {})["running"] = bool(running)
+            if running:
+                job["stage_key"] = "importing"
+                if text:
+                    job["stage"] = text
+            elif str(job.get("state") or "") == "done":
+                job["stage_key"] = "completed"
+                job["stage"] = "Done"
+
+    def chain_progress(done, total, label, *_args):
+        label = str(label or "").strip()
+        if label:
+            chain_mark(True, f"{label} — {int(done)}/{int(total)}" if total
+                       else label)
+
+    chain_mark(True, "Running the import chain…")
+
     def chain():
         _tl.jid = owner
         try:
-            result = imports.finish_album(album_dir, cfg, release=release)
+            result = imports.finish_album(album_dir, cfg, release=release,
+                                          progress=chain_progress)
             for err in result.get("errors") or []:
                 _log("  ! " + err)
             # The chain's own one-line report ("ran 12 of 14 scripts — 2
@@ -5058,6 +5092,8 @@ def _start_import_chain(album_dir, cfg, release=None):
             traceback.print_exc()
             _log("Import pipeline crashed: "
                  f"{traceback.format_exc().strip().splitlines()[-1]}")
+        finally:
+            chain_mark(False)
         _account_metadata(album_dir, cfg)
 
     _log("Running the import chain in the background (RateYourMusic links, "

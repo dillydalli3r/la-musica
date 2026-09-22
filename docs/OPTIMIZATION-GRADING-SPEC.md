@@ -1121,8 +1121,14 @@ user asked for, in the order they asked for it. `server/exporter.py` owns both.
   locale has nothing), then the entity's `primary` alias whatever its locale, and
   last any alias whose name actually differs from the entity's own (the
   Japanese/Chinese/Korean case). An alias flagged as a search hint is never
-  shown, and an alias identical to the name would not be repeated in
-  parentheses. The alias rides along in the MusicBrainz request that was already
+  shown, an alias identical to the name is not repeated in parentheses,
+  and an alias must be at least as READABLE as the name it annotates:
+  the ladder's answer is dropped when the name is already written in the
+  reader's script and the alias is not (`_reads_natively` — an English
+  reader is never shown `Radiohead (レディオヘッド)` because MusicBrainz
+  marks that alias primary, while a Japanese reader is), and the mirror
+  holds, so a Japanese name is not romanized for a `ja` reader. An alias
+  in the reader's own script always passes. The alias rides along in the MusicBrainz request that was already
   being made — no second call, ever — and the browser, entity and release-group
   pages and the credits panel show it (`宇多田ヒカル (Hikaru Utada)`), while the
   SAME setting is what translates non-Latin names for the Soulseek searches and

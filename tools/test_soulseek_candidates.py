@@ -3137,4 +3137,86 @@ finally:
     wishes_store._initialized = _saved_wish_init
     shutil.rmtree(_orph_wish_dir, ignore_errors=True)
 
+print("== the batch: three candidates at once, never two from one peer ==")
+# `soulseek_candidate_slots` (3) candidates of ONE release are asked for
+# together, from DIFFERENT peers — two folders of one peer are two copies on one
+# machine, so the second waits its turn — while `soulseek_search_concurrency`
+# (3) releases run at once and slskd's own `soulseek_download_slots` (9 = 3x3) is
+# the outer ceiling on the transfers that produces.
+def _cand(user, folder):
+    return {"username": user, "dir": folder, "files": []}
+
+
+_pool = [_cand("peerA", "/music/Album"),
+         _cand("peerA", "/music/Album (second copy)"),
+         _cand("peerB", "/shares/Album"),
+         _cand("peerC", "/albums/Album"),
+         _cand("peerD", "/elsewhere/Album")]
+_batch, _rest = soulseek_auto._take_batch(_pool, 3)
+assert [c["username"] for c in _batch] == ["peerA", "peerB", "peerC"], _batch
+assert [c["dir"] for c in _rest] == ["/music/Album (second copy)",
+                                     "/elsewhere/Album"], _rest
+_next_batch, _ = soulseek_auto._take_batch(_rest, 3)
+assert [c["username"] for c in _next_batch] == ["peerA", "peerD"], _next_batch
+assert soulseek_auto._batch_width({"soulseek_search_concurrency": 3,
+                                   "soulseek_candidate_slots": 3,
+                                   "soulseek_download_slots": 9}) == 3
+assert soulseek_auto._batch_width({"soulseek_search_concurrency": 3,
+                                   "soulseek_candidate_slots": 3,
+                                   "soulseek_download_slots": 4}) == 1, \
+    "narrowed to what slskd can actually carry"
+assert soulseek_auto._batch_width({"soulseek_search_concurrency": 6,
+                                   "soulseek_candidate_slots": 2,
+                                   "soulseek_download_slots": 12}) == 2
+from mlo.config import DEFAULT_CONFIG  # noqa: E402
+
+assert (DEFAULT_CONFIG["soulseek_search_concurrency"],
+        DEFAULT_CONFIG["soulseek_candidate_slots"],
+        DEFAULT_CONFIG["soulseek_download_slots"]) == (3, 3, 9), \
+    "the shipped numbers ARE the promise: 3 releases x 3 candidates = 9 slots"
+print("  ok 3 candidates of one release together, from 3 different peers")
+
+print("== an import chain still running is In progress, not Completed ==")
+# The album is in the library the moment the job settles, but the chain the
+# import started (links, metadata, cover art, the configured scripts) runs on
+# its own thread: the queue used to say Completed while nothing had been
+# imported yet.
+assert soulseek_auto.job_stage({"state": "running", "stage_key": "importing"}) == "importing"
+assert soulseek_auto.job_stage({"state": "done"}) == "completed"
+assert soulseek_auto.job_stage({"state": "done",
+                                "chain": {"running": True}}) == "importing", \
+    "the album is in the library, the chain is not done"
+assert soulseek_auto.job_stage({"state": "done",
+                                "chain": {"running": False}}) == "completed"
+assert soulseek_auto.job_stage({"state": "error"}) == "failed"
+assert soulseek_auto.job_stage({"state": "confirm"}) == "needs_attention"
+print("  ok a running import chain keeps the row in progress")
+
+# The transition itself, through the real `_finish`: a job that settles while
+# its chain still runs keeps the In progress stage (and the row's own text),
+# and the chain's end is what completes it.
+_saved_jobs = dict(soulseek_auto._jobs)
+try:
+    with soulseek_auto._lock:
+        soulseek_auto._job.clear()
+        soulseek_auto._job.update({"id": 900001, "state": "running",
+                                   "stage_key": "importing", "stage": "Importing",
+                                   "chain": {"running": True}, "release": None,
+                                   "log": [], "result": None, "waiting": None})
+        soulseek_auto._jobs[900001] = soulseek_auto._job
+    soulseek_auto._finish("done", {"imported": True, "album_path": "/tmp/x"})
+    assert soulseek_auto._job["stage_key"] == "importing", soulseek_auto._job
+    assert soulseek_auto.job_stage(soulseek_auto._job) == "importing"
+    assert soulseek_auto._job["stage"].startswith("Running the import chain"), \
+        soulseek_auto._job["stage"]
+    # …and once the chain is over the same job is Completed, not stuck.
+    with soulseek_auto._lock:
+        soulseek_auto._job["chain"]["running"] = False
+    assert soulseek_auto.job_stage(soulseek_auto._job) == "completed"
+finally:
+    with soulseek_auto._lock:
+        soulseek_auto._jobs.pop(900001, None)
+        soulseek_auto._jobs.update(_saved_jobs)
+print("  ok _finish keeps a job Importing while its chain runs")
+
 print("ok")

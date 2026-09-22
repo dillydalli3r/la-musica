@@ -194,7 +194,11 @@ shows an entity's **alias in your locale** in parentheses beside its name
 "Preferred locale for aliases" setting the beets import translates names with:
 an exact locale wins over a regional or script cousin (`en` before `en_PH`,
 `ja` before `ja-Latn`), then MusicBrainz's primary alias, and a search-hint
-alias is never shown. Every alias rides along in the request that was already
+alias is never shown — and an alias is only shown when the name is NOT
+already written in your own script: an English reader is never handed
+`Radiohead (レディオヘッド)` just because MusicBrainz flags that alias
+primary, while a Japanese reader is, and the mirror holds too (a Japanese
+name is not romanized for a `ja` reader). Every alias rides along in the request that was already
 being made, so nothing costs an extra MusicBrainz call. Entity pages carry
 grading and auditing detail, MusicBrainz + RateYourMusic links, cover
 upload/search, Wikipedia descriptions, manual tag editing, a lyrics editor, and a
@@ -426,7 +430,9 @@ candidate on its rip log *before* requesting any album byte
 (`soulseek_auto_log_min_score`, default 100), ranks candidates towards the copy
 that arrives fastest — lossless first, then the match score, then the peer's own
 advertised speed and queue — and downloads up to **three candidates of one
-release at once** (`soulseek_candidate_slots`): the first that passes the same
+release at once** (`soulseek_candidate_slots`), from three DIFFERENT peers (two
+folders of one peer are two copies on one machine, so the second keeps its place
+and comes back in a later batch): the first that passes the same
 verification becomes the import and the others are cancelled and swept, so a
 peer that stalls does not cost the whole album. The next candidate of that
 release is only asked for when one of the three lands or is rejected — the app
@@ -450,7 +456,9 @@ Queue tab's header reads all three back.
 
 Adding a release to the library **starts its search immediately** and puts it on
 the **download queue**, which is the one surface for wanted releases: a row shows
-what the search is doing, and the durable behaviour behind it (re-searching on
+what the search is doing, and it stays **In progress** — never Completed — while
+the import chain it started is still running over the album. The durable
+behaviour behind it (re-searching on
 `wishes_interval_hours`, default 6, with retry backoff) keeps looking **until the
 release is found or the user cancels it** — a release nobody is sharing this week
 is not abandoned. A release that already failed is not re-attempted on the next

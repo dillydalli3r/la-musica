@@ -2551,7 +2551,7 @@ function QueuePanel({ running }: { running: boolean }) {
             onClear={(item) => clear({ id: item.id }, item)}
           />
           <QueueSection
-            title="In progress" hint="downloading, verifying or moving into the library"
+            title="In progress" hint="downloading, verifying, moving into the library, or running the import chain"
             rows={sections.in_progress} tone="border-sky-800 text-sky-300"
             empty="nothing is downloading right now"
             busyId={busyId}

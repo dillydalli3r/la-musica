@@ -284,8 +284,53 @@ def _has_latin(value):
     return any("a" <= ch.lower() <= "z" for ch in str(value or ""))
 
 
+# The script each language the app ships is written in. A name in the
+# reader's own script needs no translation, and an alias in it is always
+# welcome — this table is what lets `alias_for` tell those two apart
+# without a language detector or a network call.
+_SCRIPT_CHARS = {
+    "ja": r"[\u3040-\u30ff\u4e00-\u9fff]",          # kana or CJK
+    "zh": r"[\u4e00-\u9fff]",                          # CJK
+    "ko": r"[\uac00-\ud7af]",                          # hangul
+    "ru": r"[\u0400-\u04ff]", "uk": r"[\u0400-\u04ff]",
+    "bg": r"[\u0400-\u04ff]", "sr": r"[\u0400-\u04ff]",
+    "el": r"[\u0370-\u03ff\u1f00-\u1fff]",
+    "he": r"[\u0590-\u05ff]",
+    "ar": r"[\u0600-\u06ff\u0750-\u077f]",
+    "th": r"[\u0e00-\u0e7f]",
+    "hi": r"[\u0900-\u097f]", "mr": r"[\u0900-\u097f]", "ne": r"[\u0900-\u097f]",
+}
+
+
+def _reads_natively(value, locale):
+    """Whether *value* is written in the script a reader of *locale* reads.
+
+    Everything the table does not name — English included — is read as
+    Latin, which is also what a romanization is written in.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return False
+    lang = str(locale or "").split("-")[0].split("_")[0].lower()
+    pattern = _SCRIPT_CHARS.get(lang)
+    if pattern is None:
+        return bool(_has_latin(text))
+    return bool(re.search(pattern, text))
+
+
 def alias_for(aliases, cfg=None, name=""):
     """The alias to show beside *name* in parentheses, or "".
+
+    An alias must be at least as READABLE as the name it annotates: a
+    reader who can already read "Radiohead" gains nothing from its
+    Japanese alias (MusicBrainz marks that one primary, which is how
+    the pages used to show "Radiohead (レディオヘッド)"), and the mirror
+    is worse — romanizing a name for a reader who reads the script it
+    is written in. The ladder's answer is therefore dropped when the
+    name is already in the reader's script and the alias is not; an
+    alias in their script always passes, which is what keeps
+    `宇多田ヒカル (Hikaru Utada)` for an English reader and
+    `Radiohead (レディオヘッド)` for a Japanese one.
 
     MusicBrainz states an entity's other-language names as aliases, each with
     its own `locale` and `type`. The ladder, in order:
@@ -316,6 +361,22 @@ def alias_for(aliases, cfg=None, name=""):
     if not rows:
         return ""
     want = _locale_preference(cfg)
+    chosen = _alias_ladder(rows, want, name)
+    # An alias must be at least as readable as what it annotates (see the
+    # docstring): a reader who reads the name's script gains nothing from a
+    # script they do not read, and MusicBrainz's `primary` flag says nothing
+    # about the READER. An alias in the reader's own script always passes, so
+    # this only ever drops a translation that translates nothing.
+    if (want and chosen and _reads_natively(name, want)
+            and not _reads_natively(chosen, want)):
+        return ""
+    return chosen
+
+
+def _alias_ladder(rows, want, name):
+    """Which alias the ladder picks — `alias_for` applies the readability
+    rule on top, and everything below is the ladder itself.
+    """
 
     def in_locale(alias):
         got = str(alias.get("locale") or "").strip().lower()

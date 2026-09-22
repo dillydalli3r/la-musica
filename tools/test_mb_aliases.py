@@ -91,10 +91,12 @@ rows_jp = [
 ]
 ok(alias(rows_jp, {}, "ロストアンブレラ") == "Lost Umbrella",
    "a non-Latin name with no locale and no primary still gets its Latin reading")
-# With `ja` configured, the only alias in that locale IS the name, so the
-# same-name guard drops it and the Latin reading still answers.
-ok(alias(rows_jp, {"locale": "ja"}, "ロストアンブレラ") == "Lost Umbrella",
-   "the same-name guard does not leave a ja reader with nothing")
+# With `ja` configured, the only alias in that locale IS the name — and a
+# reader who reads the script the name is written in gets NOTHING rather than a
+# script they may not read. This is the mirror of "Radiohead (レディオヘッド)",
+# and the rule is the reader's, not the name's.
+ok(alias(rows_jp, {"locale": "ja"}, "ロストアンブレラ") == "",
+   "a ja reader is not shown the Latin reading of a name they can already read")
 ok(alias(rows_jp, {"locale": "de"}, "ロストアンブレラ") == "Lost Umbrella",
    "…and a locale with no alias of its own falls through to it")
 # a transliteration beats a translation when both are offered
@@ -142,5 +144,34 @@ for key, where in (('"genres+aliases"', "artist identity"),
                    ("+labels+isrcs+aliases", "release lookup")):
     ok(key in src, f"{where} asks MusicBrainz for aliases ({key})")
 ok(src.count("alias_for(") >= 4, "and each of them attaches the chosen alias")
+
+print("== an alias must be as readable as the name it annotates ==")
+# A Latin name is never annotated with a foreign-script alias just because
+# MusicBrainz flags that one primary: the pages used to show "Radiohead
+# (レディオヘッド)" to an English reader, which translates nothing.
+rows_radio = [{"name": "レディオヘッド", "locale": "ja", "primary": True, "type": None}]
+ok(alias(rows_radio, {"locale": "en"}, "Radiohead") == "",
+   "a name in the reader's own script takes no alias from a script they cannot read")
+ok(alias(rows_radio, None, "Radiohead") == "",
+   "…and the same holds with no config dict (the saved `locale` decides)")
+ok(alias(rows_radio, {"locale": "ja"}, "Radiohead") == "レディオヘッド",
+   "…while that alias is exactly what a ja reader wants")
+# The mirror: no romanization for a reader who reads the script already.
+rows_utada = [{"name": "Hikaru Utada", "locale": "en", "primary": True, "type": None}]
+ok(alias(rows_utada, {"locale": "ja"}, "宇多田ヒカル") == "",
+   "a Japanese name is not romanized for a ja reader")
+ok(alias(rows_utada, {"locale": "en"}, "宇多田ヒカル") == "Hikaru Utada",
+   "…and it still translates for an en reader")
+# Another script, same rule.
+rows_kino = [{"name": "Kino", "locale": "en", "primary": True, "type": None}]
+ok(alias(rows_kino, {"locale": "ru"}, "Кино") == "",
+   "a Cyrillic name takes no Latin alias for a ru reader")
+ok(alias(rows_kino, {"locale": "en"}, "Кино") == "Kino",
+   "…and does for an en reader")
+# An alias in the reader's script always passes, even when it is not exactly
+# the name: "Sawayama (Rina Sawayama)" is a fuller name, not a foreign one.
+ok(alias([{"name": "Rina Sawayama", "locale": "en", "primary": True, "type": None}],
+         {"locale": "en"}, "Sawayama") == "Rina Sawayama",
+   "a readable alias is still shown beside a readable name")
 
 print(f"mb aliases: all {passed} assertions passed")
