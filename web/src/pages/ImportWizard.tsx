@@ -1792,8 +1792,18 @@ export default function ImportWizard() {
     return m;
   }, [stepTracks]);
 
-  /** The release picked in the Links step, via the Cover Art Archive. */
-  const mbCoverUrl = releaseId ? `https://coverartarchive.org/release/${releaseId}/front-500` : null;
+  /** The release picked in the Links step, via the Cover Art Archive.
+   *
+   *  The release GROUP's cover, not the release's own: the group is the album,
+   *  and its image is what the cover finder compares candidates against
+   *  (`coverartarchive.org/release-group/<rg>/front-500` — the same reference
+   *  `CoverSearchModal` shows). A release with no group id on record, or one
+   *  whose group has no image, falls back to the release's own cover. */
+  const mbCoverUrl = release?.release_group_id
+    ? `https://coverartarchive.org/release-group/${release.release_group_id}/front-500`
+    : releaseId
+      ? `https://coverartarchive.org/release/${releaseId}/front-500`
+      : null;
 
   const refreshCovers = () => {
     qc.invalidateQueries({ queryKey: ["library"] });
@@ -3638,14 +3648,16 @@ const finish = async () => {
               </div>
 
               <div className="panel p-4 space-y-2">
-                <div className="text-sm font-semibold text-zinc-300">MusicBrainz release cover</div>
+                <div className="text-sm font-semibold text-zinc-300">MusicBrainz release-group cover</div>
                 <div className="text-xs text-zinc-500">
-                  The release's own cover — compare it with musichoarders before you accept it.
+                  The release GROUP's own cover — the album's art, and what the
+                  cover search compares its candidates against. Compare it with
+                  musichoarders before you accept it.
                 </div>
                 {mbCoverUrl ? (
                   <img
                     src={api.artUrl(mbCoverUrl)}
-                    alt="MusicBrainz release cover"
+                    alt="MusicBrainz release-group cover"
                     referrerPolicy="no-referrer"
                     className="h-40 w-40 rounded-lg bg-raise border border-border object-cover"
                   />

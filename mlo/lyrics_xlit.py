@@ -58,7 +58,7 @@ from .lyrics import _atomic_write_text, _lrc_for, elrc_word_sync
 from .paths import AUDIO_EXTS
 from .stats import (
     is_audio_file, new_stats, _collect_targets, _find_albums,
-    _make_pbar, _pbar_skip, _pbar_update,
+    _make_pbar, _pbar_skip, _pbar_update, worker_count,
 )
 from .ui import print_header, log, c, Color
 
@@ -516,129 +516,171 @@ def run_lyrics_xlit(config):
 
     counts = {"ok": 0, "skip": 0, "fail": 0}
     pbar = _make_pbar(total=len(files), desc="Lyrics xlit/translate")
-    try:
-        for path in files:
-            try:
-                af = AudioFile(path)
-                if af.audio is None:
-                    raise RuntimeError(af.error or "unreadable")
 
-                instrumental = str(af.get_tag("INSTRUMENTAL") or "").strip() == "1"
-                # Original lyrics: embedded first, .lrc sidecar as fallback —
-                # the same resolution order the player uses.
-                text = (af.get_lyrics() or "").strip()
-                if not text:
-                    lrc_path = _lrc_for(path)
-                    if os.path.isfile(lrc_path):
-                        try:
-                            with open(lrc_path, "r", encoding="utf-8",
-                                      errors="replace") as fh:
-                                text = fh.read().strip()
-                        except OSError:
-                            text = ""
-                if instrumental or not text:
-                    stats["skipped_count"] += 1
-                    _pbar_skip(pbar, counts)
-                    continue
+    def _one(path):
+        """One track's transforms, off the runner thread.
 
-                changed = False
-                # What this track's own lyrics still need, from the ONE rule
-                # the grader asks too (xlit_needs): a transform the rule does
-                # not ask for is never written, so a re-run leaves an
-                # already-correct track untouched and grading can never
-                # disagree with what this loop decided.
-                need = xlit_needs(text, config)
+        Returns the row to count instead of touching the run's stats: the row
+        dict is this call's own, so N of these can run at once without a lock
+        around the counters. It has to be a pool — this script is the one
+        part of the chain that is pure waiting (one HTTP request per 40-line
+        chunk, per language, per track), and a 31-track album paid one request
+        after another is minutes of a stalled chain for work that overlaps
+        freely.
+        """
+        row = {"transliterated": 0, "translated": 0, "latin_skipped": 0,
+               "identity_skipped": 0, "stale_removed": 0, "changed": False,
+               "error": ""}
+        try:
+            af = AudioFile(path)
+            if af.audio is None:
+                raise RuntimeError(af.error or "unreadable")
 
-                # ---- transliteration ------------------------------------
-                if do_xlit:
-                    existing = str(af.get_lyrics_transform("TRANSLITERATION") or "").strip()
-                    has_sidecar = sidecars and os.path.isfile(
-                        os.path.splitext(path)[0] + XLIT_SIDECAR)
-                    if not need["transliteration"]:
-                        # Already romanized, or already in the reader's own
-                        # script (a ja reader doesn't need ja lyrics in
-                        # romaji) — generating one would be a no-op. What is
-                        # STORED is removed rather than merely skipped: this
-                        # rule is what the grader judges by, so a transform
-                        # written under an older, laxer rule would otherwise
-                        # fail XLIT_UNNEEDED forever.
-                        stats["latin_skipped"] += 1
-                        if _drop_stored_transforms(af, path, "TRANSLITERATION"):
-                            stats["stale_removed"] += 1
-                            changed = True
-                    elif not force and (existing or has_sidecar):
-                        pass  # already stored and still needed — keep it
-                    else:
-                        xlit, ok = _apply(config, text, "transliterate")
-                        if ok:
-                            if embed_tags:
-                                if af.set_tag(
-                                        f"TRANSLITERATION-{xlit_tag_suffix(config, text, af)}".upper(),
-                                        xlit):
-                                    # The bare legacy name is superseded — but
-                                    # only once the suffixed tag actually
-                                    # landed: deleting it after a refused
-                                    # write lost the transform outright.
-                                    if str(af.get_tag("TRANSLITERATION") or "").strip():
-                                        af.delete_tag("TRANSLITERATION")
-                            if sidecars:
-                                _atomic_write_text(
-                                    os.path.splitext(path)[0] + XLIT_SIDECAR, xlit)
-                            stats["transliterated"] += 1
-                            changed = True
+            instrumental = str(af.get_tag("INSTRUMENTAL") or "").strip() == "1"
+            # Original lyrics: embedded first, .lrc sidecar as fallback —
+            # the same resolution order the player uses.
+            text = (af.get_lyrics() or "").strip()
+            if not text:
+                lrc_path = _lrc_for(path)
+                if os.path.isfile(lrc_path):
+                    try:
+                        with open(lrc_path, "r", encoding="utf-8",
+                                  errors="replace") as fh:
+                            text = fh.read().strip()
+                    except OSError:
+                        text = ""
+            if instrumental or not text:
+                row["skipped"] = True
+                return row
 
-                # ---- translation ----------------------------------------
-                # Nothing to translate when the lyrics are already in the
-                # reader's own language (need["langs"] is empty then) — the
-                # model is not asked for the no-op translation _same_essence
-                # below would only throw away. Stored translations are
-                # removed instead: they are exactly what the grader rejects
-                # as XLIT_UNNEEDED (see the transliteration pass).
-                if do_trans:
-                    if not need["translation"] \
-                            and _drop_stored_transforms(af, path, "TRANSLATION"):
-                        stats["stale_removed"] += 1
+            changed = False
+            # What this track's own lyrics still need, from the ONE rule
+            # the grader asks too (xlit_needs): a transform the rule does
+            # not ask for is never written, so a re-run leaves an
+            # already-correct track untouched and grading can never
+            # disagree with what this loop decided.
+            need = xlit_needs(text, config)
+
+            # ---- transliteration ------------------------------------
+            if do_xlit:
+                existing = str(af.get_lyrics_transform("TRANSLITERATION") or "").strip()
+                has_sidecar = sidecars and os.path.isfile(
+                    os.path.splitext(path)[0] + XLIT_SIDECAR)
+                if not need["transliteration"]:
+                    # Already romanized, or already in the reader's own
+                    # script (a ja reader doesn't need ja lyrics in
+                    # romaji) — generating one would be a no-op. What is
+                    # STORED is removed rather than merely skipped: this
+                    # rule is what the grader judges by, so a transform
+                    # written under an older, laxer rule would otherwise
+                    # fail XLIT_UNNEEDED forever.
+                    row["latin_skipped"] += 1
+                    if _drop_stored_transforms(af, path, "TRANSLITERATION"):
+                        row["stale_removed"] += 1
                         changed = True
-                    for lang in need["langs"]:
-                        if not force and _has_translation(
-                                af.get_lyrics_transform("TRANSLATION", lang, exact=True),
-                                path, lang, sidecars):
-                            continue
-                        trans, ok = _apply(config, text, "translate", lang)
-                        if ok and _same_essence(trans, text):
-                            # The "translation" came back identical to the
-                            # source (e.g. English → English): storing it
-                            # would just duplicate every line in the player.
-                            stats["identity_skipped"] += 1
-                            continue
-                        if ok:
-                            if embed_tags:
-                                # one tag per configured language:
-                                # TRANSLATION-EN, TRANSLATION-DE, …
-                                if af.set_tag(f"TRANSLATION-{lang}".upper(), trans):
-                                    # Only delete the legacy bare name once
-                                    # the per-language tag is really on the
-                                    # file (see the transliteration pass).
-                                    if str(af.get_tag("TRANSLATION") or "").strip():
-                                        af.delete_tag("TRANSLATION")
-                            if sidecars:
-                                _atomic_write_text(
-                                    os.path.splitext(path)[0] + f".{lang}.lrc", trans)
-                            stats["translated"] += 1
-                            changed = True
-
-                stats["total_scanned"] += 1
-                if changed:
-                    stats["modified_count"] += 1
-                    _pbar_update(pbar, counts, "ok")
+                elif not force and (existing or has_sidecar):
+                    pass  # already stored and still needed — keep it
                 else:
-                    stats["unchanged_count"] += 1
-                    _pbar_skip(pbar, counts)
-            except Exception as e:
-                stats["error_count"] += 1
-                if len(stats["errors"]) < 25:
-                    stats["errors"].append(f"{os.path.basename(path)}: {e}")
-                _pbar_update(pbar, counts, "fail")
+                    xlit, ok = _apply(config, text, "transliterate")
+                    if ok:
+                        if embed_tags:
+                            if af.set_tag(
+                                    f"TRANSLITERATION-{xlit_tag_suffix(config, text, af)}".upper(),
+                                    xlit):
+                                # The bare legacy name is superseded — but
+                                # only once the suffixed tag actually
+                                # landed: deleting it after a refused
+                                # write lost the transform outright.
+                                if str(af.get_tag("TRANSLITERATION") or "").strip():
+                                    af.delete_tag("TRANSLITERATION")
+                        if sidecars:
+                            _atomic_write_text(
+                                os.path.splitext(path)[0] + XLIT_SIDECAR, xlit)
+                        row["transliterated"] += 1
+                        changed = True
+
+            # ---- translation ----------------------------------------
+            # Nothing to translate when the lyrics are already in the
+            # reader's own language (need["langs"] is empty then) — the
+            # model is not asked for the no-op translation _same_essence
+            # below would only throw away. Stored translations are
+            # removed instead: they are exactly what the grader rejects
+            # as XLIT_UNNEEDED (see the transliteration pass).
+            if do_trans:
+                if not need["translation"] \
+                        and _drop_stored_transforms(af, path, "TRANSLATION"):
+                    row["stale_removed"] += 1
+                    changed = True
+                for lang in need["langs"]:
+                    if not force and _has_translation(
+                            af.get_lyrics_transform("TRANSLATION", lang, exact=True),
+                            path, lang, sidecars):
+                        continue
+                    trans, ok = _apply(config, text, "translate", lang)
+                    if ok and _same_essence(trans, text):
+                        # The "translation" came back identical to the
+                        # source (e.g. English → English): storing it
+                        # would just duplicate every line in the player.
+                        row["identity_skipped"] += 1
+                        continue
+                    if ok:
+                        if embed_tags:
+                            # one tag per configured language:
+                            # TRANSLATION-EN, TRANSLATION-DE, …
+                            if af.set_tag(f"TRANSLATION-{lang}".upper(), trans):
+                                # Only delete the legacy bare name once
+                                # the per-language tag is really on the
+                                # file (see the transliteration pass).
+                                if str(af.get_tag("TRANSLATION") or "").strip():
+                                    af.delete_tag("TRANSLATION")
+                        if sidecars:
+                            _atomic_write_text(
+                                os.path.splitext(path)[0] + f".{lang}.lrc", trans)
+                        row["translated"] += 1
+                        changed = True
+            row["changed"] = changed
+        except Exception as e:
+            row["error"] = f"{os.path.basename(path)}: {e}"
+        return row
+
+    def _finish(row):
+        """Apply one worker's row to the run's stats and the bar."""
+        if row["error"]:
+            stats["error_count"] += 1
+            if len(stats["errors"]) < 25:
+                stats["errors"].append(row["error"])
+            _pbar_update(pbar, counts, "fail")
+            return
+        for key in ("transliterated", "translated", "latin_skipped",
+                    "identity_skipped", "stale_removed"):
+            stats[key] += row[key]
+        if row.get("skipped"):
+            stats["skipped_count"] += 1
+            _pbar_skip(pbar, counts)
+            return
+        stats["total_scanned"] += 1
+        if row["changed"]:
+            stats["modified_count"] += 1
+            _pbar_update(pbar, counts, "ok")
+        else:
+            stats["unchanged_count"] += 1
+            _pbar_skip(pbar, counts)
+
+    # The chain serialises SCRIPTS; the requests inside one script have no
+    # reason to be serial too. worker_limit bounds how many run at once, and
+    # the AI layer's per-chunk disk cache is lock-protected, so two tracks
+    # asking for the same transform still pay for it once.
+    workers = worker_count(config, default=4, maximum=8, items=len(files))
+    try:
+        if len(files) == 1 or workers == 1:
+            for path in files:
+                _finish(_one(path))
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futures = {ex.submit(_one, p): p for p in files}
+                for fut in as_completed(futures):
+                    _finish(fut.result())
     finally:
         try:
             pbar.close()

@@ -145,8 +145,17 @@ def run_release_tracklist(config):
 
         tracks = (release or {}).get("media") or []
         if not tracks:
-            log(f"{rel}: MusicBrainz holds no tracklist for {mbid} — "
-                f"no manifest written")
+            # resolve_release answers (None, mbid) both when MusicBrainz
+            # matched nothing and when the id named a release group with no
+            # edition this app can use — two different facts, and the wrong
+            # one sends the user looking for a tracklist that exists.
+            # (The refusal wording is integrations' own, so the log and the
+            # auto-import's `last_error` say the same thing.)
+            if release is None:
+                why = f"{mbid}: {integrations._NO_EDITION}"
+            else:
+                why = f"MusicBrainz holds no tracklist for {mbid}"
+            log(c(f"{rel}: {why} — no manifest written", Color.YELLOW))
             stats["skipped_count"] += 1
             mlo_stats._pbar_skip(pbar, counts)
             continue
@@ -323,7 +332,7 @@ def _apply_force(cfg, force, sid=None):
                 cfg[key] = bool(value)
 
 
-def _run_with_progress(runner, cfg, label, chain=None):
+def _run_with_progress(runner, cfg, label, chain=None, job=None):
     """Run *runner* with the UI's progress bar pointed at this script.
 
     Every runner builds its own tqdm-style bar, and that bar is what the UI
@@ -356,7 +365,12 @@ def _run_with_progress(runner, cfg, label, chain=None):
     swap, and the original hook is restored in `finally` even on a raise.
     """
     prior = getattr(mlo_stats, "progress_hook", None)
-    if not callable(prior):
+    # The run this script belongs to, resolved HERE (the chain's own context)
+    # rather than per frame: the runner's bar is ticked by the pool threads
+    # inside it, and those threads are not inside the job. None for a lone
+    # script run outside a job (the CLI, the suites).
+    job = job_locks.current()
+    if not callable(prior) and job is None:
         return runner(cfg)          # a headless caller (CLI/tests): no UI bar
     index, count = chain or (0, 0)
     chained = count > 1
@@ -372,21 +386,15 @@ def _run_with_progress(runner, cfg, label, chain=None):
     last = [0, 0]
 
     def emit(done, total, text, steps=None):
-        """One frame out. *steps* is the chain's whole-script pair, sent
-        beside the fractional position: the bar draws the fraction, the
-        readout prints "3/18" with no decimal in it. A hook that takes only
-        the three-argument frame (a test double, a curl-era relay) still gets
-        its numbers."""
-        frames = [(done, total, text)] if steps is None else [
-            (done, total, text, steps), (done, total, text)]
-        for frame in frames:
-            try:
-                prior(*frame)
-                return
-            except TypeError:
-                continue
-            except Exception:
-                return
+        """One frame out, to the header bar AND to this run's in-progress row
+        (job_locks.publish) — the two surfaces read the same frame or the run
+        reads as two different steps depending on where you look. *steps* is
+        the chain's whole-script pair, sent beside the fractional position:
+        the bar draws the fraction, the readout prints "3/18" with no decimal
+        in it. The RELAY is passed explicitly (`prior`): the installed hook is
+        this wrapper itself while the script runs, so handing the frame back to
+        it would feed the wrapper its own text."""
+        job_locks.publish(done, total, text, steps, job=job, hook=prior)
 
     def hook(done, total, detail):
         last[0], last[1] = done, total
@@ -437,13 +445,15 @@ def _run_with_progress(runner, cfg, label, chain=None):
         mlo_stats.progress_hook = prior
 
 
-def run_script(sid, cfg, targets=None, force=None, skip_disabled=True, chain=None):
+def run_script(sid, cfg, targets=None, force=None, skip_disabled=True, chain=None,
+               job=None):
     """Run one script against *cfg* and report what happened.
 
     *chain* ``(index, count)`` is passed by :func:`run_chain` so a step of a
     multi-script run reports against the WHOLE run's bar; a lone caller leaves
     it None and the script's own counts are the bar (see
-    :func:`_run_with_progress`).
+    :func:`_run_with_progress`). *job* is the run's in-progress row
+    (:mod:`server.job_locks`), so the same frames reach it.
 
     Returns ``{"id", "name", "label", "stats"}``, ``{"id", ..., "skipped": True,
     "reason"}`` for a script whose feature is switched off, or ``{"id",
@@ -467,7 +477,8 @@ def run_script(sid, cfg, targets=None, force=None, skip_disabled=True, chain=Non
                     "reason": f"{joined} {'are' if len(keys) > 1 else 'is'} off"}
     try:
         return {"id": sid, "name": getattr(runner, "__name__", ""),
-                "label": label, "stats": _run_with_progress(runner, cfg, label, chain)}
+                "label": label,
+                "stats": _run_with_progress(runner, cfg, label, chain, job=job)}
     except Exception as e:
         traceback.print_exc()
         return {"id": sid, "name": getattr(runner, "__name__", ""),
@@ -514,16 +525,6 @@ def run_label(ids):
     if not names:
         return "Script run"
     return names[0] if len(names) == 1 else f"{names[0]} + {len(names) - 1} more"
-
-
-def _job_progress(job, progress):
-    """Forward each finished script to the caller AND to the lock registry, so
-    the in-progress list shows which step of the run is going."""
-    def report(done, total, label, result):
-        job_locks.set_progress(job, done, total, label)
-        if progress is not None:
-            progress(done, total, label, result)
-    return report
 
 
 def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
@@ -574,8 +575,7 @@ def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
                                label=run_label(ids), wait=wait,
                                timeout=timeout) as job:
             return _run_chain_locked(cfg, ids, targets=targets, force=force,
-                                     progress=_job_progress(job, progress),
-                                     final=final)
+                                     progress=progress, final=final, job=job)
     finally:
         RUN_LOCK.release()
 
@@ -718,7 +718,7 @@ def _take_claimed(claimed, names, live):
     return ""
 
 
-def _follow_moved_targets(cfg, audio_names, claimed=()):
+def _follow_moved_targets(cfg, audio_names, claimed=(), misses=None):
     """Re-point the chain at an album a script moved, and never lose it silently.
 
     Script 14 (beets) rewrites the tags and applies the naming script, so an
@@ -767,6 +767,17 @@ def _follow_moved_targets(cfg, audio_names, claimed=()):
         if not names:                   # nothing of ours was there to follow
             out.append(t)
             continue
+        # One full-library walk per vanished target is the search this does;
+        # repeating it for every remaining script costs a library walk per
+        # script to re-learn the same answer. A target that resolved nothing
+        # once is asked about once (a script that MOVES the album later
+        # re-points the chain, and the new folder is not in here).
+        if misses is not None and os.path.normcase(t) in misses:
+            log(f"WARNING: no audio left in {t} and the album could not be "
+                f"found in the library — the scripts after this one have "
+                f"nothing to run on")
+            out.append(t)
+            continue
         moved = _find_moved_album(names, str(cfg.get("music_folder") or ""))
         if not moved:
             moved = _take_claimed(claimed, names,
@@ -779,12 +790,14 @@ def _follow_moved_targets(cfg, audio_names, claimed=()):
             log(f"WARNING: no audio left in {t} and the album could not be "
                 f"found in the library — the scripts after this one have "
                 f"nothing to run on")
+            if misses is not None:
+                misses.add(os.path.normcase(t))
             out.append(t)
     cfg["targets"] = out
 
 
 def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
-                      final=None):
+                      final=None, job=None):
     cfg = dict(cfg)
     if targets is not None:
         cfg["targets"] = [os.path.normpath(str(t)) for t in targets]
@@ -795,12 +808,23 @@ def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
     # Each target's audio, taken before any script runs: the only way to
     # recognise the album again once a script has moved its folder.
     audio_names = {t: _audio_basenames(t) for t in (cfg.get("targets") or [])}
+    # Targets whose album could not be found after a script moved it: the
+    # lookup is a library walk, so it is answered once per target, not once
+    # per remaining script (see _follow_moved_targets).
+    misses: set = set()
     for done, sid in enumerate(ids, 1):
-        result = run_script(sid, cfg, chain=(done, total))
+        result = run_script(sid, cfg, chain=(done, total), job=job)
         results.append(result)
-        _follow_moved_targets(cfg, audio_names, _claimed_targets(result))
+        _follow_moved_targets(cfg, audio_names, _claimed_targets(result),
+                              misses)
+        label = RUNNERS.get(sid, (f"Script {sid}", None))[0]
+        # Every step ends announced, including one that never entered its
+        # runner (a switched-off feature, an unavailable module): the header
+        # bar and the in-progress row both move to this step, so neither can
+        # be left showing a script the run has already left behind.
+        job_locks.publish(done, total, f"#{done}/{total} · {label}",
+                          (done, total), job=job)
         if progress is not None:
-            label = RUNNERS.get(sid, (f"Script {sid}", None))[0]
             try:
                 progress(done, total, label, result)
             except Exception:

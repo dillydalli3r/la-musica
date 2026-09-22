@@ -287,7 +287,7 @@ def _audio_crc32(ffmpeg_exe, path):
     return got
 
 
-def verify_album_checksums(ffmpeg_exe, album_dir, paths, config=None):
+def verify_album_checksums(ffmpeg_exe, album_dir, paths, config=None, workers=None):
     """Verify MEDIA=CD tracks against the CRC-32 checksums in the rip logs.
 
     This is the ONLY integrity source for CD rips — AudioAuditor is never
@@ -374,7 +374,17 @@ def verify_album_checksums(ffmpeg_exe, album_dir, paths, config=None):
     actuals = {}
     if to_decode:
         from concurrent.futures import ThreadPoolExecutor
-        workers = min(4, len(to_decode))
+        # Decoders allowed at once, from the run's own worker budget. This
+        # function is called once PER ALBUM from audit's album pool, so a
+        # constant here multiplied the run's parallelism: worker_limit=2 with
+        # two discs started eight ffmpeg decoders and pegged a container's CPU
+        # quota — the setting exists to prevent exactly that. *workers* (the
+        # caller's per-album share) wins when given.
+        if workers is None:
+            from .stats import worker_count
+            workers = worker_count(config, default=4, maximum=4,
+                                   items=len(to_decode))
+        workers = max(1, min(int(workers), len(to_decode)))
         with ThreadPoolExecutor(max_workers=workers) as ex:
             for (p, _), actual in zip(to_decode, ex.map(lambda pc: _audio_crc32(ffmpeg_exe, pc[0]), to_decode)):
                 actuals[p] = actual

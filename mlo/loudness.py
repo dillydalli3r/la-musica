@@ -34,7 +34,7 @@ from .config import should_write_audio_tag
 from .paths import AUDIO_EXTS, app_data_dir
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _walk_files,
-    _collect_targets, _find_albums, is_audio_file, worker_count,
+    _collect_targets, _find_albums, is_audio_file, worker_count, tool_threads,
 )
 from .subproc import run_tool
 from .tools import detect_all_tools
@@ -64,8 +64,14 @@ def _album_dirs(config):
 # ----------------------------------------------------------------------
 # ReplayGain via rsgain
 # ----------------------------------------------------------------------
-def _run_rsgain(rsgain_exe, path, skip_existing):
+def _run_rsgain(rsgain_exe, path, skip_existing, threads=0):
     """Run rsgain easy on an album folder (or the library root).
+
+    *threads* is this call's share of the run's thread budget
+    (mlo.stats.tool_threads): rsgain's ``-m MAX`` means "every core this
+    machine has", which is how a 2-worker run still pegged a 16-thread host —
+    and, in a container with a CPU quota, the throttling that follows is what
+    makes the pass slower than a bounded one.
 
     THIS IS THE ONE WRITE IN THE ENGINE THAT CANNOT BE MADE ATOMIC, and it is
     named here rather than glossed over: rsgain (TagLib) opens each track and
@@ -86,7 +92,8 @@ def _run_rsgain(rsgain_exe, path, skip_existing):
     which would then have to be renamed over every original — the same number
     of writes as the conversion pass, and a silent second copy of the library.
     """
-    cmd = [rsgain_exe, "easy", "-m", "MAX", "-q"]
+    mflag = str(int(threads)) if int(threads or 0) > 0 else "MAX"
+    cmd = [rsgain_exe, "easy", "-m", mflag, "-q"]
     if skip_existing:
         cmd.append("-S")
     cmd.append(path)
@@ -281,6 +288,19 @@ def run_calc_dr_replaygain(config):
     if rsgain:
         log(f"replaygain: rsgain v{rsgain['version']} · skip-existing="
             f"{'on' if skip_existing else 'off'}")
+    elif config.get("write_replaygain_tags", True):
+        # ReplayGain is rsgain's to write — nothing else in the app produces
+        # those four tags. Without it the pass still measures DR and reports
+        # "modified" albums, which reads as a complete run over a library
+        # that never got one REPLAYGAIN_* tag. Named here, exactly like the
+        # dynamic-range prerequisite below. The switch above is how a user
+        # says "I only want DR": with it off this says nothing.
+        why = "rsgain is not installed"
+        log(c(f"ERROR: ReplayGain unavailable: {why} — install it from "
+              f"Dependencies (dynamic range is measured either way).",
+              Color.RED))
+        stats["error_count"] += 1
+        stats["errors"].append(("replaygain", why))
 
     # Dynamic range is measured here, in this process, from ffmpeg's decode —
     # so the only two things it can be missing are ffmpeg and the numpy the
@@ -326,7 +346,8 @@ def run_calc_dr_replaygain(config):
     # rsgain once per album.
     if rsgain and config.get("targets") is None and os.path.isdir(folder):
         log("running rsgain over the whole library…")
-        ok, err = _run_rsgain(rsgain["rsgain_exe"], folder, skip_existing)
+        ok, err = _run_rsgain(rsgain["rsgain_exe"], folder, skip_existing,
+                              tool_threads(config, 1))
         if not ok:
             log(c(f"rsgain failed: {err}", Color.RED))
             stats["error_count"] += 1
@@ -351,13 +372,18 @@ def run_calc_dr_replaygain(config):
 
     # Respect worker_limit for the per-album DR/ReplayGain loop (CPU-heavy)
     workers = worker_count(config, default=4, maximum=8, items=len(albums))
+    # One lane's share of the thread budget: the pool runs *workers* albums at
+    # once and each one may start its own rsgain (and its own DR decode), so
+    # this is what keeps workers × cores from becoming the run's real cost.
+    per_lane = tool_threads(config, workers)
     # For a single album, avoid thread overhead
     if len(albums) == 1 or workers == 1:
         for album in sorted(albums):
             album_modified = 0
             album_failed = None
             if rsgain and config.get("targets") is not None:
-                ok, err = _run_rsgain(rsgain["rsgain_exe"], album, skip_existing)
+                ok, err = _run_rsgain(rsgain["rsgain_exe"], album, skip_existing,
+                                      per_lane)
                 if not ok:
                     album_failed = f"rsgain: {err}"
             if rsgain and album_failed is None:
@@ -410,7 +436,8 @@ def run_calc_dr_replaygain(config):
             afail = None
             failures = []
             if rsgain and config.get("targets") is not None:
-                ok, err = _run_rsgain(rsgain["rsgain_exe"], album_path, skip_existing)
+                ok, err = _run_rsgain(rsgain["rsgain_exe"], album_path,
+                                      skip_existing, per_lane)
                 if not ok:
                     afail = f"rsgain: {err}"
             if rsgain and afail is None:

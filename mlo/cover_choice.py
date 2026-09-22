@@ -20,9 +20,9 @@ was MEASURED from rather than what its name suggests:
     bytes           how many bytes that probe returned (0 = an empty answer)
     front           whether the provider labels it the front cover
     kind            the provider's own type: "front" / "back" / "other" / ""
-    release_cover   True for the release's OWN front cover, False for a
-                    release-group stand-in (the Cover Art Archive asked about
-                    the group answers with some release's image), None unknown
+    release_cover   False for the release-GROUP's image (the album's own art —
+                    the reference, ranked first), True for one release's own
+                    front cover, None unknown
     rank            the provider's own order for it (0 = its first answer)
     title / artist  the SOURCE's own statement about which release the image
                     belongs to (COV's `releaseInfo`, Deezer's and iTunes' own
@@ -37,8 +37,13 @@ The rules, in the order they decide. Each is a tier weighted so heavily that
 no lower tier can ever outvote a higher one, which is why the score IS the
 order (the same positional encoding `mlo.release_choice` uses, base 9):
 
-1. release   the RELEASE's own front cover beats a release-group stand-in.
-             Unknown (a name-searched row that states neither) sits between.
+1. release   the release GROUP's front cover beats one release's own. The group
+             image is the album's own art — it is the reference the finder shows
+             beside the candidates (`CoverSearchModal`'s `caaRef`) and what the
+             automatic search is compared against — while a `/release/<id>/front`
+             is a single edition's cover (a reissue, a promo sleeve) and ranks
+             below even a name-searched row. Unknown (a name-searched row that
+             states neither) sits between.
 2. identity  the row's own release must BE this album. The artist and the
              title it states are compared with the album's own — a row that
              contradicts them (a karaoke or tribute album carrying the same
@@ -131,7 +136,7 @@ _TIER_NAMES = ("release", "identity", "kind", "size", "source", "format",
                "square", "quality", "rank")
 # What a tie-break sentence calls each tier.
 _TIER_LABELS = {
-    "release": "the release's own cover",
+    "release": "the album's own cover (the release group's art)",
     "identity": "the album-identity check",
     "kind": "the front-vs-other type",
     "size": "the image size",
@@ -172,7 +177,8 @@ _UPSCALE_TOLERANCE = 0.02
 _SHIPPED_TARGET = 1200
 
 _RULES = (
-    "the release's own front cover beats a release-group stand-in",
+    "the release group's front cover — the album's own art — beats one "
+    "release's own cover",
     "a candidate has to BE this album: a row whose own release names another "
     "artist or another album is rejected, a row whose tracklist disagrees "
     "ranks below one that matches, and a row that states nothing about its "
@@ -526,13 +532,25 @@ def _rejection(row, url, side, ctx, identity="same", identity_why=""):
 
 
 def _release_level(row):
-    """(level, reason) for rule 1 — the release's own cover over a stand-in."""
+    """(level, reason) for rule 1 — the album's own art over one edition's.
+
+    The REFERENCE is the release-group's image: that is the cover the finder
+    shows the candidates beside (`CoverSearchModal`'s `caaRef`), the one the
+    automatic search is judged against, and the album's art rather than one
+    pressing's. A `/release/<id>/front` URL is that single release's own cover
+    — a different edition's art, a promo sleeve, a reissue — so it ranks below
+    a name-searched row, which at least does not claim to be this album's
+    specific edition either. (This used to be inverted, which is how an
+    automatic search could pick an image that was NOT the reference the user
+    was comparing it with.)
+    """
     got = row.get("release_cover")
-    if got is True:
-        return 1.0, "the release's own front cover"
     if got is False:
-        return 0.2, ("a release-group stand-in (the Cover Art Archive answered "
-                     "about the group, not this release)")
+        return 1.0, ("the release group's front cover — this album's own art, "
+                     "the image the candidates are compared against")
+    if got is True:
+        return 0.2, ("one release's own front cover — that edition's art, not "
+                     "necessarily this album's")
     return 0.6, "a name-searched cover — the source does not say whose release it is"
 
 

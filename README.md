@@ -1,6 +1,6 @@
 # la musica
 
-**v3.10.0** — a self-hosted app that *manages, optimizes, audits, grades and
+**v3.10.1** — a self-hosted app that *manages, optimizes, audits, grades and
 plays* your music library, from the browser, a desktop window or a phone.
 
 **la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a
@@ -12,7 +12,7 @@ client whose auto-importer verifies what it downloaded. All app state — config
 playlists, favourites, the beets library, the Soulseek config, measured loudness,
 caches — lives in one hidden `.mlo` folder inside your music directory.
 
-Release notes for this version are in `local/release-notes-3.10.0.md` (older ones
+Release notes for this version are in `local/release-notes-3.10.1.md` (older ones
 follow `local/release-notes-<version>.md`); the grading and optimization contract
 is in [`docs/OPTIMIZATION-GRADING-SPEC.md`](docs/OPTIMIZATION-GRADING-SPEC.md).
 
@@ -181,7 +181,11 @@ candidate with the album's OWN identity — a karaoke/tribute row, another artis
 release or a different album can no longer win, an image whose size was never
 measured cannot beat the `cover_target_size` floor, and the autonomous Covers
 step refuses to store a below-target cover (`cover_review` off = take the best
-automatically). **Recommended (Local)** and
+automatically). The album's reference cover is the **release group's**
+(`coverartarchive.org/release-group/<rg>/front-500`) — the image the finder shows
+beside the candidates, the wizard's preview, and what a candidate is preferred
+against; one release's own sleeve is a single edition's art, not the album's.
+**Recommended (Local)** and
 **Home** are computed locally from the library's own tags (genre and family,
 mood, energy, era, artist) — no provider, no model, no network.
 
@@ -390,7 +394,7 @@ overwrite* menu.
 | 6 | Audit library | AudioAuditor detectors + CD `.log` CRC verification → `AUDIT` |
 | 7 | DR & ReplayGain | in-process loudness-war DR tags + rsgain ReplayGain (album gain, FLAC and MP4 alike) |
 | 8 | Auto tagging | `ITUNESADVISORY`, `INSTRUMENTAL`, `MOOD`, `ENERGY`, `GENRE` |
-| 9 | AccurateRip | CUETools `.accurip` generation and verification |
+| 9 | AccurateRip | CUETools `.accurip` generation and verification; an existing file is regenerated only when a track's audio changed (tag writes do not count) |
 | 10 | Format all | Final canonical pass: `.accurip`/`.cue`/`.lrc`/tag trim + the embedded-cover policy |
 | 11 | Remux videos (MKV) | Any video container → MKV, video copied bit-exact when possible, audio to FLAC, chapters kept |
 | 12 | Key & BPM | librosa-backed `INITIALKEY` + `BPM` |

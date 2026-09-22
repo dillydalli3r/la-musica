@@ -24,6 +24,7 @@ from .paths import (
 from .stats import (
     new_stats, _make_pbar, _pbar_skip, _pbar_update, _diff_bytes,
     _existing_size, _safe_remove, _walk_files, _collect_targets, worker_count,
+    tool_threads,
 )
 from .tools import detect_all_tools, _version_is_older
 from .ui import log, fmt_size, print_header, c, Color
@@ -2452,7 +2453,12 @@ def run_process_images(config):
 
     cpu_count = os.cpu_count() or 1
     est_workers = worker_count(config, default=cpu_count, items=len(files))
-    threads_per_file = max(1, cpu_count // max(1, est_workers))
+    # Each cjxl lane's own thread count. The pool above runs *est_workers*
+    # files at once, so this must be the worker budget divided among them —
+    # NOT cpu_count, which made the pass occupy every core however low the
+    # Worker threads setting was (where 0 = derive it from the CPU, the two
+    # are the same number and nothing changes).
+    threads_per_file = tool_threads(config, est_workers)
 
     # With rename_to_cover, at most ONE image per folder may take the cover
     # name; every other image keeps its own basename. Otherwise front/back/

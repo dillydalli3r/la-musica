@@ -30,6 +30,7 @@ Files are named per the disc-pattern (default CD-{n}.accurip) so they
 participate in the same deterministic rename as .log/.cue.
 """
 
+import json
 import os
 import re
 import shutil
@@ -39,12 +40,94 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .audio import AudioFile
 from .discs import album_discs, _disc_pattern_for, _disc_expected_name, CUE_FILE_RE
-from .paths import AUDIO_EXTS, fsync_dir
+from .paths import AUDIO_EXTS, app_data_dir, fsync_dir
 from .stats import (is_audio_file, _collect_targets, new_stats,
                     _make_pbar, _pbar_skip, _pbar_update, worker_count)
 from .subproc import run_tool
 from .tagtext import canonical_text
 from .ui import log, c, Color, print_header
+
+# ----------------------------------------------------------------------
+# Freshness: what a .accurip was generated FROM
+# ----------------------------------------------------------------------
+# The verdicts in a .accurip are CRCs of the disc's AUDIO, so the staleness
+# test has to be about the audio. It used to be "is any track newer than the
+# .accurip", which is wrong in the expensive direction: every tag write bumps
+# a track's mtime, scripts 10 and 21 write tags AFTER 9 in the run order, so
+# on the next run the whole disc looked re-ripped — re-decoded to WAV and
+# re-verified through CUETools, every run, for ever. FLAC stores the MD5 of
+# its own audio stream (STREAMINFO), which a tag rewrite does not change and a
+# re-rip or re-encode does: that is the identity. The map below is what each
+# .accurip was built from, kept in the app's data folder (this library's, like
+# the audit evidence); a track whose identity cannot be read falls back to the
+# mtime rule, so nothing is ever assumed fresh on a weaker test than before.
+_IDENTITY_NAME = "accurip_evidence.json"
+# {normcase(abspath(.accurip)): {track_path: "flac:<md5>"}}
+_IDENTITIES: dict = {}
+
+
+def _audio_identity(path):
+    """*path*'s audio identity — "" when this container cannot answer."""
+    try:
+        af = AudioFile(path)
+        sig = getattr(getattr(af, "audio", None), "info", None)
+        sig = getattr(sig, "md5_signature", 0)
+        if sig:
+            return f"flac:{sig}"
+    except Exception:
+        pass
+    return ""
+
+
+def _identity_path(config):
+    try:
+        return os.path.join(app_data_dir(config.get("music_folder")),
+                            _IDENTITY_NAME)
+    except Exception:
+        return ""
+
+
+def _load_identities(config):
+    """The stored map; entries whose .accurip is gone are dropped."""
+    path = _identity_path(config)
+    if not path:
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items()
+            if isinstance(v, dict) and os.path.exists(k)}
+
+
+def _save_identities(config, evidence):
+    """Atomic write of the map; never raises (it is only a shortcut)."""
+    path = _identity_path(config)
+    if not path:
+        return
+    tmp = None
+    try:
+        d = os.path.dirname(path)
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".accurip_evidence_", suffix=".json",
+                                   dir=d)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(evidence, f)
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        os.replace(tmp, path)
+    except OSError:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
 
 # ----------------------------------------------------------------------
@@ -683,6 +766,9 @@ def run_generate_accurip(config):
     print_header("AccurateRip (.accurip) Generator — CUETools")
     log(f"music folder: {folder} · write .accurip files: {write_files} · force: {force}")
 
+    _IDENTITIES.clear()
+    _IDENTITIES.update(_load_identities(config))
+
     if not os.path.isdir(folder):
         log(c(f"ERROR: folder does not exist: {folder}", Color.RED))
         return stats
@@ -798,6 +884,12 @@ def run_generate_accurip(config):
 
         for disc_num, track_paths in sorted(discs.items()):
             accurip_path = os.path.join(album_dir, _disc_expected_name(pattern, disc_num, ".accurip"))
+            # What this disc's audio IS right now: the identity a generated
+            # .accurip is recorded against, and what the freshness test below
+            # compares. "" for any track means the disc cannot be answered for
+            # this way (see the fallback in the test).
+            disc_key = os.path.normcase(os.path.abspath(accurip_path))
+            disc_ids = {tp: _audio_identity(tp) for tp in track_paths}
             # Skip if exists and not forced and already a correctly formatted CUETools log
             if os.path.exists(accurip_path) and not force:
                 try:
@@ -822,22 +914,31 @@ def run_generate_accurip(config):
                             needs_regen = True
                         elif is_old_version:
                             needs_regen = True
-                        # The .accurip describes the bytes it was generated
+                        # The .accurip describes the AUDIO it was generated
                         # from: a re-rip (or a re-encode) of any track makes
                         # the stored verdict stale, and its text markers still
-                        # look perfectly current. Newer track file than the
-                        # .accurip therefore means regenerate.
-                        newest_track = 0.0
-                        for tp in track_paths:
+                        # look perfectly current. That is checked against each
+                        # track's own audio identity, NOT its mtime — a tag
+                        # write moves the mtime without touching the audio,
+                        # and the scripts after this one in a run write tags,
+                        # so the mtime rule re-decoded and re-verified every
+                        # disc on every run. A track whose identity cannot be
+                        # read (a container without one) keeps the mtime rule.
+                        if disc_ids and all(disc_ids.values()):
+                            if _IDENTITIES.get(disc_key) != disc_ids:
+                                needs_regen = True
+                        else:
+                            newest_track = 0.0
+                            for tp in track_paths:
+                                try:
+                                    newest_track = max(newest_track, os.path.getmtime(tp))
+                                except OSError:
+                                    pass
                             try:
-                                newest_track = max(newest_track, os.path.getmtime(tp))
+                                if newest_track > os.path.getmtime(accurip_path) + 1.0:
+                                    needs_regen = True
                             except OSError:
                                 pass
-                        try:
-                            if newest_track > os.path.getmtime(accurip_path) + 1.0:
-                                needs_regen = True
-                        except OSError:
-                            pass
                         if not needs_regen:
                             stats["skipped_count"] += 1
                             continue
@@ -890,6 +991,10 @@ def run_generate_accurip(config):
                         pass
                 os.replace(tmp, accurip_path)
                 fsync_dir(album_dir)
+                if disc_ids and all(disc_ids.values()):
+                    # What this file was verified against, for the next run's
+                    # freshness test — the audio, not the container's mtime.
+                    _IDENTITIES[disc_key] = dict(disc_ids)
                 stats["modified_count"] += 1
                 stats["total_scanned"] += 1
                 # Log short summary – parse status for nice output
@@ -911,4 +1016,5 @@ def run_generate_accurip(config):
         pbar.close()
     except Exception:
         pass
+    _save_identities(config, _IDENTITIES)
     return stats

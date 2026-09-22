@@ -102,7 +102,8 @@ def _load_signal(path, sr, max_seconds=None):
     fd, tmp = tempfile.mkstemp(suffix=".wav", prefix=".decode_")
     os.close(fd)
     try:
-        cmd = [ffmpeg, "-y", "-v", "error", "-nostdin", "-i", path, "-vn"]
+        cmd = [ffmpeg, "-y", "-v", "error", "-nostdin", "-threads", "1",
+               "-i", path, "-vn"]
         if max_seconds:
             cmd += ["-t", str(max_seconds)]
         cmd += ["-ac", "1", "-ar", str(sr), "-f", "wav", tmp]
@@ -383,8 +384,14 @@ def run_analyze_audiometa(config):
         return path, bpm, key, None
 
     def _finish(path, bpm, key, err):
+        # Every file this pass looked at is SCANNED, whatever came of it —
+        # the run's numbers have to add up (scanned == modified + skipped +
+        # errors, README's R10a), and a file that was analysed and needed no
+        # tag change was reported as skipped while the scanned counter stayed
+        # at zero: a whole 31-track pass read "0 scanned · 0 modified · 31
+        # skipped".
+        stats["total_scanned"] += 1
         if err is not None:
-            stats["total_scanned"] += 1
             stats["error_count"] += 1
             stats["errors"].append((os.path.basename(path), err))
             _pbar_update(pbar, counts, kind="fail")
@@ -398,7 +405,6 @@ def run_analyze_audiometa(config):
             tonic, minor = key
             key_str = _key_notation(tonic, minor, notation)
         if _write_tags(path, bpm, key_str, config, af=pending.get(path)):
-            stats["total_scanned"] += 1
             stats["modified_count"] += 1
             _pbar_update(pbar, counts, kind="ok")
         else:

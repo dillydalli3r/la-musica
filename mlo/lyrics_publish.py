@@ -163,12 +163,16 @@ def run_publish_lyrics(config):
         """Book one track's result on the runner thread (workers share no
         state but the throttle inside the provider layer)."""
         status = got["status"]
+        # Every examined track lands in scanned, published included: the ok
+        # branch returned before this line, so a run that published 5 of 31
+        # reported 26 scanned beside its "published 5" — numbers on one report
+        # that could not both be about the same 31 tracks (README R10a).
+        stats["total_scanned"] += 1
         if status == "ok":
             stats["published"] += 1
             stats["modified_count"] += 1
             _pbar_update(pbar, counts, "ok")
             return
-        stats["total_scanned"] += 1
         stats["unchanged_count"] += 1
         if status == "failed":
             stats["rejected"] += 1

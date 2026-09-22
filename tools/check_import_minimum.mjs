@@ -151,7 +151,7 @@ const covers = await render(link("Covers", "cover,advisory"));
 
 // The cover controls ARE the visible step: what the user was sent here to
 // decide, and the button that finishes the step with it.
-has(covers.open, ["Current album cover", "MusicBrainz release cover",
+has(covers.open, ["Current album cover", "MusicBrainz release-group cover",
                   "Album cover from URL", "Per-track covers",
                   "Daftendirekt", "WDPK 83.7 FM", "Continue to genres"],
     "minimum covers step shows the cover controls");

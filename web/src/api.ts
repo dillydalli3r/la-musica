@@ -1266,7 +1266,10 @@ export interface ImportRunStatus {
 /** One in-flight job in the library lock registry (server/job_locks): the work
  *  running now and the paths it holds, so nothing else deletes, moves or
  *  retags them. `progress` is null for a job that has not reported any (a tag
- *  write, an organize); `elapsed` is measured on the server in seconds. */
+ *  write, an organize); `elapsed` is measured on the server in seconds.
+ *  `steps` is the `<at>/<of>` pair of a multi-step run (a script chain), the
+ *  same pair the header bar prints; both surfaces are written from one frame
+ *  (server/job_locks.publish), so they cannot show different steps. */
 export interface JobLock {
   job: string;
   kind: string;
@@ -1274,7 +1277,7 @@ export interface JobLock {
   started_at: number;
   elapsed: number;
   paths: string[];
-  progress: { done: number; total: number | null; text: string } | null;
+  progress: { done: number; total: number | null; text: string; steps?: number[] | null } | null;
 }
 
 /** GET /api/jobs/locks — everything holding library paths right now. */

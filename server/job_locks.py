@@ -45,6 +45,8 @@ import os
 import threading
 import time
 
+from mlo import stats as mlo_stats
+
 # One lock for the registry and the condition that waits on it; every public
 # entry point takes it, so a reader never sees half a job's claims.
 _lock = threading.RLock()
@@ -455,8 +457,13 @@ def holder(path, asker=None):
         return dict(rec) if rec else dict(hit[1])
 
 
-def set_progress(job, done=None, total=None, text=""):
+def set_progress(job, done=None, total=None, text="", steps=None):
     """How far *job* has got, for the in-progress list. "" total = unknown.
+
+    *steps* is the ``(at, of)`` pair of a multi-step run — the same pair the
+    header bar prints beside its fraction — so a row and the bar can only ever
+    show the same step of the same run. Prefer :func:`publish`, which writes
+    the row and the bar together.
 
     Runners call this as they work (a script per chain step, an album per
     import); a job that never does is still listed, with no bar.
@@ -465,7 +472,52 @@ def set_progress(job, done=None, total=None, text=""):
         rec = _jobs.get(job)
         if rec is None:
             return
-        rec["progress"] = {"done": done, "total": total, "text": str(text or "")}
+        pair = [int(steps[0]), int(steps[1])] if steps else None
+        rec["progress"] = {"done": done, "total": total,
+                           "text": str(text or ""), "steps": pair}
+
+
+def publish(done=None, total=None, text="", steps=None, job=None, hook=None):
+    """One progress frame, to BOTH surfaces that show it.
+
+    The header bar (`mlo.stats.progress_hook` → the server's WebSocket relay)
+    and the in-progress row (this registry, polled every 2 s) are two
+    transports for one fact, and they used to be written by different code at
+    different moments: the bar followed the runner's own ticks with the
+    fractional position of the CURRENT script, while the row was written once
+    per FINISHED script with that script's name. The same run then read as two
+    different steps — "#10/21 · Key & BPM" in the bar against "Lyrics
+    transliterate (AI) 9/21" on the row — and a single-script run showed a
+    live bar over a row that said only "working" until it was over.
+
+    Everything that reports progress goes through here instead, so whatever
+    one surface shows, the other shows.
+
+    *hook* is who to push the bar frame to; it defaults to whatever is
+    installed now. A script's own run passes the relay it captured
+    (`_run_with_progress`'s ``prior``): while that script runs, the INSTALLED
+    hook is the chain wrapper that called this very function, and handing the
+    frame back to it fed the wrapper its own output — each round re-prefixed
+    the text ("#1/2 · #1/2 · …"), the row grew a step per file, and the
+    recursion only stopped when it hit Python's limit and the relay never saw
+    a frame at all.
+    """
+    if job is not None:
+        set_progress(job, done, total, text, steps)
+    if hook is None:
+        hook = getattr(mlo_stats, "progress_hook", None)
+    if not callable(hook):
+        return
+    frames = [(done, total, text)] if steps is None else [
+        (done, total, text, steps), (done, total, text)]
+    for frame in frames:
+        try:
+            hook(*frame)
+            return
+        except TypeError:
+            continue          # a hook that takes only the 3-argument frame
+        except Exception:
+            return
 
 
 def jobs():

@@ -143,7 +143,13 @@ so `scanned == modified + skipped + errors` holds for the run and a file can
 never be reported as both written and skipped. Script 10 counted a file it had
 just formatted as *skipped* as well, which made a pass that changed nothing look
 like a pass that did something; a tag write that fails is now reported with its
-file (`stats["errors"]`) instead of only bumping a counter.
+file (`stats["errors"]`) instead of only bumping a counter. Script 12 (every
+analysed file is scanned, whether or not the write changed anything) and script
+18 (a published track is scanned) follow the same rule, and **a missing tool is
+said out loud**: script 7 with `write_replaygain_tags` on and no `rsgain` reports
+the missing tool as an error instead of passing a DR-only run that wrote no
+`REPLAYGAIN_*` tag at all. The rule covers the same three-way split every runner
+publishes, including the ones that write nothing until they do.
 
 | # | Title | What it does | Changes | Destructive | Network |
 | --- | --- | --- | --- | --- | --- |
@@ -155,16 +161,16 @@ file (`stats["errors"]`) instead of only bumping a counter.
 | 6 | Audit library | AudioAuditor detectors (spectral/DSP) + CD `.log` CRC verification, log scoring | `AUDIT`, `LOG_GRADE`, `LOG_CRC`, `INTEGRITY` | no | no |
 | 7 | DR & ReplayGain | in-process loudness-war DR (`mlo/dr.py`) + `rsgain` ReplayGain 2.0 | `DYNAMIC RANGE`, `ALBUM DYNAMIC RANGE`, the four `REPLAYGAIN_*` | no | no |
 | 8 | Auto tagging | `ITUNESADVISORY`, `ALBUMITUNESADVISORY`, `INSTRUMENTAL`, `MOOD`, `ENERGY`, `GENRE`, plus empty MusicBrainz identity/date completion | those tags | no | optional (advisory/genre providers) |
-| 9 | AccurateRip | CUETools `.accurip` generation and verification | writes `CD-N.accurip` | no | **yes** (AccurateRip DB) |
+| 9 | AccurateRip | CUETools `.accurip` generation and verification; an existing file is regenerated only when a track's **audio** changed (each track's FLAC audio-md5, recorded per `.accurip` — a tag write no longer looks like a re-rip) | writes `CD-N.accurip` | no | **yes** (AccurateRip DB) |
 | 10 | Format all | Final canonical pass: `.accurip`/`.cue`/`.lrc`/tag trim, the canonical tag-value spelling (`mlo/tagtext.py`) + embedded-cover policy | tags, sidecars, embedded art | **yes** (strips tags outside the allowlist) | no |
 | 11 | Remux videos (MKV) | Any video container → MKV, video copied bit-exact when possible, audio to FLAC, chapters kept | video files | **yes** when `video_remove_original` (ON) | no |
-| 12 | Key & BPM | librosa key/tempo analysis | `INITIALKEY`, `BPM` | no | no |
+| 12 | Key & BPM | librosa key/tempo analysis (every file it analyses is counted as scanned, changed or not) | `INITIALKEY`, `BPM` | no | no |
 | 13 | Fetch lyrics | The configured synced-lyrics chain into `lyrics_format` | `LYRICS`/`UNSYNCEDLYRICS`, `.lrc` | no | **yes** |
 | 14 | Beets tagging | Managed beets import with the naming script, work/movement tags | identity/release tags, file paths | **yes** (moves/renames, overwrites identity tags) | **yes** (MusicBrainz) |
 | 15 | Release tracklist | Writes `.mlo_expected.json` from the release's own tracklist | adds a manifest file | no | **yes** (MusicBrainz) |
 | 16 | Mood & Energy | The mood classifier alone | `MOOD`, `ENERGY` | no | no |
-| 17 | Lyrics transliterate (AI) | Romanization/translation tags and sidecars, re-synced at `lrc_sync_level` | `TRANSLITERATION-*`, `TRANSLATION-*`, sidecars | no | **yes** (configured AI endpoint) |
-| 18 | Publish lyrics (LRCLIB) | Submits missing lyrics to the community database | nothing locally | no (external side effect) | **yes** (LRCLIB) |
+| 17 | Lyrics transliterate (AI) | Romanization/translation tags and sidecars, re-synced at `lrc_sync_level`; the per-track work runs through the worker pool (one track's chunk requests used to be paid one after another) | `TRANSLITERATION-*`, `TRANSLATION-*`, sidecars | no | **yes** (configured AI endpoint) |
+| 18 | Publish lyrics (LRCLIB) | Submits missing lyrics to the community database (every examined track counts as scanned, published included) | nothing locally | no (external side effect) | **yes** (LRCLIB) |
 | 19 | Optimize artist images | Re-fits `Artists/<Artist>/artist.*` to `artist_image_aspect` / `artist_image_target_size`, re-encodes as `artist.jpg`/`artist.png` | the artist image in place (only when it has to move) | re-encodes in place; never deletes | no |
 | 20 | Scan library layout | The music folder's shape against `<music>/Artists/<Artist>/<Album>/…`: audio at the root or in an artist folder, stray files, unexpected folders, empty albums, `wrong_case` rows. FIXES the unambiguous three when `layout_apply` (ON) is set — a wrong-case name is renamed, audio outside an album folder is moved into the one its tags name, an album-less artist folder goes to the Trash — and reports the rest as left alone, with the reason. Writes ONE report describing the whole library (plus a `fixes` list) to `<music>/.mlo/data/`, which the Library page warns from; scoped to `targets` when a run names them, and library-wide when it does not (R9) | one report file + the renamed/moved paths | `layout_apply` | no |
 | 21 | Fix AcoustID pairs | Completes an INCOMPLETE `ACOUSTID_ID`/`ACOUSTID_FINGERPRINT` pair — the failure `Missing ACOUSTID_FINGERPRINT (incomplete AcoustID pair)`, which had no fixer before. An id already on the file has its fingerprint recomputed locally; the reverse half needs a lookup and is counted, never invented | `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | no | only when the id half must be looked up |
@@ -194,6 +200,28 @@ unavailable rather than silently passing.
 **R13 — scripts clean up after themselves**: folders a run emptied are pruned
 bottom-up (never a folder that holds anything, never the music root), and the run
 reports how many were removed.
+**R14 — a run's progress is written ONCE, to both surfaces that show it.** The
+header bar (a WebSocket push from `mlo.stats.progress_hook`) and MAINTAIN → In
+progress (a 2 s poll of `server.job_locks`) are two transports for one fact, so
+every frame goes through `job_locks.publish`: the row shows the same step text
+("#10/21 · Key & BPM"), the same fractional position and the same `<at>/<of>`
+pair the bar draws. They used to be written by different code at different
+moments — the bar from the runner's own ticks for the CURRENT script, the row
+once per FINISHED script — so the same run read as two different steps, and a
+single-script run showed a live bar over a row that said only "working" until it
+was over. A step is announced for every script the chain reaches, including one
+that was skipped or unavailable.
+**R15 — the worker budget is what the WHOLE run costs.** `worker_limit`
+(Settings → Performance → "Worker threads", 0 = count them from the CPU) bounds
+the worker pools (`mlo.stats.worker_count`) and, through
+`mlo.stats.tool_threads`, the thread count each worker's native tool is given:
+cjxl's `--num_threads`, rsgain's `-m`, the ffmpeg decode fallback's `-threads`.
+A pool of 2 encoders each claiming every core was still a 16-thread run — which
+a container turns into CPU throttling, i.e. a slower run, not a faster one.
+Nested pools DIVIDE the same budget instead of multiplying it: the CD checksum
+decoders take one album's share of the audit pool (`worker_limit=2` used to start
+eight of them, one constant 4 per album), and a copy of a chain's own parallelism
+is never added on top.
 
 ---
 
@@ -375,8 +403,16 @@ evidence matters.
   `<music>/.mlo/data/audit_evidence.json`, and a file whose stamp no longer
   matches is re-audited.
 - **R23 — `.accurip` files are per disc** (`CD-1.accurip`, `CD-2.accurip`) and
-  are regenerated when a track is newer than the log, so a re-ripped disc cannot
-  inherit its neighbour's verdict.
+  are regenerated when the disc's **audio** changed, so a re-ripped disc cannot
+  inherit its neighbour's verdict — and a tag write cannot make it look like a
+  re-rip. The identity is each track's own number: FLAC's STREAMINFO audio-md5
+  (`flac -t`'s own MD5), which a lossless re-encode keeps (the PCM is the same,
+  so the CRCs are too) and a re-rip, a trim or a level change does not. What each
+  `.accurip` was built from is kept in `<music>/.mlo/data/accurip_evidence.json`
+  (this library's, like R22's audit evidence); a track whose container has no
+  such md5 falls back to the older "any track newer than the `.accurip`" rule, so
+  nothing is ever judged current on a weaker test than before. The first run
+  after this check changes regenerates once, to record the identities.
 - **R24 — the AUDIT tag vocabulary is `REAL` / `FAKE`**; the album-level summary
   is `REAL`, `FAKE` or `Mix` (`summarize_audits`: FAKE wins, a uniform REAL
   passes through, anything else is Mix) and `None` when no track carries one.
@@ -634,7 +670,12 @@ Even a forced re-rate rewrites only with evidence: the invented
   while `cover_resize_enabled` puts `cover_target_size` in force — an image
   whose size was never measured cannot be picked and the autonomous step refuses
   to store a below-target cover. A manual apply stays warning-only: the user
-  picked that exact image.
+  picked that exact image. **The album's reference cover is the release GROUP's**
+  (`coverartarchive.org/release-group/<rg>/front-500`): it is the image the
+  finder shows beside the candidates, the wizard's Links/Covers preview, and what
+  the policy's first rule prefers — a `/release/<id>/front` is one edition's own
+  sleeve and ranks below even a name-searched row. Both are asked when both ids
+  are known, and the group's cover being absent falls back to the release's.
 
 ### 7.6 Tag value spelling and spacing
 

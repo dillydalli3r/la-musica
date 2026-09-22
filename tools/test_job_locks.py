@@ -101,7 +101,15 @@ with jl.holding([album], kind="test", label="Job A") as job_a:
           rows[0]["elapsed"] >= 0 and rows[0]["started_at"] > 0, str(rows[0]))
     jl.set_progress(job_a, 2, 5, "Grade")
     check("progress is reported for a job that has some",
-          jl.jobs()[0]["progress"] == {"done": 2, "total": 5, "text": "Grade"},
+          jl.jobs()[0]["progress"] == {"done": 2, "total": 5, "text": "Grade",
+                                       "steps": None},
+          str(jl.jobs()[0]["progress"]))
+    # A multi-step run publishes the step pair the header bar prints, so a row
+    # can never show a different step than the bar (server/job_locks.publish).
+    jl.set_progress(job_a, 2.4, 18, "#3/18 · Grade", (3, 18))
+    check("a step pair rides along for a chained run",
+          jl.jobs()[0]["progress"] == {"done": 2.4, "total": 18,
+                                       "text": "#3/18 · Grade", "steps": [3, 18]},
           str(jl.jobs()[0]["progress"]))
 
 check("the claim is gone when the block ends", other(album) is None)

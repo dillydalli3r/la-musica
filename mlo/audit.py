@@ -640,6 +640,11 @@ def run_audit_library(config):
                          if cd_album_map.get(a)}
             cw = worker_count(config, default=4, maximum=8,
                               items=len(cd_albums))
+            # One album's share of that budget: the pool below runs *cw*
+            # albums at once, and each of them may start this many decoders —
+            # so the run's total stays cw (2 with worker_limit=2), instead of
+            # cw × a constant 4.
+            per_album = max(1, cw // max(1, min(len(cd_albums), cw)))
             # A bar for the CRC pass: it decodes every track of every CD, and
             # without one the header sat frozen for the whole phase.
             crc_counts = {"ok": 0, "skip": 0, "fail": 0}
@@ -647,7 +652,7 @@ def run_audit_library(config):
             with ThreadPoolExecutor(max_workers=cw) as ex:
                 futures = {
                     ex.submit(verify_album_checksums, ffmpeg_exe_for_cd,
-                              album, paths, config): album
+                              album, paths, config, per_album): album
                     for album, paths in cd_albums.items()
                 }
                 for fut in as_completed(futures):

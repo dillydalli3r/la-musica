@@ -6146,9 +6146,9 @@ def _cover_row(source, small, big, title=None, artist=None, tracks=None,
     what that same probe found — the container the bytes really are and how
     many bytes the URL answered with (0 = an empty answer). `front`/`kind` are
     the provider's own labelling ("front" / "back" / "other"), and
-    `release_cover` says whether this is the RELEASE's own front cover (True),
-    a release-group stand-in (False: the Cover Art Archive asked about the
-    group answers with some release's image) or neither stated (``None``).
+    `release_cover` says whether this is the release GROUP's image (False —
+    the album's own art, which the policy prefers) or one RELEASE's own front
+    cover (True, an edition's art) or neither stated (``None``).
     `rank` is the provider's own order (0 = its first answer), which
     `mlo.cover_choice` reads as its last tiebreak."""
     return {"source": source, "small": small or None, "big": big or None,
@@ -6191,11 +6191,12 @@ def cover_url_labels(url):
 
     Only the Cover Art Archive's URLs say this much for free, and they are the
     only ones the app can read without the provider's own metadata:
-    `/release-group/<rg>/…` is a STAND-IN for the group (some release's image —
-    whichever one CAA picked), `/release/<mbid>/front…` is that release's own
-    front cover, and a `/back` names the back. A store's CDN path states
-    nothing, which the cover policy treats as unknown rather than guessing
-    (`mlo.cover_choice`: a name-searched row sits between the two).
+    `/release-group/<rg>/…` is the GROUP's image — the album's own art, and the
+    reference the cover policy prefers, `/release/<mbid>/front…` is that one
+    release's own front cover (a specific edition's art, which the policy ranks
+    below a name-searched row), and a `/back` names the back. A store's CDN
+    path states nothing, which the cover policy treats as unknown rather than
+    guessing (`mlo.cover_choice`: a name-searched row sits between the two).
     """
     text = str(url or "")
     if "coverartarchive.org" not in text.lower():
@@ -6456,11 +6457,12 @@ def _attach_dimensions(rows, limit=COVER_PROBE_LIMIT, timeout=10.0):
 # --------------------------------------------------------------------------- #
 # The meta-search (COV) is a NAME search: it is fast, it carries the big store
 # artwork, and it can also answer with another artist's album. The Cover Art
-# Archive is an IDENTITY read: asked about the release the import stamped, it
-# answers with that release's OWN front cover, and asked about the release
-# GROUP it answers with a stand-in (some release's image, whichever CAA
-# picked). Both are asked when both are known, and `mlo.cover_choice` ranks
-# them — the release's own front cover first, the stand-in last.
+# Archive is an IDENTITY read: asked about the release GROUP it answers with
+# the album's own front cover — the reference `mlo.cover_choice` prefers and
+# the one the finder shows the candidates beside — and asked about a specific
+# release it answers with that edition's own front cover. Both are asked when
+# both are known, and the group's image is what wins: one pressing's sleeve is
+# not the album's art.
 #
 # The fallbacks below are reached only when neither has anything; each is a
 # single lookup, and each states in the search's `sources` report what it did.
@@ -6495,10 +6497,11 @@ def _caa_rows(mbid, scope, limit, artist, album, timeout, release_cover):
     """CAA images for one id, front cover first, labelled with what they are.
 
     `scope` is "release" or "release-group" — the endpoint, and therefore the
-    answer's meaning: a release's images are that release's own front/back/other
-    images (`release_cover` True), while a group's are a stand-in for the group
-    (`release_cover` False, which the cover policy ranks below the release's
-    own). CAA publishes no dimensions, which is exactly why the probe exists.
+    answer's meaning: a group's images are the album's own art
+    (`release_cover` False, the reference the policy prefers), while a
+    specific release's are that edition's own front/back/other images
+    (`release_cover` True). CAA publishes no dimensions, which is exactly why
+    the probe exists.
     """
     ident = str(mbid or "").strip()
     if not ident:
@@ -6673,11 +6676,12 @@ def cover_search(artist, album, limit=40, timeout=60.0, sources=None,
     ``sources``/``country`` override the SAVED defaults (`cover_sources`,
     `cover_country`) for this one search only — nothing here writes config.
     ``release_group_mbid``/``release_mbid``, when the caller has them, are the
-    identities the Cover Art Archive is asked about: the release's own front
-    cover is asked by the release id, its release group's stand-in by the group
-    id. The name-based fallbacks (Deezer, iTunes) run only when the meta-search
-    and the identity read both came back empty (or refused) — a dead
-    meta-search is a fallback case, not an error the user has to understand.
+    identities the Cover Art Archive is asked about: the album's own front
+    cover by the GROUP id (the reference the policy prefers) and one specific
+    release's own by the release id. The name-based fallbacks (Deezer, iTunes)
+    run only when the meta-search and the identity read both came back empty
+    (or refused) — a dead meta-search is a fallback case, not an error the user
+    has to understand.
     """
     if not artist and not album:
         raise ValueError("artist or album is required")
@@ -6712,6 +6716,31 @@ def cover_search(artist, album, limit=40, timeout=60.0, sources=None,
             detail=", ".join(f"{k} {v}" for k, v in sorted(counts.items()))))
     results.extend(cov)
     provider = "cov" if cov else None
+
+    # The album's own art first: the Cover Art Archive asked about the release
+    # GROUP. It is the reference the finder shows beside the candidates and the
+    # one the policy prefers, so it is asked whenever the caller knows the
+    # group id — leaving it to the fallback chain (its old place) meant a
+    # release with its own cover never produced the reference at all, and the
+    # pick could only ever be a single edition's sleeve.
+    if str(release_group_mbid or "").strip():
+        try:
+            ref = _caa_covers(release_group_mbid, limit, artist, album, timeout)
+        except Exception as e:
+            ref = []
+            report.append(_source_row("coverartarchive", "error",
+                                      detail=f"{type(e).__name__}: {e}"))
+        else:
+            report.append(_source_row(
+                "coverartarchive", "used" if ref else "empty", count=len(ref),
+                detail="the release group's own images, by release-group id"))
+        results.extend(ref)
+        if ref and not provider:
+            provider = "coverartarchive"
+    else:
+        report.append(_source_row(
+            "coverartarchive", "skipped",
+            detail="no release-group id to ask about — only the release"))
 
     if str(release_mbid or "").strip():
         try:

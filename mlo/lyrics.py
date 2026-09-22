@@ -853,11 +853,13 @@ def _normalize_media_source_library(config, stats):
     if not os.path.isdir(folder):
         return stats
 
-    albums = _find_albums(folder)
-
+    # Targets first: a scoped run (one album, an import) must not walk the
+    # whole library to throw the answer away.
     if config.get("targets") is not None:
         target_files = _collect_targets(config["targets"], AUDIO_EXTS)
         albums = sorted({os.path.dirname(f) for f in target_files})
+    else:
+        albums = _find_albums(folder)
 
     if not albums:
         return stats

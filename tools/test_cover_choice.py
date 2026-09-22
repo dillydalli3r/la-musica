@@ -13,8 +13,9 @@ What this pins, rule by rule:
     that stated an error, and one below the cover target (the minimum
     `server.main._cover_metrics` reports and the grader enforces), whose
     rejection names that floor;
-  * the release's own front cover beats a release-group stand-in, and a front
-    cover beats the back;
+  * the release GROUP's front cover (the album's own art, and the reference the
+    finder shows beside the candidates) beats one release's own cover, and a
+    front cover beats the back;
   * a file at the target size beats an oversized one (nothing is rewarded for
     being downscaled) and an upscaled thumbnail loses to a clean image;
   * the configured `cover_sources` order breaks a tie, and so do the format,
@@ -279,22 +280,26 @@ eq(cc.cover_payload([real], CFG)["identity"],
    "and says so plainly when nothing was verified")
 
 # --------------------------------------------------------------------------- #
-# 4. the release's own cover beats a release-group stand-in
+# 4. the release GROUP's cover — the album's own art, the reference the finder
+#    compares candidates against — beats one specific release's own cover
 # --------------------------------------------------------------------------- #
-print("\nrelease vs stand-in")
+print("\nrelease-group reference vs one release's own")
 own = cand("coverartarchive", 1200, big=CAA_RELEASE, front=True, kind="front",
            release_cover=True)
 stand_in = cand("coverartarchive", 1200, big=CAA_GROUP, front=True, kind="front",
                 release_cover=False)
-chosen, ranked, notes = cc.choose_covers([stand_in, own], CFG)
-eq(chosen.url, CAA_RELEASE, "the release's own front cover wins")
-has(chosen.reasons[-1], "release's own cover", "and the deciding sentence says so")
-has(" ".join(by_url(ranked, CAA_GROUP).reasons),
-    "release-group stand-in", "the stand-in states what it is")
+chosen, ranked, notes = cc.choose_covers([own, stand_in], CFG)
+eq(chosen.url, CAA_GROUP, "the release group's own cover wins (the reference)")
+has(chosen.reasons[0], "release group",
+    "and the winning rule names the release group's art")
+has(chosen.reasons[-1], "release group",
+    "and the deciding sentence says the tier it won on")
+has(" ".join(by_url(ranked, CAA_RELEASE).reasons),
+    "one release's own", "a single release's cover states what it is")
 eq(intg.cover_url_labels(CAA_GROUP), (None, False),
-   "a CAA release-group URL is read as a stand-in")
+   "a CAA release-group URL is read as the album's own art")
 eq(intg.cover_url_labels(CAA_RELEASE), ("front", True),
-   "a CAA release front URL is read as the release's own front cover")
+   "a CAA release front URL is read as that release's own front cover")
 eq(intg.cover_url_labels("https://cdn.test/x.jpg"), (None, None),
    "a store CDN URL states neither")
 

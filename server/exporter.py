@@ -65,8 +65,11 @@ Exports are idempotent: a destination that already is this source's export
 the audio (``apply``, an equalizer profile) stamps the file it wrote
 (``MLO_EXPORT_PROCESSING``) and compares that stamp on the next run, so
 changing the curve re-encodes rather than skipping the user's new setting.
-Progress is reported through the shared ``mlo.stats.progress_hook`` so the UI
-header bar works exactly like it does for library scripts.
+Progress is reported through ``server.job_locks.publish`` — one frame to the
+in-progress row AND the header bar — so an export reads exactly like a library
+script run on both surfaces. (It used to import ``mlo.stats.progress_hook`` by
+value, which the server replaces after this module is imported, so the bar
+stayed empty for a whole export.)
 """
 import hashlib
 import math
@@ -82,9 +85,10 @@ from mlo import eq as eq_mod
 from mlo.audio import AudioFile
 from mlo.naming import sanitize_path
 from mlo.paths import app_data_dir
-from mlo.stats import progress_hook, worker_count
+from mlo.stats import worker_count
 from mlo.subproc import tool_path
 from mlo.tools import detect_all_tools
+from server import job_locks
 
 # Audio file extensions the pruner considers "an exported track" (the audio
 # extensions the library itself knows, plus the containers this exporter can
@@ -856,7 +860,7 @@ def _measure_cmd(ffmpeg, path):
             "-map", "0:a:0", "-af", _RG_FILTER, "-f", "null", "-"]
 
 
-def _measure_sources(ffmpeg, paths, workers):
+def _measure_sources(ffmpeg, paths, workers, job=None):
     """EBU R128 measurement of every source, ahead of an ``apply`` run.
 
     The tags mode can measure inside the encode (the ebur128 filter is a
@@ -881,11 +885,7 @@ def _measure_sources(ffmpeg, paths, workers):
             measurement = None  # unreadable source: the encode will report it
         with lock:
             done["n"] += 1
-            if callable(progress_hook):
-                try:
-                    progress_hook(done["n"], len(paths), "Measuring loudness")
-                except Exception:
-                    pass
+            job_locks.publish(done["n"], len(paths), "Measuring loudness", job=job)
         return measurement
 
     if workers > 1:
@@ -1320,6 +1320,11 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
     destroy library data (it lies inside the music folder) — the caller
     turns that into a 4xx, and a run must never start."""
     opts = {k: v for k, v in opts.items() if v is not None}
+    # The job this export belongs to (the route holds one, kind="export"), read
+    # HERE: the ticks below come from pool threads, which are not inside it.
+    # job_locks.publish then writes the in-progress row and the header bar from
+    # the same frame.
+    job = job_locks.current()
     out = {"total": len(paths), "exported": 0, "skipped": 0, "failed": 0,
            "bytes": 0, "sidecars": 0, "playlists": 0, "verified": 0,
            "pruned": 0, "pruned_files": [], "warnings": [], "errors": [],
@@ -1430,7 +1435,8 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
 
     apply_gains, clipping = (None, 0)
     if rg_apply:
-        apply_gains, clipping = _apply_gains(paths, _measure_sources(ffmpeg, paths, workers))
+        apply_gains, clipping = _apply_gains(
+            paths, _measure_sources(ffmpeg, paths, workers, job))
         if clipping:
             out["warnings"].append(
                 "%d track(s) will clip after the applied ReplayGain gain — the "
@@ -1475,11 +1481,7 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
         with state["lock"]:
             state["progress"] += 1
             done = state["progress"]
-        if callable(progress_hook):
-            try:
-                progress_hook(done, out["total"], "Exporting tracks")
-            except Exception:
-                pass
+        job_locks.publish(done, out["total"], "Exporting tracks", job=job)
 
     def _fail(path, message):
         with state["lock"]:
@@ -1790,9 +1792,5 @@ def export_tracks(cfg, paths, dest, subfolder="Music", codec="copy",
                 "could not build the export archive — the export is staged in "
                 "the app's data folder")
 
-    if callable(progress_hook):
-        try:
-            progress_hook(out["total"], out["total"], "Export finished")
-        except Exception:
-            pass
+    job_locks.publish(out["total"], out["total"], "Export finished", job=job)
     return out

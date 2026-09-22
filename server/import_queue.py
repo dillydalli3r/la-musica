@@ -177,8 +177,8 @@ def _run(work, on_done=None):
                 _job["current"] = path
             try:
                 with job_locks.holding([path], job, wait=True):
-                    job_locks.set_progress(job, index - 1, len(work),
-                                           f"importing {name}")
+                    job_locks.publish(index - 1, len(work),
+                                      f"importing {name}", job=job)
                     res = _importer(path) or {}
                 chain = _chain_of(res)
                 ok = not res.get("errors")
@@ -193,7 +193,7 @@ def _run(work, on_done=None):
                     ok = False
                     error = ("imported, but the script chain did not run: "
                              + (imports.chain_summary(chain) or "no reason reported"))
-                job_locks.set_progress(job, index, len(work), name)
+                job_locks.publish(index, len(work), name, job=job)
             except Exception as e:
                 traceback.print_exc()
                 res = {"path": path, "errors": [str(e)]}

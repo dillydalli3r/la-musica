@@ -2,7 +2,7 @@ import { Activity, Lock } from "lucide-react";
 import type { JobLock } from "../api";
 import PageHeader from "../components/PageHeader";
 import { EmptyState, PageLoading } from "../components/Badges";
-import { fmtCounts } from "../lib/fmt";
+import { fmtCounts, fmtSteps } from "../lib/fmt";
 import { kindLabel, useJobLocks } from "../lib/locks";
 
 /** Elapsed seconds -> "42s" / "3m 07s" / "1h 12m". The server measures this,
@@ -18,6 +18,10 @@ function fmtElapsed(sec: number): string {
 /** One in-flight job: what it is, how far it has got, and the folders it holds. */
 function JobRow({ job }: { job: JobLock }) {
   const progress = job.progress;
+  // A chained run writes the step pair beside its fraction (the same frame the
+  // header bar gets), so the row reads "3/18" — scripts — exactly like the bar
+  // instead of printing the fractional position as a count.
+  const steps = fmtSteps(progress?.steps);
   const started = job.started_at ? new Date(job.started_at * 1000).toLocaleTimeString() : "";
   return (
     <li className="panel space-y-2">
@@ -36,7 +40,12 @@ function JobRow({ job }: { job: JobLock }) {
           <div className="flex items-center justify-between gap-3 text-[11px] text-zinc-500">
             <span className="truncate" title={progress.text}>{progress.text || "working"}</span>
             {!!progress.total && (
-              <span className="tabular-nums shrink-0">{fmtCounts(progress.done, progress.total)}</span>
+              <span
+                className="tabular-nums shrink-0"
+                title={steps ? "steps finished / steps in this run" : "files done / total"}
+              >
+                {steps ?? fmtCounts(progress.done, progress.total)}
+              </span>
             )}
           </div>
           <div className="h-1 rounded-sm bg-raise overflow-hidden">

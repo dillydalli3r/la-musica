@@ -429,14 +429,17 @@ CAA_IMAGE = "https://coverartarchive.org/release/abc/123.png"
 DEEZER_XL = "https://cdn-images.dzcdn.net/images/cover/ok/1000x1000-000000-80-0-0.jpg"
 ART100 = "https://is1-ssl.mzstatic.com/image/thumb/Music/abc/100x100bb.jpg"
 
-# (a) the primary answered → no fallback provider is even asked
+# (a) the primary answered → the album's own Cover Art Archive reference is
+# still read (that group image is what the candidates are compared against and
+# what the policy prefers), while no name-based fallback provider is asked.
 clear_caches()
 stub_cov(cover_lines(1))
-calls = stub_json({})
+calls = stub_json({"coverartarchive.org": {"images": []}})
 probes = stub_probe({IMG: png(1000, 1000)})
 out = intg.cover_search("Radiohead", "OK Computer", cfg=CFG,
                         release_group_mbid=CAA_RG)
-assert out["provider"] == "cov" and calls == [], (out, calls)
+assert out["provider"] == "cov", out
+assert [c[0] for c in calls] == [f"{intg.CAA_BASE}/release-group/{CAA_RG}"], calls
 assert probes == ["https://img.test/a0.jpg"], probes
 
 # (b) zero results, release-group MBID known → Cover Art Archive, front first
@@ -878,10 +881,11 @@ assert len(cov_calls) == 1 and cov_calls[0]["body"]["artist"] == "Radiohead", co
 assert [c[0] for c in jcalls] == [f"{intg.CAA_BASE}/release-group/{CAA_RG}"], jcalls
 entry = imp.staged_metadata(rg_album, REVIEW_ON)["covers"]
 assert entry["release_group"] == CAA_RG and len(entry["results"]) == 12, entry
-# the group's images are NOT the release's own cover, and the policy says so
+# the group's images ARE the album's own art — the reference the policy
+# prefers — and the policy says so in the row's own reasons
 assert entry["results"][0]["release_cover"] is False, entry["results"][0]
 assert entry["results"][0]["kind"] == "front", entry["results"][0]
-assert "release-group stand-in" in " ".join(entry["results"][0]["reasons"]), entry["results"][0]
+assert "release group's front cover" in " ".join(entry["results"][0]["reasons"]), entry["results"][0]
 
 # The metadata step may have staged this very album: its keys survive.
 imp.stage_metadata(staged_album, {"artist": "Radiohead",

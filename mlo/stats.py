@@ -372,3 +372,32 @@ def worker_count(config=None, default=None, maximum=None, items=None):
         count = min(count, max(1, int(items)))
     return max(1, count)
 
+
+def thread_budget(config=None):
+    """How many CPU threads a run may use in total.
+
+    ``worker_limit`` is the user's answer to "how much of this machine may the
+    scripts use", and it used to bound only the POOL sizes: each worker's
+    native tool (oxipng, cjxl, rsgain) and every in-process math library
+    (numpy/OpenBLAS through librosa) went on claiming every core, so a
+    2-worker run on a 16-thread host could still peg the CPU — the exact thing
+    the setting exists to prevent, and what a container's CPU quota turns into
+    throttling, i.e. a slower run. Anything spawning threads off a worker
+    derives its count from here. 0 (auto) reports the machine's cores.
+    """
+    config = config or {}
+    try:
+        requested = int(config.get("worker_limit", 0) or 0)
+    except (TypeError, ValueError):
+        requested = 0
+    return requested if requested > 0 else (os.cpu_count() or 1)
+
+
+def tool_threads(config=None, workers=1):
+    """The share of :func:`thread_budget` ONE worker's native tool may use.
+
+    A pool of *workers* tools each taking this many threads adds up to the
+    budget, instead of workers × cores.
+    """
+    return max(1, thread_budget(config) // max(1, int(workers or 1)))
+
