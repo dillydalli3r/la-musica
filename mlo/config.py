@@ -1147,6 +1147,12 @@ DEFAULT_CONFIG = {
     # library that cannot tolerate a wrong pressing chooses — the album then
     # waits with a "Needs you" row until someone decides.
     "cover_review": False,
+    # A disc's own streams beat a compressed derivative of them: when MusicBrainz
+    # offers both a remux/full-disc edition and a BDRip/DVDRip of the same
+    # group, the disc is taken (and a folder holding a disc structure plus a
+    # 700 MB re-encode keeps the disc's feature, not the re-encode). On by
+    # default — a re-encode cannot be undone — and off leaves the choice to
+    # the rest of the policy, exactly as before this rule existed.
     # Explicit shared folders (empty = the library folder <music>/Artists).
     "soulseek_share_dirs": [],
     # Extra share filters — substrings/paths slskd must NOT share.

@@ -69,6 +69,7 @@ const CFG_DEFAULTS: Record<string, unknown> = {
   auto_import_require_country: true,
   prefer_release_country: "",
   prefer_original_edition: true,
+  prefer_disc_streams: true,
   auto_import_medium_order: ["CD", "Vinyl", "Cassette", "Other", "Digital Media"],
   cover_auto_fetch: true,
   cover_review: false,
@@ -1152,6 +1153,10 @@ export default function SettingsPage() {
         {
           k: "prefer_original_edition", label: "Prefer the original (explicit) edition over a clean or edited one", type: "bool",
           help: "MusicBrainz states this in the release title or its disambiguation comment. Off, a clean edition is ranked on the other rules like any other — a clean edition may carry altered audio.",
+        },
+        {
+          k: "prefer_disc_streams", label: "Prefer a disc's own streams over a compressed re-encode", type: "bool",
+          help: "A BDRip/DVDRip/x264 release is a lossy derivative of the disc, and so is the 700 MB re-encode a rip sometimes ships beside its VIDEO_TS or BDMV folder. On (the default), an edition that names itself one ranks below the disc's own streams — a remux, a full disc — and a folder holding a disc structure beside a re-encode keeps the disc, never the derivative. Off, the other rules decide and the re-encode is treated like any other file.",
         },
         {
           k: "auto_import_medium_order", label: "Medium preference (comma-separated, best first)", type: "csv",

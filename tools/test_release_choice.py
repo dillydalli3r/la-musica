@@ -31,6 +31,7 @@ from server import pending_albums, wishes                # noqa: E402
 def cfg(**over):
     """A config with this policy's keys stated, so no case rides the real one."""
     c = {"auto_import_avoid_promo": True, "auto_import_require_country": True,
+         "prefer_disc_streams": True,
          "auto_import_medium_order": ["CD", "Vinyl", "Cassette", "Other", "Digital Media"],
          "prefer_release_country": "", "prefer_original_edition": True}
     c.update(over)
@@ -150,6 +151,30 @@ assert pick([over, plain], group(track_count=12)) == "plain", order([over, plain
 # with no stated count the fullest edition DEFINES the target, so it is not
 # penalised for being the fullest (the pre-existing rule, unchanged)
 assert pick([over, plain]) == "over", order([over, plain])
+
+# 1c. COMPRESSED derivatives: an edition that names itself a re-encode of a
+#     disc sorts below the disc's own streams — `prefer_disc_streams`, ON by
+#     default and the setting that turns it off.
+rip = rel("rip", title="Concert (BDRip 1080p x264)", fmt="Blu-ray")
+remux = rel("disc", title="Concert (BDRemux)", fmt="Blu-ray")
+plain_video = rel("plainvid", title="Concert", fmt="Blu-ray")
+assert pick([rip, remux]) == "disc", order([rip, remux])
+assert pick([rip, plain_video]) == "plainvid", order([rip, plain_video])
+# …and with the preference OFF the rule decides nothing: MusicBrainz's own
+# order keeps the pair, which is the behaviour every install had before it.
+assert pick([rip, remux], cfg=cfg(prefer_disc_streams=False)) == "rip", \
+    "with the preference off the disc-vs-re-encode rule decides nothing"
+# what the marker is, and what it deliberately is not
+assert rc.is_compressed_release({"title": "Concert (BDRip 1080p x264)"})
+assert rc.is_compressed_release({"title": "Concert", "disambiguation": "DVDRip"})
+assert rc.is_compressed_release({"title": "Concert (x265 10bit)"})
+assert not rc.is_compressed_release({"title": "Concert (BDRemux)"})
+assert not rc.is_compressed_release({"title": "Concert", "disambiguation": "Blu-ray"})
+assert not rc.is_compressed_release({"title": "Concert (remastered)"})
+# the reason says which rule decided
+ranked = rc.rank_releases(group(), [rip, remux])
+rip_row = [c for c in ranked if c.release_mbid == "rip"][0]
+assert any("compressed re-release" in r for r in rip_row.reasons), rip_row.reasons
 
 # 2. Status: official beats an unstated status, which beats a
 #    withdrawn/expired edition, which beats a promotion, which beats a bootleg.
@@ -361,8 +386,10 @@ assert body["policy"]["medium_order"] == cfg()["auto_import_medium_order"]
 assert body["policy"]["preferred_country"] == ""
 assert body["policy"]["prefer_original_edition"] is True
 assert body["policy"]["status_order"] == ["official", "promotion", "bootleg"]
-assert len(body["policy"]["rules"]) == 8, body["policy"]["rules"]
+assert len(body["policy"]["rules"]) == 9, body["policy"]["rules"]
 assert any("box set" in r for r in body["policy"]["rules"]), body["policy"]["rules"]
+assert any("COMPRESSED derivative" in r for r in body["policy"]["rules"]), \
+    body["policy"]["rules"]
 
 # `prefer` is the user's own edition: it is the pick, and its reasons say the
 # user asked for it; an id this group does not carry is reported as no pick.

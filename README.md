@@ -373,7 +373,14 @@ blamed on a firewall), a self-connect through the public address (refused ⇒
 "unknown", because a router without NAT hairpinning refuses it while the port may
 still be open) and slskd's own signed-in state. A definite answer about the
 internet needs a probe from outside this network, which the app does not ship —
-and the panel says so. Which EDITION is fetched is the release-choice policy's (`mlo/release_choice.py`), and it is the same policy the release-group page shows: official editions ahead of everything else, the configured medium order (CD, then the other physical media, digital last), the original ahead of a reissue — and a **box set below the album itself**, whether it is the DVD/Blu-ray bundle (media this library cannot use) or disc after disc of the same record, so a five-disc anniversary box no longer outranks the plain CD it contains. The **auto-importer** searches
+and the panel says so. Which EDITION is fetched is the release-choice policy's (`mlo/release_choice.py`), and it is the same policy the release-group page shows: official editions ahead of everything else, the configured medium order (CD, then the other physical media, digital last), the original ahead of a reissue — and a **box set below the album itself**, whether it is the DVD/Blu-ray bundle (media this library cannot use) or disc after disc of the same record, so a five-disc anniversary box no longer outranks the plain CD it contains. A
+COMPRESSED derivative of a disc sorts below the disc's own streams too
+(`prefer_disc_streams`, on by default): an edition that names itself a BDRip,
+a DVDRip or an x264 re-encode ranks under a remux or a full disc of the same
+release group, and a folder holding a `VIDEO_TS`/`BDMV` structure beside a
+700 MB re-encode keeps the disc's feature, never the re-encode. Turn the
+setting off and the other rules decide, exactly as they did before it existed.
+The **auto-importer** searches
 each release by what can only point at THAT release: a physical pressing (CD
 included) is searched by its catalog number and barcode
 (`soulseek_auto_physical_queries`) and, when it states neither, by its label and

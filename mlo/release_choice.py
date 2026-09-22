@@ -16,7 +16,10 @@ lower tier can ever outvote a higher one, which is why the score IS the order:
 2. medium      `auto_import_medium_order`, best first — CD, then the other
                physical media, digital last by default. A format the order
                does not name ranks after every configured one.
-3. tracks      a release short of the release group's OWN track count is
+3. compressed  a release that names itself a re-encode of a disc (BDRip,
+               DVDRip, x264, …) sorts below the disc's own streams — a remux or
+               a full-disc edition is taken as it comes, never a derivative.
+4. tracks      a release short of the release group's OWN track count is
                penalised, so a 1-track promo can never beat the full album.
 4. date        the edition closest to the group's first release date — the
                original, not a reissue or a deluxe — unless a later one is
@@ -91,19 +94,48 @@ _PROMO_STATUSES = frozenset({"promotion", "bootleg", "pseudo-release", "pseudo r
 # later one). The digits are the levels quantized to 0..7, which keeps the
 # score monotone in every tier while staying readable (0.8757).
 _SCORE_BASE = 8
-_TIER_NAMES = ("status", "medium", "set", "tracks", "date", "edition",
-               "disambiguation", "country")
+_TIER_NAMES = ("status", "medium", "set", "compressed", "tracks", "date",
+               "edition", "disambiguation", "country")
 # What a tie-break sentence calls each tier (see _deciding_reason).
 _TIER_LABELS = {
     "status": "release status",
     "medium": "the medium order",
     "set": "the box-set rule",
+    "compressed": "the disc-versus-re-encode rule",
     "tracks": "the track count",
     "date": "the release date",
     "edition": "the clean/edited-edition rule",
     "disambiguation": "the plain-release rule",
     "country": "the preferred country",
 }
+
+# A COMPRESSED derivative of a disc: a re-encode someone else made, not the
+# disc's own streams. MusicBrainz states these in a fan-rip release's title or
+# its disambiguation comment ("… (BDRip 1080p x264)", "DVDRip", "WEBRip"),
+# never in a field of its own — so the marker is the word.
+#
+# Deliberately NOT in this list: `remux`, `bdmv`, `dvd`, `blu-ray` (the disc
+# ITSELF — that is what wins), and codec names like `hevc`/`h264`, which a
+# remux can carry just as well. `x264`/`x265`/`xvid`/`divx` ARE here: those
+# only ever name an encode someone ran over the source.
+_COMPRESSED_RE = re.compile(
+    r"\b(?:bdrip|brrip|dvdrip|dvd-rip|webrip|web-dl|hdtv|hdtvrip|"
+    r"x264|x265|xvid|divx|microhd|halfcd|half-cd|"
+    r"re-?encode[ds]?|compressed)\b",
+    re.IGNORECASE,
+)
+
+
+def is_compressed_release(release):
+    """Whether *release* names itself a compressed derivative of a disc.
+
+    See `_COMPRESSED_RE`; the fields read are the same two the clean-edition
+    rule reads (the title and MusicBrainz's disambiguation comment).
+    """
+    node = release if isinstance(release, dict) else {}
+    text = f"{node.get('title') or ''} {node.get('disambiguation') or ''}"
+    return bool(_COMPRESSED_RE.search(text))
+
 
 # A clean/edited edition: MusicBrainz states this in the release's title or its
 # disambiguation comment, never in a field of its own.
@@ -117,6 +149,8 @@ _RULES = (
     "a release short of the release group's own track count is penalised",
     "a box set — an edition carrying DVD/Blu-ray media, or one disc after "
     "another — sorts below the album's own CD/digital media",
+    "a COMPRESSED derivative of a disc (a BDRip/DVDRip/x264 re-encode) sorts "
+    "below the disc's own streams, which are taken as they are",
     "the original edition beats a later reissue unless the later one is "
     "materially more complete",
     "prefer_release_country only ever breaks a tie",
@@ -325,6 +359,7 @@ class _Context:
     """Everything the rules need that is not the release itself."""
     order: tuple
     country: str
+    keep_disc_streams: bool
     keep_original: bool
     avoid_promo: bool
     require_country: bool
@@ -366,6 +401,7 @@ def policy_report(cfg=None):
         "medium_order": list(conf["auto_import_medium_order"]),
         "preferred_country": str(conf.get("prefer_release_country") or ""),
         "prefer_original_edition": bool(conf.get("prefer_original_edition", True)),
+        "prefer_disc_streams": bool(conf.get("prefer_disc_streams", True)),
         "status_order": list(STATUS_ORDER),
         "rules": list(_RULES),
     }
@@ -636,7 +672,17 @@ def _evaluate(rel, ctx, index):
     level_set, set_reason = _set_level(rel)
     reasons.append(set_reason)
 
-    # 4. completeness ...
+    # 4. the disc's own streams, not someone's re-encode of them: a BDRip or a
+    #    DVDRip is a lossy derivative, and when the group also offers the disc
+    #    (a remux, a full disc, the original pressing) that is what to take.
+    if ctx.keep_disc_streams and is_compressed_release(rel):
+        level_compressed = 0.0
+        reasons.append("a compressed re-release — the disc's own streams are "
+                       "preferred over a derivative (prefer_disc_streams)")
+    else:
+        level_compressed = 1.0
+
+    # 5. completeness ...
     if count <= 0:
         level_tracks = 0.5
         reasons.append("no track count on MusicBrainz — not counted against it")
@@ -663,11 +709,11 @@ def _evaluate(rel, ctx, index):
                            + ("the release group's own count" if ctx.expected_stated
                               else "the fullest edition offered"))
 
-    # 5. date ...
+    # 6. date ...
     level_date, date_reason = _release_date_level(date, ctx)
     reasons.append(date_reason)
 
-    # 6. edition kind ...
+    # 7. edition kind ...
     clean = bool(_CLEAN_RE.search(f"{title} {disambiguation}"))
     if clean and ctx.keep_original:
         level_edition = 0.0
@@ -677,12 +723,12 @@ def _evaluate(rel, ctx, index):
         if clean:
             reasons.append("clean edition — prefer_original_edition is off, so it is not penalised")
 
-    # 7. plain title ...
+    # 8. plain title ...
     level_plain = 0.0 if disambiguation else 1.0
     if disambiguation:
         reasons.append(f'MusicBrainz disambiguation "{disambiguation}"')
 
-    # 8. country (a tie-breaker, so it is the last tier) ...
+    # 9. country (a tie-breaker, so it is the last tier) ...
     if ctx.country:
         if country and country.lower() == ctx.country.lower():
             level_country = 1.0
@@ -719,8 +765,8 @@ def _evaluate(rel, ctx, index):
         disambiguation=disambiguation, reasons=tuple(reasons), eligible=eligible,
         index=index, type_ok=type_ok,
     )
-    return ((level_status, level_medium, level_set, level_tracks, level_date,
-             level_edition, level_plain, level_country), candidate)
+    return ((level_status, level_medium, level_set, level_compressed, level_tracks,
+             level_date, level_edition, level_plain, level_country), candidate)
 
 
 def _row_types(rel, ctx):
@@ -759,6 +805,7 @@ def rank_releases(release_group, releases, cfg=None, *, strict=False,
     ctx = _Context(
         order=tuple(conf["auto_import_medium_order"]),
         country=str(conf.get("prefer_release_country") or "").strip(),
+        keep_disc_streams=bool(conf.get("prefer_disc_streams", True)),
         keep_original=bool(conf.get("prefer_original_edition", True)),
         avoid_promo=bool(conf.get("auto_import_avoid_promo", True)),
         require_country=bool(conf.get("auto_import_require_country", True)),
