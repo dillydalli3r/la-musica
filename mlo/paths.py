@@ -252,30 +252,36 @@ def _trash_manifest_entries(bin_dir):
     return entries if isinstance(entries, dict) else {}
 
 
-def trash_file(path, music_folder=None, user="") -> str:
-    """Move one FILE into the app's trash bin; returns its new path ("" on
-    failure). Nothing is deleted — this is the same destination and origin
-    manifest server.main's "Remove from library" uses, so the Trash page
-    lists the entry and can put it back where it came from.
+def trash_path(path, music_folder=None, user="") -> str:
+    """Move one FILE OR FOLDER into the app's trash bin; returns its new path
+    ("" on failure). Nothing is deleted — this is the same destination and
+    origin manifest the removal routes ("Remove from library", "remove empty
+    artist") use, so the Trash page lists the entry and can put it back where
+    it came from.
 
-    A same-named entry already in the bin gets the "(2)" suffix the album
-    move uses, so a second conversion of a regenerated source never
-    overwrites the master already in there.
+    A same-named entry already in the bin gets the "(2)" suffix the album move
+    uses, so a second conversion of a regenerated source never overwrites the
+    master already in there. A file keeps its extension in that suffix
+    ("song (2).flac"); a folder is plain "name (2)", the way a removal names
+    one.
     """
     bin_dir = trash_dir(music_folder, user)
     src = os.path.abspath(path)
-    if not bin_dir or not os.path.isfile(src):
+    if not bin_dir:
+        return ""
+    is_dir = os.path.isdir(src)
+    if not is_dir and not os.path.isfile(src):
         return ""
     try:
         os.makedirs(bin_dir, exist_ok=True)
     except OSError:
         return ""
     name = os.path.basename(src)
+    stem, ext = (name, "") if is_dir else os.path.splitext(name)
     dest = os.path.join(bin_dir, name)
     n = 2
     while os.path.exists(dest):
-        dest = os.path.join(bin_dir, f"{os.path.splitext(name)[0]} ({n})"
-                                    f"{os.path.splitext(name)[1]}")
+        dest = os.path.join(bin_dir, f"{stem} ({n}){ext}")
         n += 1
     if not move_path(src, dest):
         return ""
@@ -294,6 +300,15 @@ def trash_file(path, music_folder=None, user="") -> str:
         # asks for a destination instead of guessing one.
         pass
     return dest
+
+
+def trash_file(path, music_folder=None, user="") -> str:
+    """Move one FILE into the app's trash bin; returns its new path ("" on
+    failure). The file half of :func:`trash_path`, which owns the bin, the
+    collision naming and the origin manifest."""
+    if not os.path.isfile(os.path.abspath(path)):
+        return ""
+    return trash_path(path, music_folder, user)
 
 
 def previous_state_dirs(music_folder=None):

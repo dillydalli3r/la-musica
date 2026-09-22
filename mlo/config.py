@@ -441,6 +441,14 @@ DEFAULT_CONFIG = {
     # MusicBrainz IDs in folder names to 8 chars.
     "naming_script": DEFAULT_NAMING_SCRIPT,
     "short_folder_names": False,
+    # Script 20 (library layout) FIXES what it finds instead of only reporting
+    # it: a name spelled in the wrong letter case is renamed to the script's
+    # spelling, audio sitting outside any album folder is moved into the one
+    # its own tags name, and an artist folder with no album under it goes to
+    # the Trash. OFF is the read-only report it used to be. The one-shot force
+    # flag reaches this same key, so a single run can skip the fixing without
+    # anything being saved.
+    "layout_apply": True,
 
     # Force flags used by the Run All order / individual runs — re-format even
     # when a file already looks canonical.

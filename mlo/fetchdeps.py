@@ -197,6 +197,28 @@ LINUX_BINARIES = {
         "runner": "mono",
         "launcher": ("CUETools.ARCUE", "CUETools.ARCUE.exe"),
     },
+    "rsgain": {
+        # One static x86-64 build — the v3.8 asset `rsgain-3.8-Linux.tar.xz`
+        # holds a bare `rsgain` (plus its presets/ folder), verified by
+        # unpacking it. Upstream publishes NO arm64 Linux asset, so the key is
+        # x64 only and an ARM host falls through to the distro package in
+        # LINUX_PACKAGES instead of matching a pattern that cannot exist.
+        "patterns": {
+            "x64": r"^rsgain-\d+\.\d+(?:\.\d+)*-Linux\.tar\.xz$",
+        },
+        "markers": ("rsgain",),
+    },
+    "chromaprint": {
+        # fpcalc, one tarball per architecture (verified in both: a single
+        # `fpcalc`, statically linked, so nothing else has to be on the host).
+        # The Windows zip in ASSET_PATTERNS is a different asset of the SAME
+        # release, which is why the pin and this table can share one version.
+        "patterns": {
+            "x64": r"^chromaprint-fpcalc-\d+\.\d+(?:\.\d+)*-linux-x86_64\.tar\.gz$",
+            "arm64": r"^chromaprint-fpcalc-\d+\.\d+(?:\.\d+)*-linux-arm64\.tar\.gz$",
+        },
+        "markers": ("fpcalc",),
+    },
 }
 
 # Tools whose Linux install needs an interpreter to exist on this machine: a
@@ -220,6 +242,13 @@ PLATFORM_INDEPENDENT = {"librosa", "beets", "yt-dlp", "logchecker"}
 # "succeed" with a folder of unrunnable .exe files. install_dependency()/
 # pick_asset() refuse via _require_installable() instead, naming the distro
 # package to use (the Docker image installs them; see Dockerfile).
+#
+# A key can be in BOTH this table and LINUX_BINARIES: upstream ships a build for
+# one architecture and the distro package covers the rest. rsgain publishes
+# x86-64 only, chromaprint publishes 64-bit ARM and x86-64 but nothing for a
+# 32-bit ARM host — install_kind() takes the download where a pattern matches
+# this machine and the package everywhere else, so no entry here is dead code
+# while its tool has a build for SOME architecture.
 LINUX_PACKAGES = {
     "flac": "flac",
     "libjxl": "libjxl-tools",
@@ -434,6 +463,27 @@ def install_problem(key, platform=None, machine=None):
                 f"it is unsupported on this platform.")
     return (f"{display} has no build this app can install on this platform - "
             f"install it with your system package manager.")
+
+
+def system_upgrade_command(key, platform=None):
+    """The exact command that upgrades *key*'s distro package, or None.
+
+    A tool the package manager owns can still be BEHIND, and the row has to say
+    so (see dependency_rows). The most this app can then do is name the command
+    that closes the gap, which is the one thing the Dependencies action column
+    offers for that row: the user copies it.
+
+    LINUX_PACKAGES names Debian packages, so the command is apt's, and it is the
+    --only-upgrade form of the plain install install_problem() names — a row
+    that already has the tool must not read as "install it". Never executed:
+    this app does not run package managers, and certainly not unattended.
+    """
+    if _platform_of(platform) != "linux":
+        return None
+    pkg = LINUX_PACKAGES.get(key)
+    if not pkg:
+        return None
+    return f"apt-get install --only-upgrade {pkg}"
 
 
 def launcher(key, platform=None):
@@ -1047,9 +1097,24 @@ def dependency_rows(refresh=False, block=False):
                          _upstream_source), None while unknown
 
     `state` is derived from the LIVE upstream value: `ok` (installed ==
-    upstream), `update` (upstream known and different), `missing`, `error`
-    (that tool's check failed). Rows for a tool with no upstream probe at all
-    fall back to the pinned pair, which is the only answer available for them.
+    upstream), `update` (upstream is NEWER than what is installed, whatever
+    installs it — a distro row behind its package is still behind), `missing`
+    (nothing installed), `error` (that tool's check failed). Rows for a tool
+    with no upstream probe at all fall back to the pinned pair, which is the
+    only answer available for them.
+
+    `state` deliberately does NOT say what can be done about it, because those
+    are two different facts and one field could only ever carry one of them: a
+    green Ready beside an amber Available is what the merge produced. The other
+    two facts are their own fields —
+      update_available  is a newer upstream release than what is installed (a)
+      install_kind      what this host can do: `deps` = fetch into
+                        .dependencies, `system` = the OS package manager owns
+                        it, `unsupported` = nothing this app can fetch (b)
+      action            what the row's action column offers — `install`,
+                        `update` (both fetch a download), `upgrade` (copy
+                        upgrade_command), `none` (nothing to do here) (c)
+    — and `upgrade_command` carries the exact command for `action == upgrade`.
     """
     tools = detect_all_tools()
     installed = installed_versions()
@@ -1066,33 +1131,51 @@ def dependency_rows(refresh=False, block=False):
         entry = upstream.get(key) or {}
         uv = entry.get("version")
         err = entry.get("error")
-        update_available = bool(
-            uv and have and newer_version(uv, have))
         # A failed upstream check must NOT mark a healthy install as broken:
         # GitHub rate-limits unauthenticated callers, and a wall of red for a
         # transient 403 is worse than no check at all. The upstream cell and
         # the note carry the failure; the status falls back to the pinned
         # pair, which is the one answer always available.
-        #
-        # A tool this host provides as a system package is never `update`: apt
-        # owns it, there is no Install button on that row, and an amber chip
-        # nothing can clear is the dangling promise this whole page exists to
-        # avoid. Ready + the versions is the honest pair — "installed 3.6,
-        # upstream ships 3.8, your package manager owns it".
-        system_row = install_kind(key) != "deps"
+        kind = install_kind(key)
+        update_available = bool(
+            uv and have and newer_version(uv, have))
         if not (iv or info):
             state = "missing"
         elif uv:
-            state = "update" if (update_available and not system_row) else "ok"
+            state = "update" if update_available else "ok"
         elif target and have and newer_version(target, have):
             state = "update"
         else:
             state = "ok"
+        # What the ACTION column offers, from the two facts above: `state` says
+        # whether the row is behind, `install_kind` says whether a download can
+        # close the gap. A distro tool behind upstream reads `update` like any
+        # other row and offers the package manager's command instead of a
+        # button that cannot download anything — the two used to be conflated,
+        # which is how a row kept a green Ready with an amber Available beside
+        # it and no way to clear either.
+        if state == "update":
+            action = {"deps": "update", "system": "upgrade"}.get(kind, "none")
+        elif state == "missing" and kind == "deps":
+            action = "install"
+        else:
+            action = "none"
+        upgrade_command = (
+            system_upgrade_command(key) if action == "upgrade" else None)
         if err:
             note = f"upstream check failed: {err} — status is against the pinned target"
-        elif system_row and update_available:
+        elif action == "upgrade":
             note = (f"the system package provides {have}; upstream ships {uv} — "
-                    f"upgrade it with your package manager")
+                    f"upgrade it with your package manager ({upgrade_command})")
+        elif update_available and action == "none":
+            # Behind upstream with nothing here that can fetch it (a
+            # Windows-only tool on this platform, or a build for another
+            # architecture): install_note already names the package manager or
+            # the missing build, so this only has to say the row really is
+            # behind. A row a download CAN move keeps the versions in its
+            # upstream column and no note at all.
+            note = (f"installed {have}; upstream ships {uv} — nothing this host "
+                    f"can install to close that gap")
         elif _upstream_source(key) is None:
             note = ("no upstream check for this tool — only the pinned target "
                     "is installable")
@@ -1119,7 +1202,12 @@ def dependency_rows(refresh=False, block=False):
             # the image already ships - read as a broken Install button.
             "installable": installable(key),
             "install_note": install_problem(key),
-            "install_kind": install_kind(key),
+            "install_kind": kind,
+            # The action this row offers, and the exact command it copies (see
+            # the docstring). Both are computed here so the page never has to
+            # work out for itself what a row behind upstream can do.
+            "action": action,
+            "upgrade_command": upgrade_command,
         })
     return out
 

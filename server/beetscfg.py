@@ -462,6 +462,13 @@ def run_beets_tagging(config=None):
     except Exception:
         pass
     stats["modified_count"] = len(fresh)
+    # Where the album's audio went. Beets MOVES an album into the library and
+    # names every file from the tags, so a chain pointed at the folder it came
+    # from (an import's staging folder) cannot recognise it by file name any
+    # more — `server.script_runners._follow_moved_targets` reads this to
+    # re-point the rest of the chain instead of running the whole tag-writing
+    # tail against a folder that no longer holds the album.
+    stats["moved_targets"] = list(fresh)
 
     # Re-unite sidecars / videos / covers beets left in emptied folders.
     gathered = []

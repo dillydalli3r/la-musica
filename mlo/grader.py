@@ -1129,8 +1129,17 @@ def _grade_sidecars(album_dir, all_files, cfg):
                         if acc_text != canonical:
                             ok = False
                         else:
+                            # A canonical CUETools log is a GOOD file whatever
+                            # its verdict, so NONE counts: a pressing that is
+                            # not in the AccurateRip database ends its log
+                            # "disk not present in database" with only the
+                            # Track Peak table, and the generator writes
+                            # exactly that. Failing it here marked a file the
+                            # user could never fix as "needs formatting"; the
+                            # verdict itself is the AccurateRip leg's business
+                            # (`_cd_legs` / mlo.audit name a DB miss by name).
                             st, _ = _parse_ar_side(acc_text)
-                            ok = st in ("REAL", "FAKE")
+                            ok = st in ("REAL", "FAKE", "NONE")
                     except Exception:
                         ok = "[CUETools log;" in acc_text
             except OSError:
@@ -3204,10 +3213,21 @@ def _grade_album(album_dir, lyrics_format, cfg=None):
                     cd_legs_missing.setdefault(name, []).append(tr.get("file"))
                     if tr.get("audit_legs_missing") is None:
                         tr["audit_legs_missing"] = missing
-            # The missing legs are named ONCE for the album, and they cost
-            # nothing extra: the artefact behind each one already has its own
-            # graded check (LOG_GRADE, CRC / log checksum, AccurateRip), so
-            # failing them again here would charge one absence twice.
+            # A leg nothing established is a FAILED CHECK for the album, and it
+            # is charged exactly once however many legs and tracks it covers.
+            # It used to cost nothing, on the reading that the artefact behind
+            # each leg already had a graded check of its own — which is what
+            # let an album list "nothing established the CD verdict's
+            # 'accuraterip' leg" as a problem to fix and STILL grade PASS,
+            # drawing a green dot beside a problem it had just named. An issue
+            # the verdict does not charge is a verdict that lies, so the
+            # readout below is a check of its own: every CD leg has evidence.
+            if cd_legs_missing:
+                total_checks += 1
+                failed_checks += 1
+            # The missing legs are named ONCE for the album, per leg, so the
+            # readout says which artefact is absent rather than only that one
+            # is.
             _missing_wording = {
                 "log-score": "no LOG_GRADE tag scores the rip log",
                 "checksums": ("the rip log's own checksum does not verify and "

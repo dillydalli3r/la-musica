@@ -9,6 +9,7 @@ integrations, and album import.
 import os
 import re
 import sys
+import traceback
 import asyncio
 import inspect
 import json
@@ -67,7 +68,7 @@ from server import artcache
 from server import version as version_mod
 from mlo.paths import (SKIP_DIRS, clear_track_covers, downloads_dir,
                        is_video_file, library_root, load_track_covers, move_path,
-                       save_track_covers, set_track_covers, trash_dir)
+                       save_track_covers, set_track_covers, trash_dir, trash_path)
 from mlo.subproc import tool_path
 
 # Captured at startup — worker threads use run_coroutine_threadsafe against
@@ -2962,7 +2963,6 @@ def _announce_run(ids, results, targets=None):
             )
     except Exception:
         # A notification must never turn a finished run into a failed request.
-        import traceback
         traceback.print_exc()
 
 
@@ -3909,27 +3909,19 @@ def album_remove(req: AlbumRemove, request: Request = None):
         raise HTTPException(404, "album not found")
     if not _in_music_folder(p, folder):
         raise HTTPException(400, "album outside music folder")
-    trash = os.path.normpath(trash_dir(folder, auth_mod.current_user(request)))
-    os.makedirs(trash, exist_ok=True)
+    # One helper for the whole bin: mlo.paths.trash_path picks the collision
+    # name, moves the folder and records its origin in the bin's manifest, so
+    # this route and the layout script's removal (mlo.layout, script 20) can
+    # never disagree about where an entry landed or how it is spelled.
     name = os.path.basename(p) or "album"
-    dest = os.path.normpath(os.path.join(trash, name))
-    n = 2
-    while os.path.exists(dest):
-        dest = os.path.normpath(os.path.join(trash, f"{name} ({n})"))
-        n += 1
-    if not move_path(p, dest):
-        # move_path already retried the sharing violation away; a player or
+    dest = trash_path(p, folder, auth_mod.current_user(request))
+    if not dest:
+        # trash_path retried every lock/sharing violation away; a player or
         # an importer still holds a file in the album open.
         raise HTTPException(
             500,
             f"could not move {name} to the trash — a file inside it is still "
             f"in use (stop playback and retry)")
-    entries = _manifest_read(trash)
-    entries[os.path.basename(dest)] = {
-        "origin": p.replace("\\", "/"),
-        "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-    }
-    _manifest_write(trash, entries)
     tagcache.invalidate_all()
     mbresolve.invalidate()
     _refresh_slskd_shares_soon()
@@ -5154,7 +5146,6 @@ def _stamp_import_identity(album_dirs):
             release = intg.release_lookup(mbid)
             stamped += soulseek_auto._stamp_mb_tags(d, release)
         except Exception:
-            import traceback
             traceback.print_exc()
     return stamped
 
@@ -7724,8 +7715,10 @@ def soulseek_staging_clear(req: StagingRequest):
 # --------------------------------------------------------------------------- #
 # The walk itself lives in mlo.layout — the same one Run All runs as script 20
 # — so this route, the panel and the script can never report different numbers.
-# It stays a READ-ONLY report: it says what is wrong and where, and never
-# moves anything on its own.
+# The GET route stays a READ-ONLY report: it says what is wrong and where, and
+# never moves anything on its own. The fixing half is mlo.layout.apply_fixes,
+# reached from here through POST /api/library/layout/apply (the panel's Apply
+# fixes) and by script 20 itself, which applies what its scan proved.
 @app.get("/api/library/layout")
 def library_layout():
     """Scan the whole music folder for misplaced files, unexpected folders and
@@ -7738,7 +7731,10 @@ def library_layout():
     What the app itself stores counts as expected, never as a stray: the
     album's description.txt (mlo.paths.ALBUM_SIDECAR_NAMES) next to the
     cover art, and inside an artist folder its artist.jpg / artist.png and
-    description.txt (only audio with no album folder is reported there)."""
+    description.txt (only audio with no album folder is reported there).
+
+    The rows that CAN be fixed carry what the fix would do; POST
+    /api/library/layout/apply is what carries it out."""
     cfg = load_config()
     report = mlo_layout.scan_library(cfg)
     # A manual scan IS a scan: it is what "the last scan" means to the Library
@@ -7793,29 +7789,60 @@ def library_layout_remove_empty_artist(req: AlbumRemove, request: Request = None
         raise HTTPException(
             400, "this artist folder is not an empty artist — it holds an album "
                  "or audio, and this route never moves an artist with music")
-    trash = os.path.normpath(trash_dir(folder, auth_mod.current_user(request)))
-    os.makedirs(trash, exist_ok=True)
-    name = os.path.basename(p) or "artist"
-    dest = os.path.normpath(os.path.join(trash, name))
-    n = 2
-    while os.path.exists(dest):
-        dest = os.path.normpath(os.path.join(trash, f"{name} ({n})"))
-        n += 1
-    if not move_path(p, dest):
+    # The same mlo.paths helper mlo.layout's apply phase trashes through, so
+    # the panel's "remove" and script 20's automatic removal land an entry in
+    # the identical bin with the identical origin recorded.
+    dest = trash_path(p, folder, auth_mod.current_user(request))
+    if not dest:
         raise HTTPException(
             500,
-            f"could not move {name} to the trash — a file inside it is still "
-            f"in use (stop playback and retry)")
-    entries = _manifest_read(trash)
-    entries[os.path.basename(dest)] = {
-        "origin": p.replace("\\", "/"),
-        "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-    }
-    _manifest_write(trash, entries)
+            f"could not move {os.path.basename(p) or 'artist'} to the trash — a "
+            f"file inside it is still in use (stop playback and retry)")
     tagcache.invalidate_all()
     mbresolve.invalidate()
     _refresh_slskd_shares_soon()
     return {"ok": True, "trash": dest.replace("\\", "/")}
+
+
+@app.post("/api/library/layout/apply")
+@job_locks.holds(
+    lambda request=None, **_: [library_root(load_config().get("music_folder") or "")],
+    kind="layout", label="Fix library layout")
+def library_layout_apply(request: Request = None):
+    """Scan the library and FIX what can be fixed — script 20, on demand.
+
+    What the Optimization page's Apply fixes button runs, and the same call
+    script 20 makes for itself: names spelled in the wrong letter case are
+    renamed to the naming script's spelling, audio that is not in an album
+    folder is moved into the one its own tags name, and an artist folder with
+    no album under it goes to the app's Trash. Everything else is reported,
+    untouched. Nothing is ever deleted, and no file outside the music folder is
+    touched.
+
+    The whole library, not a target list: this is the panel's action on the
+    library it is showing. A targeted run is what the import chain does with
+    script 20, where the target IS the album just written.
+
+    Returns the report — the rows left AFTER the fixes, plus `fixes`
+    (fixed/failed/skipped, in words) — and stores it, because the panel and the
+    Library page's warning read the same numbers by design.
+
+    It runs whether or not ``layout_apply`` is on: that setting is about what a
+    SCAN does on its own, and a button reading "Apply fixes" is the user's own
+    instruction rather than the scanner's default.
+    """
+    cfg = load_config()
+    folder = cfg.get("music_folder") or ""
+    if not folder or not os.path.isdir(folder):
+        raise HTTPException(400, "music_folder not set or not found")
+    report = mlo_layout.scan_library(cfg)
+    mlo_layout.apply_fixes(cfg, report, user=auth_mod.current_user(request))
+    mlo_layout.save_report(cfg, report)
+    # The library moved under both caches, exactly as a removal does.
+    tagcache.invalidate_all()
+    mbresolve.invalidate()
+    _refresh_slskd_shares_soon()
+    return report
 
 
 # --------------------------------------------------------------------------- #

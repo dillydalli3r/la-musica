@@ -15,18 +15,31 @@ export const FORCE_SCRIPTS: { key: string; label: string }[] = [
   { key: "mood", label: "16 · Mood & Energy re-analysis" },
   { key: "xlit", label: "17 · Lyrics re-transliterate / re-translate" },
   { key: "publish", label: "18 · Lyrics re-publish to LRCLIB" },
+  // Script 20 is the one force key that turns work OFF rather than redoing it:
+  // the layout pass always scans, and its apply (rename wrong-case names,
+  // gather loose audio) is what an unticked box asks to skip for this run.
+  { key: "layout", label: "20 · Layout fix" },
 ];
 
 const KEY = "mlo.force.sel";
 
 export function loadForceSel(): Record<string, boolean> {
+  const defaults = Object.fromEntries(FORCE_SCRIPTS.map((f) => [f.key, true]));
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) return JSON.parse(raw) as Record<string, boolean>;
+    if (raw) {
+      const saved = JSON.parse(raw) as Record<string, boolean>;
+      // A selection saved before a key existed must not read as "off" for it:
+      // the one-shot Force menu sends exactly the keys it knows, and a key it
+      // does not name is cleared server-side — so a switch added later would
+      // be silently disabled for every user who had ever opened the menu. A
+      // key the saved selection does not mention keeps its default.
+      return { ...defaults, ...saved };
+    }
   } catch {
     /* fall through to default */
   }
-  return Object.fromEntries(FORCE_SCRIPTS.map((f) => [f.key, true]));
+  return defaults;
 }
 
 export function saveForceSel(sel: Record<string, boolean>) {

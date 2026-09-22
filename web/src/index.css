@@ -615,17 +615,16 @@ table td {
 }
 /* Lyrics legibility: the fullscreen player's backdrop is the cover's own
    color field, so the pane picks its ink from the cover's luminance (see
-   NowPlayingView) and the glyph shadow has to follow that choice — a dark
-   shadow under dark glyphs is what would make the inverted lyrics look wrong.
-   Both polarities keep the same offsets (1px/2px under the glyph, 8px halo):
-   the halo is what separates a line from the busier mid-tones of the
-   ambience, and with the pane's own panel gone it is the whole legibility
-   layer behind the lyrics. */
+   NowPlayingView). The DARK polarity — white glyphs — carries the shadow:
+   1px/2px under the glyph plus an 8px halo is what separates a line from the
+   busier mid-tones of the ambience once the pane's own panel is gone.
+   The LIGHT polarity takes no shadow at all. Its ink is near-black and the
+   polarity rule only hands it over when the field measured bright, where the
+   contrast is already around 9:1 — a white halo there darkens nothing and
+   hides nothing, and over an off-white cover it drew a white outline around
+   every glyph (the "lyrics on a white background look outlined" report). */
 .np-shade-dark {
   text-shadow: 0 1px 2px rgb(0 0 0 / 0.55), 0 0 8px rgb(0 0 0 / 0.35);
-}
-.np-shade-light {
-  text-shadow: 0 1px 2px rgb(255 255 255 / 0.45), 0 0 8px rgb(255 255 255 / 0.3);
 }
 /* gentle breathing on the artwork glow */
 @keyframes glow-pulse {

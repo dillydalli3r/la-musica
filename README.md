@@ -1,6 +1,6 @@
 # la musica
 
-**v3.8.0** — a self-hosted app that *manages, optimizes, audits, grades and
+**v3.9.0** — a self-hosted app that *manages, optimizes, audits, grades and
 plays* your music library, from the browser, a desktop window or a phone.
 
 **la musica** (formerly Music Library Optimizer) is a FastAPI backend plus a
@@ -12,7 +12,7 @@ client whose auto-importer verifies what it downloaded. All app state — config
 playlists, favourites, the beets library, the Soulseek config, measured loudness,
 caches — lives in one hidden `.mlo` folder inside your music directory.
 
-Release notes for this version are in `local/release-notes-3.8.0.md` (older ones
+Release notes for this version are in `local/release-notes-3.9.0.md` (older ones
 follow `local/release-notes-<version>.md`); the grading and optimization contract
 is in [`docs/OPTIMIZATION-GRADING-SPEC.md`](docs/OPTIMIZATION-GRADING-SPEC.md).
 
@@ -266,7 +266,16 @@ the album tag stale). The configured AI provider is one of those sources: it is
 asked once for every track (when `advisory_ai_classify` is on) and its answer is
 ranked with the providers' by the same rule, so an AI `1` overrules a stated `0`
 or `2` while a stated `1` survives whatever it says — and it only overrules one
-when it actually read the track's words. Per source the STRONGEST answer wins —
+when it actually read the track's words (embedded lyrics first, else the `.lrc`
+sidecar). It is asked about the SONG, not its vocabulary: `1` is profanity that
+is excessive or a slur or a very strong word, or graphic sex/violence/drug use,
+while a mild word in passing — a lone `ass`, `damn` or `hell`, an idiom, a quote,
+a word ordinary in another language — is `0`, and lyrics in any language or
+script are judged in that language. The lyrics scan below it works the same way:
+its mild tier (`mlo/advisory_words.MILD`: the English "ass" family, `culo`,
+`arsch`, `reet`) is reported in the reply's `hits` and decides nothing, so a song
+carrying one is `0` like any clean track, and only a STRONG hit can escalate a
+provider's stated `0`. Per source the STRONGEST answer wins —
 every ISRC is asked, so a later pressing's explicit answer is not lost to an
 earlier clean one — and a provider-stated 0 can still be escalated to 1 by a
 word-reading stage (the configured AI, then the multilingual scan), whose source
@@ -362,7 +371,7 @@ overwrite* menu.
 | 17 | Lyrics transliterate (AI) | `TRANSLITERATION-<LANG>-LATN` / `TRANSLATION-<LANG>` tags and sidecars, re-synced at `lrc_sync_level` |
 | 18 | Publish lyrics (LRCLIB) | Submits this library's lyrics for recordings LRCLIB does not have (`lrclib_auto_publish`, `force_publish`) |
 | 19 | Optimize artist images | Crops `Artists/<Artist>/artist.*` to `artist_image_aspect`, downscales to `artist_image_target_size` (never upscales, and back to the size it recorded writing when a file was enlarged afterwards), re-encodes as `artist.jpg`/`artist.png` |
-| 20 | Scan library layout | Read-only walk of the whole music folder: audio loose in the root or in an artist folder, unexpected folders, empty albums, stray files, names whose letter case differs from `naming_script`. Writes `.mlo/data/layout_report.json` (`scanned_at` included) — the Library page's warning and the Optimization panel's report read it instead of walking again. Moves nothing |
+| 20 | Scan library layout | Walks the music folder's shape and — with `layout_apply` (ON) — FIXES the three unambiguous findings: a name whose letter case differs from `naming_script` is renamed to the script's spelling, audio sitting outside any album folder is moved into the one its own tags name, and an artist folder with no album goes to the Trash. Everything else (stray files, unexpected folders, empty albums, unreadable albums) is reported, never guessed at: nothing is deleted, a destination that already holds a file is refused rather than overwritten, and only paths inside the music folder are ever touched. Writes `.mlo/data/layout_report.json` (`scanned_at` + per-row `fixes` included) — the Library page's warning and the Optimization panel's report read it instead of walking again |
 | 21 | Fix AcoustID pairs | Completes a half-written AcoustID pair: an `ACOUSTID_ID` with no `ACOUSTID_FINGERPRINT` gets the local `fpcalc` fingerprint, a fingerprint with no id gets the lookup. Both halves present (or none) is left alone — it is the fixer for the grading failure *Missing ACOUSTID_FINGERPRINT (incomplete AcoustID pair)*, and it writes only the half that is missing |
 
 Force flags, one per script: `force_lyrics`, `force_cue`, `force_tracklist`,
@@ -393,7 +402,10 @@ factory defaults — `grade_check_audit` (the AUDIT-tag requirement) included, a
 every file category admitted — and the **Balanced** preset is those defaults as
 they were before 3.7.0 (audit tag not required) for anyone who wants the old
 answer in one click. A verdict is binary: an album is `PASS` only when every enabled check
-passes, otherwise `FAIL` with the failed checks itemized. The summary counts
+passes, otherwise `FAIL` with the failed checks itemized — and every problem the
+page lists is charged, so an album can never show *N problems to fix* beside a
+green dot (a CD leg nothing established is a failed check of its own, not a note
+beside a pass). The summary counts
 checks (`summary_pass` / `summary_total`) and reports `albums_passed` /
 `albums_failed`, plus `albums_audit_failed` for albums that pass every check
 while their audit is FAKE/Mix (the library badges those red on the Audit column).

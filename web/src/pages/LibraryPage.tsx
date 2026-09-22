@@ -4,7 +4,7 @@ import { Link, useNavigate } from "react-router-dom";
 import {
   ArrowDownUp, BarChart3, ChevronDown, ChevronRight, CloudDownload,
   FileVideo, FolderSync, FolderTree, Info as InfoIcon, Layers, Library, ListChecks,
-  ListFilter, ListPlus, Play, Tag, Trash2, Wand2,
+  ListFilter, ListPlus, Play, Search, Tag, Trash2, Wand2, X,
 } from "lucide-react";
 import { api } from "../api";
 import { SCRIPTS, DEFAULT_RUN_ALL, isScriptId } from "../lib/scripts";
@@ -98,7 +98,10 @@ const ARTIST_COL_W: Record<string, string> = {
 const ARTIST_COLS: Col[] = [
   { id: "albums", label: "Albums", sortKey: "aggregate.album_count" },
   { id: "tracks", label: "Tracks", sortKey: "aggregate.track_count" },
-  { id: "checks", label: "Checks", sortKey: "aggregate.grade_pct" },
+  // The pass COUNT, not the grade percentage: the cell reads
+  // "pass_count/total_checks", and sharing Grade's key lit both headers at
+  // once and made a click on Checks sort by the grade it does not show.
+  { id: "checks", label: "Checks", sortKey: "aggregate.pass_count" },
   { id: "grade", label: "Grade", sortKey: "aggregate.grade_pct" },
 ];
 
@@ -116,7 +119,10 @@ const TRACK_COL_W: Record<string, string> = {
   year: "w-16",
   genre: "w-24",
   media: "w-[88px]",
-  duration: "w-16",
+  // 80 px, the same floor the album tracklist gives its length column: an
+  // hour-plus length is seven characters ("1:02:33"), which the old 64 px
+  // floor could only break onto a second line.
+  duration: "w-20",
   bitrate: "w-[88px]",
   dr: "w-12",
   source: "w-20",
@@ -166,13 +172,17 @@ const ALBUM_PHONE_CLS: Record<string, string> = {
 const ARTIST_PHONE_CLS: Record<string, string> = {
   albums: PHONE_HIDE, tracks: PHONE_HIDE, checks: PHONE_HIDE,
 };
-/** Both track tables (the Tracks view and every album tracklist): the cover,
- *  the title and the length stay, the tag columns fold. */
+/** Both track tables (the Tracks view and every album tracklist): only the
+ *  cover and the title stay on a phone, every column id named here folds at
+ *  `md`. The two tables name the length column differently (`duration` in the
+ *  Tracks view, `dur` in an album tracklist), and a column whose id is
+ *  missing here is the one column that never folds — which is how the
+ *  tracklist's `dur` used to ride along on a phone. */
 const TRACK_PHONE_CLS: Record<string, string> = {
   num: PHONE_HIDE, artist: PHONE_HIDE, album: PHONE_HIDE, year: PHONE_HIDE,
-  genre: PHONE_HIDE, media: PHONE_HIDE, duration: PHONE_HIDE, bitrate: PHONE_HIDE,
-  dr: PHONE_HIDE, source: PHONE_HIDE, type: PHONE_HIDE, inst: PHONE_HIDE,
-  composer: PHONE_HIDE, lyricist: PHONE_HIDE, remixer: PHONE_HIDE,
+  genre: PHONE_HIDE, media: PHONE_HIDE, duration: PHONE_HIDE, dur: PHONE_HIDE,
+  bitrate: PHONE_HIDE, dr: PHONE_HIDE, source: PHONE_HIDE, type: PHONE_HIDE,
+  inst: PHONE_HIDE, composer: PHONE_HIDE, lyricist: PHONE_HIDE, remixer: PHONE_HIDE,
 };
 /** Tag columns the user added fold with the built-ins they sit beside. */
 function phoneHide(cls: Record<string, string>, id: string): string {
@@ -251,6 +261,9 @@ export default function LibraryPage() {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const query = useStore((s) => s.query);
+  // The Library's own search box edits the SAME store value the top bar does:
+  // one filter, so the two boxes can never disagree about what is being shown.
+  const setQuery = useStore((s) => s.setQuery);
   // Debounced 200ms: the filter memo only recomputes after typing pauses.
   const [debouncedQuery, setDebouncedQuery] = useState(query);
   useEffect(() => {
@@ -846,6 +859,40 @@ export default function LibraryPage() {
           )}
         </div>
 
+        {/* The page's own search box: it edits the store value the top bar's
+            box already edits (`useStore`'s query), so the toolbar can narrow
+            the view without the user reaching back up to the app bar — and
+            the two boxes cannot fork into two filters, which is the whole
+            reason the query lives in the store. `key:value` terms match tags
+            (artist:, genre:, year:, composer:) exactly as they do there. */}
+        <div className="search-field relative flex-1 min-w-[9rem] max-w-xs">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-500" />
+          <input
+            className="input !py-1.5 !pl-8 text-xs"
+            placeholder="Search — words + tags (artist:, genre:)"
+            aria-label="Search the library"
+            title="Plain words match album, artist, track, file and tag text; key:value matches one tag (artist: name · genre: metal · year: 1998). The same query as the top bar's box."
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              // The row is no form: Enter must not submit anything, and the
+              // caret stays in the box so a filter is typed in one pass.
+              if (e.key === "Enter") e.preventDefault();
+              else if (e.key === "Escape" && query) setQuery("");
+            }}
+          />
+          {query && (
+            <button
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 rounded text-zinc-500 hover:text-white tap"
+              onClick={() => setQuery("")}
+              title="Clear the search"
+              aria-label="Clear the search"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+
         {/* min-w-0 + wrap: the counts grow with the library, so on a phone this
             group takes its own line instead of pushing the row past the edge. */}
         <div className="ml-auto flex items-center gap-2 flex-wrap min-w-0">
@@ -1180,8 +1227,12 @@ export default function LibraryPage() {
                         onChange={() => setSelection({ albums: allAlbumsSelected ? [] : sortedAlbums.map((a) => a.path) })} />
                     </th>
                   )}
-                  <th className="th w-10"></th>
-                  <th className="th w-14"></th>
+                  {/* Both leading cells head a control rather than a column of
+                      values (the expand chevron, the cover); the Tracks view
+                      names its cover cell the same way, so the header row is
+                      not two blank announcements to a screen reader. */}
+                  <th className="th w-10"><span className="sr-only">Expand</span></th>
+                  <th className="th w-14"><span className="sr-only">Cover</span></th>
                   {albumDefs.filter((c) => albumCols.includes(c.id)).map((c) => (
                     <SortHeader key={c.id} label={c.label} sort={albumSort} sortKey={c.sortKey} onSort={setAlbumSort}
                       className={`relative ${ALBUM_COL_W[c.id] ?? (c.tag ? TAG_COL_W : "")}${phoneHide(ALBUM_PHONE_CLS, c.id)}`}
@@ -1263,14 +1314,25 @@ export default function LibraryPage() {
                 {sortedArtists.map((a) => {
                   const sel = selection.artists.includes(a.path);
                   return (
-                    <tr key={a.path} className={`table-row group ${sel ? "bg-accent/15" : ""}`}>
+                    <tr
+                      key={a.path}
+                      className={`table-row group ${sel ? "bg-accent/15" : ""}`}
+                      title={selectMode ? "Click to select" : "Open the artist page"}
+                      /* `.table-row` promises a click — pointer cursor, hover
+                         wash — and the row now answers it: it opens the
+                         artist, or ticks the row while select mode is on,
+                         the same deal the album and track rows make. */
+                      onClick={selectMode ? () => toggleArtist(a.path) : () => navigate(artistRef(a))}
+                    >
                       {selectMode && (
-                        <td className="td pr-0">
+                        <td className="td pr-0" onClick={(e) => e.stopPropagation()}>
                           <input type="checkbox" className="" checked={sel} onChange={() => toggleArtist(a.path)} />
                         </td>
                       )}
                       <td className="td">
-                        <Link to={artistRef(a)} className="font-medium hover:text-accent-soft">
+                        {/* the row click already opens the artist, so the link
+                            must not push the same route a second time */}
+                        <Link to={artistRef(a)} onClick={(e) => e.stopPropagation()} className="font-medium hover:text-accent-soft">
                           {a.name}
                         </Link>
                       </td>
@@ -1284,7 +1346,10 @@ export default function LibraryPage() {
                         <td className={`td text-zinc-500${phoneHide(ARTIST_PHONE_CLS, "checks")}`}>{a.aggregate.pass_count}/{a.aggregate.total_checks}</td>
                       )}
                       {artistCols.includes("grade") && (
-                        <td className="td"><GradeBadge pass={(a.aggregate.grade_pct ?? 0) >= 100 && !auditFails(a.aggregate.audit_summary)} score={a.aggregate.grade_pct} audit={a.aggregate.audit_summary} /></td>
+                        /* `aggregate.pass` (failed checks == 0), not a rounded
+                           `grade_pct >= 100`: rounding could draw a green dot
+                           over an artist whose album failed a check. */
+                        <td className="td"><GradeBadge pass={!!a.aggregate.pass && !auditFails(a.aggregate.audit_summary)} score={a.aggregate.grade_pct} audit={a.aggregate.audit_summary} /></td>
                       )}
                     </tr>
                   );
@@ -1401,6 +1466,12 @@ export default function LibraryPage() {
                             {tr.tags.INSTRUMENTAL === "1" && (
                               <span className="chip bg-zinc-800 text-zinc-400 border border-border text-[10px] shrink-0">INST</span>
                             )}
+                            {/* the track's rating, beside the row's other
+                                marks — this cell wraps, so it never pushes
+                                into the column next door */}
+                            <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                              <StarRating size="sm" value={ratingOf(ratings, tr.path)} onChange={(v) => setRating(tr.path, v)} pending={pending(tr.path)} />
+                            </span>
                           </div>
                         </td>
                       )}
@@ -1410,11 +1481,15 @@ export default function LibraryPage() {
                       {trackCols.includes("genre") && <td className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, "genre")}`}>{tr.tags.GENRE ?? "—"}</td>}
                       {trackCols.includes("media") && <td className={`td${phoneHide(TRACK_PHONE_CLS, "media")}`}><MediaChip media={tr.tags.MEDIA} /></td>}
                       {trackCols.includes("duration") && (
+                        /* Duration only. A 64 px cell cannot hold the 70 px
+                           star block beside a length, and a fixed-layout
+                           table paints whatever does not fit over the next
+                           column — which is how the stars ended up on top of
+                           Bitrate. The rating rides in the Title cell, the
+                           one cell that wraps to hold its marks (the album
+                           page's tracklist has always drawn it there). */
                         <td className={`td text-zinc-500${phoneHide(TRACK_PHONE_CLS, "duration")}`}>
-                          <div className="flex items-center gap-2">
-                            <StarRating size="sm" value={ratingOf(ratings, tr.path)} onChange={(v) => setRating(tr.path, v)} pending={pending(tr.path)} />
-                            <span>{fmtDuration(tr.tech.length)}</span>
-                          </div>
+                          {fmtDuration(tr.tech.length)}
                         </td>
                       )}
                       {trackCols.includes("bitrate") && <td className={`td text-zinc-500${phoneHide(TRACK_PHONE_CLS, "bitrate")}`}>{fmtTech(tr.tech) || "—"}</td>}
@@ -1731,16 +1806,22 @@ function AlbumRowGroup({
                                 {t.tags.INSTRUMENTAL === "1" && (
                                   <span className="chip bg-zinc-800 text-zinc-400 border border-border text-[10px] shrink-0">INST</span>
                                 )}
+                                {/* the rating beside the row's other marks:
+                                    this cell wraps, the 80 px Dur column
+                                    beside it cannot */}
+                                <span className="shrink-0" onClick={(e) => e.stopPropagation()}>
+                                  <StarRating size="sm" value={ratingOf(ratings, t.path)} onChange={(v) => setRating(t.path, v)} pending={pending(t.path)} />
+                                </span>
                               </div>
                             </td>
                           )}
                           {trackCols.includes("genre") && <td className={`td text-zinc-500 break-words${phoneHide(TRACK_PHONE_CLS, "genre")}`}>{t.tags.GENRE ?? "—"}</td>}
                           {trackCols.includes("dur") && (
-                            <td className="td text-zinc-500">
-                              <div className="flex items-center gap-2">
-                                <StarRating size="sm" value={ratingOf(ratings, t.path)} onChange={(v) => setRating(t.path, v)} pending={pending(t.path)} />
-                                <span>{fmtDuration(t.tech.length)}</span>
-                              </div>
+                            /* Folds with its siblings on a phone: `dur` is the
+                               id this table's header uses for the same column
+                               the Tracks view calls `duration`. */
+                            <td className={`td text-zinc-500${phoneHide(TRACK_PHONE_CLS, "dur")}`}>
+                              {fmtDuration(t.tech.length)}
                             </td>
                           )}
                           {trackCols.includes("bitrate") && (

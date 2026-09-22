@@ -13,6 +13,7 @@ Sources of truth (change these and this document is wrong until it is updated):
 | The presets | `web/src/pages/GradingPage.tsx` `applyPreset` |
 | Script ids, titles, order | `mlo/cli.py` `SCRIPTS`, `server/script_runners.py` `RUNNERS`, `mlo/config.py` `DEFAULT_RUN_ALL_ORDER`, `server/imports.py` `DEFAULT_CHAIN` |
 | Tag families and writers | `mlo/audio.py` `TAG_MAP`, `server/tags_registry.py` `TAG_FAMILY` / `TAG_WRITER` |
+| Advisory ratings | `mlo/advisory.py` (the ladder and the AI rubric), `mlo/advisory_words.py` (the lexicon and its mild tier) |
 | Audit evidence | `mlo/audit.py`, `mlo/discs.py` |
 
 Notation: **ON**/**off** is the shipped `DEFAULT_CONFIG` value of a check.
@@ -27,6 +28,15 @@ Grade script (4) over an album and reading the report.
   on every track, file and album slot passed; otherwise `FAIL` with the failed
   checks itemized. There are no partial grades and no letters
   (`mlo/grader.py:run_grade_library`, `grade_dist`).
+- **R1a — an issue the verdict lists is an issue the verdict charges.** Every
+  entry in an album's `issues` costs at least one failed check, so the dot, the
+  percentage and the *N problems to fix* list can never disagree: an album
+  cannot be a `PASS` while it displays a problem. A readout that names something
+  the grade would not charge — the CD legs' *nothing established* line (§5,
+  R26) — is charged as its own check rather than left as a note beside a green
+  verdict, and the artist rollup carries its own `pass` flag (`failed == 0`)
+  instead of deriving one from the ROUNDED `grade_pct`, which at a few thousand
+  checks rounds one failure up to `100.0`.
 - **R2 — the score is a check count, not a percentage of files.**
   `total_checks` counts every enabled assertion evaluated,
   `pass_count = max(0, total_checks - failed_checks)`, and the report prints
@@ -114,15 +124,26 @@ exception.** `import_scripts` replaces it outright; an empty list means the
 default, which is `DEFAULT_RUN_ALL_ORDER` minus `LIBRARY_WIDE_SCRIPTS` — one
 list, so a script added to Run All cannot go missing from an import, and the
 scripts an import deliberately does not run are named as data with their reason
-rather than kept as a second hand-written list. Today the set holds exactly one
-id: **20 (Scan library layout)**, whose runner walks the whole music folder and
-writes ONE report about the whole library (the Library page warns from that
-stored report) — running it once per imported album would re-walk the library
-for every import and overwrite the report with a partial scan. Script 21 is
-per-album and does run on import. `import_auto_scripts` (ON) off still means
-"run nothing after import".
+rather than kept as a second hand-written list. The exception set is **empty
+today**: it held 20 (Scan library layout) while that runner walked the whole
+music folder and wrote ONE report about the library, which an import would have
+re-scanned once per album and then overwritten with a partial scan. Script 20
+now scopes BOTH its scan and its fixes to `targets` when a run names them (and
+stores no report for a scoped run, so a one-album pass can never become "the
+last scan" the Library page warns from), which is what lets the import chain run
+it per album — after 14 (beets has put the folder in its canonical place) and
+before 4 (so the grade reads the fixed layout). A library-wide Run All still
+gets the whole-folder pass and the stored report. `import_auto_scripts` (ON) off
+still means "run nothing after import".
 **R10 — a failing script is reported, never fatal**: the chain carries on and
 per-script results are returned (`server/script_runners.py`).
+**R10a — a script's report counts each file ONCE.** Every file a script looked
+at leaves with exactly one verdict in its stats — written, skipped or failed —
+so `scanned == modified + skipped + errors` holds for the run and a file can
+never be reported as both written and skipped. Script 10 counted a file it had
+just formatted as *skipped* as well, which made a pass that changed nothing look
+like a pass that did something; a tag write that fails is now reported with its
+file (`stats["errors"]`) instead of only bumping a counter.
 
 | # | Title | What it does | Changes | Destructive | Network |
 | --- | --- | --- | --- | --- | --- |
@@ -145,7 +166,7 @@ per-script results are returned (`server/script_runners.py`).
 | 17 | Lyrics transliterate (AI) | Romanization/translation tags and sidecars, re-synced at `lrc_sync_level` | `TRANSLITERATION-*`, `TRANSLATION-*`, sidecars | no | **yes** (configured AI endpoint) |
 | 18 | Publish lyrics (LRCLIB) | Submits missing lyrics to the community database | nothing locally | no (external side effect) | **yes** (LRCLIB) |
 | 19 | Optimize artist images | Re-fits `Artists/<Artist>/artist.*` to `artist_image_aspect` / `artist_image_target_size`, re-encodes as `artist.jpg`/`artist.png` | the artist image in place (only when it has to move) | re-encodes in place; never deletes | no |
-| 20 | Scan library layout | The music folder's shape against `<music>/Artists/<Artist>/<Album>/…`: audio at the root or in an artist folder, stray files, unexpected folders, empty albums, `wrong_case` rows. Read-only — it moves nothing. Writes ONE report describing the whole library to `<music>/.mlo/data/`, which the Library page warns from; it ignores `targets` on purpose and is therefore not run by an import (R9) | one report file | no | no |
+| 20 | Scan library layout | The music folder's shape against `<music>/Artists/<Artist>/<Album>/…`: audio at the root or in an artist folder, stray files, unexpected folders, empty albums, `wrong_case` rows. FIXES the unambiguous three when `layout_apply` (ON) is set — a wrong-case name is renamed, audio outside an album folder is moved into the one its tags name, an album-less artist folder goes to the Trash — and reports the rest as left alone, with the reason. Writes ONE report describing the whole library (plus a `fixes` list) to `<music>/.mlo/data/`, which the Library page warns from; scoped to `targets` when a run names them, and library-wide when it does not (R9) | one report file + the renamed/moved paths | `layout_apply` | no |
 | 21 | Fix AcoustID pairs | Completes an INCOMPLETE `ACOUSTID_ID`/`ACOUSTID_FINGERPRINT` pair — the failure `Missing ACOUSTID_FINGERPRINT (incomplete AcoustID pair)`, which had no fixer before. An id already on the file has its fingerprint recomputed locally; the reverse half needs a lookup and is counted, never invented | `ACOUSTID_ID`, `ACOUSTID_FINGERPRINT` | no | only when the id half must be looked up |
 
 **R11 — force flags are the only way to redo work.** Each script has one, and it
@@ -153,8 +174,16 @@ is what makes the script look at a file it has already processed:
 `force_lyrics` (1), `force_cue` (2), `force_reencode_flac` (3), `force_reencode_images`
 (5), `force_audit` (6), `force_dr_replaygain` (7), `force_auto_tag` (8),
 `force_accurip` (9), `force_audiometa` (12), `force_mood` (16), `force_xlit` (17),
-`force_publish` (18), `force_tracklist` (15). Grade (4) and Scan library layout (20) need none — both
-re-read. The *Re-run & overwrite* menu on any selection sets exactly these keys.
+`force_publish` (18), `force_tracklist` (15). Grade (4) needs none — it re-reads.
+Scan library layout (20) carries `layout_apply`, the ONE key that turns work OFF
+instead of forcing a redo: the scan always reports, and the key is what lets it
+rename and move (see §2's row 20). A supplied force dict is authoritative AND
+complete — every flag it does not name is cleared — so the *Re-run & overwrite*
+menu sends a COMPLETE selection: a saved one is completed with the defaults
+(`web/src/lib/force.ts::loadForceSel`), which is what keeps a switch added later
+from being silently off for everyone who had ever opened the menu. A caller that
+sends a partial dict gets the authoritative reading: the flags it names are set
+and the rest are off. The menu on any selection sets exactly these keys.
 **R12 — a switched-off feature skips its script** instead of running it as a
 no-op: `dr_replaygain_enabled` (7), `audiometa_enabled` (12), `mood_enabled` (16),
 `lyrics_xlit_enabled` / `lyrics_translate_enabled` (17), `lrclib_auto_publish`
@@ -359,9 +388,12 @@ evidence matters.
   live readout (library, album and track pages) computes the same three legs
   R21 does: all three pass → `REAL`, any leg fails → `FAKE` with the leg named,
   and a leg that could not be evaluated is named as *missing* and the stored
-  verdict is shown as it is rather than guessed — one absence never costs two
-  checks, because each leg's own artefact already has its own graded check
-  (`LOG_GRADE`, `CRC` / `LOG_CHECKSUM`, `AccurateRip`). The
+  verdict is shown as it is rather than guessed. A missing leg is a **failed
+  check** — charged once for the album, however many legs and tracks it covers —
+  because the readout is rendered as a problem to fix and R1a forbids a pass
+  beside a listed problem: an album whose AccurateRip leg has no `.accurip`
+  behind it reads `FAIL` with that leg named, and the check clears when script 9
+  establishes the leg or `audit_require_accuraterip` is switched off. The
   evidence-satisfied reading survives only where it was written for: a track
   carrying NO stamped verdict whose own evidence (a verifying `.log` checksum or
   a REAL `.accurip`) proves the rip is reported `REAL`, with
@@ -635,6 +667,92 @@ Even a forced re-rate rewrites only with evidence: the invented
   `grade_check_tag_case` fails a value the writers would have fixed. One rule
   in one place — the grader can never fail what a writer produces.
 
+### 7.7 Advisory rating (`ITUNESADVISORY`)
+
+`ITUNESADVISORY` is `0` (not explicit), `1` (explicit) or `2` (a clean/edited
+edition); an absent tag is *unrated*, never 0. The value is decided by the ladder
+in `mlo/advisory.py::decide_advisory`, which asks for evidence in a fixed order
+and records which stage answered (`source`), plus the words it saw (`hits`).
+
+- **R61 — the providers are a source, and the merge rule is `1 > 0 > 2`.**
+  `server/integrations.py::resolve_advisory_route` asks Deezer/Spotify (ISRC),
+  Apple, Discogs and YouTube, and `merge_advisory` settles what they said: a
+  stated 1 beats everything, then a stated 0, then a clean edition's 2.
+- **R62 — the AI judges the SONG, not its vocabulary.** With
+  `advisory_ai_classify` (ON) and a provider configured, the model is asked once
+  per track and fed the track's own lyrics, read off the file (embedded first,
+  else the `.lrc` sidecar — the read `mlo/lyrics_publish.py::local_lyrics`
+  does). Its rubric is the song's subject and tone, not a keyword count: `1` is
+  excessive profanity, a slur or a very strong word, or graphic
+  sex/violence/drug use; a mild word in passing — a lone `ass`, `damn` or
+  `hell`, an idiom, a quoted word, a word ordinary in another language — is `0`.
+  The lyrics may be in ANY language or script, and the model must judge them in
+  that language rather than answering 3 because they are not English. Its answer
+  is a SOURCE in R61's merge: it overrules a stated 0 or 2 only when it READ the
+  words, is recorded in the reply's per-source map either way, and `3` (or an
+  unparseable reply) falls through the ladder. Provenance ids: `ai-lyrics` (the
+  words were read) and `ai` (they were not).
+- **R63 — the word scan is the last resort, and its mild tier decides nothing.**
+  With the AI off or silent, `mlo/advisory_words.py` scans the lyrics: only a hit
+  from the lexicon's STRONG set makes a track `1`. The MILD tier (`ass`,
+  `asses`, `arse`, `culo`, …) is reported in `hits` and never decisive, so a
+  lyric whose only hits are mild is `0` like any clean track. Matching is
+  whole-token — `ass` never fires inside `class`, `grass` or `bass` — with leet,
+  censored (`f***ing`) and drawn-out spellings seen through, and LRC scaffolding,
+  timestamps, section headers and provider credit lines are stripped before the
+  scan. A track with no lyrics states nothing: the scan never reads silence as
+  clean.
+- **R64 — an instrumental is settled first, and the fallback is the user's.**
+  `INSTRUMENTAL=1` with `auto_zero_advisory_for_instrumental` (ON) is `0` before
+  anything is asked, and costs no AI call. When every stage above was silent,
+  `advisory_fallback` decides: `0` (shipped), `2`, or `none` to write nothing at
+  all. An invented fallback value never overwrites a rating a file already
+  carries — only evidence lowers a rating.
+- **R65 — a stated 0 is escalateable, one way.** A provider's 0 is not final
+  (Deezer's `explicit_lyrics: false` also covers "not classified", Apple's
+  `notExplicit` is the master's own flag), so the stages that read the words run
+  as explicit-only signals and a STRONG hit turns the 0 into `1` with a source
+  naming the signal (`lyrics-scan (escalated)`, `ai-lyrics (escalated)`). A mild
+  hit is not a contradiction: the stated 0 stands, credited to its provider. The
+  scan never turns a stated 1, or a clean edition's 2, into anything else.
+
+### 7.8 Tool dependencies and update detection
+
+The Dependencies page — and the setup wizard's copy of the same rows — answers
+three different questions about each external tool and keeps them apart:
+`state` says whether what is installed is behind the publisher's newest release,
+`install_kind` says who installs it on this host, and `action` says what the
+row's own button offers. `mlo/fetchdeps.py::dependency_rows` is the single
+source of truth for all of them (`GET /api/dependencies`), so the page, the CLI
+table and the auto-update worker cannot disagree.
+
+- **R66 — a row that is behind says so, whoever installs it.** `state` is `ok`,
+  `update`, `missing` or `error`; `update` means the upstream release the check
+  found is NEWER than what is installed (`update_available`), and a tool the
+  distro provides is still behind when its package is. It is never forced back
+  to `ok` because this app cannot fetch it, and the header's *N update(s)
+  available* counts exactly the rows whose chip is amber — one predicate, so the
+  count and the table cannot disagree.
+- **R67 — what can be done is a separate fact.** `install_kind` is `deps` (the
+  installer fetches a pinned Windows build, a native Linux build or a pip
+  package into `.dependencies`), `system` (the OS package manager owns the
+  tool) or `unsupported` (no build for this platform), and `action` is
+  `install` / `update` / `upgrade` / `none`. A `deps` row installs and updates
+  in-app, with the row's own button; a `system` row behind upstream offers
+  `upgrade`, whose `upgrade_command` is the exact package-manager command for
+  this host (`apt-get install --only-upgrade <pkg>`, built from
+  `LINUX_PACKAGES`) — copied, never executed, because the app does not drive a
+  package manager.
+- **R68 — the page's own action is always on screen.** Install/Update-all is
+  sticky (it does not scroll away with the first rows) and is disabled only when
+  there is nothing this host can install, with the reason in its title. It never
+  disappears, and it never offers a row this host cannot install.
+- **R69 — detection matches what the installer writes.** A tool installed into
+  `.dependencies` must be what detection reports (`mlo/tools.py`'s per-tool
+  `_exe` field map), or an update the installer performed would be invisible,
+  the row would keep reading the PATH copy, and its amber chip could never
+  clear.
+
 ---
 
 ## 8. Recommended runbook
@@ -643,10 +761,14 @@ Nothing here is a substitute for the app's own Dependencies page: run it first
 and install what the platform supports.
 
 1. **Before touching anything** — set the music folder, then script **20 (Scan
-   library layout)** and script **4 (Grade)**. Both are read-only: the grade
-   tells you what is missing, and the layout report tells you where the
-   canonical `<music>/Artists/<Artist>/<Album>/…` shape is not met (misplaced
-   audio, stray files, empty folders, `wrong_case`). Script 20 writes that one
+   library layout)** and script **4 (Grade)**. The grade is read-only and tells
+   you what is missing; script 20 walks the canonical
+   `<music>/Artists/<Artist>/<Album>/…` shape and, with `layout_apply` (ON),
+   fixes the three findings that have exactly one answer — a wrong-case name is
+   renamed, audio outside any album folder is moved into the one its own tags
+   name, an album-less artist folder goes to the Trash — while everything else
+   (stray files, unexpected folders, empty albums) is reported and left alone.
+   Set `layout_apply` off for a report-only pass. Script 20 writes that one
    report to `<music>/.mlo/data/` and the Library page warns from it, so the
    same facts are one click away from the album list.
 2. **Fix the folders before the tags** — *Organize* (or script 14, whose beets
@@ -660,10 +782,12 @@ and install what the platform supports.
    2/1 canonicalize sidecars, 13/18 fetch and publish lyrics, 17 adds
    transforms, 8 writes mood/energy/genre/advisory, 5 normalizes images, 6
    audits, 7 measures DR/ReplayGain, 9 writes `.accurip`, 12 writes key/BPM, 16
-   is the standalone mood pass, 10 is the final canonical pass, 20 reports the
-   library's shape, 21 completes any half-written AcoustID pair and 4 grades.
-   An **import** runs the same list minus 20 (R9): the layout report is about
-   the whole library, so an import would only re-walk it.
+   is the standalone mood pass, 10 is the final canonical pass, 20 puts the
+   library's shape right, 21 completes any half-written AcoustID pair and 4
+   grades.
+   An **import** runs the same list (R9): script 20 is scoped to the album just
+   imported, so the layout it fixes and reports on is that album's, and the
+   grade at the end of the chain reads the fixed folder.
 4. **Re-run only what failed.** Every script is idempotent by default: it skips
    files that already carry the work, so a second *Run All* is safe and cheap.
    To redo a specific thing use its force flag (§2, R11) — that is the only way
@@ -676,7 +800,8 @@ and install what the platform supports.
    report "nothing to do" — a run that changed nothing must be able to say why
    in terms of the files it looked at, not in terms of a scope it never had.
 
-Safe to re-run at any time: **4** and **20** (both read-only), 2, 1, 5, 6, 7, 8,
+Safe to re-run at any time: **4** (read-only) and **20** (idempotent — a library
+already in the canonical shape has nothing left to fix), 2, 1, 5, 6, 7, 8,
 9, 10, 12, 13, 15, 16, 17, 21 (it acts only on a file holding half a pair).
 Re-running 3/11 only replaces files whose conversion/remux has not happened yet,
 unless their force flags are set. **Needs a human decision**:
@@ -790,7 +915,17 @@ the viewer computes per-file sidecar grades; it adds no check).
 - Grading never rewrites a tag. Every failure names the script that fixes it
   (`run organize`, `run Auto tagging (8)`, `run Audit Library`, …) and the Grade
   script stays read-only.
-- Platform decides what is possible: AccurateRip generation, the Logchecker
-  grade and the AudioAuditor audit need Windows-only tools, so a Docker/Linux
-  server reports those checks as unavailable rather than failed
-  (`GET /api/capabilities`).
+- Platform decides what is possible, and the app installs what it can rather
+  than assuming a Windows host: CUETools ships Windows binaries and runs under
+  the **mono** runtime (`LINUX_BINARIES.cuetools` + `LINUX_RUNNERS`, and the
+  Docker image installs `mono-runtime`), AudioAuditor has native Linux builds,
+  and the Logchecker phar runs on the image's `php-cli` — so AccurateRip
+  generation, the log grade and the audit all work on a Linux server. What a
+  given host cannot do is reported by `GET /api/capabilities` and shown on the
+  Dependencies page as a row with the reason and, where the OS package manager
+  owns the tool, the exact command that installs or upgrades it — never as a
+  failed check. A tool with no build for this machine's architecture (libjxl and
+  libjpeg-turbo upstream ship none the app can unpack; rsgain has no ARM Linux
+  asset) stays a `system` row on Linux: it is graded normally when the distro
+  provides it, and its row says what upstream has and what the package manager
+  would install.

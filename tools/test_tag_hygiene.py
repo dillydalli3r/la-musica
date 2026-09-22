@@ -249,6 +249,14 @@ ISO.update({
     "grade_check_tag_case": True,
     "grade_check_tag_spaces": True,
     "grade_check_tag_blank_lines": True,
+    # The CD legs: the fixture is a CD-tagged folder with no rip artefacts (no
+    # .log, no .accurip), so the readout would charge "nothing established the
+    # CD verdict's '<leg>' leg" — a real failure for a real disc folder, and
+    # not what this file grades. The CD evidence rules have their own suite
+    # (test_cd_audit.py).
+    "audit_require_accuraterip": False,
+    "audit_verify_log_checksum": False,
+    "audit_log_score_threshold": 0,
 })
 
 case_track = os.path.join(tmp, "Album", "01 - Case.flac")

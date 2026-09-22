@@ -769,8 +769,59 @@ def rename_logs_for_discs(album_dir, discs=None, log_fn=None, config=None):
     return notes
 
 
+def _accurip_disc_by_track_crc(album_dir, filename, discs, claimed):
+    """The one disc whose tracks all match this .accurip's CRC table, or None.
+
+    CUETools prints each track's CRC-32 of the decoded audio in the EAC-style
+    table at the end of the log, and `_audio_crc32` reproduces that value from
+    the file on disk — real evidence of which disc an .accurip whose name
+    carries no disc number ("App.accurip") belongs to. That is the .accurip's
+    counterpart of the rip log's TOC-duration match above.
+
+    None when the file has no such table, no ffmpeg can decode the audio, or
+    the match is not UNIQUE: renaming onto the wrong disc's name makes grading
+    read the other disc's verdict, which is worse than leaving the file alone.
+    """
+    try:
+        from .accurip import parse_accurip_track_crcs
+    except Exception:
+        return None
+    try:
+        with open(os.path.join(album_dir, filename), "r",
+                  encoding="utf-8", errors="replace") as fh:
+            table = parse_accurip_track_crcs(fh.read())
+    except OSError:
+        return None
+    if not table:
+        return None
+    try:
+        from .tools import detect_all_tools
+        ffmpeg_exe = (detect_all_tools().get("ffmpeg") or {}).get("ffmpeg_exe")
+    except Exception:
+        ffmpeg_exe = None
+    if not ffmpeg_exe or not os.path.isfile(ffmpeg_exe):
+        return None
+    matches = []
+    for d, paths in sorted(discs.items()):
+        if d in claimed or len(paths) < max(table):
+            continue
+        ordered = sorted(paths, key=lambda p: (_track_num_of(p) or 0,
+                                               _file_track_number(p) or 0))
+        for tn in sorted(table):
+            if _audio_crc32(ffmpeg_exe, ordered[tn - 1]) != table[tn]:
+                break
+        else:
+            matches.append(d)
+    return matches[0] if len(matches) == 1 else None
+
+
 def rename_accurip_for_discs(album_dir, discs=None, log_fn=None, config=None):
-    """Rename .accurip files to <pattern>.accurip using same logic as logs."""
+    """Rename .accurip files to <pattern>.accurip.
+
+    Same evidence order as the logs: an explicit disc number in the filename,
+    the single-disc fallback, then content — the log's per-track CRC table,
+    which is the .accurip's equivalent of the rip log's TOC durations.
+    """
     if config is not None and not config.get("discs_rename_enabled", True):
         return []
     pattern = _disc_pattern_for(config)
@@ -829,6 +880,19 @@ def rename_accurip_for_discs(album_dir, discs=None, log_fn=None, config=None):
                 remaining.remove(best)
             except ValueError:
                 pass
+    # 3) unique track-CRC match against the disc's own decoded audio. This is
+    #    the step a legacy name with no disc number needs: without it an
+    #    "App.accurip" on a multi-disc album stayed orphaned while the album
+    #    read REAL/FAKE off whatever that leftover file happened to say.
+    if remaining and len(claimed) < len(discs):
+        for f in list(remaining):
+            try:
+                d = _accurip_disc_by_track_crc(album_dir, f, discs, claimed)
+            except Exception:
+                d = None
+            if d is not None and d not in claimed:
+                claimed[d] = f
+                remaining.remove(f)
     for d, f in sorted(claimed.items()):
         src = os.path.join(album_dir, f)
         dst = os.path.join(album_dir, _disc_expected_name(pattern, d, ".accurip"))

@@ -65,6 +65,23 @@ RUNNER_KEYS = dict(fetchdeps.LINUX_RUNNERS)
 # Tools upstream publishes a native Linux build for: the *fetchable* half of a
 # Linux install, and the reason a container is no longer stuck without them.
 LINUX_NATIVE = tuple(fetchdeps.LINUX_BINARIES)
+# ...grouped by the architectures their assets cover. All but rsgain publish for
+# both of the 64-bit architectures installations run on; rsgain ships an x86-64
+# build only, so an ARM host has no rsgain download and takes the distro package
+# instead — which is why LINUX_PACKAGES keeps an entry for a tool that IS
+# installable here. Their per-architecture answers are checked below.
+LINUX_NATIVE_ARM_TOO = tuple(k for k, s in fetchdeps.LINUX_BINARIES.items()
+                             if "arm64" in s["patterns"])
+LINUX_NATIVE_X64_ONLY = tuple(k for k, s in fetchdeps.LINUX_BINARIES.items()
+                              if "arm64" not in s["patterns"])
+# The native entries upstream ALSO packages, i.e. the overlap between the two
+# tables: no build for the 32-bit architectures, so the package covers those.
+LINUX_PACKAGED_NATIVE = tuple(k for k in LINUX_NATIVE if k in fetchdeps.LINUX_PACKAGES)
+# The distro rows with no build at all: no asset upstream ships for ANY
+# architecture this app runs on. A key can be in both tables (rsgain,
+# chromaprint), and then LINUX_PACKAGES is the fallback for the architectures
+# LINUX_BINARIES has no pattern for.
+APT_ONLY = {k: v for k, v in APT_KEYS.items() if k not in fetchdeps.LINUX_BINARIES}
 PLATFORM_FREE = ("librosa", "beets", "yt-dlp", "logchecker")
 
 
@@ -141,17 +158,32 @@ for key in fetchdeps.DISPLAY_NAMES:
 
 with runners(True):
     # EVERY tool the app knows, on Linux: upstream's native build (oxipng,
-    # slskd, AudioAuditor, CUETools through mono), the pip/source/phar set, or
-    # the distro package. There is no "cannot install this here" row left.
-    for key in LINUX_NATIVE + PLATFORM_FREE:
+    # slskd, AudioAuditor, CUETools through mono, and the rsgain/fpcalc pair),
+    # the pip/source/phar set, or the distro package. There is no "cannot
+    # install this here" row left for a 64-bit host.
+    for key in LINUX_NATIVE_ARM_TOO + PLATFORM_FREE:
         check(f"Linux installs {key} from its own release",
               fetchdeps.install_kind(key, platform="linux", machine="x86_64") == "deps")
         check(f"...on arm64 too",
               fetchdeps.install_kind(key, platform="linux", machine="aarch64") == "deps")
         check(f"...and offers it no refusal",
-              fetchdeps.install_problem(key, platform="linux") is None)
+              fetchdeps.install_problem(key, platform="linux", machine="x86_64") is None)
+    # rsgain is the exception: upstream ships an x86-64 Linux build and no ARM
+    # one, so an ARM host must fall back to the distro package rather than
+    # reading a download that does not exist.
+    for key in LINUX_NATIVE_X64_ONLY:
+        check(f"Linux/x86-64 installs {key} from its own release",
+              fetchdeps.install_kind(key, platform="linux", machine="x86_64") == "deps"
+              and fetchdeps.install_problem(key, platform="linux", machine="x86_64") is None)
+        check(f"Linux/arm64 falls back to the {key} distro package",
+              fetchdeps.install_kind(key, platform="linux", machine="aarch64") == "system")
 
-for key in APT_KEYS:
+# The grouping above has to cover the whole table, or a tool added to
+# LINUX_BINARIES silently skips every check in this file.
+check("the native table is exactly the arm-and-x64 and x64-only entries",
+      set(LINUX_NATIVE) == set(LINUX_NATIVE_ARM_TOO) | set(LINUX_NATIVE_X64_ONLY))
+
+for key in APT_ONLY:
     check(f"Linux reports {key} as the distro package",
           fetchdeps.install_kind(key, platform="linux", machine="x86_64") == "system")
 
@@ -166,12 +198,14 @@ with runners(False):
               problem and f"apt-get install {pkg}" in problem)
 
 # A container on a 32-bit ARM/x86 host: upstream ships no build for it, so the
-# row must say so instead of promising a download that cannot happen.
+# row must never promise a download — a tool upstream ALSO packages falls back
+# to that package, and the rest say why there is nothing to fetch.
 with runners(True):
     for key in LINUX_NATIVE:
-        check(f"{key} reports unsupported on an architecture it has no build for",
-              fetchdeps.install_kind(key, platform="linux", machine="armv7l") == "unsupported")
-    check("...and says why",
+        expected = "system" if key in LINUX_PACKAGED_NATIVE else "unsupported"
+        check(f"{key} on 32-bit ARM resolves to {expected}",
+              fetchdeps.install_kind(key, platform="linux", machine="armv7l") == expected)
+    check("...and a tool with no package says why",
           "architecture" in (fetchdeps.install_problem(
               "oxipng", platform="linux", machine="armv7l") or ""))
 
@@ -186,9 +220,11 @@ check("macOS does not pretend flac is an apt package",
 
 
 # The refusal is the row's own text, so what a user reads and what an install
-# would say cannot drift apart.
+# would say cannot drift apart. On a 32-bit ARM host every entry here is a
+# system row (no native build matches), so the package name is the whole answer
+# whatever this suite runs on.
 for key, pkg in APT_KEYS.items():
-    problem = fetchdeps.install_problem(key, platform="linux")
+    problem = fetchdeps.install_problem(key, platform="linux", machine="armv7l")
     check(f"{key}'s row names the distro package ({problem!r})",
           problem and f"apt-get install {pkg}" in problem)
 check("an installable tool carries no refusal",
@@ -280,13 +316,17 @@ check("...and callers run the mono launcher there, the .exe on Windows",
 # --------------------------------------------------------------------------- #
 with runners(True), simulated_platform("posix"):
     # "Install / update all" and the per-tool buttons read this list: every tool
-    # this platform can fetch — the native builds, the pip/source/phar set.
+    # this platform can fetch — the native builds upstream has an asset for on
+    # THIS architecture (rsgain is x86-64 only), the pip/source/phar set.
     installable = fetchdeps.installable_keys()
-    check("Install all on Linux lists exactly what it can fetch",
-          set(installable) == set(LINUX_NATIVE) | set(PLATFORM_FREE))
-    check("...and no tool is left without an install path",
-          set(installable) == {k for k in fetchdeps.DISPLAY_NAMES
-                               if fetchdeps.install_kind(k) != "system"})
+    check("Install all on Linux lists every platform-free tool",
+          set(PLATFORM_FREE) <= set(installable))
+    check("...and every native build upstream has an asset for here",
+          set(LINUX_NATIVE_ARM_TOO) | (
+              set(LINUX_NATIVE_X64_ONLY) if fetchdeps.linux_arch() == "x64" else set()
+          ) <= set(installable))
+    check("...and no distro row it cannot download",
+          not (set(APT_ONLY) & set(installable)))
 
     # The installer must go for oxipng's own release rather than refuse it.
     real_release = fetchdeps.get_latest_release
@@ -311,13 +351,19 @@ with runners(True), simulated_platform("posix"):
     finally:
         fetchdeps.get_latest_release = real_release
 
-    # The distro-provided tools still refuse — with the reason the row shows,
-    # and before anything is downloaded. Nothing else does: every other tool
-    # now has a fetch path on Linux (see LINUX_BINARIES).
-    for key, pkg in APT_KEYS.items():
+    # The distro-only tools still refuse — with the reason the row shows, and
+    # before anything is downloaded. rsgain and chromaprint no longer do: on
+    # x86-64 upstream publishes a build this app can unpack, so they install
+    # here and only fall back to their package on an architecture without one.
+    for key, pkg in APT_ONLY.items():
         e = install_fails(key)
         check(f"{key}: refused on Linux, naming the package ({e})",
               e is not None and f"apt-get install {pkg}" in str(e))
+    for key in LINUX_PACKAGED_NATIVE:
+        check(f"{key} is not refused on this host, its package is the fallback",
+              fetchdeps.install_kind(key, platform="linux", machine="armv7l") == "system"
+              and fetchdeps.install_problem(key, platform="linux",
+                                            machine="armv7l") is not None)
 
     # yt-dlp's Windows .exe is not what Linux installs: it is pip-routed
     # (PIP_ON_LINUX) and must NOT be refused, or Linux never gets it at all.
@@ -341,9 +387,9 @@ with runners(True), simulated_platform("posix"):
     for key in LINUX_NATIVE + PLATFORM_FREE:
         check(f"Linux reports {key}'s own version as the target",
               latest[key] == fetchdeps.PINNED[key]["version"])
-    for key in APT_KEYS:
-        check(f"Linux reports {key}'s target as apt: {APT_KEYS[key]}",
-              latest[key] == f"apt: {APT_KEYS[key]}")
+    for key in APT_ONLY:
+        check(f"Linux reports {key}'s target as apt: {APT_ONLY[key]}",
+              latest[key] == f"apt: {APT_ONLY[key]}")
     check("every Linux row reports either a version or its package",
           all(v for v in latest.values()))
 
@@ -478,7 +524,8 @@ check("...and on stderr, where jpegtran and fpcalc answer",
 
 
 # --------------------------------------------------------------------------- #
-# A distro package is never a dangling "Update"
+# A distro row behind upstream says so — and offers the command, not a dead
+# "Install" it cannot perform
 # --------------------------------------------------------------------------- #
 def rows_with(installed, target, upstream):
     """dependency_rows() for every tool, with the four lookups stubbed out."""
@@ -499,24 +546,45 @@ def rows_with(installed, target, upstream):
 
 
 with simulated_platform("posix"):
-    # rsgain: the distro ships 3.6, upstream has 3.8. There is no Install button
-    # for a distro package, so the row must not sit on an amber Update that
-    # nothing can clear — Ready, with the versions stated.
-    rows = rows_with({"rsgain": "3.6", "oxipng": "10.2.0"},
-                     {"rsgain": "apt: rsgain", "oxipng": "10.2.0"},
-                     {"rsgain": "3.8", "oxipng": "10.2.1"})
-    rs = rows["rsgain"]
-    check("a distro tool behind upstream still reads Ready", rs["state"] == "ok")
-    check("...and carries the versions in its note",
-          rs["note"] and "3.6" in rs["note"] and "3.8" in rs["note"])
+    # libjpeg-turbo: the distro ships 2.1.5, upstream has 3.2.0, and upstream
+    # publishes no Linux build this app can unpack (the release is .deb only) —
+    # so the row is BEHIND and has to say so, with the one action that is
+    # actually available: the package manager's own command. The regression this
+    # pins: state was forced to `ok` for every distro row, so the row read a
+    # green Ready beside an amber Available whose update no button could make.
+    rows = rows_with({"libjpeg_turbo": "2.1.5", "oxipng": "10.2.0"},
+                     {"libjpeg_turbo": "apt: libjpeg-progs", "oxipng": "10.2.0"},
+                     {"libjpeg_turbo": "3.2.0", "oxipng": "10.2.1"})
+    jt = rows["libjpeg_turbo"]
+    check("a distro tool behind upstream reads Update, not Ready",
+          jt["state"] == "update")
+    check("...and offers the upgrade the package manager performs",
+          jt["action"] == "upgrade"
+          and jt["upgrade_command"] == "apt-get install --only-upgrade libjpeg-progs")
+    check("...and is never offered a download",
+          jt["installable"] is False)
+    check("...and carries the versions and the command in its note",
+          jt["note"] and "2.1.5" in jt["note"] and "3.2.0" in jt["note"]
+          and jt["upgrade_command"] in jt["note"])
     check("...and still shows the newer upstream version",
-          rs["update_available"] is True and rs["upstream_version"] == "3.8")
-    check("...and is never offered an install", rs["installable"] is False)
+          jt["update_available"] is True and jt["upstream_version"] == "3.2.0")
 
-    # oxipng is app-managed: Update IS actionable, so it must stay.
+    # oxipng is app-managed: Update IS actionable, so it must stay a download —
+    # same state, different action, which is the whole point of the split.
     ox = rows["oxipng"]
     check("an app-managed tool behind upstream still reads Update",
-          ox["state"] == "update" and ox["installable"] is True)
+          ox["state"] == "update" and ox["installable"] is True
+          and ox["action"] == "update" and ox["upgrade_command"] is None)
+
+    # A distro row AT the upstream version is up to date, and its action column
+    # stays empty: there is nothing to copy and nothing to press.
+    rows = rows_with({"libjpeg_turbo": "3.2.0"}, {"libjpeg_turbo": "apt: libjpeg-progs"},
+                     {"libjpeg_turbo": "3.2.0"})
+    jt = rows["libjpeg_turbo"]
+    check("a distro tool at the upstream version reads Ready",
+          jt["state"] == "ok" and jt["action"] == "none"
+          and jt["upgrade_command"] is None
+          and jt["installable"] is False)
 
 
 # --------------------------------------------------------------------------- #

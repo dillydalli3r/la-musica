@@ -10,6 +10,9 @@ export interface Aggregate {
   pass_count: number;
   total_checks: number;
   grade_pct: number | null;
+  /** The artist's verdict by the albums' own rule (failed checks == 0).
+   *  Not derivable from grade_pct, which is rounded. */
+  pass?: boolean;
   audit_summary: "REAL" | "FAKE" | "Mix" | null;
 }
 
@@ -253,12 +256,26 @@ export interface LayoutIssue {
   abs: string;
   detail: string;
   hint: string;
+  /** What Apply fixes would do about this row (absent = nothing may act on
+   *  it, so the row is a report and nothing else). */
+  fix?: { action: "rename" | "move" | "trash"; to?: string };
+}
+
+/** What the apply phase did about one row — or why it left it alone. */
+export interface LayoutFix {
+  kind: string;
+  path: string;
+  result: "fixed" | "failed" | "skipped";
+  /** The outcome in words, e.g. `renamed Artists/lower to "Lower"`. */
+  action: string;
 }
 
 export interface LayoutReport {
   folder: string;
   artists_dir: string;
   exists: boolean;
+  /** What is STILL wrong. A run that fixed something drops the rows it fixed,
+   *  so this always describes the library as it is now. */
   issues: LayoutIssue[];
   /** issue kind → count. */
   counts: Record<string, number>;
@@ -266,6 +283,12 @@ export interface LayoutReport {
   albums: number;
   artists: number;
   audio_files: number;
+  /** Only after an apply (script 20 with layout_apply on, or the panel's
+   *  Apply fixes): every row the run acted on, or decided not to. */
+  fixes?: LayoutFix[];
+  fixed?: number;
+  fix_failed?: number;
+  skipped?: number;
 }
 
 /** The report the LAST layout scan stored under `<music>/.mlo/data` — what

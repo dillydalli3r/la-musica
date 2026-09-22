@@ -235,11 +235,12 @@ imports.run_cover_step = _stub_cover_step
 # What the chain did, and where: the point of the whole suite.
 CHAIN_CALLS = []
 CHAIN_MOVE = None       # callable(folder) — emulates beets/organize moving it
+CHAIN_FINAL = None      # [folder] — where the chain says it ended up
 CHAIN_RAISE = None      # exception instance — emulates a chain that cannot start
 
 
 def stub_run_chain(cfg, ids, targets=None, force=None, progress=None,
-                   wait=False, timeout=None):
+                   wait=False, timeout=None, final=None):
     folder = norm((targets or [""])[0])
     entry = {"ids": list(ids), "target": folder, "wait": bool(wait),
              "force": force, "chain": None}
@@ -255,6 +256,12 @@ def stub_run_chain(cfg, ids, targets=None, force=None, progress=None,
     entry["chain"] = [r["id"] for r in results]
     if CHAIN_MOVE is not None:
         CHAIN_MOVE(folder)
+    # The chain reports the folders it ended on (`server.script_runners.
+    # run_chain(final=…)`): the target itself when nothing moved it, and
+    # whatever a moving script declared when something did. An import adopts
+    # it, so a move that also renamed every file is still reported correctly.
+    if final is not None:
+        final[:] = [norm(p) for p in (CHAIN_FINAL or targets or [])]
     entry["returned"] = len(results)
     return results
 
@@ -806,6 +813,52 @@ def check_midchain_move():
 
 
 check_midchain_move()
+
+
+def check_chain_final_target():
+    """An import reports where the chain ENDED, not the folder it was handed.
+
+    The chain follows an album a script moved (`_follow_moved_targets`: script
+    14 imports it into the library and renames every file with it) and reports
+    the folder it ended on; `_resolve_moved_album`'s MusicBrainz-id lookup is
+    the fallback for a chain that had to give up, and it can say nothing at all
+    for an album that carries no id yet — which is every album before the
+    importer stamps one. Without the chain's own answer the import keeps naming
+    the staging folder the audio has already left, and every caller that links
+    to the album (the wizard's "Open album", the queue row) lands on a folder
+    with nothing in it.
+    """
+    from server import mbresolve
+
+    before = os.path.join(LIB, "Test Artist 9", "2001 - Final Target (raw)")
+    album_of("2001 - Final Target (raw)", root=os.path.join(LIB, "Test Artist 9"))
+    write_tagged_wav(os.path.join(before, "01 - track.wav"),
+                     {"ALBUM": "Final Target", "ALBUMARTIST": "Test Artist 9"})
+    after = os.path.join(LIB, "Test Artist 9", "2001 - Final Target")
+
+    def move(folder):
+        if os.path.isdir(folder):
+            os.makedirs(os.path.dirname(after), exist_ok=True)
+            shutil.move(folder, after)
+
+    real_heal = mbresolve.heal_row
+    # No MusicBrainz id on this album, so the fallback has nothing to follow.
+    mbresolve.heal_row = lambda kind, path, ref: ""
+    global CHAIN_MOVE, CHAIN_FINAL
+    CHAIN_MOVE, CHAIN_FINAL = move, [after]
+    try:
+        res = imports.finish_album(before, CFG)
+    finally:
+        CHAIN_MOVE = CHAIN_FINAL = None
+        mbresolve.heal_row = real_heal
+    eq(res["path"], norm(after),
+       "the import reports the folder the chain ended on")
+    ok(os.path.isfile(os.path.join(after, "01 - track.wav")),
+       "which is where the album's audio is")
+    ok(not os.path.isdir(before), "and not the folder the audio left")
+
+
+check_chain_final_target()
 
 # --------------------------------------------------------------------------- #
 print()

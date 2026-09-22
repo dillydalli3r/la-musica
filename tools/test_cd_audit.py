@@ -183,8 +183,15 @@ try:
        f"({tr.get('audit')} / {tr.get('issues')})")
     ok(tr.get("audit_verified") == "log-checksum",
        f"the verdict says WHAT verified it ({tr.get('audit_verified')})")
-    ok(res["pass_count"] == res["total_checks"],
-       f"the album passes a verified CD rip ({res['pass_count']}/{res['total_checks']})")
+    # …and the album is still one check short, because a REQUIRED leg has
+    # nothing behind it: the readout names the AccurateRip leg as a problem to
+    # fix, and an album cannot be a pass beside a problem it lists (the case
+    # below, where every leg is established, is the pass).
+    ok(res["pass_count"] == res["total_checks"] - 1
+       and any("'accuraterip' leg" in i for i in res["issues"]),
+       f"a rip verified by its log is REAL, and the album is one check short "
+       f"while the AccurateRip leg is unestablished "
+       f"({res['pass_count']}/{res['total_checks']}, {res['issues']})")
 finally:
     _dm.check_log_checksum = _real_check
 
@@ -195,9 +202,26 @@ res = _grade_album(ALBUM, "EMBEDDED", _cfg())
 tr = res["tracks"][0]
 ok(tr.get("accuraterip_status") == "REAL",
    f"the .accurip verdict is REAL ({tr.get('accuraterip_status')})")
-ok(tr.get("audit") == "REAL" and res["pass_count"] == res["total_checks"],
-   f"an accurately-ripped disc passes without a valid log checksum "
-   f"({res['pass_count']}/{res['total_checks']})")
+ok(res["pass_count"] == res["total_checks"] - 1
+   and any("'checksums' leg" in i for i in res["issues"]),
+   f"an accurately-ripped disc reads REAL, and the album is one check short "
+   f"while the rip log — the checksums leg — is gone "
+   f"({res['pass_count']}/{res['total_checks']}, {res['issues']})")
+
+print("== every leg established: the album passes ==")
+# The other side of the rule above. With the .accurip in place AND the log's
+# checksum verifying, each required leg has evidence, nothing is listed, and
+# the album is a pass — which is what running script 9 over a disc the
+# AccurateRip database knows clears the readout the case above names.
+write_log((f"{real_crc:0>8}".upper() if real_crc else "00000000"))
+_dm.check_log_checksum = lambda _p: ("ok", None)
+try:
+    res = _grade_album(ALBUM, "EMBEDDED", _cfg(audit_log_score_threshold=0))
+finally:
+    _dm.check_log_checksum = _real_check
+ok(res["pass_count"] == res["total_checks"] and not res["issues"],
+   f"a disc whose every required leg has evidence is a pass "
+   f"({res['pass_count']}/{res['total_checks']}, {res['issues']})")
 
 print("== no verification: the old rule still applies ==")
 os.remove(os.path.join(ALBUM, "CD-1.accurip"))

@@ -7,6 +7,7 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
+  Copy,
   Eye,
   EyeOff,
   FolderOpen,
@@ -227,6 +228,19 @@ export default function SetupPage() {
     } finally {
       setBusy(false);
       setBusyDep(null);
+    }
+  };
+
+  /** Hand a distro row's own upgrade command to the clipboard. The command is
+   *  the backend's (never spelled out here) and is copied, not run: this app
+   *  does not drive a package manager. Same wording as the Dependencies page,
+   *  which offers the same button for the same rows. */
+  const copyCommand = async (cmd: string) => {
+    try {
+      await navigator.clipboard.writeText(cmd);
+      toast.success(`Copied: ${cmd}`);
+    } catch {
+      toast.error(`Could not reach the clipboard — run it yourself: ${cmd}`);
     }
   };
 
@@ -716,28 +730,40 @@ export default function SetupPage() {
                             "—"
                           )}
                         </td>
-                        {/* The row's own Install/Update, mirroring the chip
-                            beside it: a tool this device cannot install gets no
-                            button, and the row's own note/install_note is the
-                            hover text, so the button never promises more than
-                            the row it belongs to. */}
+                        {/* The row's own action, the same one the Dependencies
+                            page offers (the backend's `action` field decides):
+                            `install`/`update` press this row's install,
+                            `upgrade` copies the package manager's command
+                            instead — a distro tool this app cannot download
+                            over — and `none` is nothing to do here, with the
+                            chip and install_note saying why. The row's own
+                            note/install_note is the hover text, so the button
+                            never promises more than the row it belongs to. */}
                         <td className="td">
-                          {(t.state === "missing" || t.state === "update") && (
+                          {t.action === "install" || t.action === "update" ? (
                             <button
                               className="btn-ghost !py-0.5 text-[11px] tap"
                               onClick={() => installDeps([t.key], t.key)}
-                              disabled={busy || !!deviceReason || t.installable === false}
+                              disabled={busy || !!deviceReason}
                               title={
                                 deviceReason ??
-                                (t.state === "update"
+                                (t.action === "update"
                                   ? t.note ?? (t.upstream_version ? `Upstream: ${t.upstream_version}` : undefined)
                                   : t.install_note ?? t.note ?? undefined)
                               }
                             >
                               {busyDep === t.key ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-                              {t.state === "update" ? "Update" : "Install"}
+                              {t.action === "update" ? "Update" : "Install"}
                             </button>
-                          )}
+                          ) : t.upgrade_command ? (
+                            <button
+                              className="btn-ghost !py-0.5 text-[11px] tap"
+                              onClick={() => copyCommand(t.upgrade_command!)}
+                              title={t.note ?? t.upgrade_command}
+                            >
+                              <Copy className="h-3 w-3" /> Copy command
+                            </button>
+                          ) : null}
                         </td>
                       </tr>
                     ))}

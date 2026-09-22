@@ -342,7 +342,7 @@ export default function ArtistPage() {
                       checks vs. the artist folder's own image/description checks */}
                   <span className="inline-flex items-center gap-1.5 whitespace-nowrap" title="Grading of this artist's albums">
                     <GradeBadge
-                      pass={(data.aggregate.grade_pct ?? 0) >= 100 && !auditFails(data.aggregate.audit_summary)}
+                      pass={!!data.aggregate.pass && !auditFails(data.aggregate.audit_summary)}
                       score={data.aggregate.grade_pct}
                       audit={data.aggregate.audit_summary}
                     />

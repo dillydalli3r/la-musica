@@ -62,15 +62,18 @@ from server import tagcache
 # one out is a declaration someone can read rather than a second list someone
 # has to diff. Nothing else may be dropped: a script added to the run order
 # lands in this chain unless it is named here.
-LIBRARY_WIDE_SCRIPTS = (
-    # 20 Scan library layout: its runner walks the ENTIRE music folder and
-    # writes ONE report describing the whole library (the Library page warns
-    # from that stored report), ignoring `targets` on purpose. Run All runs it
-    # once; an import chain would re-walk the library once per imported album —
-    # the opposite of what an import should cost — for a report about the
-    # library rather than the album being imported.
-    20,
-)
+#
+# The tuple is empty today, and 20 (Scan library layout) is why it was not: its
+# runner used to walk the ENTIRE music folder and write ONE report describing
+# the whole library, ignoring `targets` on purpose, so an import chain would
+# have re-walked the library once per album for a report about the library
+# rather than the album being imported. It now scopes itself to `targets` when
+# it is given any (`mlo.layout._scope`) and stores nothing for a scoped run, so
+# an import runs it over the album it just imported — after beets (14) has put
+# the folder in its canonical place and before the grade (4), which is what
+# makes the layout the grade reads the fixed one. A library-wide Run All still
+# gets the whole-folder pass and its stored report.
+LIBRARY_WIDE_SCRIPTS = ()
 DEFAULT_CHAIN = [sid for sid in DEFAULT_RUN_ALL_ORDER
                  if sid not in LIBRARY_WIDE_SCRIPTS]
 
@@ -150,8 +153,11 @@ def finish_album(album_dir, cfg=None, progress=None, force=None):
     "errors", "chained", "chain_off", "note", "autonomy"}``: ``scripts`` is one
     result per chain id (``server.script_runners`` shape), ``errors`` a flat
     list for a caller that only wants to know what went wrong, and ``path`` the
-    folder the album actually ended at (a chain script renames it — see
-    :func:`_resolve_moved_album`). The three chain keys say what happened to
+    folder the album actually ended at: the chain reports where it ended up
+    (script 14 imports the album into the library and renames it, so the path
+    handed in is a staging folder by then), and :func:`_resolve_moved_album` is
+    the fallback for an album a script moved without the chain following it.
+    The three chain keys say what happened to
     the chain itself, which is what an unattended path has to report instead
     of a bare "imported":
 
@@ -320,12 +326,22 @@ def finish_album(album_dir, cfg=None, progress=None, force=None):
         _clear_pending(path, cfg, chained=False, chain_off=True)
         return out
 
+    # The folder the chain ends on, filled by `run_chain` (`final`): a script
+    # that moves the album re-points the chain at its new folder, so what the
+    # caller handed in is not necessarily where the album is when the chain is
+    # done (an import hands in its staging folder; script 14 imports the album
+    # into the library and renames it).
+    final = []
     try:
         # wait=True: an import must not skip its chain just because a UI run
         # happens to hold the library lock — it queues behind it instead.
+        # `final` is where the chain ended: script 14 moves the album into the
+        # library and renames every file, so the folder this function was
+        # handed is not the album any more (`_follow_moved_targets` follows it
+        # and this is how the import hears about it).
         out["scripts"] = script_runners.run_chain(
             run_cfg, chain, targets=[path], force=force, progress=progress,
-            wait=True)
+            wait=True, final=final)
     except script_runners.RunBusy as e:
         # Only reachable after the (1 h) wait timed out: report it so the
         # caller marks the album unfinished instead of "imported".
@@ -335,7 +351,8 @@ def finish_album(album_dir, cfg=None, progress=None, force=None):
     out["chained"] = True
     out["errors"] = [f"script {r.get('id')}: {r['error']}"
                      for r in out["scripts"] if r.get("error")]
-    out["path"] = _resolve_moved_album(out["path"], album_mbid, album_rgid)
+    out["path"] = _resolve_moved_album(final[0] if final else out["path"],
+                                       album_mbid, album_rgid)
     _invalidate_caches()
     # The configured chain has run, over the folder it left the album at — only
     # now is a framework album finished (`chained=True`), and only on the FINAL

@@ -320,14 +320,25 @@ const LAYOUT_KINDS: { kind: string; label: string; bad: boolean }[] = [
   { kind: "stray_file", label: "Stray file inside an album", bad: false },
 ];
 
+/** What Apply fixes does with a row, in the panel's words. Static and
+ *  string-keyed, so a Record: the values are sentences, not data. */
+const FIX_LABEL_BY_ACTION: Record<string, string> = {
+  rename: "will be renamed",
+  move: "will be moved",
+  trash: "will go to the Trash",
+};
+
 /** Library-layout audit: every place the music folder does not match
  *  `Artists/<Artist>/<Album>/<files>`.
  *
- *  Read-only but for ONE row. A wrong guess here moves somebody's music, so
- *  the panel reports what is where and how to fix it, and the moving stays a
- *  decision the user makes with their own file manager — except an artist
- *  folder with no albums, which cannot hold music at all and is removable to
- *  the app's Trash (never deleted, always restorable). */
+ *  Read-only until you say otherwise. A wrong guess here moves somebody's
+ *  music, so the rows say what is where and how to fix it, and every fix the
+ *  app offers is one the scan has already PROVED: an artist/album/file name
+ *  spelled in the wrong letter case, audio sitting outside any album folder
+ *  (its own tags name the album), and an artist folder with no albums — which
+ *  cannot hold music at all and is removable to the app's Trash (never
+ *  deleted, always restorable). Scan reports; Apply fixes does those three
+ *  and reports what it left alone. */
 function LayoutPanel() {
   const [report, setReport] = useState<LayoutReport | null>(null);
   // When the report on screen was scanned, and whether it is about a music
@@ -373,6 +384,33 @@ function LayoutPanel() {
       // the stamp shown is the SERVER's clock, not the browser's guess at it.
       const snap = await api.libraryLayoutReport();
       setScannedAt(snap.scanned_at);
+    } catch (e) {
+      toast.error(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Scan AND fix — the same walk as Scan plus the fixes it can prove, which is
+  // why it sits next to it: what it will do is exactly what the rows above
+  // say, and the summary it brings back says what it did. The report it
+  // returns is the POST-fix one, so the rows below are what is still wrong.
+  const apply = async () => {
+    setBusy(true);
+    try {
+      const r = await api.libraryLayoutApply();
+      setReport(r);
+      setForeign(null);
+      setOpen(new Set(LAYOUT_KINDS.filter((k) => r.counts[k.kind]).map((k) => k.kind)));
+      const snap = await api.libraryLayoutReport();
+      setScannedAt(snap.scanned_at);
+      const fixed = r.fixed ?? 0;
+      const failed = r.fix_failed ?? 0;
+      // A failed fix is not a failed run: the library is still there, and the
+      // row below says which file could not move and why. Reported apart from
+      // the successes so neither hides the other.
+      if (failed) toast.error(`Layout: ${fixed} fixed · ${failed} could not be fixed`);
+      else toast.success(fixed ? `Layout fixed — ${fixed} change${fixed === 1 ? "" : "s"}` : "Library layout already correct");
     } catch (e) {
       toast.error(String(e));
     } finally {
@@ -445,17 +483,66 @@ function LayoutPanel() {
           <RefreshCw className={`h-3.5 w-3.5 ${busy ? "animate-spin" : ""}`} />
           {busy ? "Scanning…" : report ? "Rescan" : "Scan library layout"}
         </button>
+        {/* The fixing half, offered next to the scan: it rewalks and fixes,
+            and it is only offered once a scan has shown there is a library to
+            look at. What it will touch is what the rows below mark. */}
+        {report?.exists && (
+          <button className="btn-ghost !py-1 text-xs tap" disabled={busy} onClick={apply}
+            title="Rename wrongly-cased names, move loose audio into its album folder, and send album-less artist folders to the Trash — nothing is deleted">
+            <Wand2 className={`h-3.5 w-3.5 ${busy ? "animate-spin" : ""}`} />
+            {busy ? "Fixing…" : "Apply fixes"}
+          </button>
+        )}
       </div>
 
       <div className="text-[10px] text-zinc-600 mt-1.5">
         Walks the whole music folder and reports anything that is not
         <span className="font-mono text-zinc-500"> Artists/&lt;Artist&gt;/&lt;Album&gt;/ </span>
         — misplaced files, unexpected folders, empty albums, artist folders with
-        no albums. It moves nothing: an artist folder with no albums can be
-        <span className="font-mono text-zinc-500"> removed </span>
-        to the Trash, where the Trash page can restore it, and every other row is
-        yours to fix.
+        no albums. Rows marked
+        <span className="font-mono text-zinc-500"> will be renamed </span>/
+        <span className="font-mono text-zinc-500"> moved </span>/
+        <span className="font-mono text-zinc-500"> to the Trash </span>
+        are the ones <span className="font-mono text-zinc-500">Apply fixes</span> settles by
+        itself (script 20 does this on every run too, unless the layout_apply setting is off);
+        every other row is yours to fix, and nothing is ever deleted.
       </div>
+
+      {/* What the apply phase just did, in words. Only present on a report that
+          came from an apply (script 20 or the button above): a plain scan has
+          `fixes` absent, so this stays off and the rows below are the whole
+          story. Skipped rows are not repeated here — they are the issue rows
+          below, each with its own reason. */}
+      {report?.fixes && (
+        <div className="mt-3 border border-border rounded-lg overflow-hidden">
+          <div
+            className={`px-2.5 py-1.5 text-xs ${
+              report.fix_failed ? "text-amber-200 bg-amber-950/30" : "text-emerald-300 bg-emerald-950/30"
+            }`}
+          >
+            Apply: {report.fixed} fixed · {report.fix_failed} could not be fixed ·{" "}
+            {report.skipped} left as they are
+          </div>
+          {(report.fixes.filter((f) => f.result !== "skipped")).length > 0 && (
+            <div className="stagger divide-y divide-border/60">
+              {report.fixes
+                .filter((f) => f.result !== "skipped")
+                .map((f) => (
+                  <div key={`${f.kind}:${f.path}`} className="px-2.5 py-1 text-[11px] flex items-start gap-2">
+                    <span
+                      className={`shrink-0 font-mono ${
+                        f.result === "fixed" ? "text-emerald-300" : "text-amber-200"
+                      }`}
+                    >
+                      {f.result === "fixed" ? "fixed" : "failed"}
+                    </span>
+                    <span className="min-w-0 break-words text-zinc-400">{f.action}</span>
+                  </div>
+                ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* A stored report of ANOTHER music folder is not this library's state:
           the rows would be about paths the app can no longer reach, so they
@@ -514,11 +601,23 @@ function LayoutPanel() {
                           >
                             {copied === i.abs ? "copied" : "copy path"}
                           </button>
-                          {/* The one action this panel offers, and only on the
-                              kind that cannot hold music: an artist folder with
-                              no albums. It moves the folder into the app's
-                              Trash (nothing is deleted), so the Trash page can
-                              put it back — every other row stays read-only. */}
+                          {/* What Apply fixes does with THIS row, said on the
+                              row itself: a row carrying one is settled by the
+                              script, and a row without one is the user's to
+                              move (deleting is never offered). */}
+                          {i.fix && (
+                            <span
+                              className="chip bg-raise border border-border text-zinc-400 shrink-0"
+                              title={`Apply fixes: ${i.fix.action}${i.fix.to ? ` → ${i.fix.to}` : ""}`}
+                            >
+                              {FIX_LABEL_BY_ACTION[i.fix.action] ?? "will be fixed"}
+                            </span>
+                          )}
+                          {/* The one action this panel offers per row, and only
+                              on the kind that cannot hold music: an artist
+                              folder with no albums. It moves the folder into
+                              the app's Trash (nothing is deleted), so the Trash
+                              page can put it back. */}
                           {kind === "empty_artist" && (
                             <button
                               className="btn-ghost !px-1.5 !py-0.5 text-[10px] tap shrink-0 text-red-300"

@@ -82,11 +82,18 @@ const GRID_SIZE_KEY = "mlo.gridSize";
 
 /** The stored browse view. Read once and NOT written back while browsing:
  *  the same key is Settings' default view, and a tab click that saved itself
- *  would make every later visit start in whatever was last clicked. */
+ *  would make every later visit start in whatever was last clicked.
+ *
+ *  Membership is CHECKED, not cast: the key outlives the option list (a stale
+ *  id, or the empty string a cleared field leaves behind), and an id that is
+ *  none of the five matches none of the page's `view === …` branches — a
+ *  page that renders no view at all. An id we no longer offer falls back to
+ *  the grid, exactly like a missing one. */
 export function useLibraryView(): [LibraryView, (v: LibraryView) => void] {
-  const [view, setView] = useState<LibraryView>(
-    () => (localStorage.getItem(VIEW_KEY) as LibraryView) ?? "grid"
-  );
+  const [view, setView] = useState<LibraryView>(() => {
+    const stored = localStorage.getItem(VIEW_KEY);
+    return VIEW_TABS.some((t) => t.id === stored) ? (stored as LibraryView) : "grid";
+  });
   return [view, setView];
 }
 

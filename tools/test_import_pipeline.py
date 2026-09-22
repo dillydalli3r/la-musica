@@ -80,14 +80,20 @@ CFG = {"music_folder": MF, "import_auto_scripts": False, "import_scripts": [],
 # Run All can never be silently missing from the import path again. Three were
 # (16 Mood & Energy, 17 Lyrics transliterate (AI), 19 Optimize artist images:
 # Run All ran them, an import never did), which is what this assertion now
-# catches — and the ONLY thing an import leaves out is the one script whose
-# runner walks the whole music folder instead of the album it is handed.
+# catches — and nothing is left out today: 20 (Scan library layout) was the one
+# declared exception while its runner ignored `targets` and re-walked the whole
+# library per album, and it now scopes itself to the album it is handed.
 assert imports.DEFAULT_CHAIN == [sid for sid in DEFAULT_RUN_ALL_ORDER
                                  if sid not in imports.LIBRARY_WIDE_SCRIPTS], \
     imports.DEFAULT_CHAIN
-assert imports.LIBRARY_WIDE_SCRIPTS == (20,), imports.LIBRARY_WIDE_SCRIPTS
-assert set(DEFAULT_RUN_ALL_ORDER) - set(imports.DEFAULT_CHAIN) == {20}, \
+assert imports.LIBRARY_WIDE_SCRIPTS == (), imports.LIBRARY_WIDE_SCRIPTS
+assert set(DEFAULT_RUN_ALL_ORDER) - set(imports.DEFAULT_CHAIN) == set(), \
     set(DEFAULT_RUN_ALL_ORDER) - set(imports.DEFAULT_CHAIN)
+# 20 fixes the album's layout inside the chain: after beets (14) has put the
+# folder where the naming script wants it, before the grade (4) reads it.
+assert 20 in imports.DEFAULT_CHAIN, imports.DEFAULT_CHAIN
+assert imports.DEFAULT_CHAIN.index(14) < imports.DEFAULT_CHAIN.index(20) \
+    < imports.DEFAULT_CHAIN.index(4), imports.DEFAULT_CHAIN
 for _sid in (16, 17, 19):
     assert _sid in imports.DEFAULT_CHAIN, \
         f"script {_sid} must be reached by an import, not only by Run All"

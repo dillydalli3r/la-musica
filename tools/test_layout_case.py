@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verification for the layout scanner's `wrong_case` check.
+"""Verification for the layout scanner's `wrong_case` check and its apply phase.
 
 `GET /api/library/layout` reports an artist folder, an album folder or a file
 name that spells its name differently from the naming script the organizer
@@ -12,7 +12,14 @@ pins the three things that are easy to get wrong:
   * a name that differs by more than case is NOT reported (the grader's PATH
     check owns that; a false row here pushes the user into renaming music to a
     name that is not actually correct),
-  * nothing is ever moved.
+  * the scan alone moves nothing.
+
+The second half covers the apply phase (`POST /api/library/layout/apply`,
+script 20): the canonical spelling is restored on an artist folder, an album
+folder and a file; audio loose in an artist folder is moved into the album
+folder its own tags name; an album-less artist folder goes to the Trash with
+its origin recorded; `layout_apply: false` leaves everything alone; and a run
+with targets touches only the target's subtree.
 
 Run:  python tools/test_layout_case.py
 """
@@ -183,6 +190,17 @@ def listing():
             out.add(os.path.relpath(os.path.join(root, n), MF).replace("\\", "/"))
     return out
 
+def stored(parent, name):
+    """Whether *parent* holds an entry spelled EXACTLY *name*.
+
+    `exists`/`isdir` cannot answer that — the filesystem is case-insensitive,
+    which is the whole reason this module exists — so every assertion about a
+    name's SPELLING goes through the raw directory entries."""
+    try:
+        return name in os.listdir(parent)
+    except OSError:
+        return False
+
 
 # --------------------------------------------------------------------------- #
 # scan
@@ -319,5 +337,148 @@ for p in ("Artists/lower", "Artists/Caps/bad album",
           "Artists/Files/My Album/1-01 song.flac"):
     ok(os.path.exists(os.path.join(MF, *p.split("/"))),
        f"the wrong-case name is still on disk: {p}")
+
+# --------------------------------------------------------------------------- #
+# apply — what script 20 does with what the scan proved
+# --------------------------------------------------------------------------- #
+# The fixtures the read-only half left alone are exactly the apply's subjects,
+# plus two the report alone cannot describe: audio loose in an artist folder
+# that its own TAGS can place (the 1-byte stand-in above has no tags, so it
+# stays a report), and a fresh album-less artist folder to remove.
+LOOSE = album("Artists/Loose", tags("Loose", "Loose Album"))
+NOBODY = os.path.join(MF, "Artists", "Nobody")
+os.makedirs(NOBODY, exist_ok=True)
+with open(os.path.join(NOBODY, "artist.jpg"), "wb") as f:
+    f.write(b"x")
+
+print("== apply fixes ==")
+r = _client.post("/api/library/layout/apply")
+ok(r.status_code == 200, f"the apply route accepts it ({r.status_code}: {r.text[:160]})")
+res = r.json()
+fixes = {f["path"]: f for f in res.get("fixes", [])}
+
+ok(stored(os.path.join(MF, "Artists"), "Lower")
+   and not stored(os.path.join(MF, "Artists"), "lower"),
+   "the wrong-case ARTIST folder is now spelled the script's way (Artists/lower -> Artists/Lower)")
+ok(stored(os.path.join(MF, "Artists", "Caps"), "Bad Album")
+   and not stored(os.path.join(MF, "Artists", "Caps"), "bad album"),
+   "the wrong-case ALBUM folder is now spelled the script's way (bad album -> Bad Album)")
+ok(stored(os.path.join(MF, "Artists", "Files", "My Album"), "1-01 Song.flac")
+   and not stored(os.path.join(MF, "Artists", "Files", "My Album"), "1-01 song.flac"),
+   "the wrong-case FILE is now spelled the script's way (1-01 song.flac -> 1-01 Song.flac)")
+ok(stored(os.path.join(MF, "Artists", "Loose"), "Loose Album")
+   and stored(os.path.join(MF, "Artists", "Loose", "Loose Album"), "1-01 Song.flac")
+   and not os.path.exists(os.path.join(MF, "Artists", "Loose", "1-01 Song.flac")),
+   "audio loose in an artist folder moved into the album folder its own tags name")
+ok(not os.path.exists(NOBODY),
+   "the album-less artist folder is gone from Artists/")
+
+# The counts, and the rows: what is fixed leaves `issues`, what is not stays.
+ok(res.get("fixed") == 5 and res.get("fix_failed") == 0,
+   f"five fixes, none failed (got fixed={res.get('fixed')} failed={res.get('fix_failed')})")
+ok(res.get("skipped") == 2 and sorted(res["counts"]) == ["empty_album", "stray_file"],
+   f"the two rows nothing may act on are still reported ({res.get('skipped')} skipped, {res['counts']})")
+ok(res["total"] == len(res["issues"]) == 2,
+   f"total/counts/issues agree after the fixes ({res['total']}, {len(res['issues'])})")
+ok(all(f["result"] in ("fixed", "failed", "skipped") and f["action"]
+       for f in res.get("fixes", [])),
+   "every outcome is a result plus words, so the panel can say what happened")
+ok("renamed" in fixes.get("Artists/lower", {}).get("action", ""),
+   f"the rename is worded for the user ({fixes.get('Artists/lower')})")
+ok("moved" in fixes.get("Artists/Loose/1-01 Song.flac", {}).get("action", "")
+   and "Loose Album" in fixes.get("Artists/Loose/1-01 Song.flac", {}).get("action", ""),
+   f"the move names the album folder it landed in ({fixes.get('Artists/Loose/1-01 Song.flac')})")
+ok("no longer" in fixes.get("Artists/Loose/1-01 Song.flac", {}).get("action", "")
+   or "Loose Album" in fixes.get("Artists/Loose/1-01 Song.flac", {}).get("action", ""),
+   "…and the row is about the file, not an internal path")
+
+# The removal goes to the app's Trash, with its origin recorded — never a delete.
+r = _client.post("/api/library/layout/remove-empty-artist", json={"path": NOBODY})
+ok(r.status_code == 404, f"a folder that is already gone is a 404, not a crash ({r.status_code})")
+bin_dir = os.path.join(MF, ".mlo", "trash")
+landed = [os.path.join(bin_dir, n, entry)
+          for n in os.listdir(bin_dir)
+          if os.path.isdir(os.path.join(bin_dir, n))
+          for entry in os.listdir(os.path.join(bin_dir, n))
+          if entry == "Nobody"]
+ok(len(landed) == 1 and os.path.isfile(os.path.join(landed[0], "artist.jpg")),
+   f"the artist folder landed in <music>/.mlo/trash/<scope>/Nobody with its file ({landed})")
+with open(os.path.join(os.path.dirname(landed[0]), ".mlo_manifest.json"), encoding="utf-8") as f:
+    entries = json.load(f).get("entries", {})
+ok(str(entries.get("Nobody", {}).get("origin", "")).replace("\\", "/")
+   == NOBODY.replace("\\", "/"),
+   "…and the bin records where it came from, so the Trash page can restore it")
+
+print("== layout_apply off: report only ==")
+from mlo import layout as layoutmod  # noqa: E402
+
+# Two more wrong-case album folders, for this half and the target half below:
+# nothing has touched them yet, so a report-only run and a scoped run each have
+# something to leave alone.
+album("Artists/Quiet/case album", tags("Quiet", "Case Album"))
+album("Artists/Other/case album", tags("Other", "Case Album"))
+
+# Quietly: the runner writes to stdout, which is not what this asserts.
+stats = layoutmod.run_scan_layout({"music_folder": MF, "naming_script": SCRIPT,
+                                   "layout_apply": False})
+ok(stored(os.path.join(MF, "Artists", "Quiet"), "case album")
+   and stored(os.path.join(MF, "Artists", "Other"), "case album"),
+   "with layout_apply off the run renames nothing")
+ok(not stats.get("layout_fixed") and stats.get("layout_total", 0) >= 2,
+   f"…and it still reports what is wrong ({stats.get('layout_fixed')} fixed, "
+   f"{stats.get('layout_total')} reported)")
+
+print("== targets confine the run ==")
+# What the import chain does: script 20 per album folder. Only that subtree may
+# be scanned AND fixed — the other artist's spelling is not this run's business.
+target = os.path.join(MF, "Artists", "Quiet", "case album")
+stats = layoutmod.run_scan_layout({"music_folder": MF, "naming_script": SCRIPT,
+                                   "layout_apply": True, "targets": [target]})
+ok(stored(os.path.join(MF, "Artists", "Quiet"), "Case Album")
+   and not stored(os.path.join(MF, "Artists", "Quiet"), "case album"),
+   "the targeted album folder is fixed")
+ok(stored(os.path.join(MF, "Artists", "Other"), "case album"),
+   "an artist outside the target is left exactly as it was")
+ok(stats.get("layout_fixed") == 1 and stats.get("layout_total", 0) == 0,
+   f"the scoped run counts only its own subtree ({stats.get('layout_fixed')} fixed, "
+   f"{stats.get('layout_total')} left)")
+ok(not stats.get("report_path"),
+   f"a scoped run stores nothing — a partial report must never become 'the last "
+   f"scan' ({stats.get('report_path')!r})")
+
+# …and the whole-library run still fixes what the scoped one left alone.
+stats = layoutmod.run_scan_layout({"music_folder": MF, "naming_script": SCRIPT,
+                                   "layout_apply": True})
+ok(stored(os.path.join(MF, "Artists", "Other"), "Case Album"),
+   "an untargeted run is the whole library again — it fixed the other artist")
+ok(stats.get("report_path"),
+   f"…and a whole-library run stores its report ({stats.get('report_path')!r})")
+
+print("== apply: a destination that already exists is reported, never overwritten ==")
+# The one way a fix could lose music: the album folder the file's tags name
+# already holds a file called that. Both files have to survive, and the run has
+# to SAY so instead of picking one.
+album("Artists/Twin/Album One", None, file_name="1-01 Song.flac")
+TWIN_IN_ALBUM = os.path.join(MF, "Artists", "Twin", "Album One", "1-01 Song.flac")
+with open(TWIN_IN_ALBUM, "wb") as f:
+    f.write(b"\0" * 4096)
+TWIN_LOOSE = album("Artists/Twin", tags("Twin", "Album One"))
+ok(os.path.getsize(TWIN_LOOSE) != os.path.getsize(TWIN_IN_ALBUM),
+   "the two same-named files differ, so an overwrite would be data loss")
+
+report = layoutmod.apply_fixes({"music_folder": MF, "naming_script": SCRIPT,
+                                "layout_apply": True})
+twin = [f for f in report["fixes"] if f["path"] == "Artists/Twin/1-01 Song.flac"]
+ok(len(twin) == 1 and twin[0]["result"] == "failed",
+   f"the blocked move is a FAILED outcome, not a silent skip ({twin})")
+ok("already exists" in twin[0]["action"],
+   f"…and the words say what stopped it ({twin[0]['action']})")
+ok(report["fix_failed"] == 1 and report["fixed"] == 0,
+   f"the run counts it as the one failure ({report['fixed']} fixed, "
+   f"{report['fix_failed']} failed)")
+ok(os.path.getsize(TWIN_LOOSE) and os.path.getsize(TWIN_IN_ALBUM) == 4096,
+   "both files are still there, untouched")
+ok("Artists/Twin/1-01 Song.flac" in [i["path"] for i in report["issues"]],
+   "…and the row is still reported for the user to settle")
 
 print(f"\nAll {passed} checks passed.")

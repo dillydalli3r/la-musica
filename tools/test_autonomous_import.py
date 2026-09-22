@@ -211,7 +211,8 @@ def stub_cover(album_dir, cfg):
             "candidates": 0}
 
 
-def stub_chain(cfg, ids, targets=None, force=None, progress=None, wait=True):
+def stub_chain(cfg, ids, targets=None, force=None, progress=None, wait=True,
+               timeout=None, final=None):
     _chain_calls.append({"name": os.path.basename((targets or [""])[0]),
                          "chain": list(ids), "targets": list(targets or []),
                          "cfg": dict(cfg)})

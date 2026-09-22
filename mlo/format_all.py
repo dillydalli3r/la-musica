@@ -584,13 +584,16 @@ def run_format_all(config):
     pbar = _make_pbar(total_tasks, "Formatting", unit="file")
 
     def _report(fn, ok, err):
+        # Every sidecar this run looked at counts as scanned, whatever the
+        # verdict — modified + skipped + errors is then the number of files the
+        # pass examined, which is what the summary line claims.
+        stats["total_scanned"] += 1
         if err:
             stats["error_count"] += 1
             stats["errors"].append((fn, err))
             log(c(f"  ✕ {os.path.basename(fn)}: {err}", Color.RED))
         elif ok:
             stats["modified_count"] += 1
-            stats["total_scanned"] += 1
             log(f"  ✓ {os.path.relpath(fn, folder) if os.path.commonpath([folder, fn])==folder else fn} → formatted")
         else:
             stats["skipped_count"] += 1
@@ -677,24 +680,42 @@ def run_format_all(config):
             futures[fut] = f
         for fut in as_completed(futures):
             fn, tag_res, cover_res, genres_trimmed, tags_canonicalized = fut.result()
-            # Tags: only log when actually changed to avoid noise; tagged
-            # files are many, and unreadable ones must not spam.
-            ok, err = tag_res
+            # ONE verdict per FILE: the tag pass and the art pass write the
+            # same container, so a file whose tags were trimmed IS formatted
+            # even when its art needed no change. Counting the two passes
+            # separately reported one file twice — formatted once, "already
+            # correct" once — which is how a file this run HAD rewritten came
+            # out counted as skipped, and how "N formatted, M already correct"
+            # could describe more files than were looked at.
+            tag_ok, tag_err = tag_res
+            cover_ok, cover_err = cover_res
+            err = tag_err or cover_err
+            rel = (os.path.relpath(fn, folder)
+                   if os.path.commonpath([folder, fn]) == folder else fn)
             if err:
                 counts["fail"] += 1
-            elif ok:
+                stats["error_count"] += 1
+                stats["errors"].append((fn, err))
+                log(c(f"  ✕ {os.path.basename(fn)}: {err}", Color.RED))
+            elif tag_ok or cover_ok:
+                counts["ok"] += 1
                 stats["modified_count"] += 1
-                stats["total_scanned"] += 1
+                actions = []
+                if tag_ok:
+                    actions.append("tags trimmed")
+                if cover_ok:
+                    actions.append("cover embedded" if config.get("embed_covers")
+                                   else "embedded art removed")
                 extra = ""
                 if genres_trimmed:
                     extra += f" ({genres_trimmed} extra genre value(s) dropped)"
                 if tags_canonicalized:
                     extra += f" ({tags_canonicalized} tag value(s) canonicalized)"
-                log(f"  ✓ {os.path.relpath(fn, folder) if os.path.commonpath([folder, fn])==folder else fn} → tags trimmed{extra}")
-                counts["ok"] += 1
+                log(f"  ✓ {rel} → {' + '.join(actions)}{extra}")
             else:
-                stats["skipped_count"] += 1
                 counts["skip"] += 1
+                stats["skipped_count"] += 1
+            stats["total_scanned"] += 1
             if genres_trimmed:
                 # The canonical sweep's own count: what the per-track genre
                 # cap actually removed from the library in this run.
@@ -702,22 +723,6 @@ def run_format_all(config):
             if tags_canonicalized:
                 # …and how many values the canonical VALUE rule rewrote.
                 stats["tags_canonicalized"] += tags_canonicalized
-            # Embedded art — removed (default) or the album cover embedded.
-            ok, err = cover_res
-            if err:
-                counts["fail"] += 1
-                stats["error_count"] += 1
-                stats["errors"].append((fn, err))
-                log(c(f"  ✕ {os.path.basename(fn)}: {err}", Color.RED))
-            elif ok:
-                stats["modified_count"] += 1
-                stats["total_scanned"] += 1
-                action = "cover embedded" if config.get("embed_covers") else "embedded art removed"
-                log(f"  ✓ {os.path.relpath(fn, folder) if os.path.commonpath([folder, fn])==folder else fn} → {action}")
-                counts["ok"] += 1
-            else:
-                stats["skipped_count"] += 1
-                counts["skip"] += 1
             if pbar:
                 try: pbar.update(1)
                 except: pass

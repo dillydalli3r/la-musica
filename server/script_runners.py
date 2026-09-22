@@ -202,9 +202,11 @@ RUNNERS: dict[int, tuple[str, "callable"]] = {
     # aspect/size (mlo.artistdata's own runner — the same policy the fetch and
     # the grading check use).
     19: ("Optimize artist images", run_optimize_artist_images),
-    # 20 is the ONLY read-only script: it reports the shape of the music
-    # folder and stores that report under <music>/.mlo/data, which is what the
-    # Library page warns from. No force flag — there is nothing to overwrite.
+    # 20 reports the shape of the music folder and stores that report under
+    # <music>/.mlo/data, which is what the Library page warns from; it can
+    # also apply what it finds (rename wrong-case names, gather loose audio)
+    # under `layout_apply`, which is its force key — the report is written
+    # either way, so the run never becomes a no-op.
     20: ("Scan library layout", run_scan_layout),
     # 21 completes an AcoustID PAIR a file only half carries. That pair is a
     # grading check of its own (grade_check_acoustid), and no other script
@@ -238,6 +240,12 @@ _FORCE_KEYS = {
     17: ("force_xlit",),
     # 18 re-submits lyrics for tracks LRCLIB already answers for.
     18: ("force_publish",),
+    # 20's apply phase (mlo/layout.py) — the one force key that turns work OFF:
+    # the scan always reports, and `layout_apply` is what lets it rename and
+    # move. Clearing it is what a caller asks for when it wants the read-only
+    # report the script used to be, so the wizard's `{}` and a saved force
+    # selection (neither names this key) both leave the library alone.
+    20: ("layout_apply",),
 }
 _FORCE_ALIASES = {
     "lyrics": "force_lyrics",
@@ -253,6 +261,7 @@ _FORCE_ALIASES = {
     "mood": "force_mood",
     "xlit": "force_xlit",
     "publish": "force_publish",
+    "layout": "layout_apply",
 }
 # Scripts whose feature has its own on/off switch: with it off the runner is a
 # no-op at best and a crash at worst, so a chain skips them instead. A tuple
@@ -518,13 +527,20 @@ def _job_progress(job, progress):
 
 
 def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
-              timeout=None):
+              timeout=None, final=None):
     """Run *ids* in order against a COPY of *cfg*; report after every script.
 
     ``progress(done, total, label, result)`` is called once per finished
     script. A script that fails is recorded in the returned list and the chain
     carries on — one bad script must never cost the import the rest of the
     pipeline. An id the registry does not know is a failure entry, not a stop.
+
+    *final* is an optional list the chain fills with the folders it ended on.
+    A script can MOVE an album (script 14 imports it into the library and
+    renames every file), and the chain follows it so the later scripts still
+    have an album to work on — this is how a caller that handed in a path
+    learns the album is not there any more. The run works on a copy of *cfg*,
+    so nothing else can tell it.
 
     *wait* decides what happens when another chain holds the lock:
 
@@ -558,7 +574,8 @@ def run_chain(cfg, ids, targets=None, force=None, progress=None, wait=False,
                                label=run_label(ids), wait=wait,
                                timeout=timeout) as job:
             return _run_chain_locked(cfg, ids, targets=targets, force=force,
-                                     progress=_job_progress(job, progress))
+                                     progress=_job_progress(job, progress),
+                                     final=final)
     finally:
         RUN_LOCK.release()
 
@@ -652,7 +669,56 @@ def _find_moved_album(names, music_folder):
     return ""
 
 
-def _follow_moved_targets(cfg, audio_names):
+def _claimed_targets(result):
+    """The album folders the script that just ran says it moved audio into.
+
+    A script that takes an album's audio out of the folder the chain is pointed
+    at (script 14 imports it into the library and renames every file with the
+    naming script) knows where it put it, and the folder NAME is not that
+    answer: the move renames the files with it, which is exactly what the name
+    scan in :func:`_follow_moved_targets` cannot follow. The destination is
+    declared in the runner's own stats — ``{"moved_targets": [dirs]}`` — so a
+    chain reads it from every runner the same way instead of knowing which
+    script happens to move things.
+
+    Only folders that really hold audio NOW are used: a stale path in a
+    report must not send the rest of the chain nowhere twice.
+    """
+    stats = result.get("stats") if isinstance(result, dict) else None
+    out = []
+    for d in (stats or {}).get("moved_targets") or ():
+        try:
+            p = os.path.normpath(str(d))
+        except Exception:
+            continue
+        if p and p not in out and os.path.isdir(p) and _has_audio(p):
+            out.append(p)
+    return out
+
+
+def _take_claimed(claimed, names, live):
+    """The folder a mover says it put ONE vanished target's audio in.
+
+    Only a folder no live target already points at is a candidate — a chain
+    over two albums must never hand one of them the other's. A single
+    candidate is the answer; with several, only the one holding as many audio
+    files as the vanished target had is taken, because anything looser would
+    be a guess. "" means the caller keeps its honest "there is nothing to run
+    on" warning instead of guessing.
+    """
+    cands = [d for d in claimed if os.path.normcase(d) not in live]
+    if not cands:
+        return ""
+    if len(cands) == 1:
+        return cands[0]
+    if names:
+        same = [d for d in cands if len(_audio_basenames(d)) == len(names)]
+        if len(same) == 1:
+            return same[0]
+    return ""
+
+
+def _follow_moved_targets(cfg, audio_names, claimed=()):
     """Re-point the chain at an album a script moved, and never lose it silently.
 
     Script 14 (beets) rewrites the tags and applies the naming script, so an
@@ -665,9 +731,15 @@ def _follow_moved_targets(cfg, audio_names):
 
     Identity, not name: an album's audio file names travel with it, so the
     folder that now holds the vanished target's whole audio set is the album.
-    A move that also renamed every file cannot be followed that way — then
-    the target stays put and the chain says so out loud instead of printing a
-    cheerful "nothing to do".
+    A move that ALSO renamed every file cannot be followed that way — beets
+    does exactly that on an import, naming each track from its tags — so
+    *claimed* (what the script that just ran said it moved the audio into, see
+    :func:`_claimed_targets`) is asked before the chain gives up. Without it
+    the download folder stayed the target and the whole tag-writing tail of the
+    chain ran against a folder that no longer holds the album, which is how an
+    import ended up looking finished while every later script had written
+    nothing. When neither answer exists the target stays put and the chain says
+    so out loud instead of printing a cheerful "nothing to do".
 
     "Vanished" means the target holds no audio any more, not that the
     directory is gone: beets only takes the audio, so the staging folder is
@@ -685,6 +757,7 @@ def _follow_moved_targets(cfg, audio_names):
         # that causes it.
         return
     targets = cfg.get("targets") or []
+    live = {os.path.normcase(t) for t in targets}
     out = []
     for t in targets:
         if os.path.isfile(t) or _has_audio(t):
@@ -695,6 +768,9 @@ def _follow_moved_targets(cfg, audio_names):
             out.append(t)
             continue
         moved = _find_moved_album(names, str(cfg.get("music_folder") or ""))
+        if not moved:
+            moved = _take_claimed(claimed, names,
+                                  live | {os.path.normcase(p) for p in out})
         if moved:
             log(f"Album moved: {t} → {moved}; the rest of the chain follows it")
             audio_names[moved] = names
@@ -707,7 +783,8 @@ def _follow_moved_targets(cfg, audio_names):
     cfg["targets"] = out
 
 
-def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None):
+def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None,
+                      final=None):
     cfg = dict(cfg)
     if targets is not None:
         cfg["targets"] = [os.path.normpath(str(t)) for t in targets]
@@ -721,7 +798,7 @@ def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None):
     for done, sid in enumerate(ids, 1):
         result = run_script(sid, cfg, chain=(done, total))
         results.append(result)
-        _follow_moved_targets(cfg, audio_names)
+        _follow_moved_targets(cfg, audio_names, _claimed_targets(result))
         if progress is not None:
             label = RUNNERS.get(sid, (f"Script {sid}", None))[0]
             try:
@@ -745,4 +822,12 @@ def _run_chain_locked(cfg, ids, targets=None, force=None, progress=None):
             soulseek.refresh_shares_soon()
         except Exception:
             traceback.print_exc()
+    # Where the chain ended up, for a caller that handed it an album folder:
+    # `_follow_moved_targets` re-points `cfg["targets"]` when a script moved it
+    # (beets does, on every import), and the copy made at the top of this
+    # function means the caller cannot otherwise find out. An import reports
+    # the album's real folder from this — its own path was the staging folder
+    # it came from, which holds no audio once the chain is done.
+    if final is not None:
+        final[:] = list(cfg.get("targets") or [])
     return results

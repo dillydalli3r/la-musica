@@ -60,7 +60,7 @@ SCRIPTS = (
     (17, "Lyrics transliterate (AI)", "TRANSLITERATION/TRANSLATION tags + sidecars"),
     (18, "Publish lyrics (LRCLIB)", "submit missing lyrics to the community DB"),
     (19, "Optimize artist images", "crop/resize artist artwork to the configured aspect and size"),
-    (20, "Scan library layout", "read-only layout report (nothing is moved)"),
+    (20, "Scan library layout", "layout report + fixes (case, loose audio, empty artist)"),
     (21, "Fix AcoustID pairs", "complete ACOUSTID_ID / ACOUSTID_FINGERPRINT pairs"),
 )
 SCRIPT_LABELS = {sid: name for sid, name, _ in SCRIPTS}

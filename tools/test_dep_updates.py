@@ -477,9 +477,14 @@ try:
               bool(row["upstream_version"]))
         check(f"{key} behind upstream counts as an update",
               row["update_available"] is True)
-        check(f"{key} reads Update where this host can install it "
-              f"({row['state']} / {row['install_kind']})",
-              row["state"] == ("update" if row["install_kind"] == "deps" else "ok"))
+        # Behind is behind, however this host installs it: php is a download on
+        # Windows, a distro package on Linux and neither on a platform with no
+        # build at all — the row says `update` in all three cases, and the
+        # ACTION column is what differs (see section 10).
+        check(f"{key} reads Update ({row['state']} / {row['install_kind']})",
+              row["state"] == "update"
+              and row["action"] == {"deps": "update", "system": "upgrade"}.get(
+                  row["install_kind"], "none"))
 finally:
     fetchdeps._api_json = real[0]
     fetchdeps._php_build_cache.update(real[1])
@@ -537,6 +542,129 @@ with tempfile.TemporaryDirectory() as tmp:
     finally:
         done.set()
         fetchdeps._api_json, fetchdeps.run_tool = real[1], real[2]
+        restore_deps(real[0])
+
+
+# --------------------------------------------------------------------------- #
+# 10. "Behind upstream" and "what this host can do about it" are two facts
+# --------------------------------------------------------------------------- #
+# The regression this pins: state was forced back to `ok` for every row the
+# installer could not fetch, so a distro tool behind upstream read a green
+# Ready beside an amber Available and had no button to close either — and the
+# header counted none of them, because its filter was the same `installable`
+# one the button uses. The row now says it is behind (state) and separately
+# says what is possible here (install_kind) and what to press (action).
+
+# Upstream's Linux assets, resolved from the tables: rsgain for x86-64 only,
+# fpcalc for both architectures the app supports. The asset names are the ones
+# upstream really publishes (checked against the releases API), so a pattern
+# that stops matching a real release fails here.
+LINUX_ASSETS = (
+    ("rsgain", "x86_64", "rsgain-3.8-Linux.tar.xz"),
+    ("chromaprint", "x86_64", "chromaprint-fpcalc-1.6.1-linux-x86_64.tar.gz"),
+    ("chromaprint", "aarch64", "chromaprint-fpcalc-1.6.1-linux-arm64.tar.gz"),
+)
+import re  # noqa: E402
+
+for key, machine, asset in LINUX_ASSETS:
+    pattern = fetchdeps._linux_pattern(key, machine)
+    check(f"Linux/{machine} installs {key} from its own release",
+          fetchdeps.install_kind(key, platform="linux", machine=machine) == "deps"
+          and bool(pattern))
+    check(f"...and its asset pattern matches upstream's own file name ({asset})",
+          bool(pattern) and re.fullmatch(pattern, asset, re.IGNORECASE) is not None)
+check("rsgain's x86-64-only build falls back to the distro package on ARM",
+      fetchdeps.install_kind("rsgain", platform="linux", machine="aarch64") == "system")
+check("a tool with no Linux build and no package has neither",
+      fetchdeps.install_kind("audioauditor", platform="linux",
+                             machine="armv7l") == "unsupported")
+
+# The command a distro row's Copy button hands over: apt's, from the package
+# name in LINUX_PACKAGES, and none at all where the package manager is not the
+# answer (another platform, or a tool with no package).
+check("the upgrade command names the distro package",
+      fetchdeps.system_upgrade_command("libjpeg_turbo", platform="linux")
+      == "apt-get install --only-upgrade libjpeg-progs")
+check("no package means no command",
+      fetchdeps.system_upgrade_command("oxipng", platform="linux") is None)
+check("off Linux there is no distro command to copy",
+      fetchdeps.system_upgrade_command("rsgain", platform="windows") is None)
+
+
+@contextlib.contextmanager
+def linux_host():
+    """dependency_rows() reads the platform off the HOST (install_kind is called
+    with no arguments), so the distro-row case has to be simulated here: os.name
+    and sys.platform are what host_platform() reads."""
+    real = (os.name, sys.platform)
+    os.name, sys.platform = "posix", "linux"
+    try:
+        yield
+    finally:
+        os.name, sys.platform = real
+
+
+# libjpeg-turbo on Linux is the case from the screenshot: upstream ships .deb
+# only, so the distro owns the tool and 3.2.0 is published while 2.1.5 is
+# installed.
+with linux_host():
+    rows = rows_with({"libjpeg_turbo": "2.1.5"}, {"libjpeg_turbo": "3.2.0"})
+    row = rows["libjpeg_turbo"]
+    check("a distro row behind upstream reads update (not ok)",
+          row["state"] == "update")
+    check("...counts as an available update",
+          row["update_available"] is True and row["upstream_version"] == "3.2.0")
+    check("...reports that the distro owns it",
+          row["install_kind"] == "system" and row["installable"] is False)
+    check("...and offers the command that upgrades it",
+          row["action"] == "upgrade"
+          and row["upgrade_command"] == "apt-get install --only-upgrade libjpeg-progs")
+
+    rows = rows_with({"libjpeg_turbo": "3.2.0"}, {"libjpeg_turbo": "3.2.0"})
+    row = rows["libjpeg_turbo"]
+    check("a distro row at the upstream version reads ok",
+          row["state"] == "ok" and row["update_available"] is False)
+    check("...and has nothing to offer in the action column",
+          row["action"] == "none" and row["upgrade_command"] is None)
+
+    # A row a DOWNLOAD can move must not borrow the "nothing this host can
+    # install" note: that sentence sits next to a button that DOES install it,
+    # and the two would contradict each other.
+    rows = rows_with({"oxipng": "10.2.0"}, {"oxipng": "10.2.1"})
+    row = rows["oxipng"]
+    check("a downloadable update carries no 'nothing can be installed' note",
+          row["state"] == "update" and row["action"] == "update"
+          and not row["note"])
+
+
+# --------------------------------------------------------------------------- #
+# 11. A native Linux install of rsgain/fpcalc is SEEN, not just downloaded
+# --------------------------------------------------------------------------- #
+# Adding upstream's Linux assets made the two tools installable on Linux — but
+# tools.py reports what sits under .dependencies through its own field map, and a
+# key missing from that map is installed and then invisible: detection would keep
+# describing the distro copy on PATH, so the amber Update would never clear and
+# the press would read as "nothing happened".
+with tempfile.TemporaryDirectory() as tmp:
+    for folder, exe in (("rsgain v3.8", "rsgain"), ("chromaprint v1.6.1", "fpcalc")):
+        root = os.path.join(tmp, folder)
+        os.makedirs(root, exist_ok=True)
+        open(os.path.join(root, exe), "w").close()
+    real = (sandbox_deps(tmp), fetchdeps.installed_versions)
+    try:
+        with linux_host():
+            found = tools_mod.detect_all_tools()
+            check(f"a native rsgain install is detected ({found.get('rsgain')})",
+                  (found.get("rsgain") or {}).get("version") == "3.8"
+                  and (found["rsgain"].get("rsgain_exe") or "").endswith("rsgain"))
+            check(f"a native fpcalc install is detected ({found.get('chromaprint')})",
+                  (found.get("chromaprint") or {}).get("version") == "1.6.1"
+                  and (found["chromaprint"].get("fpcalc_exe") or "").endswith("fpcalc"))
+            check("...and the rows report them as installed, not behind",
+                  fetchdeps.installed_versions().get("rsgain") == "3.8"
+                  and fetchdeps.installed_versions().get("chromaprint") == "1.6.1")
+    finally:
+        fetchdeps.installed_versions = real[1]
         restore_deps(real[0])
 
 

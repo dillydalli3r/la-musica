@@ -143,7 +143,10 @@ interface LyricInk {
    *  line keeps full ink instead of two tones of grey. */
   plain: string;
   /** The glyph shadow for this ink. text-shadow inherits, so the pane sets
-   *  it once for the whole reading surface. */
+   *  it once for the whole reading surface. Empty for the light polarity:
+   *  near-black ink only ever lands on a field the polarity rule measured as
+   *  bright, and a white halo there is a white outline around every glyph
+   *  rather than legibility (see index.css). */
   shade: string;
   /** Karaoke syllables: under the playhead, already sung, still to come. The
    *  emphasis is the scale + glow, which works on either polarity; the
@@ -175,7 +178,7 @@ const INK_ON_LIGHT: LyricInk = {
   // playing.
   dim: "text-zinc-700",
   plain: "text-zinc-900",
-  shade: "np-shade-light",
+  shade: "",
   wordNow: "text-zinc-950 scale-110 [text-shadow:0_0_16px_rgba(0,0,0,0.4)]",
   wordSung: "text-zinc-950",
   wordNext: "text-zinc-950/75",

@@ -157,6 +157,15 @@ ISO_CFG = {
     # now cares — a tag is stored in the capitalization the writers produce.
     # Off for these cases, switched on in its own block below.
     "grade_check_tag_case": False,
+    # The CD legs: these fixtures are synthetic CD-tagged folders with no
+    # rip artefacts (no .log, no .accurip), so the readout would charge
+    # "nothing established the CD verdict's '<leg>' leg" — a real failure for
+    # a real disc folder, and not the subject of a single case here. Switched
+    # off exactly as the other checks this file does not set up are; the CD
+    # evidence rules have their own suite (test_cd_audit.py).
+    "audit_require_accuraterip": False,
+    "audit_verify_log_checksum": False,
+    "audit_log_score_threshold": 0,
 }
 
 tmp = tempfile.mkdtemp(prefix="mlo_naming_test_")

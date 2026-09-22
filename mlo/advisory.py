@@ -20,15 +20,19 @@ advisory must not be invented without evidence. The ladder, in order:
 1. **Instrumental.** A track carrying INSTRUMENTAL=1 has no words to be
    explicit with, so it is 0 — `auto_zero_advisory_for_instrumental` (on by
    default) is what makes this fire.
-2. **The AI provider**, asked for 0/1/2 with the track's lyrics when they exist
-   (the whole point: a model reading the words beats a word list), and its
-   answer REPLACES the word scan below. 3 means "cannot tell" and falls through
-   — the value space this app stores is 0/1/2, and a stored 3 would fail the
-   grader on every track that carried one.
+2. **The AI provider**, asked for 0/1/2 about the song's SUBJECT AND ATTITUDE
+   with its lyrics when they exist (the whole point: a model reading the whole
+   song beats a word list — a mild word in passing is not explicit, and the
+   rubric in `_SYSTEM_PROMPT` says so), and its answer REPLACES the word scan
+   below. 3 means "cannot tell" and falls through — the value space this app
+   stores is 0/1/2, and a stored 3 would fail the grader on every track that
+   carried one.
 3. **The lyrics word scan** (`mlo.advisory_words`, an extensive multilingual
-   lexicon), when `advisory_lyrics_scan` is on and the track has lyrics: any
-   hit is 1, no hit is 0. A track with no lyrics states nothing (the scan
-   never reads silence as clean).
+   lexicon), when `advisory_lyrics_scan` is on and the track has lyrics: only a
+   hit from the lexicon's STRONG set is 1. The mild tier ("ass", "arse",
+   "culo") is reported in `hits` and decides nothing — a lone "ass" is not the
+   evidence "motherfucker" is — so a track whose only hits are mild is 0. A
+   track with no lyrics states nothing (the scan never reads silence as clean).
 4. **`advisory_fallback`** — what to store when every step above was silent:
    `"0"` (the shipped default: not explicit), `"2"` (clean edition) or
    `"none"` (write nothing at all, leaving the track unrated).
@@ -40,9 +44,10 @@ that read the words are still consulted. The providers miss exactly there
 a stated 0 that the words contradict escalates to 1 and the SOURCE names the
 signal that overruled the provider ("lyrics-scan (escalated)"). The scan's job
 there is explicit-ONLY and one-way: it never turns a stated 1, or a clean
-edition's 2, into anything else, and a stated 0 the words agree with stays 0.
-The AI is not a signal but a source — the rank above decides between its answer
-and the providers' — so it is the one stage that can overrule a stated 2.
+edition's 2, into anything else, and it escalates on a strong hit alone — mild
+language is not a contradiction, so a stated 0 the mild tier agrees with stays
+0. The AI is not a signal but a source — the rank above decides between its
+answer and the providers' — so it is the one stage that can overrule a stated 2.
 
 Every decision carries its own provenance ("instrumental", "ai-lyrics",
 "lyrics-scan", "fallback") and the words that hit, so the UI can show why a
@@ -73,18 +78,38 @@ VALID_FALLBACKS = ("0", "2", "none")
 # that provider with a rating it never gave.
 ESCALATED = " (escalated)"
 
-# How much of the lyrics a model is asked to read. The opening verse decides
-# an explicit rating and a whole song's text is a needless prompt; the tail of
-# a long song is where a swear word usually still shows up.
-_LYRICS_LIMIT = 6000
+# How much of the lyrics a model is asked to read. The rubric asks for the
+# song's SUBJECT AND TONE, and a theme can be carried by the last verse as much
+# as the first — so the cap is a safety valve against a pathological file (a
+# whole discography in one .lrc), not a judgement budget: 12000 characters is
+# past the end of all but the longest lyrics, and a text that runs over it is
+# cut rather than refused.
+_LYRICS_LIMIT = 12000
 
+# The rating rubric. It asks for the song's SUBJECT AND ATTITUDE, not for a
+# keyword count: the failure this prompt exists to prevent is a track marked
+# explicit because one mild word appears in it. Which terms are mild enough to
+# say so is the lexicon's own tier (`mlo.advisory_words.MILD`), and the two
+# must agree — the examples below are that tier's English entries, and the
+# prompt's rule ("mild in passing is not explicit") is that tier's rule stated
+# for a reader that has no lexicon.
 _SYSTEM_PROMPT = (
-    "You rate a song's iTunes advisory value from its lyrics. Answer with ONE "
-    "digit and nothing else: 0 = no explicit content, 1 = explicit content "
-    "(profanity, slurs, graphic sex or violence), 2 = a clean/edited edition of "
-    "an explicit song, 3 = cannot tell (no lyrics, or not enough to judge). "
-    "Judge the lyrics as written, in any language, including slang and "
-    "transliteration. Never explain."
+    "You rate a song's iTunes advisory value from what the song is ABOUT, not "
+    "from the words it happens to contain. Answer with ONE digit and nothing "
+    "else: 0 = not explicit, 1 = explicit, 2 = a clean/edited edition of an "
+    "explicit song, 3 = cannot tell (no lyrics, or not enough to judge). "
+    "Rate 1 when the lyrics are explicit as a whole — profanity that is "
+    "excessive, or a slur, or a very strong word (hard swearing, a sexual or "
+    "violent term of abuse), or graphic sex, violence or drug use. Rate 0 "
+    "when they are not, INCLUDING a song that is otherwise clean and carries "
+    "a mild word in passing: a lone 'ass', 'damn' or 'hell', an idiom, a word "
+    "quoted from someone else, or a word that is ordinary in another language "
+    "is not explicit on its own. Weigh the theme and the tone over the "
+    "vocabulary — a song about heartbreak that swears once is not the same "
+    "record as one whose subject is the profanity. The lyrics may be in ANY "
+    "language or script: judge them in that language, slang, transliteration "
+    "and mixed-language lines included, and never answer 3 merely because the "
+    "lyrics are not English. Never explain."
 )
 
 
@@ -117,6 +142,25 @@ def scan_lyrics(text) -> List[str]:
         return advisory_words.scan_lyrics(text)
     except Exception:
         return []
+
+
+def _strong_hits(hits) -> List[str]:
+    """The hits that establish explicit: the lexicon's mild tier filtered out.
+
+    `scan_lyrics` reports EVERY term it saw, and the mild entries in that list
+    ("ass", "arse", "culo") are evidence of nothing on their own — a song that
+    carries one in passing is not explicit for it (see
+    `mlo.advisory_words.MILD`). The filter lives there, in the data, so "which
+    terms count" is declared once and a caller that asked `if hits` cannot
+    disagree with it. No lexicon means no hits to filter either.
+    """
+    if not hits:
+        return []
+    try:
+        from . import advisory_words
+        return advisory_words.strong(hits)
+    except Exception:
+        return list(hits)
 
 
 def ai_advisory(cfg, artist="", title="", album="", lyrics="") -> Optional[Tuple[int, str]]:
@@ -258,7 +302,10 @@ def _word_stages(cfg, *, text, verdict) -> Optional[Dict]:
         return verdict
     if (cfg or {}).get("advisory_lyrics_scan", True) and text:
         hits = scan_lyrics(text)
-        return {"value": 1 if hits else 0, "source": "lyrics-scan",
+        # The mild tier is reported, never decisive: a lyric whose only hits
+        # are "ass" or "culo" is 0 like any other clean track, and the reply
+        # still names what was seen (`hits`) so a reader can check the call.
+        return {"value": 1 if _strong_hits(hits) else 0, "source": "lyrics-scan",
                 "stage": STAGE_LYRICS, "hits": hits, "fallback": False}
     return None
 
@@ -275,8 +322,9 @@ def _escalate_explicit(cfg, text) -> Optional[Dict]:
     question, and the scan is the signal consulted for it — explicit-ONLY,
     because this stage has no way to say "clean edition".
 
-    Only 1 escalates — a scan that hit nothing AGREES with the provider, and
-    that is `None` here ("no escalation"), not a new decision. The track's
+    Only a STRONG hit escalates — the mild tier is reported and nothing more,
+    so a stated 0 the words agree with (only "ass" in the lyric, say) stays 0,
+    which is `None` here ("no escalation"), not a new decision. The track's
     words must EXIST for the escalation to fire at all: there is nothing to
     read, and nothing is not the evidence it takes to contradict a provider.
     The returned decision names the signal that fired (`ESCALATED`), never the
@@ -285,7 +333,7 @@ def _escalate_explicit(cfg, text) -> Optional[Dict]:
     if not text or not (cfg or {}).get("advisory_lyrics_scan", True):
         return None
     hits = scan_lyrics(text)
-    if not hits:
+    if not _strong_hits(hits):
         return None
     return {"value": 1, "source": "lyrics-scan" + ESCALATED,
             "stage": STAGE_LYRICS, "hits": hits, "fallback": False}

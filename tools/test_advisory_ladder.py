@@ -270,8 +270,14 @@ try:
     assert out["stage"] == "ai" and out["hits"] == [], out
     assert "sticks and stones may break my bones" in seen["user"], seen
     assert "Rihanna" in seen["user"] and "S&M" in seen["user"], seen
-    assert "0 = no explicit content" in seen["system"], seen
-    assert "3 = cannot tell" in seen["system"], seen
+    # The prompt IS the rubric, and the parser only accepts 0/1/2 (3 falls
+    # through) — so what the prompt must say is that the four answers exist and
+    # that mild language alone is not explicit. Assert those two facts, not a
+    # sentence: the wording is the model's instruction, not this suite's
+    # contract.
+    rubric = seen["system"].lower()
+    assert all(f"{digit} =" in rubric for digit in "0123"), seen
+    assert "mild" in rubric and "explicit" in rubric, seen
 
     # ----------------------------------------------------------------------- #
     # 4) The AI saying 3 (cannot tell) or nonsense falls THROUGH to the scan.
@@ -287,6 +293,30 @@ try:
     # a scan hit really is what makes it explicit, and a clean line is 0
     out = advisory.decide_advisory(cfg(), lyrics="we built this city on rock and roll")
     assert out["stage"] == "lyrics" and out["value"] == 0 and out["hits"] == [], out
+
+    # ----------------------------------------------------------------------- #
+    # 4b) MILD language alone does not make a song explicit. The lexicon's
+    #     mild tier ("ass", "arse", "culo") is REPORTED and never decides: the
+    #     scan's job is to overrule a provider only when the words say so, and
+    #     a passing "ass" says nothing about the song.
+    # ----------------------------------------------------------------------- #
+    ai_mod.ai_configured = lambda c: False
+    for line in ("you're an ass", "shake that ass", "my arse", "un culo"):
+        out = advisory.decide_advisory(cfg(), lyrics=line)
+        assert out["stage"] == "lyrics" and out["value"] == 0, (line, out)
+        assert out["hits"], f"the mild hit is still reported: {line}"
+        assert not advisory_words.strong(out["hits"]), (line, out)
+        assert advisory_words.MILD, "the mild tier must not be empty"
+    # ... and over a provider's stated 0 the mild words agree with it: no
+    # escalation, the provider keeps its value and its credit.
+    out = advisory.decide_advisory(cfg(), value=0, source="apple-album",
+                                   lyrics="shake that ass")
+    assert out["value"] == 0 and out["source"] == "apple-album", out
+    # One strong word in the same lyric still escalates, tier or no tier.
+    out = advisory.decide_advisory(cfg(), value=0, source="apple-album",
+                                   lyrics="shake that ass and fuck off")
+    assert out["value"] == 1 and out["source"] == "lyrics-scan (escalated)", out
+    assert advisory_words.strong(out["hits"]) == ["fuck"], out
 
     # ----------------------------------------------------------------------- #
     # 5) No AI configured: the scan is the first move, not a second opinion.

@@ -2091,6 +2091,15 @@ export const api = {
    *  walk-free, which is why the Library page can afford to ask on load. */
   libraryLayoutReport: () => json<LayoutSnapshot>(`${API}/library/layout/report`),
 
+  /** Scan the library AND fix what can be fixed (script 20's apply phase):
+   *  wrong-case names, audio outside any album folder, album-less artist
+   *  folders — the last ones to the Trash, never deleted. Returns the rows
+   *  that are left plus `fixes`, and stores the report, so the panel and the
+   *  Library page's warning stay the same answer. Long-running: it walks and
+   *  reads one file's tags per album. */
+  libraryLayoutApply: () =>
+    json<LayoutReport>(`${API}/library/layout/apply`, { method: "POST" }, 1800000),
+
   /** Move an album-less artist folder into the app's Trash. The server
    *  re-derives the finding, so a folder that gained an album since the scan
    *  is refused instead of moved. */
@@ -2160,6 +2169,13 @@ export const api = {
         /** deps (the installer fetches it), system (a distro package this host
          *  provides) or unsupported (no build for this platform). */
         install_kind?: "deps" | "system" | "unsupported";
+        /** What this row's ACTION column offers: `install`/`update` download
+         *  into .dependencies, `upgrade` copies `upgrade_command` (the OS
+         *  package manager owns the tool), `none` is nothing to do here. */
+        action?: "install" | "update" | "upgrade" | "none";
+        /** The exact command that upgrades a `system` row on this host. Shown
+         *  and copied, never run — the app drives no package manager. */
+        upgrade_command?: string | null;
       }[];
     }>(`${API}/dependencies${refresh ? "?refresh=1" : ""}`),
   installDependencies: (keys?: string[]) =>

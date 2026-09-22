@@ -230,6 +230,13 @@ def _aggregate_albums(albums_data):
         "pass_count": pass_count,
         "total_checks": total_checks,
         "grade_pct": round(100.0 * pass_count / total_checks, 1) if total_checks else None,
+        # The artist's own verdict, by the same rule the albums use (failed ==
+        # 0) and requiring at least one graded check, so an artist with no
+        # albums at all is not handed a pass for nothing. It is a field rather
+        # than something the UI derives from grade_pct because grade_pct is
+        # ROUNDED: at a few thousand checks one failure is 99.98 %, which
+        # rounds to 100.0 and drew a green artist dot over a failed album.
+        "pass": bool(total_checks) and pass_count == total_checks,
         "audit_summary": audit,
     }
 

@@ -355,6 +355,38 @@ del _RAW_WORDS, _RAW_PHRASES, _entries
 _TERMS: tuple[str, ...] = _ORDERED
 WORDS: frozenset[str] = frozenset(_TERMS)
 
+# --------------------------------------------------------------------------- #
+# Severity — the mild tier
+# --------------------------------------------------------------------------- #
+# Terms whose presence is MILD on its own: a lyric can carry one of these
+# without being ABOUT anything explicit. A hit from this set is still reported
+# (the readout says what was seen, and the AI stage above the scan reads it in
+# context), but a track whose ONLY hits are these is not called explicit by the
+# scan — "ass" in passing is not the evidence "motherfucker" is, and the scan
+# exists to overrule a provider only when the words actually say so.
+#
+# Deliberately short, and the place to extend when a term turns out to fire on
+# ordinary lyrics: the English "ass" family, and the body-word cognates that
+# carry no insult of their own in the languages that have one. Insults BUILT on
+# them stay strong ("asshole", "arschloch", "culero") — the compound is the
+# insult, the body word is not.
+_RAW_MILD = """
+    ass asses arse arses asshat asshats jackass jackasses dumbass dumbasses
+    culo culos culi arsch reet
+"""
+MILD: frozenset[str] = frozenset(_fold(t) for t in _RAW_MILD.split())
+del _RAW_MILD
+
+
+def strong(hits: Iterable[str]) -> list[str]:
+    """The hits that establish explicit, in order: ``hits`` minus the mild tier.
+
+    The filter every decision goes through, so "which terms count" lives in ONE
+    place — a caller that reported ``hits`` and then asked ``if hits`` would
+    count a lone "ass" as explicit, which is exactly what this tier is for.
+    """
+    return [h for h in hits if h not in MILD]
+
 # Scripts that do not put spaces between words. A term in one of these is
 # matched as a substring, because there is no token boundary to match against
 # (and Korean glues particles onto the stem, which is the same problem).

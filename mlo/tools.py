@@ -299,6 +299,14 @@ _DEPS_NATIVE_FIELDS = {
     "slskd": "slskd_exe",
     "audioauditor": "cli_exe",
     "cuetools": "arcue_exe",
+    # rsgain and chromaprint became installable here when upstream's Linux
+    # assets were added (fetchdeps.LINUX_BINARIES). Without a field they would
+    # be installed into .dependencies and still not COUNT: detection would keep
+    # reporting the distro copy on PATH, so the row's amber Update would never
+    # clear and the new download would be invisible to mlo.loudness and
+    # mlo.acoustid (which read rsgain_exe / resolves fpcalc itself).
+    "rsgain": "rsgain_exe",
+    "chromaprint": "fpcalc_exe",
 }
 
 
@@ -306,9 +314,10 @@ def _detect_deps_native():
     """Tools installed as native binaries under .dependencies (POSIX only).
 
     fetchdeps installs native Linux builds there (see fetchdeps.LINUX_BINARIES:
-    oxipng, slskd, AudioAuditor, and CUETools through its mono launcher) and the
-    .exe scan above cannot see them. A Windows host sharing this folder must
-    never pick one up: an .exe-less folder is a file it cannot execute.
+    oxipng, slskd, AudioAuditor, CUETools through its mono launcher, and
+    upstream's rsgain and fpcalc) and the .exe scan above cannot see them. A
+    Windows host sharing this folder must never pick one up: an .exe-less
+    folder is a file it cannot execute.
     """
     from .fetchdeps import INSTALL_PREFIX, LINUX_BINARIES, run_name
 

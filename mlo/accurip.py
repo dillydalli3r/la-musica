@@ -90,6 +90,13 @@ def _patched_cue_for_temp(original_text, discs_wav_map):
 
     discs_wav_map: {lowercase original basename -> wav basename}
     """
+    # A converted album's cue still names the file it was ripped from
+    # (album.ape for album.flac), so a reference whose basename is not in the
+    # map is retried by stem. A stem shared by two tracks proves nothing and
+    # is left alone: guessing there puts one track's audio under another's.
+    by_stem = {}
+    for src_base, wav in discs_wav_map.items():
+        by_stem.setdefault(os.path.splitext(src_base)[0], set()).add(wav)
     out_lines = []
     for line in original_text.splitlines():
         m = CUE_FILE_RE.match(line.rstrip("\n"))
@@ -97,11 +104,32 @@ def _patched_cue_for_temp(original_text, discs_wav_map):
             ref = m.group(1)
             base = ref.replace("/", "\\").split("\\")[-1]
             wav = discs_wav_map.get(base.lower())
+            if not wav:
+                cands = by_stem.get(os.path.splitext(base.lower())[0])
+                wav = next(iter(cands)) if cands and len(cands) == 1 else None
             if wav:
                 # keep any directory part of original ref (should be none) but replace basename
                 head = ref[: len(ref) - len(base)] if base else ""
                 new_ref = head + wav
                 line = line.replace(f'"{ref}"', f'"{new_ref}"', 1)
+        out_lines.append(line)
+    return "\n".join(out_lines) + "\n"
+
+
+def _cue_all_files_to(cue_text, wav):
+    """Point every FILE line of `cue_text` at one WAV basename.
+
+    For a disc whose audio is a single image file per disc: the cue's TRACK
+    and INDEX lines are the disc's layout and cannot be rebuilt from the audio
+    alone, so every reference — stale or not — has exactly one possible
+    answer, and it is this file.
+    """
+    out_lines = []
+    for line in cue_text.splitlines():
+        m = CUE_FILE_RE.match(line.rstrip("\n"))
+        if m:
+            ref = m.group(1)
+            line = line.replace(f'"{ref}"', f'"{wav}"', 1)
         out_lines.append(line)
     return "\n".join(out_lines) + "\n"
 
@@ -236,41 +264,89 @@ def _run_arcue(arcue_exe, cue_path, cwd, timeout=120):
     return combined
 
 
+def _synthesized_cue(track_paths, name_map):
+    """A one-track-per-file cue for `track_paths`, in the order given.
+
+    CUETools builds the disc's TOC from a cue sheet, so when the album has
+    none — or has one that names audio this disc does not hold — the track
+    order is the only TOC evidence there is, and this cue is that order.
+    """
+    lines = []
+    for idx, tp in enumerate(track_paths, 1):
+        base = os.path.basename(tp)
+        wav = name_map.get(base.lower(), os.path.splitext(base)[0] + ".wav")
+        lines.append(f'FILE "{wav}" WAVE')
+        lines.append(f'  TRACK {idx:02d} AUDIO')
+        lines.append('    INDEX 01 00:00:00')
+    return "\n".join(lines) + "\n"
+
+
+def _cue_unresolved_refs(cue_text, folder):
+    """The FILE references in `cue_text` that name no file in `folder`."""
+    unresolved = []
+    for line in cue_text.splitlines():
+        m = CUE_FILE_RE.match(line.rstrip("\n"))
+        if not m:
+            continue
+        ref = m.group(1)
+        base = ref.replace("/", "\\").split("\\")[-1]
+        if not base or not os.path.isfile(os.path.join(folder, base)):
+            unresolved.append(base or ref)
+    return unresolved
+
+
 def _generate_via_cuetools(ffmpeg_exe, arcue_exe, album_dir, disc_num, track_paths, cue_path, config):
     """Generate the CUETools verification log for one disc via ArCueDotNet.
 
     Uses a temp dir with WAVs + patched cue, invokes ArCueDotNet -v, captures
     the verbose log.  Returns the raw log text (as CUETools emitted it).
     """
-    # If cue_path is None, we create a minimal cue synthesising TRACKs from sorted track_paths
     tmp_dir = tempfile.mkdtemp(prefix="mlo_accurip_")
     try:
         # Decode to WAVs
         name_map = _convert_to_wavs(ffmpeg_exe, track_paths, tmp_dir, config)
 
+        # The cue drives the TOC, so the order it is built from must be the
+        # disc's track order, not the caller's listdir order.
+        from .discs import _track_num_of, _file_track_number
+
+        def _tn(p):
+            try:
+                n = _track_num_of(p)
+                if n is not None:
+                    return n
+                return _file_track_number(p) or 999
+            except Exception:
+                return 999
+
+        track_paths = sorted(track_paths, key=_tn)
+
+        patched = None
         if cue_path and os.path.isfile(cue_path):
             raw_cue = open(cue_path, "r", encoding="utf-8", errors="replace").read()
             patched = _patched_cue_for_temp(raw_cue, name_map)
-        else:
-            # Synthesize minimal cue (no REM DISCID – CUETools will compute TOC from file order)
-            # Sort track_paths to deterministic order
-            from .discs import _track_num_of, _file_track_number
-            def _tn(p):
-                try:
-                    n = _track_num_of(p)
-                    if n is not None:
-                        return n
-                    return _file_track_number(p) or 999
-                except Exception:
-                    return 999
-            sorted_paths = sorted(track_paths, key=_tn)
-            lines = []
-            for idx, tp in enumerate(sorted_paths, 1):
-                wav = name_map.get(os.path.basename(tp).lower(), os.path.splitext(os.path.basename(tp))[0] + ".wav")
-                lines.append(f'FILE "{wav}" WAVE')
-                lines.append(f'  TRACK {idx:02d} AUDIO')
-                lines.append('    INDEX 01 00:00:00')
-            patched = "\n".join(lines) + "\n"
+            unresolved = _cue_unresolved_refs(patched, tmp_dir)
+            if unresolved and len(name_map) == 1:
+                # A one-file disc: every FILE line can only mean that file,
+                # and the cue's TRACK/INDEX lines are the disc's layout, which
+                # no synthesized cue can recover. Repoint instead of discarding.
+                patched = _cue_all_files_to(patched, next(iter(name_map.values())))
+                unresolved = _cue_unresolved_refs(patched, tmp_dir)
+            if unresolved:
+                # A cue that names audio this disc does not hold — a stale
+                # name left by a rename, or one album-wide cue on a multi-disc
+                # set — leaves ArCueDotNet hunting for files that are not
+                # there. Its fallback is to guess among the folder's audio,
+                # and it gives up ("unable to locate the audio files") as soon
+                # as the folder holds more files than the cue names. The temp
+                # WAVs are the audio this disc does have, so build from them.
+                log(c(f"  disc {disc_num}: cue {os.path.basename(cue_path)} names "
+                      f"{len(unresolved)} file(s) that are not on this disc "
+                      f"({', '.join(unresolved[:2])}) – synthesizing minimal cue",
+                      Color.YELLOW))
+                patched = None
+        if patched is None:
+            patched = _synthesized_cue(track_paths, name_map)
 
         cue_tmp = os.path.join(tmp_dir, f"CD-{disc_num}.cue")
         # Write patched cue as UTF-8 without BOM; ArCueDotNet handles it
@@ -307,7 +383,40 @@ def _generate_via_cuetools(ffmpeg_exe, arcue_exe, album_dir, disc_num, track_pat
 # Public helpers – .accurip status parsing (used by grader/audit)
 # ----------------------------------------------------------------------
 _AR_ID_RE = re.compile(r"\[AccurateRip ID:\s*([0-9a-fA-F\-]+)\]", re.IGNORECASE)
-_TRACK_AR_RE = re.compile(r"^\s*0*(\d+)\s+\[[0-9a-fA-F]+\|[0-9a-fA-F]+\]\s*\([^\)]+\)\s*(.+)$")
+# The table header. The words are stable across CUETools versions, the
+# spacing is not: 2.1.4+ prints ``Track   [  CRC   |   V2   ] Status`` and
+# 2.0.9/2.1.2 prints ``Track [ CRC ] Status``, so only the words are matched.
+_AR_TABLE_RE = re.compile(r"^\s*Track\s*\[[^\]]*\]\s*Status\s*$", re.MULTILINE)
+# One row of that table: the track number, its CRC (V2 is absent before
+# 2.1.4, so the second CRC is optional), the confidence in parentheses and
+# the verdict. The confidence is optional too — the verdict is what is
+# classified, and a row with no confidence still says one.
+_TRACK_AR_RE = re.compile(
+    r"^\s*0*(\d+)\s+\[\s*[0-9a-fA-F]{8}\s*(?:\|\s*[0-9a-fA-F]{8}\s*)?\]"
+    r"(?:\s*\(([^)]*)\))?\s*(.*)$"
+)
+# A row of the EAC-style table at the end of the log: peak, CRC32 of the
+# decoded audio, then the same CRC with null samples excluded. The ``--``
+# row is the whole disc, the numbered ones are the tracks.
+_TRACK_CRC_RE = re.compile(r"^\s*(--|\d+)\s+[\d.]+\s+\[\s*([0-9a-fA-F]{8})\s*\]")
+
+
+def parse_accurip_track_crcs(text):
+    """{track number: CRC32} from the EAC-style table of a CUETools log.
+
+    That CRC is the CRC-32 of the track's decoded 16-bit PCM — the value
+    ``mlo.discs._audio_crc32`` recomputes from the audio on disk. It is the
+    only content in an .accurip that ties the file to one disc's audio, which
+    is what a rename of a file with no disc number in its name has to go on.
+    The ``--`` (whole disc) row is not a track and is left out.
+    """
+    crcs = {}
+    for line in (text or "").splitlines():
+        m = _TRACK_CRC_RE.match(line)
+        if not m or m.group(1) == "--":
+            continue
+        crcs[int(m.group(1))] = m.group(2).upper()
+    return crcs
 
 
 def parse_accurip_status(text):
@@ -323,6 +432,9 @@ def parse_accurip_status(text):
       `` 01     [aaaaaaaa|bbbbbbbb] (V1/Y) Accurately ripped`` (pre-2.1.4)
       `` 01     [aaaaaaaa|bbbbbbbb] (0/Y) No match``
       `` 01     [aaaaaaaa|bbbbbbbb] (0/Y) No match (V2 was not tested)``
+      `` 01     [aaaaaaaa] (V/Y) Accurately ripped`` (2.0.9/2.1.2: no V2 column,
+      and the header is then ``Track [ CRC ] Status``) – both layouts are read,
+      and a row whose confidence is missing is read too
       Offsetted blocks: ``Offsetted by N:`` + single-CRC lines (alternate pressings)
       Footer: ``Track Peak [ CRC32 ] ...``
 
@@ -350,18 +462,18 @@ def parse_accurip_status(text):
             return ("NONE", "AccurateRip ID not found")
         return ("NONE", "no AccurateRip ID")
     start = m_id.end()
-    # Per spec the header is ``Track   [  CRC   |   V2   ] Status`` (2.1.4+) or ``Track   [ CRC    ] Status`` (single CRC offsetted)
-    header_pos = text.find("Track   [", start)
-    if header_pos == -1:
-        header_pos = text.find("Track   [", m_id.start())
-    block_start = header_pos
+    # A header this parser does not recognise must not lose the table: the
+    # rows are self-describing, so the block falls back to everything the ID
+    # line introduces and the terminators below still close it.
+    header = _AR_TABLE_RE.search(text, start)
+    block_start = header.start() if header else start
     end_markers = ["Offsetted by", "Track Peak", "[CTDB TOCID"]
     block_end = len(text)
     for marker in end_markers[0:2]:
         idx = text.find(marker, block_start + 1)
         if idx != -1 and idx < block_end:
             block_end = idx
-    block = text[block_start:block_end] if block_start != -1 else text[start:block_end]
+    block = text[block_start:block_end]
     low_block = block.lower()
     # Global pre-check: ``Track not present in AccurateRip database`` inside primary block means NONE, not FAKE
     # (spec distinguishes not-present from No match). Keep block-level string for fallback.
@@ -373,7 +485,7 @@ def parse_accurip_status(text):
         m = _TRACK_AR_RE.match(line)
         if m:
             tracks_found += 1
-            status = m.group(2).strip().lower()
+            status = m.group(3).strip().lower()
             # Spec: ``Track not present in AccurateRip database`` -> not in DB -> NONE
             if "not present" in status:
                 any_not_present = True
@@ -389,6 +501,11 @@ def parse_accurip_status(text):
                     any_no_match = True
             # else: accurately ripped -> ok (spec may have "or (N/Y) differs" for CTDB, not AR)
     if tracks_found == 0:
+        # The AR ID line ends with ``disk not present in database.`` when the
+        # disc is not in the database at all, and that sentence — not the
+        # missing table — is the reason there is nothing to score.
+        if "not present in database" in low_block:
+            return ("NONE", "AccurateRip disk not present in database")
         if "not present" in low_block and "accuraterip" in low_block:
             return ("NONE", "Track not present in AccurateRip database")
         if "no match" in low_block:
@@ -417,6 +534,12 @@ def parse_accurip_per_track(text):
     Covers spec cases: ``Accurately ripped`` → REAL, ``No match`` / ``No match (V2 was not tested)`` → FAKE,
     ``Track not present in AccurateRip database`` → NONE.
 
+    The table header is matched by its words, not its column spacing: a log
+    whose layout this parser has not seen keeps its per-track verdicts instead
+    of collapsing to the album-level answer. Rows are still read after the
+    AccurateRip ID line, so CTDB statuses (a different section, and a
+    different database) are never mistaken for AccurateRip ones.
+
     If the log has no AccurateRip ID or no parsable primary block, returns {}.
     Offsetted by ... blocks are ignored (alternate pressings per spec).
     """
@@ -426,19 +549,13 @@ def parse_accurip_per_track(text):
     if not m_id:
         return {}
     start = m_id.end()
-    header_pos = text.find("Track   [", start)
-    if header_pos == -1:
-        header_pos = text.find("Track   [", m_id.start())
-    if header_pos == -1:
-        return {}
-    block_start = header_pos
+    header = _AR_TABLE_RE.search(text, start)
+    block_start = header.start() if header else start
     block_end = len(text)
-    for marker in ("Offsetted by", "Track Peak", "[CTDB TOCID"):
-        # Only first two terminate primary, but include third as safety
-        if marker in ("Offsetted by", "Track Peak"):
-            idx = text.find(marker, block_start + 1)
-            if idx != -1 and idx < block_end:
-                block_end = idx
+    for marker in ("Offsetted by", "Track Peak"):
+        idx = text.find(marker, block_start + 1)
+        if idx != -1 and idx < block_end:
+            block_end = idx
     block = text[block_start:block_end]
     per = {}
     for line in block.splitlines():
@@ -449,7 +566,7 @@ def parse_accurip_per_track(text):
             tn = int(m.group(1))
         except ValueError:
             continue
-        status_raw = m.group(2).strip().lower()
+        status_raw = m.group(3).strip().lower()
         if "not present" in status_raw:
             per[tn] = "NONE"
         elif "accurately ripped" in status_raw:
@@ -474,7 +591,9 @@ def _canonical_accurip_text(content, keep_empty_lines=False, keep_other_lines=Fa
       which does ``rstrip()`` — the file must not end with an empty line.
     - Final newline is controlled by ``append_final_newline`` (like ``_canonical_lyrics``
       and ``canonical_cue_text``); when False (default) the file has **no** trailing
-      newline byte, matching ``.cue`` default. When True, exactly one LF is appended.
+      newline byte, matching ``.cue`` default. When True the text ends with exactly
+      one LF — never a second one, so canonicalising an already-canonical file is a
+      no-op (grading compares the stored file with this very function).
     This is intentionally *not* preserving table-alignment leading spaces — per
     user request for optimization, the file is still valid for parsing.
     Runs directly after generation and is used for grading.
@@ -505,7 +624,12 @@ def _canonical_accurip_text(content, keep_empty_lines=False, keep_other_lines=Fa
         # Keep backward compat: if caller expects old unconditional "\n", they should pass True explicitly
         # For now, default to False to remove the extra blank line at bottom
         append_final_newline = False
-    if result and append_final_newline:
+    # Only when the text does not already end with one: with
+    # keep_empty_accurip_lines on, the log's own trailing empty line is kept,
+    # and appending a second LF to it grew the file by a line on EVERY pass —
+    # script 10 rewrote it forever and grading, which compares the stored bytes
+    # with exactly this function, could never accept it.
+    if result and append_final_newline and not result.endswith("\n"):
         result += "\n"
     return result
 
@@ -566,16 +690,33 @@ def run_generate_accurip(config):
     from .tools import detect_all_tools
     tools = detect_all_tools()
     ffmpeg_exe = (tools.get("ffmpeg") or {}).get("ffmpeg_exe")
-    if not ffmpeg_exe or not os.path.isfile(ffmpeg_exe):
-        log(c("ERROR: ffmpeg not found — needed to transport FLAC → WAV for CUETools", Color.RED))
-        log(c("Install via Dependencies → ffmpeg or place ffmpeg.exe in .dependencies/ffmpeg v*/", Color.YELLOW))
-        return stats
-
+    if ffmpeg_exe and not os.path.isfile(ffmpeg_exe):
+        ffmpeg_exe = None
     cuetools = tools.get("cuetools") or {}
     arcue_exe = resolve_arcue_exe(tools)
+
+    # Both tools are installed from the same page, so a run missing both names
+    # both: reporting only the first made the user install ffmpeg, run the
+    # script again, and only then learn CUETools was missing too.
+    missing = []
+    if not ffmpeg_exe:
+        missing.append(("ffmpeg", "decodes each track to the WAV that CUETools "
+                                  "verifies", ".dependencies/ffmpeg v*/ffmpeg.exe"))
     if not arcue_exe:
-        log(c("ERROR: CUETools ARCUE (ArCueDotNet/CUETools.ARCUE) not found — needed for AccurateRip verification", Color.RED))
-        log(c("Install via Dependencies → CUETools or place CUETools.ARCUE.exe in .dependencies/CUETools v*/", Color.YELLOW))
+        missing.append(("CUETools", "computes the track CRCs and queries the "
+                                    "AccurateRip database",
+                        ".dependencies/CUETools v*/CUETools.ARCUE.exe"))
+    if missing:
+        log(c(f"ERROR: AccurateRip cannot run — {len(missing)} required tool(s) "
+              f"missing: " + ", ".join(name for name, _w, _d in missing), Color.RED))
+        for name, why, where in missing:
+            log(c(f"  {name} ({where}) — {why}", Color.RED))
+        log(c("Install " + " and ".join(f"'{n}'" for n, _w, _d in missing) +
+              " from the Dependencies page (Settings → Dependencies), then run "
+              "AccurateRip again.", Color.YELLOW))
+        stats["error_count"] += 1
+        stats["errors"].append(("AccurateRip",
+                                "missing tool(s): " + ", ".join(n for n, _w, _d in missing)))
         return stats
     log(f"cuetools: {arcue_exe} · v{cuetools.get('version')} · ffmpeg: {ffmpeg_exe}")
 
@@ -629,12 +770,14 @@ def run_generate_accurip(config):
     for album_dir in cd_albums:
         discs = album_discs(album_dir)
         if not discs:
-            # Single-disc fallback
+            # Single-disc fallback: an album whose tracks carry no D-TT prefix
+            # is one disc. It used to need a .log or a .cue to qualify, which
+            # skipped exactly the albums whose sidecars are missing — the ones
+            # this pass can still verify, because a cue is synthesized from
+            # the track order when there is none.
             try:
                 aud = [os.path.join(album_dir, f) for f in os.listdir(album_dir) if is_audio_file(f)]
-                logs = [f for f in os.listdir(album_dir) if f.lower().endswith(".log")]
-                cues = [f for f in os.listdir(album_dir) if f.lower().endswith(".cue")]
-                if aud and (logs or cues):
+                if aud:
                     discs = {1: aud}
                 else:
                     stats["skipped_count"] += 1
@@ -716,18 +859,8 @@ def run_generate_accurip(config):
                 # but MEDIA=CD; the synthetic cue will list the WAV transports in track-number order.
                 log(c(f"  {os.path.basename(album_dir)} disc {disc_num}: no cue found – synthesizing minimal cue for CUETools", Color.YELLOW))
 
-            # Sort tracks deterministically
-            from .discs import _track_num_of, _file_track_number
-            def _tn(p):
-                try:
-                    n = _track_num_of(p)
-                    if n is not None:
-                        return n
-                    return _file_track_number(p) or 999
-                except Exception:
-                    return 999
-            track_paths = sorted(track_paths, key=_tn)
-
+            # The disc's track order is applied inside _generate_via_cuetools,
+            # where the cue that carries it is built.
             try:
                 content = _generate_via_cuetools(ffmpeg_exe, arcue_exe, album_dir, disc_num, track_paths, cue_path, config)
                 # Format directly after generation per user spec: trim each line, trim outer blanks only

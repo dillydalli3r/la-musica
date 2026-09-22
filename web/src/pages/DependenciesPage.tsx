@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { FolderOpen, Loader2, RotateCcw, Wrench } from "lucide-react";
+import { Copy, FolderOpen, Loader2, RotateCcw, Wrench } from "lucide-react";
 import { api, deviceUnavailable, installSummary, unavailableFeatures } from "../api";
 import { toast } from "../store";
 import PageHeader from "../components/PageHeader";
@@ -25,6 +25,14 @@ type DepTool = {
   /** The sentence explaining that, shown on the row. */
   install_note?: string | null;
   install_kind?: "deps" | "system" | "unsupported";
+  /** What this row's ACTION column offers, decided by the backend so the page
+   *  never has to work it out from `state` + `install_kind` itself: `install`
+   *  and `update` are downloads (missing / behind upstream), `upgrade` means
+   *  the OS package manager owns the tool, `none` means nothing to do here. */
+  action?: "install" | "update" | "upgrade" | "none";
+  /** The exact upgrade command `upgrade` copies — apt's, for this host. Shown
+   *  and copied, never run: this app does not drive a package manager. */
+  upgrade_command?: string | null;
 };
 
 /** Sidebar "Dependencies" — the external binaries the scripts shell out to
@@ -70,18 +78,37 @@ export default function DependenciesPage() {
   };
 
   const tools: DepTool[] = deps?.tools ?? [];
-  // Only what this host can FETCH counts as missing/update for the buttons:
-  // `installable` is the backend's own answer (a Windows-only tool on Linux,
-  // or one the image already provides as a distro package, has nothing to
-  // download — pressing Install on those is what made a working server look
-  // broken). They stay in the table below, labelled with the reason.
+  // Every row that is BEHIND upstream is an update, whichever way it can be
+  // installed — a distro row sitting on an older package is still behind, and
+  // the header counts the same predicate its amber chip and amber Available
+  // value do, so the two can no longer disagree about how many there are.
+  const updates = tools.filter((t) => t.state === "update");
+  // Only what this host can FETCH is work for a button: `installable` is the
+  // backend's own answer (a Windows-only tool on Linux, or one the image
+  // already provides as a distro package, has nothing to download — pressing
+  // Install on those is what made a working server look broken). They stay in
+  // the table above, labelled with the reason and the command that IS theirs.
+  const depsUpdates = updates.filter((t) => t.installable !== false);
   const missing = tools.filter((t) => t.state === "missing" && t.installable !== false);
-  const updates = tools.filter((t) => t.state === "update" && t.installable !== false);
   const blocked = tools.filter((t) => t.state === "missing" && t.installable === false);
+  const sysUpdates = updates.filter((t) => t.installable === false);
   const ready = tools.filter((t) => t.state === "ok").length;
   // The tool list is empty only when the payload could not be read at all —
   // that case is the page's empty state, not a one-row table.
   const noTools = !isLoading && tools.length === 0;
+  // What the one page-level button would do, in words. It stays on screen (and
+  // disabled) when there is nothing it can do, so the reason belongs in its
+  // title rather than in its absence.
+  const nothingToDo = missing.length === 0 && depsUpdates.length === 0;
+  const actionTitle = deviceReason ?? (
+    nothingToDo
+      ? sysUpdates.length
+        ? `Everything this host can install is current — the ${sysUpdates.length} row(s) the system package manager owns are upgraded with the command each row offers`
+        : "Everything is current — nothing to install or update"
+      : blocked.length
+        ? `Installs or updates the ${missing.length + depsUpdates.length} tool(s) this host can install, skipping the ${blocked.length} it cannot`
+        : "Installs what is missing or behind; anything already at the newest release is left alone"
+  );
 
   /** Path relative to the deps dir when possible — the full prefix repeats on
    * every row, so show the distinguishing tail ("…/flac v1.5.0/flac.exe"). */
@@ -121,6 +148,21 @@ export default function DependenciesPage() {
     }
   };
 
+  /** Hand the row's own upgrade command to the clipboard — the command the
+   *  BACKEND built for this host, so the page never spells out a package name
+   *  itself. Copied, never run: this app does not drive a package manager. */
+  const copyCommand = async (cmd: string) => {
+    try {
+      await navigator.clipboard.writeText(cmd);
+      toast.success(`Copied: ${cmd}`);
+    } catch {
+      // The Clipboard API needs a secure context, and this app is normally
+      // served over plain http on the LAN, where it is undefined — so the
+      // command goes in the message instead of being lost with the copy.
+      toast.error(`Could not reach the clipboard — run it yourself: ${cmd}`);
+    }
+  };
+
   const openDepsDir = async () => {
     if (!deps?.deps_dir) return;
     try {
@@ -132,9 +174,14 @@ export default function DependenciesPage() {
 
   return (
     <div className="p-6 space-y-5 mx-auto max-w-6xl">
+      {/* `sticky`: the page scrolls through fifteen rows and the action that
+          fixes them all must not scroll away with the first ones. The primary
+          action lives in this header's actions row, so the whole bar pins
+          below the top bar while the table scrolls under it. */}
       <PageHeader
         icon={Wrench}
         title="Dependencies"
+        sticky
         subtitle="External tools the scripts rely on. Missing ones are downloaded into the app's dependencies folder — nothing is installed system-wide."
         actions={
           <>
@@ -145,21 +192,29 @@ export default function DependenciesPage() {
                 do to the majority of the work waiting: with an update behind
                 it, that is "Update all" (a row already installed takes the
                 NEWEST release upstream has, not the pin), and it still
-                installs the missing tools on that same press. The counts sit
-                in the title and the aria-label, and `busy` covers the whole
-                table — a second button for "missing only" would have been a
-                subset of this one. */}
+                installs the missing tools on that same press. It counts only
+                the rows a DOWNLOAD can move (`depsUpdates`): the header's
+                update count includes the distro rows too, and those are
+                upgraded with the command their own row offers, not with a
+                press here. The counts sit in the title and the aria-label,
+                and `busy` covers the whole table — a second button for
+                "missing only" would have been a subset of this one.
+
+                It is never hidden, and it is never disabled for a count that
+                is not about it: the header can say "4 update(s) available"
+                while this button is off (all four are the package manager's),
+                and the title says which case that is instead of leaving a
+                button that looks broken. The header it lives in is `sticky`,
+                so it stays on screen while the fifteen rows scroll. */}
             <button
               className="btn-primary !py-1 text-xs tap"
               onClick={() => install()}
-              disabled={busy || !!deviceReason || (missing.length === 0 && updates.length === 0)}
-              title={deviceReason ?? (blocked.length
-                ? `Installs what is missing or behind — skips the ${blocked.length} tool(s) this host cannot install`
-                : "Installs what is missing or behind; anything already at the newest release is left alone")}
-              aria-label={`${updates.length ? "Update all" : "Install all"}: ${missing.length} missing, ${updates.length} update(s)`}
+              disabled={busy || !!deviceReason || nothingToDo}
+              title={actionTitle}
+              aria-label={`${depsUpdates.length ? "Update all" : "Install all"}: ${missing.length} missing, ${depsUpdates.length} update(s) this host can install`}
             >
               {busy && !busyKey ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-              {busy && !busyKey ? "Installing…" : updates.length ? "Update all" : "Install all"}
+              {busy && !busyKey ? "Installing…" : depsUpdates.length ? "Update all" : "Install all"}
             </button>
           </>
         }
@@ -183,7 +238,20 @@ export default function DependenciesPage() {
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-zinc-500">
         <span>
           {isLoading ? "Checking tools…" : `${ready}/${tools.length} ready`}
-          {updates.length > 0 && <span className="text-amber-400"> · {updates.length} update(s) available</span>}
+          {/* Every row that is behind upstream, the distro-owned ones
+              included: `updates` is the same filter the amber chip and the
+              amber Available value are drawn from, so the count can no longer
+              be smaller than the number of amber cells on screen. The title
+              names them, plus the command a distro row needs instead of a
+              button here. */}
+          {updates.length > 0 && (
+            <span
+              className="text-amber-400"
+              title={updates.map((t) => `${t.name}: installed ${t.installed_version ?? "?"}, available ${t.upstream_version ?? "?"}${t.upgrade_command ? ` — ${t.upgrade_command}` : ""}`).join("\n")}
+            >
+              {" "}· {updates.length} update(s) available
+            </span>
+          )}
           {missing.length > 0 && <span className="text-red-400"> · {missing.length} missing</span>}
           {/* Not "missing": there is nothing this host could install, so the
               count must not read as work waiting to be done. The row carries
@@ -296,20 +364,23 @@ export default function DependenciesPage() {
                 <td className="td text-[11px] text-zinc-600 font-mono truncate" title={t.path ?? ""}>
                   {t.path ? shortPath(t.path) : "—"}
                 </td>
-                {/* One row's own Install/Update, mirroring the chip beside it:
-                    a row this host cannot install gets no button (the chip and
-                    its title already say why), and the rest keep the row's own
-                    note as the hover text so the button cannot be more
-                    optimistic than the row it belongs to. */}
+                {/* One row's own action, from the backend's `action` rather
+                    than from the state + kind combination the page would
+                    otherwise have to re-derive: `install`/`update` press THIS
+                    row's install, `upgrade` copies the command the package
+                    manager needs (this app never runs one), and `none` means
+                    the row has nothing to do here — its chip and note say why.
+                    The row's own note is the hover text, so a button can never
+                    promise more than the row it belongs to. */}
                 <td className="td">
-                  {(t.state === "missing" || t.state === "update") && (
+                  {t.action === "install" || t.action === "update" ? (
                     <button
                       className="btn-ghost !py-0.5 text-[11px] tap"
                       onClick={() => install([t.key], t.key)}
-                      disabled={busy || !!deviceReason || t.installable === false}
+                      disabled={busy || !!deviceReason}
                       title={
                         deviceReason ??
-                        (t.state === "update"
+                        (t.action === "update"
                           ? t.note ?? (t.upstream_version ? `Upstream: ${t.upstream_version}` : undefined)
                           : t.install_note ?? t.note ?? undefined)
                       }
@@ -317,9 +388,17 @@ export default function DependenciesPage() {
                       {busyKey === t.key ? (
                         <Loader2 className="h-3 w-3 animate-spin" />
                       ) : null}
-                      {t.state === "update" ? "Update" : "Install"}
+                      {t.action === "update" ? "Update" : "Install"}
                     </button>
-                  )}
+                  ) : t.upgrade_command ? (
+                    <button
+                      className="btn-ghost !py-0.5 text-[11px] tap"
+                      onClick={() => copyCommand(t.upgrade_command!)}
+                      title={t.note ?? t.upgrade_command}
+                    >
+                      <Copy className="h-3 w-3" /> Copy command
+                    </button>
+                  ) : null}
                 </td>
               </tr>
             ))}
@@ -333,7 +412,10 @@ export default function DependenciesPage() {
         (scoop etc.) are shown as ready. An INSTALLED tool takes the newest release{" "}
         <span className="text-zinc-500">Available</span> names — that is what the Update chip and its button
         offer — and a row already at that version is a no-op (nothing is downloaded). Only a FIRST install
-        takes the reviewed pinned version in <span className="text-zinc-500">Latest</span>.
+        takes the reviewed pinned version in <span className="text-zinc-500">Latest</span>. A row the OS package
+        manager owns (a distro tool) is never downloaded over: it shows{" "}
+        <span className="text-zinc-500">Copy command</span> with the exact upgrade command for this host, which
+        you run yourself — this app never touches a package manager.
         {deps?.note && <span className="text-amber-500"> Upstream check: {deps.note}</span>}
         {deps?.upstream_checked_at && (
           <span> Checked {new Date(deps.upstream_checked_at).toLocaleTimeString()}.</span>
